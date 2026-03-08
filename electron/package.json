@@ -1,0 +1,10 @@
+{
+  "name": "surf-ace-electron",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "echo \"TODO: wire electron dev runner\"",
+    "test": "echo \"TODO: add tests\""
+  }
+}
