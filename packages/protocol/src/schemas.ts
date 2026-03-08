@@ -78,3 +78,96 @@ export const snapshotGetRequestSchema = {
     },
   },
 } as const;
+
+export const pairResponseSchema = {
+  $id: "surf-ace/pair.response",
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "payload"],
+  properties: {
+    type: { const: "pair.response" },
+    payload: {
+      type: "object",
+      additionalProperties: true,
+      required: [
+        "sessionId",
+        "resumed",
+        "surface",
+        "currentContentId",
+        "currentRevision",
+        "contentType",
+      ],
+      properties: {
+        sessionId: { type: "string", minLength: 1 },
+        resumed: { type: "boolean" },
+        surface: {
+          type: "object",
+          additionalProperties: true,
+          required: ["id", "name", "viewport"],
+          properties: {
+            id: { type: "string", minLength: 1 },
+            name: { type: "string", minLength: 1 },
+            viewport: {
+              type: "object",
+              additionalProperties: false,
+              required: ["width", "height"],
+              properties: {
+                width: { type: "number", minimum: 1 },
+                height: { type: "number", minimum: 1 },
+              },
+            },
+          },
+        },
+        currentContentId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        currentRevision: { type: "number", minimum: 0 },
+        contentType: { anyOf: [{ type: "string" }, { type: "null" }] },
+      },
+    },
+  },
+} as const;
+
+export const drawingFlushEventSchema = {
+  $id: "surf-ace/event.drawing_flush",
+  type: "object",
+  additionalProperties: false,
+  required: ["type", "payload"],
+  properties: {
+    type: { const: "event.drawing_flush" },
+    payload: {
+      type: "object",
+      additionalProperties: false,
+      required: ["strokes"],
+      properties: {
+        contentId: { type: "string" },
+        strokes: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["strokeId", "points"],
+            properties: {
+              strokeId: { type: "string", minLength: 1 },
+              points: {
+                type: "array",
+                minItems: 1,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["x", "y"],
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    pressure: { type: "number" },
+                  },
+                },
+              },
+              startedAt: { type: "string" },
+              endedAt: { type: "string" },
+              videoTimestamp: { type: "number" },
+            },
+          },
+        },
+      },
+    },
+  },
+} as const;
