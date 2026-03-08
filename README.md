@@ -4,8 +4,10 @@ Monorepo for the Surf Ace project.
 
 ## Packages
 
--  — OpenClaw extension plugin (discovery, pairing, push, watch, snapshot)
--  — Surface app(s)
+- `surf-ace-extension/` — OpenClaw provider plugin (discovery, pairing, push, watch, snapshot)
+- `ios/` — iOS surface app
+- `electron/` — Electron surface app
+- `packages/protocol/` — Shared wire types and schemas
 
 ## Status
 
