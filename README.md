@@ -1,14 +1,17 @@
 # Surf Ace
 
-Monorepo for the Surf Ace project.
+Monorepo for Surf Ace.
 
-## Packages
+## Source of truth
 
-- `surf-ace-extension/` — OpenClaw provider plugin (discovery, pairing, push, watch, snapshot)
-- `ios/` — iOS surface app
-- `electron/` — Electron surface app
-- `packages/protocol/` — Shared wire types and schemas
+- `DESIGN.md` is the single canonical design/invariants document.
+- Transitional notes, reviews, and retros are **not** committed in this repo.
+- Legacy implementation code is kept under `legacy/` for reference only.
 
-## Status
+## Layout
 
-Extracted from [clawdbot](https://github.com/clickety-clacks/clawdbot) fork. Standalone development.
+- `surf-ace-extension/` — OpenClaw extension plugin
+- `ios/` — new iOS client implementation (fresh)
+- `electron/` — new Electron client implementation (fresh)
+- `packages/protocol/` — shared protocol/types
+- `legacy/` — prior HTTP-era client code
