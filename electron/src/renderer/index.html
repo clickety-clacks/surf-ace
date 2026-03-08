@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Surf Ace</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="shell" id="shell">
+      <header class="topbar">
+        <div class="identity">
+          <h1 id="screen-name">Surf Ace</h1>
+          <p id="screen-status">Standby</p>
+        </div>
+        <div class="controls">
+          <button id="markup-toggle" type="button">Markup Off</button>
+          <p id="fingerprint"></p>
+        </div>
+      </header>
+
+      <main id="viewport" class="viewport">
+        <section id="standby-card" class="standby-card">
+          <h2>Standby</h2>
+          <p>Waiting for pairing or frame push.</p>
+        </section>
+
+        <section id="content-stage" class="content-stage" hidden>
+          <div id="content-root" class="content-root"></div>
+        </section>
+
+        <div id="flush-indicator" class="flush-indicator" hidden>Sending</div>
+        <canvas id="markup-canvas" class="markup-canvas"></canvas>
+      </main>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>
