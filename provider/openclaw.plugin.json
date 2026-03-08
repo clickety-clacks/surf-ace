@@ -1,0 +1,7 @@
+{
+  id: surf-ace,
+  name: Surf Ace,
+  version: 0.1.0,
+  description: Surf Ace screen discovery, pairing, and content push for OpenClaw.,
+  entry: dist/index.js
+}
