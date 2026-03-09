@@ -55,7 +55,7 @@ Implementation order is explicitly phased:
 1. Multi-window support (already in protocol).
 2. Multi-pane support inside a window (`paneId`, pane split/resize/focus lifecycle).
 3. Stable read/write targeting by `{surfaceId, paneId}` with v1-compatible default `paneId="root"`.
-4. **Multi-session pane contention policy** — handling when multiple CLU sessions target the same pane is an explicit open topic (see **`## Open Topics → OT-1`**). Candidate models currently under discussion include tab isolation and single-visible-owner with history.
+4. **Multi-session pane contention policy** — resolved as single-visible-owner + history (OT-1). Each pane has one visible content slot; pushes become immediately visible; displaced content is pushed onto a per-pane Back stack navigable with Back/Forward buttons. See §3.1.1 and §6.2 for the normative model.
 
 **Phase 2 — Annotation semantics:**
 1. Annotation mode UX lock.
@@ -73,8 +73,8 @@ Constraint: annotation semantics in §§13–14 are normative architecture and m
 6. Content operations are isolated per pane (push/clear in pane A does not mutate pane B).
 7. Connection/session ownership semantics remain unchanged at window level (`surfaceId`), with pane routing handled inside that session.
 8. At least one iOS and one Electron implementation pass topology tests for pane isolation and routing.
-9. Tab model is active: `content.set` auto-creates a tab per session per pane; surface routes by `sessionId`; `surf_ace_push` returns `tabId`; `tab.list` and `tab.close` are operable; tab lifecycle events fire.
-10. Annotation buffer is keyed by `(surfaceId, paneId, tabId)`; `surf_ace_read` is session-keyed and reads the calling session's tab automatically.
+9. Visibility model is active: `content.set` makes new content immediately visible; the displaced item is pushed onto the pane's Back stack; `event.content_superseded` fires to the displaced session; Back/Forward navigation is operable on the surface UI.
+10. Annotation buffer is keyed by `(surfaceId, paneId)`; `surf_ace_read` reads the pane's annotation state for the calling session.
 
 Only after these are true do annotation-priority implementation tasks move to Phase 2.
 
@@ -111,7 +111,11 @@ Before the protocol details, these terms are used consistently throughout this s
 
 **Connection job** — the provider's per-surface background process that maintains the WS connection, runs the pair handshake, handles reconnect, and syncs local state. Fully opaque to CLU.
 
-**Tab** — a rendering slot within a pane, owned by a single CLU session. Tabs are auto-created on the session's first push to a pane and persist until the tab is cleared or closed. Each pane holds at most one tab per CLU session (one-per-session-per-pane rule). The surface routes pushes to the correct tab by session ID; CLU does not reference tabs explicitly — routing is implicit. The annotation layer belongs to the active tab. Tabs are a Phase 1 concept (see §2.3). `tabId` is assigned by the surface on tab creation as a stable opaque string. The surface MAY derive it from `sessionId` (e.g. a truncated hash) but is not required to. `tabId` is authoritative as returned by the surface in push responses and `event.tab_created`. CLU MUST use the echoed `tabId` as the canonical identifier — not attempt to predict or derive it.
+**Visible owner** — the CLU session whose most recently pushed content is currently displayed in a pane. Ownership transfers immediately on any successful `content.set`; no permission is required. A session becomes the visible owner of a pane the moment its push lands.
+
+**Back stack / Forward stack** — per-pane history stacks. When a new push displaces the current visible content, the displaced item is pushed onto the pane's Back stack. The user can navigate Back and Forward using buttons on the surface UI. A new push after a Back navigation truncates the Forward branch (browser-style). Maximum 20 entries per pane (combined Back + Forward); LRU eviction when the limit is exceeded.
+
+**Pending update** — a deferred visibility change queued while annotation mode is active. When a push arrives during annotation mode, it is held as a pending update. The surface shows an indicator. The swap fires when annotation mode exits, or after the max defer TTL (30 seconds), whichever comes first.
 
 ## Core Invariants
 
@@ -122,13 +126,13 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 3. **Content persistence through reconnect.** Connection state MUST NOT affect displayed content. Content is never cleared by a disconnect, grace expiry, restart, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`.
 4. **Reads are local-only.** CLU reads exclusively from the provider's local buffer. No `surf_ace_*` read operation triggers a live network call to a surface.
 5. **Panes are always present.** Every surface window has one or more panes at all times. The default layout uses `paneId="root"`. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. When unsplit, a window has one pane (`root`).
-6. **Tab-per-session isolation.** Each pane may contain one or more tabs. Each tab is owned by exactly one CLU session. One tab per session per pane. Subsequent pushes from the same session update that session's existing tab in-place. Tab routing is by `sessionId`; CLU does not address tabs explicitly for normal pushes.
+6. **Single-visible-owner.** Each pane has exactly one visible content slot at any time. The most recent successful `content.set` to a pane determines what is visible. There are no tabs, no per-session slots, and no permission prompts for normal pushes. When new content displaces the current visible item, the displaced item is pushed onto the pane's Back stack.
 7. **Provider-injected session identity.** `sessionId` is injected by the provider from the authenticated WS session context. CLU MUST NOT pass `sessionId` as a wire field on any operation. Surface implementations MUST NOT accept `sessionId` from the wire payload.
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
 9. **Annotation mode locks the viewport.** When annotation mode is active, scroll is disabled and link following is disabled. The drawing layer captures all touch and stylus input until annotation mode exits.
 10. **Monotonic revision gate.** Content mutations (`content.set`, `content.clear`, `content.append`, `content.patch`) carry a monotonic `revision`. The surface applies mutations only when `revision == currentRevision + 1`. Out-of-order mutations are rejected with `stale_revision`.
-11. **Annotation buffer is tab-scoped.** The annotation buffer (live dirty channel, closed frame queue, and all non-annotation registers) is keyed per tab: `(surfaceId, paneId, tabId)`. Tabs in the same pane do not share annotation state.
-12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`), pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_focused`, `event.pane_renamed`), and tab lifecycle events (`event.tab_created`, `event.tab_removed`, `event.tab_focused`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`.
+11. **Annotation buffer is pane-scoped.** The annotation buffer (live dirty channel, closed frame queue, and all non-annotation registers) is keyed per pane: `(surfaceId, paneId)`. Annotation state belongs to the pane, not to any particular session.
+12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`), pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_focused`, `event.pane_renamed`), and content ownership events (`event.content_superseded`, `event.pane_navigated`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`.
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
 14. **Portable extension packaging.** Surf Ace MUST remain installable as a standalone OpenClaw extension bundle that can be dropped into any compatible OpenClaw installation (without requiring Clawline as a dependency and without requiring core patches). Any needed wake/routing behavior must be implemented through extension-local code and published SDK surfaces.
 
@@ -138,13 +142,13 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 
 Surfaces continue advertising `_surf-ace._tcp` over Bonjour/mDNS.
 
-#### 3.1.1 Multi-Window, Multi-Pane, and Multi-Tab Topology (iPad + Electron)
+#### 3.1.1 Multi-Window and Multi-Pane Topology (iPad + Electron)
 
-A single app instance may host multiple surface windows simultaneously. Each window is an independent Surf Ace surface. Within each window, one or more panes provide independent content and annotation contexts. Within each pane, one or more tabs allow multiple CLU sessions to coexist without overwriting each other.
+A single app instance may host multiple surface windows simultaneously. Each window is an independent Surf Ace surface. Within each window, one or more panes provide independent content and annotation contexts. Each pane uses the single-visible-owner model: the most recent push wins immediately, with prior content pushed onto a Back stack for user history navigation.
 
-**Topology hierarchy:** Surface → Window (letter-labeled A/B/AA…) → Pane (number-labeled pane_0/pane_1…/root) → Tab (session-keyed)
+**Topology hierarchy:** Surface → Window (letter-labeled A/B/AA…) → Pane (number-labeled pane_0/pane_1…/root)
 
-> **Phasing note:** Tab support is Phase 1 scope — it ships alongside multi-pane topology, before any annotation-semantics work (Phase 2). See §2.3 for the full phasing plan.
+> **Phasing note:** Pane topology is Phase 1 scope. See §2.3 for the full phasing plan.
 
 Window rules:
 1. Each window has its own stable `surfaceId` and independent local state (capture frame queue, taps, selection, scroll, etc.).
@@ -168,20 +172,16 @@ Naming system:
 5. When a window is split into N panes, new panes are auto-numbered sequentially from the highest existing pane number + 1.
 6. Labels and names are displayed prominently on the surface — exact placement and visual style TBD in the separate UI spec (see tracking/surf-ace-ui-open-topics.md).
 
-Tab rules (Phase 1 committed work, see §2.3):
-1. Each pane may contain one or more tabs. Each tab is owned by exactly one CLU session (identified by `sessionId`). One tab per session per pane — tabs do not proliferate beyond the number of distinct sessions that have pushed to that pane.
-2. A tab is auto-created on the first `content.set` push from a given session to a pane. Subsequent pushes from the same session update that session's existing tab in-place — no new tab is created.
-3. A push from a different session creates that session's own tab in the pane (up to the practical max of 2–3 tabs per pane in normal use).
-4. The surface routes `content.set` pushes to the correct tab by `sessionId`. CLU does not address tabs explicitly — routing is invisible to CLU by default.
-5. `content.set` response (and `surf_ace_push` at the CLU tool layer) echoes `tabId` so CLU knows which tab it owns. CLU does not need to reference `tabId` for subsequent pushes to the same pane.
-6. Tab addressing: CLU targets a pane by `paneId` only; the surface resolves the correct tab using `sessionId` on the connection. CLU tools pass `paneId`; tab routing is implicit.
-7. User tab switching: the user can switch between tabs within a pane (browser-style UI on the surface). `event.tab_focused` fires when the user switches to a different tab. Tab switching is a surface-side UI feature; CLU is notified but does not drive it.
-8. The user can close a tab manually from the surface UI; CLU can call `tab.close` explicitly. Surface emits `event.tab_removed` in both cases.
-9. Max tabs per pane equals the number of distinct CLU sessions that have pushed to that pane and not cleared (typically 2–3 in practice).
-10. `tabId` format: derived from `sessionId` (e.g., a stable short hash or the full `sessionId` string). Surface assigns `tabId` on tab creation and echoes it in the `content.set` response. Required properties: (1) stable for the tab's lifetime, (2) unique within its containing pane (enforces one-tab-per-session-per-pane), (3) treated as opaque by providers — surface is free to use any derivation scheme. `tabId` is authoritative as returned by the surface in push responses and `event.tab_created`. CLU MUST use the echoed `tabId` as the canonical identifier — not attempt to predict or derive it.
-11. Annotations are tab-scoped. The annotation layer (drawing overlay, capture frames) belongs to the active tab. See §13.2 for buffer scoping.
-12. **`sessionId` injection:** The provider injects `sessionId` from the authenticated WS session context. CLU does not pass `sessionId` explicitly — it is derived server-side from the connection that delivered the push request. Surface implementations MUST NOT accept `sessionId` from the wire payload; the provider stamps it before forwarding the request to the surface.
-13. **Tab switch during active annotation:** If the user switches tabs while annotation mode is active (an open live frame exists), annotation mode exits immediately (equivalent to tapping Done). Any in-flight strokes are finalized and assigned to the tab that was active when the strokes began. The newly focused tab is displayed in view-only mode until annotation mode is re-entered. `event.tab_focused` fires after the tab switch completes; annotation mode on the new tab is inactive until the user re-engages.
+Visibility and history rules (Phase 1 committed work, see §2.3):
+1. Each pane has exactly one visible content slot. The most recent `content.set` to a pane becomes immediately visible — there are no tabs, no per-session content slots, and no permission prompts for normal pushes.
+2. When a new push displaces the current visible item, the displaced item is pushed onto the pane's **Back stack**. The surface UI exposes Back and Forward buttons so the user can navigate pane history.
+3. A new push after a Back navigation **truncates the Forward branch** browser-style (all Forward entries are discarded).
+4. **History limits:** maximum 20 entries per pane (combined Back + Forward). When the limit is reached the oldest Back entry is evicted (LRU).
+5. **Supersede signal:** when session A's push displaces session B's visible content, the provider emits `event.content_superseded` to session B with the pane ID, revision, and displacing session ID. Session B may retarget, notify the user, or do nothing. The signal is advisory; no acknowledgment is required.
+6. **No permission prompts.** Any session may push to any pane it has access to. There is no per-session content slot, foreground-ownership lock, or explicit takeover step.
+7. **`sessionId` injection:** The provider injects `sessionId` from the authenticated WS session context. CLU does not pass `sessionId` explicitly — it is derived server-side from the connection that delivered the push request. Surface implementations MUST NOT accept `sessionId` from the wire payload; the provider stamps it before forwarding the request to the surface.
+8. Annotations are pane-scoped. The annotation layer (drawing overlay, capture frames) belongs to the pane. See §13.2 for buffer scoping.
+9. **Push during annotation mode:** if the target pane is in annotation mode when a push arrives, the visibility swap is **deferred**. The surface shows a "pending update" indicator. When annotation mode exits, the pending content becomes visible. Maximum defer TTL: 30 seconds — after which the swap fires regardless and in-progress annotations are preserved as a snapshot. Only one pending update is held per pane at a time; a second push while a first is deferred supersedes the first (the first session receives `event.content_superseded`).
 
 TXT keys used by WS protocol:
 
@@ -223,7 +223,7 @@ The surface runs a WebSocket server. There is no REST HTTP API — the only HTTP
 3. Surface advertises `busy=1` while paired or in reconnect grace.
 4. Same-provider takeover is explicit: if a new `pair.request` has the same `providerId` and `takeover=true`, surface accepts the new socket and closes the old one as `1000` reason `superseded`.
 
-**Multi-session CLU contention** policy is currently open. The protocol must support whichever policy is selected (e.g., tab isolation or single-visible-owner with history) without requiring user permission prompts. See **`## Open Topics → OT-1`** for the authoritative open topic.
+**Multi-session CLU contention** is resolved: single-visible-owner with history (OT-1). Each pane has one visible slot; pushes become immediately visible; displaced sessions receive `event.content_superseded`. No permission prompts. See §3.1.1 and §6.2 for the normative model.
 
 ### 4.3 Pair-First Rule
 
@@ -345,7 +345,7 @@ Flow:
 3. `surfaceId` (target window surface on multi-window endpoints).
 4. `resume` (optional prior `sessionId`).
 5. `takeover` (optional bool, same-provider stale-connection eviction).
-6. `providerName` (optional human-readable session/chat label for UI indicators such as tab labels).
+6. `providerName` (optional human-readable session/chat label for UI indicators such as the active session indicator).
 7. `eventProfile` (optional, default `minimum_deep`).
 8. `drawingFlushConfig` (optional, provider-preferred idle/max interval values).
 9. `protocolVersion` (`1` for this spec).
@@ -358,7 +358,7 @@ Flow:
 5. Limits.
 6. Current content summary (`currentContentId`, `currentRevision`, `contentType` or `null`).
 
-### 6.1.1 Pane and Tab Lifecycle Operations (Phase 1)
+### 6.1.1 Pane Lifecycle Operations (Phase 1)
 
 These operations are post-pair and scoped to a paired `surfaceId`. They implement the pane topology committed in §2.3 Phase 1 and §3.1.1.
 
@@ -399,7 +399,7 @@ Closes a pane and removes it from the layout.
 
 **Response fields:** `paneId` (ack echo), `closedFramesDiscarded` (count of unread closed frames dropped from provider buffer for this pane).
 
-**Behavior:** Before the pane is removed, the surface closes all tabs within the pane. `event.tab_removed` is emitted for each tab. Tab annotation state (including any open live frame and queued closed frames) is discarded. `closedFramesDiscarded` in the `pane.close` response counts frames across all tabs in the pane — it is the sum of discarded closed frames across all tabs, not just the focused tab. All `event.tab_removed` events are emitted before `event.pane_removed`. Content and annotation state for the closed pane are discarded. Any unread closed frames in the provider buffer for this pane are also discarded; `closedFramesDiscarded` reports the total count so CLU knows what was lost. `event.pane_removed` is emitted last.
+**Behavior:** Content and annotation state for the closed pane are discarded. Any unread closed frames in the provider buffer for this pane are also discarded; `closedFramesDiscarded` reports the total count so CLU knows what was lost. The pane's Back and Forward history stacks are also discarded. `event.pane_removed` is emitted.
 
 ---
 
@@ -413,47 +413,24 @@ These events are always-on (not profile-gated), analogous to `event.surface_appe
 
 ---
 
-#### `tab.list`
-Lists all tabs currently open in a pane.
-
-**Request fields:** `paneId`.
-
-**Response fields:** `tabs` — array of `{ tabId, sessionId, label (e.g. "Chat A"), activeContentId, contentType, focused: bool }`.
-
-- `label` is a surface-assigned human-readable label derived from `sessionId` (e.g. "Chat A", "Chat B").
-- `activeContentId` and `contentType` reflect the content currently displayed in that tab (`null` if the tab has been cleared).
-- `focused: true` for the tab currently visible to the user.
-
-#### `tab.close`
-Closes a tab and discards its content and annotation state.
-
-**Request fields:** `paneId`, `tabId`.
-
-**Response fields:** `tabId` (ack), `closedFramesDiscarded` (count of unread closed annotation frames dropped from provider buffer for this tab).
-
-**Behavior:** Tab content and annotation state (including any open live frame and queued closed frames) are discarded. Surface emits `event.tab_removed`. If the closed tab was the focused tab, the surface focuses another tab in the pane (surface-defined behavior).
-
----
-
-**Tab lifecycle events (surface → provider, always-on, not profile-gated):**
-- `event.tab_created` — `{ surfaceId, paneId, tabId, sessionId, label }` — fired when a new tab is auto-created on first push from a session.
-- `event.tab_removed` — `{ surfaceId, paneId, tabId }` — fired when a tab is closed (user-initiated or via `tab.close`).
-- `event.tab_focused` — `{ surfaceId, paneId, tabId }` — fired when the user switches to a different tab within a pane.
+**Content ownership events (surface → provider, always-on, not profile-gated):**
+- `event.content_superseded` — `{ surfaceId, paneId, revision, bySessionId }` — emitted to the displaced session when a new push takes over the visible slot.
+- `event.pane_navigated` — `{ surfaceId, paneId, direction, revision, sessionId }` — emitted when the user navigates Back or Forward in pane history. `direction` is `"back"` or `"forward"`. `revision` and `sessionId` identify the item now visible.
 
 These events are always-on and do not appear in `pair.response.eventConfig.activeEvents` (which lists only profile-controlled events).
 
 ### 6.2 Content Set
 
-`content.set` replaces active content payload in the calling session's tab within the target pane.
+`content.set` replaces the visible content in the target pane (single-visible-owner model).
 
 Rules:
 1. `contentId` generated by provider (`ct_<8hex>`).
 2. `revision` must be next revision.
 3. Content must be self-contained.
 4. `content.set` MUST clear all drawing overlay strokes before rendering the new content.
-5. The surface uses `sessionId` to route the push to the correct tab — creating a new tab if no tab yet exists for this session in this pane, or updating the existing tab in-place if one does. **The provider injects `sessionId` from the authenticated WS session context. CLU does not pass `sessionId` explicitly — it is derived server-side from the connection that delivered the push request. Surface implementations MUST NOT accept `sessionId` from the wire payload; the provider stamps it. `sessionId` is NOT a wire field on `content.set` requests.**
-6. Successful set returns rendered content summary including `tabId` (the tab that was created or updated).
-7. `tabId` in the response allows CLU to know which tab it owns, but CLU does not need to reference `tabId` for subsequent pushes — the surface continues to route by `sessionId` automatically.
+5. The new content becomes immediately visible. The previously visible item is pushed onto the pane's Back stack. The Forward stack is truncated. **The provider injects `sessionId` from the authenticated WS session context. CLU does not pass `sessionId` explicitly — it is derived server-side from the connection that delivered the push request. Surface implementations MUST NOT accept `sessionId` from the wire payload; the provider stamps it. `sessionId` is NOT a wire field on `content.set` requests.**
+6. If a different session previously owned the visible slot, the provider emits `event.content_superseded` to that session after the swap.
+7. If the pane is in annotation mode when the push arrives, the visibility swap is deferred (see §3.1.1 and §6.10 for defer semantics). Successful set returns rendered content summary including `deferred: bool`.
 
 ### 6.3 Content Append
 
@@ -544,7 +521,7 @@ Each content type has distinct protocol behavior. The following are the notable 
 
 *Non-pencil platforms (Electron, non-pencil touch):* An "Annotate" button must be tapped to enter annotation mode; finger then draws strokes. Tapping the button again exits annotation mode. This is vim-style (press once to enter, press again to exit) and is not a persistent setting.
 
-**Tab switch during annotation mode:** If the user switches tabs while annotation mode is active, annotation mode exits immediately (equivalent to tapping Done). Any in-flight strokes are finalized and assigned to the tab that was active when the strokes began. The newly focused tab is displayed in view-only mode until annotation mode is re-entered. `event.tab_focused` fires after the tab switch completes; annotation mode on the new tab is inactive until the user re-engages.
+**Push deferred during annotation mode:** If a `content.set` arrives while annotation mode is active, the visibility swap is deferred. The surface shows a "pending update" indicator. When the user exits annotation mode (Done button on iPad, Annotate toggle on Electron), the pending content becomes visible immediately. If annotation mode has not exited within 30 seconds of the push, the swap fires automatically and in-progress annotations are preserved as a snapshot. Only one pending update is held per pane; a second push while a first is deferred supersedes it.
 
 **Why this is UX-only:** The wire protocol does not distinguish annotation-mode events from normal drawing events. Drawing flushes are emitted from both annotation mode strokes and (on surfaces that permit it) free-form drawing. The annotation mode construct exists at the surface UX layer to ensure a clean, scroll-locked capture frame — it does not produce a distinct wire event type.
 
@@ -644,9 +621,8 @@ The stream is still always-on; expansions are negotiated at pair time, not throu
 | `event.pane_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is closed. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.pane_focused` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is brought to focus. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.pane_renamed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane name changes. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
-| `event.tab_created` | Lifecycle — **not profile-gated** | Always | Emitted when a new tab is auto-created on first push from a session. Always active. Does NOT appear in `activeEvents`. |
-| `event.tab_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a tab is closed (user or `tab.close`). Always active. Does NOT appear in `activeEvents`. |
-| `event.tab_focused` | Lifecycle — **not profile-gated** | Always | Emitted when the user switches to a different tab within a pane. Always active. Does NOT appear in `activeEvents`. |
+| `event.content_superseded` | Lifecycle — **not profile-gated** | Always | Emitted to the displaced session when a new push takes over the visible slot. Always active. Does NOT appear in `activeEvents`. |
+| `event.pane_navigated` | Lifecycle — **not profile-gated** | Always | Emitted when the user navigates Back or Forward in pane history. Always active. Does NOT appear in `activeEvents`. |
 | `event.scroll` | Context-rich but high-volume | No (`deep_plus_scroll` only) | Useful but not strictly required for minimum usefulness. |
 
 Event behavior rules:
@@ -838,12 +814,6 @@ The schema below defines every v1 application message type over WS.
       "maxLength": 64,
       "description": "Pane identity within a surface. 'root' for the default single-pane layout. 'pane_N' (N a non-negative decimal integer) for auto-assigned panes (e.g. 'pane_0', 'pane_1'). Any non-empty string not starting with 'pane_' for user-assigned names. Name resolution (human-friendly aliases) is handled at the CLU layer; the wire layer accepts any non-empty string."
     },
-    "TabId": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "description": "Tab identity within a pane. Assigned by the surface on first push from a session. Derived from sessionId (e.g., a stable short hash or the full sessionId string). Format is surface-defined; providers treat it as an opaque string. CLU does not need to reference tabId for routing — surface routes by sessionId automatically. TabId is echoed in push responses so CLU can identify which tab it owns."
-    },
     "Revision": {
       "type": "integer",
       "minimum": 0
@@ -872,9 +842,8 @@ The schema below defines every v1 application message type over WS.
         "event.pane_removed",
         "event.pane_focused",
         "event.pane_renamed",
-        "event.tab_created",
-        "event.tab_removed",
-        "event.tab_focused"
+        "event.content_superseded",
+        "event.pane_navigated"
       ]
     },
     "ProfileControlledEventType": {
@@ -1201,10 +1170,7 @@ The schema below defines every v1 application message type over WS.
                 "revision": { "$ref": "#/$defs/Revision" },
                 "contentType": { "$ref": "#/$defs/ContentType" },
                 "content": {},
-                "tabId": {
-                  "$ref": "#/$defs/TabId",
-                  "description": "Optional. If provided, explicitly targets an existing tab within the pane. If omitted, the surface routes by sessionId to the session's existing tab or creates a new one. CLU does not need to pass tabId for normal pushes — session-based routing handles this automatically."
-                },
+
                 "display": {
                   "type": "object",
                   "additionalProperties": false,
@@ -1546,7 +1512,7 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["currentContentId", "currentRevision", "tabId"],
+          "required": ["currentContentId", "currentRevision", "deferred"],
           "properties": {
             "currentContentId": {
               "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
@@ -1555,9 +1521,9 @@ The schema below defines every v1 application message type over WS.
             "contentType": {
               "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
             },
-            "tabId": {
-              "oneOf": [{ "$ref": "#/$defs/TabId" }, { "type": "null" }],
-              "description": "The tab that was created or updated for this session in the target pane. Required. Present (non-null) on content.set responses. Null on content.append, content.patch, and content.clear. CLU does not need to pass tabId on subsequent pushes — surface continues routing by sessionId automatically."
+            "deferred": {
+              "type": "boolean",
+              "description": "True if the content push was queued due to active annotation mode and has not yet become visible. False if content is immediately visible."
             }
           }
         }
@@ -1685,8 +1651,7 @@ The schema below defines every v1 application message type over WS.
             "pane.focus",
             "pane.rename",
             "pane.close",
-            "tab.list",
-            "tab.close"
+            "pane.navigate"
           ]
         },
         "id": { "$ref": "#/$defs/RequestId" },
@@ -2331,191 +2296,64 @@ The schema below defines every v1 application message type over WS.
       }
     },
 
-    "TabListRequest": {
+    "ContentSupersededEvent": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
-        "type": { "const": "request" },
-        "op": { "const": "tab.list" },
-        "id": { "$ref": "#/$defs/RequestId" },
+        "type": { "const": "event" },
+        "op": { "const": "event.content_superseded" },
+        "eventId": { "$ref": "#/$defs/EventId" },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["paneId"],
+          "required": ["surfaceId", "paneId", "revision", "bySessionId"],
           "properties": {
-            "paneId": { "$ref": "#/$defs/PaneId" }
-          }
-        }
-      }
-    },
-    "TabListResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "response" },
-        "op": { "const": "tab.list" },
-        "id": { "$ref": "#/$defs/RequestId" },
-        "ok": { "const": true },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["tabs"],
-          "properties": {
-            "tabs": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["tabId", "sessionId", "label", "activeContentId", "contentType", "focused"],
-                "properties": {
-                  "tabId": { "$ref": "#/$defs/TabId" },
-                  "sessionId": { "$ref": "#/$defs/SessionId" },
-                  "label": {
-                    "type": "string",
-                    "description": "Surface-assigned human-readable label for this tab (e.g. 'Chat A', 'Chat B'). Derived from sessionId."
-                  },
-                  "activeContentId": {
-                    "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }],
-                    "description": "The content currently displayed in this tab, or null if the tab has been cleared."
-                  },
-                  "contentType": {
-                    "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
-                  },
-                  "focused": {
-                    "type": "boolean",
-                    "description": "true if this is the tab currently visible to the user in this pane."
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-
-    "TabCloseRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "id", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "request" },
-        "op": { "const": "tab.close" },
-        "id": { "$ref": "#/$defs/RequestId" },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["paneId", "tabId"],
-          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "paneId": { "$ref": "#/$defs/PaneId" },
-            "tabId": { "$ref": "#/$defs/TabId" }
-          }
-        }
-      }
-    },
-    "TabCloseResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "response" },
-        "op": { "const": "tab.close" },
-        "id": { "$ref": "#/$defs/RequestId" },
-        "ok": { "const": true },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["tabId", "closedFramesDiscarded"],
-          "properties": {
-            "tabId": { "$ref": "#/$defs/TabId" },
-            "closedFramesDiscarded": {
+            "revision": {
               "type": "integer",
-              "minimum": 0,
-              "description": "Count of unread closed annotation frames dropped from provider buffer for this tab. CLU can use this to know what was lost."
-            }
-          }
-        }
-      }
-    },
-
-    "TabCreatedEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "event" },
-        "op": { "const": "event.tab_created" },
-        "eventId": { "$ref": "#/$defs/EventId" },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["surfaceId", "paneId", "tabId", "sessionId", "label"],
-          "properties": {
-            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
-            "paneId": { "$ref": "#/$defs/PaneId" },
-            "tabId": { "$ref": "#/$defs/TabId" },
-            "sessionId": { "$ref": "#/$defs/SessionId" },
-            "label": {
+              "description": "Revision of the item that was pushed out of the visible slot."
+            },
+            "bySessionId": {
               "type": "string",
-              "description": "Surface-assigned human-readable label for the new tab (e.g. 'Chat A')."
+              "description": "The session that took ownership of the visible slot."
             }
           }
         }
       }
     },
-    "TabRemovedEvent": {
+    "PaneNavigatedEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "event" },
-        "op": { "const": "event.tab_removed" },
+        "op": { "const": "event.pane_navigated" },
         "eventId": { "$ref": "#/$defs/EventId" },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["surfaceId", "paneId", "tabId"],
+          "required": ["surfaceId", "paneId", "direction", "revision"],
           "properties": {
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "paneId": { "$ref": "#/$defs/PaneId" },
-            "tabId": { "$ref": "#/$defs/TabId" }
-          }
-        }
-      }
-    },
-    "TabFocusedEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "event" },
-        "op": { "const": "event.tab_focused" },
-        "eventId": { "$ref": "#/$defs/EventId" },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["surfaceId", "paneId", "tabId"],
-          "properties": {
-            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
-            "paneId": { "$ref": "#/$defs/PaneId" },
-            "tabId": {
-              "$ref": "#/$defs/TabId",
-              "description": "The tab the user has switched to."
+            "direction": {
+              "type": "string",
+              "enum": ["back", "forward"],
+              "description": "Direction the user navigated."
+            },
+            "revision": {
+              "type": "integer",
+              "description": "Revision of the item now visible after navigation."
+            },
+            "sessionId": {
+              "type": "string",
+              "description": "Session that originally pushed the now-visible item."
             }
           }
         }
@@ -2608,12 +2446,12 @@ Protocol is ready for implementation when these checks pass in integration tests
 13. `snapshot.get` returns base64 PNG for `image` and conditionally includes `visibleText`/`drawings` per request flags.
 14. All messages validate against the schema in Section 10.
 15. Surf Ace extension skills are present at these provider paths and load successfully:
-   - `extensions/surf-ace/skills/surf-ace-ops/SKILL.md` (tool usage for list/push/read/clear/pane/tab ops)
+   - `extensions/surf-ace/skills/surf-ace-ops/SKILL.md` (tool usage for list/push/read/clear/pane ops)
    - `extensions/surf-ace/skills/surf-ace-markup/SKILL.md` (annotation interpretation + markup workflow)
 16. Surf Ace agent-instruction injection is present and wired from these provider paths:
    - `extensions/surf-ace/src/agent-instructions.ts` (builds Surf Ace instruction snippet)
    - `extensions/surf-ace/index.ts` (registers/injects Surf Ace instruction snippet into agent runtime prompt)
-   The injected instructions MUST cover event semantics (`event.drawing_flush`, pane/tab lifecycle events, navigation/page/selection handling) so agents can correctly interpret Surf Ace alerts.
+   The injected instructions MUST cover event semantics (`event.drawing_flush`, pane lifecycle events, `event.content_superseded`, `event.pane_navigated`, navigation/page/selection handling) so agents can correctly interpret Surf Ace alerts.
 
 Implementation status: ready for implementation.
 
@@ -2637,9 +2475,9 @@ The provider maintains a structured local buffer for each surface. The buffer ha
 
 CLU reads from this local buffer only; no `surf_ace_read` call triggers a live network call to a surface.
 
-**Buffer scoping (tab model):** The annotation buffer — both channels A and B, plus all non-annotation registers — is scoped per tab. The buffer key is `(surfaceId, paneId, tabId)`. Each tab maintains its own independent live dirty channel, closed frame queue, and registers. Tabs in the same pane do not share annotation state.
+**Buffer scoping:** The annotation buffer — both channels A and B, plus all non-annotation registers — is scoped per pane. The buffer key is `(surfaceId, paneId)`. Each pane maintains its own independent live dirty channel, closed frame queue, and registers.
 
-`surf_ace_read` at the CLU tool layer is already session-keyed: the calling session's `sessionId` is used to derive `tabId`, so the read automatically targets that session's tab without requiring any `tabId` parameter. No API change is needed at the CLU tool layer — session-keyed routing is implicit and transparent to callers. This means existing `surf_ace_read` callers continue to work unchanged and automatically read their own tab's buffer.
+`surf_ace_read` reads the annotation buffer for the specified pane. The buffer is pane-scoped and shared across all sessions for that pane — no session-scoping parameter is accepted or needed.
 
 ---
 
@@ -2903,8 +2741,7 @@ content        string   Content payload. Encoding by type:
 fingerprint    string
 contentId      string   Stable content ID assigned by provider (ct_<8hex>)
 revision       int      Revision after push
-tabId          string   The tab that was created or updated for this session in the target pane.
-                        Derived from sessionId. CLU does not need to pass tabId on subsequent pushes
+deferred       bool     True if the content push was queued due to active annotation mode and has
                         — surface continues routing by sessionId automatically.
 ```
 
@@ -2933,7 +2770,7 @@ revision       int      Revision after clear
 
 #### `surf_ace_read`
 
-Read dual-channel annotation state plus register values from the local buffer for a screen. Read-only, local — no network call to the surface. **Tab-scoped:** `surf_ace_read` reads the calling session's tab. The provider derives `tabId` from the calling CLU session's identity — CLU does not pass `tabId` in the tool call. No `tabId` parameter is needed or accepted. This ensures each CLU session reads only its own annotation state, with no cross-session bleed. If the session has no tab in the specified pane (it has never pushed to that pane), `surf_ace_read` returns empty channels for that pane.
+Read dual-channel annotation state plus register values from the local buffer for a screen. Read-only, local — no network call to the surface. **Pane-scoped:** `surf_ace_read` reads the annotation buffer for the specified pane. The buffer is shared across all sessions for that pane. No session-scoping parameter is accepted or needed.
 
 Response includes:
 1. **Live dirty channel first** (if a frame is currently open/active),
@@ -3086,7 +2923,7 @@ The injected Surf Ace instruction text MUST teach agents how to interpret surfac
 - `event.page`
 - `event.selection` (v1 text-only handling)
 - `event.pane_created` / `event.pane_removed` / `event.pane_focused` / `event.pane_renamed`
-- `event.tab_created` / `event.tab_removed` / `event.tab_focused`
+- `event.content_superseded` / `event.pane_navigated`
 
 Standalone-provider note: Surf Ace MAY run as a standalone extension without Clawline coupling, provided it implements gateway wake/routing plumbing comparable to existing channel extensions (for example, Discord-style wake + route behavior) rather than relying on Clawline-specific internal helpers.
 
@@ -3115,12 +2952,13 @@ Each pane within a window is assigned a numeric identifier starting at `0` (`0`,
 - Displayed within the pane boundary, in a position that does not overlap with active content.
 - Always visible regardless of what content is rendered in the pane.
 
-#### Tab indicator
+#### Navigation controls
 
-When a pane contains multiple tabs, a tab bar MUST be shown at the top of the pane. Requirements:
-- The currently active tab MUST be visually distinguished from inactive tabs.
-- Each tab MUST display a short label. The label is derived from the `sessionId` of the owning CLU session. Surfaces MAY display a truncated or formatted version of the sessionId. If the provider includes a `providerName` field in `pair.request` (§6.1), the surface SHOULD prefer that as the human-readable label. If no `providerName` is available and the `sessionId` is long or opaque, a sequential tab number (1, 2, 3…) is also acceptable as a fallback label.
-- The tab bar is only shown when two or more tabs are present in a pane. A single-tab pane does not show a tab bar.
+Each pane MUST show Back and Forward navigation buttons when history exists. Requirements:
+- **Back button** is enabled when the pane's Back stack is non-empty; disabled (greyed out or hidden) otherwise.
+- **Forward button** is enabled when the pane's Forward stack is non-empty; disabled otherwise.
+- The buttons MUST be rendered in the pane chrome (not overlapping active content).
+- A "pending update" indicator (e.g. a badge or subtle overlay) MUST be shown when a push has been deferred due to active annotation mode (see §3.1.1 and §6.10).
 
 ---
 
@@ -3146,12 +2984,12 @@ The surface transitions back to **healthy** immediately upon receiving a ping on
 
 ### 15.3 Active Session Indicator
 
-The surface MUST display the name of the CLU session (chat) that owns the currently active tab. The session name is the `providerName` field supplied in the `pair.request` message (§6.1). If no `providerName` was provided, the surface MAY display the `providerId` or a generic label.
+The surface MUST display the name of the CLU session (chat) that is the current visible owner of the active pane. The session name is the `providerName` field supplied in the `pair.request` message (§6.1). If no `providerName` was provided, the surface MAY display the `providerId` or a generic label.
 
 Requirements:
-- The label MUST be displayed as a small, unobtrusive element near the tab bar or connectivity indicator.
-- When the active pane has no tabs (i.e., no session owns it), the label is absent or shows a neutral/empty state.
-- When the active tab changes (including tab switch events per §6.1.1), the label MUST update immediately to reflect the owning session of the newly focused tab.
+- The label MUST be displayed as a small, unobtrusive element near the connectivity indicator.
+- When the active pane has no visible owner (i.e., no session has pushed to it), the label is absent or shows a neutral/empty state.
+- When the visible owner changes (including after a Back/Forward navigation), the label MUST update immediately to reflect the owning session of the newly visible content.
 - The indicator is informational only; it is never interactive.
 
 ---
@@ -3202,7 +3040,7 @@ Required behavior (normative, cross-referenced from §7.4):
 
 #### General
 
-Content MUST fill the pane. The surface renders content at native resolution. The content area is the full pane minus any chrome elements (pane label, tab bar).
+Content MUST fill the pane. The surface renders content at native resolution. The content area is the full pane minus any chrome elements (pane label, navigation controls).
 
 #### While NOT in annotation mode
 
@@ -3218,7 +3056,7 @@ All of the following MUST be enforced:
 - **Link following disabled**: taps do not navigate.
 - **Drawing layer active**: the drawing layer captures all touch and stylus input. Normal content interaction is suspended.
 
-These constraints are synchronized with annotation mode state and are lifted immediately upon exiting annotation mode (iPad: Done button; Electron: Annotate toggle; all platforms: automatic exit on tab switch).
+These constraints are synchronized with annotation mode state and are lifted immediately upon exiting annotation mode (iPad: Done button; Electron: Annotate toggle).
 
 ---
 
@@ -3226,28 +3064,15 @@ These constraints are synchronized with annotation mode state and are lifted imm
 
 This section is the authoritative list of unresolved design decisions. Items here MUST NOT be implemented against until explicitly resolved and removed from this list. When a topic is resolved, the decision moves into normative sections of the spec; it is not retained here.
 
-### OT-1: Multi-Session Pane Contention Policy
+### OT-1: Multi-Session Pane Contention Policy ✅ Resolved
 
-**Problem:** When multiple CLU sessions (chats) push content to the same pane, the protocol needs a deterministic visibility policy. The current tab model ensures sessions do not overwrite each other's content, but does not specify which tab is initially visible or how supersede events work.
+**Resolution:** Single-visible-owner + history (candidate 3).
 
-**Candidate policies:**
-1. **Tab isolation** — each session has its own tab; the user controls which tab is visible; no session automatically becomes the foreground tab on push.
-2. **Single-visible-owner + supersede** — newest write becomes visible immediately; the prior session receives a superseded signal so it can retarget or notify the user.
-3. **Single-visible-owner + history** — no tabs; pane has Back/Forward navigation history so the user can restore prior visible states quickly.
+The newest `content.set` to a pane becomes immediately visible. There are no tabs. The displaced item is pushed onto the pane's Back stack; the user navigates history with Back/Forward buttons on the surface UI. A new push after a Back navigation truncates the Forward branch browser-style. The displaced session receives `event.content_superseded`. Pushes during annotation mode are deferred up to 30 seconds. History stack max: 20 entries per pane, LRU eviction. Revision counter is per-pane.
 
-**Requirements any policy must meet:**
-- No permission prompts for normal session pushes.
-- Superseded sessions must be explicitly notifiable when their content is no longer visible.
-- The model must be able to make intelligent fallback decisions (retarget another pane/surface, notify user, or wait).
+This model is normatively described in §3.1.1, §6.2, and §6.10. See Appendix A.13 for rationale context.
 
-**Edge-case open questions (history policy candidate):**
-1. **Push arrives during annotation mode:** defer until annotation exits (current preferred direction) vs immediate swap. If deferred, define max defer TTL and visible "pending update" indicator semantics.
-2. **History stack limits:** max entries per pane, eviction policy, and whether entries store full rendered states vs references.
-3. **Back then new push behavior:** whether Forward branch is truncated browser-style when new content is written after a Back navigation.
-4. **Per-pane timeline scope:** history is per-pane; define UI expectations when different panes are at different timeline positions.
-5. **Superseded-session behavior:** whether superseded sessions receive explicit machine events by default or infer supersession from visibility/occupancy state.
-
-**Status:** Open. Requires explicit policy decision before implementation. See Appendix A.13 for additional rationale context.
+**Status:** Resolved. Decision moved into normative sections.
 
 ### OT-2: Model-Side Markup (Provider-Originated Strokes)
 
@@ -3551,10 +3376,10 @@ Model markups may become full interactive UIs embedded in the surface — widget
 
 ### A.13 Multi-Session CLU Contention — Rationale Context
 
-> **This topic is tracked in `## Open Topics → OT-1` (the authoritative source).** The candidate policies, requirements, and resolution status are documented there. This appendix entry is rationale context only.
+> **OT-1 is resolved.** The normative model is single-visible-owner + history. See §3.1.1, §6.2, §6.10, and OT-1 in the Open Topics section for the full specification.
 
-**Background:** The WS single-connection rule governs provider-level connections. At the CLU tool layer, multiple CLU sessions route through the same provider. The tab model (§3.1.1, §6.1.1) was designed so that sessions never overwrite each other's content — but the policy governing tab visibility (which session's tab is foregrounded on push, and how superseded sessions are notified) has not been decided.
+**Background:** The WS single-connection rule governs provider-level connections. At the CLU tool layer, multiple CLU sessions route through the same provider. The resolved model ensures sessions can coexist: each push becomes immediately visible, the displaced item is preserved in pane history for the user to navigate, and the displaced session receives an explicit machine event (`event.content_superseded`) so it can retarget or notify the user.
 
-**Protocol support:** The wire protocol as specified (`tab.list`, `tab.close`, `event.tab_focused`, `content.set` routing by `sessionId`) can support any of the three candidate policies in OT-1 without wire-level changes. The policy choice is a provider-side behavior decision.
+**Key design choices:** No tabs; no permission prompts; no per-session content slots. History is per-pane, navigable with Back/Forward. Pushes during annotation are deferred, not dropped. Revision counter is per-pane.
 
-**Related sections:** §3.1.1 (topology), §6.1.1 (pane/tab lifecycle ops), §6.2 (content routing), §13.2 (annotation buffering), §14.3 (`surf_ace_list` occupancy).
+**Related sections:** §3.1.1 (visibility and history rules), §6.1.1 (pane lifecycle ops), §6.2 (content routing), §6.10 (annotation mode deferral), §13.2 (annotation buffer scoping), §14.3 (`surf_ace_list` occupancy).
