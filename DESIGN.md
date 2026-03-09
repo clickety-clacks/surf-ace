@@ -126,13 +126,13 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 3. **Content persistence through reconnect.** Connection state MUST NOT affect displayed content. Content is never cleared by a disconnect, grace expiry, restart, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`.
 4. **Reads are local-only.** CLU reads exclusively from the provider's local buffer. No `surf_ace_*` read operation triggers a live network call to a surface.
 5. **Panes are always present.** Every surface window has one or more panes at all times. The default layout uses `paneId="root"`. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. When unsplit, a window has one pane (`root`).
-6. **Single-visible-owner.** Each pane has exactly one visible content slot at any time. The most recent successful `content.set` to a pane determines what is visible. There are no tabs, no per-session slots, and no permission prompts for normal pushes. When new content displaces the current visible item, the displaced item is pushed onto the pane's Back stack.
+6. **Single-visible-owner.** Each pane has exactly one visible content slot at any time. The most recent successful `content.set` to a pane determines what is visible. There are no tabs, no per-session slots, and no permission prompts for normal pushes. When new content displaces the current visible item, the displaced item is pushed onto the pane's Back stack and the Forward stack is truncated (browser-style).
 7. **Provider-injected session identity.** `sessionId` is injected by the provider from the authenticated WS session context. CLU MUST NOT pass `sessionId` as a wire field on any operation. Surface implementations MUST NOT accept `sessionId` from the wire payload.
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
 9. **Annotation mode locks the viewport.** When annotation mode is active, scroll is disabled and link following is disabled. The drawing layer captures all touch and stylus input until annotation mode exits.
 10. **Monotonic revision gate.** Content mutations (`content.set`, `content.clear`, `content.append`, `content.patch`) carry a monotonic `revision`. The surface applies mutations only when `revision == currentRevision + 1`. Out-of-order mutations are rejected with `stale_revision`.
 11. **Annotation buffer is pane-scoped.** The annotation buffer (live dirty channel, closed frame queue, and all non-annotation registers) is keyed per pane: `(surfaceId, paneId)`. Annotation state belongs to the pane, not to any particular session.
-12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`), pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_focused`, `event.pane_renamed`), and content ownership events (`event.content_superseded`, `event.pane_navigated`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`.
+12. **Always-on events.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`), pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_focused`, `event.pane_renamed`), and the navigation event (`event.pane_navigated`) are never profile-gated — they fire regardless of `eventProfile` and do not appear in `pair.response.eventConfig.activeEvents`. The provider-generated `event.content_superseded` is always delivered to the displaced CLU session regardless of any profile setting.
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
 14. **Portable extension packaging.** Surf Ace MUST remain installable as a standalone OpenClaw extension bundle that can be dropped into any compatible OpenClaw installation (without requiring Clawline as a dependency and without requiring core patches). Any needed wake/routing behavior must be implemented through extension-local code and published SDK surfaces.
 
@@ -413,9 +413,11 @@ These events are always-on (not profile-gated), analogous to `event.surface_appe
 
 ---
 
-**Content ownership events (surface → provider, always-on, not profile-gated):**
-- `event.content_superseded` — `{ surfaceId, paneId, revision, bySessionId }` — emitted to the displaced session when a new push takes over the visible slot.
-- `event.pane_navigated` — `{ surfaceId, paneId, direction, revision, sessionId }` — emitted when the user navigates Back or Forward in pane history. `direction` is `"back"` or `"forward"`. `revision` and `sessionId` identify the item now visible.
+**Navigation event (surface → provider, always-on, not profile-gated):**
+- `event.pane_navigated` — `{ surfaceId, paneId, direction, revision, sessionId }` — emitted by the surface when the user navigates Back or Forward in pane history. `direction` is `"back"` or `"forward"`. `revision` and `sessionId` identify the item now visible.
+
+**Provider-generated ownership event (provider → CLU session, always-on):**
+- `event.content_superseded` — `{ surfaceId, paneId, revision, bySessionId }` — synthesized by the provider and delivered to the displaced CLU session when a new push takes over the visible slot. This event does NOT appear on the surface WS socket; it is generated internally by the provider after routing a `content.set` push.
 
 These events are always-on and do not appear in `pair.response.eventConfig.activeEvents` (which lists only profile-controlled events).
 
@@ -621,8 +623,8 @@ The stream is still always-on; expansions are negotiated at pair time, not throu
 | `event.pane_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is closed. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.pane_focused` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is brought to focus. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.pane_renamed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane name changes. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
-| `event.content_superseded` | Lifecycle — **not profile-gated** | Always | Emitted to the displaced session when a new push takes over the visible slot. Always active. Does NOT appear in `activeEvents`. |
-| `event.pane_navigated` | Lifecycle — **not profile-gated** | Always | Emitted when the user navigates Back or Forward in pane history. Always active. Does NOT appear in `activeEvents`. |
+| `event.pane_navigated` | Lifecycle — **not profile-gated** | Always | Emitted by the surface when the user navigates Back or Forward in pane history. Always active. Does NOT appear in `activeEvents`. |
+| `event.content_superseded` | **Provider-generated** (not a surface wire event) | Always | Synthesized by the provider after routing a `content.set` that displaces another session's visible content. Delivered to the displaced CLU session. Never appears on the surface WS socket. Does NOT appear in `activeEvents`. |
 | `event.scroll` | Context-rich but high-volume | No (`deep_plus_scroll` only) | Useful but not strictly required for minimum usefulness. |
 
 Event behavior rules:
@@ -761,15 +763,8 @@ The schema below defines every v1 application message type over WS.
     { "$ref": "#/$defs/PaneFocusedEvent" },
     { "$ref": "#/$defs/PaneRenamedEvent" },
 
-    { "$ref": "#/$defs/TabListRequest" },
-    { "$ref": "#/$defs/TabCloseRequest" },
-
-    { "$ref": "#/$defs/TabListResponse" },
-    { "$ref": "#/$defs/TabCloseResponse" },
-
-    { "$ref": "#/$defs/TabCreatedEvent" },
-    { "$ref": "#/$defs/TabRemovedEvent" },
-    { "$ref": "#/$defs/TabFocusedEvent" }
+    { "$ref": "#/$defs/ContentSupersededEvent" },
+    { "$ref": "#/$defs/PaneNavigatedEvent" }
   ],
   "$defs": {
     "RequestId": {
@@ -828,6 +823,7 @@ The schema below defines every v1 application message type over WS.
     },
     "EventType": {
       "type": "string",
+      "description": "Surface-to-provider wire event types. Does not include provider-generated events (e.g. event.content_superseded) which are synthesized by the provider and never appear on the surface WS socket.",
       "enum": [
         "event.drawing_flush",
         "event.tap",
@@ -842,7 +838,6 @@ The schema below defines every v1 application message type over WS.
         "event.pane_removed",
         "event.pane_focused",
         "event.pane_renamed",
-        "event.content_superseded",
         "event.pane_navigated"
       ]
     },
@@ -1650,8 +1645,7 @@ The schema below defines every v1 application message type over WS.
             "pane.split",
             "pane.focus",
             "pane.rename",
-            "pane.close",
-            "pane.navigate"
+            "pane.close"
           ]
         },
         "id": { "$ref": "#/$defs/RequestId" },
@@ -2742,7 +2736,7 @@ fingerprint    string
 contentId      string   Stable content ID assigned by provider (ct_<8hex>)
 revision       int      Revision after push
 deferred       bool     True if the content push was queued due to active annotation mode and has
-                        — surface continues routing by sessionId automatically.
+                        not yet become visible. False if content is immediately visible.
 ```
 
 **Errors:** `not_connected`, `screen_not_found`, `content_too_large`, `unsupported_content_type`, `render_failed`
