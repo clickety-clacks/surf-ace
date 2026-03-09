@@ -10,7 +10,7 @@ Surf Ace is a standalone display and annotation system that turns any screen run
 ### Actors
 
 - **CLU** — the AI orchestrator. CLU discovers surfaces, pushes content to them, reads user annotations and events, and interprets surface activity.
-- **Surfaces** — screens running the Surf Ace app. A surface is a render target that CLU can address by stablele identity. Multiple surfaces can be active simultaneously; CLU manages them independently.
+- **Surfaces** — screens running the Surf Ace app. A surface is a render target that CLU can address by stable identity. Multiple surfaces can be active simultaneously; CLU manages them independently.
 - **Users** — annotators and viewers. On iPad, users draw on content with a stylus (Apple Pencil) or finger. On Electron, users annotate with mouse or trackpad. User interactions are captured and reported to CLU for interpretation.
 
 ### Core Goals
@@ -20,7 +20,7 @@ Surf Ace is a standalone display and annotation system that turns any screen run
 3. **User annotation.** Users draw and annotate on displayed content using a stylus (iPad) or input device (Electron). Annotation strokes are captured and reported to CLU.
 4. **CLU interpretation.** CLU reads user annotations and interprets them — identifying point-outs, markup gestures, written content, and spatial relationships to the displayed material.
 5. **Zero-config discovery.** Surfaces advertise themselves via Bonjour/mDNS (`_surf-ace._tcp`). No manual setup, pairing codes, or configuration is required.
-6. **Multi-surface and multi-pane.** CLU can manage multiple surfaces simultaneously. Each surface has a stablele identity and independent state. Within a surface, windows can be split into multiple panes, each with independent content and annotation context. CLU can target content and read annotations at the pane level.
+6. **Multi-surface and multi-pane.** CLU can manage multiple surfaces simultaneously. Each surface has a stable identity and independent state. Within a surface, windows can be split into multiple panes, each with independent content and annotation context. CLU can target content and read annotations at the pane level.
 7. **Standalone app.** Surf Ace is its own binary on each platform. It is not a plugin, extension, or embedded view inside another application.
 
 ### Architecture Overview
@@ -54,8 +54,8 @@ Implementation order is explicitly phased:
 **Phase 1 — Surface topology first (before annotations):**
 1. Multi-window support (already in protocol).
 2. Multi-pane support inside a window (`paneId`, pane split/resize/focus lifecycle).
-3. Stablele read/write targeting by `{surfaceId, paneId}` with v1-compatible default `paneId="root"`.
-4. **Multi-session pane contention policy** — handling when multiple CLU sessions target the same pane is an explicit open topic (see **`## Open Topics → OT-1`**). Candidate models currently under discussion include history entry isolation and single-visible-owner with history.
+3. Stable read/write targeting by `{surfaceId, paneId}` with v1-compatible default `paneId="root"`.
+4. **Multi-session pane history routing** — when multiple CLU sessions target the same pane, the newest `content.set` becomes visible immediately. The previously visible history entry moves to the pane's Back stack, and the displaced session receives a provider-generated `event.content_superseded`.
 
 **Phase 2 — Annotation semantics:**
 1. Annotation mode UX lock.
@@ -65,7 +65,7 @@ Implementation order is explicitly phased:
 Constraint: annotation semantics in §§13–14 are normative architecture and may be implemented in parallel, but release/priority gating is: Phase 1 topology work (multi-window + multi-pane targeting) must ship before annotation-priority milestones are considered complete.
 
 **Phase 1 done checklist (must all be true):**
-1. A single window can be split into multiple panes, each with stablele `paneId`.
+1. A single window can be split into multiple panes, each with stable `paneId`.
 2. Pane lifecycle exists: create/split, resize, focus/select, close.
 3. All screen-scoped tool operations can target `{surfaceId, paneId}`.
 4. Backward compatibility: callers omitting `paneId` continue to target `paneId="root"`.
@@ -95,13 +95,13 @@ Ownership: `extensions/surf-ace/` owns the Surf Ace provider runtime — mDNS di
 
 Before the protocol details, these terms are used consistently throughout this spec:
 
-**Surface** — a render-target context addressable by stablele identity. In v1 multi-window topology, each window is a distinct surface (`surfaceId`) even when hosted by one app instance/device endpoint. Within each window, pane routing is nested under the surface via `paneId` (default `root`, split into additional panes as needed).
+**Surface** — a render-target context addressable by stable identity. In v1 multi-window topology, each window is a distinct surface (`surfaceId`) even when hosted by one app instance/device endpoint. Within each window, pane routing is nested under the surface via `paneId` (default `root`, split into additional panes as needed).
 
 **Endpoint** — the app/device WS host:port advertised via mDNS. One endpoint may host multiple surfaces (windows).
 
 **Provider** — the Clawline server-side component that manages connections to surfaces. It is the WS client and reconnect owner. It maintains local state for each surface.
 
-**Content** — the item currently displayed in a rendering scope. Content has a type (`html`, `image`, `pdf`, `terminal`, `markdown`, `video`, `canvas`) and a stablele identity (`contentId`). A window always has panes; when unsplit it has one pane (`root`), and when split it has multiple panes. Each pane displays one content item independently (scoped by `paneId`). CLU pushes content to a target scope and can clear it. Content is distinct from annotations. `video` and `canvas` are defined in the protocol for forward compatibility; full implementation is deferred to v2.
+**Content** — the item currently displayed in a rendering scope. Content has a type (`html`, `image`, `pdf`, `terminal`, `markdown`, `video`, `canvas`) and a stable identity (`contentId`). A window always has panes; when unsplit it has one pane (`root`), and when split it has multiple panes. Each pane displays one content item independently (scoped by `paneId`). CLU pushes content to a target scope and can clear it. Content is distinct from annotations. `video` and `canvas` are defined in the protocol for forward compatibility; full implementation is deferred to v2.
 
 **Annotations** — drawing strokes the user has made on top of the current content using the stylus or finger. Annotations are layered over content and persist until the provider explicitly removes them. Annotations are not content and are not cleared when content changes unless the spec says so.
 
@@ -111,7 +111,7 @@ Before the protocol details, these terms are used consistently throughout this s
 
 **Connection job** — the provider's per-surface background process that maintains the WS connection, runs the pair handshake, handles reconnect, and syncs local state. Fully opaque to CLU.
 
-**History entry** — a snapshot of content previously visible in a pane. When new content displaces the current view, the prior content becomes a history entry in the pane's Back stack. The surface provides Back/Forward navigation (browser-style). Max depth: 20 entries per pane; oldest evicted LRU. Navigating Back then receiving a new push truncates the Forward branch.
+**History entry** — the pane-local record for one CLU session's content in that pane, keyed by `contentId`. The currently visible history entry is the foreground view for the pane. When new content from a different session displaces the current view, the prior visible history entry moves into the pane's Back stack. The surface provides Back/Forward navigation (browser-style). Max depth: 20 entries per pane; oldest entry evicted first. Navigating Back then receiving a new push truncates the Forward branch.
 
 ## Core Invariants
 
@@ -127,10 +127,10 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
 9. **Annotation mode locks the viewport.** When annotation mode is active, scroll is disabled and link following is disabled. The drawing layer captures all touch and stylus input until annotation mode exits.
 10. **Monotonic revision gate.** Content mutations (`content.set`, `content.clear`, `content.append`, `content.patch`) carry a monotonic `revision`. The surface applies mutations only when `revision == currentRevision + 1`. Out-of-order mutations are rejected with `stale_revision`.
-11. **Annotation buffer is content-scoped.** The annotation buffer (live dirty channel, closed frame queue, and all non-annotation registers) is keyed per history entry: `(surfaceId, paneId, contentId)`. Tabs in the same pane do not share annotation state.
-12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_focused`, `event.pane_renamed`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`. `event.content_superseded` is provider-generated (not a surface wire event).
+11. **Annotation buffer is content-scoped.** The annotation buffer (live dirty channel, closed frame queue, and all non-annotation registers) is keyed per history entry: `(surfaceId, paneId, contentId)`. History entries in the same pane do not share annotation state.
+12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`), pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_focused`, `event.pane_renamed`), and history lifecycle events (`event.history_entry_created`, `event.history_entry_removed`, `event.history_entry_focused`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`. `event.content_superseded` is provider-generated (not a surface wire event).
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
-14. **Porhistory entryle extension packaging.** Surf Ace MUST remain installable as a standalone OpenClaw extension bundle that can be dropped into any compatible OpenClaw installation (without requiring Clawline as a dependency and without requiring core patches). Any needed wake/routing behavior must be implemented through extension-local code and published SDK surfaces.
+14. **Portable extension packaging.** Surf Ace MUST remain installable as a standalone OpenClaw extension bundle that can be dropped into any compatible OpenClaw installation (without requiring Clawline as a dependency and without requiring core patches). Any needed wake/routing behavior must be implemented through extension-local code and published SDK surfaces.
 
 ## 3. Transport and Discovery
 
@@ -147,14 +147,14 @@ A single app instance may host multiple surface windows simultaneously. Each win
 > **Phasing note:** History navigation is Phase 1 scope — it ships alongside multi-pane topology, before any annotation-semantics work (Phase 2). See §2.3 for the full phasing plan.
 
 Window rules:
-1. Each window has its own stablele `surfaceId` and independent local state (capture frame queue, taps, selection, scroll, etc.).
+1. Each window has its own stable `surfaceId` and independent local state (capture frame queue, taps, selection, scroll, etc.).
 2. The app advertises one device endpoint over mDNS (one host/port), not one mDNS record per window.
 3. Windows are enumerated in-band over WS (`surfaces.list`) and can appear/disappear at runtime (`event.surface_appeared`, `event.surface_removed`).
 4. Provider maintains one paired WS session per active window/surface, even when multiple windows share the same device endpoint.
 5. Creating/removing a window does not require mDNS rebroadcast; only app endpoint lifecycle affects mDNS advertisement/goodbye.
 
 Pane rules (Phase 1 committed work, see §2.3):
-1. Each window may contain one or more panes, each identified by a stablele `paneId`. `paneId` format: `pane_<decimal>` for auto-assigned (e.g. `pane_0`, `pane_1`); user-assigned names are arbitrary non-empty strings that do not start with `pane_`. The default single-pane ID is the literal string `root`.
+1. Each window may contain one or more panes, each identified by a stable `paneId`. `paneId` format: `pane_<decimal>` for auto-assigned (e.g. `pane_0`, `pane_1`); user-assigned names are arbitrary non-empty strings that do not start with `pane_`. The default single-pane ID is the literal string `root`.
 2. Default single-pane layout uses `paneId="root"`.
 3. Each pane has independent content, capture frame queue, taps, selection, scroll, and annotation state.
 4. All screen-scoped operations target `{ surfaceId, paneId }`; callers omitting `paneId` default to `"root"`.
@@ -191,7 +191,7 @@ Connection URL derivation:
 
 ### 3.2 Surface WS Endpoint
 
-The surface runs a WebSocket server. There is no REST HTTP API — the only HTTP traffic is the mandatory WS upgrade handshake required by RFC 6455 before the socket is establelished.
+The surface runs a WebSocket server. There is no REST HTTP API — the only HTTP traffic is the mandatory WS upgrade handshake required by RFC 6455 before the socket is established.
 
 1. Required: WS upgrade path (`/ws` by default, or the path advertised in TXT `ws` key).
 2. Optional: `GET /health` → `200 OK` for diagnostics only.
@@ -209,13 +209,13 @@ The surface runs a WebSocket server. There is no REST HTTP API — the only HTTP
 3. Surface advertises `busy=1` while paired or in reconnect grace.
 4. Same-provider takeover is explicit: if a new `pair.request` has the same `providerId` and `takeover=true`, surface accepts the new socket and closes the old one as `1000` reason `superseded`.
 
-**Multi-session CLU contention** policy is currently open. The protocol must support whichever policy is selected (e.g., history entry isolation or single-visible-owner with history) without requiring user permission prompts. See **`## Open Topics → OT-1`** for the authoritative open topic.
+**Multi-session CLU routing** is settled in v1: the newest `content.set` for a pane becomes visible immediately. If that write comes from a different session than the currently visible history entry, the displaced entry moves to the Back stack and the provider emits `event.content_superseded` locally for the displaced session.
 
 ### 4.3 Pair-First Rule
 
 All operations other than `surfaces.list` and `pair.request` are invalid until pairing succeeds.
 
-`surfaces.list` is a pre-pair discovery operation used only on multi-window endpoints to enumerate active window surfaces and their stablele IDs.
+`surfaces.list` is a pre-pair discovery operation used only on multi-window endpoints to enumerate active window surfaces and their stable IDs.
 
 ### 4.4 Reconnect Behavior
 
@@ -244,7 +244,7 @@ Application-level keepalive is required:
 5. Missing 2 consecutive pong responses causes provider to close socket and reconnect.
 
 Pair timeout:
-1. Provider MUST apply a 10s pairing timeout from WS connection establelishment.
+1. Provider MUST apply a 10s pairing timeout from WS connection establishment.
 2. If no `pair.response` arrives in 10s, provider closes socket and enters reconnect backoff.
 
 **Surface UI connectivity indicator (required):**
@@ -263,7 +263,7 @@ Rules:
 2. On window close, surface emits `event.surface_removed` with `{ surfaceId }` and closes any paired socket for that surface.
 3. Provider may call `surfaces.list` at any time to reconcile active windows.
 4. Window lifecycle changes are in-band WS signals; they do not require mDNS rebroadcast.
-5. Surface identity is window-scoped and stablele across app restarts when restoration metadata exists; otherwise new windows receive new `surfaceId`s.
+5. Surface identity is window-scoped and stable across app restarts when restoration metadata exists; otherwise new windows receive new `surfaceId`s.
 6. `event.surface_appeared` and `event.surface_removed` are **not profile-gated** — they are always emitted regardless of `eventProfile` setting. Providers MUST handle these events on any active socket.
 
 ## 5. Message Model
@@ -326,7 +326,7 @@ Flow:
 4. If success, connection enters active mode and event streaming starts immediately.
 
 `pair.request` fields include:
-1. `providerId` (stablele identity for resume).
+1. `providerId` (stable identity for resume).
 2. `connectionId` (unique per socket attempt).
 3. `surfaceId` (target window surface on multi-window endpoints).
 4. `resume` (optional prior `sessionId`).
@@ -342,7 +342,7 @@ Flow:
 3. Surface metadata (id/name/viewport/capabilities).
 4. `eventConfig` (active event profile, active event list, and effective drawing flush config).
 5. Limits.
-6. Current content summary (`currentContentId`, `currentRevision`, `contentType` or `null`).
+6. Current pane state summary (`panes[]` with per-pane `paneId`, `currentContentId`, `currentRevision`, `contentType`, and `focused`).
 
 ### 6.1.1 Pane Lifecycle and History Operations (Phase 1)
 
@@ -398,6 +398,53 @@ These events are always-on (not profile-gated), analogous to `event.surface_appe
 
 ---
 
+#### `history.list`
+Returns the history model for one pane.
+
+**Request fields:** `paneId` (default `root`).
+
+**Response fields:**
+- `paneId`
+- `visibleContentId` (or `null` if the pane is idle)
+- `canGoBack` / `canGoForward`
+- `historyEntries` — ordered array of history entries in timeline order relative to the visible entry:
+  1. Back-stack entries, nearest-first
+  2. The visible entry
+  3. Forward-stack entries, nearest-first
+
+**History entry fields:** `contentId`, `sessionId`, `label`, `activeContentId` (or `null` if cleared), `contentType` (or `null`), `position` (`back` | `visible` | `forward`), `distanceFromVisible` (`0` for visible, positive integer otherwise), `focused` (bool; equivalent to `position=="visible"`).
+
+#### `history.close`
+Removes one history entry from a pane.
+
+**Request fields:** `paneId`, `contentId`.
+
+**Behavior:**
+1. If the closed history entry is currently visible, the pane reveals the nearest Back entry; if none exists, it reveals the nearest Forward entry; if neither exists, the pane becomes idle.
+2. Closing a non-visible history entry does not change the visible pane content.
+3. Closing a history entry discards its unread closed-frame queue and all local registers keyed to that `(surfaceId, paneId, contentId)`.
+
+**Response fields:** `paneId`, `contentId`, `closedFramesDiscarded`.
+
+#### History routing rules
+
+These rules are normative for the single-visible-owner history model:
+1. `content.set` always targets one pane and one CLU session. The provider derives that session's `contentId` and routes all later writes for that same session back into the same history entry until the session is explicitly cleared or closed.
+2. If the write targets the session that is already visible in the pane, the visible history entry is updated in place. No new back-stack node is created.
+3. If the write targets a different session than the visible history entry, the visible entry moves to the Back stack, the target session's history entry becomes visible, and any Forward branch is truncated.
+4. Back/Forward navigation changes only which existing history entry is visible. It never mutates `contentId`, `revision`, or annotation state inside an entry.
+5. The Back stack is capped at 20 history entries per pane. When a new entry would exceed the limit, the oldest non-visible entry is evicted together with its local buffer state.
+6. `content.clear` clears the calling session's history entry in the target pane. The history entry remains addressable with `activeContentId=null` until it is replaced or closed.
+
+**History lifecycle events (surface → provider):**
+- `event.history_entry_created` — `{ surfaceId, paneId, contentId, sessionId, label }`
+- `event.history_entry_removed` — `{ surfaceId, paneId, contentId }`
+- `event.history_entry_focused` — `{ surfaceId, paneId, contentId }`
+
+These events are always-on (not profile-gated). They describe user-visible timeline changes inside a pane. `event.content_superseded` remains provider-generated and is not a surface wire event.
+
+---
+
 #### `canvas` (v1 reserved, v2 required)
 - `content.set` payload is optional: a background specification (`{ color, grid }`) or empty.
 - There is no underlying document — annotations are the primary artifact, not an overlay.
@@ -440,7 +487,7 @@ Drawing semantics in default mode:
 1. Surface does no stroke classification, shape recognition, or gesture interpretation.
 2. Surface accumulates raw strokes locally.
 3. Surface emits `event.drawing_flush` only when the flush gate fires.
-4. Each stroke has a stablele unique `strokeId` (`stroke_<hex>`) assigned at capture time.
+4. Each stroke has a stable unique `strokeId` (`stroke_<hex>`) assigned at capture time.
 5. Flush payload is an ordered array of strokes; each stroke remains independently addressable by `strokeId`.
 6. Surface keeps strokes rendered until explicitly removed by provider via `annotations.remove`.
 
@@ -482,7 +529,7 @@ The stream is still always-on; expansions are negotiated at pair time, not throu
 |---|---|---|---|
 | `event.drawing_flush` | Batched raw intent artifact | Yes | Carries all changed drawing input since last send at meaningful time boundaries. |
 | `event.tap` | Deep semantic | Yes | Point-out taps only; UI-navigation taps excluded (see `event.navigation`). |
-| `event.selection` | Deep semantic | Yes | Represents explicit user focus with interprehistory entryle payload. |
+| `event.selection` | Deep semantic | Yes | Represents explicit user focus with interpretable payload. |
 | `event.page` | Deep semantic | Yes | Complete navigation state transition for paged content. |
 | `event.navigation` | Deep semantic | Yes | Surface navigated away from pushed content. Carries new URL; signals any open capture frame or buffered annotation state is stale. |
 | `event.snapshot_hint` | Provider-internal control plane | Yes (internal only) | Used for reconnect/backpressure state sync. Not exposed in CLU register model. Appears in `pair.response.eventConfig.activeEvents` (it is profile-controlled, part of `minimum_deep`), but the provider does not surface it to CLU tooling. |
@@ -492,6 +539,9 @@ The stream is still always-on; expansions are negotiated at pair time, not throu
 | `event.pane_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is closed. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.pane_focused` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is brought to focus. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.pane_renamed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane name changes. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
+| `event.history_entry_created` | Lifecycle — **not profile-gated** | Always | Emitted when a pane gains a new history entry for a CLU session. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
+| `event.history_entry_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a history entry is explicitly closed or evicted. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
+| `event.history_entry_focused` | Lifecycle — **not profile-gated** | Always | Emitted when Back/Forward navigation or a new push changes the visible history entry in a pane. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.scroll` | Context-rich but high-volume | No (`deep_plus_scroll` only) | Useful but not strictly required for minimum usefulness. |
 
 Event behavior rules:
@@ -630,15 +680,15 @@ The schema below defines every v1 application message type over WS.
     { "$ref": "#/$defs/PaneFocusedEvent" },
     { "$ref": "#/$defs/PaneRenamedEvent" },
 
-    { "$ref": "#/$defs/TabListRequest" },
-    { "$ref": "#/$defs/TabCloseRequest" },
+    { "$ref": "#/$defs/HistoryListRequest" },
+    { "$ref": "#/$defs/HistoryCloseRequest" },
 
-    { "$ref": "#/$defs/TabListResponse" },
-    { "$ref": "#/$defs/TabCloseResponse" },
+    { "$ref": "#/$defs/HistoryListResponse" },
+    { "$ref": "#/$defs/HistoryCloseResponse" },
 
-    { "$ref": "#/$defs/TabCreatedEvent" },
-    { "$ref": "#/$defs/TabRemovedEvent" },
-    { "$ref": "#/$defs/TabFocusedEvent" }
+    { "$ref": "#/$defs/HistoryEntryCreatedEvent" },
+    { "$ref": "#/$defs/HistoryEntryRemovedEvent" },
+    { "$ref": "#/$defs/HistoryEntryFocusedEvent" }
   ],
   "$defs": {
     "RequestId": {
@@ -683,12 +733,6 @@ The schema below defines every v1 application message type over WS.
       "maxLength": 64,
       "description": "Pane identity within a surface. 'root' for the default single-pane layout. 'pane_N' (N a non-negative decimal integer) for auto-assigned panes (e.g. 'pane_0', 'pane_1'). Any non-empty string not starting with 'pane_' for user-assigned names. Name resolution (human-friendly aliases) is handled at the CLU layer; the wire layer accepts any non-empty string."
     },
-    "TabId": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "description": "Content identity within a pane. Assigned by the provider on each content.set call. Used to key annotation state and history entries."
-    },
     "Revision": {
       "type": "integer",
       "minimum": 0
@@ -717,11 +761,14 @@ The schema below defines every v1 application message type over WS.
         "event.pane_removed",
         "event.pane_focused",
         "event.pane_renamed",
+        "event.history_entry_created",
+        "event.history_entry_removed",
+        "event.history_entry_focused"
       ]
     },
     "ProfileControlledEventType": {
       "type": "string",
-      "description": "Event types that are governed by eventProfile. Excludes lifecycle events (event.surface_appeared, event.surface_removed) which are always active and never appear in activeEvents.",
+      "description": "Event types that are governed by eventProfile. Excludes lifecycle events (surface, pane, and history-entry lifecycle) which are always active and never appear in activeEvents.",
       "enum": [
         "event.drawing_flush",
         "event.tap",
@@ -1039,6 +1086,11 @@ The schema below defines every v1 application message type over WS.
               "additionalProperties": false,
               "required": ["contentId", "revision", "contentType", "content"],
               "properties": {
+                "paneId": {
+                  "$ref": "#/$defs/PaneId",
+                  "default": "root",
+                  "description": "Target pane. Defaults to 'root' when omitted."
+                },
                 "contentId": { "$ref": "#/$defs/ContentId" },
                 "revision": { "$ref": "#/$defs/Revision" },
                 "contentType": { "$ref": "#/$defs/ContentType" },
@@ -1119,6 +1171,11 @@ The schema below defines every v1 application message type over WS.
           "additionalProperties": false,
           "required": ["contentId", "revision", "lines"],
           "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "default": "root",
+              "description": "Target pane. Defaults to 'root' when omitted."
+            },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
             "lines": {
@@ -1144,6 +1201,11 @@ The schema below defines every v1 application message type over WS.
           "additionalProperties": false,
           "required": ["contentId", "revision", "patch"],
           "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "default": "root",
+              "description": "Target pane. Defaults to 'root' when omitted."
+            },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
             "patch": {
@@ -1184,6 +1246,11 @@ The schema below defines every v1 application message type over WS.
           "additionalProperties": false,
           "required": ["revision"],
           "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "default": "root",
+              "description": "Target pane. Defaults to 'root' when omitted."
+            },
             "revision": { "$ref": "#/$defs/Revision" }
           }
         }
@@ -1204,6 +1271,11 @@ The schema below defines every v1 application message type over WS.
           "additionalProperties": false,
           "required": ["contentId", "strokeIds"],
           "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "default": "root",
+              "description": "Target pane. Defaults to 'root' when omitted."
+            },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "strokeIds": {
               "type": "array",
@@ -1229,6 +1301,11 @@ The schema below defines every v1 application message type over WS.
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "default": "root",
+              "description": "Target pane. Defaults to 'root' when omitted."
+            },
             "includeImage": { "type": "boolean", "default": false },
             "includeVisibleText": { "type": "boolean", "default": true },
             "includeDrawings": { "type": "boolean", "default": false }
@@ -1324,7 +1401,7 @@ The schema below defines every v1 application message type over WS.
                   "type": "array",
                   "items": { "$ref": "#/$defs/ProfileControlledEventType" },
                   "uniqueItems": true,
-                  "description": "Profile-controlled events active for this session. Lifecycle events (surface_appeared/removed) are excluded — they are always active regardless of profile."
+                  "description": "Profile-controlled events active for this session. Surface, pane, and history-entry lifecycle events are excluded — they are always active regardless of profile."
                 },
                 "drawingFlushConfig": { "$ref": "#/$defs/DrawingFlushConfig" }
               }
@@ -1352,14 +1429,26 @@ The schema below defines every v1 application message type over WS.
             "state": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["currentContentId", "currentRevision", "contentType"],
+              "required": ["panes"],
               "properties": {
-                "currentContentId": {
-                  "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
-                },
-                "currentRevision": { "$ref": "#/$defs/Revision" },
-                "contentType": {
-                  "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+                "panes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["paneId", "currentContentId", "currentRevision", "contentType", "focused"],
+                    "properties": {
+                      "paneId": { "$ref": "#/$defs/PaneId" },
+                      "currentContentId": {
+                        "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
+                      },
+                      "currentRevision": { "$ref": "#/$defs/Revision" },
+                      "contentType": {
+                        "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+                      },
+                      "focused": { "type": "boolean" }
+                    }
+                  }
                 }
               }
             }
@@ -1384,8 +1473,9 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["currentContentId", "currentRevision", "contentId"],
+          "required": ["paneId", "currentContentId", "currentRevision", "contentId"],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "currentContentId": {
               "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
             },
@@ -1394,7 +1484,7 @@ The schema below defines every v1 application message type over WS.
               "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
             },
             "contentId": {
-              "oneOf": [{ "$ref": "#/$defs/TabId" }, { "type": "null" }],
+              "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }],
               "description": "The history entry that was created or updated for this session in the target pane. Required. Present (non-null) on content.set responses. Null on content.append, content.patch, and content.clear. CLU does not need to pass contentId on subsequent pushes — surface continues routing by sessionId automatically."
             }
           }
@@ -1415,8 +1505,9 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "removedStrokeIds", "notFoundStrokeIds", "remainingStrokeCount"],
+          "required": ["paneId", "contentId", "removedStrokeIds", "notFoundStrokeIds", "remainingStrokeCount"],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "removedStrokeIds": {
               "type": "array",
@@ -1448,6 +1539,7 @@ The schema below defines every v1 application message type over WS.
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "paneId",
             "contentId",
             "revision",
             "contentType",
@@ -1455,6 +1547,7 @@ The schema below defines every v1 application message type over WS.
             "selection"
           ],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "contentId": {
               "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
             },
@@ -1523,6 +1616,8 @@ The schema below defines every v1 application message type over WS.
             "pane.focus",
             "pane.rename",
             "pane.close",
+            "history.list",
+            "history.close"
           ]
         },
         "id": { "$ref": "#/$defs/RequestId" },
@@ -1573,6 +1668,7 @@ The schema below defines every v1 application message type over WS.
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "paneId",
             "contentId",
             "revision",
             "flushId",
@@ -1586,6 +1682,7 @@ The schema below defines every v1 application message type over WS.
             "lastStrokeAt"
           ],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
             "flushId": { "$ref": "#/$defs/FlushId" },
@@ -1621,8 +1718,9 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "revision", "kind", "position"],
+          "required": ["paneId", "contentId", "revision", "kind", "position"],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
             "kind": { "type": "string", "enum": ["tap", "long_press"] },
@@ -1645,8 +1743,9 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "revision", "phase", "viewport", "visibleText"],
+          "required": ["paneId", "contentId", "revision", "phase", "viewport", "visibleText"],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
             "phase": { "const": "settled" },
@@ -1669,8 +1768,9 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "revision", "selection"],
+          "required": ["paneId", "contentId", "revision", "selection"],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
             "selection": { "$ref": "#/$defs/Selection" }
@@ -1691,8 +1791,9 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "revision", "page", "totalPages"],
+          "required": ["paneId", "contentId", "revision", "page", "totalPages"],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
             "page": { "type": "integer", "minimum": 1 },
@@ -1715,8 +1816,9 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "revision", "url"],
+          "required": ["paneId", "contentId", "revision", "url"],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
             "url": { "type": "string" }
@@ -2167,47 +2269,59 @@ The schema below defines every v1 application message type over WS.
       }
     },
 
-    "TabListRequest": {
+    "HistoryListRequest": {
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "type", "op", "id", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "request" },
+        "op": { "const": "history.list" },
         "id": { "$ref": "#/$defs/RequestId" },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["paneId"],
           "properties": {
-            "paneId": { "$ref": "#/$defs/PaneId" }
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "default": "root",
+              "description": "Target pane. Defaults to 'root' when omitted."
+            }
           }
         }
       }
     },
-    "TabListResponse": {
+    "HistoryListResponse": {
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "response" },
+        "op": { "const": "history.list" },
         "id": { "$ref": "#/$defs/RequestId" },
         "ok": { "const": true },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["history entries"],
+          "required": ["paneId", "visibleContentId", "canGoBack", "canGoForward", "historyEntries"],
           "properties": {
-            "history entries": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "visibleContentId": {
+              "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
+            },
+            "canGoBack": { "type": "boolean" },
+            "canGoForward": { "type": "boolean" },
+            "historyEntries": {
               "type": "array",
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["contentId", "sessionId", "label", "activeContentId", "contentType", "focused"],
+                "required": ["contentId", "sessionId", "label", "activeContentId", "contentType", "position", "distanceFromVisible", "focused"],
                 "properties": {
+                  "contentId": { "$ref": "#/$defs/ContentId" },
                   "sessionId": { "$ref": "#/$defs/SessionId" },
                   "label": {
                     "type": "string",
@@ -2219,6 +2333,14 @@ The schema below defines every v1 application message type over WS.
                   },
                   "contentType": {
                     "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+                  },
+                  "position": {
+                    "type": "string",
+                    "enum": ["back", "visible", "forward"]
+                  },
+                  "distanceFromVisible": {
+                    "type": "integer",
+                    "minimum": 0
                   },
                   "focused": {
                     "type": "boolean",
@@ -2232,13 +2354,14 @@ The schema below defines every v1 application message type over WS.
       }
     },
 
-    "TabCloseRequest": {
+    "HistoryCloseRequest": {
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "type", "op", "id", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "request" },
+        "op": { "const": "history.close" },
         "id": { "$ref": "#/$defs/RequestId" },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
@@ -2247,25 +2370,29 @@ The schema below defines every v1 application message type over WS.
           "required": ["paneId", "contentId"],
           "properties": {
             "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" }
           }
         }
       }
     },
-    "TabCloseResponse": {
+    "HistoryCloseResponse": {
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "response" },
+        "op": { "const": "history.close" },
         "id": { "$ref": "#/$defs/RequestId" },
         "ok": { "const": true },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "closedFramesDiscarded"],
+          "required": ["paneId", "contentId", "closedFramesDiscarded"],
           "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
             "closedFramesDiscarded": {
               "type": "integer",
               "minimum": 0,
@@ -2276,13 +2403,14 @@ The schema below defines every v1 application message type over WS.
       }
     },
 
-    "TabCreatedEvent": {
+    "HistoryEntryCreatedEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "event" },
+        "op": { "const": "event.history_entry_created" },
         "eventId": { "$ref": "#/$defs/EventId" },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
@@ -2292,6 +2420,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
             "sessionId": { "$ref": "#/$defs/SessionId" },
             "label": {
               "type": "string",
@@ -2301,13 +2430,14 @@ The schema below defines every v1 application message type over WS.
         }
       }
     },
-    "TabRemovedEvent": {
+    "HistoryEntryRemovedEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "event" },
+        "op": { "const": "event.history_entry_removed" },
         "eventId": { "$ref": "#/$defs/EventId" },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
@@ -2317,17 +2447,19 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" }
           }
         }
       }
     },
-    "TabFocusedEvent": {
+    "HistoryEntryFocusedEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "event" },
+        "op": { "const": "event.history_entry_focused" },
         "eventId": { "$ref": "#/$defs/EventId" },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
         "payload": {
@@ -2337,6 +2469,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" }
           }
         }
       }
@@ -2369,7 +2502,7 @@ Resolution: explicit max-byte limits in pair response; typed schemas; `content_t
 Resolution: mutation ops require both current `contentId` and next `revision`; stale content returns `stale_content`.
 
 7. Ambiguous state after reconnect.
-Resolution: pair response always returns authoritative current state (`currentContentId`, `currentRevision`, `contentType`), and provider performs immediate `snapshot.get` before normal operation.
+Resolution: pair response always returns authoritative current pane state (`panes[]` with per-pane `currentContentId`, `currentRevision`, `contentType`, and `focused`), and provider performs immediate `snapshot.get` before normal operation.
 
 8. Short drawing pauses triggering noisy sends.
 Resolution: send requires unsent changes (`dirty=true`) plus either idle-window silence or max-interval expiry; small pauses do not flush.
@@ -2384,7 +2517,7 @@ Resolution: `dirty` gating forbids sends unless new strokes arrived since last s
 Resolution: surface shows a visible in-flight send indicator for every drawing flush attempt.
 
 12. Surgical deletion drift (wrong strokes removed).
-Resolution: every stroke carries stablele `strokeId`; `annotations.remove` accepts explicit `strokeIds` and returns `removedStrokeIds` + `notFoundStrokeIds`, leaving unspecified strokes untouched.
+Resolution: every stroke carries stable `strokeId`; `annotations.remove` accepts explicit `strokeIds` and returns `removedStrokeIds` + `notFoundStrokeIds`, leaving unspecified strokes untouched.
 
 13. Surface overreach on drawing semantics.
 Resolution: surface remains passive and non-interpreting; only CLU decides persistent vs consumed drawings and invokes `annotations.remove` when needed.
@@ -2399,7 +2532,7 @@ Resolution: `visibleText` and `drawings` are conditional fields governed by requ
 Resolution: surface must prioritize pong generation over render/mutation queue work.
 
 17. Pair handshake hang.
-Resolution: provider enforces 10s `pair.request` timeout from socket establelishment, then closes and reconnects.
+Resolution: provider enforces 10s `pair.request` timeout from socket establishment, then closes and reconnects.
 
 18. Reconnect race between fresh events and state resync.
 Resolution: provider buffers post-reconnect events during mandatory snapshot, applies snapshot first, then drains buffered events in order.
@@ -2416,7 +2549,7 @@ Protocol is ready for implementation when these checks pass in integration tests
 1. Provider can discover, connect, pair, push content, clear content, and get snapshot over WS only.
 2. Default `minimum_deep` profile emits `event.drawing_flush`, `event.tap`, `event.selection`, `event.page`, `event.navigation`, and provider-internal `event.snapshot_hint` without any watch subscription call.
 3. Surface flushes drawings only under dual-gate timing (`idleWindowMs` + `maxIntervalMs`) and never flushes unchanged data.
-4. Every stroke in `event.drawing_flush` and `snapshot.get` has stablele `strokeId` and retains ID stableility until explicitly removed.
+4. Every stroke in `event.drawing_flush` and `snapshot.get` has stable `strokeId` and retains ID stability until explicitly removed.
 5. `annotations.remove` removes only requested stroke IDs, reports `removedStrokeIds`/`notFoundStrokeIds`, and preserves all unspecified strokes.
 6. Reconnect path resumes within grace for same provider; after grace expiry the session is invalidated and `busy=0` (new providers may connect), but displayed content is unchanged.
 7. Revision errors and idempotency replay behave exactly as specified.
@@ -2452,8 +2585,8 @@ This section specifies how surface events reach CLU. It is intentionally separat
 
 The provider maintains a structured local buffer for each surface. The buffer has **two annotation channels** plus typed **non-annotation registers**.
 
-- **Channel A — Live dirty channel (muhistory entryle):** near-real-time stroke deltas for the currently active context frame while the user is annotating.
-- **Channel B — Closed frame queue (immuhistory entryle):** finalized context frames that must remain deliverable until CLU consumes them.
+- **Channel A — Live dirty channel (mutable):** near-real-time stroke deltas for the currently active context frame while the user is annotating.
+- **Channel B — Closed frame queue (immutable):** finalized context frames that must remain deliverable until CLU consumes them.
 
 CLU reads from this local buffer only; no `surf_ace_read` call triggers a live network call to a surface.
 
@@ -2470,16 +2603,16 @@ Annotation data is keyed by **context**, not by annotation session.
 A context key is:
 - CLU-pushed content: active `contentId`
 - HTML user navigation context: normalized URL (fragment stripped, query preserved)
-- Non-URL types: `contentId` (or equivalent stablele content identity)
+- Non-URL types: `contentId` (or equivalent stable content identity)
 
 **Important invariants:**
 1. Scroll alone does **not** create a new context frame.
 2. Navigation/content change alone does **not** create a frame.
 3. A new frame is created only when annotation actually occurs in that context.
-4. Re-entering annotation mode in the same context appends to the same muhistory entryle context frame.
+4. Re-entering annotation mode in the same context appends to the same mutable context frame.
 
 **Lifecycle (dual-channel semantics):**
-1. On first stroke in a context with no open frame, provider creates/open a muhistory entryle context frame.
+1. On first stroke in a context with no open frame, provider creates/opens a mutable context frame.
 2. While annotating in that context, incoming `event.drawing_flush` strokes are appended to that open frame and exposed through the live dirty channel.
 3. Exiting annotation mode (`Done` / toggle off) does **not** force frame finalization; it only pauses live writes. Re-entry in the same context resumes appending to the same frame.
 4. When annotation begins in a different context, provider finalizes the previous context frame and enqueues it to Channel B (closed queue), then opens/resumes the new context's frame.
@@ -2522,7 +2655,7 @@ This preserves context-coherent payloads while still allowing CLU to react durin
 
 The live channel exposes the currently open context frame with incremental dirty state:
 
-- `liveFrame` — current muhistory entryle frame (or `null` if none)
+- `liveFrame` — current mutable frame (or `null` if none)
 - `liveDirtyStrokeIds[]` — stroke IDs appended since last `surf_ace_read`
 - `liveSeq` — monotonically increasing sequence for live updates on that frame
 
@@ -2530,7 +2663,7 @@ The live channel exposes the currently open context frame with incremental dirty
 
 ---
 
-#### Channel B: Closed Frame Queue (Immuhistory entryle)
+#### Channel B: Closed Frame Queue (Immutable)
 
 Closed frames are appended to FIFO `frames[]` and remain deliverable until consumed by `surf_ace_read`.
 
@@ -2551,7 +2684,7 @@ The same stroke may appear in both channels:
 
 This is intentional. Closed frames are guaranteed context-preserved records and MUST remain deliverable even if CLU already saw live deltas.
 
-**Dedup guidance:** CLU should dedupe by `strokeId` per `frameId` (or per `contextKey` where appropriate). Provider MUST keep stablele `strokeId` across live and closed representations.
+**Dedup guidance:** CLU should dedupe by `strokeId` per `frameId` (or per `contextKey` where appropriate). Provider MUST keep stable `strokeId` across live and closed representations.
 
 ---
 
@@ -2571,7 +2704,7 @@ The following registers handle non-annotation surface events.
 | `taps` | Append | array | Ordered list of point-out tap events since last read. UI-navigation taps (link follows, button activations) are NOT included here — they produce `event.navigation` instead. |
 | `playbackPosition` | Latest-wins | number? | **Video only.** Current playback position in seconds. `null` for all other content types. Populated by a v2 wire event. In v1, always `null`. |
 | `playbackState` | Latest-wins | string? | **Video only.** One of `"playing"`, `"paused"`, `"ended"`. `null` for all other content types. In v1, always `null`. |
-| `lastNavigation` | Latest-wins | object? | **HTML only.** Most recent navigation away from CLU-pushed content. `{ url: string, navigatedAt: EpochMs }` or `null`. Populated by `event.navigation`. `navigatedAt` maps from wire `NavigationEvent.sentAt`. Cleared on `surf_ace_read`. |
+| `lastNavigation` | Latest-wins | object? | **HTML only.** Most recent navigation away from CLU-pushed content in the currently addressed pane. `{ url: string, navigatedAt: EpochMs }` or `null`. Populated by `event.navigation`. `navigatedAt` maps from wire `NavigationEvent.sentAt`. Cleared on `surf_ace_read`. |
 
 #### Overflow
 
@@ -2600,7 +2733,7 @@ This gives one alert per unread activity burst while still allowing live reads d
 
 CLU uses one read tool:
 
-**`surf_ace_read(fingerprint)`** — reads live annotation state first, then closed frames (bounded), plus registers.
+**`surf_ace_read(fingerprint, paneId?)`** — reads live annotation state first, then closed frames (bounded), plus registers, for one pane (`paneId` defaults to `root`).
 
 Read order and behavior:
 1. Return **live channel first** (`liveFrame` + `liveDirtyStrokeIds` + `liveSeq`) if present.
@@ -2617,7 +2750,7 @@ CLU should prioritize interpreting `liveFrame` first when present, then process 
 1. **Live preempts backlog.** If `liveFrame` + `liveDirtyStrokeIds` is present, model should process that first for real-time responsiveness.
 2. **Backlog drains when live is quiescent.** Process `frames[]` oldest-first only when no `liveSeq` increment has occurred for at least 1000 ms (recommended default).
 3. **If new live arrives while draining backlog, pause backlog and return to live processing.**
-4. **Closed frames are still processed even if some strokes were seen live.** Their image/context payload is authoritative for completion and audihistory entryility.
+4. **Closed frames are still processed even if some strokes were seen live.** Their image/context payload is authoritative for completion and auditability.
 5. **Dedup by stroke identity.** A stroke may appear in both channels; dedupe by `strokeId` scoped to `frameId`/`contextKey`.
 
 This preserves both goals: real-time reaction during active annotation and guaranteed catch-up for older context.
@@ -2662,7 +2795,7 @@ Rules:
 6. CLU never calls a "connect" or "pair" tool. By the time CLU acts on a screen, the provider is already connected — or actively attempting to be.
 
 Connection states visible to CLU (via `surf_ace_list`):
-- `connected` — WS socket establelished and pair handshake complete; ready for operations.
+- `connected` — WS socket established and pair handshake complete; ready for operations.
 - `connecting` — provider is actively attempting to connect or reconnect.
 - `unreachable` — screen was discovered but repeated connection attempts have failed (backoff limit reached or mDNS record stale).
 
@@ -2676,9 +2809,7 @@ CLU's tool surface has a strict read/write split:
 
 ### 14.3 CLU Tool Surface
 
-CLU interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stablele identity, mapped from `surfaceId`) as the primary screen selector.
-
-Pane note: pane selector is currently omitted from v1 tool signatures in this document; Phase 1 completion requires adding optional `paneId` (default `root`) to all screen-scoped tools.
+CLU interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector, plus optional `paneId` defaulting to `root`.
 
 ---
 
@@ -2690,12 +2821,15 @@ Returns all known screens and their locally cached state. Read-only, local.
 
 **Returns:** array of screen records:
 ```
-fingerprint       string    Stablele screen identity (window-scoped; mapped from `surfaceId`)
+fingerprint       string    Stable screen identity (window-scoped; mapped from `surfaceId`)
 name              string    Human-readable screen name
 connectionState   enum      "connected" | "connecting" | "unreachable"
 lastSeenAt        epochMs   When screen was last seen in mDNS or active
 viewport          object    { width, height, scale }
-activeContent     object?   { contentId, contentType, revision } or null if idle
+focusedPaneId     string    Currently focused pane ID
+panes             array     [{ paneId, name, autoLabel, focused, activeContent, historySummary }]
+                          activeContent: { contentId, contentType, revision } or null if idle
+                          historySummary: { visibleContentId, backCount, forwardCount }
 pendingEvents     int       Count of buffered events not yet read by CLU
 ```
 
@@ -2710,6 +2844,7 @@ Push content to a screen, replacing whatever is currently displayed. Write.
 **Params:**
 ```
 fingerprint    string   Target screen
+paneId         string?  Target pane. Defaults to "root"
 contentType    enum     "html" | "image" | "pdf" | "terminal" | "markdown" | "video" | "canvas"
 content        string   Content payload. Encoding by type:
                           html/terminal/markdown: UTF-8 text
@@ -2721,11 +2856,9 @@ content        string   Content payload. Encoding by type:
 **Returns:**
 ```
 fingerprint    string
-contentId      string   Stablele content ID assigned by provider (ct_<8hex>)
+paneId         string   Target pane
+contentId      string   Stable content/history-entry ID assigned by provider (ct_<8hex>)
 revision       int      Revision after push
-contentId          string   The history entry that was created or updated for this session in the target pane.
-                        Derived from sessionId. CLU does not need to pass contentId on subsequent pushes
-                        — surface continues routing by sessionId automatically.
 ```
 
 **Errors:** `not_connected`, `screen_not_found`, `content_too_large`, `unsupported_content_type`, `render_failed`
@@ -2734,16 +2867,18 @@ contentId          string   The history entry that was created or updated for th
 
 #### `surf_ace_clear`
 
-Clear the current content and return the screen to connected-idle. Write.
+Clear the calling session's history entry in the target pane. If that history entry is currently visible, the pane becomes idle until another history entry is focused or pushed. Write.
 
 **Params:**
 ```
 fingerprint    string   Target screen
+paneId         string?  Target pane. Defaults to "root"
 ```
 
 **Returns:**
 ```
 fingerprint    string
+paneId         string
 revision       int      Revision after clear
 ```
 
@@ -2753,7 +2888,7 @@ revision       int      Revision after clear
 
 #### `surf_ace_read`
 
-Read dual-channel annotation state plus register values from the local buffer for a screen. Read-only, local — no network call to the surface. **Content-scoped:** `surf_ace_read` reads the calling session's content. The provider derives `contentId` from the calling CLU session's identity — CLU does not pass `contentId` in the tool call. No `contentId` parameter is needed or accepted. This ensures each CLU session reads only its own annotation state, with no cross-session bleed. If the session has no history entry in the specified pane (it has never pushed to that pane), `surf_ace_read` returns empty channels for that pane.
+Read dual-channel annotation state plus register values from the local buffer for a pane. Read-only, local — no network call to the surface. **Content-scoped:** `surf_ace_read` reads the calling session's content. The provider derives `contentId` from the calling CLU session's identity — CLU does not pass `contentId` in the tool call. No `contentId` parameter is needed or accepted. This ensures each CLU session reads only its own annotation state, with no cross-session bleed. If the session has no history entry in the specified pane (it has never pushed to that pane), `surf_ace_read` returns empty channels for that pane.
 
 Response includes:
 1. **Live dirty channel first** (if a frame is currently open/active),
@@ -2765,6 +2900,7 @@ Closed frames are dequeued on read. Register values are cleared. Live dirty mark
 **Params:**
 ```
 fingerprint    string   Target screen
+paneId         string?  Target pane. Defaults to "root"
 ```
 
 **Returns:**
@@ -2772,7 +2908,7 @@ fingerprint    string   Target screen
 fingerprint       string
 
 // Channel A: live dirty (newest / active context)
-liveFrame         object?  Current muhistory entryle context frame, or null if no active frame.
+liveFrame         object?  Current mutable context frame, or null if no active frame.
                            {
                              frameId        string
                              contextKey     string
@@ -2851,11 +2987,12 @@ This tool is deprecated and removed in the capture frame model. Frame images are
 
 Remove specific annotation strokes from a screen's drawing overlay by stroke ID. Write.
 
-**Note (dual-channel frame model):** In the dual-channel model, strokes disappear from the surface display when annotation mode exits, but the underlying context frame may remain open and continue on later same-context re-entry (§13.2). Closed frames in the queue are immuhistory entryle records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay (active session UI). For most CLU workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at CLU interpretation time (dedupe/ignore/act), not by mutating closed frames.
+**Note (dual-channel frame model):** In the dual-channel model, strokes disappear from the surface display when annotation mode exits, but the underlying context frame may remain open and continue on later same-context re-entry (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay (active session UI). For most CLU workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at CLU interpretation time (dedupe/ignore/act), not by mutating closed frames.
 
 **Params:**
 ```
 fingerprint    string     Target screen
+paneId         string?    Target pane. Defaults to "root"
 contentId      string     Must match the currently active content
 strokeIds      string[]   Stroke IDs to remove
 ```
@@ -2863,6 +3000,7 @@ strokeIds      string[]   Stroke IDs to remove
 **Returns:**
 ```
 fingerprint            string
+paneId                 string
 removedStrokeIds       string[]
 notFoundStrokeIds      string[]
 remainingStrokeCount   int
@@ -2906,6 +3044,7 @@ The injected Surf Ace instruction text MUST teach agents how to interpret surfac
 - `event.page`
 - `event.selection` (v1 text-only handling)
 - `event.pane_created` / `event.pane_removed` / `event.pane_focused` / `event.pane_renamed`
+- `event.history_entry_created` / `event.history_entry_removed` / `event.history_entry_focused`
 
 Standalone-provider note: Surf Ace MAY run as a standalone extension without Clawline coupling, provided it implements gateway wake/routing plumbing comparable to existing channel extensions (for example, Discord-style wake + route behavior) rather than relying on Clawline-specific internal helpers.
 
@@ -2962,7 +3101,7 @@ These constraints are normative (duplicated here from §6.10 for completeness):
 
 See also §7.4, which defines the flush send timing requirements. This section cross-references that requirement for UI completeness.
 
-A subtle visual indicator MUST be displayed while a `drawing_flush` event is being transmitted to the provider. Examples of accephistory entryle treatments: a small pulsing dot, a corner status chip, or a brief overlay.
+A subtle visual indicator MUST be displayed while a `drawing_flush` event is being transmitted to the provider. Examples of acceptable treatments: a small pulsing dot, a corner status chip, or a brief overlay.
 
 Required behavior (normative, cross-referenced from §7.4):
 1. Indicator becomes visible when `event.drawing_flush` transmission starts.
@@ -3000,57 +3139,17 @@ These constraints are synchronized with annotation mode state and are lifted imm
 
 This section is the authoritative list of unresolved design decisions. Items here MUST NOT be implemented against until explicitly resolved and removed from this list. When a topic is resolved, the decision moves into normative sections of the spec; it is not retained here.
 
-### OT-1: Multi-Session Pane Contention Policy
-
-**Problem:** When multiple CLU sessions (chats) push content to the same pane, the protocol needs a deterministic visibility policy. The current history entry model ensures sessions do not overwrite each other's content, but does not specify which history entry is initially visible or how supersede events work.
-
-**Candidate policies:**
-1. ~~Tab isolation~~ — **RESOLVED: replaced by history model.** See single-visible-owner + history (above).
-2. **Single-visible-owner + supersede** — newest write becomes visible immediately; the prior session receives a superseded signal so it can retarget or notify the user.
-3. **Single-visible-owner + history** — no history entries; pane has Back/Forward navigation history so the user can restore prior visible states quickly.
-
-**Requirements any policy must meet:**
-- No permission prompts for normal session pushes.
-- Superseded sessions must be explicitly notifiable when their content is no longer visible.
-- The model must be able to make intelligent fallback decisions (retarget another pane/surface, notify user, or wait).
-
-**Edge-case open questions (history policy candidate):**
-1. **Push arrives during annotation mode:** defer until annotation exits (current preferred direction) vs immediate swap. If deferred, define max defer TTL and visible "pending update" indicator semantics.
-2. **History stack limits:** max entries per pane, eviction policy, and whether entries store full rendered states vs references.
-3. **Back then new push behavior:** whether Forward branch is truncated browser-style when new content is written after a Back navigation.
-4. **Per-pane timeline scope:** history is per-pane; define UI expectations when different panes are at different timeline positions.
-5. **Superseded-session behavior:** whether superseded sessions receive explicit machine events by default or infer supersession from visibility/occupancy state.
-
-**Status:** Open. Requires explicit policy decision before implementation. See Appendix A.13 for additional rationale context.
-
-### OT-2: Model-Side Markup (Provider-Originated Strokes)
+### OT-1: Model-Side Markup (Provider-Originated Strokes)
 
 **Problem:** CLU has no mechanism to draw on surfaces in v1. The model can only push content and read user strokes. There is no wire op for model-originated strokes, no capture exclusion mechanism to prevent them from entering annotation buffers, and no visual distinction protocol.
 
 **Status:** Open. Not Phase 1 or Phase 2 scope. See Appendix A.12 for background.
 
-### OT-3: Semantic Gesture Classification (On-Device)
+### OT-2: Semantic Gesture Classification (On-Device)
 
 **Problem:** Multi-stroke semantic gestures (brackets, lasso, circle-for-emphasis) cannot be reliably interpreted from raw geometry alone. On-device model integration (per finalized frame) is the most promising path but the wire contract (`semanticHints` field, confidence thresholds, fallback behavior) is not designed.
 
 **Status:** Open. Design deferred to v2. See Appendix A.3, A.4 for background.
-
-### OT-4: iOS Deployment Target Floor
-
-**Decision:** Surf Ace targets the newest released OS major version as the minimum deployment target. Current floor: iOS/iPadOS 26 and macOS 26 for native surface builds.
-
-**Status:** Resolved. Moved into Core Invariants (#13).
-
-### OT-5: Distribution Method for Porhistory entryle Surf Ace Extension
-
-**Decision:**
-- **Development:** `openclaw plugins install -l ~/src/surf-ace` (official link mode; `git pull` = immediately live after gateway restart)
-- **Distribution:** `openclaw plugins install ./surf-ace.zip` (official OpenClaw zip install path; no custom packaging scripts required)
-- **Separate repo:** Surf Ace lives in its own standalone repo (not bundled with Clawline). Fresh implementation — no porting from the clawline-rebase branch.
-
-Both dev and distribution use the standard `openclaw plugins install` CLI. This satisfies all selection criteria: no Clawline dependency, no core patching, repeahistory entryle upgrades/rollback via zip replacement, skills and instruction injection verified at install time.
-
-**Status:** Resolved. Moved into Core Invariants (#14).
 
 ---
 
@@ -3213,7 +3312,7 @@ However, geometry-based inference of the "between" region still requires underst
 - For user-navigated URLs (within an HTML push): the full URL string, normalized (fragment stripped, query preserved)
 - For non-URL content (images, PDFs): the content hash or `contentId`
 
-Each context record holds: `{ contentId?, url?, liveFrame?, liveDirtyStrokeIds?, closedFrameQueue, scrollPosition, selection, page, timestamps }`, where `timestamps` is `{ createdAt: EpochMs, lastActivityAt: EpochMs }` — `createdAt` is when the context record was first establelished (content pushed or first navigation), `lastActivityAt` is updated on every register write. Note: the old `annotations`/`drawBuffer` fields are replaced by dual annotation channels (`liveFrame` + `closedFrameQueue`).
+Each context record holds: `{ contentId?, url?, liveFrame?, liveDirtyStrokeIds?, closedFrameQueue, scrollPosition, selection, page, timestamps }`, where `timestamps` is `{ createdAt: EpochMs, lastActivityAt: EpochMs }` — `createdAt` is when the context record was first established (content pushed or first navigation), `lastActivityAt` is updated on every register write. Note: the old `annotations`/`drawBuffer` fields are replaced by dual annotation channels (`liveFrame` + `closedFrameQueue`).
 
 In v1, `content.set`, `content.clear`, and `event.navigation` still enforce hard-clear behavior at the surface rendering layer, but provider buffer retention is split:
 - interactive overlay state is cleared per protocol,
@@ -3274,7 +3373,7 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
 **Design direction:**
 1. Keep multi-window model unchanged (`surfaceId` stays window identity).
 2. Add pane identity inside a surface: `paneId`.
-3. Scope all muhistory entryle state by `contextScope = { surfaceId, paneId }`.
+3. Scope all mutable state by `contextScope = { surfaceId, paneId }`.
 4. Default single-pane v1 behavior maps to `paneId="root"`.
 5. Pane-aware operations (split/resize/close/focus) are Phase 1 committed topology operations.
 6. Read/write tools become pane-aware by optional selector:
@@ -3289,7 +3388,7 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
 
 **Goal (v2+ enhancements):** Extend one-window multi-pane behavior with richer pane layout orchestration and lifecycle semantics beyond the Phase 1 committed baseline.
 
-**Compatibility principle:** Model muhistory entryle state as `contextScope = { surfaceId, paneId? }` where `paneId` defaults to `root` in v1/Phase 1. This preserves current single-pane behavior and allows advanced pane-aware ops without breaking existing semantics.
+**Compatibility principle:** Model mutable state as `contextScope = { surfaceId, paneId? }` where `paneId` defaults to `root` in v1/Phase 1. This preserves current single-pane behavior and allows advanced pane-aware ops without breaking existing semantics.
 
 **Expected v2+ shape:**
 1. Advanced pane lifecycle/layout operations (nested split templates, persistent layout presets, pane groups).
@@ -3323,11 +3422,13 @@ Model markups may become full interactive UIs embedded in the surface — widget
 
 **Status:** Open. Needs design discussion before any implementation. Not part of Phase 1 or Phase 2 scope as currently defined.
 
-### A.13 Multi-Session CLU Contention — Rationale Context
+### A.13 Multi-Session CLU History Routing — Rationale Context
 
-> **This topic is tracked in `## Open Topics → OT-1` (the authoritative source).** The candidate policies, requirements, and resolution status are documented there. This appendix entry is rationale context only.
+**Background:** The WS single-connection rule governs provider-level connections. At the CLU tool layer, multiple CLU sessions route through the same provider. The history-entry model (§3.1.1, §6.1.1) prevents sessions from overwriting each other's content while still guaranteeing a single visible owner per pane.
 
-**Background:** The WS single-connection rule governs provider-level connections. At the CLU tool layer, multiple CLU sessions route through the same provider. The history entry model (§3.1.1, §6.1.1) was designed so that sessions never overwrite each other's content — but the policy governing history entry visibility (which session's history entry is foregrounded on push, and how superseded sessions are notified) has not been decided.
-
+**Resolved policy summary:**
+1. The newest `content.set` in a pane becomes visible immediately.
+2. If the displaced visible content belongs to another session, that history entry moves to the Back stack and the provider emits `event.content_superseded` locally for the displaced session.
+3. Back/Forward navigation changes visibility only; it does not rewrite session-owned history entries.
 
 **Related sections:** §3.1.1 (topology), §6.1.1 (pane/history entry lifecycle ops), §6.2 (content routing), §13.2 (annotation buffering), §14.3 (`surf_ace_list` occupancy).
