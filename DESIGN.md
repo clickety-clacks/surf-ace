@@ -252,6 +252,7 @@ The surface MUST display a persistent visual indicator of connection state. Visu
 - Healthy: ping received within expected window — no indicator or neutral.
 - Stale — yellow: no ping received within `heartbeatIntervalMs + heartbeatGraceMs` (default 13s = 10s interval + 3s grace). Surface transitions to yellow at this threshold.
 - Disconnected — red: WS socket is not connected.
+ - Resume/reconnect state SHOULD be presented as a subtle status chip in the window chrome.
 Returns to healthy immediately when a ping is received on a live connection. Content is never cleared by any of these states (see §4.4 invariant).
 
 ### 4.6 Runtime Window Lifecycle (Multi-Window Endpoints)
@@ -369,6 +370,8 @@ Brings a pane into foreground / active focus.
 
 **Response fields:** `paneId` (ack echo), `focused: true`.
 
+**Surface default affordance:** Focused pane SHOULD render with a stronger border accent than unfocused panes.
+
 #### `pane.rename`
 Assigns or clears a human-readable name for a pane.
 
@@ -377,6 +380,8 @@ Assigns or clears a human-readable name for a pane.
 **Response fields:** `paneId`, `name` (new name or null).
 
 **Behavior:** Pane names are display metadata only. CLU pane targeting uses numeric `paneId` only.
+
+**Surface default affordance:** Rename SHOULD use inline title editing in the pane header.
 
 #### `pane.close`
 Closes a pane and removes it from the layout.
@@ -411,6 +416,12 @@ These rules are normative for the single-visible-owner history model:
 6. The Back stack is capped at 20 pane-history states. When a new state would exceed the limit, the oldest non-visible state is evicted together with any internal restore bookkeeping.
 7. `content.append` / `content.patch` remain valid only against the currently visible content in that pane, enforced by `contentId` + `revision`.
 8. `content.clear` clears the currently visible content for the targeted pane. Any history bookkeeping needed to preserve older pane states is internal to the surface/provider and not part of the CLU call surface.
+
+**Surface default affordances:**
+- Back/Forward controls SHOULD appear on the right side of the pane header.
+- Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances.
+- v1 SHOULD NOT display history depth counters.
+- If overlay restoration fails, the surface SHOULD show a non-blocking toast plus a warning icon in the pane header.
 
 ---
 
@@ -2811,34 +2822,34 @@ Surface implementations MUST display the following identifiers at all times, reg
 
 #### Window label
 
-Each window is assigned a short alphabetic identifier using an auto-incrementing sequence: `A`, `B`, `C` … `Z`, `AA`, `AB`, … This label MUST be:
-- Displayed prominently in a fixed corner of the window.
+Each window is assigned a short alphabetic identifier using an auto-incrementing sequence: `a`, `b`, `c` … `z`, `aa`, `ab`, … This label MUST be:
+- Displayed prominently in the top-left corner of the window chrome.
 - Persistent — never hidden, obscured, or removed based on content or connection state.
 - Rendered so it does not scroll with content (always in the chrome layer, not the content layer).
 
-The window label is the primary addressing handle. It MUST be visible at all times so that a user can tell CLU "move content to window B" without ambiguity.
+The window label is the primary addressing handle. It MUST be visible at all times so that a user can tell CLU "move content to window b" without ambiguity.
 
 #### Pane label
 
-Each pane within a window is assigned a numeric identifier starting at `0` (`0`, `1`, `2`, …). A user may assign a custom name to a pane (e.g., `fred`, `Janice`); when a custom name exists it MUST be displayed instead of the number. The pane label MUST be:
-- Displayed within the pane boundary, in a position that does not overlap with active content.
+Each pane is assigned a globally unique numeric identifier for the entire surface instance. A user may assign a custom name to a pane (e.g., `fred`, `Janice`); when a custom name exists it MUST be displayed instead of the number. The pane label MUST be:
+- Displayed in the top-left of the pane header, within the pane boundary, in a position that does not overlap with active content.
 - Always visible regardless of what content is rendered in the pane.
 
 #### iPad (pencil platforms)
 
 - **Automatic entry:** Pencil contact with the screen MUST automatically enter annotation mode. No button tap is required to initiate pencil drawing.
-- **Finger sketching button:** A "finger sketching" button MUST be persistently visible at all times — including when annotation mode is inactive. Tapping it enables finger input as a drawing tool, either alongside an active pencil or as the sole drawing instrument (entering annotation mode if not already active).
-- **Done button:** While annotation mode is active, a "Done" button MUST be visible. Tapping it exits annotation mode. No other gesture is required to exit.
+- **Finger sketching button:** A "finger sketching" button MUST be persistently visible in the pane header at all times — including when annotation mode is inactive. Tapping it enables finger input as a drawing tool, either alongside an active pencil or as the sole drawing instrument (entering annotation mode if not already active).
+- **Done button:** While annotation mode is active, a "Done" button MUST be visible as a top-right overlay pill. Tapping it exits annotation mode. No other gesture is required to exit.
 
 #### Electron (non-pencil platforms)
 
-- **Annotate button:** An "Annotate" button MUST be persistently visible at all times. Tapping it enters annotation mode.
-- **Done button:** While annotation mode is active, a "Done" button MUST be visible. Tapping it exits annotation mode.
+- **Annotate button:** An "Annotate" button MUST be persistently visible in the pane header at all times. Tapping it enters annotation mode.
+- **Done button:** While annotation mode is active, a "Done" button MUST be visible as a top-right overlay pill. Tapping it exits annotation mode.
 - There is no automatic entry trigger on non-pencil platforms — the Annotate button is the entry path.
 
 #### Annotation mode visual state (all platforms)
 
-When annotation mode is active, the surface MUST display a clear visual indication that distinguishes the annotating state from normal viewing. This MAY be a subtle overlay, a border change, or a persistent mode badge. The visual treatment must be sufficient for the user to immediately know they are in annotation mode without consulting any other indicator.
+When annotation mode is active, the surface MUST display a clear visual indication that distinguishes the annotating state from normal viewing. Default treatment: a 2px accent border plus a small "Annotating" badge. Pane labels and controls MUST remain visible and MUST NOT be dimmed while annotating.
 
 #### Behavioral constraints while in annotation mode (all platforms)
 
@@ -2849,11 +2860,55 @@ These constraints are normative (duplicated here from §15.6 "While IN annotatio
 
 ---
 
+### 15.2 Accessibility
+
+Surface chrome defaults MUST satisfy the following accessibility requirements:
+- All chrome controls MUST provide a minimum 44x44 touch target.
+- All chrome labels and controls MUST meet WCAG AA contrast.
+
+Electron keyboard defaults:
+- `A` enters annotation mode.
+- `D` exits annotation mode via Done.
+- `Cmd-[` navigates Back.
+- `Cmd-]` navigates Forward.
+- `Cmd-1` through `Cmd-9` focus the first nine visible panes by layout order. These shortcuts do not redefine pane IDs.
+
+---
+
+### 15.3 Pane Header Controls and Affordances
+
+Pane header chrome provides the default location for pane-local controls.
+
+Required defaults:
+- Pane label or custom pane name is shown on the left side of the pane header.
+- Back/Forward controls are shown on the right side of the pane header.
+- Finger sketching and Electron Annotate controls live in the pane header.
+- Split is initiated from a pane menu.
+- Rename uses inline title editing in the pane header.
+- Focused pane renders with a stronger border accent than unfocused panes.
+
+History controls default behavior:
+- Disabled Back/Forward controls render at 40% opacity.
+- Disabled Back/Forward controls do not show hover affordances.
+- v1 does not show history depth counters.
+
+---
+
+### 15.4 Degraded and Empty States
+
+Default user-visible handling for degraded or unavailable states:
+- Overlay restore failure shows a non-blocking toast plus a warning icon in the pane header.
+- Blocked navigation or blocked content replacement during annotation mode shows a small toast: `"Finish annotation (Done) to navigate"`.
+- Unsupported content renders a centered empty-state message.
+- Reconnect/resume state may be surfaced as a subtle status chip in the window chrome.
+
+---
+
 ### 15.5 Drawing Flush In-Flight Indicator
 
 See also §7.4, which defines the flush send timing requirements. This section cross-references that requirement for UI completeness.
 
-A subtle visual indicator MUST be displayed while a `drawing_flush` event is being transmitted to the provider. Examples of acceptable treatments: a small pulsing dot, a corner status chip, or a brief overlay.
+A small pulsing dot in the pane header MUST be displayed while a `drawing_flush` event is being transmitted to the provider.
 
 Required behavior (normative, cross-referenced from §7.4):
 1. Indicator becomes visible when `event.drawing_flush` transmission starts.
@@ -2883,6 +2938,7 @@ All of the following MUST be enforced:
 - **Link following disabled**: taps do not navigate.
 - **Drawing layer active**: the drawing layer captures all touch and stylus input. Normal content interaction is suspended.
 - **Pane visibility locked**: pane content replacement and user navigation are blocked until the user taps **Done**.
+- **Blocked attempt feedback**: if navigation or content replacement is attempted while annotation mode is active, the surface shows a small toast: `"Finish annotation (Done) to navigate"`.
 
 These constraints are synchronized with annotation mode state and are lifted only after the user taps **Done**. After **Done**, any user navigation or agent-driven content update is a normal context switch and follows the same pane-history rules as any other content change.
 
@@ -2907,24 +2963,37 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Session Label UI Hint** — "`providerName` (optional human-readable session/chat label for UI indicators)." Source: §6.1
 - **Pane Focus Visibility** — "Brings a pane into foreground / active focus." Source: §6.1.1
 - **Pane Rename Affordance** — "Assigns or clears a human-readable name for a pane." Source: §6.1.1
+- **Focused Pane Accent** — "Focused pane SHOULD render with a stronger border accent than unfocused panes." Source: §6.1.1
+- **Header History Controls** — "Back/Forward controls SHOULD appear on the right side of the pane header." Source: §6.1.1
+- **Disabled History Controls** — "Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances." Source: §6.1.1
+- **No History Counters** — "v1 SHOULD NOT display history depth counters." Source: §6.1.1
+- **Restore Failure UI** — "the surface SHOULD show a non-blocking toast plus a warning icon in the pane header." Source: §6.1.1
 - **Flush Send Indicator** — "Surface must show a subtle visual send indicator while a drawing flush is in-flight to provider." Source: §7.4
-- **Flush Indicator Presentation** — "Indicator must be subtle but noticeable (for example corner badge, pulsing icon, or brief overlay)." Source: §7.4
-- **Persistent Window Label** — "Displayed prominently in a fixed corner of the window." Source: §15.1
+- **Reconnect Status Chip** — "Resume/reconnect state SHOULD be presented as a subtle status chip in the window chrome." Source: §4.4
+- **Persistent Window Label** — "Displayed prominently in the top-left corner of the window chrome." Source: §15.1
 - **Always-Visible Window Label** — "Persistent — never hidden, obscured, or removed based on content or connection state." Source: §15.1
 - **Non-Scrolling Window Label** — "Rendered so it does not scroll with content (always in the chrome layer, not the content layer)." Source: §15.1
 - **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible at all times." Source: §15.1
-- **Pane Label Placement** — "Displayed within the pane boundary, in a position that does not overlap with active content." Source: §15.1
+- **Pane Label Placement** — "Displayed in the top-left of the pane header, within the pane boundary." Source: §15.1
 - **Always-Visible Pane Label** — "Always visible regardless of what content is rendered in the pane." Source: §15.1
 - **Pencil Auto Entry** — "Pencil contact with the screen MUST automatically enter annotation mode." Source: §15.1
-- **Finger Sketching Control** — "A 'finger sketching' button MUST be persistently visible at all times." Source: §15.1
-- **Done Exit Control** — "While annotation mode is active, a 'Done' button MUST be visible. Tapping it exits annotation mode." Source: §15.1
-- **Electron Annotate Entry** — "An 'Annotate' button MUST be persistently visible at all times. Tapping it enters annotation mode." Source: §15.1
-- **Annotation Mode Visual State** — "The surface MUST display a clear visual indication that distinguishes the annotating state from normal viewing." Source: §15.1
-- **Annotation Visual Treatments** — "This MAY be a subtle overlay, a border change, or a persistent mode badge." Source: §15.1
+- **Finger Sketching Control** — "A 'finger sketching' button MUST be persistently visible in the pane header at all times." Source: §15.1
+- **Done Exit Control** — "While annotation mode is active, a 'Done' button MUST be visible as a top-right overlay pill." Source: §15.1
+- **Electron Annotate Entry** — "An 'Annotate' button MUST be persistently visible in the pane header at all times. Tapping it enters annotation mode." Source: §15.1
+- **Annotation Mode Visual State** — "Default treatment: a 2px accent border plus a small 'Annotating' badge." Source: §15.1
+- **Annotation Controls Stay Visible** — "Pane labels and controls MUST remain visible and MUST NOT be dimmed while annotating." Source: §15.1
 - **Annotation Viewport Lock** — "Scroll is disabled. The viewport is locked." Source: §15.1 / §15.6
 - **Annotation Tap Blocking** — "Link following is disabled. Taps do not navigate." Source: §15.1 / §15.6
 - **Drawing Capture Layer** — "The drawing layer captures all touch and stylus input." Source: §15.1 / §15.6
-- **Flush Indicator Examples** — "A subtle visual indicator MUST be displayed ... a small pulsing dot, a corner status chip, or a brief overlay." Source: §15.5
+- **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
+- **Accessibility Contrast** — "All chrome labels and controls MUST meet WCAG AA contrast." Source: §15.2
+- **Electron Shortcut Defaults** — "`A` enters annotation mode ... `Cmd-1` through `Cmd-9` focus the first nine visible panes by layout order." Source: §15.2
+- **Pane Header Control Placement** — "Pane label or custom pane name is shown on the left side of the pane header." Source: §15.3
+- **Pane Menu Split** — "Split is initiated from a pane menu." Source: §15.3
+- **Inline Rename** — "Rename uses inline title editing in the pane header." Source: §15.3
+- **Unsupported Content Empty State** — "Unsupported content renders a centered empty-state message." Source: §15.4
+- **Blocked Attempt Toast** — "Blocked navigation or blocked content replacement during annotation mode shows a small toast." Source: §15.4 / §15.6
+- **Flush Indicator Placement** — "A small pulsing dot in the pane header MUST be displayed while a `drawing_flush` event is being transmitted." Source: §15.5
 - **Flush Indicator Visibility Rule** — "Indicator becomes visible when `event.drawing_flush` transmission starts." Source: §15.5
 - **Flush Indicator Duration Rule** — "Indicator remains visible while the transmission is in-flight." Source: §15.5
 - **Content Area Fill** — "Content MUST fill the pane." Source: §15.6
@@ -3117,6 +3186,8 @@ However, geometry-based inference of the "between" region still requires underst
 
 **Decision:** On pencil-supported devices, pencil contact automatically enters annotation mode; fingers do normal operations (scroll, select, tap, follow links) by default. A "finger sketching" button is always visible and, when tapped, adds finger drawing capability to annotation mode. On non-pencil platforms (Electron), an "Annotate" button is the sole entry point for annotation mode and enables finger drawing. In both cases the button can be tapped before any drawing occurs. This is the only surface-level mode distinction and it is UI-only; the wire protocol and register model do not change based on mode.
 
+**UI defaults alignment:** Finger sketching / Annotate controls live in the pane header. The Done control is a top-right overlay pill while annotation mode is active. Blocked navigation or blocked content replacement during annotation mode produces a small toast directing the user to finish annotation first.
+
 **Data model:** The provider MUST store surface state in a context dictionary keyed by `contextKey`, where `contextKey` is:
 - For CLU-pushed content: the `contentId` (e.g. `ct_a1b2c3d4`)
 - For user-navigated URLs (within an HTML push): the full URL string, normalized (fragment stripped, query preserved)
@@ -3169,6 +3240,8 @@ Rationale: Frames are preservation/backlog artifacts, not mandatory segmentation
 **Video** (`video`) — fundamentally temporal rather than spatial. Annotations carry an optional `videoTimestamp` field anchoring strokes to playback position. Two additional registers: `playbackPosition` and `playbackState`. The multi-scroll / bounding-box problems from A.2/A.3 have a temporal analog here — strokes made at different playback times may span content that is no longer visible. Full semantics deferred to v2. See Section 6.9.
 
 **Blank canvas** (`canvas`) — an optional/legacy content type where annotations are the primary artifact and there is no underlying document. The surface renders a blank or gridded background. `content.clear` removes all annotations (same global rule as all content types). In v1, CLU observes user strokes via the existing register model (read-only for the native annotation layer). CLU does not need this content type in order to present draw-capable experiences, because normal HTML/SVG content can already render its own `<canvas>` or similar drawing UI. Dedicated native-overlay annotation writes remain undefined in v1 and would require a future protocol extension. Useful for whiteboard-style collaboration. See Section 6.9.
+
+**Default empty/degraded presentation:** Unsupported content should use a centered empty-state message. Blank-canvas presentations may use a blank or gridded background.
 
 **Everything else** (slides, word documents, maps) is a variant of HTML or PDF with cosmetic differences. No new model required.
 
