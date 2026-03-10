@@ -2888,6 +2888,63 @@ These constraints are synchronized with annotation mode state and are lifted onl
 
 ---
 
+## UI/UX Invariants Index
+
+This section is a consolidated copy/reference index of existing UI/UX mentions elsewhere in the document; it does not supersede the original normative or contextual locations.
+
+- **Window Letter Labels** — "Windows are auto-assigned short letter labels: a, b, c … z, aa, ab … (displayed prominently on surface)." Source: §3.1.1
+- **Pane Name Display Metadata** — "Users may assign human-readable pane names for display, but CLU pane addressing is always by numeric `paneId`." Source: §3.1.1
+- **Prominent Surface Labels** — "Labels and names are displayed prominently on the surface — exact placement and visual style TBD in the separate UI spec." Source: §3.1.1
+- **Displayed Content Persistence** — "The surface renders content and keeps it displayed until CLU explicitly changes it." Source: §1
+- **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
+- **History Navigation Controls** — "Previously visible content in that pane remains navigable through the surface's Back/Forward controls." Source: §6.1.1
+- **Degraded Restore Safety** — "The surface MUST still show that state's content payload when available, clear the overlay for safety." Source: §6.1.1
+- **Connectivity Indicator** — "The surface MUST display a persistent visual indicator of connection state." Source: §4.4
+- **Connectivity Neutral State** — "Healthy: ping received within expected window — no indicator or neutral." Source: §4.4
+- **Connectivity Warning State** — "Warning: one ping missed or latency high — mild visible warning." Source: §4.4
+- **Connectivity Lost State** — "Disconnected: outside grace or socket dead — clear visible disconnected state." Source: §4.4
+- **Window Auto Label in UI** — "`autoLabel` is the auto-assigned window letter ... displayed on the surface UI." Source: §6.0
+- **Session Label UI Hint** — "`providerName` (optional human-readable session/chat label for UI indicators)." Source: §6.1
+- **Pane Focus Visibility** — "Brings a pane into foreground / active focus." Source: §6.1.1
+- **Pane Rename Affordance** — "Assigns or clears a human-readable name for a pane." Source: §6.1.1
+- **Flush Send Indicator** — "Surface must show a subtle visual send indicator while a drawing flush is in-flight to provider." Source: §7.4
+- **Flush Indicator Presentation** — "Indicator must be subtle but noticeable (for example corner badge, pulsing icon, or brief overlay)." Source: §7.4
+- **Persistent Window Label** — "Displayed prominently in a fixed corner of the window." Source: §15.1
+- **Always-Visible Window Label** — "Persistent — never hidden, obscured, or removed based on content or connection state." Source: §15.1
+- **Non-Scrolling Window Label** — "Rendered so it does not scroll with content (always in the chrome layer, not the content layer)." Source: §15.1
+- **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible at all times." Source: §15.1
+- **Pane Label Placement** — "Displayed within the pane boundary, in a position that does not overlap with active content." Source: §15.1
+- **Always-Visible Pane Label** — "Always visible regardless of what content is rendered in the pane." Source: §15.1
+- **Pencil Auto Entry** — "Pencil contact with the screen MUST automatically enter annotation mode." Source: §15.1
+- **Finger Sketching Control** — "A 'finger sketching' button MUST be persistently visible at all times." Source: §15.1
+- **Done Exit Control** — "While annotation mode is active, a 'Done' button MUST be visible. Tapping it exits annotation mode." Source: §15.1
+- **Electron Annotate Entry** — "An 'Annotate' button MUST be persistently visible at all times. Tapping it enters annotation mode." Source: §15.1
+- **Annotation Mode Visual State** — "The surface MUST display a clear visual indication that distinguishes the annotating state from normal viewing." Source: §15.1
+- **Annotation Visual Treatments** — "This MAY be a subtle overlay, a border change, or a persistent mode badge." Source: §15.1
+- **Annotation Viewport Lock** — "Scroll is disabled. The viewport is locked." Source: §15.1 / §15.6
+- **Annotation Tap Blocking** — "Link following is disabled. Taps do not navigate." Source: §15.1 / §15.6
+- **Drawing Capture Layer** — "The drawing layer captures all touch and stylus input." Source: §15.1 / §15.6
+- **Flush Indicator Examples** — "A subtle visual indicator MUST be displayed ... a small pulsing dot, a corner status chip, or a brief overlay." Source: §15.5
+- **Flush Indicator Visibility Rule** — "Indicator becomes visible when `event.drawing_flush` transmission starts." Source: §15.5
+- **Flush Indicator Duration Rule** — "Indicator remains visible while the transmission is in-flight." Source: §15.5
+- **Content Area Fill** — "Content MUST fill the pane." Source: §15.6
+- **Chrome Reservation** — "The content area is the full pane minus any chrome elements (pane label, history navigation controls)." Source: §15.6
+- **Normal Interaction Affordances** — "Scroll ... Link following ... Text selection" are enabled while not in annotation mode. Source: §15.6
+- **Annotation Interaction Suspension** — "Normal content interaction is suspended." Source: §15.6
+- **Annotation Visibility Lock** — "Pane content replacement and user navigation are blocked until the user taps **Done**." Source: §15.6
+- **Post-Done Context Switch** — "After **Done**, any user navigation or agent-driven content update is a normal context switch." Source: §15.6
+- **Native Overlay Visual Distinction Gap** — "There is no ... visual distinction protocol for those overlay marks." Source: §OT-1
+- **Viewport Overlay Positioning (iOS)** — "Position the `PKCanvasView` as a fixed overlay over the scroll view's visible area." Source: §A.1
+- **Viewport Overlay Positioning (Electron)** — "Position the annotation canvas element as a fixed overlay ... over the content frame." Source: §A.1
+- **No Explicit Browsing Modes** — "The surface always behaves like a real browser." Source: §A.7
+- **UI-Only Mode Distinction** — "This is the only surface-level mode distinction and it is UI-only." Source: §A.7
+- **UI TODO Boundary** — "UI/UX/presentation details (button design, visual affordances, mode indicator) are a separate TODO." Source: §A.7
+- **Legacy Canvas Presentation** — "The surface renders a blank or gridded background." Source: §A.9
+- **Native Overlay Model Markup Goal** — "Model markups render visually on the surface alongside (but distinguishable from) user strokes." Source: §A.12
+- **Future Interactive Affordances** — "widgets, buttons, state displays" may become part of a future native-overlay markup model. Source: §A.12
+
+---
+
 ## Open Topics
 
 This section is the authoritative list of unresolved design decisions. Items here MUST NOT be implemented against until explicitly resolved and removed from this list. When a topic is resolved, the decision moves into normative sections of the spec; it is not retained here.
