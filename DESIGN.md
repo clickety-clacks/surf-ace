@@ -3118,7 +3118,7 @@ When annotation mode is active, the surface MUST display a clear visual indicati
 
 #### Behavioral constraints while in annotation mode (all platforms)
 
-These constraints are normative (duplicated here from §6.10 for completeness):
+These constraints are normative (duplicated here from §15.6 "While IN annotation mode" for completeness):
 - Scroll is disabled. The viewport is locked.
 - Link following is disabled. Taps do not navigate.
 - The drawing layer captures all touch and stylus input.
@@ -3206,7 +3206,7 @@ Annotation stroke points and bounding boxes are stored in **viewport coordinates
 
 **Coordinate space in the capture frame model:**
 
-In the capture frame model (see §13.2), each closed frame contains a viewport screenshot and strokes in the same viewport-at-capture-time coordinate space. Because annotation mode locks the viewport (§6.10), there is no scroll movement between screenshot and strokes — they are spatially coherent by construction. The frame-level `scrollOffset` can be used to map strokes to content-space position when needed:
+In the capture frame model (see §13.2), each closed frame contains a viewport screenshot and strokes in the same viewport-at-capture-time coordinate space. Because annotation mode locks the viewport (see §15.6 "While IN annotation mode"), there is no scroll movement between screenshot and strokes — they are spatially coherent by construction. The frame-level `scrollOffset` can be used to map strokes to content-space position when needed:
 
 ```
 content_x = stroke_bbox.x + frame.scrollOffset.x
@@ -3231,7 +3231,7 @@ Position the annotation canvas element as a fixed overlay (`position: fixed`, or
 
 In v2, the wire `DrawingFlushEvent` payload may optionally be extended with `scrollOffsetAtFirstStroke` / `scrollOffsetAtLastStroke` for surfaces that do not implement the annotation mode lock. In the capture frame model, this is unnecessary — the frame-level `scrollOffset` is authoritative.
 
-**Capture frame model note:** The coordinate ambiguity question is fully resolved by the frame design. Each finalized frame contains both (a) a viewport screenshot taken at frame open and (b) all strokes accumulated into that frame — both in the same viewport-at-open coordinate space. Because the surface is scroll-locked during annotation mode (§6.10), viewport motion does not occur while drawing. Image and strokes are in the same coordinate space by construction, with zero translation required. `scrollOffset` at frame open can map to content space when needed. No per-stroke `scrollOffset` capture is required — frame-level `scrollOffset` is authoritative.
+**Capture frame model note:** The coordinate ambiguity question is fully resolved by the frame design. Each finalized frame contains both (a) a viewport screenshot taken at frame open and (b) all strokes accumulated into that frame — both in the same viewport-at-open coordinate space. Because the surface is scroll-locked during annotation mode (see §15.6 "While IN annotation mode"), viewport motion does not occur while drawing. Image and strokes are in the same coordinate space by construction, with zero translation required. `scrollOffset` at frame open can map to content space when needed. No per-stroke `scrollOffset` capture is required — frame-level `scrollOffset` is authoritative.
 
 ---
 
@@ -3239,7 +3239,7 @@ In v2, the wire `DrawingFlushEvent` payload may optionally be extended with `scr
 
 **Question:** If a user annotates the top of a long webpage, scrolls down, and annotates the bottom — how does the provider produce a meaningful image for CLU?
 
-**Decision:** Multi-scroll behavior is handled by the dual-channel context model. Because annotation mode locks the viewport (§6.10), scrolling cannot occur while actively drawing. If a user annotates at scroll position A, exits annotation mode, scrolls, and re-enters annotation in the **same context**, strokes append to the same context frame (not a new context frame). If annotation resumes only after a true context switch (e.g., different URL/content context and annotation starts there), the previous context frame is finalized and the new context gets its own frame.
+**Decision:** Multi-scroll behavior is handled by the dual-channel context model. Because annotation mode locks the viewport (see §15.6 "While IN annotation mode"), scrolling cannot occur while actively drawing. If a user annotates at scroll position A, exits annotation mode, scrolls, and re-enters annotation in the **same context**, strokes append to the same context frame (not a new context frame). If annotation resumes only after a true context switch (e.g., different URL/content context and annotation starts there), the previous context frame is finalized and the new context gets its own frame.
 
 CLU may therefore receive either one evolving context frame (same context, multiple annotation sessions) or multiple finalized frames (annotation across distinct contexts). `scrollOffset` at frame open remains the reference anchor for mapping to document-space.
 
@@ -3459,4 +3459,4 @@ Model markups may become full interactive UIs embedded in the surface — widget
 2. If the displaced visible content belongs to another session, that history entry moves to the Back stack and the provider emits `event.content_superseded` locally for the displaced session.
 3. Back/Forward navigation changes visibility only; it does not rewrite session-owned history entries.
 
-**Related sections:** §3.1.1 (topology), §6.1.1 (pane/history entry lifecycle ops), §6.2 (content routing), §13.2 (annotation buffering), §14.3 (`surf_ace_list` occupancy).
+**Related sections:** §3.1.1 (topology), §6.1.1 (pane lifecycle, history operations, and history routing rules), §13.2 (annotation buffering), §14.3 (`surf_ace_list` occupancy).
