@@ -2812,6 +2812,8 @@ Standalone-provider note: Surf Ace MAY run as a standalone extension without Cla
 
 ## 15. Surface UI Design
 
+**Companion flow artifact (non-normative):** `docs/design/surf-ace-ui-flows.html` (Figma-style state-flow visualization for review discussion).
+
 This section is **normative**. Surface implementations MUST conform to the requirements described here. This section does not specify pixel sizes, exact colors, fonts, or precise layout coordinates — those are implementation details left to each platform. It specifies what must be shown and the behavioral rules governing each UI element.
 
 ---

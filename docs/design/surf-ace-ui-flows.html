@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Surf Ace — UI Flows</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:Inter,system-ui,-apple-system,sans-serif}
+body{background:#1e1e2e;overflow:hidden;user-select:none;-webkit-user-select:none}
+
+/* toolbar */
+#toolbar{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:100;
+  display:flex;gap:8px;align-items:center;padding:8px 14px;border-radius:999px;
+  background:rgba(30,30,46,.85);border:1px solid #3a3a5c;backdrop-filter:blur(12px);
+  font-size:12px;color:#a0a0c0}
+#toolbar span{color:#fff;font-weight:700}
+#toolbar button{background:#2e2e48;border:1px solid #4a4a70;color:#ccd;border-radius:8px;padding:5px 10px;font-size:12px;cursor:pointer}
+#toolbar button:hover{background:#3a3a60}
+
+/* canvas */
+#canvas{position:fixed;inset:0;cursor:grab}
+#canvas.grabbing{cursor:grabbing}
+#world{position:absolute;transform-origin:0 0}
+
+/* section labels (above groups) */
+.section-label{position:absolute;font-size:13px;font-weight:700;color:#6b6b90;letter-spacing:.08em;text-transform:uppercase}
+
+/* frame */
+.frame{position:absolute;border-radius:14px;overflow:visible}
+.frame-inner{border-radius:14px;overflow:hidden;border:1.5px solid #3a4060;background:#141828}
+.frame-label{position:absolute;bottom:-30px;left:0;right:0;text-align:center;font-size:11px;color:#7070a0;font-weight:600;white-space:nowrap}
+
+/* arrow layer */
+#arrows{position:absolute;inset:0;pointer-events:none;overflow:visible}
+
+/* mini pane */
+.mpane{position:absolute;border-radius:9px;background:#0f1626;overflow:hidden}
+.mpane.focus{border:1.5px solid #5a8aff}
+.mpane.annot-f{box-shadow:inset 0 0 0 1.5px #6aadff}
+.mpane.annot-p{box-shadow:inset 0 0 0 1.5px #aa80ff}
+
+/* overlay titles */
+.win-title{position:absolute;top:7px;left:50%;transform:translateX(-50%);z-index:6;padding:5px 11px;border-radius:7px;
+  background:rgba(18,24,46,.5);border:1px solid rgba(140,160,220,.4);backdrop-filter:blur(8px);
+  font-size:20px;font-weight:800;color:rgba(238,243,255,.85)}
+.pane-title{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.pane-title span{padding:5px 9px;border-radius:7px;
+  background:rgba(18,24,46,.5);border:1px solid rgba(140,160,220,.4);backdrop-filter:blur(8px);
+  font-size:18px;font-weight:800;color:rgba(238,243,255,.85)}
+
+/* bottom control bar */
+.cbar{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);display:flex;gap:4px;align-items:center;
+  padding:5px 7px;border-radius:999px;
+  background:rgba(18,26,52,.55);border:1px solid rgba(100,130,200,.4);backdrop-filter:blur(8px)}
+.cbtn{min-height:28px;min-width:28px;padding:4px 8px;border-radius:999px;border:1px solid #3d5590;
+  background:#1e2f56;color:#ddeaff;font-size:10px;font-weight:700;cursor:default;
+  display:flex;align-items:center;justify-content:center}
+.cbtn.active{background:#3f68c7;border-color:#6a93ef}
+.cbtn.done{background:#3a7fff;border-color:#6a9fff;color:#fff}
+
+/* strokes */
+.strokes{position:absolute;inset:0;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span>Surf Ace Flows</span>
+  <button onclick="zoom(1.15)">＋</button>
+  <button onclick="zoom(0.87)">－</button>
+  <button onclick="reset()">Reset</button>
+  <span id="zlabel">100%</span>
+</div>
+
+<div id="canvas">
+  <div id="world">
+    <svg id="arrows"></svg>
+
+    <!-- ─── ROW 1: Title states ─────────────────────────── -->
+    <div class="section-label" style="left:60px;top:20px">Title overlay states</div>
+
+    <!-- Frame: titles visible -->
+    <div class="frame" style="left:60px;top:60px;width:260px;height:200px">
+      <div class="frame-inner" style="width:260px;height:200px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="win-title">Window A</div>
+          <div style="position:absolute;left:8px;top:8px;right:8px;bottom:8px;display:grid;grid-template-columns:1fr 1fr;gap:6px">
+            <div class="mpane" style="inset:unset;position:relative;border-radius:9px;border:1px solid #2e3d66;">
+              <div class="pane-title"><span>Pane 1</span></div>
+              <div class="cbar" style="position:absolute;left:50%;bottom:5px;transform:translateX(-50%)">
+                <div class="cbtn">◀</div><div class="cbtn">👆</div>
+              </div>
+            </div>
+            <div class="mpane" style="position:relative;border-radius:9px;border:1px solid #2e3d66;">
+              <div class="pane-title"><span>Pane 2</span></div>
+              <div class="cbar" style="position:absolute;left:50%;bottom:5px;transform:translateX(-50%)">
+                <div class="cbtn">◀</div><div class="cbtn">▶</div><div class="cbtn">👆</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Titles visible (default)</div>
+    </div>
+
+    <!-- Frame: titles hidden -->
+    <div class="frame" style="left:440px;top:60px;width:260px;height:200px">
+      <div class="frame-inner" style="width:260px;height:200px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <!-- no titles -->
+          <div style="position:absolute;left:8px;top:8px;right:8px;bottom:8px;display:grid;grid-template-columns:1fr 1fr;gap:6px">
+            <div class="mpane" style="position:relative;border-radius:9px;border:1px solid #2e3d66;">
+              <div class="cbar" style="position:absolute;left:50%;bottom:5px;transform:translateX(-50%)">
+                <div class="cbtn">◀</div><div class="cbtn">👆</div>
+              </div>
+            </div>
+            <div class="mpane" style="position:relative;border-radius:9px;border:1px solid #2e3d66;">
+              <div class="cbar" style="position:absolute;left:50%;bottom:5px;transform:translateX(-50%)">
+                <div class="cbtn">◀</div><div class="cbtn">▶</div><div class="cbtn">👆</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Titles hidden (pointer moved)</div>
+    </div>
+
+    <!-- ─── ROW 2: Navigation states ─────────────────────── -->
+    <div class="section-label" style="left:60px;top:338px">Navigation</div>
+
+    <!-- Frame: no history -->
+    <div class="frame" style="left:60px;top:380px;width:170px;height:160px" id="fnav0">
+      <div class="frame-inner" style="width:170px;height:160px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="mpane" style="position:absolute;inset:8px;border-radius:9px;border:1px solid #2e3d66;">
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn">👆</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">No history</div>
+    </div>
+
+    <!-- Frame: has back -->
+    <div class="frame" style="left:350px;top:380px;width:170px;height:160px" id="fnavb">
+      <div class="frame-inner" style="width:170px;height:160px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="mpane" style="position:absolute;inset:8px;border-radius:9px;border:1px solid #2e3d66;">
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn">◀</div><div class="cbtn">👆</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Has back</div>
+    </div>
+
+    <!-- Frame: has back + forward -->
+    <div class="frame" style="left:640px;top:380px;width:170px;height:160px" id="fnavbf">
+      <div class="frame-inner" style="width:170px;height:160px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="mpane" style="position:absolute;inset:8px;border-radius:9px;border:1px solid #2e3d66;">
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn">◀</div><div class="cbtn">▶</div><div class="cbtn">👆</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Back + forward</div>
+    </div>
+
+    <!-- ─── ROW 3: Annotation states ─────────────────────── -->
+    <div class="section-label" style="left:60px;top:658px">Annotation</div>
+
+    <!-- Frame: enter annotation (finger) -->
+    <div class="frame" style="left:60px;top:700px;width:170px;height:180px" id="fannot">
+      <div class="frame-inner" style="width:170px;height:180px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="mpane annot-f" style="position:absolute;inset:8px;border-radius:9px;">
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn active">👆</div>
+              <div class="cbtn done">Done</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Finger annotate</div>
+    </div>
+
+    <!-- Frame: pencil annotation -->
+    <div class="frame" style="left:350px;top:700px;width:170px;height:180px" id="fpencil">
+      <div class="frame-inner" style="width:170px;height:180px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="mpane annot-p" style="position:absolute;inset:8px;border-radius:9px;">
+            <svg class="strokes" viewBox="0 0 154 164" preserveAspectRatio="none"><path d="M10 130 Q40 60 80 90 Q110 115 150 40" stroke="#aa80ff" stroke-width="1.5" fill="none" opacity=".6"/></svg>
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn">👆</div>
+              <div class="cbtn done" style="background:#7a50e0;border-color:#a07fe0">Done</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Pencil annotate</div>
+    </div>
+
+    <!-- Frame: finger + pencil both on -->
+    <div class="frame" style="left:640px;top:700px;width:170px;height:180px" id="fboth">
+      <div class="frame-inner" style="width:170px;height:180px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="mpane annot-p" style="position:absolute;inset:8px;border-radius:9px;">
+            <svg class="strokes" viewBox="0 0 154 164" preserveAspectRatio="none">
+              <path d="M10 130 Q40 60 80 90 Q110 115 150 40" stroke="#aa80ff" stroke-width="1.5" fill="none" opacity=".5"/>
+              <path d="M8 60 Q50 100 90 50 Q120 20 150 80" stroke="#6aadff" stroke-width="2" fill="none" opacity=".5"/>
+            </svg>
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn active">👆</div>
+              <div class="cbtn done" style="background:#7a50e0;border-color:#a07fe0">Done</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Pencil + finger</div>
+    </div>
+
+    <!-- ─── ROW 4: Extra states ─────────────────────────── -->
+    <div class="section-label" style="left:60px;top:950px">Edge states</div>
+
+    <!-- Frame: blocked toast -->
+    <div class="frame" style="left:60px;top:992px;width:170px;height:180px" id="ftoast">
+      <div class="frame-inner" style="width:170px;height:180px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="win-title">Window A</div>
+          <div class="mpane annot-f" style="position:absolute;inset:8px;border-radius:9px;">
+            <div style="position:absolute;left:8px;bottom:44px;right:8px;padding:6px 8px;border-radius:7px;background:#1b2747;border:1px solid #4b5f96;font-size:9px;color:#c0d0f0">Finish annotation (Done) to navigate</div>
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn active">👆</div>
+              <div class="cbtn done">Done</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Blocked action toast</div>
+    </div>
+
+    <!-- Frame: flush in-flight indicator -->
+    <div class="frame" style="left:350px;top:992px;width:170px;height:180px" id="fflush">
+      <div class="frame-inner" style="width:170px;height:180px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="win-title">Window A</div>
+          <div class="mpane" style="position:absolute;inset:8px;border-radius:9px;border:1px solid #2e3d66;">
+            <div style="position:absolute;top:8px;right:8px;width:8px;height:8px;border-radius:50%;background:#45e3a0;box-shadow:0 0 0 3px rgba(69,227,160,.3)"></div>
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn">◀</div>
+              <div class="cbtn">👆</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Flush in-flight dot</div>
+    </div>
+
+    <!-- Frame: post-Done normal nav resumes -->
+    <div class="frame" style="left:640px;top:992px;width:170px;height:180px" id="fpostdone">
+      <div class="frame-inner" style="width:170px;height:180px">
+        <div style="position:relative;width:100%;height:100%;background:#0d1424">
+          <div class="win-title">Window A</div>
+          <div class="mpane" style="position:absolute;inset:8px;border-radius:9px;border:1px solid #2e3d66;">
+            <div class="cbar" style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%)">
+              <div class="cbtn">◀</div>
+              <div class="cbtn">▶</div>
+              <div class="cbtn">👆</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-label">Post-Done: nav resumes</div>
+    </div>
+
+  </div><!-- world -->
+</div><!-- canvas -->
+
+<script>
+  let scale=1, ox=60, oy=30, dragging=false, sx=0, sy=0;
+  const world=document.getElementById('world');
+  const canvas=document.getElementById('canvas');
+  const zlabel=document.getElementById('zlabel');
+
+  function applyTransform(){
+    world.style.transform=`translate(${ox}px,${oy}px) scale(${scale})`;
+    zlabel.textContent=Math.round(scale*100)+'%';
+  }
+  function zoom(f,cx,cy){
+    const rect=canvas.getBoundingClientRect();
+    const px=cx??rect.width/2, py=cy??rect.height/2;
+    ox=(ox-px)*f+px; oy=(oy-py)*f+py; scale*=f; applyTransform();
+  }
+  function reset(){ scale=1; ox=60; oy=30; applyTransform(); }
+
+  canvas.addEventListener('mousedown',e=>{if(e.button!==0)return;dragging=true;sx=e.clientX-ox;sy=e.clientY-oy;canvas.classList.add('grabbing')});
+  window.addEventListener('mouseup',()=>{dragging=false;canvas.classList.remove('grabbing')});
+  window.addEventListener('mousemove',e=>{if(!dragging)return;ox=e.clientX-sx;oy=e.clientY-sy;applyTransform()});
+  canvas.addEventListener('wheel',e=>{e.preventDefault();const f=e.deltaY<0?1.08:.925;zoom(f,e.clientX,e.clientY)},{passive:false});
+
+  // touch pan
+  let lx=0,ly=0,lt2=null;
+  canvas.addEventListener('touchstart',e=>{if(e.touches.length===1){lx=e.touches[0].clientX;ly=e.touches[0].clientY}},{passive:true});
+  canvas.addEventListener('touchmove',e=>{
+    if(e.touches.length===1){ox+=e.touches[0].clientX-lx;oy+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;applyTransform()}
+  },{passive:true});
+
+  // draw arrows via SVG
+  const svg=document.getElementById('arrows');
+  svg.style.cssText='position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible';
+
+  function frameCX(el){ return el.offsetLeft+el.offsetWidth/2 }
+  function frameCY(el){ return el.offsetTop+el.offsetHeight/2 }
+  function frameRight(el){ return el.offsetLeft+el.offsetWidth }
+  function frameLeft(el){ return el.offsetLeft }
+  function frameTop(el){ return el.offsetTop }
+  function frameBottom(el){ return el.offsetTop+el.offsetHeight }
+
+  function addArrow(x1,y1,x2,y2,label=''){
+    const g=document.createElementNS('http://www.w3.org/2000/svg','g');
+    const mid=`${(x1+x2)/2} ${(y1+y2)/2}`;
+    const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+    const cx=(x1+x2)/2;
+    path.setAttribute('d',`M${x1} ${y1} C${cx} ${y1} ${cx} ${y2} ${x2} ${y2}`);
+    path.setAttribute('stroke','#44557a');path.setAttribute('stroke-width','1.5');path.setAttribute('fill','none');
+    path.setAttribute('marker-end','url(#arrowhead)');
+    g.appendChild(path);
+    if(label){
+      const t=document.createElementNS('http://www.w3.org/2000/svg','text');
+      t.setAttribute('x',(x1+x2)/2);t.setAttribute('y',(y1+y2)/2-5);
+      t.setAttribute('text-anchor','middle');t.setAttribute('font-size','10');t.setAttribute('fill','#5f7099');t.setAttribute('font-family','Inter,sans-serif');
+      t.textContent=label; g.appendChild(t);
+    }
+    svg.appendChild(g);
+  }
+
+  // defs for arrowhead
+  const defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
+  defs.innerHTML=`<marker id="arrowhead" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><polygon points="0 0,7 3.5,0 7" fill="#44557a"/></marker>`;
+  svg.appendChild(defs);
+
+  requestAnimationFrame(()=>{
+    const fnav0=document.getElementById('fnav0');
+    const fnavb=document.getElementById('fnavb');
+    const fnavbf=document.getElementById('fnavbf');
+    const fannot=document.getElementById('fannot');
+    const fpencil=document.getElementById('fpencil');
+    const fboth=document.getElementById('fboth');
+
+    addArrow(frameRight(fnav0),frameCY(fnav0), frameLeft(fnavb),frameCY(fnavb), 'navigate');
+    addArrow(frameRight(fnavb),frameCY(fnavb), frameLeft(fnavbf),frameCY(fnavbf), 'navigate back');
+    addArrow(frameCX(fnavb), frameTop(fnavb), frameCX(fannot), frameBottom(fannot)+20, 'tap 👆');
+    addArrow(frameCX(fnavb), frameBottom(fnavb)+20, frameCX(fpencil), frameTop(fpencil), 'use Pencil');
+    addArrow(frameCX(fpencil), frameTop(fpencil), frameCX(fboth), frameTop(fboth), 'tap 👆');
+    const ftoast=document.getElementById('ftoast');
+    const fflush=document.getElementById('fflush');
+    const fpostdone=document.getElementById('fpostdone');
+    addArrow(frameCX(fannot), frameBottom(fannot), frameCX(ftoast), frameTop(ftoast), 'blocked nav');
+    addArrow(frameCX(fnavb), frameBottom(fnavb), frameCX(fflush), frameTop(fflush), 'flush starts');
+    addArrow(frameCX(fannot), frameBottom(fannot)+60, frameCX(fpostdone), frameTop(fpostdone), 'tap Done');
+  });
+
+  applyTransform();
+</script>
+</body>
+</html>
