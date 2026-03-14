@@ -2887,6 +2887,11 @@ Required defaults:
 - Split is initiated from a pane menu.
 - Rename uses inline title editing on the pane label overlay.
 
+#### Icon assets
+
+- **iOS / iPadOS / macOS (native):** All control icons MUST use SF Symbols. Recommended mappings: Back → `chevron.backward`, Forward → `chevron.forward`, 👆 drawing input → `hand.draw`, Done → plain text label "Done" (no symbol needed).
+- **Electron:** Platform-appropriate icon set (e.g. Lucide, Phosphor, or equivalent); SF Symbols are not available on non-Apple platforms.
+
 History controls default behavior:
 - Disabled Back/Forward controls render at 40% opacity.
 - Disabled Back/Forward controls do not show hover affordances.
