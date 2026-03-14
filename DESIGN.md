@@ -2968,16 +2968,16 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Restore Failure UI** — "the surface SHOULD show a non-blocking toast plus a warning icon in the pane header." Source: §6.1.1
 - **Flush Send Indicator** — "Surface must show a subtle visual send indicator while a drawing flush is in-flight to provider." Source: §7.4
 - **Reconnect Status Chip** — "Resume/reconnect state SHOULD be presented as a subtle status chip in the window chrome." Source: §4.4
-- **Persistent Window Label** — "Displayed prominently in the top-left corner of the window chrome." Source: §15.1
-- **Always-Visible Window Label** — "Persistent — never hidden, obscured, or removed based on content or connection state." Source: §15.1
+- **Window Label Placement** — "Floating translucent overlay, centered top of window, above all pane content." Source: §15.1
+- **Window Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; never hidden by content or connection state." Source: §15.1
 - **Non-Scrolling Window Label** — "Rendered so it does not scroll with content (always in the chrome layer, not the content layer)." Source: §15.1
-- **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible at all times." Source: §15.1
-- **Pane Label Placement** — "Displayed in the top-left of the pane header, within the pane boundary." Source: §15.1
-- **Always-Visible Pane Label** — "Always visible regardless of what content is rendered in the pane." Source: §15.1
+- **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible when the surface is at rest." Source: §15.1
+- **Pane Label Placement** — "Large floating translucent overlay centered within the pane content area." Source: §15.1
+- **Pane Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; never hidden by content or annotation mode." Source: §15.1
 - **Pencil Auto Entry** — "Pencil contact with the screen MUST automatically enter annotation mode." Source: §15.1
-- **Finger Sketching Control** — "A 'finger sketching' button MUST be persistently visible in the pane header at all times." Source: §15.1
+- **Drawing Input Button (👆)** — "A single 👆 button MUST be present in the pane control bar at all times. Handles finger and non-Apple-Pencil stylus input. Tapping enters annotation mode or toggles finger draw within an active pencil session." Source: §15.1
 - **Done Exit Control** — "While annotation mode is active, a 'Done' button MUST be visible as a top-right overlay pill." Source: §15.1
-- **Electron Annotate Entry** — "An 'Annotate' button MUST be persistently visible in the pane header at all times. Tapping it enters annotation mode." Source: §15.1
+- **Electron Annotate Entry** — "Electron uses the 👆 button (no Apple Pencil auto-entry). No separate Annotate button." Source: §15.1
 - **Annotation Mode Visual State** — "Default treatment: a 2px accent border plus a small 'Annotating' badge." Source: §15.1
 - **Annotation Controls Stay Visible** — "Pane labels and controls MUST remain visible and MUST NOT be dimmed while annotating." Source: §15.1
 - **Annotation Viewport Lock** — "Scroll is disabled. The viewport is locked." Source: §15.1 / §15.6
