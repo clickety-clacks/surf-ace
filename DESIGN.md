@@ -166,7 +166,7 @@ Naming system:
 3. Users may assign human-readable pane names for display, but CLU pane addressing is always by numeric `paneId`.
 4. The model may create, split, rename, and close panes in conversation with the user; this is not considered intrusive.
 5. When any window is split, new panes are assigned sequentially from the highest active pane number + 1, never duplicating a pane number already in use in another window.
-6. Labels and names are displayed prominently on the surface — exact placement and visual style TBD in the separate UI spec (see tracking/surf-ace-ui-open-topics.md).
+6. Labels and names are displayed prominently on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
 
 
 TXT keys used by WS protocol:
@@ -248,7 +248,7 @@ Pair timeout:
 2. If no `pair.response` arrives in 10s, provider closes socket and enters reconnect backoff.
 
 **Surface UI connectivity indicator (required):**
-The surface MUST display a persistent visual indicator of connection state. Visual design TBD in separate UI spec (see tracking/surf-ace-ui-open-topics.md); required behavior:
+The surface MUST display a persistent visual indicator of connection state via the connection state bar (§15.7). Required behavior:
 - Healthy: ping received within expected window — no indicator or neutral.
 - Stale — yellow: no ping received within `heartbeatIntervalMs + heartbeatGraceMs` (default 13s = 10s interval + 3s grace). Surface transitions to yellow at this threshold.
 - Disconnected — red: WS socket is not connected.
@@ -2972,7 +2972,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 
 - **Window Letter Labels** — "Windows are auto-assigned short letter labels: a, b, c … z, aa, ab … (displayed prominently on surface)." Source: §3.1.1
 - **Pane Name Display Metadata** — "Users may assign human-readable pane names for display, but CLU pane addressing is always by numeric `paneId`." Source: §3.1.1
-- **Prominent Surface Labels** — "Labels and names are displayed prominently on the surface — exact placement and visual style TBD in the separate UI spec." Source: §3.1.1
+- **Prominent Surface Labels** — "Window label: centered-top floating overlay. Pane label: centered floating overlay within pane. Visibility rules: visible at rest, hidden on active interaction." Source: §3.1.1 / §15.1
 - **Displayed Content Persistence** — "The surface renders content and keeps it displayed until CLU explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
 - **History Navigation Controls** — "Previously visible content in that pane remains navigable through the surface's Back/Forward controls." Source: §6.1.1
@@ -3015,7 +3015,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Inline Rename** — "Rename uses inline title editing in the pane header." Source: §15.3
 - **Unsupported Content Empty State** — "Unsupported content renders a centered empty-state message." Source: §15.4
 - **Blocked Attempt Toast** — "Blocked navigation or blocked content replacement during annotation mode shows a small toast." Source: §15.4 / §15.6
-- **Flush Indicator Placement** — "A small pulsing dot in the pane header MUST be displayed while a `drawing_flush` event is being transmitted." Source: §15.5
+- **Flush Indicator** — "While a `drawing_flush` is in-flight, the annotation mode border pulses (brightness oscillation on the 2px accent border). Starts on transmission start, stops on ack." Source: §15.5
 - **Flush Indicator Visibility Rule** — "Indicator becomes visible when `event.drawing_flush` transmission starts." Source: §15.5
 - **Flush Indicator Duration Rule** — "Indicator remains visible while the transmission is in-flight." Source: §15.5
 - **Content Area Fill** — "Content MUST fill the pane." Source: §15.6
@@ -3046,11 +3046,9 @@ This section is the authoritative list of unresolved design decisions. Items her
 
 **Status:** Open. Not Phase 1 or Phase 2 scope. See Appendix A.12 for background.
 
-### OT-2: Semantic Gesture Classification (On-Device)
+### OT-2: Semantic Gesture Classification — CLOSED
 
-**Problem:** Multi-stroke semantic gestures (brackets, lasso, circle-for-emphasis) cannot be reliably interpreted from raw geometry alone. On-device model integration (per finalized frame) is the most promising path but the wire contract (`semanticHints` field, confidence thresholds, fallback behavior) is not designed.
-
-**Status:** Open. Design deferred to v2. See Appendix A.3, A.4 for background.
+**Decision:** No on-device semantic classification. The surface sends raw stroke geometry in the buffer. CLU receives and interprets the geometry directly, using whatever approach it sees fit. No `semanticHints` field, no wire extension, no on-device model integration. Closed; will not be revisited.
 
 ---
 
