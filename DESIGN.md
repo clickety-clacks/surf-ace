@@ -2905,15 +2905,15 @@ Default user-visible handling for degraded or unavailable states:
 - Overlay restore failure shows a non-blocking toast plus a warning icon in the pane header.
 - Blocked navigation or blocked content replacement during annotation mode shows a small toast: `"Finish annotation (Done) to navigate"`.
 - Unsupported content renders a centered empty-state message.
-- Reconnect/resume state may be surfaced as a subtle status chip in the window chrome.
+- Reconnect/resume state is shown via the connection state bar (see §15.7).
 
 ---
 
 ### 15.5 Drawing Flush In-Flight Indicator
 
-See also §7.4, which defines the flush send timing requirements. This section cross-references that requirement for UI completeness.
+See also §7.4, which defines the flush send timing requirements.
 
-A small pulsing dot in the pane header MUST be displayed while a `drawing_flush` event is being transmitted to the provider.
+While a `drawing_flush` event is in-flight, the pane's annotation mode border MUST pulse. The pulse is a brightness/opacity oscillation on the existing 2px annotation accent border — it does not change color or add new chrome. The pulse starts when transmission begins and stops when the provider acknowledges receipt.
 
 Required behavior (normative, cross-referenced from §7.4):
 1. Indicator becomes visible when `event.drawing_flush` transmission starts.
@@ -2948,6 +2948,23 @@ All of the following MUST be enforced:
 These constraints are synchronized with annotation mode state and are lifted only after the user taps **Done**. After **Done**, any user navigation or agent-driven content update is a normal context switch and follows the same pane-history rules as any other content change.
 
 ---
+
+### 15.7 Connection State Bar
+
+A 2px overlay line MUST be rendered at the bottom edge of each window, spanning the full window width. It sits as an overlay above pane content at 80% opacity. It MUST persist during annotation mode.
+
+**States and colors (Clawline design system tokens):**
+
+| State | Color token | Hex | Behavior |
+|---|---|---|---|
+| Connected | `--ok` | `#22c55e` | Solid line |
+| Connecting / Reconnecting | `--warn` | `#f59e0b` | Animated: a bright highlight sweeps left↔right continuously (KITT/Cylon-style bounce), repeating until connected |
+| Disconnected | `--destructive` | `#ef4444` | Solid line |
+
+**Platform color references:**
+- iOS/iPadOS/macOS native: map tokens to `Color.green` / `Color.yellow` / `Color.red` system colors, or use exact hex values above.
+- Electron: use CSS custom properties (`--ok`, `--warn`, `--destructive`) from the Clawline design system.
+
 
 ## UI/UX Invariants Index
 
