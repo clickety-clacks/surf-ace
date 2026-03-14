@@ -308,7 +308,9 @@ body{background:#1e1e2e;overflow:hidden;user-select:none;-webkit-user-select:non
 </div><!-- canvas -->
 
 <script>
-  let scale=1, ox=60, oy=30, dragging=false, sx=0, sy=0;
+  // ── canvas pan/zoom ──────────────────────────────────────
+  let scale=1, ox=60, oy=30;
+  let canvasDrag=false, csx=0, csy=0;
   const world=document.getElementById('world');
   const canvas=document.getElementById('canvas');
   const zlabel=document.getElementById('zlabel');
@@ -322,76 +324,142 @@ body{background:#1e1e2e;overflow:hidden;user-select:none;-webkit-user-select:non
     const px=cx??rect.width/2, py=cy??rect.height/2;
     ox=(ox-px)*f+px; oy=(oy-py)*f+py; scale*=f; applyTransform();
   }
-  function reset(){ scale=1; ox=60; oy=30; applyTransform(); }
+  function reset(){ scale=1; ox=60; oy=30; applyTransform(); drawArrows(); }
 
-  canvas.addEventListener('mousedown',e=>{if(e.button!==0)return;dragging=true;sx=e.clientX-ox;sy=e.clientY-oy;canvas.classList.add('grabbing')});
-  window.addEventListener('mouseup',()=>{dragging=false;canvas.classList.remove('grabbing')});
-  window.addEventListener('mousemove',e=>{if(!dragging)return;ox=e.clientX-sx;oy=e.clientY-sy;applyTransform()});
   canvas.addEventListener('wheel',e=>{e.preventDefault();const f=e.deltaY<0?1.08:.925;zoom(f,e.clientX,e.clientY)},{passive:false});
 
-  // touch pan
-  let lx=0,ly=0,lt2=null;
-  canvas.addEventListener('touchstart',e=>{if(e.touches.length===1){lx=e.touches[0].clientX;ly=e.touches[0].clientY}},{passive:true});
+  // touch pan (background only)
+  let lx=0,ly=0;
+  canvas.addEventListener('touchstart',e=>{
+    if(e.target.closest('.frame'))return;
+    if(e.touches.length===1){lx=e.touches[0].clientX;ly=e.touches[0].clientY}
+  },{passive:true});
   canvas.addEventListener('touchmove',e=>{
+    if(frameDragging||e.target.closest('.frame'))return;
     if(e.touches.length===1){ox+=e.touches[0].clientX-lx;oy+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;applyTransform()}
   },{passive:true});
 
-  // draw arrows via SVG
+  // ── frame dragging ───────────────────────────────────────
+  let frameDragging=false, dragEl=null, fdx=0, fdy=0;
+
+  // Make each .frame draggable; canvas pan only when no frame is hit
+  document.querySelectorAll('.frame').forEach(fr=>{
+    fr.style.cursor='grab';
+    // mouse
+    fr.addEventListener('mousedown',e=>{
+      if(e.button!==0)return;
+      e.stopPropagation();
+      frameDragging=true; dragEl=fr;
+      const wx=(e.clientX-ox)/scale, wy=(e.clientY-oy)/scale;
+      fdx=wx-fr.offsetLeft; fdy=wy-fr.offsetTop;
+      fr.style.cursor='grabbing';
+    });
+    // touch
+    fr.addEventListener('touchstart',e=>{
+      if(e.touches.length!==1)return;
+      e.stopPropagation();
+      frameDragging=true; dragEl=fr;
+      const t=e.touches[0];
+      const wx=(t.clientX-ox)/scale, wy=(t.clientY-oy)/scale;
+      fdx=wx-fr.offsetLeft; fdy=wy-fr.offsetTop;
+    },{passive:true});
+    fr.addEventListener('touchmove',e=>{
+      if(!frameDragging||dragEl!==fr||e.touches.length!==1)return;
+      e.stopPropagation();
+      const t=e.touches[0];
+      const wx=(t.clientX-ox)/scale, wy=(t.clientY-oy)/scale;
+      fr.style.left=(wx-fdx)+'px'; fr.style.top=(wy-fdy)+'px';
+      drawArrows();
+    },{passive:true});
+    fr.addEventListener('touchend',()=>{ frameDragging=false; dragEl=null; },{passive:true});
+  });
+
+  // canvas pan starts only on canvas background
+  canvas.addEventListener('mousedown',e=>{
+    if(frameDragging||e.target.closest('.frame'))return;
+    canvasDrag=true; csx=e.clientX-ox; csy=e.clientY-oy;
+    canvas.classList.add('grabbing');
+  });
+
+  window.addEventListener('mouseup',()=>{
+    if(frameDragging && dragEl){ dragEl.style.cursor='grab'; }
+    frameDragging=false; dragEl=null;
+    canvasDrag=false; canvas.classList.remove('grabbing');
+  });
+
+  window.addEventListener('mousemove',e=>{
+    if(frameDragging && dragEl){
+      const wx=(e.clientX-ox)/scale, wy=(e.clientY-oy)/scale;
+      dragEl.style.left=(wx-fdx)+'px';
+      dragEl.style.top=(wy-fdy)+'px';
+      drawArrows();
+    } else if(canvasDrag){
+      ox=e.clientX-csx; oy=e.clientY-csy; applyTransform();
+    }
+  });
+
+  // ── SVG arrows ───────────────────────────────────────────
   const svg=document.getElementById('arrows');
   svg.style.cssText='position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible';
 
-  function frameCX(el){ return el.offsetLeft+el.offsetWidth/2 }
-  function frameCY(el){ return el.offsetTop+el.offsetHeight/2 }
-  function frameRight(el){ return el.offsetLeft+el.offsetWidth }
-  function frameLeft(el){ return el.offsetLeft }
-  function frameTop(el){ return el.offsetTop }
-  function frameBottom(el){ return el.offsetTop+el.offsetHeight }
+  const defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
+  defs.innerHTML=`<marker id="arrowhead" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><polygon points="0 0,7 3.5,0 7" fill="#44557a"/></marker>`;
+  svg.appendChild(defs);
 
-  function addArrow(x1,y1,x2,y2,label=''){
+  function fL(el){return el.offsetLeft}
+  function fR(el){return el.offsetLeft+el.offsetWidth}
+  function fT(el){return el.offsetTop}
+  function fB(el){return el.offsetTop+el.offsetHeight}
+  function fCX(el){return el.offsetLeft+el.offsetWidth/2}
+  function fCY(el){return el.offsetTop+el.offsetHeight/2}
+
+  function makeArrow(x1,y1,x2,y2,label){
     const g=document.createElementNS('http://www.w3.org/2000/svg','g');
-    const mid=`${(x1+x2)/2} ${(y1+y2)/2}`;
-    const path=document.createElementNS('http://www.w3.org/2000/svg','path');
     const cx=(x1+x2)/2;
+    const path=document.createElementNS('http://www.w3.org/2000/svg','path');
     path.setAttribute('d',`M${x1} ${y1} C${cx} ${y1} ${cx} ${y2} ${x2} ${y2}`);
     path.setAttribute('stroke','#44557a');path.setAttribute('stroke-width','1.5');path.setAttribute('fill','none');
     path.setAttribute('marker-end','url(#arrowhead)');
     g.appendChild(path);
     if(label){
       const t=document.createElementNS('http://www.w3.org/2000/svg','text');
-      t.setAttribute('x',(x1+x2)/2);t.setAttribute('y',(y1+y2)/2-5);
-      t.setAttribute('text-anchor','middle');t.setAttribute('font-size','10');t.setAttribute('fill','#5f7099');t.setAttribute('font-family','Inter,sans-serif');
+      t.setAttribute('x',cx);t.setAttribute('y',(y1+y2)/2-5);
+      t.setAttribute('text-anchor','middle');t.setAttribute('font-size','10');
+      t.setAttribute('fill','#5f7099');t.setAttribute('font-family','Inter,sans-serif');
       t.textContent=label; g.appendChild(t);
     }
-    svg.appendChild(g);
+    return g;
   }
 
-  // defs for arrowhead
-  const defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
-  defs.innerHTML=`<marker id="arrowhead" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><polygon points="0 0,7 3.5,0 7" fill="#44557a"/></marker>`;
-  svg.appendChild(defs);
+  const ARROWS=[
+    (f)=>makeArrow(fR(f.fnav0),fCY(f.fnav0),fL(f.fnavb),fCY(f.fnavb),'navigate'),
+    (f)=>makeArrow(fR(f.fnavb),fCY(f.fnavb),fL(f.fnavbf),fCY(f.fnavbf),'navigate back'),
+    (f)=>makeArrow(fCX(f.fnavb),fT(f.fnavb),fCX(f.fannot),fB(f.fannot)+20,'tap 👆'),
+    (f)=>makeArrow(fCX(f.fnavb),fB(f.fnavb)+20,fCX(f.fpencil),fT(f.fpencil),'use Pencil'),
+    (f)=>makeArrow(fCX(f.fpencil),fT(f.fpencil),fCX(f.fboth),fT(f.fboth),'tap 👆'),
+    (f)=>makeArrow(fCX(f.fannot),fB(f.fannot),fCX(f.ftoast),fT(f.ftoast),'blocked nav'),
+    (f)=>makeArrow(fCX(f.fnavb),fB(f.fnavb),fCX(f.fflush),fT(f.fflush),'flush starts'),
+    (f)=>makeArrow(fCX(f.fannot),fB(f.fannot)+60,fCX(f.fpostdone),fT(f.fpostdone),'tap Done'),
+  ];
 
-  requestAnimationFrame(()=>{
-    const fnav0=document.getElementById('fnav0');
-    const fnavb=document.getElementById('fnavb');
-    const fnavbf=document.getElementById('fnavbf');
-    const fannot=document.getElementById('fannot');
-    const fpencil=document.getElementById('fpencil');
-    const fboth=document.getElementById('fboth');
+  function drawArrows(){
+    // remove old arrows (keep defs)
+    [...svg.children].forEach(c=>{if(c!==defs)c.remove()});
+    const f={
+      fnav0:document.getElementById('fnav0'),
+      fnavb:document.getElementById('fnavb'),
+      fnavbf:document.getElementById('fnavbf'),
+      fannot:document.getElementById('fannot'),
+      fpencil:document.getElementById('fpencil'),
+      fboth:document.getElementById('fboth'),
+      ftoast:document.getElementById('ftoast'),
+      fflush:document.getElementById('fflush'),
+      fpostdone:document.getElementById('fpostdone'),
+    };
+    ARROWS.forEach(fn=>svg.appendChild(fn(f)));
+  }
 
-    addArrow(frameRight(fnav0),frameCY(fnav0), frameLeft(fnavb),frameCY(fnavb), 'navigate');
-    addArrow(frameRight(fnavb),frameCY(fnavb), frameLeft(fnavbf),frameCY(fnavbf), 'navigate back');
-    addArrow(frameCX(fnavb), frameTop(fnavb), frameCX(fannot), frameBottom(fannot)+20, 'tap 👆');
-    addArrow(frameCX(fnavb), frameBottom(fnavb)+20, frameCX(fpencil), frameTop(fpencil), 'use Pencil');
-    addArrow(frameCX(fpencil), frameTop(fpencil), frameCX(fboth), frameTop(fboth), 'tap 👆');
-    const ftoast=document.getElementById('ftoast');
-    const fflush=document.getElementById('fflush');
-    const fpostdone=document.getElementById('fpostdone');
-    addArrow(frameCX(fannot), frameBottom(fannot), frameCX(ftoast), frameTop(ftoast), 'blocked nav');
-    addArrow(frameCX(fnavb), frameBottom(fnavb), frameCX(fflush), frameTop(fflush), 'flush starts');
-    addArrow(frameCX(fannot), frameBottom(fannot)+60, frameCX(fpostdone), frameTop(fpostdone), 'tap Done');
-  });
-
-  applyTransform();
+  requestAnimationFrame(()=>{ drawArrows(); applyTransform(); });
 </script>
 </body>
 </html>
