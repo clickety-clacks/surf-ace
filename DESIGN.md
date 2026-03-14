@@ -2847,7 +2847,7 @@ Each pane is assigned a globally unique numeric identifier for the entire surfac
 
 #### Annotation mode visual state (all platforms)
 
-When annotation mode is active, the surface MUST display a clear visual indication that distinguishes the annotating state from normal viewing. Default treatment: a 2px accent border plus a small "Annotating" badge. Pane labels and controls MUST remain visible and MUST NOT be dimmed while annotating.
+When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator. No badge, label, or additional chrome is added. Pane labels MUST remain visible. While annotation mode is active, Back, Forward, and 👆 controls are hidden; only the Done button is shown in the control cluster.
 
 #### Behavioral constraints while in annotation mode (all platforms)
 
@@ -2883,7 +2883,7 @@ Required defaults:
 - Back/Forward controls appear only when history exists in that direction; hidden otherwise.
 - Done appears only while annotation mode is active; hidden otherwise.
 - 👆 (drawing input) button is always present in the control cluster.
-- Multiple panes in a window share a background; pane boundaries are indicated by a divider only (no individual pane borders).
+- Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. There is no focused-pane concept — all panes are visually equal when not in annotation mode.
 - Split is initiated from a pane menu.
 - Rename uses inline title editing on the pane label overlay.
 
@@ -2985,7 +2985,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Session Label UI Hint** — "`providerName` (optional human-readable session/chat label for UI indicators)." Source: §6.1
 - **Pane Focus Visibility** — "Brings a pane into foreground / active focus." Source: §6.1.1
 - **Pane Rename Affordance** — "Assigns or clears a human-readable name for a pane." Source: §6.1.1
-- **Focused Pane Accent** — "Focused pane SHOULD render with a stronger border accent than unfocused panes." Source: §6.1.1
+- **No Focused Pane Concept** — "All panes are visually equal when not in annotation mode. There is no focused-pane border distinction." Source: §15.3
 - **Header History Controls** — "Back/Forward controls SHOULD appear on the right side of the pane header." Source: §6.1.1
 - **Disabled History Controls** — "Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances." Source: §6.1.1
 - **No History Counters** — "v1 SHOULD NOT display history depth counters." Source: §6.1.1
