@@ -2875,15 +2875,17 @@ Electron keyboard defaults:
 
 ### 15.3 Pane Header Controls and Affordances
 
-Pane header chrome provides the default location for pane-local controls.
+Pane controls float above content rather than occupying a fixed header bar. The pane itself is chrome-free — content fills the entire pane area.
 
 Required defaults:
-- Pane label or custom pane name is shown on the left side of the pane header.
-- Back/Forward controls are shown on the right side of the pane header.
-- Finger sketching and Electron Annotate controls live in the pane header.
+- Pane label is displayed as a large floating translucent overlay centered in the pane (see §15.1 for visibility rules).
+- All pane controls (Back, Forward, 👆, Done) live in a single floating control cluster at the bottom-center of the pane.
+- Back/Forward controls appear only when history exists in that direction; hidden otherwise.
+- Done appears only while annotation mode is active; hidden otherwise.
+- 👆 (drawing input) button is always present in the control cluster.
+- Multiple panes in a window share a background; pane boundaries are indicated by a divider only (no individual pane borders).
 - Split is initiated from a pane menu.
-- Rename uses inline title editing in the pane header.
-- Focused pane renders with a stronger border accent than unfocused panes.
+- Rename uses inline title editing on the pane label overlay.
 
 History controls default behavior:
 - Disabled Back/Forward controls render at 40% opacity.
