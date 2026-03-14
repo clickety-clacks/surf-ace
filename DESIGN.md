@@ -2820,34 +2820,30 @@ This section is **normative**. Surface implementations MUST conform to the requi
 
 ### 15.1 Persistent Indicators
 
-Surface implementations MUST display the following identifiers at all times, regardless of content type, connection state, or annotation mode.
+Surface implementations MUST display the following identifiers. Labels are visible by default and hidden only during active pointer movement or touch interaction — they are always visible at rest, which satisfies the core requirement of readability from across the room. Labels MUST NOT be hidden based on content type, connection state, or annotation mode.
 
 #### Window label
 
 Each window is assigned a short alphabetic identifier using an auto-incrementing sequence: `a`, `b`, `c` … `z`, `aa`, `ab`, … This label MUST be:
-- Displayed prominently in the top-left corner of the window chrome.
-- Persistent — never hidden, obscured, or removed based on content or connection state.
-- Rendered so it does not scroll with content (always in the chrome layer, not the content layer).
+- Displayed prominently, centered at the top of the window, as a floating translucent overlay above all pane content.
+- Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
+- Rendered in the overlay layer — it does not scroll with content.
 
-The window label is the primary addressing handle. It MUST be visible at all times so that a user can tell CLU "move content to window b" without ambiguity.
+The window label is the primary addressing handle. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity.
 
 #### Pane label
 
 Each pane is assigned a globally unique numeric identifier for the entire surface instance. A user may assign a custom name to a pane (e.g., `fred`, `Janice`); when a custom name exists it MUST be displayed instead of the number. The pane label MUST be:
-- Displayed in the top-left of the pane header, within the pane boundary, in a position that does not overlap with active content.
-- Always visible regardless of what content is rendered in the pane.
+- Displayed as a large floating translucent overlay centered within the pane content area.
+- Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
+- On touch interfaces: a control in the bottom bar allows the user to manually re-show all labels; any tap while labels are visible hides them again.
+- On pointer interfaces: moving the pointer hides labels; hovering the pane control bar restores them.
 
-#### iPad (pencil platforms)
+#### All platforms
 
-- **Automatic entry:** Pencil contact with the screen MUST automatically enter annotation mode. No button tap is required to initiate pencil drawing.
-- **Finger sketching button:** A "finger sketching" button MUST be persistently visible in the pane header at all times — including when annotation mode is inactive. Tapping it enables finger input as a drawing tool, either alongside an active pencil or as the sole drawing instrument (entering annotation mode if not already active).
-- **Done button:** While annotation mode is active, a "Done" button MUST be visible as a top-right overlay pill. Tapping it exits annotation mode. No other gesture is required to exit.
-
-#### Electron (non-pencil platforms)
-
-- **Annotate button:** An "Annotate" button MUST be persistently visible in the pane header at all times. Tapping it enters annotation mode.
-- **Done button:** While annotation mode is active, a "Done" button MUST be visible as a top-right overlay pill. Tapping it exits annotation mode.
-- There is no automatic entry trigger on non-pencil platforms — the Annotate button is the entry path.
+- **Finger/stylus button (👆):** A single drawing-input button MUST be present in the pane control bar at all times, including when annotation mode is inactive. Tapping it enables finger/stylus input as a drawing tool — entering annotation mode if not already active, or toggling finger draw on/off within an active pencil session.
+- **Apple Pencil (pencil platforms only):** Pencil contact with the screen MUST automatically enter annotation mode. No button tap is required.
+- **Done button:** While annotation mode is active, a **Done** button MUST be visible as a floating pill in the pane. Tapping it exits annotation mode. No other gesture is required to exit.
 
 #### Annotation mode visual state (all platforms)
 
