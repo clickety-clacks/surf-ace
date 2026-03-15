@@ -370,7 +370,7 @@ Brings a pane into foreground / active focus.
 
 **Response fields:** `paneId` (ack echo), `focused: true`.
 
-**Surface default affordance:** Focused pane SHOULD render with a stronger border accent than unfocused panes.
+**Surface default affordance:** Panes are visually equal when not in annotation mode — no border distinction between focused and unfocused panes. The focused pane is a protocol concept only (default pane target when `paneId` is omitted), not a visual one.
 
 #### `pane.rename`
 Assigns or clears a human-readable name for a pane.
