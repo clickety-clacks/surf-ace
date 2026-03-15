@@ -53,7 +53,7 @@ Implementation order is explicitly phased:
 
 **Phase 1 — Surface topology first (before annotations):**
 1. Multi-window support (already in protocol).
-2. Multi-pane support inside a window (`paneId`, pane split/resize/focus lifecycle).
+2. Multi-pane support inside a window (`paneId`, pane split/resize/close lifecycle).
 3. Stable read/write targeting by `{surfaceId, paneId}`.
 4. **Surface-owned pane history routing** — when multiple CLU sessions target the same pane, the newest `content.set` becomes visible immediately. The previously visible pane content remains navigable via the surface's Back stack, and the displaced session receives a provider-generated `event.content_superseded`.
 
@@ -66,7 +66,7 @@ Constraint: annotation semantics in §§13–14 are normative architecture and m
 
 **Phase 1 done checklist (must all be true):**
 1. A single window can be split into multiple panes, each with stable `paneId`.
-2. Pane lifecycle exists: create/split, resize, focus/select, close.
+2. Pane lifecycle exists: create/split, resize, rename, close.
 3. All screen-scoped tool operations can target `{surfaceId, paneId}`.
 4. **`paneId` is required** on all pane-scoped tool calls. CLU MUST always specify which pane it is targeting. There is no default-pane fallback.
 5. `surfaces.list` (or equivalent pane-aware listing) can enumerate panes and active content per pane.
@@ -128,7 +128,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 9. **Annotation mode locks the viewport.** When annotation mode is active, scroll is disabled and link following is disabled. The drawing layer captures all touch and stylus input until annotation mode exits.
 10. **Monotonic revision gate.** Content mutations (`content.set`, `content.clear`, `content.append`, `content.patch`) carry a monotonic `revision`. The surface applies mutations only when `revision == currentRevision + 1`. Out-of-order mutations are rejected with `stale_revision`.
 11. **Annotation reads are pane-scoped at the CLU boundary.** `surf_ace_read` and related CLU-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but CLU does not pass or track history identifiers.
-12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`. `event.content_superseded` is provider-generated (not a surface wire event).
+12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`. `event.content_superseded` is provider-generated (not a surface wire event).
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
 14. **Portable extension packaging.** Surf Ace MUST remain installable as a standalone OpenClaw extension bundle that can be dropped into any compatible OpenClaw installation (without requiring Clawline as a dependency and without requiring core patches). Any needed wake/routing behavior must be implemented through extension-local code and published SDK surfaces.
 
@@ -158,15 +158,15 @@ Pane rules (Phase 1 committed work, see §2.3):
 2. Pane IDs are allocated from one surface-instance-wide numeric sequence shared across every window in that app instance.
 3. Each pane has independent content, capture frame queue, taps, selection, scroll, and annotation state.
 4. All screen-scoped CLU tools target `{ surfaceId, paneId }`. `paneId` is **required**. CLU must always specify the target pane explicitly.
-5. Pane lifecycle (create/split/resize/focus/close) is managed in-band; pane changes do not affect window-level session or mDNS state.
+5. Pane lifecycle (create/split/resize/rename/close) is managed in-band; pane changes do not affect window-level session or mDNS state.
 
 Naming system:
-1. **Window labels** (a, b, c … z, aa, ab …) are assigned by the **provider/extension**, not the surface. The extension assigns letters based on its own discovery order of `surfaceId` values and communicates them to the surface during pairing.
+1. **Window labels** (a, b, c … z, aa, ab …) are assigned by the **provider/extension**, not the surface.
 2. **Pane IDs** are assigned by the **provider/extension** and sent to the surface in topology commands. They are globally unique integers across all windows managed by that provider instance. The surface never generates pane IDs independently.
 3. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. CLU addresses panes by numeric `paneId` only.
 4. The extension is the sole authority on topology. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
 5. When a pane is split, the extension specifies the new `paneId` values in the request. The surface creates the panes as directed and emits `event.pane_created` for each.
-6. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the window label and initial `paneId` during pairing. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
+6. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the window label and initial `paneId`. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
 7. Labels are displayed on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
 
 
@@ -235,15 +235,6 @@ Surface reconnect grace:
 
 **Invariant: connection state MUST NOT affect displayed content.** Content is never cleared by a disconnect, grace expiry, restart, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`. A surface showing content will continue showing that content indefinitely until told otherwise.
 
-### 4.6 iOS / iPadOS Background Behavior
-
-iOS suspends background apps and terminates their network connections. Surf Ace handles this as follows:
-
-1. **On background:** The WebSocket connection drops. The surface transitions to `disconnected` state. Displayed content and annotation strokes are retained in memory for the lifetime of the process.
-2. **On foreground return:** The surface immediately attempts to reconnect. Content remains visible during reconnect. Once reconnected, the surface emits `event.surface_resumed`.
-3. **Provider response to `event.surface_resumed`:** The provider SHOULD call `surf_ace_list` to verify pane topology and content state, then re-push content as needed.
-4. **No disk persistence:** All pane state is in-memory only. A force-quit or OS memory eviction clears all state. The provider is the source of truth and re-establishes surface state on cold reconnect.
-
 ### 4.5 Keepalive
 
 Application-level keepalive is required:
@@ -259,22 +250,19 @@ Pair timeout:
 
 **Surface UI connectivity indicator (required):**
 The surface MUST display a persistent visual indicator of connection state via the connection state bar (§15.7). Required behavior:
-- Healthy: ping received within expected window — no indicator or neutral.
-- Stale — yellow: no ping received within `heartbeatIntervalMs + heartbeatGraceMs` (default 13s = 10s interval + 3s grace). Surface transitions to yellow at this threshold.
-- Disconnected — red: WS socket is not connected.
- - Resume/reconnect state SHOULD be presented as a subtle status chip in the window chrome.
-Returns to healthy immediately when a ping is received on a live connection. Content is never cleared by any of these states (see §4.4 invariant).
+- Connected — green: render the persistent 2px connection state bar as a solid green line.
+- Connecting / reconnecting — yellow: render the same bar in the warning state with the animated sweep defined in §15.7.
+- Disconnected — red: render the same bar as a solid red line.
+Content is never cleared by any of these states (see §4.4 invariant).
 
 ### 4.6 iOS / iPadOS Background Behavior
 
 When the Surf Ace app moves to the iOS/iPadOS background:
 
-1. **Grace period (30 s):** The surface holds its WebSocket connection using a background task. Content pushed during this window is accepted and stored.
-2. **After grace period:** iOS suspends the process. The WebSocket drops; the surface enters `disconnected` state. Displayed content and annotation strokes are preserved in memory.
-3. **On foreground return:** The surface immediately attempts to reconnect. Content remains visible during reconnect. Once reconnected, the surface emits `event.surface_resumed` so the provider can verify pane content state.
+1. **On background:** The WebSocket connection drops immediately. The surface transitions to `disconnected` state. Displayed content and annotation strokes are preserved in memory for the lifetime of the process.
+2. **On foreground return:** The surface immediately attempts to reconnect. Content remains visible during reconnect. Once reconnected, the surface emits `event.surface_resumed`.
+3. **Provider response to `event.surface_resumed`:** The provider SHOULD call `surf_ace_list` to verify pane topology and content state, then re-push content as needed.
 4. **Content durability:** Pane content and strokes survive background/foreground cycles for the lifetime of the process. They are NOT written to disk — a full process kill clears all pane state.
-
-The provider SHOULD respond to `event.surface_resumed` by calling `surf_ace_list` to verify pane topology and content are as expected.
 
 ### 4.7 Runtime Window Lifecycle (Multi-Window Endpoints)
 
@@ -335,10 +323,8 @@ Severe violation threshold:
 
 Rules:
 1. Provider MAY call `surfaces.list` immediately after WS connect.
-2. Response contains `{ surfaceId, name, autoLabel, viewport, paired }[]`. `autoLabel` is the window letter (e.g. `"a"`, `"b"`, `"aa"`) assigned by the provider/extension during pairing. Used to address the window by letter in CLU and displayed on the surface UI. `paired: true` when the surface is either actively connected to a provider OR is in resume grace for a prior session — mirroring `busy=1` mDNS semantics. When `paired: true`, `pair.request` requires `takeover=true`, but note: only the **same** `providerId` that owns the current session can successfully take over during the grace window (§4.2). A different provider sending `takeover=true` will still receive a `busy` error. `paired: false` means the surface is fully available and any provider may connect.
+2. Response contains `{ surfaceId, name, viewport, paired }[]`. `paired: true` when the surface is either actively connected to a provider OR is in resume grace for a prior session — mirroring `busy=1` mDNS semantics. When `paired: true`, `pair.request` requires `takeover=true`, but note: only the **same** `providerId` that owns the current session can successfully take over during the grace window (§4.2). A different provider sending `takeover=true` will still receive a `busy` error. `paired: false` means the surface is fully available and any provider may connect.
 3. Provider selects a `surfaceId` and sends `pair.request` for that surface.
-4. Phase 1 pane profile: once pane support is enabled, `surfaces.list` MUST optionally expose pane summaries per surface (at minimum `paneId` and `activeContent`) for topology-aware targeting.
-
 ### 6.1 Pair Handshake
 
 Flow:
@@ -364,7 +350,7 @@ Flow:
 3. Surface metadata (id/name/viewport/capabilities).
 4. `eventConfig` (active event profile, active event list, and effective drawing flush config).
 5. Limits.
-6. Current pane state summary (`panes[]` with per-pane `paneId`, `currentContentId`, `currentRevision`, `contentType`, and `focused`).
+6. Current pane state summary (`panes[]` with per-pane `paneId`, `currentContentId`, `currentRevision`, and `contentType`).
 
 ### 6.1.1 Pane Lifecycle and History Operations (Phase 1)
 
@@ -373,25 +359,16 @@ These operations are post-pair and scoped to a paired `surfaceId`. They implemen
 #### `panes.list`
 Returns current pane layout for the paired surface.
 
-**Response fields per pane:** `paneId`, `name` (user-assigned or null), `activeContentId` (or null), `contentType` (or null), `viewport`, `focused` (bool).
+**Response fields per pane:** `paneId`, `name` (extension-assigned or null), `activeContentId` (or null), `contentType` (or null), `viewport`.
 
 #### `pane.split`
 Splits an existing pane into N panes.
 
-**Request fields:** `paneId` (required — pane to split), `count` (total pane count after split, including the source pane; min 2), `direction` (`horizontal` | `vertical`).
+**Request fields:** `paneId` (required — pane to split), `count` (total pane count after split, including the source pane; min 2), `direction` (`horizontal` | `vertical`), `newPaneIds` (required array of extension-assigned pane IDs for the newly created panes, length `count - 1`).
 
 **Behavior:** The source pane retains its `paneId` and content. The extension specifies the `paneId` values for each new pane in the request. The surface creates the panes as directed and emits `event.pane_created` for each.
 
 **Response fields:** `panes` — array of `{ paneId }` for all panes in the window after the split (including existing panes).
-
-#### `pane.focus`
-Brings a pane into foreground / active focus.
-
-**Request fields:** `paneId`.
-
-**Response fields:** `paneId` (ack echo), `focused: true`.
-
-**Surface default affordance:** Panes are visually equal at all times when not in annotation mode. There is no focused-pane concept — visually or in the protocol.
 
 #### `pane.rename`
 Assigns or clears a name for a pane. This is an **extension-to-surface** operation — the extension names panes. There is no user-facing rename UI on the surface.
@@ -439,10 +416,10 @@ These rules are normative for the single-visible-owner history model:
 8. `content.clear` clears the currently visible content for the targeted pane. Any history bookkeeping needed to preserve older pane states is internal to the surface/provider and not part of the CLU call surface.
 
 **Surface default affordances:**
-- Back/Forward controls SHOULD appear on the right side of the pane header.
+- Back/Forward controls SHOULD appear in the bottom-center floating control cluster.
 - Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances.
 - v1 SHOULD NOT display history depth counters.
-- If overlay restoration fails, the surface SHOULD show a non-blocking toast plus a warning icon in the pane header.
+- If overlay restoration fails, the surface SHOULD show a non-blocking toast plus a warning icon in the bottom-center floating control cluster.
 
 ---
 
@@ -537,6 +514,7 @@ The stream is still always-on; expansions are negotiated at pair time, not throu
 | `event.snapshot_hint` | Provider-internal control plane | Yes (internal only) | Used for reconnect/backpressure state sync. Not exposed in CLU register model. Appears in `pair.response.eventConfig.activeEvents` (it is profile-controlled, part of `minimum_deep`), but the provider does not surface it to CLU tooling. |
 | `event.surface_appeared` | Lifecycle — **not profile-gated** | Always | Emitted on any active socket when a new window appears. Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents` (which lists only profile-controlled events). |
 | `event.surface_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a window closes. Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
+| `event.surface_resumed` | Lifecycle — **not profile-gated** | Always | Emitted when a surface successfully reconnects after background/resume. Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
 | `event.pane_created` | Lifecycle — **not profile-gated** | Always | Emitted when a new pane is created (split or standalone). Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
 | `event.pane_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is closed. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.pane_renamed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane name changes. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
@@ -659,34 +637,22 @@ The schema below defines every v1 application message type over WS.
     { "$ref": "#/$defs/NavigationEvent" },
     { "$ref": "#/$defs/SurfaceAppearedEvent" },
     { "$ref": "#/$defs/SurfaceRemovedEvent" },
+    { "$ref": "#/$defs/SurfaceResumedEvent" },
     { "$ref": "#/$defs/SnapshotHintEvent" },
 
     { "$ref": "#/$defs/PanesListRequest" },
     { "$ref": "#/$defs/PaneSplitRequest" },
-    { "$ref": "#/$defs/PaneFocusRequest" },
     { "$ref": "#/$defs/PaneRenameRequest" },
     { "$ref": "#/$defs/PaneCloseRequest" },
 
     { "$ref": "#/$defs/PanesListResponse" },
     { "$ref": "#/$defs/PaneSplitResponse" },
-    { "$ref": "#/$defs/PaneFocusResponse" },
     { "$ref": "#/$defs/PaneRenameResponse" },
     { "$ref": "#/$defs/PaneCloseResponse" },
 
     { "$ref": "#/$defs/PaneCreatedEvent" },
     { "$ref": "#/$defs/PaneRemovedEvent" },
-    { "$ref": "#/$defs/PaneFocusedEvent" },
-    { "$ref": "#/$defs/PaneRenamedEvent" },
-
-    { "$ref": "#/$defs/HistoryListRequest" },
-    { "$ref": "#/$defs/HistoryCloseRequest" },
-
-    { "$ref": "#/$defs/HistoryListResponse" },
-    { "$ref": "#/$defs/HistoryCloseResponse" },
-
-    { "$ref": "#/$defs/HistoryEntryCreatedEvent" },
-    { "$ref": "#/$defs/HistoryEntryRemovedEvent" },
-    { "$ref": "#/$defs/HistoryEntryFocusedEvent" }
+    { "$ref": "#/$defs/PaneRenamedEvent" }
   ],
   "$defs": {
     "RequestId": {
@@ -713,10 +679,6 @@ The schema below defines every v1 application message type over WS.
       "type": "string",
       "pattern": "^ct_[0-9a-f]{8}$"
     },
-    "HistoryEntryId": {
-      "type": "string",
-      "pattern": "^he_[0-9a-f]{8}$"
-    },
     "StrokeId": {
       "type": "string",
       "pattern": "^stroke_[0-9a-f]{6,64}$"
@@ -730,17 +692,9 @@ The schema below defines every v1 application message type over WS.
       "pattern": "^fl_[A-Za-z0-9._:-]{3,96}$"
     },
     "PaneId": {
-      "description": "Pane identity within a surface. Normative model: globally unique numeric pane IDs scoped to the entire surface instance. New responses and examples use integers. For wire compatibility, legacy string IDs ('root' and 'pane_<decimal>') may be accepted on input if already shipped, but providers must canonicalize to numeric pane IDs in responses and events.",
-      "oneOf": [
-        {
-          "type": "integer",
-          "minimum": 1
-        },
-        {
-          "type": "string",
-          "pattern": "^(root|pane_[0-9]+)$"
-        }
-      ]
+      "description": "Pane identity within a surface. Normative model: globally unique numeric pane IDs scoped to the entire surface instance.",
+      "type": "integer",
+      "minimum": 1
     },
     "Revision": {
       "type": "integer",
@@ -765,6 +719,7 @@ The schema below defines every v1 application message type over WS.
         "event.navigation",
         "event.surface_appeared",
         "event.surface_removed",
+        "event.surface_resumed",
         "event.snapshot_hint",
         "event.pane_created",
         "event.pane_removed",
@@ -1024,11 +979,10 @@ The schema below defines every v1 application message type over WS.
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["surfaceId", "name", "autoLabel", "viewport", "paired"],
+                "required": ["surfaceId", "name", "viewport", "paired"],
                 "properties": {
                   "surfaceId": { "$ref": "#/$defs/SurfaceId" },
                   "name": { "type": "string" },
-                  "autoLabel": { "type": "string", "description": "Auto-assigned window letter label (e.g. 'a', 'b', 'aa'). Displayed prominently on surface UI and usable as a short address in CLU tools." },
                   "viewport": { "$ref": "#/$defs/SurfaceViewport" },
                   "paired": { "type": "boolean", "description": "true if actively paired or in resume grace (mirrors mDNS busy=1). pair.request requires takeover=true, but only same-provider takeover succeeds during grace. A different provider will receive busy." }
                 }
@@ -1089,7 +1043,7 @@ The schema below defines every v1 application message type over WS.
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["contentId", "revision", "contentType", "content"],
+              "required": ["paneId", "contentId", "revision", "contentType", "content"],
               "properties": {
                 "paneId": {
                   "$ref": "#/$defs/PaneId",
@@ -1173,7 +1127,7 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "revision", "lines"],
+          "required": ["paneId", "contentId", "revision", "lines"],
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
@@ -1202,7 +1156,7 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "revision", "patch"],
+          "required": ["paneId", "contentId", "revision", "patch"],
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
@@ -1246,7 +1200,7 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["revision"],
+          "required": ["paneId", "revision"],
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
@@ -1270,7 +1224,7 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["contentId", "strokeIds"],
+          "required": ["paneId", "contentId", "strokeIds"],
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
@@ -1300,6 +1254,7 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
+          "required": ["paneId"],
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
@@ -1400,7 +1355,7 @@ The schema below defines every v1 application message type over WS.
                   "type": "array",
                   "items": { "$ref": "#/$defs/ProfileControlledEventType" },
                   "uniqueItems": true,
-                  "description": "Profile-controlled events active for this session. Surface, pane, and history-entry lifecycle events are excluded — they are always active regardless of profile."
+                  "description": "Profile-controlled events active for this session. Surface and pane lifecycle events are excluded — they are always active regardless of profile."
                 },
                 "drawingFlushConfig": { "$ref": "#/$defs/DrawingFlushConfig" }
               }
@@ -1435,7 +1390,7 @@ The schema below defines every v1 application message type over WS.
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["paneId", "currentContentId", "currentRevision", "contentType", "focused"],
+                    "required": ["paneId", "currentContentId", "currentRevision", "contentType"],
                     "properties": {
                       "paneId": { "$ref": "#/$defs/PaneId" },
                       "currentContentId": {
@@ -1444,8 +1399,7 @@ The schema below defines every v1 application message type over WS.
                       "currentRevision": { "$ref": "#/$defs/Revision" },
                       "contentType": {
                         "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
-                      },
-                      "focused": { "type": "boolean" }
+                      }
                     }
                   }
                 }
@@ -1612,7 +1566,6 @@ The schema below defines every v1 application message type over WS.
             "heartbeat.ping",
             "panes.list",
             "pane.split",
-            "pane.focus",
             "pane.rename",
             "pane.close"
           ]
@@ -1865,6 +1818,26 @@ The schema below defines every v1 application message type over WS.
         }
       }
     },
+    "SurfaceResumedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.surface_resumed" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" }
+          }
+        }
+      }
+    },
     "SnapshotHintEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -1922,7 +1895,7 @@ The schema below defines every v1 application message type over WS.
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["paneId", "name", "activeContentId", "contentType", "viewport", "focused"],
+                "required": ["paneId", "name", "activeContentId", "contentType", "viewport"],
                 "properties": {
                   "paneId": { "$ref": "#/$defs/PaneId" },
                   "name": {
@@ -1930,7 +1903,7 @@ The schema below defines every v1 application message type over WS.
                       { "type": "string", "minLength": 1 },
                       { "type": "null" }
                     ],
-                    "description": "User-assigned human-readable name for this pane, or null if none."
+                    "description": "Extension-assigned human-readable name for this pane, or null if none."
                   },
                   "activeContentId": {
                     "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
@@ -1938,8 +1911,7 @@ The schema below defines every v1 application message type over WS.
                   "contentType": {
                     "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
                   },
-                  "viewport": { "$ref": "#/$defs/SurfaceViewport" },
-                  "focused": { "type": "boolean" }
+                  "viewport": { "$ref": "#/$defs/SurfaceViewport" }
                 }
               }
             }
@@ -1961,7 +1933,7 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["count", "direction"],
+          "required": ["paneId", "count", "direction", "newPaneIds"],
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
@@ -1975,6 +1947,13 @@ The schema below defines every v1 application message type over WS.
             "direction": {
               "type": "string",
               "enum": ["horizontal", "vertical"]
+            },
+            "newPaneIds": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/PaneId" },
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "Extension-assigned pane IDs for the newly created panes. Must contain exactly count - 1 entries."
             }
           }
         }
@@ -2009,49 +1988,6 @@ The schema below defines every v1 application message type over WS.
                 }
               }
             }
-          }
-        }
-      }
-    },
-
-    "PaneFocusRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "id", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "request" },
-        "op": { "const": "pane.focus" },
-        "id": { "$ref": "#/$defs/RequestId" },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["paneId"],
-          "properties": {
-            "paneId": { "$ref": "#/$defs/PaneId" }
-          }
-        }
-      }
-    },
-    "PaneFocusResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "response" },
-        "op": { "const": "pane.focus" },
-        "id": { "$ref": "#/$defs/RequestId" },
-        "ok": { "const": true },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["paneId", "focused"],
-          "properties": {
-            "paneId": { "$ref": "#/$defs/PaneId" },
-            "focused": { "const": true }
           }
         }
       }
@@ -2264,7 +2200,7 @@ Resolution: explicit max-byte limits in pair response; typed schemas; `content_t
 Resolution: mutation ops require both current `contentId` and next `revision`; stale content returns `stale_content`.
 
 7. Ambiguous state after reconnect.
-Resolution: pair response always returns authoritative current pane state (`panes[]` with per-pane `currentContentId`, `currentRevision`, `contentType`, and `focused`), and provider performs immediate `snapshot.get` before normal operation.
+Resolution: pair response always returns authoritative current pane state (`panes[]` with per-pane `currentContentId`, `currentRevision`, and `contentType`), and provider performs immediate `snapshot.get` before normal operation.
 
 8. Short drawing pauses triggering noisy sends.
 Resolution: send requires unsent changes (`dirty=true`) plus either idle-window silence or max-interval expiry; small pauses do not flush.
@@ -2323,12 +2259,12 @@ Protocol is ready for implementation when these checks pass in integration tests
 13. `snapshot.get` returns base64 PNG for `image` and conditionally includes `visibleText`/`drawings` per request flags.
 14. All messages validate against the schema in Section 10.
 15. Surf Ace extension skills are present at these provider paths and load successfully:
-   - `extensions/surf-ace/skills/surf-ace-ops/SKILL.md` (tool usage for list/push/read/clear/pane/history entry ops)
+   - `extensions/surf-ace/skills/surf-ace-ops/SKILL.md` (tool usage for list/push/read/clear/pane ops)
    - `extensions/surf-ace/skills/surf-ace-markup/SKILL.md` (annotation interpretation + markup workflow)
 16. Surf Ace agent-instruction injection is present and wired from these provider paths:
    - `extensions/surf-ace/src/agent-instructions.ts` (builds Surf Ace instruction snippet)
    - `extensions/surf-ace/index.ts` (registers/injects Surf Ace instruction snippet into agent runtime prompt)
-   The injected instructions MUST cover event semantics (`event.drawing_flush`, pane/history entry lifecycle events, navigation/page/selection handling) so agents can correctly interpret Surf Ace alerts.
+   The injected instructions MUST cover event semantics (`event.drawing_flush`, pane lifecycle events, navigation/page/selection handling) so agents can correctly interpret Surf Ace alerts.
 
 Implementation status: ready for implementation.
 
@@ -2352,7 +2288,7 @@ The provider maintains a structured local buffer for each surface. The buffer ha
 
 CLU reads from this local buffer only; no `surf_ace_read` call triggers a live network call to a surface.
 
-**Buffer scoping:** At the CLU boundary, annotation reads are pane-scoped: `surf_ace_read(fingerprint, paneId?)` targets a pane and returns the currently visible annotation state for that pane. Surfaces/providers may keep additional per-history restore data internally so Back/Forward can restore prior content + overlay states, but that bookkeeping is opaque to CLU and not part of the tool API.
+**Buffer scoping:** At the CLU boundary, annotation reads are pane-scoped: `surf_ace_read(fingerprint, paneId)` targets a pane and returns the currently visible annotation state for that pane. Surfaces/providers may keep additional per-history restore data internally so Back/Forward can restore prior content + overlay states, but that bookkeeping is opaque to CLU and not part of the tool API.
 
 ---
 
@@ -2586,8 +2522,7 @@ name              string    Human-readable screen name
 connectionState   enum      "connected" | "connecting" | "unreachable"
 lastSeenAt        epochMs   When screen was last seen in mDNS or active
 viewport          object    { width, height, scale }
-focusedPaneId     integer?  Deprecated. Not surfaced — there is no focused-pane concept. Omit from surface state.
-panes             array     [{ paneId, name, focused, activeContent, historySummary }]
+panes             array     [{ paneId, name, activeContent, historySummary }]
                           activeContent: { contentId, contentType, revision } or null if idle
                           historySummary: { visibleContentId, backCount, forwardCount }
 pendingEvents     int       Count of buffered events not yet read by CLU
@@ -2748,7 +2683,7 @@ This tool is deprecated and removed in the capture frame model. Frame images are
 
 Remove specific annotation strokes from a screen's drawing overlay by stroke ID. Write.
 
-**Note (dual-channel frame model):** In the dual-channel model, strokes disappear from the surface display when annotation mode exits, but the underlying context frame may remain open and continue on later same-context re-entry (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay (active session UI). For most CLU workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at CLU interpretation time (dedupe/ignore/act), not by mutating closed frames.
+**Note (dual-channel frame model):** In the dual-channel model, rendered strokes persist until the provider explicitly removes them or content changes under the normal content rules. The underlying context frame may remain open and continue on later same-context re-entry (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay. For most CLU workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at CLU interpretation time (dedupe/ignore/act), not by mutating closed frames.
 
 **Params:**
 ```
@@ -2831,7 +2766,7 @@ The window label is the primary addressing handle. It MUST be visible when the s
 
 #### Pane label
 
-Each pane is assigned a globally unique numeric identifier for the entire surface instance. A user may assign a custom name to a pane (e.g., `fred`, `Janice`); when a custom name exists it MUST be displayed instead of the number. The pane label MUST be:
+Each pane is assigned a globally unique numeric identifier for the entire surface instance. If the extension assigns a pane name, that name MUST be displayed instead of the number. The pane label MUST be:
 - Displayed as a large floating translucent overlay centered within the pane content area.
 - Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
 - On touch interfaces: a control in the bottom bar allows the user to manually re-show all labels; any tap while labels are visible hides them again.
@@ -2841,7 +2776,7 @@ Each pane is assigned a globally unique numeric identifier for the entire surfac
 
 - **Finger/stylus button (👆):** A single drawing-input button MUST be present in the pane control bar at all times, including when annotation mode is inactive. Tapping it enables finger/stylus input as a drawing tool — entering annotation mode if not already active, or toggling finger draw on/off within an active pencil session.
 - **Apple Pencil (pencil platforms only):** Pencil contact with the screen MUST automatically enter annotation mode. No button tap is required.
-- **Done button:** While annotation mode is active, a **Done** button MUST be visible as a floating pill in the pane. Tapping it exits annotation mode. No other gesture is required to exit.
+- **Done button:** While annotation mode is active, a **Done** button MUST be visible in the bottom-center floating control cluster. Tapping it exits annotation mode. No other gesture is required to exit.
 
 #### Annotation mode visual state (all platforms)
 
@@ -2867,7 +2802,6 @@ Electron keyboard defaults:
 - `D` exits annotation mode via Done.
 - `Cmd-[` navigates Back.
 - `Cmd-]` navigates Forward.
-- `Cmd-1` through `Cmd-9` focus the first nine visible panes by layout order. These shortcuts do not redefine pane IDs.
 
 ---
 
@@ -2898,7 +2832,7 @@ History controls default behavior:
 ### 15.4 Degraded and Empty States
 
 Default user-visible handling for degraded or unavailable states:
-- Overlay restore failure shows a non-blocking toast plus a warning icon in the pane header.
+- Overlay restore failure shows a non-blocking toast plus a warning icon in the bottom-center floating control cluster.
 - Blocked navigation or blocked content replacement during annotation mode shows a small toast: `"Finish annotation (Done) to navigate"`.
 - Unsupported content renders a centered empty-state message.
 - Reconnect/resume state is shown via the connection state bar (see §15.7).
@@ -2909,7 +2843,7 @@ Default user-visible handling for degraded or unavailable states:
 
 See also §7.4, which defines the flush send timing requirements.
 
-While a `drawing_flush` event is in-flight, the pane's annotation mode border MUST pulse. The pulse is a brightness/opacity oscillation on the existing 2px annotation accent border — it does not change color or add new chrome. The pulse starts when transmission begins and stops when the provider acknowledges receipt.
+While a `drawing_flush` event is in-flight, the pane's annotation mode border MUST pulse. The pulse is a brightness/opacity oscillation on the existing 2px annotation accent border — it does not change color or add new chrome. The pulse starts when transmission begins and stops when transmission completes (success or terminal failure).
 
 Required behavior (normative, cross-referenced from §7.4):
 1. Indicator becomes visible when `event.drawing_flush` transmission starts.
@@ -2966,63 +2900,49 @@ A 2px overlay line MUST be rendered at the bottom edge of each window, spanning 
 
 This section is a consolidated copy/reference index of existing UI/UX mentions elsewhere in the document; it does not supersede the original normative or contextual locations.
 
-- **Window Letter Labels** — "Window labels (a, b, c…) assigned by provider/extension during pairing, not auto-generated by the surface." Source: §3.1.1
+- **Window Letter Labels** — "Window labels (a, b, c…) are assigned by provider/extension, not the surface." Source: §3.1.1
 - **Pane Name Authority** — "Pane names assigned by extension via `pane.rename`. No user-facing rename UI. CLU addresses panes by paneId only." Source: §3.1.1
 - **Prominent Surface Labels** — "Window label: centered-top floating overlay. Pane label: centered floating overlay within pane. Visibility rules: visible at rest, hidden on active interaction." Source: §3.1.1 / §15.1
 - **Displayed Content Persistence** — "The surface renders content and keeps it displayed until CLU explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
 - **History Navigation Controls** — "Previously visible content in that pane remains navigable through the surface's Back/Forward controls." Source: §6.1.1
+- **Floating History Controls** — "Back/Forward controls SHOULD appear in the bottom-center floating control cluster." Source: §6.1.1 / §15.3
+- **Disabled History Controls** — "Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances." Source: §6.1.1 / §15.3
+- **No History Counters** — "v1 SHOULD NOT display history depth counters." Source: §6.1.1 / §15.3
 - **Degraded Restore Safety** — "The surface MUST still show that state's content payload when available, clear the overlay for safety." Source: §6.1.1
-- **Connectivity Indicator** — "The surface MUST display a persistent visual indicator of connection state." Source: §4.4
-- **Connectivity Neutral State** — "Healthy: ping received within expected window — no indicator or neutral." Source: §4.4
-- **Connectivity Warning State** — "Warning: one ping missed or latency high — mild visible warning." Source: §4.4
-- **Connectivity Lost State** — "Disconnected: outside grace or socket dead — clear visible disconnected state." Source: §4.4
-- **Window Auto Label in UI** — "`autoLabel` is the provider-assigned window letter, communicated to the surface during pairing and displayed on the surface UI." Source: §6.0
-- **Session Label UI Hint** — "`providerName` (optional human-readable session/chat label for UI indicators)." Source: §6.1
-- **Pane Focus Visibility** — "Brings a pane into foreground / active focus." Source: §6.1.1
-- **Pane Rename** — "Extension-to-surface: extension names panes. No user UI." Source: §6.1.1
-- **No Focused Pane Concept** — "All panes are visually equal when not in annotation mode. There is no focused-pane border distinction." Source: §15.3
-- **Header History Controls** — "Back/Forward controls SHOULD appear on the right side of the pane header." Source: §6.1.1
-- **Disabled History Controls** — "Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances." Source: §6.1.1
-- **No History Counters** — "v1 SHOULD NOT display history depth counters." Source: §6.1.1
-- **Restore Failure UI** — "the surface SHOULD show a non-blocking toast plus a warning icon in the pane header." Source: §6.1.1
-- **Flush Send Indicator** — "Surface must show a subtle visual send indicator while a drawing flush is in-flight to provider." Source: §7.4
-- **Reconnect Status Chip** — "Resume/reconnect state SHOULD be presented as a subtle status chip in the window chrome." Source: §4.4
+- **Restore Failure UI** — "The surface SHOULD show a non-blocking toast plus a warning icon in the bottom-center floating control cluster." Source: §6.1.1 / §15.4
+- **Connection State Bar** — "The surface MUST display a persistent visual indicator of connection state via the connection state bar." Source: §4.5 / §15.7
+- **Connected State UI** — "Connected — green: render the persistent 2px connection state bar as a solid green line." Source: §4.5 / §15.7
+- **Connecting State UI** — "Connecting / reconnecting — yellow: render the same bar in the warning state with the animated sweep defined in §15.7." Source: §4.5 / §15.7
+- **Disconnected State UI** — "Disconnected — red: render the same bar as a solid red line." Source: §4.5 / §15.7
 - **Window Label Placement** — "Floating translucent overlay, centered top of window, above all pane content." Source: §15.1
 - **Window Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; never hidden by content or connection state." Source: §15.1
-- **Non-Scrolling Window Label** — "Rendered so it does not scroll with content (always in the chrome layer, not the content layer)." Source: §15.1
 - **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible when the surface is at rest." Source: §15.1
 - **Pane Label Placement** — "Large floating translucent overlay centered within the pane content area." Source: §15.1
-- **Pane Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; never hidden by content or annotation mode." Source: §15.1
+- **Pane Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; restored on idle." Source: §15.1
 - **Pencil Auto Entry** — "Pencil contact with the screen MUST automatically enter annotation mode." Source: §15.1
-- **Drawing Input Button (👆)** — "A single 👆 button MUST be present in the pane control bar at all times. Handles finger and non-Apple-Pencil stylus input. Tapping enters annotation mode or toggles finger draw within an active pencil session." Source: §15.1
-- **Done Exit Control** — "While annotation mode is active, a 'Done' button MUST be visible as a top-right overlay pill." Source: §15.1
-- **Electron Annotate Entry** — "Electron uses the 👆 button (no Apple Pencil auto-entry). No separate Annotate button." Source: §15.1
-- **Annotation Mode Visual State** — "Default treatment: a 2px accent border plus a small 'Annotating' badge." Source: §15.1
-- **Annotation Controls Stay Visible** — "Pane labels and controls MUST remain visible and MUST NOT be dimmed while annotating." Source: §15.1
-- **Annotation Viewport Lock** — "Scroll is disabled. The viewport is locked." Source: §15.1 / §15.6
-- **Annotation Tap Blocking** — "Link following is disabled. Taps do not navigate." Source: §15.1 / §15.6
-- **Drawing Capture Layer** — "The drawing layer captures all touch and stylus input." Source: §15.1 / §15.6
+- **Drawing Input Button (👆)** — "A single drawing-input button MUST be present in the pane control bar at all times." Source: §15.1
+- **Done Exit Control** — "While annotation mode is active, a Done button MUST be visible in the bottom-center floating control cluster." Source: §15.1 / §15.3
+- **Annotation Mode Visual State** — "When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator." Source: §15.1
+- **Control Cluster Rule** — "All pane controls (Back, Forward, 👆, Done) live in a single floating control cluster at the bottom-center of the pane." Source: §15.3
+- **No Focused Pane Concept** — "There is no focused-pane concept — all panes are visually equal when not in annotation mode." Source: §15.3
 - **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
 - **Accessibility Contrast** — "All chrome labels and controls MUST meet WCAG AA contrast." Source: §15.2
-- **Electron Shortcut Defaults** — "`A` enters annotation mode ... `Cmd-1` through `Cmd-9` focus the first nine visible panes by layout order." Source: §15.2
+- **Electron Shortcut Defaults** — "`A` enters annotation mode, `D` exits annotation mode via Done, `Cmd-[` navigates Back, `Cmd-]` navigates Forward." Source: §15.2
 - **Unsupported Content Empty State** — "Unsupported content renders a centered empty-state message." Source: §15.4
 - **Blocked Attempt Toast** — "Blocked navigation or blocked content replacement during annotation mode shows a small toast." Source: §15.4 / §15.6
-- **Flush Indicator** — "While a `drawing_flush` is in-flight, the annotation mode border pulses (brightness oscillation on the 2px accent border). Starts on transmission start, stops on ack." Source: §15.5
-- **Flush Indicator Visibility Rule** — "Indicator becomes visible when `event.drawing_flush` transmission starts." Source: §15.5
-- **Flush Indicator Duration Rule** — "Indicator remains visible while the transmission is in-flight." Source: §15.5
+- **Flush Indicator** — "While a `drawing_flush` is in-flight, the annotation mode border pulses." Source: §7.4 / §15.5
+- **Flush Indicator Completion Rule** — "The pulse starts when transmission begins and stops when transmission completes (success or terminal failure)." Source: §7.4 / §15.5
 - **Content Area Fill** — "Content MUST fill the pane." Source: §15.6
-- **Chrome Reservation** — "The content area is the full pane minus any chrome elements (pane label, history navigation controls)." Source: §15.6
-- **Normal Interaction Affordances** — "Scroll ... Link following ... Text selection" are enabled while not in annotation mode. Source: §15.6
+- **Normal Interaction Affordances** — "Scroll, link following, and text selection are enabled while not in annotation mode." Source: §15.6
 - **Annotation Interaction Suspension** — "Normal content interaction is suspended." Source: §15.6
-- **Annotation Visibility Lock** — "Pane content replacement and user navigation are blocked until the user taps **Done**." Source: §15.6
-- **Post-Done Context Switch** — "After **Done**, any user navigation or agent-driven content update is a normal context switch." Source: §15.6
+- **Annotation Visibility Lock** — "Pane content replacement and user navigation are blocked until the user taps Done." Source: §15.6
+- **Post-Done Context Switch** — "After Done, any user navigation or agent-driven content update is a normal context switch." Source: §15.6
 - **Native Overlay Visual Distinction Gap** — "There is no ... visual distinction protocol for those overlay marks." Source: §OT-1
 - **Viewport Overlay Positioning (iOS)** — "Position the `PKCanvasView` as a fixed overlay over the scroll view's visible area." Source: §A.1
 - **Viewport Overlay Positioning (Electron)** — "Position the annotation canvas element as a fixed overlay ... over the content frame." Source: §A.1
 - **No Explicit Browsing Modes** — "The surface always behaves like a real browser." Source: §A.7
 - **UI-Only Mode Distinction** — "This is the only surface-level mode distinction and it is UI-only." Source: §A.7
-- **UI TODO Boundary** — "UI/UX/presentation details (button design, visual affordances, mode indicator) are a separate TODO." Source: §A.7
 - **Legacy Canvas Presentation** — "The surface renders a blank or gridded background." Source: §A.9
 - **Native Overlay Model Markup Goal** — "Model markups render visually on the surface alongside (but distinguishable from) user strokes." Source: §A.12
 - **Future Interactive Affordances** — "widgets, buttons, state displays" may become part of a future native-overlay markup model. Source: §A.12
@@ -3197,9 +3117,9 @@ However, geometry-based inference of the "between" region still requires underst
 - How should annotation buffering handle URL fragments (#section) vs. full URL changes?
 - What happens to annotations when CLU calls `surf_ace_push` with new content — are they cleared or preserved?
 
-**Decision:** On pencil-supported devices, pencil contact automatically enters annotation mode; fingers do normal operations (scroll, select, tap, follow links) by default. A "finger sketching" button is always visible and, when tapped, adds finger drawing capability to annotation mode. On non-pencil platforms (Electron), an "Annotate" button is the sole entry point for annotation mode and enables finger drawing. In both cases the button can be tapped before any drawing occurs. This is the only surface-level mode distinction and it is UI-only; the wire protocol and register model do not change based on mode.
+**Decision:** On pencil-supported devices, pencil contact automatically enters annotation mode; fingers do normal operations (scroll, select, tap, follow links) by default. A single 👆 drawing-input button is always visible and, when tapped, adds finger drawing capability to annotation mode. On non-pencil platforms (Electron), that same 👆 button is the entry point for annotation mode and enables drawing input. This is the only surface-level mode distinction and it is UI-only; the wire protocol and register model do not change based on mode.
 
-**UI defaults alignment:** Finger sketching / Annotate controls live in the pane header. The Done control is a top-right overlay pill while annotation mode is active. Blocked navigation or blocked content replacement during annotation mode produces a small toast directing the user to finish annotation first.
+**UI defaults alignment:** Drawing controls live in the bottom-center floating control cluster. The Done control appears in that cluster while annotation mode is active. Blocked navigation or blocked content replacement during annotation mode produces a small toast directing the user to finish annotation first.
 
 **Data model:** The provider MUST store surface state in a context dictionary keyed by `contextKey`, where `contextKey` is:
 - For CLU-pushed content: the `contentId` (e.g. `ct_a1b2c3d4`)
@@ -3214,11 +3134,11 @@ In v1, `content.set`, `content.clear`, and `event.navigation` still enforce hard
 
 Navigation to a new URL creates a new active context candidate, but context switch for frame finalization occurs only when annotation starts in that new context. Navigation alone does not create/finalize a frame.
 
-In v2+, restore-on-revisit will require a new wire operation (e.g. `content.restore`) or a `preserveAnnotations` flag on `content.set`. This is a **protocol change**, not a provider-side policy switch — Section 6.2 mandates that `content.set` MUST clear all drawing overlay strokes at the surface level, and the provider cannot suppress this behavior unilaterally. The context dictionary is the right data structure for v2; the wire op to activate it is a v2 design item.
+In v2+, restore-on-revisit will require a new wire operation (e.g. `content.restore`) or a `preserveAnnotations` flag on `content.set`. This is a **protocol change**, not a provider-side policy switch: v1 content replacement still hard-clears the drawing overlay at the surface level, and the provider cannot suppress this behavior unilaterally. The context dictionary is the right data structure for v2; the wire op to activate it is a v2 design item.
 
 **Implementation note:** Surface implementations should keep a context dictionary from day one. v1 already uses it for dual-channel buffering/finalization boundaries; v2 restore-on-revisit can layer on without storage rewrite.
 
-**Status:** Resolved for v1. Restore policy deferred to v2 (A.7 phase). UI/UX/presentation details (button design, visual affordances, mode indicator) are a separate TODO — not specced here.
+**Status:** Resolved for v1. Restore policy deferred to v2 (A.7 phase). Current UI defaults are specified normatively in §15.
 
 ---
 
@@ -3250,9 +3170,9 @@ Rationale: Frames are preservation/backlog artifacts, not mandatory segmentation
 
 **Added to spec (v1 reserved, v2 required):**
 
-**Video** (`video`) — fundamentally temporal rather than spatial. Annotations carry an optional `videoTimestamp` field anchoring strokes to playback position. Two additional registers: `playbackPosition` and `playbackState`. The multi-scroll / bounding-box problems from A.2/A.3 have a temporal analog here — strokes made at different playback times may span content that is no longer visible. Full semantics deferred to v2. See Section 6.9.
+**Video** (`video`) — fundamentally temporal rather than spatial. Annotations carry an optional `videoTimestamp` field anchoring strokes to playback position. Two additional registers: `playbackPosition` and `playbackState`. The multi-scroll / bounding-box problems from A.2/A.3 have a temporal analog here — strokes made at different playback times may span content that is no longer visible. Full semantics deferred to v2. See the `video` characteristics in §6.1.1.
 
-**Blank canvas** (`canvas`) — an optional/legacy content type where annotations are the primary artifact and there is no underlying document. The surface renders a blank or gridded background. `content.clear` removes all annotations (same global rule as all content types). In v1, CLU observes user strokes via the existing register model (read-only for the native annotation layer). CLU does not need this content type in order to present draw-capable experiences, because normal HTML/SVG content can already render its own `<canvas>` or similar drawing UI. Dedicated native-overlay annotation writes remain undefined in v1 and would require a future protocol extension. Useful for whiteboard-style collaboration. See Section 6.9.
+**Blank canvas** (`canvas`) — an optional/legacy content type where annotations are the primary artifact and there is no underlying document. The surface renders a blank or gridded background. `content.clear` removes all annotations (same global rule as all content types). In v1, CLU observes user strokes via the existing register model (read-only for the native annotation layer). CLU does not need this content type in order to present draw-capable experiences, because normal HTML/SVG content can already render its own `<canvas>` or similar drawing UI. Dedicated native-overlay annotation writes remain undefined in v1 and would require a future protocol extension. Useful for whiteboard-style collaboration. See the `canvas` characteristics in §6.1.1.
 
 **Default empty/degraded presentation:** Unsupported content should use a centered empty-state message. Blank-canvas presentations may use a blank or gridded background.
 
@@ -3272,9 +3192,9 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
 3. Scope all mutable state by `contextScope = { surfaceId, paneId }`.
 4. Even a single-pane surface uses the same globally unique numeric `paneId` model as multi-pane layouts.
 5. Pane-aware operations (split/resize/close/focus) are Phase 1 committed topology operations.
-6. Read/write tools become pane-aware by optional selector:
-   - Phase 1-compatible: `paneId` required on all pane-scoped calls
-   - pane-aware targeting: explicit pane target for `push/read/clear/annotations_remove`.
+6. Read/write tools become pane-aware through explicit pane targeting:
+   - `paneId` required on all pane-scoped calls
+   - explicit pane target for `push/read/clear/annotations_remove`.
 
 **Why this is safe:** This adds pane orchestration via explicit `paneId` targeting. CLU always specifies which pane it is addressing. No ambiguity from fallback resolution.
 
