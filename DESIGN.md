@@ -68,7 +68,7 @@ Constraint: annotation semantics in §§13–14 are normative architecture and m
 1. A single window can be split into multiple panes, each with stable `paneId`.
 2. Pane lifecycle exists: create/split, resize, focus/select, close.
 3. All screen-scoped tool operations can target `{surfaceId, paneId}`.
-4. Backward compatibility: CLU tools keep `paneId` optional; omitted `paneId` resolves to the focused pane.
+4. **`paneId` is required** on all pane-scoped tool calls. CLU MUST always specify which pane it is targeting. There is no default-pane fallback.
 5. `surfaces.list` (or equivalent pane-aware listing) can enumerate panes and active content per pane.
 6. Content operations are isolated per pane (push/clear in pane A does not mutate pane B).
 7. Connection/session ownership semantics remain unchanged at window level (`surfaceId`), with pane routing handled inside that session.
@@ -121,7 +121,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 2. **One connection per surface.** Exactly one paired provider connection is active per surface at a time. Additional providers are rejected with `busy` until the current session expires or is explicitly taken over by the same provider.
 3. **Content persistence through reconnect.** Connection state MUST NOT affect displayed content. Content is never cleared by a disconnect, grace expiry, restart, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`.
 4. **Reads are local-only.** CLU reads exclusively from the provider's local buffer. No `surf_ace_*` read operation triggers a live network call to a surface.
-5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a globally unique numeric `paneId`, and each window always has exactly one focused pane.
+5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a globally unique numeric `paneId`. CLU MUST always specify the target `paneId` explicitly — there is no concept of a "focused pane" and no default-pane resolution.
 6. **Single-visible-owner with history.** Each pane shows one piece of content at a time (the most recent `content.set`). Prior content enters the Back stack. The user can navigate Back/Forward. Subsequent pushes from the same session update the current view in-place. A push from a different session displaces the current view (supersede).
 7. **Provider-injected session identity.** `sessionId` is injected by the provider from the authenticated WS session context. CLU MUST NOT pass `sessionId` as a wire field on any operation. Surface implementations MUST NOT accept `sessionId` from the wire payload.
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
@@ -157,7 +157,7 @@ Pane rules (Phase 1 committed work, see §2.3):
 1. Each window may contain one or more panes, each identified by a stable globally unique numeric `paneId`.
 2. Pane IDs are allocated from one surface-instance-wide numeric sequence shared across every window in that app instance.
 3. Each pane has independent content, capture frame queue, taps, selection, scroll, and annotation state.
-4. All screen-scoped CLU tools target `{ surfaceId, paneId }`; callers may pass the pane number alone with no window qualifier. If `paneId` is omitted, the provider resolves the focused pane for the addressed window.
+4. All screen-scoped CLU tools target `{ surfaceId, paneId }`. `paneId` is **required**. CLU must always specify the target pane explicitly.
 5. Pane lifecycle (create/split/resize/focus/close) is managed in-band; pane changes do not affect window-level session or mDNS state.
 
 Naming system:
@@ -357,7 +357,7 @@ Returns current pane layout for the paired surface.
 #### `pane.split`
 Splits an existing pane into N panes.
 
-**Request fields:** `paneId` (pane to split; omitted resolves to the focused pane), `count` (total pane count after split, including the source pane; min 2), `direction` (`horizontal` | `vertical`).
+**Request fields:** `paneId` (required — pane to split), `count` (total pane count after split, including the source pane; min 2), `direction` (`horizontal` | `vertical`).
 
 **Behavior:** The source pane retains its `paneId` and content and becomes the first pane. `count - 1` new empty panes are created with sequential globally unique numeric `paneId`s. Surface emits `event.pane_created` for each new pane.
 
@@ -370,7 +370,7 @@ Brings a pane into foreground / active focus.
 
 **Response fields:** `paneId` (ack echo), `focused: true`.
 
-**Surface default affordance:** Panes are visually equal when not in annotation mode — no border distinction between focused and unfocused panes. The focused pane is a protocol concept only (default pane target when `paneId` is omitted), not a visual one.
+**Surface default affordance:** Panes are visually equal at all times when not in annotation mode. There is no focused-pane concept — visually or in the protocol.
 
 #### `pane.rename`
 Assigns or clears a human-readable name for a pane.
@@ -1074,7 +1074,7 @@ The schema below defines every v1 application message type over WS.
               "properties": {
                 "paneId": {
                   "$ref": "#/$defs/PaneId",
-                  "description": "Target pane. If omitted, the provider resolves the focused pane for the addressed surface. Responses echo the effective numeric paneId."
+                  "description": "Target pane. Required — CLU must always specify which pane to target."
                 },
                 "contentId": { "$ref": "#/$defs/ContentId" },
                 "revision": { "$ref": "#/$defs/Revision" },
@@ -1158,7 +1158,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. If omitted, the provider resolves the focused pane for the addressed surface. Responses echo the effective numeric paneId."
+              "description": "Target pane. Required — CLU must always specify which pane to target."
             },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
@@ -1187,7 +1187,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. If omitted, the provider resolves the focused pane for the addressed surface. Responses echo the effective numeric paneId."
+              "description": "Target pane. Required — CLU must always specify which pane to target."
             },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
@@ -1231,7 +1231,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. If omitted, the provider resolves the focused pane for the addressed surface. Responses echo the effective numeric paneId."
+              "description": "Target pane. Required — CLU must always specify which pane to target."
             },
             "revision": { "$ref": "#/$defs/Revision" }
           }
@@ -1255,7 +1255,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. If omitted, the provider resolves the focused pane for the addressed surface. Responses echo the effective numeric paneId."
+              "description": "Target pane. Required — CLU must always specify which pane to target."
             },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "strokeIds": {
@@ -1284,7 +1284,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. If omitted, the provider resolves the focused pane for the addressed surface. Responses echo the effective numeric paneId."
+              "description": "Target pane. Required — CLU must always specify which pane to target."
             },
             "includeImage": { "type": "boolean", "default": false },
             "includeVisibleText": { "type": "boolean", "default": true },
@@ -1946,7 +1946,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Pane to split. If omitted, the provider resolves the focused pane for the addressed surface. Responses echo the effective numeric paneId."
+              "description": "Pane to split. Required."
             },
             "count": {
               "type": "integer",
@@ -2495,7 +2495,7 @@ This gives one alert per unread activity burst while still allowing live reads d
 
 CLU uses one read tool:
 
-**`surf_ace_read(fingerprint, paneId?)`** — reads live annotation state first, then closed frames (bounded), plus registers, for one pane (`paneId` omitted => focused pane).
+**`surf_ace_read(fingerprint, paneId)`** — reads live annotation state first, then closed frames (bounded), plus registers, for one pane. `paneId` is required.
 
 Read order and behavior:
 1. Return **live channel first** (`liveFrame` + `liveDirtyStrokeIds` + `liveSeq`) if present.
@@ -2571,7 +2571,7 @@ CLU's tool surface has a strict read/write split:
 
 ### 14.3 CLU Tool Surface
 
-CLU interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector. `paneId` is optional: if omitted, the provider targets the focused pane for that surface. All pane-aware tool responses echo the effective numeric `paneId`.
+CLU interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector. `paneId` is **required** on all pane-scoped calls — CLU must always specify the target pane explicitly. All pane-aware tool responses echo the effective numeric `paneId`.
 
 ---
 
@@ -2588,7 +2588,7 @@ name              string    Human-readable screen name
 connectionState   enum      "connected" | "connecting" | "unreachable"
 lastSeenAt        epochMs   When screen was last seen in mDNS or active
 viewport          object    { width, height, scale }
-focusedPaneId     integer?  Currently focused pane ID, or null during transient layout changes
+focusedPaneId     integer?  Deprecated. Not surfaced — there is no focused-pane concept. Omit from surface state.
 panes             array     [{ paneId, name, focused, activeContent, historySummary }]
                           activeContent: { contentId, contentType, revision } or null if idle
                           historySummary: { visibleContentId, backCount, forwardCount }
@@ -2606,7 +2606,7 @@ Push content to a screen, replacing whatever is currently displayed. Write.
 **Params:**
 ```
 fingerprint    string   Target screen
-paneId         integer? Optional. Omitted => focused pane
+paneId         integer  Required.
 contentType    enum     "html" | "image" | "pdf" | "terminal" | "markdown" | "video" | "canvas"
 content        string   Content payload. Encoding by type:
                           html/terminal/markdown: UTF-8 text
@@ -2634,7 +2634,7 @@ Clear the currently visible content in the target pane. If older content exists 
 **Params:**
 ```
 fingerprint    string   Target screen
-paneId         integer? Optional. Omitted => focused pane
+paneId         integer  Required.
 ```
 
 **Returns:**
@@ -2662,7 +2662,7 @@ Closed frames are dequeued on read. Register values are cleared. Live dirty mark
 **Params:**
 ```
 fingerprint    string   Target screen
-paneId         integer? Optional. Omitted => focused pane
+paneId         integer  Required.
 ```
 
 **Returns:**
@@ -2755,7 +2755,7 @@ Remove specific annotation strokes from a screen's drawing overlay by stroke ID.
 **Params:**
 ```
 fingerprint    string     Target screen
-paneId         integer?   Optional. Omitted => focused pane
+paneId         integer  Required.
 contentId      string     Must match the currently active content
 strokeIds      string[]   Stroke IDs to remove
 ```
@@ -3280,10 +3280,10 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
 4. Even a single-pane surface uses the same globally unique numeric `paneId` model as multi-pane layouts.
 5. Pane-aware operations (split/resize/close/focus) are Phase 1 committed topology operations.
 6. Read/write tools become pane-aware by optional selector:
-   - Phase 1-compatible default: no pane specified → focused pane
+   - Phase 1-compatible: `paneId` required on all pane-scoped calls
    - pane-aware targeting: explicit pane target for `push/read/clear/annotations_remove`.
 
-**Why this is safe:** This adds pane orchestration without changing the CLU call shape beyond optional numeric pane targeting. Existing callers can omit `paneId` and use the focused pane; pane-aware callers can split into more panes without semantic breakage.
+**Why this is safe:** This adds pane orchestration via explicit `paneId` targeting. CLU always specifies which pane it is addressing. No ambiguity from fallback resolution.
 
 ---
 
@@ -3291,7 +3291,7 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
 
 **Goal (v2+ enhancements):** Extend one-window multi-pane behavior with richer pane layout orchestration and lifecycle semantics beyond the Phase 1 committed baseline.
 
-**Compatibility principle:** Model mutable state as `contextScope = { surfaceId, paneId? }` where omitted `paneId` resolves to the focused pane. This preserves single-pane behavior while keeping advanced pane-aware ops available without extra window qualifiers.
+**Compatibility principle:** Model mutable state as `contextScope = { surfaceId, paneId }`. `paneId` is always required. CLU must read surface state to know valid `paneId` values before targeting a pane.
 
 **Expected v2+ shape:**
 1. Advanced pane lifecycle/layout operations (nested split templates, persistent layout presets, pane groups).
