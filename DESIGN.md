@@ -128,7 +128,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 9. **Annotation mode locks the viewport.** When annotation mode is active, scroll is disabled and link following is disabled. The drawing layer captures all touch and stylus input until annotation mode exits.
 10. **Monotonic revision gate.** Content mutations (`content.set`, `content.clear`, `content.append`, `content.patch`) carry a monotonic `revision`. The surface applies mutations only when `revision == currentRevision + 1`. Out-of-order mutations are rejected with `stale_revision`.
 11. **Annotation reads are pane-scoped at the CLU boundary.** `surf_ace_read` and related CLU-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but CLU does not pass or track history identifiers.
-12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_focused`, `event.pane_renamed`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`. `event.content_superseded` is provider-generated (not a surface wire event).
+12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`. `event.content_superseded` is provider-generated (not a surface wire event).
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
 14. **Portable extension packaging.** Surf Ace MUST remain installable as a standalone OpenClaw extension bundle that can be dropped into any compatible OpenClaw installation (without requiring Clawline as a dependency and without requiring core patches). Any needed wake/routing behavior must be implemented through extension-local code and published SDK surfaces.
 
@@ -161,13 +161,13 @@ Pane rules (Phase 1 committed work, see §2.3):
 5. Pane lifecycle (create/split/resize/focus/close) is managed in-band; pane changes do not affect window-level session or mDNS state.
 
 Naming system:
-1. Windows are auto-assigned short letter labels: a, b, c … z, aa, ab … (displayed prominently on surface).
-2. Pane IDs are auto-assigned from one global numeric sequence across the entire running surface instance: e.g. two windows with two panes each may be pane IDs `1`, `2`, `3`, `4`.
-3. Users may assign human-readable pane names for display, but CLU pane addressing is always by numeric `paneId`.
-4. The model may create, split, rename, and close panes in conversation with the user; this is not considered intrusive.
-5. When any window is split, new panes are assigned sequentially from the highest active pane number + 1, never duplicating a pane number already in use in another window.
-6. **Initial surface state:** A freshly launched surface starts with one window (`a`) containing one pane (`paneId = 1`). CLU MUST call `surf_ace_list` before any pane-scoped operation to discover current pane topology and valid `paneId` values. CLU MUST NOT assume pane topology without reading it first.
-7. Labels and names are displayed prominently on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
+1. **Window labels** (a, b, c … z, aa, ab …) are assigned by the **provider/extension**, not the surface. The extension assigns letters based on its own discovery order of `surfaceId` values and communicates them to the surface during pairing.
+2. **Pane IDs** are assigned by the **provider/extension** and sent to the surface in topology commands. They are globally unique integers across all windows managed by that provider instance. The surface never generates pane IDs independently.
+3. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. CLU addresses panes by numeric `paneId` only.
+4. The extension is the sole authority on topology. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
+5. When a pane is split, the extension specifies the new `paneId` values in the request. The surface creates the panes as directed and emits `event.pane_created` for each.
+6. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the window label and initial `paneId` during pairing. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
+7. Labels are displayed on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
 
 
 TXT keys used by WS protocol:
@@ -234,6 +234,15 @@ Surface reconnect grace:
 4. On normal close with reason `superseded`, surface accepts the takeover — but displayed content is NOT cleared. The new provider decides what to show.
 
 **Invariant: connection state MUST NOT affect displayed content.** Content is never cleared by a disconnect, grace expiry, restart, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`. A surface showing content will continue showing that content indefinitely until told otherwise.
+
+### 4.6 iOS / iPadOS Background Behavior
+
+iOS suspends background apps and terminates their network connections. Surf Ace handles this as follows:
+
+1. **On background:** The WebSocket connection drops. The surface transitions to `disconnected` state. Displayed content and annotation strokes are retained in memory for the lifetime of the process.
+2. **On foreground return:** The surface immediately attempts to reconnect. Content remains visible during reconnect. Once reconnected, the surface emits `event.surface_resumed`.
+3. **Provider response to `event.surface_resumed`:** The provider SHOULD call `surf_ace_list` to verify pane topology and content state, then re-push content as needed.
+4. **No disk persistence:** All pane state is in-memory only. A force-quit or OS memory eviction clears all state. The provider is the source of truth and re-establishes surface state on cold reconnect.
 
 ### 4.5 Keepalive
 
@@ -371,7 +380,7 @@ Splits an existing pane into N panes.
 
 **Request fields:** `paneId` (required — pane to split), `count` (total pane count after split, including the source pane; min 2), `direction` (`horizontal` | `vertical`).
 
-**Behavior:** The source pane retains its `paneId` and content and becomes the first pane. `count - 1` new empty panes are created with sequential globally unique numeric `paneId`s. Surface emits `event.pane_created` for each new pane.
+**Behavior:** The source pane retains its `paneId` and content. The extension specifies the `paneId` values for each new pane in the request. The surface creates the panes as directed and emits `event.pane_created` for each.
 
 **Response fields:** `panes` — array of `{ paneId }` for all panes in the window after the split (including existing panes).
 
@@ -385,7 +394,7 @@ Brings a pane into foreground / active focus.
 **Surface default affordance:** Panes are visually equal at all times when not in annotation mode. There is no focused-pane concept — visually or in the protocol.
 
 #### `pane.rename`
-Assigns or clears a human-readable name for a pane.
+Assigns or clears a name for a pane. This is an **extension-to-surface** operation — the extension names panes. There is no user-facing rename UI on the surface.
 
 **Request fields:** `paneId`, `name` (string or null to clear).
 
@@ -393,11 +402,8 @@ Assigns or clears a human-readable name for a pane.
 
 **Behavior:** Pane names are display metadata only. CLU pane targeting uses numeric `paneId` only.
 
-**Surface default affordance:** Rename SHOULD use inline title editing on the pane label overlay.
+**Surface default affordance:** The surface displays pane names as assigned by the extension. Topology is fully extension-controlled — no user-initiated rename or split UI is provided.
 
-**Pane menu trigger:**
-- **iOS / iPadOS:** Long-press on the pane label overlay opens the pane menu (Split, Rename, Close Pane).
-- **Electron:** Right-click anywhere in the pane opens the context menu (Split, Rename, Close Pane).
 
 #### `pane.close`
 Closes a pane and removes it from the layout.
@@ -2822,7 +2828,7 @@ The injected Surf Ace instruction text MUST teach agents how to interpret surfac
 - `event.navigation`
 - `event.page`
 - `event.selection` (v1 text-only handling)
-- `event.pane_created` / `event.pane_removed` / `event.pane_focused` / `event.pane_renamed`
+- `event.pane_created` / `event.pane_removed` / `event.pane_renamed`
 
 Standalone-provider note: Surf Ace MAY run as a standalone extension without Clawline coupling, provided it implements gateway wake/routing plumbing comparable to existing channel extensions (for example, Discord-style wake + route behavior) rather than relying on Clawline-specific internal helpers.
 
@@ -2900,8 +2906,6 @@ Required defaults:
 - Done appears only while annotation mode is active; hidden otherwise.
 - 👆 (drawing input) button is always present in the control cluster.
 - Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. There is no focused-pane concept — all panes are visually equal when not in annotation mode.
-- Split is initiated from a pane menu.
-- Rename uses inline title editing on the pane label overlay.
 
 #### Icon assets
 
@@ -2986,8 +2990,8 @@ A 2px overlay line MUST be rendered at the bottom edge of each window, spanning 
 
 This section is a consolidated copy/reference index of existing UI/UX mentions elsewhere in the document; it does not supersede the original normative or contextual locations.
 
-- **Window Letter Labels** — "Windows are auto-assigned short letter labels: a, b, c … z, aa, ab … (displayed prominently on surface)." Source: §3.1.1
-- **Pane Name Display Metadata** — "Users may assign human-readable pane names for display, but CLU pane addressing is always by numeric `paneId`." Source: §3.1.1
+- **Window Letter Labels** — "Window labels (a, b, c…) assigned by provider/extension during pairing, not auto-generated by the surface." Source: §3.1.1
+- **Pane Name Authority** — "Pane names assigned by extension via `pane.rename`. No user-facing rename UI. CLU addresses panes by paneId only." Source: §3.1.1
 - **Prominent Surface Labels** — "Window label: centered-top floating overlay. Pane label: centered floating overlay within pane. Visibility rules: visible at rest, hidden on active interaction." Source: §3.1.1 / §15.1
 - **Displayed Content Persistence** — "The surface renders content and keeps it displayed until CLU explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
@@ -3000,7 +3004,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Window Auto Label in UI** — "`autoLabel` is the auto-assigned window letter ... displayed on the surface UI." Source: §6.0
 - **Session Label UI Hint** — "`providerName` (optional human-readable session/chat label for UI indicators)." Source: §6.1
 - **Pane Focus Visibility** — "Brings a pane into foreground / active focus." Source: §6.1.1
-- **Pane Rename Affordance** — "Assigns or clears a human-readable name for a pane." Source: §6.1.1
+- **Pane Rename** — "Extension-to-surface: extension names panes. No user UI." Source: §6.1.1
 - **No Focused Pane Concept** — "All panes are visually equal when not in annotation mode. There is no focused-pane border distinction." Source: §15.3
 - **Header History Controls** — "Back/Forward controls SHOULD appear on the right side of the pane header." Source: §6.1.1
 - **Disabled History Controls** — "Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances." Source: §6.1.1
@@ -3026,9 +3030,6 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
 - **Accessibility Contrast** — "All chrome labels and controls MUST meet WCAG AA contrast." Source: §15.2
 - **Electron Shortcut Defaults** — "`A` enters annotation mode ... `Cmd-1` through `Cmd-9` focus the first nine visible panes by layout order." Source: §15.2
-- **Pane Header Control Placement** — "Pane label or custom pane name is shown on the left side of the pane header." Source: §15.3
-- **Pane Menu Split** — "Split is initiated from a pane menu." Source: §15.3
-- **Inline Rename** — "Rename uses inline title editing in the pane header." Source: §15.3
 - **Unsupported Content Empty State** — "Unsupported content renders a centered empty-state message." Source: §15.4
 - **Blocked Attempt Toast** — "Blocked navigation or blocked content replacement during annotation mode shows a small toast." Source: §15.4 / §15.6
 - **Flush Indicator** — "While a `drawing_flush` is in-flight, the annotation mode border pulses (brightness oscillation on the 2px accent border). Starts on transmission start, stops on ack." Source: §15.5
