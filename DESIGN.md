@@ -3178,7 +3178,7 @@ Rationale: Frames are preservation/backlog artifacts, not mandatory segmentation
 
 **Everything else** (slides, word documents, maps) is a variant of HTML or PDF with cosmetic differences. No new model required.
 
-**Status:** Both types added to the protocol (schema enum, content type characteristics in 6.9, video registers in 13.2). Implementations may return `unsupported_content_type` for these in v1. Full behavioral spec deferred to v2.
+**Status:** Both types added to the protocol (schema enum, content type characteristics in §6.1.1, video registers in 13.2). Implementations may return `unsupported_content_type` for these in v1. Full behavioral spec deferred to v2.
 
 ---
 
