@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Surf Ace UI v10 — finalized spec</title>
+  <style>
+    :root{
+      --bg:#0a1020;--pane:#10182d;--line:#2e3d66;--text:#eef3ff;--muted:#97a9d6;
+      --glass:rgba(20,29,54,.45);
+      --ok:#22c55e;--warn:#f59e0b;--danger:#ef4444;--accent:#7cadff;
+    }
+    *{box-sizing:border-box;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+    body{margin:0;background:radial-gradient(1300px 900px at 10% -30%,#27427f 0%,var(--bg) 52%);color:var(--text);padding:16px}
+
+    h2{text-align:center;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin:0 0 18px}
+
+    .stage{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;max-width:1500px;margin:0 auto}
+    @media(max-width:980px){.stage{grid-template-columns:1fr}}
+
+    /* ── Window ── */
+    .window{
+      position:relative;border-radius:0;overflow:hidden;
+      min-height:460px;display:flex;flex-direction:column;
+    }
+
+    /* Connection state bar — bottom edge overlay */
+    .window::after{
+      content:'';position:absolute;bottom:0;left:0;right:0;height:2px;
+      background:var(--bar-color,var(--ok));opacity:.8;z-index:20;
+    }
+    .window.connecting::after{
+      background:linear-gradient(90deg,transparent 0%,var(--warn) 50%,transparent 100%);
+      background-size:200% 100%;
+      animation:kitt 1.4s ease-in-out infinite alternate;
+    }
+    .window.disconnected::after{background:var(--danger);}
+    @keyframes kitt{from{background-position:0% 0%}to{background-position:200% 0%}}
+
+    /* Window label — centered top floating overlay */
+    .win-tag{
+      position:absolute;top:12px;left:50%;transform:translateX(-50%);
+      padding:7px 18px;border-radius:10px;
+      background:var(--glass);border:1px solid rgba(155,176,232,.4);
+      backdrop-filter:blur(14px);
+      font-size:26px;font-weight:800;letter-spacing:.02em;color:rgba(238,243,255,.85);
+      z-index:10;transition:opacity .18s;white-space:nowrap;
+    }
+
+    /* Panes */
+    .panes{display:grid;grid-template-columns:1fr 1fr;flex:1;min-height:460px}
+    .pane{position:relative;min-height:460px;background:var(--pane);overflow:hidden}
+    .pane+.pane{border-left:2px solid var(--line)}
+
+    /* Annotation mode — 2px accent border */
+    .pane.annot{box-shadow:inset 0 0 0 2px var(--accent)}
+    .pane.annot.flush{animation:border-pulse 0.7s ease-in-out infinite alternate}
+    @keyframes border-pulse{
+      from{box-shadow:inset 0 0 0 2px rgba(124,173,255,.95)}
+      to  {box-shadow:inset 0 0 0 2px rgba(124,173,255,.25)}
+    }
+    .pane.pencil.annot{box-shadow:inset 0 0 0 2px #b89dff}
+    .pane.pencil.annot.flush{animation:pencil-pulse 0.7s ease-in-out infinite alternate}
+    @keyframes pencil-pulse{
+      from{box-shadow:inset 0 0 0 2px rgba(184,157,255,.95)}
+      to  {box-shadow:inset 0 0 0 2px rgba(184,157,255,.25)}
+    }
+
+    /* Pane label — large centered floating overlay */
+    .pane-title{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;z-index:8;transition:opacity .18s}
+    .pane-title span{
+      padding:10px 20px;border-radius:12px;
+      background:rgba(14,22,46,.55);border:1px solid rgba(150,171,228,.4);
+      backdrop-filter:blur(10px);font-size:38px;font-weight:800;color:rgba(238,243,255,.88);
+    }
+
+    /* Faux content */
+    .canvas{position:absolute;inset:0;display:grid;place-items:center;color:#7d90bf22;font-size:22px;font-style:italic}
+
+    /* Bottom control cluster */
+    .controls{
+      position:absolute;left:50%;bottom:16px;transform:translateX(-50%);
+      display:flex;gap:5px;align-items:center;
+      padding:6px 8px;border-radius:999px;
+      background:var(--glass);border:1px solid rgba(150,170,226,.38);
+      backdrop-filter:blur(14px);z-index:9;
+    }
+    .btn{
+      min-height:36px;min-width:36px;padding:6px 11px;
+      border-radius:999px;border:1px solid #47629f;
+      background:#21365f;color:#e9f1ff;
+      font-size:12px;font-weight:700;cursor:pointer;
+      display:flex;align-items:center;justify-content:center;
+    }
+    .btn[hidden]{display:none!important}
+    .btn[disabled]{opacity:.35;cursor:not-allowed}
+    .btn.active{background:#4777d9;border-color:#7aa3ff}
+    .btn.done-btn{background:#1b3f2a;border-color:#22c55e;color:#7fe8a8}
+
+    /* Title hide states */
+    body.hide-titles .pane-title,
+    body.hide-titles .win-tag{opacity:0;pointer-events:none}
+
+    /* Connection state label */
+    .conn-label{
+      position:absolute;bottom:24px;right:10px;
+      font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+      color:var(--muted);opacity:.55;z-index:6;
+    }
+
+    .section-label{font-size:10px;color:var(--muted);opacity:.6;text-align:center;padding:6px 0 2px;letter-spacing:.05em;text-transform:uppercase}
+  </style>
+</head>
+<body>
+  <h2>Surf Ace UI · v10 · Finalized spec</h2>
+  <div class="stage" id="stage">
+
+    <!-- Window A: Navigation, two panes, connected -->
+    <section class="window" style="--bar-color:var(--ok)" title="Connected">
+      <div class="win-tag">Window A</div>
+      <div class="panes">
+        <article class="pane" data-pane="1" data-back="1" data-fwd="0" data-annot="0">
+          <div class="canvas">html content</div>
+          <div class="pane-title"><span>Pane 1</span></div>
+          <div class="controls"></div>
+        </article>
+        <article class="pane" data-pane="2" data-back="2" data-fwd="1" data-annot="0">
+          <div class="canvas">pdf content</div>
+          <div class="pane-title"><span>Pane 2</span></div>
+          <div class="controls"></div>
+        </article>
+      </div>
+      <div class="section-label">connected · navigation · labels visible at rest</div>
+    </section>
+
+    <!-- Window B: Finger annotation active, flush in-flight -->
+    <section class="window connecting" title="Connecting">
+      <div class="win-tag">Window B</div>
+      <div class="panes">
+        <article class="pane annot flush" data-pane="1" data-back="0" data-fwd="0" data-annot="1">
+          <div class="canvas">finger strokes</div>
+          <div class="pane-title"><span>Pane 1</span></div>
+          <div class="controls"></div>
+        </article>
+        <article class="pane" data-pane="2" data-back="1" data-fwd="0" data-annot="0">
+          <div class="canvas">image content</div>
+          <div class="pane-title"><span>Pane 2</span></div>
+          <div class="controls"></div>
+        </article>
+      </div>
+      <div class="section-label">reconnecting (KITT sweep) · pane 1 annotation + flush pulse</div>
+    </section>
+
+    <!-- Window C: Pencil annotation, disconnected -->
+    <section class="window disconnected" title="Disconnected">
+      <div class="win-tag">Window C</div>
+      <div class="panes">
+        <article class="pane pencil annot" data-pane="1" data-back="0" data-fwd="0" data-annot="1">
+          <div class="canvas">pencil strokes</div>
+          <div class="pane-title"><span>Pane 1</span></div>
+          <div class="controls"></div>
+        </article>
+        <article class="pane pencil annot" data-pane="2" data-back="0" data-fwd="0" data-annot="1">
+          <div class="canvas">pencil strokes</div>
+          <div class="pane-title"><span>Pane 2</span></div>
+          <div class="controls"></div>
+        </article>
+      </div>
+      <div class="section-label">disconnected · pencil annotation · back/👆 hidden</div>
+    </section>
+
+  </div>
+
+  <script>
+    const touchUI = matchMedia('(pointer:coarse)').matches;
+
+    function buildControls(pane){
+      const annot = pane.dataset.annot === '1';
+      const back  = Number(pane.dataset.back||0) > 0;
+      const fwd   = Number(pane.dataset.fwd||0)  > 0;
+      const bar   = pane.querySelector('.controls');
+      bar.innerHTML = '';
+
+      if(!annot){
+        if(back){ bar.appendChild(mkBtn('chevron.backward','◀','back-btn')); }
+        if(fwd) { bar.appendChild(mkBtn('chevron.forward', '▶','fwd-btn')); }
+        const draw = mkBtn('hand.draw','👆','draw-btn');
+        draw.title='Enter annotation mode';
+        bar.appendChild(draw);
+      } else {
+        const done = mkBtn(null,'Done','done-btn');
+        bar.appendChild(done);
+      }
+
+      // Titles button on touch only, when not in annotation
+      if(touchUI && !annot){
+        const t = mkBtn(null,'Titles','titles-btn');
+        t.onclick = e => { e.stopPropagation(); showTitles(); };
+        bar.appendChild(t);
+      }
+
+      // Hover control bar → show titles (pointer devices)
+      bar.addEventListener('mouseenter',()=>{ if(!touchUI) showTitles(); });
+    }
+
+    function mkBtn(symbol, label, cls){
+      const b = document.createElement('button');
+      b.className = 'btn ' + cls;
+      b.textContent = label;
+      if(symbol) b.title = symbol;
+      return b;
+    }
+
+    function showTitles(){ document.body.classList.remove('hide-titles'); }
+    function hideTitles(){ document.body.classList.add('hide-titles'); }
+
+    document.querySelectorAll('.pane').forEach(buildControls);
+
+    // Hide titles on interaction
+    document.addEventListener('mousemove',()=>{ if(!touchUI) hideTitles(); },{passive:true});
+    document.addEventListener('touchstart',()=> hideTitles(),{passive:true});
+    document.addEventListener('click',()=>{ if(touchUI) hideTitles(); },{passive:true});
+  </script>
+</body>
+</html>
