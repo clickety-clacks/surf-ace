@@ -166,7 +166,8 @@ Naming system:
 3. Users may assign human-readable pane names for display, but CLU pane addressing is always by numeric `paneId`.
 4. The model may create, split, rename, and close panes in conversation with the user; this is not considered intrusive.
 5. When any window is split, new panes are assigned sequentially from the highest active pane number + 1, never duplicating a pane number already in use in another window.
-6. Labels and names are displayed prominently on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
+6. **Initial surface state:** A freshly launched surface starts with one window (`a`) containing one pane (`paneId = 1`). CLU MUST call `surf_ace_list` before any pane-scoped operation to discover current pane topology and valid `paneId` values. CLU MUST NOT assume pane topology without reading it first.
+7. Labels and names are displayed prominently on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
 
 
 TXT keys used by WS protocol:
@@ -255,7 +256,18 @@ The surface MUST display a persistent visual indicator of connection state via t
  - Resume/reconnect state SHOULD be presented as a subtle status chip in the window chrome.
 Returns to healthy immediately when a ping is received on a live connection. Content is never cleared by any of these states (see §4.4 invariant).
 
-### 4.6 Runtime Window Lifecycle (Multi-Window Endpoints)
+### 4.6 iOS / iPadOS Background Behavior
+
+When the Surf Ace app moves to the iOS/iPadOS background:
+
+1. **Grace period (30 s):** The surface holds its WebSocket connection using a background task. Content pushed during this window is accepted and stored.
+2. **After grace period:** iOS suspends the process. The WebSocket drops; the surface enters `disconnected` state. Displayed content and annotation strokes are preserved in memory.
+3. **On foreground return:** The surface immediately attempts to reconnect. Content remains visible during reconnect. Once reconnected, the surface emits `event.surface_resumed` so the provider can verify pane content state.
+4. **Content durability:** Pane content and strokes survive background/foreground cycles for the lifetime of the process. They are NOT written to disk — a full process kill clears all pane state.
+
+The provider SHOULD respond to `event.surface_resumed` by calling `surf_ace_list` to verify pane topology and content are as expected.
+
+### 4.7 Runtime Window Lifecycle (Multi-Window Endpoints)
 
 When a user opens or closes windows on iPad/Electron, surface availability changes without endpoint change.
 
@@ -381,7 +393,11 @@ Assigns or clears a human-readable name for a pane.
 
 **Behavior:** Pane names are display metadata only. CLU pane targeting uses numeric `paneId` only.
 
-**Surface default affordance:** Rename SHOULD use inline title editing in the pane header.
+**Surface default affordance:** Rename SHOULD use inline title editing on the pane label overlay.
+
+**Pane menu trigger:**
+- **iOS / iPadOS:** Long-press on the pane label overlay opens the pane menu (Split, Rename, Close Pane).
+- **Electron:** Right-click anywhere in the pane opens the context menu (Split, Rename, Close Pane).
 
 #### `pane.close`
 Closes a pane and removes it from the layout.
