@@ -335,7 +335,7 @@ Severe violation threshold:
 
 Rules:
 1. Provider MAY call `surfaces.list` immediately after WS connect.
-2. Response contains `{ surfaceId, name, autoLabel, viewport, paired }[]`. `autoLabel` is the auto-assigned window letter (e.g. `"a"`, `"b"`, `"aa"`) used to address the window by letter in CLU and displayed on the surface UI. `paired: true` when the surface is either actively connected to a provider OR is in resume grace for a prior session — mirroring `busy=1` mDNS semantics. When `paired: true`, `pair.request` requires `takeover=true`, but note: only the **same** `providerId` that owns the current session can successfully take over during the grace window (§4.2). A different provider sending `takeover=true` will still receive a `busy` error. `paired: false` means the surface is fully available and any provider may connect.
+2. Response contains `{ surfaceId, name, autoLabel, viewport, paired }[]`. `autoLabel` is the window letter (e.g. `"a"`, `"b"`, `"aa"`) assigned by the provider/extension during pairing. Used to address the window by letter in CLU and displayed on the surface UI. `paired: true` when the surface is either actively connected to a provider OR is in resume grace for a prior session — mirroring `busy=1` mDNS semantics. When `paired: true`, `pair.request` requires `takeover=true`, but note: only the **same** `providerId` that owns the current session can successfully take over during the grace window (§4.2). A different provider sending `takeover=true` will still receive a `busy` error. `paired: false` means the surface is fully available and any provider may connect.
 3. Provider selects a `surfaceId` and sends `pair.request` for that surface.
 4. Phase 1 pane profile: once pane support is enabled, `surfaces.list` MUST optionally expose pane summaries per surface (at minimum `paneId` and `activeContent`) for topology-aware targeting.
 
@@ -418,7 +418,6 @@ Closes a pane and removes it from the layout.
 **Pane lifecycle events (surface → provider):**
 - `event.pane_created` — `{ surfaceId, paneId, parentPaneId (pane that was split, or null if created standalone), fromSplit: bool }`
 - `event.pane_removed` — `{ surfaceId, paneId }`
-- `event.pane_focused` — `{ surfaceId, paneId }`
 - `event.pane_renamed` — `{ surfaceId, paneId, name }`
 
 These events are always-on (not profile-gated), analogous to `event.surface_appeared`/`event.surface_removed`.
@@ -540,7 +539,6 @@ The stream is still always-on; expansions are negotiated at pair time, not throu
 | `event.surface_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a window closes. Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
 | `event.pane_created` | Lifecycle — **not profile-gated** | Always | Emitted when a new pane is created (split or standalone). Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
 | `event.pane_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is closed. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
-| `event.pane_focused` | Lifecycle — **not profile-gated** | Always | Emitted when a pane is brought to focus. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.pane_renamed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane name changes. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.scroll` | Context-rich but high-volume | No (`deep_plus_scroll` only) | Useful but not strictly required for minimum usefulness. |
 
@@ -770,7 +768,6 @@ The schema below defines every v1 application message type over WS.
         "event.snapshot_hint",
         "event.pane_created",
         "event.pane_removed",
-        "event.pane_focused",
         "event.pane_renamed"
       ]
     },
@@ -2212,27 +2209,6 @@ The schema below defines every v1 application message type over WS.
         }
       }
     },
-    "PaneFocusedEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "event" },
-        "op": { "const": "event.pane_focused" },
-        "eventId": { "$ref": "#/$defs/EventId" },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["surfaceId", "paneId"],
-          "properties": {
-            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
-            "paneId": { "$ref": "#/$defs/PaneId" }
-          }
-        }
-      }
-    },
     "PaneRenamedEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -3001,7 +2977,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Connectivity Neutral State** — "Healthy: ping received within expected window — no indicator or neutral." Source: §4.4
 - **Connectivity Warning State** — "Warning: one ping missed or latency high — mild visible warning." Source: §4.4
 - **Connectivity Lost State** — "Disconnected: outside grace or socket dead — clear visible disconnected state." Source: §4.4
-- **Window Auto Label in UI** — "`autoLabel` is the auto-assigned window letter ... displayed on the surface UI." Source: §6.0
+- **Window Auto Label in UI** — "`autoLabel` is the provider-assigned window letter, communicated to the surface during pairing and displayed on the surface UI." Source: §6.0
 - **Session Label UI Hint** — "`providerName` (optional human-readable session/chat label for UI indicators)." Source: §6.1
 - **Pane Focus Visibility** — "Brings a pane into foreground / active focus." Source: §6.1.1
 - **Pane Rename** — "Extension-to-surface: extension names panes. No user UI." Source: §6.1.1
