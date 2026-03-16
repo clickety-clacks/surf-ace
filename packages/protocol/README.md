@@ -1,3 +1,3 @@
-# Surf Ace Protocol
+# @surf-ace/protocol
 
-Shared message/schema definitions extracted from DESIGN.md.
+Shared Surf Ace wire types and the extracted JSON Schema from `DESIGN.md`.

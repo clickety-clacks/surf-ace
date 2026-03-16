@@ -1,0 +1,1570 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clawline.local/specs/surf-ace-ws-v1.schema.json",
+  "title": "Surf Ace WS v1 Message",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/SurfacesListRequest" },
+    { "$ref": "#/$defs/PairRequest" },
+    { "$ref": "#/$defs/ContentSetRequest" },
+    { "$ref": "#/$defs/ContentAppendRequest" },
+    { "$ref": "#/$defs/ContentPatchRequest" },
+    { "$ref": "#/$defs/ContentClearRequest" },
+    { "$ref": "#/$defs/AnnotationsRemoveRequest" },
+    { "$ref": "#/$defs/SnapshotGetRequest" },
+    { "$ref": "#/$defs/HeartbeatPingRequest" },
+
+    { "$ref": "#/$defs/SurfacesListResponse" },
+    { "$ref": "#/$defs/PairResponse" },
+    { "$ref": "#/$defs/MutationAckResponse" },
+    { "$ref": "#/$defs/AnnotationsRemoveResponse" },
+    { "$ref": "#/$defs/SnapshotResponse" },
+    { "$ref": "#/$defs/HeartbeatPongResponse" },
+    { "$ref": "#/$defs/ErrorResponse" },
+
+    { "$ref": "#/$defs/DrawingFlushEvent" },
+    { "$ref": "#/$defs/TapEvent" },
+    { "$ref": "#/$defs/ScrollEvent" },
+    { "$ref": "#/$defs/SelectionEvent" },
+    { "$ref": "#/$defs/PageEvent" },
+    { "$ref": "#/$defs/NavigationEvent" },
+    { "$ref": "#/$defs/SurfaceAppearedEvent" },
+    { "$ref": "#/$defs/SurfaceRemovedEvent" },
+    { "$ref": "#/$defs/SurfaceResumedEvent" },
+    { "$ref": "#/$defs/SnapshotHintEvent" },
+
+    { "$ref": "#/$defs/PanesListRequest" },
+    { "$ref": "#/$defs/PaneSplitRequest" },
+    { "$ref": "#/$defs/PaneRenameRequest" },
+    { "$ref": "#/$defs/PaneCloseRequest" },
+
+    { "$ref": "#/$defs/PanesListResponse" },
+    { "$ref": "#/$defs/PaneSplitResponse" },
+    { "$ref": "#/$defs/PaneRenameResponse" },
+    { "$ref": "#/$defs/PaneCloseResponse" },
+
+    { "$ref": "#/$defs/PaneCreatedEvent" },
+    { "$ref": "#/$defs/PaneRemovedEvent" },
+    { "$ref": "#/$defs/PaneRenamedEvent" }
+  ],
+  "$defs": {
+    "RequestId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+    },
+    "ProviderId": {
+      "type": "string",
+      "pattern": "^pv_[A-Za-z0-9._:-]{3,64}$"
+    },
+    "ConnectionId": {
+      "type": "string",
+      "pattern": "^cn_[A-Za-z0-9._:-]{3,64}$"
+    },
+    "SessionId": {
+      "type": "string",
+      "pattern": "^sa_[A-Za-z0-9._:-]{8,128}$"
+    },
+    "SurfaceId": {
+      "type": "string",
+      "pattern": "^sf_[A-Za-z0-9._:-]{3,64}$"
+    },
+    "ContentId": {
+      "type": "string",
+      "pattern": "^ct_[0-9a-f]{8}$"
+    },
+    "StrokeId": {
+      "type": "string",
+      "pattern": "^stroke_[0-9a-f]{6,64}$"
+    },
+    "EventId": {
+      "type": "string",
+      "pattern": "^ev_[A-Za-z0-9._:-]{3,96}$"
+    },
+    "FlushId": {
+      "type": "string",
+      "pattern": "^fl_[A-Za-z0-9._:-]{3,96}$"
+    },
+    "PaneId": {
+      "description": "Pane identity within a surface. Normative model: globally unique numeric pane IDs scoped to the entire surface instance.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "Revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "EpochMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ContentType": {
+      "type": "string",
+      "enum": ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"]
+    },
+    "EventType": {
+      "type": "string",
+      "enum": [
+        "event.drawing_flush",
+        "event.tap",
+        "event.scroll",
+        "event.selection",
+        "event.page",
+        "event.navigation",
+        "event.surface_appeared",
+        "event.surface_removed",
+        "event.surface_resumed",
+        "event.snapshot_hint",
+        "event.pane_created",
+        "event.pane_removed",
+        "event.pane_renamed"
+      ]
+    },
+    "ProfileControlledEventType": {
+      "type": "string",
+      "description": "Event types that are governed by eventProfile. Excludes lifecycle events (surface and pane lifecycle) which are always active and never appear in activeEvents.",
+      "enum": [
+        "event.drawing_flush",
+        "event.tap",
+        "event.scroll",
+        "event.selection",
+        "event.page",
+        "event.navigation",
+        "event.snapshot_hint"
+      ]
+    },
+    "EventProfile": {
+      "type": "string",
+      "enum": ["minimum_deep", "deep_plus_scroll"]
+    },
+    "DrawingFlushConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["idleWindowMs", "maxIntervalMs"],
+      "properties": {
+        "idleWindowMs": {
+          "type": "integer",
+          "minimum": 5000,
+          "maximum": 10000,
+          "default": 8000
+        },
+        "maxIntervalMs": {
+          "type": "integer",
+          "minimum": 10000,
+          "default": 30000
+        }
+      }
+    },
+    "Position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "Rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "minimum": 0 },
+        "height": { "type": "number", "minimum": 0 }
+      }
+    },
+    "Viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scrollOffset", "visibleRect", "contentSize", "zoomLevel"],
+      "properties": {
+        "scrollOffset": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        "visibleRect": { "$ref": "#/$defs/Rect" },
+        "contentSize": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "height"],
+          "properties": {
+            "width": { "type": "number", "minimum": 0 },
+            "height": { "type": "number", "minimum": 0 }
+          }
+        },
+        "zoomLevel": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "SurfaceViewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "scale"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "scale": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "Selection": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {
+            "kind": { "const": "text" },
+            "text": { "type": "string" },
+            "boundingRect": { "$ref": "#/$defs/Rect" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Selection point variant (reserved for v2 unless explicitly negotiated). v1 providers MAY receive this but MUST ignore when no v2 selection negotiation is active.",
+          "required": ["kind", "position"],
+          "properties": {
+            "kind": { "const": "point" },
+            "position": { "$ref": "#/$defs/Position" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Selection region variant (reserved for v2 unless explicitly negotiated). v1 providers MAY receive this but MUST ignore when no v2 selection negotiation is active.",
+          "required": ["kind", "rect"],
+          "properties": {
+            "kind": { "const": "region" },
+            "rect": { "$ref": "#/$defs/Rect" },
+            "text": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "ErrorBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "busy",
+            "not_paired",
+            "invalid_payload",
+            "invalid_request_id_reuse",
+            "invalid_operation",
+            "unsupported_protocol_version",
+            "unsupported_content_type",
+            "unsupported_operation_for_content_type",
+            "stale_revision",
+            "stale_content",
+            "content_too_large",
+            "render_failed",
+            "rate_limited",
+            "internal_error"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "details": { "type": "object" }
+      }
+    },
+    "HtmlContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["html"],
+      "properties": {
+        "html": { "type": "string" },
+        "baseUrl": { "type": "string" }
+      }
+    },
+    "ImageContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data", "mediaType"],
+      "properties": {
+        "data": { "type": "string" },
+        "mediaType": { "type": "string" },
+        "alt": { "type": "string" }
+      }
+    },
+    "PdfContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data"],
+      "properties": {
+        "data": { "type": "string" }
+      }
+    },
+    "TerminalContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lines", "scrollback"],
+      "properties": {
+        "lines": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "scrollback": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "MarkdownContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["markdown"],
+      "properties": {
+        "markdown": { "type": "string" }
+      }
+    },
+    "VideoContent": {
+      "type": "string"
+    },
+    "CanvasContent": {
+      "oneOf": [
+        { "type": "string", "maxLength": 0 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "color": { "type": "string" },
+            "grid": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+
+    "SurfacesListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "surfaces.list" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+    "SurfacesListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "surfaces.list" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaces"],
+          "properties": {
+            "surfaces": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["surfaceId", "name", "viewport", "paired"],
+                "properties": {
+                  "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+                  "name": { "type": "string" },
+                  "viewport": { "$ref": "#/$defs/SurfaceViewport" },
+                  "paired": { "type": "boolean", "description": "true if actively paired or in resume grace (mirrors mDNS busy=1). pair.request requires takeover=true, but only same-provider takeover succeeds during grace. A different provider will receive busy." }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "PairRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "pair.request" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId"],
+          "properties": {
+            "providerId": { "$ref": "#/$defs/ProviderId" },
+            "connectionId": { "$ref": "#/$defs/ConnectionId" },
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "providerName": { "type": "string" },
+            "protocolVersion": { "const": 1 },
+            "takeover": { "type": "boolean" },
+            "eventProfile": { "$ref": "#/$defs/EventProfile" },
+            "drawingFlushConfig": { "$ref": "#/$defs/DrawingFlushConfig" },
+            "resume": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sessionId"],
+              "properties": {
+                "sessionId": { "$ref": "#/$defs/SessionId" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ContentSetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "content.set" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["paneId", "contentId", "revision", "contentType", "content"],
+              "properties": {
+                "paneId": {
+                  "$ref": "#/$defs/PaneId",
+                  "description": "Target pane. Required — CLU must always specify which pane to target."
+                },
+                "contentId": { "$ref": "#/$defs/ContentId" },
+                "revision": { "$ref": "#/$defs/Revision" },
+                "contentType": { "$ref": "#/$defs/ContentType" },
+                "content": {},
+                "display": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "title": { "type": "string" },
+                    "scrollable": { "type": "boolean" },
+                    "interactive": { "type": "boolean" }
+                  }
+                }
+              }
+            },
+            {
+              "oneOf": [
+                {
+                  "properties": {
+                    "contentType": { "const": "html" },
+                    "content": { "$ref": "#/$defs/HtmlContent" }
+                  }
+                },
+                {
+                  "properties": {
+                    "contentType": { "const": "image" },
+                    "content": { "$ref": "#/$defs/ImageContent" }
+                  }
+                },
+                {
+                  "properties": {
+                    "contentType": { "const": "pdf" },
+                    "content": { "$ref": "#/$defs/PdfContent" }
+                  }
+                },
+                {
+                  "properties": {
+                    "contentType": { "const": "terminal" },
+                    "content": { "$ref": "#/$defs/TerminalContent" }
+                  }
+                },
+                {
+                  "properties": {
+                    "contentType": { "const": "markdown" },
+                    "content": { "$ref": "#/$defs/MarkdownContent" }
+                  }
+                },
+                {
+                  "properties": {
+                    "contentType": { "const": "video" },
+                    "content": { "$ref": "#/$defs/VideoContent" }
+                  }
+                },
+                {
+                  "properties": {
+                    "contentType": { "const": "canvas" },
+                    "content": { "$ref": "#/$defs/CanvasContent" }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "ContentAppendRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "content.append" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "revision", "lines"],
+          "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "description": "Target pane. Required — CLU must always specify which pane to target."
+            },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "lines": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "ContentPatchRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "content.patch" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "revision", "patch"],
+          "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "description": "Target pane. Required — CLU must always specify which pane to target."
+            },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "patch": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["selector", "action"],
+              "properties": {
+                "selector": { "type": "string" },
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "replace_inner",
+                    "replace_outer",
+                    "insert_before",
+                    "insert_after",
+                    "remove"
+                  ]
+                },
+                "html": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ContentClearRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "content.clear" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "revision"],
+          "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "description": "Target pane. Required — CLU must always specify which pane to target."
+            },
+            "revision": { "$ref": "#/$defs/Revision" }
+          }
+        }
+      }
+    },
+    "AnnotationsRemoveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "annotations.remove" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "strokeIds"],
+          "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "description": "Target pane. Required — CLU must always specify which pane to target."
+            },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "strokeIds": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/StrokeId" },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+    "SnapshotGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "snapshot.get" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId"],
+          "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "description": "Target pane. Required — CLU must always specify which pane to target."
+            },
+            "includeImage": { "type": "boolean", "default": false },
+            "includeVisibleText": { "type": "boolean", "default": true },
+            "includeDrawings": { "type": "boolean", "default": false }
+          }
+        }
+      }
+    },
+    "HeartbeatPingRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "heartbeat.ping" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nonce"],
+          "properties": {
+            "nonce": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        }
+      }
+    },
+
+    "PairResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "pair.request" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sessionId",
+            "resumed",
+            "surfaceId",
+            "surfaceName",
+            "viewport",
+            "capabilities",
+            "eventConfig",
+            "limits",
+            "state"
+          ],
+          "properties": {
+            "sessionId": { "$ref": "#/$defs/SessionId" },
+            "resumed": { "type": "boolean" },
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "surfaceName": { "type": "string" },
+            "viewport": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["width", "height", "scale"],
+              "properties": {
+                "width": { "type": "integer", "minimum": 1 },
+                "height": { "type": "integer", "minimum": 1 },
+                "scale": { "type": "number", "exclusiveMinimum": 0 }
+              }
+            },
+            "capabilities": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["contentTypes", "eventTypes"],
+              "properties": {
+                "contentTypes": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/ContentType" },
+                  "uniqueItems": true
+                },
+                "eventTypes": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/EventType" },
+                  "uniqueItems": true
+                }
+              }
+            },
+            "eventConfig": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["profile", "activeEvents", "drawingFlushConfig"],
+              "properties": {
+                "profile": { "$ref": "#/$defs/EventProfile" },
+                "activeEvents": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/ProfileControlledEventType" },
+                  "uniqueItems": true,
+                  "description": "Profile-controlled events active for this session. Surface and pane lifecycle events are excluded — they are always active regardless of profile."
+                },
+                "drawingFlushConfig": { "$ref": "#/$defs/DrawingFlushConfig" }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "maxMessageBytes",
+                "maxFrameBytes",
+                "maxVisibleTextBytes",
+                "maxStrokePointsPerFlush",
+                "maxDrawingFlushBytes",
+                "resumeGraceMs"
+              ],
+              "properties": {
+                "maxMessageBytes": { "type": "integer", "minimum": 1024 },
+                "maxFrameBytes": { "type": "integer", "minimum": 1024 },
+                "maxVisibleTextBytes": { "type": "integer", "minimum": 256 },
+                "maxStrokePointsPerFlush": { "type": "integer", "minimum": 1 },
+                "maxDrawingFlushBytes": { "type": "integer", "minimum": 1024 },
+                "resumeGraceMs": { "type": "integer", "minimum": 5000, "default": 20000, "description": "Session continuity grace window in ms. The same provider must reconnect within this window to resume the session with the same providerId. New providers may connect after grace expiry." }
+              }
+            },
+            "state": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["panes"],
+              "properties": {
+                "panes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["paneId", "currentContentId", "currentRevision", "contentType"],
+                    "properties": {
+                      "paneId": { "$ref": "#/$defs/PaneId" },
+                      "currentContentId": {
+                        "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
+                      },
+                      "currentRevision": { "$ref": "#/$defs/Revision" },
+                      "contentType": {
+                        "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "MutationAckResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": {
+          "type": "string",
+          "enum": ["content.set", "content.append", "content.patch", "content.clear"]
+        },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "currentContentId", "currentRevision", "contentId"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "currentContentId": {
+              "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
+            },
+            "currentRevision": { "$ref": "#/$defs/Revision" },
+            "contentType": {
+              "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+            },
+            "contentId": {
+              "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }],
+              "description": "The content payload identity applied by this mutation. Required. Present (non-null) on content.set responses. Null on content.clear responses."
+            }
+          }
+        }
+      }
+    },
+    "AnnotationsRemoveResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "annotations.remove" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "removedStrokeIds", "notFoundStrokeIds", "remainingStrokeCount"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "removedStrokeIds": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/StrokeId" },
+              "uniqueItems": true
+            },
+            "notFoundStrokeIds": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/StrokeId" },
+              "uniqueItems": true
+            },
+            "remainingStrokeCount": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "SnapshotResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "snapshot.get" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "paneId",
+            "contentId",
+            "revision",
+            "contentType",
+            "viewport",
+            "selection"
+          ],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": {
+              "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
+            },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "contentType": {
+              "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+            },
+            "viewport": { "$ref": "#/$defs/Viewport" },
+            "visibleText": { "type": "string" },
+            "selection": { "$ref": "#/$defs/Selection" },
+            "drawings": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/Stroke" }
+            },
+            "image": {
+              "type": "string",
+              "contentEncoding": "base64",
+              "contentMediaType": "image/png"
+            }
+          }
+        }
+      }
+    },
+    "HeartbeatPongResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "heartbeat.ping" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nonce"],
+          "properties": {
+            "nonce": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "error"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": {
+          "type": "string",
+          "enum": [
+            "surfaces.list",
+            "pair.request",
+            "content.set",
+            "content.append",
+            "content.patch",
+            "content.clear",
+            "annotations.remove",
+            "snapshot.get",
+            "heartbeat.ping",
+            "panes.list",
+            "pane.split",
+            "pane.rename",
+            "pane.close"
+          ]
+        },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": false },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "error": { "$ref": "#/$defs/ErrorBody" }
+      }
+    },
+
+    "StrokePoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "timestamp"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "pressure": { "type": "number", "minimum": 0, "maximum": 1 },
+        "timestamp": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+    "Stroke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strokeId", "tool", "points"],
+      "properties": {
+        "strokeId": { "$ref": "#/$defs/StrokeId" },
+        "tool": { "type": "string", "enum": ["pencil", "finger", "mouse"] },
+        "videoTimestamp": { "type": "number", "minimum": 0 },
+        "points": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StrokePoint" },
+          "minItems": 1
+        }
+      }
+    },
+
+    "DrawingFlushEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.drawing_flush" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "paneId",
+            "contentId",
+            "revision",
+            "flushId",
+            "flushReason",
+            "idleWindowMs",
+            "maxIntervalMs",
+            "strokes",
+            "strokeCount",
+            "pointsCount",
+            "firstStrokeAt",
+            "lastStrokeAt"
+          ],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "flushId": { "$ref": "#/$defs/FlushId" },
+            "flushReason": {
+              "type": "string",
+              "enum": ["idle_window", "max_interval"]
+            },
+            "idleWindowMs": { "type": "integer", "minimum": 5000, "maximum": 10000 },
+            "maxIntervalMs": { "type": "integer", "minimum": 10000 },
+            "strokes": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/Stroke" },
+              "minItems": 1
+            },
+            "strokeCount": { "type": "integer", "minimum": 1 },
+            "pointsCount": { "type": "integer", "minimum": 1 },
+            "firstStrokeAt": { "$ref": "#/$defs/EpochMs" },
+            "lastStrokeAt": { "$ref": "#/$defs/EpochMs" }
+          }
+        }
+      }
+    },
+    "TapEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.tap" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "revision", "kind", "position"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "kind": { "type": "string", "enum": ["tap", "long_press"] },
+            "position": { "$ref": "#/$defs/Position" },
+            "nearestContent": { "type": "string" }
+          }
+        }
+      }
+    },
+    "ScrollEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.scroll" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "revision", "phase", "viewport", "visibleText"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "phase": { "const": "settled" },
+            "viewport": { "$ref": "#/$defs/Viewport" },
+            "visibleText": { "type": "string" }
+          }
+        }
+      }
+    },
+    "SelectionEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.selection" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "revision", "selection"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "selection": { "$ref": "#/$defs/Selection" }
+          }
+        }
+      }
+    },
+    "PageEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.page" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "revision", "page", "totalPages"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "page": { "type": "integer", "minimum": 1 },
+            "totalPages": { "type": "integer", "minimum": 1 },
+            "pageText": { "type": "string" }
+          }
+        }
+      }
+    },
+    "NavigationEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.navigation" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "revision", "url"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "url": { "type": "string" }
+          }
+        }
+      }
+    },
+    "SurfaceAppearedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.surface_appeared" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId", "name", "viewport"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "name": { "type": "string" },
+            "viewport": { "$ref": "#/$defs/SurfaceViewport" }
+          }
+        }
+      }
+    },
+    "SurfaceRemovedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.surface_removed" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" }
+          }
+        }
+      }
+    },
+    "SurfaceResumedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.surface_resumed" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" }
+          }
+        }
+      }
+    },
+    "SnapshotHintEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.snapshot_hint" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason"],
+          "properties": {
+            "reason": {
+              "type": "string",
+              "enum": ["after_render", "after_reconnect", "backpressure_drop"]
+            }
+          }
+        }
+      }
+    },
+
+    "PanesListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "panes.list" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+    "PanesListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "panes.list" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["panes"],
+          "properties": {
+            "panes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["paneId", "name", "activeContentId", "contentType", "viewport"],
+                "properties": {
+                  "paneId": { "$ref": "#/$defs/PaneId" },
+                  "name": {
+                    "oneOf": [
+                      { "type": "string", "minLength": 1 },
+                      { "type": "null" }
+                    ],
+                    "description": "Extension-assigned human-readable name for this pane, or null if none."
+                  },
+                  "activeContentId": {
+                    "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
+                  },
+                  "contentType": {
+                    "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+                  },
+                  "viewport": { "$ref": "#/$defs/SurfaceViewport" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "PaneSplitRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "pane.split" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "count", "direction", "newPaneIds"],
+          "properties": {
+            "paneId": {
+              "$ref": "#/$defs/PaneId",
+              "description": "Pane to split. Required."
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 2,
+              "description": "Total pane count after split, including the source pane."
+            },
+            "direction": {
+              "type": "string",
+              "enum": ["horizontal", "vertical"]
+            },
+            "newPaneIds": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/PaneId" },
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "Extension-assigned pane IDs for the newly created panes. Must contain exactly count - 1 entries."
+            }
+          }
+        }
+      }
+    },
+    "PaneSplitResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "pane.split" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["panes"],
+          "properties": {
+            "panes": {
+              "type": "array",
+              "minItems": 1,
+              "description": "All panes in the window after the split, including pre-existing panes. The source pane retains its original paneId and appears first.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["paneId"],
+                "properties": {
+                  "paneId": { "$ref": "#/$defs/PaneId" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "PaneRenameRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "pane.rename" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "name"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "name": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "type": "null" }
+              ],
+              "description": "New human-readable name for the pane, or null to clear an existing name."
+            }
+          }
+        }
+      }
+    },
+    "PaneRenameResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "pane.rename" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "name"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "name": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "type": "null" }
+              ]
+            }
+          }
+        }
+      }
+    },
+
+    "PaneCloseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "pane.close" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" }
+          }
+        }
+      }
+    },
+    "PaneCloseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "pane.close" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "closedFramesDiscarded"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "closedFramesDiscarded": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count of unread closed annotation frames dropped from the provider buffer for this pane. CLU can use this to know what was lost."
+            }
+          }
+        }
+      }
+    },
+
+    "PaneCreatedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.pane_created" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId", "paneId", "fromSplit"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "parentPaneId": {
+              "oneOf": [{ "$ref": "#/$defs/PaneId" }, { "type": "null" }],
+              "description": "The pane that was split to produce this new pane, or null if created standalone."
+            },
+            "fromSplit": {
+              "type": "boolean",
+              "description": "true when this pane was created as part of a pane.split operation."
+            }
+          }
+        }
+      }
+    },
+    "PaneRemovedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.pane_removed" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId", "paneId"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "paneId": { "$ref": "#/$defs/PaneId" }
+          }
+        }
+      }
+    },
+    "PaneRenamedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.pane_renamed" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId", "paneId", "name"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "name": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "type": "null" }
+              ]
+            }
+          }
+        }
+      }
+    }
+
+  }
+}

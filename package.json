@@ -1,0 +1,7 @@
+{
+  "name": "@surf-ace/monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ]
+}
