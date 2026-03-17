@@ -1,12 +1,12 @@
 import {
   SURF_ACE_PROTOCOL_SCHEMAS,
   type SurfAceSchemaName,
-} from "./schemas-manifest";
+} from "./schemas-manifest.js";
 import {
   EVENT_MESSAGES,
   REQUEST_MESSAGES,
   RESPONSE_MESSAGES,
-} from "./message-names";
+} from "./message-names.js";
 
 const REQUEST_MESSAGE_SET = new Set<string>(REQUEST_MESSAGES);
 const RESPONSE_MESSAGE_SET = new Set<string>(RESPONSE_MESSAGES);

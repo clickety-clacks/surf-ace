@@ -4,7 +4,7 @@ import {
   snapshotGetRequestSchema,
   pairResponseSchema,
   drawingFlushEventSchema,
-} from "./schemas";
+} from "./schemas.js";
 
 export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "pair.request": pairRequestSchema,

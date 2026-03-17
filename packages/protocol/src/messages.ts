@@ -14,10 +14,9 @@ export type {
   SurfaceViewport as Viewport,
   SurfacesListRequest,
   SurfacesListResponse,
-} from "./index";
-
+} from "./index.js";
 export type JsonObject = Record<string, unknown>;
-export type SurfAceRequest = import("./index").Request;
-export type SurfAceResponse = import("./index").Response;
-export type SurfAceEvent = import("./index").Event;
-export type SurfaceSummary = import("./index").SurfacesListResponse["payload"]["surfaces"][number];
+export type SurfAceRequest = import("./index.js").Request;
+export type SurfAceResponse = import("./index.js").Response;
+export type SurfAceEvent = import("./index.js").Event;
+export type SurfaceSummary = import("./index.js").SurfacesListResponse["payload"]["surfaces"][number];

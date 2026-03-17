@@ -663,8 +663,8 @@ export type Event =
   | PaneRemovedEvent
   | PaneRenamedEvent;
 
-export * from "./message-names";
-export * from "./messages";
-export * from "./schemas";
-export * from "./schemas-manifest";
-export * from "./pair-example";
+export * from "./message-names.js";
+export * from "./messages.js";
+export * from "./schemas.js";
+export * from "./schemas-manifest.js";
+export * from "./pair-example.js";

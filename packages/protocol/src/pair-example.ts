@@ -1,4 +1,4 @@
-import type { PairRequest, PairResponse } from "./index";
+import type { PairRequest, PairResponse } from "./index.js";
 
 export function buildExamplePairRequest(): PairRequest {
   return {
