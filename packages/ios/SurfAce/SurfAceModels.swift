@@ -90,6 +90,8 @@ enum SurfAceFramePayload: Equatable {
     case pdf(data: String)
     case terminal(lines: [String], scrollback: Int)
     case markdown(markdown: String)
+    case video(url: String)
+    case canvas(color: String?, grid: Bool)
 }
 
 struct SurfAceFrame: Equatable {
@@ -110,41 +112,66 @@ struct SurfAceFrame: Equatable {
             throw SurfAceFrameParseError.unsupportedType
         }
 
-        guard let content = jsonObject["content"] as? [String: Any] else {
-            throw SurfAceFrameParseError.missingField("content")
-        }
-
         let payload: SurfAceFramePayload
         switch contentType {
         case .html:
+            guard let content = jsonObject["content"] as? [String: Any] else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
             guard let html = content["html"] as? String else {
                 throw SurfAceFrameParseError.missingField("content.html")
             }
             payload = .html(html: html, baseURL: content["baseUrl"] as? String)
         case .image:
+            guard let content = jsonObject["content"] as? [String: Any] else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
             guard let data = content["data"] as? String,
                   let mediaType = content["mediaType"] as? String else {
                 throw SurfAceFrameParseError.missingField("content.data/mediaType")
             }
             payload = .image(data: data, mediaType: mediaType, alt: content["alt"] as? String)
         case .pdf:
+            guard let content = jsonObject["content"] as? [String: Any] else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
             guard let data = content["data"] as? String else {
                 throw SurfAceFrameParseError.missingField("content.data")
             }
             payload = .pdf(data: data)
         case .terminal:
+            guard let content = jsonObject["content"] as? [String: Any] else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
             guard let lines = content["lines"] as? [String],
                   let scrollback = content["scrollback"] as? Int else {
                 throw SurfAceFrameParseError.missingField("content.lines/scrollback")
             }
             payload = .terminal(lines: lines, scrollback: scrollback)
         case .markdown:
+            guard let content = jsonObject["content"] as? [String: Any] else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
             guard let markdown = content["markdown"] as? String else {
                 throw SurfAceFrameParseError.missingField("content.markdown")
             }
             payload = .markdown(markdown: markdown)
-        case .video, .canvas:
-            throw SurfAceFrameParseError.unsupportedType
+        case .video:
+            guard let url = jsonObject["content"] as? String else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
+            payload = .video(url: url)
+        case .canvas:
+            if let content = jsonObject["content"] as? [String: Any] {
+                payload = .canvas(
+                    color: content["color"] as? String,
+                    grid: content["grid"] as? Bool ?? false
+                )
+            } else if let content = jsonObject["content"] as? String, content.isEmpty {
+                payload = .canvas(color: nil, grid: false)
+            } else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
         }
 
         let display = jsonObject["display"] as? [String: Any]
@@ -305,6 +332,20 @@ indirect enum SurfAcePaneLayoutNode {
         }
     }
 
+    func replacingPaneID(from sourcePaneID: Int, to destinationPaneID: Int) -> SurfAcePaneLayoutNode {
+        switch self {
+        case .empty:
+            return self
+        case .leaf(let paneId):
+            return .leaf(paneId == sourcePaneID ? destinationPaneID : paneId)
+        case .split(let direction, let children):
+            return .split(
+                direction: direction,
+                children: children.map { $0.replacingPaneID(from: sourcePaneID, to: destinationPaneID) }
+            )
+        }
+    }
+
     func removingLeaf(paneId: Int) -> SurfAcePaneLayoutNode? {
         switch self {
         case .empty:
@@ -328,7 +369,7 @@ indirect enum SurfAcePaneLayoutNode {
 protocol SurfAcePaneBridging: AnyObject {
     func render(entry: SurfAcePaneEntry?)
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool)
-    func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke])
+    func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool
     func captureDrawingData() -> Data
     func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot?
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult
@@ -339,7 +380,7 @@ protocol SurfAcePaneBridging: AnyObject {
 @MainActor
 @Observable
 final class SurfAcePaneModel {
-    let paneId: Int
+    var paneId: Int
     var name: String?
     var backStack: [SurfAcePaneEntry]
     var currentEntry: SurfAcePaneEntry
@@ -347,6 +388,7 @@ final class SurfAcePaneModel {
     var annotationMode = false
     var fingerDrawEnabled = false
     var isDrawingFlushSending = false
+    var drawingRestoreWarningVisible = false
     var toast: String?
     var lastViewport = SurfAceViewport(
         scrollOffset: SurfAcePoint(x: 0, y: 0),
@@ -392,6 +434,7 @@ final class SurfAceSurfaceModel {
     var name: String
     var paneLayout: SurfAcePaneLayoutNode
     var panesById: [Int: SurfAcePaneModel]
+    var providerTopologyInitialized = false
     var connectionBarState: SurfAceConnectionBarState = .disconnected
     var labelsVisible = true
     var viewportSize = CGSize(width: 1, height: 1)
@@ -404,8 +447,9 @@ final class SurfAceSurfaceModel {
         self.surfaceId = surfaceId
         self.windowLabel = windowLabel
         self.name = name
-        self.panesById = [:]
-        self.paneLayout = .empty
+        let initialPane = SurfAcePaneModel(paneId: 1)
+        self.panesById = [initialPane.paneId: initialPane]
+        self.paneLayout = .leaf(initialPane.paneId)
     }
 
     var panes: [SurfAcePaneModel] { paneLayout.paneIDs.compactMap { panesById[$0] } }

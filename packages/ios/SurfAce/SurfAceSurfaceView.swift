@@ -192,12 +192,28 @@ private struct SurfAcePaneControls: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Button("Titles") {
+            Button(pane.labelText) {
                 runtime.toggleLabelsVisibility(surfaceId: surface.surfaceId)
             }
             .buttonStyle(SurfAceGlassButtonStyle())
 
+            if pane.drawingRestoreWarningVisible {
+                SurfAceWarningIndicator()
+            }
+
             if pane.annotationMode {
+                Button {
+                    runtime.setAnnotationMode(
+                        surfaceId: surface.surfaceId,
+                        paneId: pane.paneId,
+                        enabled: true,
+                        fingerDrawEnabled: !pane.fingerDrawEnabled
+                    )
+                } label: {
+                    Image(systemName: "hand.draw")
+                }
+                .buttonStyle(SurfAceGlassButtonStyle())
+
                 Button("Done") {
                     runtime.setAnnotationMode(
                         surfaceId: surface.surfaceId,
@@ -247,6 +263,18 @@ private struct SurfAcePaneControls: View {
                 .buttonStyle(SurfAceGlassButtonStyle())
             }
         }
+    }
+}
+
+private struct SurfAceWarningIndicator: View {
+    var body: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(Color.yellow)
+            .frame(minWidth: 44, minHeight: 44)
+            .padding(.horizontal, 10)
+            .background(.black.opacity(0.58), in: Capsule())
+            .accessibilityLabel("Drawing restore warning")
     }
 }
 
@@ -382,6 +410,16 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
                 guard let self else { return }
                 self.runtime.handleNavigationEvent(surfaceId: self.surfaceId, paneId: self.paneId, url: url, sentAt: sentAt)
             }
+            hostView.onPDFPageChanged = { [weak self] page, totalPages, pageText in
+                guard let self else { return }
+                self.runtime.handlePDFPageChanged(
+                    surfaceId: self.surfaceId,
+                    paneId: self.paneId,
+                    page: page,
+                    totalPages: totalPages,
+                    pageText: pageText
+                )
+            }
             hostView.onStrokeBatch = { [weak self] strokes, drawingData in
                 guard let self else { return }
                 self.runtime.handleNewStrokes(
@@ -406,8 +444,8 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             hostView?.setInteraction(annotationMode: annotationMode, fingerDrawEnabled: fingerDrawEnabled)
         }
 
-        func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) {
-            hostView?.restoreDrawing(from: drawingData, strokes: strokes)
+        func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool {
+            hostView?.restoreDrawing(from: drawingData, strokes: strokes) ?? drawingData.isEmpty
         }
 
         func captureDrawingData() -> Data {
@@ -486,6 +524,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     var onScrollSettled: ((SurfAceViewport, String) -> Void)?
     var onTapEvent: ((String, SurfAcePoint, String) -> Void)?
     var onNavigationEvent: ((String, Int64) -> Void)?
+    var onPDFPageChanged: ((Int, Int, String?) -> Void)?
     var onStrokeBatch: (([SurfAceStroke], Data) -> Void)?
 
     private struct TrackedStroke {
@@ -500,6 +539,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private let navigationMessageName = "surfAceNavigation"
 
     private let webView: WKWebView
+    private let pdfView = PDFView()
     private let canvasView = PKCanvasView()
     private var currentEntry: SurfAcePaneEntry?
     private var annotationMode = false
@@ -524,11 +564,16 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         super.init(frame: frame)
         setupViewHierarchy()
         setupScripts()
+        setupPDFTracking()
         render(entry: nil)
     }
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     func render(entry: SurfAcePaneEntry?) {
@@ -541,25 +586,40 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             case .html(let rawHTML, let suppliedBaseURL):
                 html = rawHTML
                 baseURL = suppliedBaseURL.flatMap(URL.init(string:))
+                showWebView()
             case .image(let data, let mediaType, let alt):
                 html = imageHTML(data: data, mediaType: mediaType, alt: alt)
                 baseURL = nil
+                showWebView()
             case .pdf(let data):
-                html = pdfHTML(data: data)
-                baseURL = nil
+                renderPDF(data)
+                applyCurrentInteractionState()
+                return
             case .terminal(let lines, _):
                 html = terminalHTML(lines: lines)
                 baseURL = nil
+                showWebView()
             case .markdown(let markdown):
                 html = markdownHTML(markdown)
                 baseURL = nil
+                showWebView()
+            case .video(let url):
+                html = videoPlaceholderHTML(url: url)
+                baseURL = nil
+                showWebView()
+            case .canvas(let color, let grid):
+                html = canvasPlaceholderHTML(color: color, grid: grid)
+                baseURL = nil
+                showWebView()
             case nil:
                 html = standbyHTML()
                 baseURL = nil
+                showWebView()
             }
         } else {
             html = standbyHTML()
             baseURL = nil
+            showWebView()
         }
 
         webView.loadHTMLString(html, baseURL: baseURL)
@@ -572,15 +632,26 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         applyCurrentInteractionState()
     }
 
-    func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) {
+    func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool {
         isApplyingProgrammaticDrawingChange = true
         defer { isApplyingProgrammaticDrawingChange = false }
 
-        let drawing = (try? PKDrawing(data: drawingData)) ?? PKDrawing()
+        guard !drawingData.isEmpty else {
+            canvasView.drawing = PKDrawing()
+            trackedStrokes = []
+            return true
+        }
+        guard let drawing = try? PKDrawing(data: drawingData) else {
+            canvasView.drawing = PKDrawing()
+            trackedStrokes = []
+            return false
+        }
+
         canvasView.drawing = drawing
         trackedStrokes = zip(drawing.strokes, strokes).map { stroke, serialized in
             TrackedStroke(strokeId: serialized.strokeId, stroke: stroke, signature: strokeSignature(stroke))
         }
+        return true
     }
 
     func captureDrawingData() -> Data {
@@ -602,9 +673,17 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         case .image(_, _, let alt):
             lastVisibleText = alt ?? ""
         case .pdf(let data):
-            lastVisibleText = extractPDFText(data)
+            lastViewport = pdfViewport()
+            lastVisibleText = currentPDFPageText() ?? extractPDFText(data)
+            lastSelection = nil
         case .terminal(let lines, _):
             lastVisibleText = lines.suffix(200).map(SurfAceANSI.strip).joined(separator: "\n")
+        case .video, .canvas:
+            if let payload = await evaluateSnapshotPayload() {
+                lastViewport = payload.viewport
+            }
+            lastVisibleText = ""
+            lastSelection = nil
         case nil:
             break
         }
@@ -737,6 +816,13 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         webView.scrollView.backgroundColor = .clear
         webView.scrollView.keyboardDismissMode = .onDrag
 
+        pdfView.translatesAutoresizingMaskIntoConstraints = false
+        pdfView.backgroundColor = .black
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.usePageViewController(false)
+
         canvasView.translatesAutoresizingMaskIntoConstraints = false
         canvasView.backgroundColor = .clear
         canvasView.isOpaque = false
@@ -744,6 +830,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         canvasView.tool = PKInkingTool(.pen, color: .systemOrange, width: 4)
 
         addSubview(webView)
+        addSubview(pdfView)
         addSubview(canvasView)
 
         NSLayoutConstraint.activate([
@@ -751,6 +838,10 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             webView.trailingAnchor.constraint(equalTo: trailingAnchor),
             webView.topAnchor.constraint(equalTo: topAnchor),
             webView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            pdfView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pdfView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pdfView.topAnchor.constraint(equalTo: topAnchor),
+            pdfView.bottomAnchor.constraint(equalTo: bottomAnchor),
             canvasView.leadingAnchor.constraint(equalTo: leadingAnchor),
             canvasView.trailingAnchor.constraint(equalTo: trailingAnchor),
             canvasView.topAnchor.constraint(equalTo: topAnchor),
@@ -768,18 +859,109 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         controller.add(self, name: navigationMessageName)
     }
 
+    private func setupPDFTracking() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePDFPageChangedNotification(_:)),
+            name: Notification.Name.PDFViewPageChanged,
+            object: pdfView
+        )
+    }
+
     private func applyCurrentInteractionState() {
         let entryScrollable = currentEntry?.scrollable ?? true
         let entryInteractive = currentEntry?.interactive ?? true
         if annotationMode {
             webView.scrollView.isScrollEnabled = false
             webView.isUserInteractionEnabled = false
+            pdfView.isUserInteractionEnabled = false
+            pdfScrollView()?.isScrollEnabled = false
             canvasView.drawingPolicy = fingerDrawEnabled ? .anyInput : .pencilOnly
         } else {
             webView.scrollView.isScrollEnabled = entryScrollable
             webView.isUserInteractionEnabled = entryInteractive
+            pdfView.isUserInteractionEnabled = entryInteractive
+            pdfScrollView()?.isScrollEnabled = entryScrollable
             canvasView.drawingPolicy = .pencilOnly
         }
+    }
+
+    private func showWebView() {
+        pdfView.document = nil
+        pdfView.isHidden = true
+        webView.isHidden = false
+    }
+
+    private func renderPDF(_ base64Data: String) {
+        webView.isHidden = true
+        pdfView.isHidden = false
+        guard let data = Data(base64Encoded: base64Data, options: [.ignoreUnknownCharacters]),
+              let document = PDFDocument(data: data) else {
+            pdfView.document = nil
+            webView.loadHTMLString(placeholderHTML(title: "PDF unavailable", detail: "This PDF could not be rendered on iOS."), baseURL: nil)
+            showWebView()
+            return
+        }
+
+        pdfView.document = document
+        pdfView.goToFirstPage(nil)
+        lastViewport = pdfViewport()
+        lastVisibleText = currentPDFPageText() ?? ""
+        DispatchQueue.main.async { [weak self] in
+            self?.notifyPDFPageChanged()
+        }
+    }
+
+    private func pdfScrollView() -> UIScrollView? {
+        if let scrollView = pdfView.subviews.compactMap({ $0 as? UIScrollView }).first {
+            return scrollView
+        }
+        return pdfView.subviews
+            .flatMap(\.subviews)
+            .compactMap { $0 as? UIScrollView }
+            .first
+    }
+
+    private func pdfViewport() -> SurfAceViewport {
+        let scrollView = pdfScrollView()
+        let contentOffset = scrollView?.contentOffset ?? .zero
+        let contentSize = scrollView?.contentSize ?? bounds.size
+        return SurfAceViewport(
+            scrollOffset: SurfAcePoint(x: Double(contentOffset.x), y: Double(contentOffset.y)),
+            visibleRect: SurfAceRect(
+                x: Double(contentOffset.x),
+                y: Double(contentOffset.y),
+                width: Double(max(bounds.width, 1)),
+                height: Double(max(bounds.height, 1))
+            ),
+            contentSize: SurfAceSize(
+                width: Double(max(contentSize.width, 1)),
+                height: Double(max(contentSize.height, 1))
+            ),
+            zoomLevel: Double(scrollView?.zoomScale ?? pdfView.scaleFactor)
+        )
+    }
+
+    private func currentPDFPageText() -> String? {
+        pdfView.currentPage?.string?.prefix(4096).description
+    }
+
+    @objc
+    private func handlePDFPageChangedNotification(_ notification: Notification) {
+        notifyPDFPageChanged()
+    }
+
+    private func notifyPDFPageChanged() {
+        guard let document = pdfView.document,
+              let currentPage = pdfView.currentPage else {
+            return
+        }
+        lastViewport = pdfViewport()
+        let page = max(document.index(for: currentPage) + 1, 1)
+        let totalPages = max(document.pageCount, 1)
+        let pageText = currentPage.string?.prefix(4096).description
+        lastVisibleText = pageText ?? ""
+        onPDFPageChanged?(page, totalPages, pageText)
     }
 
     private func applyDrawing(strokes: [PKStroke]) {
@@ -1008,16 +1190,68 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         """
     }
 
-    private func pdfHTML(data: String) -> String {
-        """
+    private func placeholderHTML(title: String, detail: String, backgroundCSS: String = "#0a0f14") -> String {
+        let escapedTitle = escapeHTML(title)
+        let escapedDetail = escapeHTML(detail)
+        return """
         <!doctype html>
         <html>
         <head>
-          <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0,user-scalable=yes" />
-          <style>html, body { margin: 0; height: 100%; background: #0a0f14; } embed { width: 100%; height: 100%; border: 0; }</style>
+          <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+          <style>
+            html, body { margin: 0; min-height: 100%; background: \(backgroundCSS); color: #f3f5f8; }
+            body {
+              min-height: 100vh;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            }
+            .card {
+              max-width: 320px;
+              padding: 20px 22px;
+              border-radius: 18px;
+              background: rgba(0, 0, 0, 0.34);
+              text-align: center;
+            }
+            h1 { margin: 0 0 8px; font-size: 20px; }
+            p { margin: 0; line-height: 1.4; color: rgba(243, 245, 248, 0.78); }
+          </style>
         </head>
-        <body><embed src="data:application/pdf;base64,\(data)" type="application/pdf" /></body>
+        <body>
+          <div class="card">
+            <h1>\(escapedTitle)</h1>
+            <p>\(escapedDetail)</p>
+          </div>
+        </body>
         </html>
+        """
+    }
+
+    private func videoPlaceholderHTML(url: String) -> String {
+        placeholderHTML(
+            title: "Video unavailable",
+            detail: "This iOS surface is showing a placeholder for the provider's video content.\n\(url)"
+        )
+    }
+
+    private func canvasPlaceholderHTML(color: String?, grid: Bool) -> String {
+        let background = canvasBackgroundCSS(color: color, grid: grid)
+        return placeholderHTML(
+            title: "Canvas unavailable",
+            detail: "This iOS surface is showing a placeholder for the provider's canvas content.",
+            backgroundCSS: background
+        )
+    }
+
+    private func canvasBackgroundCSS(color: String?, grid: Bool) -> String {
+        let trimmedColor = color?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseColor = (trimmedColor?.isEmpty == false) ? trimmedColor! : "#ffffff"
+        guard grid else { return baseColor }
+        return """
+        linear-gradient(rgba(15, 23, 42, 0.10) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(15, 23, 42, 0.10) 1px, transparent 1px),
+        \(baseColor)
         """
     }
 

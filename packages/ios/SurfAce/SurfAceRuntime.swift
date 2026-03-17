@@ -1,7 +1,6 @@
 import CryptoKit
 import Foundation
 import Observation
-import PDFKit
 import UIKit
 
 actor SurfAceOutboundSender {
@@ -129,7 +128,7 @@ final class SurfAceRuntime {
     private let resumeGraceMilliseconds = 20_000
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
-    private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
+    private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown, .video, .canvas]
     private let eventTypes = [
         "event.drawing_flush",
         "event.tap",
@@ -299,7 +298,7 @@ final class SurfAceRuntime {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         pane.bridge = bridge
         bridge.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry)
-        bridge.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
+        restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         bridge.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
     }
 
@@ -344,7 +343,7 @@ final class SurfAceRuntime {
         }
 
         pane.bridge?.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry)
-        pane.bridge?.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
+        restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         pane.lastNavigationURL = pane.currentEntry.url
         noteInteraction(surfaceId: surfaceId)
     }
@@ -408,7 +407,36 @@ final class SurfAceRuntime {
                 ]
             )
         }
-        postPDFPageChangeIfNeeded(surfaceId: surfaceId, paneId: paneId)
+    }
+
+    func handlePDFPageChanged(surfaceId: String, paneId: Int, page: Int, totalPages: Int, pageText: String?) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let contentId = pane.currentEntry.contentId else {
+            return
+        }
+
+        let normalizedText = pageText?.prefix(maxVisibleTextBytes).description
+        if pane.lastPage?.page == page, pane.lastPage?.totalPages == totalPages {
+            pane.lastVisibleText = normalizedText ?? pane.lastVisibleText
+            return
+        }
+
+        pane.lastPage = (page, totalPages, normalizedText)
+        pane.lastVisibleText = normalizedText ?? ""
+        guard eventIsEnabled(surfaceId: surfaceId, eventName: "event.page") else { return }
+
+        sendEvent(
+            surfaceId: surfaceId,
+            op: "event.page",
+            payload: [
+                "paneId": paneId,
+                "contentId": contentId,
+                "revision": pane.currentEntry.revision,
+                "page": page,
+                "totalPages": totalPages,
+                "pageText": normalizedText as Any,
+            ]
+        )
     }
 
     func handleTapEvent(surfaceId: String, paneId: Int, kind: String, position: SurfAcePoint, nearestContent: String) {
@@ -870,8 +898,7 @@ final class SurfAceRuntime {
 
         if resumed || surfaceNeedsResumedEvent.contains(surfaceId) {
             surfaceNeedsResumedEvent.remove(surfaceId)
-            sendLifecycleEvent(surfaceId: surfaceId, op: "event.surface_resumed", payload: ["surfaceId": surfaceId])
-            sendSnapshotHint(surfaceId: surfaceId, reason: "after_reconnect")
+            enqueuePostReconnectEvents(surfaceId: surfaceId)
         }
 
         return response
@@ -1072,7 +1099,7 @@ final class SurfAceRuntime {
         pane.lastNavigationURL = nil
         pane.lastPage = nil
         pane.bridge?.render(entry: pane.currentEntry)
-        pane.bridge?.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
+        restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         sendSnapshotHint(surfaceId: surfaceId, reason: "after_render")
 
         return mutationAck(
@@ -1190,6 +1217,7 @@ final class SurfAceRuntime {
         }
         pane.forwardStack.removeAll()
         pane.currentEntry = .empty(revision: revision)
+        pane.drawingRestoreWarningVisible = false
         pane.pendingFlushStrokes.removeAll()
         pane.firstPendingStrokeAt = nil
         pane.lastPendingStrokeAt = nil
@@ -1440,43 +1468,35 @@ final class SurfAceRuntime {
         sendEvent(surfaceId: surfaceId, op: "event.snapshot_hint", payload: ["reason": reason])
     }
 
+    private func enqueuePostReconnectEvents(surfaceId: String) {
+        Task { @MainActor in
+            if self.eventIsEnabled(surfaceId: surfaceId, eventName: "event.snapshot_hint") {
+                _ = await self.sendEventAsync(
+                    surfaceId: surfaceId,
+                    op: "event.snapshot_hint",
+                    payload: ["reason": "after_reconnect"]
+                )
+            }
+            _ = await self.sendEventAsync(
+                surfaceId: surfaceId,
+                op: "event.surface_resumed",
+                payload: ["surfaceId": surfaceId]
+            )
+        }
+    }
+
     private func eventIsEnabled(surfaceId: String, eventName: String) -> Bool {
         activeSessions[surfaceId]?.eventProfile.activeEvents.contains(eventName) == true
     }
 
-    private func postPDFPageChangeIfNeeded(surfaceId: String, paneId: Int) {
-        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
-              eventIsEnabled(surfaceId: surfaceId, eventName: "event.page"),
-              let contentId = pane.currentEntry.contentId,
-              case .pdf(let data) = pane.currentEntry.payload,
-              let decoded = Data(base64Encoded: data, options: [.ignoreUnknownCharacters]),
-              let document = PDFDocument(data: decoded) else {
-            return
+    private func restorePaneDrawing(surfaceId: String, pane: SurfAcePaneModel) {
+        guard let bridge = pane.bridge else { return }
+        let restored = bridge.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
+        let hasPersistedDrawing = !pane.currentEntry.drawingData.isEmpty
+        pane.drawingRestoreWarningVisible = hasPersistedDrawing && !restored
+        if pane.drawingRestoreWarningVisible {
+            pane.toast = "Annotation restore failed"
         }
-
-        let totalPages = max(document.pageCount, 1)
-        let scrollableHeight = max(pane.lastViewport.contentSize.height - pane.lastViewport.visibleRect.height, 1)
-        let progress = min(max(pane.lastViewport.scrollOffset.y / scrollableHeight, 0), 1)
-        let page = min(max(Int((progress * Double(totalPages - 1)).rounded(.down)) + 1, 1), totalPages)
-
-        if pane.lastPage?.page == page {
-            return
-        }
-
-        let pageText = document.page(at: page - 1)?.string?.prefix(maxVisibleTextBytes).description
-        pane.lastPage = (page, totalPages, pageText)
-        sendEvent(
-            surfaceId: surfaceId,
-            op: "event.page",
-            payload: [
-                "paneId": paneId,
-                "contentId": contentId,
-                "revision": pane.currentEntry.revision,
-                "page": page,
-                "totalPages": totalPages,
-                "pageText": pageText as Any,
-            ]
-        )
     }
 
     private func scheduleDrawingFlush(surfaceId: String, paneId: Int) {
@@ -1594,14 +1614,19 @@ final class SurfAceRuntime {
             surface.name = "\(screenName) \(windowLabel.uppercased())"
         }
 
-        guard initialPaneId > 0 else {
+        guard initialPaneId > 0, !surface.providerTopologyInitialized else {
             return
         }
 
-        if surface.panes.isEmpty {
-            surface.panesById[initialPaneId] = SurfAcePaneModel(paneId: initialPaneId)
-            surface.paneLayout = .leaf(initialPaneId)
+        if case .leaf(let currentPaneId) = surface.paneLayout,
+           let bootstrapPane = surface.panesById[currentPaneId],
+           currentPaneId != initialPaneId {
+            surface.panesById.removeValue(forKey: currentPaneId)
+            bootstrapPane.paneId = initialPaneId
+            surface.panesById[initialPaneId] = bootstrapPane
+            surface.paneLayout = surface.paneLayout.replacingPaneID(from: currentPaneId, to: initialPaneId)
         }
+        surface.providerTopologyInitialized = true
     }
 
     private func viewportPayload(for surface: SurfAceSurfaceModel) -> [String: Any] {
@@ -1682,7 +1707,7 @@ final class SurfAceRuntime {
             "w": "\(viewport["width"] ?? 1)",
             "h": "\(viewport["height"] ?? 1)",
             "s": "\(viewport["scale"] ?? 1)",
-            "cap": "31",
+            "cap": "\(contentBitmask(for: supportedContentTypes))",
             "busy": activeSessions.isEmpty && resumeGraceBySurfaceId.isEmpty ? "0" : "1",
             "pk": fingerprint,
             "ws": webSocketPath,
@@ -1812,6 +1837,19 @@ final class SurfAceRuntime {
         guard let value = value as? String else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func contentBitmask(for contentTypes: [SurfAceContentType]) -> Int {
+        let bits: [SurfAceContentType: Int] = [
+            .html: 1 << 0,
+            .image: 1 << 1,
+            .pdf: 1 << 2,
+            .terminal: 1 << 3,
+            .markdown: 1 << 4,
+            .video: 1 << 5,
+            .canvas: 1 << 6,
+        ]
+        return contentTypes.reduce(0) { $0 | (bits[$1] ?? 0) }
     }
 
     private func randomHex(prefix: String? = nil, byteCount: Int) -> String {

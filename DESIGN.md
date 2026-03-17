@@ -2775,7 +2775,7 @@ The window label is the primary addressing handle. It MUST be visible when the s
 Each pane is assigned a globally unique numeric identifier for the entire surface instance. If the extension assigns a pane name, that name MUST be displayed instead of the number. The pane label MUST be:
 - Displayed as a large floating translucent overlay centered within the pane content area.
 - Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
-- On touch interfaces: a control in the bottom bar allows the user to manually re-show all labels; any tap while labels are visible hides them again.
+- On touch interfaces: a control in the bottom bar displays the pane's assigned label text (numeric `paneId` or custom name). This control is both the pane label identifier and the manual re-show affordance; tapping it re-shows all labels, and any tap while labels are visible hides them again.
 - On pointer interfaces: moving the pointer hides labels; hovering the pane control bar restores them.
 
 #### All platforms
@@ -2786,7 +2786,7 @@ Each pane is assigned a globally unique numeric identifier for the entire surfac
 
 #### Annotation mode visual state (all platforms)
 
-When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator. No badge, label, or additional chrome is added. Pane labels MUST remain visible. While annotation mode is active, Back, Forward, and 👆 controls are hidden; only the Done button is shown in the control cluster.
+When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator. No badge, label, or additional chrome is added. Pane labels MUST remain visible. While annotation mode is active, Back and Forward are hidden; the pane-label control, 👆 control, and Done button remain in the control cluster.
 
 #### Behavioral constraints while in annotation mode (all platforms)
 
@@ -2817,10 +2817,11 @@ Pane controls float above content rather than occupying a fixed header bar. The 
 
 Required defaults:
 - Pane label is displayed as a large floating translucent overlay centered in the pane (see §15.1 for visibility rules).
-- All pane controls (Back, Forward, 👆, Done) live in a single floating control cluster at the bottom-center of the pane.
+- All pane controls (pane-label control, Back, Forward, 👆, Done) live in a single floating control cluster at the bottom-center of the pane.
 - Back/Forward controls appear only when history exists in that direction; hidden otherwise.
 - Done appears only while annotation mode is active; hidden otherwise.
 - 👆 (drawing input) button is always present in the control cluster.
+- On touch interfaces, the pane-label control uses the pane's assigned label text (numeric `paneId` or custom name) as its visible button text.
 - Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. There is no focused-pane concept — all panes are visually equal when not in annotation mode.
 
 #### Icon assets
