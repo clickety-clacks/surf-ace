@@ -1,6 +1,7 @@
 import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
 import {
   type SurfAceAnnotateRemoveInput,
+  type SurfAceSplitInput,
   type SurfAcePushInput,
   type SurfAceRuntime,
   type SurfAceRuntimeOptions,
@@ -11,6 +12,8 @@ export const surfAceToolNames = [
   "surf_ace_list",
   "surf_ace_push",
   "surf_ace_clear",
+  "surf_ace_split",
+  "surf_ace_close_pane",
   "surf_ace_read",
   "surf_ace_annotations_remove",
 ] as const;
@@ -48,7 +51,7 @@ const paneIdParam = {
 export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefinition<any>[] {
   return [
     {
-      description: "List all discovered Surf Ace surfaces, panes, and local provider state.",
+      description: "List all discovered Surf Ace surfaces, visible window labels, pane topology, and local provider state.",
       execute: async () => await runtime.listScreens(),
       inputSchema: {
         additionalProperties: false,
@@ -93,6 +96,42 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_clear",
+    },
+    {
+      description: "Split an existing Surf Ace pane into a larger pane layout.",
+      execute: async (args: SurfAceSplitInput) => await runtime.split(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          count: {
+            minimum: 2,
+            type: "integer",
+          },
+          direction: {
+            enum: ["horizontal", "vertical"],
+            type: "string",
+          },
+          fingerprint: fingerprintParam,
+          paneId: paneIdParam,
+        },
+        required: ["fingerprint", "paneId", "count", "direction"],
+        type: "object",
+      },
+      name: "surf_ace_split",
+    },
+    {
+      description: "Close an existing Surf Ace pane.",
+      execute: async (args: { fingerprint: string; paneId: number }) => await runtime.closePane(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          fingerprint: fingerprintParam,
+          paneId: paneIdParam,
+        },
+        required: ["fingerprint", "paneId"],
+        type: "object",
+      },
+      name: "surf_ace_close_pane",
     },
     {
       description: "Read the local dual-channel Surf Ace buffer for a pane. No live network call is made.",

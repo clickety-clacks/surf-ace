@@ -54,6 +54,7 @@ class StaticDiscoveryService implements SurfAceDiscoveryService {
 class FakeSurfAceWsServer {
   readonly annotationsRemoveRequests: Array<{ contentId: string; paneId: number; strokeIds: string[] }> = [];
   readonly clearRequests: Array<{ paneId: number; revision: number }> = [];
+  readonly closePaneRequests: Array<{ paneId: number }> = [];
   readonly contentSetRequests: Array<{
     contentId: string;
     contentType: string;
@@ -80,6 +81,13 @@ class FakeSurfAceWsServer {
       },
     ],
   ]);
+  readonly splitRequests: Array<{
+    count: number;
+    direction: string;
+    newPaneIds: number[];
+    paneId: number;
+  }> = [];
+  dropNextSplitRequest = false;
 
   pairedSocket: import("ws").WebSocket | null = null;
   readonly surfaceId = "sf_surface-a";
@@ -361,6 +369,79 @@ class FakeSurfAceWsServer {
         );
         return;
       }
+      case "pane.split": {
+        const paneId = Number(message.payload?.paneId ?? 0);
+        const sourcePane = this.panes.get(paneId);
+        assert.ok(sourcePane);
+        if (this.dropNextSplitRequest) {
+          this.dropNextSplitRequest = false;
+          socket.close();
+          return;
+        }
+        const newPaneIds = Array.isArray(message.payload?.newPaneIds)
+          ? message.payload.newPaneIds.map((value) => Number(value))
+          : [];
+        this.splitRequests.push({
+          count: Number(message.payload?.count ?? 0),
+          direction: String(message.payload?.direction ?? ""),
+          newPaneIds,
+          paneId,
+        });
+        for (const newPaneId of newPaneIds) {
+          this.panes.set(newPaneId, {
+            contentId: null,
+            contentType: null,
+            drawings: [],
+            name: null,
+            revision: 0,
+            viewport: {
+              ...sourcePane.viewport,
+            },
+          });
+        }
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "pane.split", {
+              panes: [...this.panes.keys()].map((currentPaneId) => ({
+                paneId: currentPaneId,
+              })),
+            }),
+          ),
+        );
+        return;
+      }
+      case "pane.close": {
+        const paneId = Number(message.payload?.paneId ?? 0);
+        assert.ok(this.panes.has(paneId));
+        if (this.panes.size === 1) {
+          socket.send(
+            JSON.stringify({
+              error: {
+                code: "invalid_operation",
+                message: "Cannot close the last remaining pane.",
+              },
+              id: message.id,
+              ok: false,
+              op: "pane.close",
+              sentAt: Date.now(),
+              type: "response",
+              v: 1,
+            }),
+          );
+          return;
+        }
+        this.panes.delete(paneId);
+        this.closePaneRequests.push({ paneId });
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "pane.close", {
+              closedFramesDiscarded: 0,
+              paneId,
+            }),
+          ),
+        );
+        return;
+      }
       case "annotations.remove": {
         const paneId = Number(message.payload?.paneId ?? 0);
         const pane = this.panes.get(paneId);
@@ -489,9 +570,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(screen);
       assert.deepEqual(
         Object.keys(screen).sort(),
-        ["connectionState", "fingerprint", "lastSeenAt", "name", "panes", "pendingEvents", "viewport"].sort(),
+        [
+          "connectionState",
+          "fingerprint",
+          "lastSeenAt",
+          "name",
+          "panes",
+          "pendingEvents",
+          "viewport",
+          "windowLabel",
+        ].sort(),
       );
       assert.equal(screen.fingerprint, server.surfaceId);
+      assert.equal(screen.windowLabel, "a");
       assert.deepEqual(screen.panes.map((pane) => pane.paneId), [1]);
       assert.deepEqual(
         Object.keys(screen.panes[0] ?? {}).sort(),
@@ -682,6 +773,67 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         revision: clear.revision,
       });
       assert.deepEqual(server.clearRequests.map((request) => request.paneId), [server.initialRemotePaneId]);
+    });
+  });
+
+  await t.test("provider splits panes with provider-assigned pane ids and closes them by pane scope", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const split = await runtime.split({
+        count: 3,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: 1,
+      });
+
+      assert.deepEqual(split, [{ paneId: 1 }, { paneId: 2 }, { paneId: 3 }]);
+      assert.deepEqual(server.splitRequests, [
+        {
+          count: 3,
+          direction: "horizontal",
+          newPaneIds: [2, 3],
+          paneId: server.initialRemotePaneId,
+        },
+      ]);
+
+      const splitScreens = await runtime.listScreens();
+      assert.deepEqual(splitScreens[0]?.panes.map((pane) => pane.paneId), [1, 2, 3]);
+
+      const close = await runtime.closePane({
+        fingerprint: server.surfaceId,
+        paneId: 2,
+      });
+      assert.deepEqual(close, { ok: true });
+      assert.deepEqual(server.closePaneRequests, [{ paneId: 2 }]);
+
+      const afterCloseScreens = await runtime.listScreens();
+      assert.deepEqual(afterCloseScreens[0]?.panes.map((pane) => pane.paneId), [1, 3]);
+    });
+  });
+
+  await t.test("provider rejects invalid split counts and cleans reserved panes after split transport failure", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      await assert.rejects(
+        runtime.split({
+          count: 1,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        }),
+        /at least 2/,
+      );
+
+      server.dropNextSplitRequest = true;
+      await assert.rejects(
+        runtime.split({
+          count: 3,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        }),
+      );
+
+      const screens = await runtime.listScreens();
+      assert.deepEqual(screens[0]?.panes.map((pane) => pane.paneId), [1]);
     });
   });
 });

@@ -2524,11 +2524,12 @@ Returns all known screens and their locally cached state. Read-only, local.
 **Returns:** array of screen records:
 ```
 fingerprint       string    Stable screen identity (window-scoped; mapped from `surfaceId`)
+windowLabel       string    Provider-assigned visible window label (`a`, `b`, `aa`, ...)
 name              string    Human-readable screen name
 connectionState   enum      "connected" | "connecting" | "unreachable"
 lastSeenAt        epochMs   When screen was last seen in mDNS or active
 viewport          object    { width, height, scale }
-panes             array     [{ paneId, name, activeContent, historySummary }]
+panes             array     Full current pane topology: [{ paneId, name, activeContent, historySummary }]
                           activeContent: { contentId, contentType, revision } or null if idle
                           historySummary: { visibleContentId, backCount, forwardCount }
 pendingEvents     int       Count of buffered events not yet read by CLU
@@ -2584,6 +2585,48 @@ revision       int      Revision after clear
 ```
 
 **Errors:** `not_connected`, `screen_not_found`
+
+---
+
+#### `surf_ace_split`
+
+Split an existing pane into `count` total panes. Write.
+
+**Params:**
+```
+fingerprint    string   Target screen
+paneId         integer  Required source pane.
+count          integer  Required total pane count after split, including the source pane. Minimum 2.
+direction      enum     "horizontal" | "vertical"
+```
+
+**Behavior:** The provider sends `pane.split` to the surface and assigns the `paneId` values for the newly created panes.
+
+**Returns:** array of pane records:
+```
+paneId         integer  Effective pane id after the split. Includes the source pane and each newly created pane.
+```
+
+**Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
+
+---
+
+#### `surf_ace_close_pane`
+
+Close an existing pane and remove it from the current layout. Write.
+
+**Params:**
+```
+fingerprint    string   Target screen
+paneId         integer  Required pane to close.
+```
+
+**Returns:**
+```
+ok             bool     Always true on success.
+```
+
+**Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
 
 ---
 

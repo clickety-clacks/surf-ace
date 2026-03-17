@@ -1,8 +1,10 @@
 export function buildSurfAceAgentInstructions(): string {
   return [
-    "Surf Ace is pane-scoped. Always call `surf_ace_list` first, then target a specific `{ fingerprint, paneId }`.",
+    "Surf Ace is pane-scoped. Always call `surf_ace_list` first, then target a specific `{ fingerprint, windowLabel, paneId }`.",
     "Use `surf_ace_push` for full `content.set` replacements only.",
     "Use `surf_ace_clear` to clear the currently visible content in a pane.",
+    "Use `surf_ace_split` to split a specific pane into a larger provider-assigned pane topology.",
+    "Use `surf_ace_close_pane` to remove a specific pane from the current window layout.",
     "Treat `event.drawing_flush` as raw annotation geometry. Interpret it at the CLU layer; the surface never classifies strokes for you.",
     "Treat `event.navigation` as HTML-only. Discard it when the pane is not currently showing HTML content.",
     "Treat `event.page` as the authoritative page register for paged content.",

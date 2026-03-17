@@ -57,6 +57,7 @@ export default plugin;
 export { buildSurfAceAgentInstructions } from "./agent-instructions.js";
 export {
   type SurfAceConnectionState,
+  type SurfAceClosePaneResult,
   type SurfAceLocalEvent,
   type SurfAcePaneSummary,
   type SurfAcePushInput,
@@ -65,6 +66,8 @@ export {
   type SurfAceRuntime,
   type SurfAceRuntimeOptions,
   type SurfAceScreenSummary,
+  type SurfAceSplitInput,
+  type SurfAceSplitResult,
   type SurfAceSnapshotResult,
   SurfAceToolError,
   createSurfAceRuntime,

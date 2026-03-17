@@ -101,6 +101,7 @@ export type SurfAceScreenSummary = {
   panes: SurfAcePaneSummary[];
   pendingEvents: number;
   viewport: SurfaceViewport;
+  windowLabel: string;
 };
 
 export type SurfAceFrameStroke = {
@@ -235,6 +236,21 @@ export type SurfAceClearResult = {
   revision: number;
 };
 
+export type SurfAceSplitInput = {
+  count: number;
+  direction: "horizontal" | "vertical";
+  fingerprint: string;
+  paneId: number;
+};
+
+export type SurfAceSplitResult = Array<{
+  paneId: number;
+}>;
+
+export type SurfAceClosePaneResult = {
+  ok: true;
+};
+
 export type SurfAceLocalEvent =
   | {
       paneId: number;
@@ -262,9 +278,11 @@ export type SurfAceRuntimeOptions = {
 export interface SurfAceRuntime {
   annotateRemove(input: SurfAceAnnotateRemoveInput): Promise<SurfAceAnnotateRemoveResult>;
   clear(input: { fingerprint: string; paneId: number }): Promise<SurfAceClearResult>;
+  closePane(input: { fingerprint: string; paneId: number }): Promise<SurfAceClosePaneResult>;
   listScreens(): Promise<SurfAceScreenSummary[]>;
   push(input: SurfAcePushInput, context?: { sessionKey?: string }): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: number }): Promise<SurfAceReadResult>;
+  split(input: SurfAceSplitInput): Promise<SurfAceSplitResult>;
   snapshot(input: { fingerprint: string; paneId: number }): Promise<SurfAceSnapshotResult>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -744,6 +762,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           })),
         pendingEvents: this.pendingEventCount(surface),
         viewport: cloneViewport(surface.viewport),
+        windowLabel: surface.windowLabel,
       }));
   }
 
@@ -760,6 +779,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.start();
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.contentClear(surface, input);
+  }
+
+  async split(input: SurfAceSplitInput): Promise<SurfAceSplitResult> {
+    await this.start();
+    const surface = this.requireConnectedSurface(input.fingerprint);
+    return await this.paneSplit(surface, input);
+  }
+
+  async closePane(input: { fingerprint: string; paneId: number }): Promise<SurfAceClosePaneResult> {
+    await this.start();
+    const surface = this.requireConnectedSurface(input.fingerprint);
+    return await this.paneClose(surface, input);
   }
 
   async read(input: { fingerprint: string; paneId: number }): Promise<SurfAceReadResult> {
@@ -894,6 +925,113 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const response = await this.sendRequest(surface, request);
     return this.applyMutationResponse(surface, pane, response, request) as SurfAceClearResult;
+  }
+
+  private async paneSplit(
+    surface: ManagedSurface,
+    input: SurfAceSplitInput,
+  ): Promise<SurfAceSplitResult> {
+    if (input.count < 2) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        "Surf Ace split count must be at least 2.",
+      );
+    }
+
+    const pane = this.requirePane(surface.surfaceId, input.paneId);
+    const reservedPanes: ManagedPane[] = [];
+    const additionalPaneCount = input.count - 1;
+    const newPaneIds = Array.from({ length: additionalPaneCount }, () => {
+      const paneId = this.allocatePaneId();
+      const created = createPane(paneId, paneId, surface.viewport);
+      surface.panes.set(created.paneId, created);
+      reservedPanes.push(created);
+      return paneId;
+    });
+
+    const request: PaneSplitRequest = {
+      id: makeBrandedRequestId(),
+      op: "pane.split",
+      payload: {
+        count: input.count,
+        direction: input.direction,
+        newPaneIds: newPaneIds.map((paneId) => asPaneId(paneId)),
+        paneId: pane.remotePaneId,
+      },
+      sentAt: asEpochMs(this.now()),
+      type: "request",
+      v: 1,
+    };
+
+    let response: Response;
+    try {
+      response = await this.sendRequest(surface, request);
+    } catch (error) {
+      for (const reservedPane of reservedPanes) {
+        surface.panes.delete(reservedPane.paneId);
+      }
+      throw error;
+    }
+
+    if (isErrorResponse(response)) {
+      for (const reservedPane of reservedPanes) {
+        surface.panes.delete(reservedPane.paneId);
+      }
+      throw new SurfAceToolError(
+        mutationErrorCode(response.error.code),
+        response.error.message,
+      );
+    }
+
+    const payload = (response as PaneSplitResponse).payload;
+    const seenRemotePaneIds = new Set<number>();
+    const panes = payload.panes.map(({ paneId: remotePaneId }) => {
+      seenRemotePaneIds.add(remotePaneId);
+      const managedPane = this.ensurePane(surface, remotePaneId);
+      managedPane.viewport = cloneViewport(surface.viewport);
+      return { paneId: managedPane.paneId };
+    });
+
+    for (const managedPane of [...surface.panes.values()]) {
+      if (!seenRemotePaneIds.has(managedPane.remotePaneId)) {
+        surface.panes.delete(managedPane.paneId);
+      }
+    }
+
+    return panes;
+  }
+
+  private async paneClose(
+    surface: ManagedSurface,
+    input: { fingerprint: string; paneId: number },
+  ): Promise<SurfAceClosePaneResult> {
+    const pane = this.requirePane(surface.surfaceId, input.paneId);
+    const request: PaneCloseRequest = {
+      id: makeBrandedRequestId(),
+      op: "pane.close",
+      payload: {
+        paneId: pane.remotePaneId,
+      },
+      sentAt: asEpochMs(this.now()),
+      type: "request",
+      v: 1,
+    };
+
+    const response = await this.sendRequest(surface, request);
+    if (isErrorResponse(response)) {
+      throw new SurfAceToolError(
+        mutationErrorCode(response.error.code),
+        response.error.message,
+      );
+    }
+
+    const payload = (response as PaneCloseResponse).payload;
+    const removedPane = this.findPaneByRemoteId(surface, payload.paneId);
+    if (removedPane) {
+      surface.panes.delete(removedPane.paneId);
+    }
+
+    return { ok: true };
   }
 
   private async contentSet(
