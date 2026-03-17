@@ -2,10 +2,16 @@
   "name": "@surf-ace/extension",
   "version": "0.1.0",
   "private": true,
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "type": "module",
+  "main": "dist/extension/src/index.js",
+  "types": "dist/extension/src/index.d.ts",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc -p tsconfig.json"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "dependencies": {
     "@surf-ace/protocol": "workspace:*",

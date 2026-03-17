@@ -6,7 +6,10 @@
     "strict": true,
     "declaration": true,
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "..",
+    "types": ["node"],
+    "skipLibCheck": true
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "../protocol/src/**/*"],
+  "exclude": ["src/**/*.test.ts"]
 }

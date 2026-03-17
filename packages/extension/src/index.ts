@@ -1,1 +1,72 @@
-export { register } from "./surf-ace-tools";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
+import { createSurfAceTools } from "./surf-ace-tools.js";
+import { createSurfAceRuntime } from "./surf-ace-runtime.js";
+
+const plugin = {
+  id: "surf-ace",
+  name: "Surf Ace",
+  description: "Surf Ace discovery, persistent surface connections, and pane tools for OpenClaw.",
+  configSchema: emptyPluginConfigSchema(),
+  register(api: OpenClawPluginApi) {
+    const runtime = createSurfAceRuntime({
+      logger: (api.logger ?? console) as never,
+    });
+
+    api.registerService({
+      id: "surf-ace-extension",
+      start: async () => {
+        await runtime.start();
+      },
+      stop: async () => {
+        await runtime.stop();
+      },
+    });
+
+    for (const tool of createSurfAceTools(runtime)) {
+      api.registerTool({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+        execute: async (_id: string, params: unknown) => {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(await tool.execute(params as never), null, 2),
+              },
+            ],
+          };
+        },
+      });
+    }
+
+    api.on("before_prompt_build", async () => ({
+      prependContext: buildSurfAceAgentInstructions(),
+    }));
+  },
+};
+
+export default plugin;
+
+export { buildSurfAceAgentInstructions } from "./agent-instructions.js";
+export {
+  type SurfAceConnectionState,
+  type SurfAceLocalEvent,
+  type SurfAcePaneSummary,
+  type SurfAcePushInput,
+  type SurfAcePushResult,
+  type SurfAceReadResult,
+  type SurfAceRuntime,
+  type SurfAceRuntimeOptions,
+  type SurfAceScreenSummary,
+  type SurfAceSnapshotResult,
+  SurfAceToolError,
+  createSurfAceRuntime,
+} from "./surf-ace-runtime.js";
+export {
+  surfAceToolNames,
+  type SurfAceToolDefinition,
+  type SurfAceToolName,
+} from "./surf-ace-tools.js";
