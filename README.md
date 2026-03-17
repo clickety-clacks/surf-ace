@@ -1,17 +1,30 @@
 # Surf Ace
 
-Monorepo for Surf Ace.
+Turn any screen into a CLU-managed surface. Push content, read annotations, orchestrate displays across devices.
 
-## Source of truth
+## Packages
 
-- `DESIGN.md` is the single canonical design/invariants document.
-- Transitional notes, reviews, and retros are **not** committed in this repo.
-- Legacy implementation code is kept under `legacy/` for reference only.
+| Package | Description |
+|---|---|
+| `packages/protocol` | Shared TypeScript types and JSON Schema for the wire protocol |
+| `packages/extension` | OpenClaw extension — provider-side WS client, CLU tools, Bonjour discovery |
+| `packages/ios` | iOS/iPadOS surface app (Swift) |
+| `packages/electron` | Electron surface app (macOS/Windows/Linux) |
 
-## Layout
+## Spec
 
-- `surf-ace-extension/` — OpenClaw extension plugin
-- `ios/` — new iOS client implementation (fresh)
-- `electron/` — new Electron client implementation (fresh)
-- `packages/protocol/` — shared protocol/types
-- `legacy/` — prior HTTP-era client code
+Full wire protocol spec: [DESIGN.md](./DESIGN.md)
+
+UI flows reference: [docs/design/surf-ace-ui-flows.html](./docs/design/surf-ace-ui-flows.html)
+
+## Repo
+
+`clickety-clacks/surf-ace`
+
+## Status
+
+- [x] Wire protocol spec (DESIGN.md)
+- [x] Protocol package (types + JSON Schema)
+- [x] Extension package (WS runtime, CLU tools, discovery, reconnect)
+- [ ] iOS surface app
+- [ ] Electron surface app
