@@ -511,6 +511,7 @@ export class SurfaceWsServer {
       response.payload.resumed
     ) {
       const surfaceId = response.payload.surfaceId;
+      await this.sendSnapshotHint(surfaceId, "after_reconnect");
       await this.sendEvent(socket, {
         eventId: makeEventId(),
         op: "event.surface_resumed",
@@ -519,7 +520,6 @@ export class SurfaceWsServer {
         type: "event",
         v: 1,
       });
-      await this.sendSnapshotHint(surfaceId, "after_reconnect");
     }
   }
 

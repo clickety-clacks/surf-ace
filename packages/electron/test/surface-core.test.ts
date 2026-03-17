@@ -11,7 +11,7 @@ function applyProviderBootstrap(core: SurfaceCore, surfaceId: string, initialPan
   return core.getRendererWindowState(surfaceId).panes[0]!.paneId;
 }
 
-test("surface core waits for provider bootstrap before creating the initial pane", () => {
+test("surface core initializes with a bootstrap pane before provider topology arrives", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -23,8 +23,60 @@ test("surface core waits for provider bootstrap before creating the initial pane
   const windowState = core.getRendererWindowState(surface.surfaceId);
 
   assert.equal(windowState.windowLabel, "");
-  assert.equal(windowState.layout, null);
-  assert.deepEqual(windowState.panes, []);
+  assert.deepEqual(windowState.layout, { paneId: 0, type: "pane" });
+  assert.equal(windowState.panes.length, 1);
+  assert.equal(windowState.panes[0]?.paneId, 0);
+  assert.equal(windowState.panes[0]?.label, "");
+});
+
+test("surface core replaces the bootstrap pane with the provider initial pane", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const initialPaneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+
+  assert.equal(initialPaneId, 7);
+  assert.deepEqual(windowState.layout, { paneId: 7, type: "pane" });
+  assert.equal(windowState.panes.length, 1);
+  assert.equal(windowState.panes[0]?.paneId, 7);
+});
+
+test("surface core accepts degraded video and canvas content types", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 5);
+
+  core.contentSet(surface.surfaceId, {
+    content: "about:blank",
+    contentId: "ct_video" as never,
+    contentType: "video",
+    historyOwnerToken: "hot_video",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  core.contentSet(surface.surfaceId, {
+    content: { color: "#fff", grid: true },
+    contentId: "ct_canvas" as never,
+    contentType: "canvas",
+    historyOwnerToken: "hot_canvas",
+    paneId: paneId as never,
+    revision: 2 as never,
+  });
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(pane.content.contentType, "canvas");
 });
 
 test("surface core assigns pane history and split topology", () => {

@@ -155,9 +155,12 @@ export class SurfaceCoreError extends Error {
 
 const DEFAULT_VISIBLE_RECT = { height: 768, width: 1024, x: 0, y: 0 };
 const MAX_HISTORY_DEPTH = 20;
+const BOOTSTRAP_PANE_ID = 0;
 const SUPPORTED_CONTENT_TYPES: ContentType[] = [
+  "canvas",
   "html",
   "image",
+  "video",
   "pdf",
   "terminal",
   "markdown",
@@ -261,15 +264,15 @@ export class SurfaceCore {
             content: cloneContent(current.content),
             contentId: current.contentId,
             contentType: current.contentType,
-            display: current.display ? { ...current.display } : undefined,
-            revision: current.revision,
-          },
-          drawings: structuredClone(current.annotations),
-          flushInFlight: pane.flushInFlight,
-          label: pane.name ?? String(pane.paneId),
-          name: pane.name,
-          paneId,
-          showDone: pane.annotating,
+          display: current.display ? { ...current.display } : undefined,
+          revision: current.revision,
+        },
+        drawings: structuredClone(current.annotations),
+        flushInFlight: pane.flushInFlight,
+        label: pane.name ?? (pane.paneId > BOOTSTRAP_PANE_ID ? String(pane.paneId) : ""),
+        name: pane.name,
+        paneId,
+        showDone: pane.annotating,
           toast: pane.toast,
         };
       }),
@@ -795,12 +798,13 @@ export class SurfaceCore {
   }
 
   private createSurface(surfaceId: string, name: string, viewport: SurfaceViewport): SurfaceState {
+    const bootstrapPane = createPaneState(BOOTSTRAP_PANE_ID, this.now());
     const surface: SurfaceState = {
       connectionBar: "disconnected",
-      layout: null,
+      layout: { paneId: BOOTSTRAP_PANE_ID, type: "pane" },
       name,
-      paneOrder: [],
-      panes: new Map(),
+      paneOrder: [BOOTSTRAP_PANE_ID],
+      panes: new Map([[BOOTSTRAP_PANE_ID, bootstrapPane]]),
       surfaceId,
       viewport: cloneViewport(viewport),
       windowLabel: "",
@@ -812,13 +816,32 @@ export class SurfaceCore {
   }
 
   private ensureInitialPane(surface: SurfaceState, initialPaneId: number): boolean {
-    if (initialPaneId < 1 || surface.panes.has(initialPaneId)) {
+    if (initialPaneId < 1 || surface.panes.has(initialPaneId) || surface.panes.size !== 1) {
       return false;
     }
-    if (surface.panes.size > 0) {
+    const currentPaneId = surface.paneOrder[0];
+    if (currentPaneId === undefined || currentPaneId === initialPaneId) {
       return false;
     }
-    surface.panes.set(initialPaneId, createPaneState(initialPaneId, this.now()));
+    const currentPane = surface.panes.get(currentPaneId);
+    if (!currentPane || currentEntry(currentPane).contentId !== null || currentPane.history.length !== 1) {
+      return false;
+    }
+
+    const replacementPane = createPaneState(initialPaneId, this.now());
+    replacementPane.annotating = currentPane.annotating;
+    replacementPane.dirtyStrokeIds = [...currentPane.dirtyStrokeIds];
+    replacementPane.firstDirtyStrokeAt = currentPane.firstDirtyStrokeAt;
+    replacementPane.flushInFlight = currentPane.flushInFlight;
+    replacementPane.lastDirtyStrokeAt = currentPane.lastDirtyStrokeAt;
+    replacementPane.lastSuccessfulFlushAt = currentPane.lastSuccessfulFlushAt;
+    replacementPane.latestContentEventAt = currentPane.latestContentEventAt;
+    replacementPane.name = currentPane.name;
+    replacementPane.snapshot = structuredClone(currentPane.snapshot);
+    replacementPane.toast = currentPane.toast;
+
+    surface.panes.delete(currentPaneId);
+    surface.panes.set(initialPaneId, replacementPane);
     surface.paneOrder = [initialPaneId];
     surface.layout = { paneId: initialPaneId, type: "pane" };
     return true;

@@ -26,20 +26,31 @@ type Stroke = {
   tool: "finger" | "mouse" | "pencil";
 };
 
+type ImageContent = { alt?: string; data: string; mediaType: string };
+type PdfContent = { data: string };
+type HtmlContent = { baseUrl?: string; html: string };
+type TerminalContent = { lines: string[]; scrollback: number };
+type MarkdownContent = { markdown: string };
+type VideoContent = string;
+type CanvasContent = "" | { color?: string; grid?: boolean };
+type PaneContentValue =
+  | null
+  | CanvasContent
+  | HtmlContent
+  | ImageContent
+  | MarkdownContent
+  | PdfContent
+  | TerminalContent
+  | VideoContent;
+
 type RendererPaneState = {
   annotationBorderVisible: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
   content: {
-    content:
-      | null
-      | { alt?: string; data: string; mediaType: string }
-      | { data: string }
-      | { html: string; baseUrl?: string }
-      | { lines: string[]; scrollback: number }
-      | { markdown: string };
+    content: PaneContentValue;
     contentId: string | null;
-    contentType: "html" | "image" | "markdown" | "pdf" | "terminal" | null;
+    contentType: "canvas" | "html" | "image" | "markdown" | "pdf" | "terminal" | "video" | null;
     display?: { interactive?: boolean; scrollable?: boolean; title?: string };
     revision: number;
   };
@@ -71,18 +82,46 @@ type Bootstrap = {
   surfaceId: string;
 };
 
+type NavigationMemo = {
+  at: number;
+  url: string;
+};
+
 type PaneView = {
   annotationCanvas: HTMLCanvasElement;
+  annotationShield: HTMLDivElement;
   contentEl: HTMLElement;
   controlsEl: HTMLDivElement;
   currentContentKey: string;
   currentDrawingsKey: string;
+  currentRenderToken: number;
   currentScrollHandler: (() => void) | null;
   currentWebView: Electron.WebviewTag | null;
+  lastNavigation: NavigationMemo | null;
   paneId: number;
   rootEl: HTMLDivElement;
   scrollEl: HTMLDivElement;
   toastTimeout: number | null;
+};
+
+type PdfJsModule = {
+  getDocument: (source: { data: Uint8Array; disableWorker: boolean }) => {
+    promise: Promise<PdfDocument>;
+  };
+};
+
+type PdfDocument = {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<PdfPage>;
+};
+
+type PdfPage = {
+  getTextContent: () => Promise<{ items: Array<{ str?: string }> }>;
+  getViewport: (params: { scale: number }) => { height: number; width: number };
+  render: (params: {
+    canvasContext: CanvasRenderingContext2D;
+    viewport: { height: number; width: number };
+  }) => { promise: Promise<void> };
 };
 
 const appRoot = document.querySelector("#app") as HTMLDivElement;
@@ -90,6 +129,7 @@ const paneViews = new Map<number, PaneView>();
 let bootstrap: Bootstrap | null = null;
 let latestState: RendererWindowState | null = null;
 let labelsHideTimer: number | null = null;
+let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 
 function escapeHtml(input: string): string {
   return input
@@ -131,6 +171,21 @@ function drawingsKey(drawings: Stroke[]): string {
   return drawings.map((stroke) => stroke.strokeId).join(",");
 }
 
+function paneStateById(paneId: number): RendererPaneState | null {
+  return latestState?.panes.find((pane) => pane.paneId === paneId) ?? null;
+}
+
+function paneStateFor(view: PaneView): RendererPaneState | null {
+  return paneStateById(view.paneId);
+}
+
+function rememberPaneContext(paneId: number): void {
+  if (paneId <= 0) {
+    return;
+  }
+  window.surfAce.command({ paneId, type: "focus-pane" });
+}
+
 function scheduleLabelsHide(): void {
   document.body.classList.add("labels-hidden");
   if (labelsHideTimer) {
@@ -142,18 +197,22 @@ function scheduleLabelsHide(): void {
   }, 900);
 }
 
+function paneBounds(view: PaneView) {
+  const rect = view.rootEl.getBoundingClientRect();
+  return {
+    height: rect.height,
+    width: rect.width,
+    x: rect.x,
+    y: rect.y,
+  };
+}
+
 function reportPaneSnapshot(view: PaneView): void {
-  const paneRect = view.rootEl.getBoundingClientRect();
   const visibleText = currentVisibleText(view);
   const selection = currentSelectionWithin(view);
   const viewport = currentViewport(view);
   window.surfAce.reportSnapshot({
-    bounds: {
-      height: paneRect.height,
-      width: paneRect.width,
-      x: paneRect.x,
-      y: paneRect.y,
-    },
+    bounds: paneBounds(view),
     paneId: view.paneId,
     selection,
     viewport,
@@ -182,10 +241,37 @@ function currentViewport(view: PaneView): Viewport {
   };
 }
 
+function currentVisiblePdfPage(view: PaneView): HTMLElement | null {
+  const pages = [...view.contentEl.querySelectorAll<HTMLElement>(".content-pdf-page")];
+  if (pages.length === 0) {
+    return null;
+  }
+
+  const viewportTop = view.scrollEl.scrollTop;
+  const viewportBottom = viewportTop + view.scrollEl.clientHeight;
+  let bestPage = pages[0] ?? null;
+  let bestVisibleHeight = -1;
+
+  for (const page of pages) {
+    const top = page.offsetTop;
+    const bottom = top + page.offsetHeight;
+    const visibleHeight = Math.min(bottom, viewportBottom) - Math.max(top, viewportTop);
+    if (visibleHeight > bestVisibleHeight) {
+      bestVisibleHeight = visibleHeight;
+      bestPage = page;
+    }
+  }
+
+  return bestPage;
+}
+
 function currentVisibleText(view: PaneView): string {
-  const webview = view.currentWebView;
-  if (webview) {
+  if (view.currentWebView) {
     return "";
+  }
+  const currentPdfPage = currentVisiblePdfPage(view);
+  if (currentPdfPage) {
+    return (currentPdfPage.dataset.pageText ?? "").slice(0, 4096);
   }
   return (view.contentEl.textContent ?? "").slice(0, 4096);
 }
@@ -265,6 +351,14 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   return button;
 }
 
+function blockInteractionWhileAnnotating(view: PaneView, event: Event): void {
+  if (!paneStateFor(view)?.annotationBorderVisible) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
+
 function bindDrawing(view: PaneView): void {
   let activeStroke: Stroke | null = null;
   const canvas = view.annotationCanvas;
@@ -278,8 +372,31 @@ function bindDrawing(view: PaneView): void {
     };
   };
 
+  canvas.addEventListener(
+    "wheel",
+    (event) => {
+      blockInteractionWhileAnnotating(view, event);
+    },
+    { passive: false },
+  );
+  view.annotationShield.addEventListener(
+    "wheel",
+    (event) => {
+      blockInteractionWhileAnnotating(view, event);
+    },
+    { passive: false },
+  );
+  view.annotationShield.addEventListener(
+    "touchmove",
+    (event) => {
+      blockInteractionWhileAnnotating(view, event);
+    },
+    { passive: false },
+  );
+
   canvas.addEventListener("pointerdown", (event) => {
-    const paneState = latestState?.panes.find((pane) => pane.paneId === view.paneId);
+    rememberPaneContext(view.paneId);
+    const paneState = paneStateFor(view);
     if (!paneState?.annotationBorderVisible || event.button !== 0) {
       return;
     }
@@ -289,6 +406,7 @@ function bindDrawing(view: PaneView): void {
       tool: event.pointerType === "pen" ? "pencil" : event.pointerType === "touch" ? "finger" : "mouse",
     };
     canvas.setPointerCapture(event.pointerId);
+    event.preventDefault();
   });
 
   canvas.addEventListener("pointermove", (event) => {
@@ -296,7 +414,8 @@ function bindDrawing(view: PaneView): void {
       return;
     }
     activeStroke.points.push(pointFromEvent(event));
-    redrawDrawings(view, [...(latestState?.panes.find((pane) => pane.paneId === view.paneId)?.drawings ?? []), activeStroke]);
+    redrawDrawings(view, [...(paneStateFor(view)?.drawings ?? []), activeStroke]);
+    event.preventDefault();
   });
 
   const finishStroke = (event: PointerEvent) => {
@@ -315,8 +434,9 @@ function bindDrawing(view: PaneView): void {
     if (canvas.hasPointerCapture(event.pointerId)) {
       canvas.releasePointerCapture(event.pointerId);
     }
-    const pane = latestState?.panes.find((entry) => entry.paneId === view.paneId);
+    const pane = paneStateFor(view);
     redrawDrawings(view, pane?.drawings ?? []);
+    event.preventDefault();
   };
 
   canvas.addEventListener("pointerup", finishStroke);
@@ -324,12 +444,16 @@ function bindDrawing(view: PaneView): void {
 }
 
 function attachCommonEvents(view: PaneView): void {
+  view.rootEl.addEventListener("pointerdown", () => {
+    rememberPaneContext(view.paneId);
+  });
   view.rootEl.addEventListener("pointermove", scheduleLabelsHide, { passive: true });
   view.controlsEl.addEventListener("mouseenter", () => {
     document.body.classList.remove("labels-hidden");
   });
   view.scrollEl.addEventListener("scroll", () => {
     reportPaneSnapshot(view);
+    view.currentScrollHandler?.();
     window.surfAce.command({
       paneId: view.paneId,
       type: "scroll",
@@ -362,6 +486,8 @@ function ensurePaneView(paneId: number): PaneView {
   const contentEl = document.createElement("div");
   contentEl.className = "pane-content";
   scrollEl.appendChild(contentEl);
+  const shieldEl = document.createElement("div");
+  shieldEl.className = "annotation-shield";
   const labelEl = document.createElement("div");
   labelEl.className = "pane-label";
   labelEl.innerHTML = "<span></span>";
@@ -373,16 +499,19 @@ function ensurePaneView(paneId: number): PaneView {
   toastEl.className = "pane-toast";
   toastEl.hidden = true;
 
-  rootEl.append(scrollEl, canvas, labelEl, controlsEl, toastEl);
+  rootEl.append(scrollEl, shieldEl, canvas, labelEl, controlsEl, toastEl);
 
   const view: PaneView = {
     annotationCanvas: canvas,
+    annotationShield: shieldEl,
     contentEl,
     controlsEl,
     currentContentKey: "",
     currentDrawingsKey: "",
+    currentRenderToken: 0,
     currentScrollHandler: null,
     currentWebView: null,
+    lastNavigation: null,
     paneId,
     rootEl,
     scrollEl,
@@ -420,6 +549,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   if (pane.showDone) {
     const done = createButton("Done", "done");
     done.addEventListener("click", () => {
+      rememberPaneContext(pane.paneId);
       window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
     });
     view.controlsEl.appendChild(done);
@@ -428,20 +558,35 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
 
   const back = createButton("◀", "back", !pane.canGoBack);
   back.addEventListener("click", () => {
+    rememberPaneContext(pane.paneId);
     window.surfAce.command({ direction: "back", paneId: pane.paneId, type: "history" });
   });
   const forward = createButton("▶", "forward", !pane.canGoForward);
   forward.addEventListener("click", () => {
+    rememberPaneContext(pane.paneId);
     window.surfAce.command({ direction: "forward", paneId: pane.paneId, type: "history" });
   });
   const annotate = createButton("👆", "annotate");
   annotate.addEventListener("click", () => {
+    rememberPaneContext(pane.paneId);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
   });
   view.controlsEl.append(back, forward, annotate);
 }
 
-function wireWebView(view: PaneView, pane: RendererPaneState, webview: Electron.WebviewTag): void {
+function sendNavigationIntent(view: PaneView, paneId: number, url: string): void {
+  if (!url) {
+    return;
+  }
+  const now = Date.now();
+  if (view.lastNavigation && view.lastNavigation.url === url && now - view.lastNavigation.at < 300) {
+    return;
+  }
+  view.lastNavigation = { at: now, url };
+  window.surfAce.command({ paneId, type: "navigation", url });
+}
+
+function wireWebView(view: PaneView, paneId: number, webview: Electron.WebviewTag): void {
   webview.addEventListener("ipc-message", (event) => {
     if (event.channel !== "surf-ace-content") {
       return;
@@ -452,21 +597,21 @@ function wireWebView(view: PaneView, pane: RendererPaneState, webview: Electron.
     }
     if (payload.type === "scroll") {
       window.surfAce.command({
-        paneId: pane.paneId,
+        paneId,
         type: "scroll",
         viewport: payload.viewport,
         visibleText: payload.visibleText,
       });
       window.surfAce.reportSnapshot({
         bounds: paneBounds(view),
-        paneId: pane.paneId,
+        paneId,
         selection: null,
         viewport: payload.viewport,
         visibleText: payload.visibleText,
       });
     } else if (payload.type === "selection") {
       window.surfAce.command({
-        paneId: pane.paneId,
+        paneId,
         selection: payload.selection ?? null,
         type: "selection",
       });
@@ -474,14 +619,16 @@ function wireWebView(view: PaneView, pane: RendererPaneState, webview: Electron.
       window.surfAce.command({
         kind: payload.kind,
         nearestContent: payload.nearestContent,
-        paneId: pane.paneId,
+        paneId,
         position: payload.position,
         type: "tap",
       });
+    } else if (payload.type === "navigation") {
+      sendNavigationIntent(view, paneId, String(payload.url ?? ""));
     } else if (payload.type === "ready") {
       window.surfAce.reportSnapshot({
         bounds: paneBounds(view),
-        paneId: pane.paneId,
+        paneId,
         selection: null,
         viewport: payload.viewport,
         visibleText: payload.visibleText,
@@ -489,28 +636,141 @@ function wireWebView(view: PaneView, pane: RendererPaneState, webview: Electron.
     }
   });
 
-  webview.addEventListener("did-navigate", (event) => {
-    if (pane.annotationBorderVisible) {
-      return;
+  const handleWillNavigate = (event: Event & { preventDefault?: () => void; url?: string }) => {
+    const url = String(event.url ?? "");
+    if (paneStateById(paneId)?.annotationBorderVisible) {
+      event.preventDefault?.();
     }
-    window.surfAce.command({ paneId: pane.paneId, type: "navigation", url: event.url });
-  });
-  webview.addEventListener("did-navigate-in-page", (event) => {
-    if (pane.annotationBorderVisible) {
-      return;
-    }
-    window.surfAce.command({ paneId: pane.paneId, type: "navigation", url: event.url });
+    sendNavigationIntent(view, paneId, url);
+  };
+
+  webview.addEventListener("will-navigate", handleWillNavigate as EventListener);
+  webview.addEventListener("will-frame-navigate", handleWillNavigate as EventListener);
+}
+
+function renderCenteredState(view: PaneView, title: string, detail?: string): void {
+  const empty = document.createElement("div");
+  empty.className = "content-empty";
+  const titleEl = document.createElement("strong");
+  titleEl.textContent = title;
+  empty.appendChild(titleEl);
+  if (detail) {
+    const detailEl = document.createElement("p");
+    detailEl.textContent = detail;
+    empty.appendChild(detailEl);
+  }
+  view.contentEl.appendChild(empty);
+  reportPaneSnapshot(view);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const decoded = window.atob(value);
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index += 1) {
+    bytes[index] = decoded.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function loadPdfJs(): Promise<PdfJsModule> {
+  pdfJsModulePromise ??= import("pdfjs-dist/legacy/build/pdf.mjs") as Promise<PdfJsModule>;
+  return pdfJsModulePromise;
+}
+
+function visiblePdfPageReport(view: PaneView, paneId: number, totalPages: number, force = false): void {
+  const pageEl = currentVisiblePdfPage(view);
+  if (!pageEl) {
+    return;
+  }
+  const page = Number(pageEl.dataset.pageNumber ?? "1");
+  const reportKey = `${page}/${totalPages}`;
+  if (!force && view.rootEl.dataset.pdfReportKey === reportKey) {
+    return;
+  }
+  view.rootEl.dataset.pdfReportKey = reportKey;
+  window.surfAce.reportPage({
+    page,
+    pageText: pageEl.dataset.pageText || undefined,
+    paneId,
+    totalPages,
   });
 }
 
-function paneBounds(view: PaneView) {
-  const rect = view.rootEl.getBoundingClientRect();
-  return {
-    height: rect.height,
-    width: rect.width,
-    x: rect.x,
-    y: rect.y,
-  };
+async function renderPdfContent(view: PaneView, pane: RendererPaneState, token: number): Promise<void> {
+  const container = document.createElement("div");
+  container.className = "content-pdf-stack";
+  view.contentEl.appendChild(container);
+
+  try {
+    const pdfJs = await loadPdfJs();
+    if (token !== view.currentRenderToken) {
+      return;
+    }
+    const documentProxy = await pdfJs.getDocument({
+      data: base64ToBytes((pane.content.content as PdfContent).data),
+      disableWorker: true,
+    }).promise;
+    if (token !== view.currentRenderToken) {
+      return;
+    }
+
+    for (let pageNumber = 1; pageNumber <= documentProxy.numPages; pageNumber += 1) {
+      const page = await documentProxy.getPage(pageNumber);
+      if (token !== view.currentRenderToken) {
+        return;
+      }
+
+      const viewport = page.getViewport({ scale: 1.5 });
+      const pageEl = document.createElement("section");
+      pageEl.className = "content-pdf-page";
+      pageEl.dataset.pageNumber = String(pageNumber);
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      if (!context) {
+        continue;
+      }
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      canvas.style.width = "100%";
+      canvas.style.height = "auto";
+      pageEl.appendChild(canvas);
+      container.appendChild(pageEl);
+
+      await page.render({ canvasContext: context, viewport }).promise;
+      const textContent = await page.getTextContent();
+      pageEl.dataset.pageText = textContent.items
+        .map((item) => item.str ?? "")
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 4096);
+    }
+
+    if (token !== view.currentRenderToken) {
+      return;
+    }
+
+    view.currentScrollHandler = () => {
+      visiblePdfPageReport(view, pane.paneId, documentProxy.numPages);
+    };
+    visiblePdfPageReport(view, pane.paneId, documentProxy.numPages, true);
+    reportPaneSnapshot(view);
+  } catch {
+    if (token !== view.currentRenderToken) {
+      return;
+    }
+    view.contentEl.replaceChildren();
+    renderCenteredState(view, "PDF unavailable", "This PDF could not be rendered on Electron.");
+  }
+}
+
+function resetDynamicContent(view: PaneView): number {
+  view.currentRenderToken += 1;
+  view.currentWebView = null;
+  view.currentScrollHandler = null;
+  view.rootEl.dataset.pdfReportKey = "";
+  view.contentEl.replaceChildren();
+  return view.currentRenderToken;
 }
 
 function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
@@ -520,64 +780,50 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   }
 
   view.currentContentKey = key;
-  view.currentWebView = null;
+  const renderToken = resetDynamicContent(view);
   view.contentEl.className = `pane-content type-${pane.content.contentType ?? "empty"}`;
-  view.contentEl.replaceChildren();
 
-  if (!pane.content.contentType || !pane.content.content) {
-    const empty = document.createElement("div");
-    empty.className = "content-empty";
-    empty.textContent = "Surface ready";
-    view.contentEl.appendChild(empty);
-    reportPaneSnapshot(view);
+  if (!pane.content.contentType || pane.content.content === null) {
+    renderCenteredState(view, "Surface ready");
     return;
   }
 
   if (pane.content.contentType === "html") {
+    const html = pane.content.content as HtmlContent;
     const webview = document.createElement("webview");
     webview.className = "content-html-webview";
     webview.setAttribute("preload", bootstrap!.guestPreloadUrl);
     webview.src = `data:text/html;charset=utf-8,${encodeURIComponent(
       `<!doctype html><html><head>${
-        pane.content.content.baseUrl ? `<base href="${pane.content.content.baseUrl}">` : ""
-      }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${pane.content.content.html}</body></html>`,
+        html.baseUrl ? `<base href="${html.baseUrl}">` : ""
+      }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${html.html}</body></html>`,
     )}`;
     view.contentEl.appendChild(webview);
     view.currentWebView = webview;
-    wireWebView(view, pane, webview);
+    wireWebView(view, pane.paneId, webview);
     return;
   }
 
   if (pane.content.contentType === "image") {
+    const imageContent = pane.content.content as ImageContent;
     const image = document.createElement("img");
     image.className = "content-image";
-    image.alt = pane.content.content.alt ?? "";
-    image.src = `data:${pane.content.content.mediaType};base64,${pane.content.content.data}`;
+    image.alt = imageContent.alt ?? "";
+    image.src = `data:${imageContent.mediaType};base64,${imageContent.data}`;
     view.contentEl.appendChild(image);
     reportPaneSnapshot(view);
     return;
   }
 
   if (pane.content.contentType === "pdf") {
-    const frame = document.createElement("iframe");
-    frame.className = "content-pdf-frame";
-    frame.src = `data:application/pdf;base64,${pane.content.content.data}`;
-    frame.addEventListener("load", () => {
-      reportPaneSnapshot(view);
-      window.surfAce.reportPage({
-        page: 1,
-        paneId: pane.paneId,
-        totalPages: 1,
-      });
-    });
-    view.contentEl.appendChild(frame);
+    void renderPdfContent(view, pane, renderToken);
     return;
   }
 
   if (pane.content.contentType === "markdown") {
     const article = document.createElement("article");
     article.className = "content-markdown";
-    article.innerHTML = markdownToHtml(pane.content.content.markdown);
+    article.innerHTML = markdownToHtml((pane.content.content as MarkdownContent).markdown);
     view.contentEl.appendChild(article);
     reportPaneSnapshot(view);
     return;
@@ -586,9 +832,19 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   if (pane.content.contentType === "terminal") {
     const pre = document.createElement("pre");
     pre.className = "content-terminal";
-    pre.textContent = pane.content.content.lines.join("\n");
+    pre.textContent = (pane.content.content as TerminalContent).lines.join("\n");
     view.contentEl.appendChild(pre);
     reportPaneSnapshot(view);
+    return;
+  }
+
+  if (pane.content.contentType === "video") {
+    renderCenteredState(view, "Video unavailable", "This Electron surface does not render video content.");
+    return;
+  }
+
+  if (pane.content.contentType === "canvas") {
+    renderCenteredState(view, "Canvas unavailable", "This Electron surface does not render canvas content.");
   }
 }
 
@@ -596,8 +852,11 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   view.rootEl.classList.toggle("annotating", pane.annotationBorderVisible);
   view.rootEl.classList.toggle("flush-in-flight", pane.flushInFlight);
   view.annotationCanvas.classList.toggle("enabled", pane.annotationBorderVisible);
-  const label = view.rootEl.querySelector(".pane-label span") as HTMLSpanElement;
+  view.annotationShield.classList.toggle("enabled", pane.annotationBorderVisible);
+  const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement;
+  const label = labelWrap.querySelector("span") as HTMLSpanElement;
   label.textContent = pane.label;
+  labelWrap.hidden = !pane.label;
   buildControls(view, pane);
   renderPaneContent(view, pane);
 
@@ -637,6 +896,7 @@ function renderWindow(state: RendererWindowState): void {
   const windowLabel = document.createElement("div");
   windowLabel.className = "window-label";
   windowLabel.textContent = state.windowLabel;
+  windowLabel.hidden = !state.windowLabel;
   const windowName = document.createElement("div");
   windowName.className = "window-name";
   windowName.textContent = state.name;
@@ -666,6 +926,7 @@ async function init(): Promise<void> {
       const view = paneViews.get(pane.paneId);
       if (view) {
         redrawDrawings(view, pane.drawings);
+        view.currentScrollHandler?.();
         reportPaneSnapshot(view);
       }
     }

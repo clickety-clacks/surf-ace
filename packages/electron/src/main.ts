@@ -15,6 +15,7 @@ const WS_PORT = Number(process.env.SURF_ACE_PORT ?? 18791);
 const STATE_FILE_NAME = "surface-core-state.json";
 
 const windows = new Map<string, BrowserWindow>();
+const lastExplicitPaneIds = new Map<string, number>();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -77,9 +78,14 @@ function broadcastSurfaceState(surfaceId: string): void {
   if (!window || window.isDestroyed()) {
     return;
   }
+  const state = core.getRendererWindowState(surfaceId);
+  const activePaneId = lastExplicitPaneIds.get(surfaceId);
+  if (activePaneId && !state.panes.some((pane) => pane.paneId === activePaneId)) {
+    lastExplicitPaneIds.delete(surfaceId);
+  }
   const windowLabel = core.surfaceWindowLabel(surfaceId);
   window.setTitle(windowLabel ? `${endpointName()} · ${windowLabel}` : endpointName());
-  window.webContents.send("surface:state", core.getRendererWindowState(surfaceId));
+  window.webContents.send("surface:state", state);
 }
 
 function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
@@ -88,26 +94,26 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
       return;
     }
     const state = core.getRendererWindowState(surfaceId);
-    const firstPaneId = state.panes[0]?.paneId;
-    if (!firstPaneId) {
+    const activePaneId = lastExplicitPaneIds.get(surfaceId);
+    if (!activePaneId || !state.panes.some((pane) => pane.paneId === activePaneId)) {
       return;
     }
     if (input.key.toLowerCase() === "a" && !input.meta) {
-      core.setAnnotating(surfaceId, firstPaneId, true);
+      core.setAnnotating(surfaceId, activePaneId, true);
       void persistState();
       return;
     }
     if (input.key.toLowerCase() === "d" && !input.meta) {
-      core.setAnnotating(surfaceId, firstPaneId, false);
+      core.setAnnotating(surfaceId, activePaneId, false);
       void persistState();
       return;
     }
     if (input.meta && input.key === "[") {
-      core.navigateHistory(surfaceId, firstPaneId, "back");
+      core.navigateHistory(surfaceId, activePaneId, "back");
       return;
     }
     if (input.meta && input.key === "]") {
-      core.navigateHistory(surfaceId, firstPaneId, "forward");
+      core.navigateHistory(surfaceId, activePaneId, "forward");
     }
   });
 }
@@ -140,6 +146,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   });
   window.on("closed", () => {
     windows.delete(surfaceId);
+    lastExplicitPaneIds.delete(surfaceId);
     if (!isQuitting) {
       void server.broadcastSurfaceRemoved(surfaceId);
       server.disconnectSurface(surfaceId, "provider_shutdown");
@@ -251,7 +258,12 @@ function installIpc(): void {
     }
 
     const paneId = Number(payload.paneId ?? 0);
+    if (paneId > 0) {
+      lastExplicitPaneIds.set(surfaceId, paneId);
+    }
     switch (payload.type) {
+      case "focus-pane":
+        break;
       case "annotate":
         core.setAnnotating(surfaceId, paneId, Boolean(payload.enabled));
         break;

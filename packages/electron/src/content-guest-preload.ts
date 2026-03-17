@@ -26,6 +26,10 @@ type ContentTelemetry =
       type: "tap";
     }
   | {
+      type: "navigation";
+      url: string;
+    }
+  | {
       type: "ready";
       visibleText: string;
       viewport: {
@@ -98,6 +102,23 @@ function nearestText(target: EventTarget | null): string | undefined {
   return text ? text.slice(0, 240) : undefined;
 }
 
+function navigationTarget(target: EventTarget | null): HTMLElement | null {
+  if (!(target instanceof HTMLElement)) {
+    return null;
+  }
+  return target.closest(
+    "a[href],button,[role='button'],input[type='button'],input[type='submit'],summary",
+  );
+}
+
+function linkTarget(target: EventTarget | null): HTMLAnchorElement | null {
+  if (!(target instanceof HTMLElement)) {
+    return null;
+  }
+  const match = target.closest("a[href]");
+  return match instanceof HTMLAnchorElement ? match : null;
+}
+
 let scrollTimer: NodeJS.Timeout | null = null;
 window.addEventListener(
   "scroll",
@@ -124,6 +145,9 @@ document.addEventListener("selectionchange", () => {
 });
 
 document.addEventListener("pointerdown", (event) => {
+  if (navigationTarget(event.target)) {
+    return;
+  }
   longPressTimer = setTimeout(() => {
     emit({
       kind: "long_press",
@@ -136,6 +160,13 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 document.addEventListener("pointerup", (event) => {
+  if (navigationTarget(event.target)) {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+    return;
+  }
   if (longPressTimer) {
     clearTimeout(longPressTimer);
     longPressTimer = null;
@@ -147,6 +178,42 @@ document.addEventListener("pointerup", (event) => {
     });
   }
 });
+
+document.addEventListener("pointercancel", () => {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+});
+
+document.addEventListener(
+  "click",
+  (event) => {
+    const link = linkTarget(event.target);
+    if (!link?.href) {
+      return;
+    }
+    emit({
+      type: "navigation",
+      url: link.href,
+    });
+  },
+  { capture: true },
+);
+
+document.addEventListener(
+  "submit",
+  (event) => {
+    if (!(event.target instanceof HTMLFormElement)) {
+      return;
+    }
+    emit({
+      type: "navigation",
+      url: event.target.action || window.location.href,
+    });
+  },
+  { capture: true },
+);
 
 window.addEventListener("DOMContentLoaded", () => {
   emit({
