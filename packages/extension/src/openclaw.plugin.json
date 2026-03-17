@@ -1,0 +1,11 @@
+{
+  "name": "surf-ace",
+  "version": "0.1.0",
+  "tools": [
+    "surf_ace_list",
+    "surf_ace_push",
+    "surf_ace_read",
+    "surf_ace_snapshot",
+    "surf_ace_annotate_remove"
+  ]
+}
