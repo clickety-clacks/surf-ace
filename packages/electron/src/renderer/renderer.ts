@@ -57,7 +57,7 @@ type LayoutNode =
 
 type RendererWindowState = {
   connectionBar: "connected" | "connecting" | "disconnected";
-  layout: LayoutNode;
+  layout: LayoutNode | null;
   name: string;
   panes: RendererPaneState[];
   surfaceId: string;
@@ -642,7 +642,9 @@ function renderWindow(state: RendererWindowState): void {
   windowName.textContent = state.name;
   const layoutRoot = document.createElement("div");
   layoutRoot.className = "layout-root";
-  layoutRoot.appendChild(renderLayout(state.layout, panesById));
+  if (state.layout) {
+    layoutRoot.appendChild(renderLayout(state.layout, panesById));
+  }
   wrapper.append(windowLabel, windowName, layoutRoot);
   appRoot.replaceChildren(wrapper);
 }

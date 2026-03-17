@@ -57,10 +57,12 @@ class FakeSurfAceWsServer {
   readonly contentSetRequests: Array<{
     contentId: string;
     contentType: string;
+    historyOwnerToken: string;
     paneId: number;
     revision: number;
   }> = [];
-  readonly initialRemotePaneId = 41;
+  initialRemotePaneId = 41;
+  readonly pairRequests: Array<{ initialPaneId: number; windowLabel: string }> = [];
   readonly panes = new Map<number, TestPane>([
     [
       41,
@@ -192,6 +194,22 @@ class FakeSurfAceWsServer {
         );
         return;
       case "pair.request":
+        const requestedInitialPaneId = Number(message.payload?.initialPaneId ?? 0);
+        if (
+          requestedInitialPaneId > 0 &&
+          this.panes.size === 1 &&
+          !this.panes.has(requestedInitialPaneId)
+        ) {
+          const bootstrapPane = this.panes.get(this.initialRemotePaneId);
+          assert.ok(bootstrapPane);
+          this.panes.delete(this.initialRemotePaneId);
+          this.initialRemotePaneId = requestedInitialPaneId;
+          this.panes.set(this.initialRemotePaneId, bootstrapPane);
+        }
+        this.pairRequests.push({
+          initialPaneId: Number(message.payload?.initialPaneId ?? 0),
+          windowLabel: String(message.payload?.windowLabel ?? ""),
+        });
         this.pairedSocket = socket;
         socket.send(
           JSON.stringify(
@@ -302,6 +320,7 @@ class FakeSurfAceWsServer {
         this.contentSetRequests.push({
           contentId: pane.contentId,
           contentType: pane.contentType,
+          historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
           paneId,
           revision: pane.revision,
         });
@@ -526,9 +545,24 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         );
 
         assert.equal(server.contentSetRequests.length, 3);
+        assert.deepEqual(server.pairRequests, [
+          {
+            initialPaneId: 1,
+            windowLabel: "a",
+          },
+        ]);
         assert.deepEqual(
           server.contentSetRequests.map((request) => request.paneId),
           [server.initialRemotePaneId, server.initialRemotePaneId, server.initialRemotePaneId],
+        );
+        assert.ok(server.contentSetRequests.every((request) => request.historyOwnerToken.startsWith("hot_")));
+        assert.equal(
+          server.contentSetRequests[0]?.historyOwnerToken,
+          server.contentSetRequests[1]?.historyOwnerToken,
+        );
+        assert.notEqual(
+          server.contentSetRequests[0]?.historyOwnerToken,
+          server.contentSetRequests[2]?.historyOwnerToken,
         );
         assert.equal(first.paneId, 1);
         assert.equal(second.paneId, 1);

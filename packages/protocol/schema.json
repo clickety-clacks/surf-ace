@@ -399,11 +399,13 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId"],
+          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId", "windowLabel", "initialPaneId"],
           "properties": {
             "providerId": { "$ref": "#/$defs/ProviderId" },
             "connectionId": { "$ref": "#/$defs/ConnectionId" },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "windowLabel": { "type": "string", "minLength": 1 },
+            "initialPaneId": { "$ref": "#/$defs/PaneId" },
             "providerName": { "type": "string" },
             "protocolVersion": { "const": 1 },
             "takeover": { "type": "boolean" },
@@ -436,13 +438,14 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["paneId", "contentId", "revision", "contentType", "content"],
+              "required": ["paneId", "contentId", "historyOwnerToken", "revision", "contentType", "content"],
               "properties": {
                 "paneId": {
                   "$ref": "#/$defs/PaneId",
                   "description": "Target pane. Required — CLU must always specify which pane to target."
                 },
                 "contentId": { "$ref": "#/$defs/ContentId" },
+                "historyOwnerToken": { "type": "string", "minLength": 1 },
                 "revision": { "$ref": "#/$defs/Revision" },
                 "contentType": { "$ref": "#/$defs/ContentType" },
                 "content": {},

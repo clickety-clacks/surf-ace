@@ -230,24 +230,11 @@ final class SurfAceRuntime {
         }
 
         let stored = identityMapping.surfacesBySceneKey[sceneKey]
-        let surfaceId: String
-        let windowLabel: String
-        let initialPaneId: Int
+        let surfaceId = stored?.surfaceId ?? randomHex(prefix: "sf", byteCount: 8)
 
-        if let stored {
-            surfaceId = stored.surfaceId
-            windowLabel = stored.windowLabel
-            initialPaneId = stored.initialPaneId
-        } else {
-            surfaceId = randomHex(prefix: "sf", byteCount: 8)
-            windowLabel = windowLabelForIndex(identityMapping.nextWindowLabelIndex)
-            identityMapping.nextWindowLabelIndex += 1
-            initialPaneId = identityMapping.nextPaneId
-            identityMapping.nextPaneId += 1
+        if stored == nil {
             identityMapping.surfacesBySceneKey[sceneKey] = StoredSurfaceIdentity(
-                surfaceId: surfaceId,
-                windowLabel: windowLabel,
-                initialPaneId: initialPaneId
+                surfaceId: surfaceId
             )
             persistIdentityMapping()
         }
@@ -255,9 +242,8 @@ final class SurfAceRuntime {
         let surface = SurfAceSurfaceModel(
             sceneKey: sceneKey,
             surfaceId: surfaceId,
-            windowLabel: windowLabel,
-            name: "\(screenName) \(windowLabel.uppercased())",
-            initialPaneId: initialPaneId
+            windowLabel: "",
+            name: screenName
         )
         surfaceById[surfaceId] = surface
         surfaceIdBySceneKey[sceneKey] = surfaceId
@@ -781,8 +767,11 @@ final class SurfAceRuntime {
             requestedIdleWindowMs: drawingConfigPayload?["idleWindowMs"] as? Int,
             requestedMaxIntervalMs: drawingConfigPayload?["maxIntervalMs"] as? Int
         )
-        let providerWindowLabel = normalizedWindowLabel(from: payload["windowLabel"])
-        let providerInitialPaneId = payload["initialPaneId"] as? Int
+        guard let providerWindowLabel = normalizedWindowLabel(from: payload["windowLabel"]),
+              let providerInitialPaneId = payload["initialPaneId"] as? Int,
+              providerInitialPaneId > 0 else {
+            return makeErrorResponse(op: "pair.request", id: id, code: "invalid_payload", message: "windowLabel and initialPaneId are required")
+        }
         let takeover = payload["takeover"] as? Bool ?? false
         let resumePayload = payload["resume"] as? [String: Any]
         let resumeSessionId = resumePayload?["sessionId"] as? String
@@ -1071,7 +1060,9 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "invalid content.set payload")
         }
 
-        let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"])
+        guard let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"]) else {
+            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "historyOwnerToken is required")
+        }
         applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
 
         pane.pendingFlushStrokes.removeAll()
@@ -1577,10 +1568,9 @@ final class SurfAceRuntime {
         surfaceById[surfaceId]?.panesById[paneId]
     }
 
-    private func applyContentSet(frame: SurfAceFrame, to pane: SurfAcePaneModel, historyOwnerToken: String?) {
+    private func applyContentSet(frame: SurfAceFrame, to pane: SurfAcePaneModel, historyOwnerToken: String) {
         let nextEntry = SurfAcePaneEntry.from(frame: frame, historyOwnerToken: historyOwnerToken)
         let shouldReplaceInPlace = pane.currentEntry.contentId != nil
-            && historyOwnerToken != nil
             && pane.currentEntry.historyOwnerToken == historyOwnerToken
 
         if shouldReplaceInPlace {
@@ -1598,52 +1588,20 @@ final class SurfAceRuntime {
         pane.currentEntry = nextEntry
     }
 
-    private func applyProviderBootstrapTopology(surface: SurfAceSurfaceModel, windowLabel: String?, initialPaneId: Int?) {
-        var didPersist = false
-
-        if let windowLabel, surface.windowLabel != windowLabel {
+    private func applyProviderBootstrapTopology(surface: SurfAceSurfaceModel, windowLabel: String, initialPaneId: Int) {
+        if surface.windowLabel != windowLabel {
             surface.windowLabel = windowLabel
             surface.name = "\(screenName) \(windowLabel.uppercased())"
-            if var stored = identityMapping.surfacesBySceneKey[surface.sceneKey] {
-                stored.windowLabel = windowLabel
-                identityMapping.surfacesBySceneKey[surface.sceneKey] = stored
-                didPersist = true
-            }
         }
 
-        if let initialPaneId {
-            didPersist = reassignBootstrapPaneIfNeeded(surface: surface, initialPaneId: initialPaneId) || didPersist
+        guard initialPaneId > 0 else {
+            return
         }
 
-        if didPersist {
-            persistIdentityMapping()
+        if surface.panes.isEmpty {
+            surface.panesById[initialPaneId] = SurfAcePaneModel(paneId: initialPaneId)
+            surface.paneLayout = .leaf(initialPaneId)
         }
-    }
-
-    private func reassignBootstrapPaneIfNeeded(surface: SurfAceSurfaceModel, initialPaneId: Int) -> Bool {
-        guard initialPaneId > 0,
-              surface.panes.count == 1,
-              let currentPaneId = surface.paneLayout.paneIDs.first,
-              currentPaneId != initialPaneId,
-              surface.panesById[initialPaneId] == nil,
-              let currentPane = surface.panesById[currentPaneId],
-              currentPane.currentEntry.contentId == nil,
-              currentPane.backStack.isEmpty,
-              currentPane.forwardStack.isEmpty else {
-            return false
-        }
-
-        let replacementPane = SurfAcePaneModel(paneId: initialPaneId, name: currentPane.name)
-        replacementPane.lastMeasuredSize = currentPane.lastMeasuredSize
-        surface.panesById.removeValue(forKey: currentPaneId)
-        surface.panesById[initialPaneId] = replacementPane
-        surface.paneLayout = .leaf(initialPaneId)
-
-        if var stored = identityMapping.surfacesBySceneKey[surface.sceneKey] {
-            stored.initialPaneId = initialPaneId
-            identityMapping.surfacesBySceneKey[surface.sceneKey] = stored
-        }
-        return true
     }
 
     private func viewportPayload(for surface: SurfAceSurfaceModel) -> [String: Any] {
@@ -1668,6 +1626,8 @@ final class SurfAceRuntime {
 
     private func paneRect(in rect: CGRect, layout: SurfAcePaneLayoutNode, targetPaneId: Int) -> CGRect? {
         switch layout {
+        case .empty:
+            return nil
         case .leaf(let paneId):
             return paneId == targetPaneId ? rect : nil
         case .split(let direction, let children):
@@ -1852,16 +1812,6 @@ final class SurfAceRuntime {
         guard let value = value as? String else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private func windowLabelForIndex(_ index: Int) -> String {
-        var value = index
-        var label = ""
-        repeat {
-            label = String(UnicodeScalar(97 + (value % 26))!) + label
-            value = (value / 26) - 1
-        } while value >= 0
-        return label
     }
 
     private func randomHex(prefix: String? = nil, byteCount: Int) -> String {

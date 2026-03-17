@@ -163,6 +163,8 @@ export type PairRequest = RequestBase<"pair.request"> & {
     providerId: ProviderId;
     connectionId: ConnectionId;
     surfaceId: SurfaceId;
+    windowLabel: string;
+    initialPaneId: PaneId;
     providerName?: string;
     protocolVersion: 1;
     takeover?: boolean;
@@ -176,6 +178,7 @@ export type ContentSetPayload =
   | {
       paneId: PaneId;
       contentId: ContentId;
+      historyOwnerToken: string;
       revision: Revision;
       contentType: "html";
       content: HtmlContent;
@@ -184,6 +187,7 @@ export type ContentSetPayload =
   | {
       paneId: PaneId;
       contentId: ContentId;
+      historyOwnerToken: string;
       revision: Revision;
       contentType: "image";
       content: ImageContent;
@@ -192,6 +196,7 @@ export type ContentSetPayload =
   | {
       paneId: PaneId;
       contentId: ContentId;
+      historyOwnerToken: string;
       revision: Revision;
       contentType: "pdf";
       content: PdfContent;
@@ -200,6 +205,7 @@ export type ContentSetPayload =
   | {
       paneId: PaneId;
       contentId: ContentId;
+      historyOwnerToken: string;
       revision: Revision;
       contentType: "terminal";
       content: TerminalContent;
@@ -208,6 +214,7 @@ export type ContentSetPayload =
   | {
       paneId: PaneId;
       contentId: ContentId;
+      historyOwnerToken: string;
       revision: Revision;
       contentType: "markdown";
       content: MarkdownContent;
@@ -216,6 +223,7 @@ export type ContentSetPayload =
   | {
       paneId: PaneId;
       contentId: ContentId;
+      historyOwnerToken: string;
       revision: Revision;
       contentType: "video";
       content: VideoContent;
@@ -224,6 +232,7 @@ export type ContentSetPayload =
   | {
       paneId: PaneId;
       contentId: ContentId;
+      historyOwnerToken: string;
       revision: Revision;
       contentType: "canvas";
       content: CanvasContent;

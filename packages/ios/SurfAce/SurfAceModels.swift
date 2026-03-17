@@ -276,11 +276,14 @@ enum SurfAceLayoutDirection: String {
 }
 
 indirect enum SurfAcePaneLayoutNode {
+    case empty
     case leaf(Int)
     case split(direction: SurfAceLayoutDirection, children: [SurfAcePaneLayoutNode])
 
     var paneIDs: [Int] {
         switch self {
+        case .empty:
+            return []
         case .leaf(let paneId):
             return [paneId]
         case .split(_, let children):
@@ -290,6 +293,8 @@ indirect enum SurfAcePaneLayoutNode {
 
     func replacingLeaf(paneId: Int, with replacement: SurfAcePaneLayoutNode) -> SurfAcePaneLayoutNode {
         switch self {
+        case .empty:
+            return self
         case .leaf(let currentPaneId):
             return currentPaneId == paneId ? replacement : self
         case .split(let direction, let children):
@@ -302,6 +307,8 @@ indirect enum SurfAcePaneLayoutNode {
 
     func removingLeaf(paneId: Int) -> SurfAcePaneLayoutNode? {
         switch self {
+        case .empty:
+            return self
         case .leaf(let currentPaneId):
             return currentPaneId == paneId ? nil : self
         case .split(let direction, let children):
@@ -392,14 +399,13 @@ final class SurfAceSurfaceModel {
     var lastError: String?
     @ObservationIgnored var labelRestoreTask: Task<Void, Never>?
 
-    init(sceneKey: String, surfaceId: String, windowLabel: String, name: String, initialPaneId: Int) {
+    init(sceneKey: String, surfaceId: String, windowLabel: String, name: String) {
         self.sceneKey = sceneKey
         self.surfaceId = surfaceId
         self.windowLabel = windowLabel
         self.name = name
-        let initialPane = SurfAcePaneModel(paneId: initialPaneId)
-        self.panesById = [initialPaneId: initialPane]
-        self.paneLayout = .leaf(initialPaneId)
+        self.panesById = [:]
+        self.paneLayout = .empty
     }
 
     var panes: [SurfAcePaneModel] { paneLayout.paneIDs.compactMap { panesById[$0] } }
@@ -407,15 +413,11 @@ final class SurfAceSurfaceModel {
 }
 
 struct SurfAceIdentityMapping: Codable {
-    var nextPaneId = 1
-    var nextWindowLabelIndex = 0
     var surfacesBySceneKey: [String: StoredSurfaceIdentity] = [:]
 }
 
 struct StoredSurfaceIdentity: Codable {
     var surfaceId: String
-    var windowLabel: String
-    var initialPaneId: Int
 }
 
 extension CGRect {

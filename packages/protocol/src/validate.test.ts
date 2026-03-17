@@ -9,9 +9,11 @@ test("validateEnvelopeType accepts current request envelopes", () => {
     op: "pair.request",
     payload: {
       connectionId: "cn_1",
+      initialPaneId: 1,
       protocolVersion: 1,
       providerId: "prov_1",
       surfaceId: "sf_1",
+      windowLabel: "a",
     },
     sentAt: Date.now(),
     type: "request",

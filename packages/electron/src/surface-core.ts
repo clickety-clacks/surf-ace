@@ -78,7 +78,7 @@ type LayoutNode =
 
 type SurfaceState = {
   connectionBar: "connected" | "connecting" | "disconnected";
-  layout: LayoutNode;
+  layout: LayoutNode | null;
   name: string;
   paneOrder: number[];
   panes: Map<number, PaneState>;
@@ -88,11 +88,8 @@ type SurfaceState = {
 };
 
 export type PersistentSurfaceState = {
-  nextPaneId: number;
-  nextWindowLabelIndex: number;
   primarySurfaceId: string | null;
   version: 1;
-  windowLabels: Record<string, string>;
 };
 
 export type RendererPaneState = {
@@ -117,7 +114,7 @@ export type RendererPaneState = {
 
 export type RendererWindowState = {
   connectionBar: SurfaceState["connectionBar"];
-  layout: LayoutNode;
+  layout: LayoutNode | null;
   name: string;
   panes: RendererPaneState[];
   surfaceId: string;
@@ -175,11 +172,8 @@ export class SurfaceCore {
   constructor(options?: { now?: () => number; persistentState?: PersistentSurfaceState }) {
     this.now = options?.now ?? (() => Date.now());
     this.persistentState = options?.persistentState ?? {
-      nextPaneId: 1,
-      nextWindowLabelIndex: 0,
       primarySurfaceId: null,
       version: 1,
-      windowLabels: {},
     };
   }
 
@@ -254,7 +248,7 @@ export class SurfaceCore {
     const surface = this.getSurface(surfaceId);
     return {
       connectionBar: surface.connectionBar,
-      layout: structuredClone(surface.layout),
+      layout: surface.layout ? structuredClone(surface.layout) : null,
       name: surface.name,
       panes: surface.paneOrder.map((paneId) => {
         const pane = surface.panes.get(paneId)!;
@@ -358,6 +352,27 @@ export class SurfaceCore {
     };
   }
 
+  applyProviderBootstrapTopology(
+    surfaceId: string,
+    payload: { initialPaneId: number; windowLabel: string },
+  ): void {
+    const surface = this.getSurface(surfaceId);
+    let didChange = false;
+
+    if (surface.windowLabel !== payload.windowLabel) {
+      surface.windowLabel = payload.windowLabel;
+      didChange = true;
+    }
+
+    if (this.ensureInitialPane(surface, payload.initialPaneId)) {
+      didChange = true;
+    }
+
+    if (didChange) {
+      this.emit({ surfaceId, type: "surface-changed" });
+    }
+  }
+
   paneSplit(
     surfaceId: string,
     payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; paneId: number },
@@ -380,7 +395,7 @@ export class SurfaceCore {
       surface.panes.set(pane.paneId, pane);
       surface.paneOrder.push(pane.paneId);
     }
-    surface.layout = splitLayoutNode(surface.layout, sourcePane.paneId, payload.direction, [
+    surface.layout = splitLayoutNode(surface.layout!, sourcePane.paneId, payload.direction, [
       sourcePane.paneId,
       ...newPaneIds,
     ]);
@@ -397,7 +412,7 @@ export class SurfaceCore {
     }
 
     return {
-      panes: flattenLayout(surface.layout).map((paneId) => ({ paneId })),
+      panes: flattenLayout(surface.layout!).map((paneId) => ({ paneId })),
     };
   }
 
@@ -420,7 +435,7 @@ export class SurfaceCore {
 
     surface.panes.delete(paneId);
     surface.paneOrder = surface.paneOrder.filter((entry) => entry !== paneId);
-    surface.layout = collapseLayout(removePaneFromLayout(surface.layout, paneId));
+    surface.layout = collapseLayout(removePaneFromLayout(surface.layout!, paneId));
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({ paneId, surfaceId, type: "pane-removed" });
     return {
@@ -432,7 +447,6 @@ export class SurfaceCore {
   contentSet(
     surfaceId: string,
     payload: ContentSetRequest["payload"],
-    options?: { ownerToken?: string | null },
   ): MutationAckResponse["payload"] {
     const pane = this.requirePane(surfaceId, payload.paneId);
     if (!SUPPORTED_CONTENT_TYPES.includes(payload.contentType)) {
@@ -452,17 +466,16 @@ export class SurfaceCore {
       pane.history = pane.history.slice(0, pane.historyIndex + 1);
     }
 
-    const ownerToken = options?.ownerToken ?? null;
     const nextEntry: HistoryEntry = {
       annotations: [],
       content: cloneContent(payload.content),
       contentId: payload.contentId,
       contentType: payload.contentType,
       display: payload.display ? { ...payload.display } : undefined,
-      ownerToken,
+      ownerToken: payload.historyOwnerToken,
       revision: payload.revision,
     };
-    if (shouldReplaceVisibleEntry(pane, ownerToken)) {
+    if (shouldReplaceVisibleEntry(pane, payload.historyOwnerToken)) {
       pane.history[pane.historyIndex] = nextEntry;
     } else {
       pane.history.push(nextEntry);
@@ -782,19 +795,15 @@ export class SurfaceCore {
   }
 
   private createSurface(surfaceId: string, name: string, viewport: SurfaceViewport): SurfaceState {
-    const windowLabel = this.ensureWindowLabel(surfaceId);
-    const firstPaneId = this.allocateInitialPaneId();
-    const firstPane = createPaneState(firstPaneId, this.now());
-
     const surface: SurfaceState = {
       connectionBar: "disconnected",
-      layout: { paneId: firstPaneId, type: "pane" },
+      layout: null,
       name,
-      paneOrder: [firstPaneId],
-      panes: new Map([[firstPaneId, firstPane]]),
+      paneOrder: [],
+      panes: new Map(),
       surfaceId,
       viewport: cloneViewport(viewport),
-      windowLabel,
+      windowLabel: "",
     };
     this.surfaces.set(surfaceId, surface);
     this.emit({ surfaceId, type: "surface-created" });
@@ -802,21 +811,17 @@ export class SurfaceCore {
     return surface;
   }
 
-  private allocateInitialPaneId(): number {
-    const paneId = this.persistentState.nextPaneId;
-    this.persistentState.nextPaneId += 1;
-    return paneId;
-  }
-
-  private ensureWindowLabel(surfaceId: string): string {
-    const existing = this.persistentState.windowLabels[surfaceId];
-    if (existing) {
-      return existing;
+  private ensureInitialPane(surface: SurfaceState, initialPaneId: number): boolean {
+    if (initialPaneId < 1 || surface.panes.has(initialPaneId)) {
+      return false;
     }
-    const label = windowLabelForIndex(this.persistentState.nextWindowLabelIndex);
-    this.persistentState.nextWindowLabelIndex += 1;
-    this.persistentState.windowLabels[surfaceId] = label;
-    return label;
+    if (surface.panes.size > 0) {
+      return false;
+    }
+    surface.panes.set(initialPaneId, createPaneState(initialPaneId, this.now()));
+    surface.paneOrder = [initialPaneId];
+    surface.layout = { paneId: initialPaneId, type: "pane" };
+    return true;
   }
 
   private requirePane(surfaceId: string, paneId: number): PaneState {
@@ -879,16 +884,12 @@ function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
 }
 
-function shouldReplaceVisibleEntry(pane: PaneState, ownerToken: string | null): boolean {
+function shouldReplaceVisibleEntry(pane: PaneState, ownerToken: string): boolean {
   const current = currentEntry(pane);
-  if (isBootstrapEntry(current)) {
+  if (current.contentId === null) {
     return true;
   }
-  return ownerToken !== null && current.ownerToken === ownerToken;
-}
-
-function isBootstrapEntry(entry: HistoryEntry): boolean {
-  return entry.contentId === null && entry.contentType === null && entry.revision === 0;
+  return current.ownerToken === ownerToken;
 }
 
 function assertRevision(pane: PaneState, revision: number): void {
@@ -1038,14 +1039,4 @@ function firstPointTimestamp(stroke: Stroke): number {
 
 function lastPointTimestamp(stroke: Stroke): number {
   return stroke.points[stroke.points.length - 1]?.timestamp ?? Date.now();
-}
-
-function windowLabelForIndex(index: number): string {
-  let remaining = index;
-  let output = "";
-  do {
-    output = String.fromCharCode(97 + (remaining % 26)) + output;
-    remaining = Math.floor(remaining / 26) - 1;
-  } while (remaining >= 0);
-  return output;
 }

@@ -12,11 +12,13 @@ export const pairRequestSchema = {
     payload: {
       type: "object",
       additionalProperties: false,
-      required: ["providerId", "connectionId", "surfaceId", "protocolVersion"],
+      required: ["providerId", "connectionId", "surfaceId", "windowLabel", "initialPaneId", "protocolVersion"],
       properties: {
         providerId: { type: "string", pattern: "^pv_[A-Za-z0-9._:-]{3,64}$" },
         connectionId: { type: "string", pattern: "^cn_[A-Za-z0-9._:-]{3,64}$" },
         surfaceId: { type: "string", pattern: "^sf_[A-Za-z0-9._:-]{3,64}$" },
+        windowLabel: { type: "string", minLength: 1 },
+        initialPaneId: { type: "integer", minimum: 1 },
         providerName: { type: "string" },
         protocolVersion: { const: 1 },
         takeover: { type: "boolean" },
@@ -57,10 +59,11 @@ export const contentSetRequestSchema = {
     payload: {
       type: "object",
       additionalProperties: false,
-      required: ["paneId", "contentId", "revision", "contentType", "content"],
+      required: ["paneId", "contentId", "historyOwnerToken", "revision", "contentType", "content"],
       properties: {
         paneId: { type: "integer", minimum: 1 },
         contentId: { type: "string", pattern: "^ct_[0-9a-f]{8}$" },
+        historyOwnerToken: { type: "string", minLength: 1 },
         revision: { type: "integer", minimum: 0 },
         contentType: {
           enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"],

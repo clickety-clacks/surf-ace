@@ -535,6 +535,12 @@ function ensureDirectory(dirPath: string): Promise<void> {
   return fs.mkdir(dirPath, { recursive: true }).then(() => undefined);
 }
 
+function historyOwnerTokenForSession(sessionKey?: string): string {
+  const hash = createHash("sha256");
+  hash.update(sessionKey ?? "anonymous");
+  return `hot_${hash.digest("hex").slice(0, 16)}`;
+}
+
 function isErrorResponse(response: Response): response is ErrorResponse {
   return (response as ErrorResponse).ok === false;
 }
@@ -911,6 +917,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         content: normalizeContent(input.contentType, input.content),
         contentId: nextContentId,
         contentType: input.contentType,
+        historyOwnerToken: historyOwnerTokenForSession(sessionKey),
         paneId: pane.remotePaneId,
         revision: asRevision((pane.currentRevision as number) + 1),
       } as ContentSetRequest["payload"],
@@ -1250,6 +1257,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return created;
   }
 
+  private ensureInitialPairPane(surface: ManagedSurface): PaneId {
+    const existingPaneIds = [...surface.panes.keys()].sort((left, right) => left - right);
+    const paneId = existingPaneIds[0] ? asPaneId(existingPaneIds[0]) : this.allocatePaneId();
+    if (!surface.panes.has(paneId)) {
+      surface.panes.set(paneId, createPane(paneId, paneId, surface.viewport));
+    }
+    return paneId;
+  }
+
   private findPaneByRemoteId(surface: ManagedSurface, remotePaneId: PaneId): ManagedPane | null {
     for (const pane of surface.panes.values()) {
       if (pane.remotePaneId === remotePaneId) {
@@ -1456,6 +1472,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!client) {
       throw new Error("pair_without_client");
     }
+    const initialPaneId = this.ensureInitialPairPane(surface);
 
     const buildPairRequest = (takeover: boolean): PairRequest => ({
       id: makeBrandedRequestId(),
@@ -1464,12 +1481,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         connectionId: makeConnectionId(),
         drawingFlushConfig: this.drawingFlushConfig,
         eventProfile: this.eventProfile,
+        initialPaneId,
         protocolVersion: 1,
         providerId: this.providerId(),
         providerName: this.providerName,
         resume: surface.sessionId ? { sessionId: surface.sessionId } : undefined,
         surfaceId: surface.surfaceId,
         takeover,
+        windowLabel: surface.windowLabel,
       },
       sentAt: asEpochMs(this.now()),
       type: "request",

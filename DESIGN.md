@@ -342,7 +342,9 @@ Flow:
 6. `providerName` (optional human-readable session/chat label for UI indicators).
 7. `eventProfile` (optional, default `minimum_deep`).
 8. `drawingFlushConfig` (optional, provider-preferred idle/max interval values).
-9. `protocolVersion` (`1` for this spec).
+9. `windowLabel` (required provider-assigned window label for this surface bootstrap).
+10. `initialPaneId` (required provider-assigned initial pane id for this surface bootstrap).
+11. `protocolVersion` (`1` for this spec).
 
 `pair.response` success includes:
 1. `sessionId`.
@@ -407,13 +409,14 @@ History is fully modeled and owned by the surface. CLU does not list, target, or
 
 These rules are normative for the single-visible-owner history model:
 1. `content.set` always targets one pane. The newly targeted content becomes front/visible immediately in that pane.
-2. Previously visible content in that pane remains navigable through the surface's Back/Forward controls, with any Forward branch truncated when a new push arrives after Back navigation.
-3. Back/Forward navigation changes only which previously shown pane content is visible. It never changes the `contentId` or `revision` originally written for that content.
-4. Back/Forward restores both the content payload and the persisted annotation overlay for the selected pane-history state.
-5. If annotation-overlay restoration fails for the selected pane-history state, the surface MUST still show that state's content payload when available, clear the overlay for safety, and emit a degraded-state warning locally. The failure MUST NOT silently show a different pane-history state.
-6. The Back stack is capped at 20 pane-history states. When a new state would exceed the limit, the oldest non-visible state is evicted together with any internal restore bookkeeping.
-7. `content.append` / `content.patch` remain valid only against the currently visible content in that pane, enforced by `contentId` + `revision`.
-8. `content.clear` clears the currently visible content for the targeted pane. Any history bookkeeping needed to preserve older pane states is internal to the surface/provider and not part of the CLU call surface.
+2. Each `content.set` carries a provider-injected opaque `historyOwnerToken`. Surfaces use this token to decide whether the visible entry should be replaced in place (same token) or pushed onto Back history (different token). CLU never provides this token directly.
+3. Previously visible content in that pane remains navigable through the surface's Back/Forward controls, with any Forward branch truncated when a new push arrives after Back navigation.
+4. Back/Forward navigation changes only which previously shown pane content is visible. It never changes the `contentId` or `revision` originally written for that content.
+5. Back/Forward restores both the content payload and the persisted annotation overlay for the selected pane-history state.
+6. If annotation-overlay restoration fails for the selected pane-history state, the surface MUST still show that state's content payload when available, clear the overlay for safety, and emit a degraded-state warning locally. The failure MUST NOT silently show a different pane-history state.
+7. The Back stack is capped at 20 pane-history states. When a new state would exceed the limit, the oldest non-visible state is evicted together with any internal restore bookkeeping.
+8. `content.append` / `content.patch` remain valid only against the currently visible content in that pane, enforced by `contentId` + `revision`.
+9. `content.clear` clears the currently visible content for the targeted pane. Any history bookkeeping needed to preserve older pane states is internal to the surface/provider and not part of the CLU call surface.
 
 **Surface default affordances:**
 - Back/Forward controls SHOULD appear in the bottom-center floating control cluster.
@@ -1006,11 +1009,13 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId"],
+          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId", "windowLabel", "initialPaneId"],
           "properties": {
             "providerId": { "$ref": "#/$defs/ProviderId" },
             "connectionId": { "$ref": "#/$defs/ConnectionId" },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "windowLabel": { "type": "string", "minLength": 1 },
+            "initialPaneId": { "$ref": "#/$defs/PaneId" },
             "providerName": { "type": "string" },
             "protocolVersion": { "const": 1 },
             "takeover": { "type": "boolean" },
@@ -1043,13 +1048,14 @@ The schema below defines every v1 application message type over WS.
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["paneId", "contentId", "revision", "contentType", "content"],
+              "required": ["paneId", "contentId", "historyOwnerToken", "revision", "contentType", "content"],
               "properties": {
                 "paneId": {
                   "$ref": "#/$defs/PaneId",
                   "description": "Target pane. Required — CLU must always specify which pane to target."
                 },
                 "contentId": { "$ref": "#/$defs/ContentId" },
+                "historyOwnerToken": { "type": "string", "minLength": 1 },
                 "revision": { "$ref": "#/$defs/Revision" },
                 "contentType": { "$ref": "#/$defs/ContentType" },
                 "content": {},

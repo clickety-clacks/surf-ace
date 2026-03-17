@@ -577,6 +577,12 @@ export class SurfaceWsServer {
     if (request.payload.protocolVersion !== 1) {
       throw new SurfaceCoreError("unsupported_protocol_version", "Unsupported protocol version");
     }
+    if (!request.payload.windowLabel || request.payload.initialPaneId < 1) {
+      throw new SurfaceCoreError(
+        "invalid_payload",
+        "pair.request requires windowLabel and initialPaneId",
+      );
+    }
 
     const surfaceId = request.payload.surfaceId;
     this.core.getSurface(surfaceId);
@@ -626,6 +632,10 @@ export class SurfaceWsServer {
       meta.pairedSurfaceId = surfaceId;
     }
 
+    this.core.applyProviderBootstrapTopology(surfaceId, {
+      initialPaneId: Number(request.payload.initialPaneId),
+      windowLabel: request.payload.windowLabel,
+    });
     this.core.setConnectionBar(surfaceId, "connected");
     this.onBusyChanged?.();
 
@@ -726,14 +736,17 @@ export class SurfaceWsServer {
 
   private async handleContentSet(socket: WebSocket, request: ContentSetRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const session = this.requireActiveSession(surfaceId);
     const contentBytes = Buffer.byteLength(JSON.stringify(request.payload.content), "utf8");
     if (contentBytes > DEFAULT_LIMITS.maxFrameBytes) {
       throw new SurfaceCoreError("content_too_large", "Content exceeded max frame size");
     }
-    const payload = this.core.contentSet(surfaceId, request.payload, {
-      ownerToken: session.sessionId,
-    });
+    if (!request.payload.historyOwnerToken) {
+      throw new SurfaceCoreError(
+        "invalid_payload",
+        "content.set requires historyOwnerToken",
+      );
+    }
+    const payload = this.core.contentSet(surfaceId, request.payload);
     return {
       id: request.id,
       ok: true,
@@ -868,14 +881,6 @@ export class SurfaceWsServer {
 
   private activeSession(surfaceId: string): ActiveSession | null {
     return this.transport(surfaceId).active;
-  }
-
-  private requireActiveSession(surfaceId: string): ActiveSession {
-    const session = this.activeSession(surfaceId);
-    if (!session) {
-      throw new SurfaceCoreError("not_paired", "Operation requires pair.request first");
-    }
-    return session;
   }
 
   private handleSocketClosed(socket: WebSocket): void {

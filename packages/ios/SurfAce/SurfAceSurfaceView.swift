@@ -98,6 +98,8 @@ private struct SurfAcePaneTreeView: View {
 
     var body: some View {
         switch node {
+        case .empty:
+            Color.black.opacity(0.94)
         case .leaf(let paneId):
             if let pane = surface.panesById[paneId] {
                 SurfAcePaneView(runtime: runtime, surface: surface, pane: pane)

@@ -77,6 +77,8 @@ function broadcastSurfaceState(surfaceId: string): void {
   if (!window || window.isDestroyed()) {
     return;
   }
+  const windowLabel = core.surfaceWindowLabel(surfaceId);
+  window.setTitle(windowLabel ? `${endpointName()} · ${windowLabel}` : endpointName());
   window.webContents.send("surface:state", core.getRendererWindowState(surfaceId));
 }
 
@@ -122,7 +124,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     backgroundColor: "#0b1324",
     height: Math.max(720, surface.viewport.height),
     show: false,
-    title: `${endpointName()} · ${surface.windowLabel}`,
+    title: surface.windowLabel ? `${endpointName()} · ${surface.windowLabel}` : endpointName(),
     webPreferences: {
       contextIsolation: true,
       preload: path.join(distDir, "preload.cjs"),
