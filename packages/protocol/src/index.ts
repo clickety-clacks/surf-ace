@@ -402,8 +402,12 @@ export type StrokePoint = Position & {
   pressure?: number;
 };
 
+export type StrokeTool = "pencil" | "finger" | "mouse";
+
 export type Stroke = {
   strokeId: StrokeId;
+  tool: StrokeTool;
+  videoTimestamp?: number;
   points: StrokePoint[];
 };
 

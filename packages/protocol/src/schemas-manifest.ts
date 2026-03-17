@@ -1,17 +1,150 @@
 import {
-  pairRequestSchema,
+  annotationsRemoveRequestSchema,
+  annotationsRemoveResponseSchema,
+  contentAppendRequestSchema,
+  contentClearRequestSchema,
+  contentPatchRequestSchema,
   contentSetRequestSchema,
-  snapshotGetRequestSchema,
-  pairResponseSchema,
   drawingFlushEventSchema,
+  errorResponseSchema,
+  heartbeatPingRequestSchema,
+  heartbeatPongResponseSchema,
+  mutationAckResponseSchema,
+  navigationEventSchema,
+  pageEventSchema,
+  pairRequestSchema,
+  pairResponseSchema,
+  paneCloseRequestSchema,
+  paneCloseResponseSchema,
+  paneCreatedEventSchema,
+  paneRemovedEventSchema,
+  paneRenamedEventSchema,
+  paneRenameRequestSchema,
+  paneRenameResponseSchema,
+  panesListRequestSchema,
+  panesListResponseSchema,
+  paneSplitRequestSchema,
+  paneSplitResponseSchema,
+  scrollEventSchema,
+  selectionEventSchema,
+  snapshotGetRequestSchema,
+  snapshotHintEventSchema,
+  snapshotResponseSchema,
+  surfaceAppearedEventSchema,
+  surfaceRemovedEventSchema,
+  surfaceResumedEventSchema,
+  surfacesListRequestSchema,
+  surfacesListResponseSchema,
+  tapEventSchema,
 } from "./schemas.js";
 
 export const SURF_ACE_PROTOCOL_SCHEMAS = {
-  "pair.request": pairRequestSchema,
-  "content.set": contentSetRequestSchema,
-  "snapshot.get": snapshotGetRequestSchema,
-  "pair.response": pairResponseSchema,
-  "event.drawing_flush": drawingFlushEventSchema,
+  "surfaces.list": {
+    request: surfacesListRequestSchema,
+    response: surfacesListResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "pair.request": {
+    request: pairRequestSchema,
+    response: pairResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "content.set": {
+    request: contentSetRequestSchema,
+    response: mutationAckResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "content.append": {
+    request: contentAppendRequestSchema,
+    response: mutationAckResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "content.patch": {
+    request: contentPatchRequestSchema,
+    response: mutationAckResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "content.clear": {
+    request: contentClearRequestSchema,
+    response: mutationAckResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "annotations.remove": {
+    request: annotationsRemoveRequestSchema,
+    response: annotationsRemoveResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "snapshot.get": {
+    request: snapshotGetRequestSchema,
+    response: snapshotResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "heartbeat.ping": {
+    request: heartbeatPingRequestSchema,
+    response: heartbeatPongResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "panes.list": {
+    request: panesListRequestSchema,
+    response: panesListResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "pane.split": {
+    request: paneSplitRequestSchema,
+    response: paneSplitResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "pane.rename": {
+    request: paneRenameRequestSchema,
+    response: paneRenameResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "pane.close": {
+    request: paneCloseRequestSchema,
+    response: paneCloseResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "event.drawing_flush": {
+    event: drawingFlushEventSchema,
+  },
+  "event.tap": {
+    event: tapEventSchema,
+  },
+  "event.scroll": {
+    event: scrollEventSchema,
+  },
+  "event.selection": {
+    event: selectionEventSchema,
+  },
+  "event.page": {
+    event: pageEventSchema,
+  },
+  "event.navigation": {
+    event: navigationEventSchema,
+  },
+  "event.surface_appeared": {
+    event: surfaceAppearedEventSchema,
+  },
+  "event.surface_removed": {
+    event: surfaceRemovedEventSchema,
+  },
+  "event.surface_resumed": {
+    event: surfaceResumedEventSchema,
+  },
+  "event.snapshot_hint": {
+    event: snapshotHintEventSchema,
+  },
+  "event.pane_created": {
+    event: paneCreatedEventSchema,
+  },
+  "event.pane_removed": {
+    event: paneRemovedEventSchema,
+  },
+  "event.pane_renamed": {
+    event: paneRenamedEventSchema,
+  },
 } as const;
 
 export type SurfAceSchemaName = keyof typeof SURF_ACE_PROTOCOL_SCHEMAS;
+export type SurfAceSchemaManifestEntry =
+  (typeof SURF_ACE_PROTOCOL_SCHEMAS)[SurfAceSchemaName];
