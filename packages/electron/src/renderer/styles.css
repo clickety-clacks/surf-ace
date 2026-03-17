@@ -1,0 +1,336 @@
+:root {
+  --bg: #08111f;
+  --pane: rgba(15, 24, 44, 0.92);
+  --pane-edge: rgba(116, 141, 182, 0.26);
+  --glass: rgba(15, 24, 44, 0.56);
+  --text: #eef4ff;
+  --muted: rgba(220, 232, 255, 0.7);
+  --accent: #7cadff;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --destructive: #ef4444;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(circle at 12% -10%, rgba(89, 132, 227, 0.45), transparent 34%),
+    radial-gradient(circle at 88% 6%, rgba(43, 214, 204, 0.18), transparent 28%),
+    linear-gradient(180deg, #08111f 0%, #07111b 100%);
+  color: var(--text);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+.surface-window {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
+.surface-window::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  opacity: 0.8;
+  z-index: 70;
+}
+
+.surface-window.connection-connected::after {
+  background: var(--ok);
+}
+
+.surface-window.connection-connecting::after {
+  background: linear-gradient(90deg, transparent 0%, var(--warn) 50%, transparent 100%);
+  background-size: 220% 100%;
+  animation: connection-sweep 1.4s ease-in-out infinite alternate;
+}
+
+.surface-window.connection-disconnected::after {
+  background: var(--destructive);
+}
+
+@keyframes connection-sweep {
+  from {
+    background-position: 0 0;
+  }
+
+  to {
+    background-position: 200% 0;
+  }
+}
+
+.window-label {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 10px 18px;
+  border-radius: 14px;
+  background: var(--glass);
+  border: 1px solid rgba(160, 186, 236, 0.36);
+  color: rgba(243, 248, 255, 0.9);
+  font-size: 28px;
+  font-weight: 800;
+  backdrop-filter: blur(14px);
+  transition: opacity 0.18s ease;
+}
+
+.window-name {
+  position: absolute;
+  top: 24px;
+  right: 22px;
+  z-index: 30;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.labels-hidden .window-label,
+.labels-hidden .pane-label {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.layout-root {
+  height: 100%;
+  width: 100%;
+}
+
+.layout-split {
+  display: flex;
+  height: 100%;
+  width: 100%;
+}
+
+.layout-split.direction-horizontal {
+  flex-direction: row;
+}
+
+.layout-split.direction-vertical {
+  flex-direction: column;
+}
+
+.pane-shell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--pane);
+  overflow: hidden;
+}
+
+.pane-shell + .pane-shell {
+  border-left: 2px solid var(--pane-edge);
+}
+
+.direction-vertical > .pane-shell + .pane-shell {
+  border-left: 0;
+  border-top: 2px solid var(--pane-edge);
+}
+
+.pane-shell.annotating {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.pane-shell.annotating.flush-in-flight {
+  animation: flush-pulse 0.75s ease-in-out infinite alternate;
+}
+
+@keyframes flush-pulse {
+  from {
+    box-shadow: inset 0 0 0 2px rgba(124, 173, 255, 0.96);
+  }
+
+  to {
+    box-shadow: inset 0 0 0 2px rgba(124, 173, 255, 0.22);
+  }
+}
+
+.pane-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 25;
+  transition: opacity 0.18s ease;
+}
+
+.pane-label span {
+  padding: 12px 24px;
+  border-radius: 16px;
+  background: rgba(12, 22, 42, 0.54);
+  border: 1px solid rgba(162, 187, 238, 0.34);
+  backdrop-filter: blur(14px);
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 800;
+}
+
+.pane-scroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+}
+
+.pane-content {
+  position: relative;
+  min-height: 100%;
+  width: 100%;
+}
+
+.pane-content.type-html,
+.pane-content.type-pdf {
+  min-height: 100%;
+}
+
+.pane-content.type-markdown {
+  padding: 24px 28px 92px;
+}
+
+.pane-content.type-terminal {
+  padding: 20px 22px 92px;
+}
+
+.pane-content.type-image {
+  padding: 18px 18px 92px;
+  display: flex;
+  justify-content: center;
+}
+
+.content-html-webview,
+.content-pdf-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.content-image {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+.content-markdown {
+  max-width: 960px;
+  margin: 0 auto;
+  line-height: 1.65;
+  font-size: 18px;
+}
+
+.content-markdown h1,
+.content-markdown h2,
+.content-markdown h3 {
+  line-height: 1.2;
+}
+
+.content-markdown code {
+  padding: 0.15em 0.3em;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.content-terminal {
+  margin: 0;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(6, 10, 14, 0.92);
+  color: #edf8f2;
+  font: 14px/1.45 "SF Mono", "Menlo", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.content-empty {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.annotation-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 18;
+  pointer-events: none;
+}
+
+.annotation-layer.enabled {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.control-cluster {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(13, 22, 41, 0.64);
+  border: 1px solid rgba(164, 189, 235, 0.32);
+  backdrop-filter: blur(14px);
+  z-index: 24;
+}
+
+.control-button {
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 999px;
+  border: 1px solid rgba(119, 154, 215, 0.42);
+  background: rgba(40, 62, 108, 0.88);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.control-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.control-button.done {
+  background: rgba(22, 66, 42, 0.95);
+  border-color: rgba(76, 215, 120, 0.6);
+}
+
+.pane-toast {
+  position: absolute;
+  bottom: 78px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 26;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(8, 13, 25, 0.82);
+  border: 1px solid rgba(162, 128, 86, 0.34);
+  color: #f6dcc4;
+  font-size: 13px;
+  backdrop-filter: blur(14px);
+}

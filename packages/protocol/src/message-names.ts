@@ -1,63 +1,49 @@
-/**
- * Surf Ace protocol message names extracted from DESIGN.md.
- *
- * This is intentionally names-only for now so provider + clients can
- * share canonical operation/event ids while payload schemas are filled in.
- */
-
 export const REQUEST_MESSAGES = [
   "surfaces.list",
   "pair.request",
-  "pane.list",
-  "pane.create",
-  "pane.remove",
-  "pane.focus",
-  "pane.rename",
-  "tab.list",
-  "tab.close",
   "content.set",
   "content.append",
   "content.patch",
   "content.clear",
+  "annotations.remove",
   "snapshot.get",
-  "heartbeat",
+  "heartbeat.ping",
+  "panes.list",
+  "pane.split",
+  "pane.rename",
+  "pane.close",
 ] as const;
 
 export const RESPONSE_MESSAGES = [
-  "surfaces.list.response",
-  "pair.response",
-  "pane.list.response",
-  "pane.create.response",
-  "pane.remove.response",
-  "pane.focus.response",
-  "pane.rename.response",
-  "tab.list.response",
-  "tab.close.response",
-  "content.set.response",
-  "content.append.response",
-  "content.patch.response",
-  "content.clear.response",
-  "snapshot.get.response",
-  "error",
+  "surfaces.list",
+  "pair.request",
+  "content.set",
+  "content.append",
+  "content.patch",
+  "content.clear",
+  "annotations.remove",
+  "snapshot.get",
+  "heartbeat.ping",
+  "panes.list",
+  "pane.split",
+  "pane.rename",
+  "pane.close",
 ] as const;
 
 export const EVENT_MESSAGES = [
-  "event.surface_appeared",
-  "event.surface_removed",
-  "event.pane_created",
-  "event.pane_removed",
-  "event.pane_focused",
-  "event.pane_renamed",
-  "event.tab_created",
-  "event.tab_removed",
-  "event.tab_focused",
   "event.drawing_flush",
   "event.tap",
-  "event.selection",
-  "event.page_turn",
-  "event.navigation",
   "event.scroll",
+  "event.selection",
+  "event.page",
+  "event.navigation",
+  "event.surface_appeared",
+  "event.surface_removed",
+  "event.surface_resumed",
   "event.snapshot_hint",
+  "event.pane_created",
+  "event.pane_removed",
+  "event.pane_renamed",
 ] as const;
 
 export type RequestMessageName = (typeof REQUEST_MESSAGES)[number];

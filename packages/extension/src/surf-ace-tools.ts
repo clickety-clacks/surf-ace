@@ -10,9 +10,9 @@ import {
 export const surfAceToolNames = [
   "surf_ace_list",
   "surf_ace_push",
+  "surf_ace_clear",
   "surf_ace_read",
-  "surf_ace_snapshot",
-  "surf_ace_annotate_remove",
+  "surf_ace_annotations_remove",
 ] as const;
 
 export type SurfAceToolName = (typeof surfAceToolNames)[number];
@@ -48,7 +48,7 @@ const paneIdParam = {
 export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefinition<any>[] {
   return [
     {
-      description: "List all discovered Surf Ace surfaces, panes, labels, and local provider state.",
+      description: "List all discovered Surf Ace surfaces, panes, and local provider state.",
       execute: async () => await runtime.listScreens(),
       inputSchema: {
         additionalProperties: false,
@@ -58,84 +58,41 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_list",
     },
     {
-      description:
-        "Run a Surf Ace write operation. Defaults to `content.set`, and also supports `content.clear`, `content.append`, `content.patch`, `pane.split`, and `pane.rename`.",
-      execute: async (args: SurfAcePushInput, context?: SurfAceToolContext) => {
-        const normalized = {
-          ...args,
-          sessionKey: "sessionKey" in args ? (args.sessionKey ?? context?.sessionKey) : context?.sessionKey,
-        } as SurfAcePushInput;
-        return await runtime.push(normalized);
-      },
+      description: "Push content to a Surf Ace pane, replacing whatever is currently visible.",
+      execute: async (args: SurfAcePushInput, context?: SurfAceToolContext) =>
+        await runtime.push(args, { sessionKey: context?.sessionKey }),
       inputSchema: {
         additionalProperties: false,
         properties: {
           content: {
-            description: "Required for `content.set`. Type-specific payload or the user-level string form from the spec.",
-          },
-          contentId: {
-            description: "Optional current contentId override for append/patch. Defaults to the pane's active content.",
+            description: "Required content payload string, encoded per content type as defined in the spec.",
             type: "string",
           },
           contentType: {
             enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"],
             type: "string",
           },
-          count: { minimum: 2, type: "integer" },
-          direction: { enum: ["horizontal", "vertical"], type: "string" },
-          display: {
-            additionalProperties: false,
-            properties: {
-              interactive: { type: "boolean" },
-              scrollable: { type: "boolean" },
-              title: { type: "string" },
-            },
-            type: "object",
-          },
           fingerprint: fingerprintParam,
-          lines: {
-            items: { type: "string" },
-            type: "array",
-          },
-          name: {
-            type: ["string", "null"],
-          },
-          op: {
-            enum: [
-              "content.set",
-              "content.clear",
-              "content.append",
-              "content.patch",
-              "pane.split",
-              "pane.rename",
-            ],
-            type: "string",
-          },
           paneId: paneIdParam,
-          patch: {
-            additionalProperties: false,
-            properties: {
-              action: {
-                enum: [
-                  "replace_inner",
-                  "replace_outer",
-                  "insert_before",
-                  "insert_after",
-                  "remove",
-                ],
-                type: "string",
-              },
-              html: { type: "string" },
-              selector: { type: "string" },
-            },
-            required: ["action", "selector"],
-            type: "object",
-          },
+        },
+        required: ["fingerprint", "paneId", "contentType", "content"],
+        type: "object",
+      },
+      name: "surf_ace_push",
+    },
+    {
+      description: "Clear the currently visible content in a pane.",
+      execute: async (args: { fingerprint: string; paneId: number }) => await runtime.clear(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          fingerprint: fingerprintParam,
+          paneId: paneIdParam,
         },
         required: ["fingerprint", "paneId"],
         type: "object",
       },
-      name: "surf_ace_push",
+      name: "surf_ace_clear",
     },
     {
       description: "Read the local dual-channel Surf Ace buffer for a pane. No live network call is made.",
@@ -150,20 +107,6 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_read",
-    },
-    {
-      description: "Read the provider's cached Surf Ace snapshot for a pane. No live network call is made.",
-      execute: async (args: { fingerprint: string; paneId: number }) => await runtime.snapshot(args),
-      inputSchema: {
-        additionalProperties: false,
-        properties: {
-          fingerprint: fingerprintParam,
-          paneId: paneIdParam,
-        },
-        required: ["fingerprint", "paneId"],
-        type: "object",
-      },
-      name: "surf_ace_snapshot",
     },
     {
       description: "Remove specific annotation strokes from the currently rendered Surf Ace overlay.",
@@ -183,7 +126,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         required: ["fingerprint", "paneId", "contentId", "strokeIds"],
         type: "object",
       },
-      name: "surf_ace_annotate_remove",
+      name: "surf_ace_annotations_remove",
     },
   ];
 }

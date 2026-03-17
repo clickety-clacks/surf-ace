@@ -52,9 +52,18 @@ class StaticDiscoveryService implements SurfAceDiscoveryService {
 }
 
 class FakeSurfAceWsServer {
+  readonly annotationsRemoveRequests: Array<{ contentId: string; paneId: number; strokeIds: string[] }> = [];
+  readonly clearRequests: Array<{ paneId: number; revision: number }> = [];
+  readonly contentSetRequests: Array<{
+    contentId: string;
+    contentType: string;
+    paneId: number;
+    revision: number;
+  }> = [];
+  readonly initialRemotePaneId = 41;
   readonly panes = new Map<number, TestPane>([
     [
-      1,
+      41,
       {
         contentId: null,
         contentType: null,
@@ -103,6 +112,8 @@ class FakeSurfAceWsServer {
   }
 
   sendDrawingFlush(paneId: number, contentId: string): void {
+    const pane = this.panes.get(paneId);
+    assert.ok(pane);
     this.pairedSocket?.send(
       JSON.stringify({
         eventId: `ev_${this.nextEventId++}`,
@@ -117,7 +128,7 @@ class FakeSurfAceWsServer {
           maxIntervalMs: 30000,
           paneId,
           pointsCount: 2,
-          revision: this.panes.get(paneId)?.revision ?? 0,
+          revision: pane.revision,
           strokeCount: 1,
           strokes: [
             {
@@ -134,10 +145,29 @@ class FakeSurfAceWsServer {
         v: 1,
       }),
     );
+    pane.drawings = ["stroke_abc123"];
+  }
+
+  sendNavigation(paneId: number, contentId: string, url: string): number {
     const pane = this.panes.get(paneId);
-    if (pane) {
-      pane.drawings = ["stroke_abc123"];
-    }
+    assert.ok(pane);
+    const sentAt = Date.now();
+    this.pairedSocket?.send(
+      JSON.stringify({
+        eventId: `ev_${this.nextEventId++}`,
+        op: "event.navigation",
+        payload: {
+          contentId,
+          paneId,
+          revision: pane.revision,
+          url,
+        },
+        sentAt,
+        type: "event",
+        v: 1,
+      }),
+    );
+    return sentAt;
   }
 
   private async handleMessage(
@@ -269,6 +299,12 @@ class FakeSurfAceWsServer {
         pane.contentType = String(message.payload?.contentType);
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
         pane.drawings = [];
+        this.contentSetRequests.push({
+          contentId: pane.contentId,
+          contentType: pane.contentType,
+          paneId,
+          revision: pane.revision,
+        });
         socket.send(
           JSON.stringify(
             this.response(message.id, "content.set", {
@@ -290,6 +326,10 @@ class FakeSurfAceWsServer {
         pane.contentType = null;
         pane.drawings = [];
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
+        this.clearRequests.push({
+          paneId,
+          revision: pane.revision,
+        });
         socket.send(
           JSON.stringify(
             this.response(message.id, "content.clear", {
@@ -297,70 +337,6 @@ class FakeSurfAceWsServer {
               currentContentId: null,
               currentRevision: pane.revision,
               paneId,
-            }),
-          ),
-        );
-        return;
-      }
-      case "content.append":
-      case "content.patch": {
-        const paneId = Number(message.payload?.paneId ?? 0);
-        const pane = this.panes.get(paneId);
-        assert.ok(pane);
-        pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
-        socket.send(
-          JSON.stringify(
-            this.response(message.id, message.op, {
-              contentId: pane.contentId,
-              currentContentId: pane.contentId,
-              currentRevision: pane.revision,
-              paneId,
-            }),
-          ),
-        );
-        return;
-      }
-      case "pane.rename": {
-        const paneId = Number(message.payload?.paneId ?? 0);
-        const pane = this.panes.get(paneId);
-        assert.ok(pane);
-        pane.name = (message.payload?.name as string | null | undefined) ?? null;
-        socket.send(
-          JSON.stringify(
-            this.response(message.id, "pane.rename", {
-              name: pane.name,
-              paneId,
-            }),
-          ),
-        );
-        return;
-      }
-      case "pane.split": {
-        const sourcePaneId = Number(message.payload?.paneId ?? 0);
-        assert.ok(this.panes.get(sourcePaneId));
-        const newPaneIds = Array.isArray(message.payload?.newPaneIds)
-          ? message.payload?.newPaneIds.map((value) => Number(value))
-          : [];
-        for (const paneId of newPaneIds) {
-          this.panes.set(paneId, {
-            contentId: null,
-            contentType: null,
-            drawings: [],
-            name: null,
-            revision: 0,
-            viewport: {
-              height: 768,
-              scale: 2,
-              width: 512,
-            },
-          });
-        }
-        socket.send(
-          JSON.stringify(
-            this.response(message.id, "pane.split", {
-              panes: [...this.panes.keys()].sort((left, right) => left - right).map((paneId) => ({
-                paneId,
-              })),
             }),
           ),
         );
@@ -375,6 +351,11 @@ class FakeSurfAceWsServer {
           : [];
         const removedStrokeIds = strokeIds.filter((strokeId) => pane.drawings.includes(strokeId));
         pane.drawings = pane.drawings.filter((strokeId) => !removedStrokeIds.includes(strokeId));
+        this.annotationsRemoveRequests.push({
+          contentId: String(message.payload?.contentId ?? ""),
+          paneId,
+          strokeIds,
+        });
         socket.send(
           JSON.stringify(
             this.response(message.id, "annotations.remove", {
@@ -430,15 +411,23 @@ async function waitFor(
   }
 }
 
-test("runtime maintains WS state, local buffers, and pane operations", async () => {
-  const port = 22119;
+let nextPort = 22119;
+
+async function withRuntimeHarness(
+  run: (ctx: {
+    alertBodies: Array<Record<string, unknown>>;
+    runtime: ReturnType<typeof createSurfAceRuntime>;
+    server: FakeSurfAceWsServer;
+  }) => Promise<void>,
+): Promise<void> {
+  const port = nextPort++;
   const server = new FakeSurfAceWsServer(port);
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-"));
   const discovery = new StaticDiscoveryService([
     {
       busy: false,
       capabilitiesBitmask: 31,
-      endpointId: "endpoint-test",
+      endpointId: `endpoint-${port}`,
       fingerprintPrefix: "abcd1234",
       host: "127.0.0.1",
       instanceName: "Test Surface",
@@ -450,79 +439,215 @@ test("runtime maintains WS state, local buffers, and pane operations", async () 
       wsPath: "/ws",
     },
   ]);
-
   const runtime = createSurfAceRuntime({ discovery, stateDir });
+  const alertBodies: Array<Record<string, unknown>> = [];
+  const originalFetch = globalThis.fetch;
 
   try {
+    globalThis.fetch = (async (_input, init) => {
+      alertBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+
     await runtime.start();
     await waitFor(() => server.pairedSocket !== null);
-
-    const initialScreens = await runtime.listScreens();
-    assert.equal(initialScreens.length, 1);
-    assert.equal(initialScreens[0]?.windowLabel, "a");
-    assert.deepEqual(initialScreens[0]?.panes.map((pane) => pane.paneId), [1]);
-
-    const pushResult = await runtime.push({
-      content: "<p>Hello</p>",
-      contentType: "html",
-      fingerprint: server.surfaceId,
-      paneId: 1,
-      sessionKey: "agent:test:1",
-    });
-    assert.equal(pushResult.op, "content.set");
-    assert.equal(pushResult.paneId, 1);
-
-    await runtime.push({
-      fingerprint: server.surfaceId,
-      name: "Primary",
-      op: "pane.rename",
-      paneId: 1,
-    });
-    const splitResult = await runtime.push({
-      count: 2,
-      direction: "horizontal",
-      fingerprint: server.surfaceId,
-      op: "pane.split",
-      paneId: 1,
-    });
-    assert.equal(splitResult.op, "pane.split");
-    assert.equal(splitResult.paneIds.length, 2);
-
-    const updatedScreens = await runtime.listScreens();
-    assert.deepEqual(
-      updatedScreens[0]?.panes.map((pane) => pane.paneId),
-      [1, splitResult.paneIds.find((paneId) => paneId !== 1) ?? 2],
-    );
-    assert.equal(updatedScreens[0]?.panes[0]?.name, "Primary");
-
-    const activeContentId = server.panes.get(1)?.contentId;
-    assert.ok(activeContentId);
-    server.sendDrawingFlush(1, activeContentId as string);
-    await waitFor(async () => {
-      const screens = await runtime.listScreens();
-      return (screens[0]?.pendingEvents ?? 0) > 0;
-    }).catch(() => {
-      throw new Error("drawing_flush_not_processed");
-    });
-
-    const readResult = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
-    console.log(JSON.stringify(readResult, null, 2));
-    assert.equal(readResult.liveDirtyStrokeIds[0], "stroke_abc123");
-    assert.equal(readResult.liveFrame?.strokes.length, 1);
-
-    const removeResult = await runtime.annotateRemove({
-      contentId: activeContentId as string,
-      fingerprint: server.surfaceId,
-      paneId: 1,
-      strokeIds: ["stroke_abc123"],
-    });
-    assert.deepEqual(removeResult.removedStrokeIds, ["stroke_abc123"]);
-
-    const snapshotResult = await runtime.snapshot({ fingerprint: server.surfaceId, paneId: 1 });
-    assert.equal(snapshotResult.snapshot?.contentId, activeContentId);
+    await run({ alertBodies, runtime, server });
   } finally {
+    globalThis.fetch = originalFetch;
     await runtime.stop();
     await server.close();
     await fs.rm(stateDir, { force: true, recursive: true });
   }
+}
+
+test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
+  await t.test("listScreens exposes only the CLU surface fields and local pane ids", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const screens = await runtime.listScreens();
+      assert.equal(screens.length, 1);
+
+      const screen = screens[0];
+      assert.ok(screen);
+      assert.deepEqual(
+        Object.keys(screen).sort(),
+        ["connectionState", "fingerprint", "lastSeenAt", "name", "panes", "pendingEvents", "viewport"].sort(),
+      );
+      assert.equal(screen.fingerprint, server.surfaceId);
+      assert.deepEqual(screen.panes.map((pane) => pane.paneId), [1]);
+      assert.deepEqual(
+        Object.keys(screen.panes[0] ?? {}).sort(),
+        ["activeContent", "historySummary", "name", "paneId"].sort(),
+      );
+    });
+  });
+
+  await t.test("provider keeps pane identity local and reuses content ownership per injected session", async () => {
+    await withRuntimeHarness(async ({ alertBodies, runtime, server }) => {
+      const localEvents: Array<{
+        paneId: number;
+        previousSessionKey: string;
+        surfaceId: string;
+        type: string;
+        visibleContentId: string | null;
+      }> = [];
+      const unsubscribe = runtime.subscribe((event) => {
+        if (event.type === "event.content_superseded") {
+          localEvents.push(event);
+        }
+      });
+
+      try {
+        const first = await runtime.push(
+          {
+            content: "<p>first</p>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: 1,
+          },
+          { sessionKey: "agent:test:1" },
+        );
+        const second = await runtime.push(
+          {
+            content: "<p>second</p>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: 1,
+          },
+          { sessionKey: "agent:test:1" },
+        );
+        const third = await runtime.push(
+          {
+            content: "<p>third</p>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: 1,
+          },
+          { sessionKey: "agent:test:2" },
+        );
+
+        assert.equal(server.contentSetRequests.length, 3);
+        assert.deepEqual(
+          server.contentSetRequests.map((request) => request.paneId),
+          [server.initialRemotePaneId, server.initialRemotePaneId, server.initialRemotePaneId],
+        );
+        assert.equal(first.paneId, 1);
+        assert.equal(second.paneId, 1);
+        assert.equal(third.paneId, 1);
+        assert.equal(first.contentId, second.contentId);
+        assert.notEqual(first.contentId, third.contentId);
+        assert.deepEqual(localEvents, [
+          {
+            paneId: 1,
+            previousSessionKey: "agent:test:1",
+            surfaceId: server.surfaceId,
+            type: "event.content_superseded",
+            visibleContentId: first.contentId,
+          },
+        ]);
+
+        const screens = await runtime.listScreens();
+        assert.equal(screens[0]?.panes[0]?.historySummary.visibleContentId, third.contentId);
+        assert.equal(screens[0]?.panes[0]?.historySummary.backCount, 1);
+
+        server.sendDrawingFlush(server.initialRemotePaneId, third.contentId);
+        await waitFor(() => alertBodies.length === 1);
+        assert.deepEqual(alertBodies[0], {
+          message: "Surf Ace updates pending on Surface A",
+          noOverlay: true,
+          sessionKey: "agent:main:main",
+        });
+
+        server.sendDrawingFlush(server.initialRemotePaneId, third.contentId);
+        await new Promise((resolve) => {
+          setTimeout(resolve, 50);
+        });
+        assert.equal(alertBodies.length, 1);
+
+        const read = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+        assert.ok(read.liveDirtyStrokeIds.includes("stroke_abc123"));
+        assert.equal(read.liveFrame?.contentId, third.contentId);
+
+        server.sendDrawingFlush(server.initialRemotePaneId, third.contentId);
+        await waitFor(() => alertBodies.length === 2);
+
+        const removed = await runtime.annotateRemove({
+          contentId: third.contentId,
+          fingerprint: server.surfaceId,
+          paneId: 1,
+          strokeIds: ["stroke_abc123"],
+        });
+        assert.deepEqual(removed, {
+          fingerprint: server.surfaceId,
+          notFoundStrokeIds: [],
+          paneId: 1,
+          remainingStrokeCount: 0,
+          removedStrokeIds: ["stroke_abc123"],
+        });
+        assert.deepEqual(server.annotationsRemoveRequests, [
+          {
+            contentId: third.contentId,
+            paneId: server.initialRemotePaneId,
+            strokeIds: ["stroke_abc123"],
+          },
+        ]);
+      } finally {
+        unsubscribe();
+      }
+    });
+  });
+
+  await t.test("provider discards non-html navigation events and keeps clear scoped to remote pane ids", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const markdownPush = await runtime.push(
+        {
+          content: "# notes",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        },
+        { sessionKey: "agent:test:1" },
+      );
+
+      server.sendNavigation(server.initialRemotePaneId, markdownPush.contentId, "https://example.com/ignored");
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+
+      const markdownRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.equal(markdownRead.lastNavigation, null);
+
+      const htmlPush = await runtime.push(
+        {
+          content: "<p>html</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        },
+        { sessionKey: "agent:test:1" },
+      );
+
+      const navigatedAt = server.sendNavigation(
+        server.initialRemotePaneId,
+        htmlPush.contentId,
+        "https://example.com/live",
+      );
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+
+      const htmlRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.deepEqual(htmlRead.lastNavigation, {
+        navigatedAt,
+        url: "https://example.com/live",
+      });
+
+      const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.deepEqual(clear, {
+        fingerprint: server.surfaceId,
+        paneId: 1,
+        revision: clear.revision,
+      });
+      assert.deepEqual(server.clearRequests.map((request) => request.paneId), [server.initialRemotePaneId]);
+    });
+  });
 });

@@ -1,0 +1,31 @@
+name: SurfAce
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    DEVELOPMENT_TEAM: ""
+    SUPPORTS_MACCATALYST: NO
+    TARGETED_DEVICE_FAMILY: "1,2"
+    INFOPLIST_KEY_UIApplicationSupportsMultipleScenes: YES
+targets:
+  SurfAce:
+    type: application
+    platform: iOS
+    sources:
+      - path: SurfAce
+        excludes:
+          - Info.plist
+    info:
+      path: SurfAce/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAce
+        PRODUCT_NAME: SurfAce
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 0.1.0
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO

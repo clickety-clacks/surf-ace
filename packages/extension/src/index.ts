@@ -25,7 +25,7 @@ const plugin = {
     });
 
     for (const tool of createSurfAceTools(runtime)) {
-      api.registerTool({
+      api.registerTool((ctx) => ({
         name: tool.name,
         description: tool.description,
         parameters: tool.inputSchema,
@@ -34,12 +34,16 @@ const plugin = {
             content: [
               {
                 type: "text" as const,
-                text: JSON.stringify(await tool.execute(params as never), null, 2),
+                text: JSON.stringify(
+                  await tool.execute(params as never, { sessionKey: ctx.sessionKey }),
+                  null,
+                  2,
+                ),
               },
             ],
           };
         },
-      });
+      }));
     }
 
     api.on("before_prompt_build", async () => ({

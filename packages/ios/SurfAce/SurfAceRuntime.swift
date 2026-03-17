@@ -1,0 +1,1899 @@
+import CryptoKit
+import Foundation
+import Observation
+import PDFKit
+import UIKit
+
+actor SurfAceOutboundSender {
+    enum Priority: Int {
+        case event = 0
+        case response = 1
+        case heartbeat = 2
+    }
+
+    private struct QueuedSend {
+        let priority: Priority
+        let sequence: Int
+        let text: String
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private let socket: SurfAceWebSocket
+    private var queue: [QueuedSend] = []
+    private var nextSequence = 0
+    private var isDraining = false
+
+    init(socket: SurfAceWebSocket) {
+        self.socket = socket
+    }
+
+    func send(text: String, priority: Priority) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            nextSequence += 1
+            queue.append(
+                QueuedSend(
+                    priority: priority,
+                    sequence: nextSequence,
+                    text: text,
+                    continuation: continuation
+                )
+            )
+            queue.sort { lhs, rhs in
+                if lhs.priority == rhs.priority {
+                    return lhs.sequence < rhs.sequence
+                }
+                return lhs.priority.rawValue > rhs.priority.rawValue
+            }
+
+            if !isDraining {
+                isDraining = true
+                Task {
+                    await drainQueue()
+                }
+            }
+        }
+    }
+
+    private func drainQueue() async {
+        while !queue.isEmpty {
+            let next = queue.removeFirst()
+            do {
+                try await socket.send(text: next.text)
+                next.continuation.resume()
+            } catch {
+                next.continuation.resume(throwing: error)
+                for pending in queue {
+                    pending.continuation.resume(throwing: error)
+                }
+                queue.removeAll()
+                isDraining = false
+                return
+            }
+        }
+        isDraining = false
+    }
+}
+
+private struct SurfAceRequestReplayEntry {
+    let payloadDigest: String
+    let responseJSON: String
+}
+
+private struct SurfAceSessionState {
+    let sessionId: String
+    let providerId: String
+    let connectionId: String
+    let connectionUUID: String
+    let socket: SurfAceWebSocket
+    let sender: SurfAceOutboundSender
+    let eventProfile: SurfAceEventProfile
+    let drawingFlushConfig: SurfAceDrawingFlushConfig
+    let pairedAt: Date
+}
+
+private struct SurfAceResumeGraceState {
+    let sessionId: String
+    let providerId: String
+    let expiresAt: Date
+}
+
+@MainActor
+@Observable
+final class SurfAceRuntime {
+    var screenName: String
+    var fingerprint: String
+    var instanceDisambiguator: String
+    var serverPort: Int = 0
+    var endpointError: String?
+    var surfaces: [SurfAceSurfaceModel] = []
+
+    @ObservationIgnored private let server = SurfAceHTTPServer()
+    @ObservationIgnored private let bonjourPublisher = SurfAceBonjourPublisher()
+    @ObservationIgnored private let identityStore = SurfAceIdentityStore()
+    @ObservationIgnored private let mappingStoreKey = "SurfAce.SurfaceIdentityMapping"
+    @ObservationIgnored private var identity: SurfAceIdentity?
+    @ObservationIgnored private var isStarted = false
+    @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
+    @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
+    @ObservationIgnored private var activeSessions: [String: SurfAceSessionState] = [:]
+    @ObservationIgnored private var resumeGraceBySurfaceId: [String: SurfAceResumeGraceState] = [:]
+    @ObservationIgnored private var resumeGraceTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var surfaceNeedsResumedEvent: Set<String> = []
+    @ObservationIgnored private var identityMapping = SurfAceIdentityMapping()
+
+    private let maxMessageBytes = 12 * 1024 * 1024
+    private let maxFrameBytes = 10 * 1024 * 1024
+    private let maxVisibleTextBytes = 4_096
+    private let maxStrokePointsPerFlush = 8_192
+    private let maxDrawingFlushBytes = 2 * 1024 * 1024
+    private let resumeGraceMilliseconds = 20_000
+    private let webSocketPath = "/ws"
+    private let healthPath = "/health"
+    private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
+    private let eventTypes = [
+        "event.drawing_flush",
+        "event.tap",
+        "event.scroll",
+        "event.selection",
+        "event.page",
+        "event.navigation",
+        "event.surface_appeared",
+        "event.surface_removed",
+        "event.surface_resumed",
+        "event.snapshot_hint",
+        "event.pane_created",
+        "event.pane_removed",
+        "event.pane_renamed",
+    ]
+
+    init() {
+        let fallbackName = "Surf Ace"
+        self.screenName = "\(fallbackName) - \(UIDevice.current.name)"
+        self.fingerprint = "00000000"
+        let vendorID = UIDevice.current.identifierForVendor?
+            .uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased() ?? "0000"
+        self.instanceDisambiguator = String(vendorID.prefix(6))
+
+        do {
+            let identity = try identityStore.loadOrCreateIdentity()
+            self.identity = identity
+            self.fingerprint = identity.fingerprint
+        } catch {
+            self.endpointError = "Identity init failed: \(error.localizedDescription)"
+        }
+
+        loadIdentityMapping()
+        bonjourPublisher.onPublishFailure = { [weak self] details in
+            Task { @MainActor in
+                self?.endpointError = "Bonjour publish failed (\(details)); WS server remains available"
+            }
+        }
+    }
+
+    func start() async {
+        guard !isStarted else { return }
+        observeLifecycle()
+
+        do {
+            let port = try await server.start(
+                webSocketPath: webSocketPath,
+                httpHandler: { [weak self] request in
+                    guard let self else { return HTTPServerResponse(statusCode: 500) }
+                    return await self.handleHTTP(request: request)
+                },
+                webSocketHandler: { [weak self] socket in
+                    guard let self else {
+                        await socket.close(code: 4500, reason: "runtime_unavailable")
+                        return
+                    }
+                    await self.handleWebSocket(socket)
+                }
+            )
+            serverPort = Int(port)
+            isStarted = true
+            publishBonjour()
+        } catch {
+            endpointError = "Server failed: \(error.localizedDescription)"
+        }
+    }
+
+    func stop() async {
+        for task in resumeGraceTasks.values {
+            task.cancel()
+        }
+        resumeGraceTasks.removeAll()
+
+        for surface in surfaces {
+            for pane in surface.panes {
+                pane.pendingFlushTask?.cancel()
+                pane.pendingFlushTask = nil
+            }
+        }
+
+        let sessions = activeSessions
+        activeSessions.removeAll()
+        for (_, session) in sessions {
+            await session.socket.close(code: 1000, reason: "provider_shutdown")
+        }
+
+        await server.stop()
+        bonjourPublisher.stop()
+        isStarted = false
+    }
+
+    func registerSurface(sceneKey: String) -> SurfAceSurfaceModel {
+        if let existingSurfaceId = surfaceIdBySceneKey[sceneKey],
+           let existing = surfaceById[existingSurfaceId] {
+            return existing
+        }
+
+        let stored = identityMapping.surfacesBySceneKey[sceneKey]
+        let surfaceId: String
+        let windowLabel: String
+        let initialPaneId: Int
+
+        if let stored {
+            surfaceId = stored.surfaceId
+            windowLabel = stored.windowLabel
+            initialPaneId = stored.initialPaneId
+        } else {
+            surfaceId = randomHex(prefix: "sf", byteCount: 8)
+            windowLabel = windowLabelForIndex(identityMapping.nextWindowLabelIndex)
+            identityMapping.nextWindowLabelIndex += 1
+            initialPaneId = identityMapping.nextPaneId
+            identityMapping.nextPaneId += 1
+            identityMapping.surfacesBySceneKey[sceneKey] = StoredSurfaceIdentity(
+                surfaceId: surfaceId,
+                windowLabel: windowLabel,
+                initialPaneId: initialPaneId
+            )
+            persistIdentityMapping()
+        }
+
+        let surface = SurfAceSurfaceModel(
+            sceneKey: sceneKey,
+            surfaceId: surfaceId,
+            windowLabel: windowLabel,
+            name: "\(screenName) \(windowLabel.uppercased())",
+            initialPaneId: initialPaneId
+        )
+        surfaceById[surfaceId] = surface
+        surfaceIdBySceneKey[sceneKey] = surfaceId
+        surfaces.append(surface)
+        refreshConnectionState(surfaceId: surfaceId)
+        refreshBonjourTXT()
+        broadcastLifecycleEvent(
+            op: "event.surface_appeared",
+            payload: [
+                "surfaceId": surface.surfaceId,
+                "name": surface.name,
+                "viewport": viewportPayload(for: surface),
+            ]
+        )
+        return surface
+    }
+
+    func unregisterSurface(sceneKey: String) {
+        guard let surfaceId = surfaceIdBySceneKey.removeValue(forKey: sceneKey),
+              let surface = surfaceById.removeValue(forKey: surfaceId) else {
+            return
+        }
+
+        surface.labelRestoreTask?.cancel()
+        for pane in surface.panes {
+            pane.pendingFlushTask?.cancel()
+            pane.pendingFlushTask = nil
+        }
+        surfaces.removeAll { $0.surfaceId == surfaceId }
+
+        broadcastLifecycleEvent(
+            op: "event.surface_removed",
+            payload: ["surfaceId": surfaceId]
+        )
+
+        if let session = activeSessions.removeValue(forKey: surfaceId) {
+            Task {
+                await session.socket.close(code: 1000, reason: "surface_removed")
+            }
+        }
+        cancelResumeGrace(surfaceId: surfaceId)
+        refreshBonjourTXT()
+    }
+
+    func updateViewport(surfaceId: String, size: CGSize, scale: CGFloat) {
+        guard let surface = surfaceById[surfaceId], size.width > 0, size.height > 0 else { return }
+        surface.viewportSize = size
+        surface.viewportScale = scale
+        refreshBonjourTXT()
+    }
+
+    func attachPaneBridge(surfaceId: String, paneId: Int, bridge: any SurfAcePaneBridging) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        pane.bridge = bridge
+        bridge.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry)
+        bridge.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
+        bridge.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
+    }
+
+    func detachPaneBridge(surfaceId: String, paneId: Int) {
+        pane(surfaceId: surfaceId, paneId: paneId)?.bridge = nil
+    }
+
+    func setAnnotationMode(surfaceId: String, paneId: Int, enabled: Bool, fingerDrawEnabled: Bool) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        pane.annotationMode = enabled
+        pane.fingerDrawEnabled = enabled && fingerDrawEnabled
+        pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
+        noteInteraction(surfaceId: surfaceId)
+    }
+
+    func toggleLabelsVisibility(surfaceId: String) {
+        guard let surface = surfaceById[surfaceId] else { return }
+        if surface.labelsVisible {
+            noteInteraction(surfaceId: surfaceId)
+        } else {
+            surface.labelRestoreTask?.cancel()
+            surface.labelsVisible = true
+        }
+    }
+
+    func navigateHistory(surfaceId: String, paneId: Int, direction: HistoryDirection) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return
+        }
+
+        switch direction {
+        case .back:
+            guard let previous = pane.backStack.popLast() else { return }
+            pane.forwardStack.append(pane.currentEntry)
+            pane.currentEntry = previous
+        case .forward:
+            guard let next = pane.forwardStack.popLast() else { return }
+            pane.backStack.append(pane.currentEntry)
+            pane.currentEntry = next
+        }
+
+        pane.bridge?.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry)
+        pane.bridge?.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
+        pane.lastNavigationURL = pane.currentEntry.url
+        noteInteraction(surfaceId: surfaceId)
+    }
+
+    func noteInteraction(surfaceId: String) {
+        guard let surface = surfaceById[surfaceId] else { return }
+        surface.labelsVisible = false
+        surface.labelRestoreTask?.cancel()
+        surface.labelRestoreTask = Task { [weak surface] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                surface?.labelsVisible = true
+            }
+        }
+    }
+
+    func clearToast(surfaceId: String, paneId: Int) {
+        pane(surfaceId: surfaceId, paneId: paneId)?.toast = nil
+    }
+
+    func handleSelectionChanged(surfaceId: String, paneId: Int, text: String, rect: CGRect?) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let contentId = pane.currentEntry.contentId,
+              let rect,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              eventIsEnabled(surfaceId: surfaceId, eventName: "event.selection") else {
+            return
+        }
+
+        let selection = SurfAceSelection.text(text.prefix(maxVisibleTextBytes).description, boundingRect: rect.surfAceRect)
+        pane.lastSelection = selection
+        sendEvent(
+            surfaceId: surfaceId,
+            op: "event.selection",
+            payload: [
+                "paneId": paneId,
+                "contentId": contentId,
+                "revision": pane.currentEntry.revision,
+                "selection": jsonObject(fromEncodable: selection) ?? NSNull(),
+            ]
+        )
+    }
+
+    func handleScrollSettled(surfaceId: String, paneId: Int, viewport: SurfAceViewport, visibleText: String) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        pane.lastViewport = viewport
+        pane.lastVisibleText = visibleText
+        if eventIsEnabled(surfaceId: surfaceId, eventName: "event.scroll"),
+           let contentId = pane.currentEntry.contentId {
+            sendEvent(
+                surfaceId: surfaceId,
+                op: "event.scroll",
+                payload: [
+                    "paneId": paneId,
+                    "contentId": contentId,
+                    "revision": pane.currentEntry.revision,
+                    "phase": "settled",
+                    "viewport": jsonObject(fromEncodable: viewport) ?? NSNull(),
+                    "visibleText": visibleText.prefix(maxVisibleTextBytes).description,
+                ]
+            )
+        }
+        postPDFPageChangeIfNeeded(surfaceId: surfaceId, paneId: paneId)
+    }
+
+    func handleTapEvent(surfaceId: String, paneId: Int, kind: String, position: SurfAcePoint, nearestContent: String) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let contentId = pane.currentEntry.contentId,
+              eventIsEnabled(surfaceId: surfaceId, eventName: "event.tap") else {
+            return
+        }
+
+        sendEvent(
+            surfaceId: surfaceId,
+            op: "event.tap",
+            payload: [
+                "paneId": paneId,
+                "contentId": contentId,
+                "revision": pane.currentEntry.revision,
+                "kind": kind == "long_press" ? "long_press" : "tap",
+                "position": jsonObject(fromEncodable: position) ?? NSNull(),
+                "nearestContent": nearestContent.prefix(maxVisibleTextBytes).description,
+            ]
+        )
+    }
+
+    func handleNavigationEvent(surfaceId: String, paneId: Int, url: String, sentAt: Int64?) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              pane.currentEntry.contentType == .html,
+              let contentId = pane.currentEntry.contentId,
+              let normalized = normalizeURL(url) else {
+            return
+        }
+
+        pane.currentEntry.url = normalized
+        pane.lastNavigationURL = normalized
+        sendEvent(
+            surfaceId: surfaceId,
+            op: "event.navigation",
+            payload: [
+                "paneId": paneId,
+                "contentId": contentId,
+                "revision": pane.currentEntry.revision,
+                "url": normalized,
+            ],
+            sentAt: sentAt
+        )
+    }
+
+    func handleNewStrokes(
+        surfaceId: String,
+        paneId: Int,
+        strokes: [SurfAceStroke],
+        drawingData: Data
+    ) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId), !strokes.isEmpty else { return }
+        noteInteraction(surfaceId: surfaceId)
+
+        if !pane.annotationMode {
+            pane.annotationMode = true
+            pane.fingerDrawEnabled = false
+            pane.bridge?.setInteraction(annotationMode: true, fingerDrawEnabled: false)
+        }
+
+        pane.currentEntry.drawingData = drawingData
+        for stroke in strokes {
+            pane.currentEntry.strokesById[stroke.strokeId] = stroke
+            if let existingIndex = pane.pendingFlushStrokes.firstIndex(where: { $0.strokeId == stroke.strokeId }) {
+                pane.pendingFlushStrokes[existingIndex] = stroke
+            } else {
+                pane.pendingFlushStrokes.append(stroke)
+            }
+        }
+
+        let now = timestampNow()
+        if pane.firstPendingStrokeAt == nil {
+            pane.firstPendingStrokeAt = strokes.first?.points.first?.timestamp ?? now
+        }
+        pane.lastPendingStrokeAt = strokes.last?.points.last?.timestamp ?? now
+        scheduleDrawingFlush(surfaceId: surfaceId, paneId: paneId)
+    }
+
+    enum HistoryDirection {
+        case back
+        case forward
+    }
+
+    private func observeLifecycle() {
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleDidEnterBackground()
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleWillEnterForeground()
+            }
+        }
+    }
+
+    private func handleDidEnterBackground() {
+        let currentSessions = activeSessions
+        for surfaceId in currentSessions.keys {
+            surfaceNeedsResumedEvent.insert(surfaceId)
+            surfaceById[surfaceId]?.connectionBarState = .disconnected
+        }
+        for (_, session) in currentSessions {
+            Task {
+                await session.socket.close(code: 1000, reason: "background")
+            }
+        }
+    }
+
+    private func handleWillEnterForeground() {
+        refreshBonjourTXT()
+        for surfaceId in surfaceNeedsResumedEvent {
+            refreshConnectionState(surfaceId: surfaceId)
+        }
+    }
+
+    private func handleHTTP(request: HTTPServerRequest) async -> HTTPServerResponse {
+        guard request.method == "GET" else {
+            return jsonResponse(statusCode: 404, body: ["error": "not_found"])
+        }
+
+        if request.path == healthPath {
+            return jsonResponse(
+                statusCode: 200,
+                body: [
+                    "status": "ok",
+                    "busy": activeSessions.isEmpty ? 0 : 1,
+                    "surfaces": surfaces.map { surface in
+                        [
+                            "surfaceId": surface.surfaceId,
+                            "name": surface.name,
+                            "paired": activeSessions[surface.surfaceId] != nil || resumeGraceBySurfaceId[surface.surfaceId] != nil,
+                        ]
+                    },
+                    "http": [
+                        "healthPath": healthPath,
+                        "upgradePath": webSocketPath,
+                    ],
+                    "ws": [
+                        "version": 1,
+                        "implementedOps": [
+                            "surfaces.list",
+                            "pair.request",
+                            "content.set",
+                            "content.append",
+                            "content.patch",
+                            "content.clear",
+                            "annotations.remove",
+                            "snapshot.get",
+                            "heartbeat.ping",
+                            "panes.list",
+                            "pane.split",
+                            "pane.rename",
+                            "pane.close",
+                        ],
+                    ],
+                ]
+            )
+        }
+
+        return jsonResponse(statusCode: 404, body: ["error": "not_found"])
+    }
+
+    private func handleWebSocket(_ socket: SurfAceWebSocket) async {
+        let connectionUUID = randomHex(prefix: "cn", byteCount: 8)
+        let sender = SurfAceOutboundSender(socket: socket)
+        var replayCache: [String: SurfAceRequestReplayEntry] = [:]
+        var replayOrder: [String] = []
+
+        while true {
+            do {
+                guard let message = try await socket.receive() else {
+                    await handleSocketTermination(connectionUUID: connectionUUID)
+                    return
+                }
+
+                switch message {
+                case .close:
+                    await handleSocketTermination(connectionUUID: connectionUUID)
+                    return
+                case .text(let text):
+                    if text.lengthOfBytes(using: .utf8) > maxMessageBytes {
+                        let errorResponse = makeErrorResponse(
+                            op: "pair.request",
+                            id: "oversize",
+                            code: "content_too_large",
+                            message: "message exceeds maxMessageBytes"
+                        )
+                        if let json = encodeJSON(errorResponse) {
+                            try? await sender.send(text: json, priority: .response)
+                        }
+                        await socket.close(code: 4413, reason: "content_too_large")
+                        await handleSocketTermination(connectionUUID: connectionUUID)
+                        return
+                    }
+
+                    guard let requestObject = decodeJSONObject(from: text),
+                          let type = requestObject["type"] as? String,
+                          type == "request",
+                          let op = requestObject["op"] as? String,
+                          let id = requestObject["id"] as? String else {
+                        await socket.close(code: 4410, reason: "protocol_violation")
+                        await handleSocketTermination(connectionUUID: connectionUUID)
+                        return
+                    }
+
+                    let payload = requestObject["payload"] as? [String: Any] ?? [:]
+                    let payloadDigest = payloadHash(["op": op, "payload": payload])
+
+                    if let cached = replayCache[id] {
+                        if cached.payloadDigest == payloadDigest {
+                            let priority: SurfAceOutboundSender.Priority = (op == "heartbeat.ping") ? .heartbeat : .response
+                            try await sender.send(text: cached.responseJSON, priority: priority)
+                            continue
+                        }
+
+                        let mismatch = makeErrorResponse(
+                            op: op,
+                            id: id,
+                            code: "invalid_request_id_reuse",
+                            message: "request id reused with different payload"
+                        )
+                        if let json = encodeJSON(mismatch) {
+                            try await sender.send(text: json, priority: .response)
+                        }
+                        continue
+                    }
+
+                    let responseObject = await processRequest(
+                        op: op,
+                        id: id,
+                        payload: payload,
+                        socket: socket,
+                        sender: sender,
+                        connectionUUID: connectionUUID
+                    )
+                    guard let responseJSON = encodeJSON(responseObject) else {
+                        await socket.close(code: 4500, reason: "internal_error")
+                        await handleSocketTermination(connectionUUID: connectionUUID)
+                        return
+                    }
+
+                    let priority: SurfAceOutboundSender.Priority = (op == "heartbeat.ping") ? .heartbeat : .response
+                    try await sender.send(text: responseJSON, priority: priority)
+                    replayCache[id] = SurfAceRequestReplayEntry(payloadDigest: payloadDigest, responseJSON: responseJSON)
+                    replayOrder.append(id)
+                    if replayOrder.count > 1_024 {
+                        replayCache.removeValue(forKey: replayOrder.removeFirst())
+                    }
+                }
+            } catch {
+                await handleSocketTermination(connectionUUID: connectionUUID)
+                return
+            }
+        }
+    }
+
+    private func processRequest(
+        op: String,
+        id: String,
+        payload: [String: Any],
+        socket: SurfAceWebSocket,
+        sender: SurfAceOutboundSender,
+        connectionUUID: String
+    ) async -> [String: Any] {
+        switch op {
+        case "surfaces.list":
+            return handleSurfacesList(id: id)
+        case "pair.request":
+            return await handlePairRequest(
+                id: id,
+                payload: payload,
+                socket: socket,
+                sender: sender,
+                connectionUUID: connectionUUID
+            )
+        case "panes.list":
+            return handlePanesList(id: id, connectionUUID: connectionUUID)
+        case "pane.split":
+            return handlePaneSplit(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "pane.rename":
+            return handlePaneRename(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "pane.close":
+            return handlePaneClose(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "content.set":
+            return await handleContentSet(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "content.append":
+            return await handleContentAppend(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "content.patch":
+            return await handleContentPatch(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "content.clear":
+            return handleContentClear(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "annotations.remove":
+            return handleAnnotationsRemove(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "snapshot.get":
+            return await handleSnapshotGet(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "heartbeat.ping":
+            return handleHeartbeatPing(id: id, payload: payload, connectionUUID: connectionUUID)
+        default:
+            return makeErrorResponse(op: op, id: id, code: "invalid_payload", message: "unsupported operation")
+        }
+    }
+
+    private func handleSurfacesList(id: String) -> [String: Any] {
+        [
+            "v": 1,
+            "type": "response",
+            "op": "surfaces.list",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "surfaces": surfaces.map { surface in
+                    [
+                        "surfaceId": surface.surfaceId,
+                        "name": surface.name,
+                        "viewport": viewportPayload(for: surface),
+                        "paired": activeSessions[surface.surfaceId] != nil || resumeGraceBySurfaceId[surface.surfaceId] != nil,
+                    ]
+                },
+            ],
+        ]
+    }
+
+    private func handlePairRequest(
+        id: String,
+        payload: [String: Any],
+        socket: SurfAceWebSocket,
+        sender: SurfAceOutboundSender,
+        connectionUUID: String
+    ) async -> [String: Any] {
+        guard let providerId = payload["providerId"] as? String,
+              let connectionId = payload["connectionId"] as? String,
+              let protocolVersion = payload["protocolVersion"] as? Int,
+              let surfaceId = payload["surfaceId"] as? String,
+              let surface = surfaceById[surfaceId] else {
+            return makeErrorResponse(op: "pair.request", id: id, code: "invalid_payload", message: "providerId, connectionId, protocolVersion, surfaceId are required")
+        }
+
+        guard protocolVersion == 1 else {
+            return makeErrorResponse(op: "pair.request", id: id, code: "unsupported_protocol_version", message: "protocolVersion must be 1")
+        }
+
+        let eventProfile = SurfAceEventProfile(rawValue: payload["eventProfile"] as? String ?? "") ?? .minimumDeep
+        let drawingConfigPayload = payload["drawingFlushConfig"] as? [String: Any]
+        let drawingFlushConfig = SurfAceDrawingFlushConfig.from(
+            requestedIdleWindowMs: drawingConfigPayload?["idleWindowMs"] as? Int,
+            requestedMaxIntervalMs: drawingConfigPayload?["maxIntervalMs"] as? Int
+        )
+        let providerWindowLabel = normalizedWindowLabel(from: payload["windowLabel"])
+        let providerInitialPaneId = payload["initialPaneId"] as? Int
+        let takeover = payload["takeover"] as? Bool ?? false
+        let resumePayload = payload["resume"] as? [String: Any]
+        let resumeSessionId = resumePayload?["sessionId"] as? String
+
+        if let existing = activeSessions[surfaceId] {
+            if existing.providerId == providerId, takeover {
+                Task {
+                    await existing.socket.close(code: 1000, reason: "superseded")
+                }
+                activeSessions.removeValue(forKey: surfaceId)
+            } else {
+                return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "surface already paired")
+            }
+        }
+
+        var resumed = false
+        if let grace = resumeGraceBySurfaceId[surfaceId] {
+            guard grace.providerId == providerId else {
+                return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "surface already paired")
+            }
+            if let resumeSessionId, resumeSessionId != grace.sessionId {
+                return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "resume sessionId mismatch")
+            }
+            resumed = true
+            cancelResumeGrace(surfaceId: surfaceId)
+        }
+
+        let sessionId = resumed ? (resumeSessionId ?? randomHex(prefix: "sa", byteCount: 12)) : randomHex(prefix: "sa", byteCount: 12)
+        let session = SurfAceSessionState(
+            sessionId: sessionId,
+            providerId: providerId,
+            connectionId: connectionId,
+            connectionUUID: connectionUUID,
+            socket: socket,
+            sender: sender,
+            eventProfile: eventProfile,
+            drawingFlushConfig: drawingFlushConfig,
+            pairedAt: Date()
+        )
+
+        applyProviderBootstrapTopology(
+            surface: surface,
+            windowLabel: providerWindowLabel,
+            initialPaneId: providerInitialPaneId
+        )
+        activeSessions[surfaceId] = session
+        refreshConnectionState(surfaceId: surfaceId)
+        reschedulePendingFlushes(surfaceId: surfaceId)
+        refreshBonjourTXT()
+
+        let response: [String: Any] = [
+            "v": 1,
+            "type": "response",
+            "op": "pair.request",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "sessionId": sessionId,
+                "resumed": resumed,
+                "surfaceId": surface.surfaceId,
+                "surfaceName": surface.name,
+                "viewport": viewportPayload(for: surface),
+                "capabilities": [
+                    "contentTypes": supportedContentTypes.map(\.rawValue),
+                    "eventTypes": eventTypes,
+                ],
+                "eventConfig": [
+                    "profile": eventProfile.rawValue,
+                    "activeEvents": eventProfile.activeEvents,
+                    "drawingFlushConfig": [
+                        "idleWindowMs": drawingFlushConfig.idleWindowMs,
+                        "maxIntervalMs": drawingFlushConfig.maxIntervalMs,
+                    ],
+                ],
+                "limits": [
+                    "maxMessageBytes": maxMessageBytes,
+                    "maxFrameBytes": maxFrameBytes,
+                    "maxVisibleTextBytes": maxVisibleTextBytes,
+                    "maxStrokePointsPerFlush": maxStrokePointsPerFlush,
+                    "maxDrawingFlushBytes": maxDrawingFlushBytes,
+                    "resumeGraceMs": resumeGraceMilliseconds,
+                ],
+                "state": [
+                    "panes": surface.panes.map { pane in
+                        [
+                            "paneId": pane.paneId,
+                            "currentContentId": pane.currentEntry.contentId as Any,
+                            "currentRevision": pane.currentEntry.revision,
+                            "contentType": pane.currentEntry.contentType?.rawValue as Any,
+                        ]
+                    },
+                ],
+            ],
+        ]
+
+        if resumed || surfaceNeedsResumedEvent.contains(surfaceId) {
+            surfaceNeedsResumedEvent.remove(surfaceId)
+            sendLifecycleEvent(surfaceId: surfaceId, op: "event.surface_resumed", payload: ["surfaceId": surfaceId])
+            sendSnapshotHint(surfaceId: surfaceId, reason: "after_reconnect")
+        }
+
+        return response
+    }
+
+    private func handlePanesList(id: String, connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID) else {
+            return makeErrorResponse(op: "panes.list", id: id, code: "not_paired", message: "pair.request required")
+        }
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "panes.list",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "panes": surface.panes.map { pane in
+                    [
+                        "paneId": pane.paneId,
+                        "name": pane.name as Any,
+                        "activeContentId": pane.currentEntry.contentId as Any,
+                        "contentType": pane.currentEntry.contentType?.rawValue as Any,
+                        "viewport": paneViewportPayload(surfaceId: surfaceId, paneId: pane.paneId),
+                    ]
+                },
+            ],
+        ]
+    }
+
+    private func handlePaneSplit(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID) else {
+            return makeErrorResponse(op: "pane.split", id: id, code: "not_paired", message: "pair.request required")
+        }
+
+        guard let paneId = payload["paneId"] as? Int,
+              let count = payload["count"] as? Int,
+              let directionRaw = payload["direction"] as? String,
+              let direction = SurfAceLayoutDirection(rawValue: directionRaw),
+              let newPaneIds = payload["newPaneIds"] as? [Int],
+              count >= 2,
+              newPaneIds.count == count - 1,
+              let _ = surface.panesById[paneId] else {
+            return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "invalid pane.split payload")
+        }
+
+        for newPaneId in newPaneIds where surface.panesById[newPaneId] != nil {
+            return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "newPaneIds must be unique")
+        }
+
+        let children: [SurfAcePaneLayoutNode] = [.leaf(paneId)] + newPaneIds.map(SurfAcePaneLayoutNode.leaf)
+        surface.paneLayout = surface.paneLayout.replacingLeaf(
+            paneId: paneId,
+            with: .split(direction: direction, children: children)
+        )
+
+        for newPaneId in newPaneIds {
+            surface.panesById[newPaneId] = SurfAcePaneModel(paneId: newPaneId)
+            sendLifecycleEvent(
+                surfaceId: surfaceId,
+                op: "event.pane_created",
+                payload: [
+                    "surfaceId": surfaceId,
+                    "paneId": newPaneId,
+                    "parentPaneId": paneId,
+                    "fromSplit": true,
+                ]
+            )
+        }
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "pane.split",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "panes": surface.panes.map { ["paneId": $0.paneId] },
+            ],
+        ]
+    }
+
+    private func handlePaneRename(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId) else {
+            return makeErrorResponse(op: "pane.rename", id: id, code: "invalid_payload", message: "paneId is required")
+        }
+
+        let name = payload["name"] as? String
+        pane.name = name?.isEmpty == true ? nil : name
+        sendLifecycleEvent(
+            surfaceId: surfaceId,
+            op: "event.pane_renamed",
+            payload: [
+                "surfaceId": surfaceId,
+                "paneId": paneId,
+                "name": pane.name as Any,
+            ]
+        )
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "pane.rename",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "paneId": paneId,
+                "name": pane.name as Any,
+            ],
+        ]
+    }
+
+    private func handlePaneClose(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              surface.panes.count > 1,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId) else {
+            return makeErrorResponse(op: "pane.close", id: id, code: "invalid_operation", message: "cannot close pane")
+        }
+
+        pane.pendingFlushTask?.cancel()
+        pane.pendingFlushTask = nil
+        surface.panesById.removeValue(forKey: paneId)
+        if let newLayout = surface.paneLayout.removingLeaf(paneId: paneId) {
+            surface.paneLayout = newLayout
+        }
+
+        sendLifecycleEvent(
+            surfaceId: surfaceId,
+            op: "event.pane_removed",
+            payload: [
+                "surfaceId": surfaceId,
+                "paneId": paneId,
+            ]
+        )
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "pane.close",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "paneId": paneId,
+                "closedFramesDiscarded": 0,
+            ],
+        ]
+    }
+
+    private func handleContentSet(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let contentId = payload["contentId"] as? String,
+              let revision = payload["revision"] as? Int else {
+            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "paneId, contentId, revision are required")
+        }
+
+        guard revision == pane.currentEntry.revision + 1 else {
+            return staleRevisionResponse(op: "content.set", id: id, expectedRevision: pane.currentEntry.revision + 1)
+        }
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return makeErrorResponse(op: "content.set", id: id, code: "invalid_operation", message: "annotation mode is active")
+        }
+        guard payloadByteCount(payload) <= maxFrameBytes else {
+            return makeErrorResponse(op: "content.set", id: id, code: "content_too_large", message: "content exceeds maxFrameBytes")
+        }
+
+        let frame: SurfAceFrame
+        do {
+            frame = try SurfAceFrame.from(contentId: contentId, revision: revision, jsonObject: payload)
+        } catch SurfAceFrameParseError.unsupportedType {
+            return makeErrorResponse(op: "content.set", id: id, code: "unsupported_content_type", message: "unsupported contentType")
+        } catch SurfAceFrameParseError.invalidContentID {
+            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "contentId must match ct_<8hex>")
+        } catch SurfAceFrameParseError.missingField(let field) {
+            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "missing \(field)")
+        } catch {
+            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "invalid content.set payload")
+        }
+
+        let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"])
+        applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
+
+        pane.pendingFlushStrokes.removeAll()
+        pane.firstPendingStrokeAt = nil
+        pane.lastPendingStrokeAt = nil
+        pane.lastSelection = nil
+        pane.lastNavigationURL = nil
+        pane.lastPage = nil
+        pane.bridge?.render(entry: pane.currentEntry)
+        pane.bridge?.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
+        sendSnapshotHint(surfaceId: surfaceId, reason: "after_render")
+
+        return mutationAck(
+            id: id,
+            op: "content.set",
+            paneId: paneId,
+            entry: pane.currentEntry
+        )
+    }
+
+    private func handleContentAppend(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let contentId = payload["contentId"] as? String,
+              let revision = payload["revision"] as? Int,
+              let lines = payload["lines"] as? [String] else {
+            return makeErrorResponse(op: "content.append", id: id, code: "invalid_payload", message: "invalid content.append payload")
+        }
+
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return makeErrorResponse(op: "content.append", id: id, code: "invalid_operation", message: "annotation mode is active")
+        }
+        guard pane.currentEntry.contentId == contentId else {
+            return makeErrorResponse(op: "content.append", id: id, code: "stale_content", message: "contentId is not current")
+        }
+        guard revision == pane.currentEntry.revision + 1 else {
+            return staleRevisionResponse(op: "content.append", id: id, expectedRevision: pane.currentEntry.revision + 1)
+        }
+        guard case .terminal(let existingLines, let scrollback) = pane.currentEntry.payload else {
+            return makeErrorResponse(op: "content.append", id: id, code: "unsupported_operation_for_content_type", message: "append is terminal-only")
+        }
+
+        let nextLines = existingLines + lines
+        let nextPayload = SurfAceFramePayload.terminal(lines: nextLines, scrollback: scrollback)
+        pane.currentEntry.payload = nextPayload
+        pane.currentEntry.revision = revision
+        pane.bridge?.render(entry: pane.currentEntry)
+
+        return mutationAck(id: id, op: "content.append", paneId: paneId, entry: pane.currentEntry)
+    }
+
+    private func handleContentPatch(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let contentId = payload["contentId"] as? String,
+              let revision = payload["revision"] as? Int,
+              let patchObject = payload["patch"] as? [String: Any],
+              let selector = patchObject["selector"] as? String,
+              let action = patchObject["action"] as? String else {
+            return makeErrorResponse(op: "content.patch", id: id, code: "invalid_payload", message: "invalid content.patch payload")
+        }
+
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return makeErrorResponse(op: "content.patch", id: id, code: "invalid_operation", message: "annotation mode is active")
+        }
+        guard pane.currentEntry.contentId == contentId else {
+            return makeErrorResponse(op: "content.patch", id: id, code: "stale_content", message: "contentId is not current")
+        }
+        guard revision == pane.currentEntry.revision + 1 else {
+            return staleRevisionResponse(op: "content.patch", id: id, expectedRevision: pane.currentEntry.revision + 1)
+        }
+        guard case .html = pane.currentEntry.payload else {
+            return makeErrorResponse(op: "content.patch", id: id, code: "unsupported_operation_for_content_type", message: "patch is html-only")
+        }
+        guard let bridge = pane.bridge else {
+            return makeErrorResponse(op: "content.patch", id: id, code: "render_failed", message: "pane renderer unavailable")
+        }
+
+        let patch = SurfAceFramePatchRequest(
+            contentId: contentId,
+            selector: selector,
+            action: action,
+            html: patchObject["html"] as? String
+        )
+
+        switch await bridge.applyHTMLPatch(patch) {
+        case .success(let updatedHTML):
+            pane.currentEntry.payload = .html(html: updatedHTML, baseURL: nil)
+            pane.currentEntry.revision = revision
+            return mutationAck(id: id, op: "content.patch", paneId: paneId, entry: pane.currentEntry)
+        case .selectorNotFound:
+            return makeErrorResponse(op: "content.patch", id: id, code: "render_failed", message: "patch selector did not match any element")
+        case .invalidAction:
+            return makeErrorResponse(op: "content.patch", id: id, code: "render_failed", message: "patch action is not supported")
+        case .failed(let message):
+            return makeErrorResponse(op: "content.patch", id: id, code: "render_failed", message: message)
+        }
+    }
+
+    private func handleContentClear(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let revision = payload["revision"] as? Int else {
+            return makeErrorResponse(op: "content.clear", id: id, code: "invalid_payload", message: "paneId and revision are required")
+        }
+
+        guard revision == pane.currentEntry.revision + 1 else {
+            return staleRevisionResponse(op: "content.clear", id: id, expectedRevision: pane.currentEntry.revision + 1)
+        }
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return makeErrorResponse(op: "content.clear", id: id, code: "invalid_operation", message: "annotation mode is active")
+        }
+
+        if pane.currentEntry.contentId != nil {
+            pane.backStack.append(pane.currentEntry)
+            if pane.backStack.count > 20 {
+                pane.backStack.removeFirst(pane.backStack.count - 20)
+            }
+        }
+        pane.forwardStack.removeAll()
+        pane.currentEntry = .empty(revision: revision)
+        pane.pendingFlushStrokes.removeAll()
+        pane.firstPendingStrokeAt = nil
+        pane.lastPendingStrokeAt = nil
+        pane.bridge?.render(entry: nil)
+        pane.bridge?.clearDrawings()
+
+        return mutationAck(id: id, op: "content.clear", paneId: paneId, entry: pane.currentEntry)
+    }
+
+    private func handleAnnotationsRemove(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let contentId = payload["contentId"] as? String,
+              let strokeIds = payload["strokeIds"] as? [String] else {
+            return makeErrorResponse(op: "annotations.remove", id: id, code: "invalid_payload", message: "paneId, contentId, strokeIds are required")
+        }
+
+        guard pane.currentEntry.contentId == contentId else {
+            return makeErrorResponse(op: "annotations.remove", id: id, code: "stale_content", message: "contentId is not current")
+        }
+
+        var removed: [String] = []
+        var notFound: [String] = []
+        for strokeId in strokeIds {
+            if pane.currentEntry.strokesById.removeValue(forKey: strokeId) != nil {
+                removed.append(strokeId)
+                pane.pendingFlushStrokes.removeAll { $0.strokeId == strokeId }
+            } else {
+                notFound.append(strokeId)
+            }
+        }
+
+        pane.bridge?.removeDrawingStrokeIDs(removed)
+        pane.currentEntry.drawingData = pane.bridge?.captureDrawingData() ?? Data()
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "annotations.remove",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "paneId": paneId,
+                "contentId": contentId,
+                "removedStrokeIds": removed,
+                "notFoundStrokeIds": notFound,
+                "remainingStrokeCount": pane.currentEntry.strokesById.count,
+            ],
+        ]
+    }
+
+    private func handleSnapshotGet(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId) else {
+            return makeErrorResponse(op: "snapshot.get", id: id, code: "invalid_payload", message: "paneId is required")
+        }
+
+        let includeImage = payload["includeImage"] as? Bool ?? false
+        let includeVisibleText = payload["includeVisibleText"] as? Bool ?? true
+        let includeDrawings = payload["includeDrawings"] as? Bool ?? false
+        let snapshot = await pane.bridge?.fetchSnapshot(includeImage: includeImage)
+
+        pane.lastViewport = snapshot?.viewport ?? defaultViewport(surface: surfaceById[surfaceId])
+        if let visibleText = snapshot?.visibleText {
+            pane.lastVisibleText = visibleText
+        }
+        pane.lastSelection = snapshot?.selection ?? pane.lastSelection
+
+        var responsePayload: [String: Any] = [
+            "paneId": paneId,
+            "contentId": pane.currentEntry.contentId as Any,
+            "revision": pane.currentEntry.revision,
+            "contentType": pane.currentEntry.contentType?.rawValue as Any,
+            "viewport": jsonObject(fromEncodable: pane.lastViewport) ?? NSNull(),
+            "selection": jsonObject(fromEncodable: pane.lastSelection) ?? NSNull(),
+        ]
+        if includeVisibleText {
+            responsePayload["visibleText"] = pane.lastVisibleText.prefix(maxVisibleTextBytes).description
+        }
+        if includeDrawings {
+            responsePayload["drawings"] = jsonObject(fromEncodable: pane.activeStrokes) ?? []
+        }
+        if includeImage, let image = snapshot?.imageBase64 {
+            responsePayload["image"] = image
+        }
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "snapshot.get",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": responsePayload,
+        ]
+    }
+
+    private func handleHeartbeatPing(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard pairedSurface(for: connectionUUID) != nil else {
+            return makeErrorResponse(op: "heartbeat.ping", id: id, code: "not_paired", message: "pair.request required")
+        }
+        guard let nonce = payload["nonce"] as? String else {
+            return makeErrorResponse(op: "heartbeat.ping", id: id, code: "invalid_payload", message: "nonce is required")
+        }
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "heartbeat.ping",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": ["nonce": nonce],
+        ]
+    }
+
+    private func pairedSurface(for connectionUUID: String) -> (String, SurfAceSurfaceModel)? {
+        guard let pair = activeSessions.first(where: { $0.value.connectionUUID == connectionUUID }),
+              let surface = surfaceById[pair.key] else {
+            return nil
+        }
+        return (pair.key, surface)
+    }
+
+    private func handleSocketTermination(connectionUUID: String) async {
+        guard let pair = activeSessions.first(where: { $0.value.connectionUUID == connectionUUID }) else { return }
+        let surfaceId = pair.key
+        let session = pair.value
+        activeSessions.removeValue(forKey: surfaceId)
+        beginResumeGrace(surfaceId: surfaceId, sessionId: session.sessionId, providerId: session.providerId)
+        refreshConnectionState(surfaceId: surfaceId)
+        refreshBonjourTXT()
+    }
+
+    private func beginResumeGrace(surfaceId: String, sessionId: String, providerId: String) {
+        let state = SurfAceResumeGraceState(
+            sessionId: sessionId,
+            providerId: providerId,
+            expiresAt: Date().addingTimeInterval(Double(resumeGraceMilliseconds) / 1000)
+        )
+        resumeGraceBySurfaceId[surfaceId] = state
+        cancelResumeGrace(surfaceId: surfaceId, clearStateOnly: true)
+        resumeGraceBySurfaceId[surfaceId] = state
+        resumeGraceTasks[surfaceId] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(self?.resumeGraceMilliseconds ?? 20_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.resumeGraceBySurfaceId.removeValue(forKey: surfaceId)
+                self?.refreshConnectionState(surfaceId: surfaceId)
+                self?.refreshBonjourTXT()
+            }
+        }
+    }
+
+    private func cancelResumeGrace(surfaceId: String, clearStateOnly: Bool = false) {
+        resumeGraceTasks[surfaceId]?.cancel()
+        resumeGraceTasks.removeValue(forKey: surfaceId)
+        if !clearStateOnly {
+            resumeGraceBySurfaceId.removeValue(forKey: surfaceId)
+        }
+    }
+
+    private func refreshConnectionState(surfaceId: String) {
+        guard let surface = surfaceById[surfaceId] else { return }
+        if activeSessions[surfaceId] != nil {
+            surface.connectionBarState = .connected
+        } else if resumeGraceBySurfaceId[surfaceId] != nil {
+            surface.connectionBarState = .connecting
+        } else {
+            surface.connectionBarState = .disconnected
+        }
+    }
+
+    private func mutationAck(id: String, op: String, paneId: Int, entry: SurfAcePaneEntry) -> [String: Any] {
+        [
+            "v": 1,
+            "type": "response",
+            "op": op,
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "paneId": paneId,
+                "currentContentId": entry.contentId as Any,
+                "currentRevision": entry.revision,
+                "contentType": entry.contentType?.rawValue as Any,
+                "contentId": entry.contentId as Any,
+            ],
+        ]
+    }
+
+    private func staleRevisionResponse(op: String, id: String, expectedRevision: Int) -> [String: Any] {
+        makeErrorResponse(
+            op: op,
+            id: id,
+            code: "stale_revision",
+            message: "revision mismatch",
+            details: ["expectedRevision": expectedRevision]
+        )
+    }
+
+    private func sendEvent(surfaceId: String, op: String, payload: [String: Any], sentAt: Int64? = nil) {
+        Task {
+            _ = await sendEventAsync(surfaceId: surfaceId, op: op, payload: payload, sentAt: sentAt)
+        }
+    }
+
+    private func sendEventAsync(
+        surfaceId: String,
+        op: String,
+        payload: [String: Any],
+        sentAt: Int64? = nil
+    ) async -> Bool {
+        guard let session = activeSessions[surfaceId] else { return false }
+        let envelope: [String: Any] = [
+            "v": 1,
+            "type": "event",
+            "op": op,
+            "eventId": randomHex(prefix: "ev", byteCount: 8),
+            "sentAt": sentAt ?? timestampNow(),
+            "payload": payload,
+        ]
+        guard let json = encodeJSON(envelope) else { return false }
+        do {
+            try await session.sender.send(text: json, priority: .event)
+            return true
+        } catch {
+            surfaceById[surfaceId]?.lastError = "Event send failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private func sendLifecycleEvent(surfaceId: String, op: String, payload: [String: Any]) {
+        sendEvent(surfaceId: surfaceId, op: op, payload: payload)
+    }
+
+    private func broadcastLifecycleEvent(op: String, payload: [String: Any]) {
+        for surfaceId in activeSessions.keys {
+            sendEvent(surfaceId: surfaceId, op: op, payload: payload)
+        }
+    }
+
+    private func sendSnapshotHint(surfaceId: String, reason: String) {
+        guard eventIsEnabled(surfaceId: surfaceId, eventName: "event.snapshot_hint") else { return }
+        sendEvent(surfaceId: surfaceId, op: "event.snapshot_hint", payload: ["reason": reason])
+    }
+
+    private func eventIsEnabled(surfaceId: String, eventName: String) -> Bool {
+        activeSessions[surfaceId]?.eventProfile.activeEvents.contains(eventName) == true
+    }
+
+    private func postPDFPageChangeIfNeeded(surfaceId: String, paneId: Int) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              eventIsEnabled(surfaceId: surfaceId, eventName: "event.page"),
+              let contentId = pane.currentEntry.contentId,
+              case .pdf(let data) = pane.currentEntry.payload,
+              let decoded = Data(base64Encoded: data, options: [.ignoreUnknownCharacters]),
+              let document = PDFDocument(data: decoded) else {
+            return
+        }
+
+        let totalPages = max(document.pageCount, 1)
+        let scrollableHeight = max(pane.lastViewport.contentSize.height - pane.lastViewport.visibleRect.height, 1)
+        let progress = min(max(pane.lastViewport.scrollOffset.y / scrollableHeight, 0), 1)
+        let page = min(max(Int((progress * Double(totalPages - 1)).rounded(.down)) + 1, 1), totalPages)
+
+        if pane.lastPage?.page == page {
+            return
+        }
+
+        let pageText = document.page(at: page - 1)?.string?.prefix(maxVisibleTextBytes).description
+        pane.lastPage = (page, totalPages, pageText)
+        sendEvent(
+            surfaceId: surfaceId,
+            op: "event.page",
+            payload: [
+                "paneId": paneId,
+                "contentId": contentId,
+                "revision": pane.currentEntry.revision,
+                "page": page,
+                "totalPages": totalPages,
+                "pageText": pageText as Any,
+            ]
+        )
+    }
+
+    private func scheduleDrawingFlush(surfaceId: String, paneId: Int) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        pane.pendingFlushTask?.cancel()
+
+        guard !pane.pendingFlushStrokes.isEmpty,
+              let session = activeSessions[surfaceId],
+              let lastDirtyAt = pane.lastPendingStrokeAt else { return }
+
+        let lastSuccessfulSendAt = pane.lastSuccessfulFlushAt ?? session.pairedAt
+        let config = session.drawingFlushConfig
+        let idleDeadline = lastDirtyAt + Int64(config.idleWindowMs)
+        let maxDeadline = Int64(lastSuccessfulSendAt.timeIntervalSince1970 * 1000) + Int64(config.maxIntervalMs)
+        let fireAt = min(idleDeadline, maxDeadline)
+        let delay = max(0, fireAt - timestampNow())
+
+        pane.pendingFlushTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(delay)))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.flushDrawing(surfaceId: surfaceId, paneId: paneId)
+            }
+        }
+    }
+
+    private func reschedulePendingFlushes(surfaceId: String) {
+        guard let surface = surfaceById[surfaceId] else { return }
+        for pane in surface.panes where !pane.pendingFlushStrokes.isEmpty {
+            scheduleDrawingFlush(surfaceId: surfaceId, paneId: pane.paneId)
+        }
+    }
+
+    private func flushDrawing(surfaceId: String, paneId: Int) {
+        guard let session = activeSessions[surfaceId],
+              let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let contentId = pane.currentEntry.contentId,
+              !pane.pendingFlushStrokes.isEmpty else {
+            return
+        }
+
+        let config = session.drawingFlushConfig
+        let lastDirtyAt = pane.lastPendingStrokeAt ?? timestampNow()
+        let reason: String
+        if let lastSuccessfulFlushAt = pane.lastSuccessfulFlushAt {
+            let elapsed = Int64(Date().timeIntervalSince(lastSuccessfulFlushAt) * 1000)
+            reason = elapsed >= Int64(config.maxIntervalMs) ? "max_interval" : "idle_window"
+        } else {
+            reason = "idle_window"
+        }
+
+        let strokes = pane.pendingFlushStrokes
+        let firstStrokeAt = pane.firstPendingStrokeAt ?? strokes.first?.points.first?.timestamp ?? timestampNow()
+        let lastStrokeAt = strokes.last?.points.last?.timestamp ?? lastDirtyAt
+        let pointsCount = strokes.reduce(0) { $0 + $1.points.count }
+
+        pane.isDrawingFlushSending = true
+        let payload: [String: Any] = [
+            "paneId": paneId,
+            "contentId": contentId,
+            "revision": pane.currentEntry.revision,
+            "flushId": randomHex(prefix: "fl", byteCount: 8),
+            "flushReason": reason,
+            "idleWindowMs": config.idleWindowMs,
+            "maxIntervalMs": config.maxIntervalMs,
+            "strokes": jsonObject(fromEncodable: strokes) ?? [],
+            "strokeCount": strokes.count,
+            "pointsCount": pointsCount,
+            "firstStrokeAt": firstStrokeAt,
+            "lastStrokeAt": lastStrokeAt,
+        ]
+
+        Task { @MainActor in
+            let succeeded = await self.sendEventAsync(surfaceId: surfaceId, op: "event.drawing_flush", payload: payload)
+            guard let pane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
+            pane.isDrawingFlushSending = false
+            if succeeded {
+                pane.pendingFlushStrokes.removeAll()
+                pane.firstPendingStrokeAt = nil
+                pane.lastPendingStrokeAt = nil
+                pane.lastSuccessfulFlushAt = Date()
+            } else {
+                self.scheduleDrawingFlush(surfaceId: surfaceId, paneId: paneId)
+            }
+        }
+    }
+
+    private func pane(surfaceId: String, paneId: Int) -> SurfAcePaneModel? {
+        surfaceById[surfaceId]?.panesById[paneId]
+    }
+
+    private func applyContentSet(frame: SurfAceFrame, to pane: SurfAcePaneModel, historyOwnerToken: String?) {
+        let nextEntry = SurfAcePaneEntry.from(frame: frame, historyOwnerToken: historyOwnerToken)
+        let shouldReplaceInPlace = pane.currentEntry.contentId != nil
+            && historyOwnerToken != nil
+            && pane.currentEntry.historyOwnerToken == historyOwnerToken
+
+        if shouldReplaceInPlace {
+            pane.currentEntry = nextEntry
+            return
+        }
+
+        if pane.currentEntry.contentId != nil {
+            pane.backStack.append(pane.currentEntry)
+            if pane.backStack.count > 20 {
+                pane.backStack.removeFirst(pane.backStack.count - 20)
+            }
+        }
+        pane.forwardStack.removeAll()
+        pane.currentEntry = nextEntry
+    }
+
+    private func applyProviderBootstrapTopology(surface: SurfAceSurfaceModel, windowLabel: String?, initialPaneId: Int?) {
+        var didPersist = false
+
+        if let windowLabel, surface.windowLabel != windowLabel {
+            surface.windowLabel = windowLabel
+            surface.name = "\(screenName) \(windowLabel.uppercased())"
+            if var stored = identityMapping.surfacesBySceneKey[surface.sceneKey] {
+                stored.windowLabel = windowLabel
+                identityMapping.surfacesBySceneKey[surface.sceneKey] = stored
+                didPersist = true
+            }
+        }
+
+        if let initialPaneId {
+            didPersist = reassignBootstrapPaneIfNeeded(surface: surface, initialPaneId: initialPaneId) || didPersist
+        }
+
+        if didPersist {
+            persistIdentityMapping()
+        }
+    }
+
+    private func reassignBootstrapPaneIfNeeded(surface: SurfAceSurfaceModel, initialPaneId: Int) -> Bool {
+        guard initialPaneId > 0,
+              surface.panes.count == 1,
+              let currentPaneId = surface.paneLayout.paneIDs.first,
+              currentPaneId != initialPaneId,
+              surface.panesById[initialPaneId] == nil,
+              let currentPane = surface.panesById[currentPaneId],
+              currentPane.currentEntry.contentId == nil,
+              currentPane.backStack.isEmpty,
+              currentPane.forwardStack.isEmpty else {
+            return false
+        }
+
+        let replacementPane = SurfAcePaneModel(paneId: initialPaneId, name: currentPane.name)
+        replacementPane.lastMeasuredSize = currentPane.lastMeasuredSize
+        surface.panesById.removeValue(forKey: currentPaneId)
+        surface.panesById[initialPaneId] = replacementPane
+        surface.paneLayout = .leaf(initialPaneId)
+
+        if var stored = identityMapping.surfacesBySceneKey[surface.sceneKey] {
+            stored.initialPaneId = initialPaneId
+            identityMapping.surfacesBySceneKey[surface.sceneKey] = stored
+        }
+        return true
+    }
+
+    private func viewportPayload(for surface: SurfAceSurfaceModel) -> [String: Any] {
+        [
+            "width": max(Int(surface.viewportSize.width.rounded()), 1),
+            "height": max(Int(surface.viewportSize.height.rounded()), 1),
+            "scale": Double(max(surface.viewportScale, 1)),
+        ]
+    }
+
+    private func paneViewportPayload(surfaceId: String, paneId: Int) -> [String: Any] {
+        guard let surface = surfaceById[surfaceId] else {
+            return ["width": 1, "height": 1, "scale": 1]
+        }
+        let rect = paneRect(in: CGRect(origin: .zero, size: surface.viewportSize), layout: surface.paneLayout, targetPaneId: paneId) ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        return [
+            "width": max(Int(rect.width.rounded()), 1),
+            "height": max(Int(rect.height.rounded()), 1),
+            "scale": Double(max(surface.viewportScale, 1)),
+        ]
+    }
+
+    private func paneRect(in rect: CGRect, layout: SurfAcePaneLayoutNode, targetPaneId: Int) -> CGRect? {
+        switch layout {
+        case .leaf(let paneId):
+            return paneId == targetPaneId ? rect : nil
+        case .split(let direction, let children):
+            guard !children.isEmpty else { return nil }
+            switch direction {
+            case .horizontal:
+                let childHeight = rect.height / CGFloat(children.count)
+                for (index, child) in children.enumerated() {
+                    let childRect = CGRect(
+                        x: rect.minX,
+                        y: rect.minY + CGFloat(index) * childHeight,
+                        width: rect.width,
+                        height: childHeight
+                    )
+                    if let match = paneRect(in: childRect, layout: child, targetPaneId: targetPaneId) {
+                        return match
+                    }
+                }
+            case .vertical:
+                let childWidth = rect.width / CGFloat(children.count)
+                for (index, child) in children.enumerated() {
+                    let childRect = CGRect(
+                        x: rect.minX + CGFloat(index) * childWidth,
+                        y: rect.minY,
+                        width: childWidth,
+                        height: rect.height
+                    )
+                    if let match = paneRect(in: childRect, layout: child, targetPaneId: targetPaneId) {
+                        return match
+                    }
+                }
+            }
+            return nil
+        }
+    }
+
+    private func publishBonjour() {
+        bonjourPublisher.publish(name: screenName, port: serverPort, txtRecord: bonjourTXTRecord())
+    }
+
+    private func refreshBonjourTXT() {
+        guard isStarted else { return }
+        bonjourPublisher.updateTXTRecord(bonjourTXTRecord())
+    }
+
+    private func bonjourTXTRecord() -> [String: String] {
+        let firstSurface = surfaces.first
+        let viewport = firstSurface.map(viewportPayload(for:)) ?? ["width": 1, "height": 1, "scale": 1]
+        return [
+            "name": screenName,
+            "v": "1",
+            "w": "\(viewport["width"] ?? 1)",
+            "h": "\(viewport["height"] ?? 1)",
+            "s": "\(viewport["scale"] ?? 1)",
+            "cap": "31",
+            "busy": activeSessions.isEmpty && resumeGraceBySurfaceId.isEmpty ? "0" : "1",
+            "pk": fingerprint,
+            "ws": webSocketPath,
+            "tls": "0",
+        ]
+    }
+
+    private func defaultViewport(surface: SurfAceSurfaceModel?) -> SurfAceViewport {
+        SurfAceViewport(
+            scrollOffset: SurfAcePoint(x: 0, y: 0),
+            visibleRect: SurfAceRect(
+                x: 0,
+                y: 0,
+                width: Double(max(surface?.viewportSize.width ?? 1, 1)),
+                height: Double(max(surface?.viewportSize.height ?? 1, 1))
+            ),
+            contentSize: SurfAceSize(
+                width: Double(max(surface?.viewportSize.width ?? 1, 1)),
+                height: Double(max(surface?.viewportSize.height ?? 1, 1))
+            ),
+            zoomLevel: 1
+        )
+    }
+
+    private func normalizeURL(_ url: String) -> String? {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard var components = URLComponents(string: trimmed) else { return trimmed }
+        components.fragment = nil
+        return components.string ?? trimmed
+    }
+
+    private func payloadByteCount(_ payload: [String: Any]) -> Int {
+        (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]).count) ?? 0
+    }
+
+    private func makeErrorResponse(
+        op: String,
+        id: String,
+        code: String,
+        message: String,
+        details: [String: Any]? = nil
+    ) -> [String: Any] {
+        var error: [String: Any] = [
+            "code": code,
+            "message": message,
+        ]
+        if let details {
+            error["details"] = details
+        }
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": op,
+            "id": id,
+            "ok": false,
+            "sentAt": timestampNow(),
+            "error": error,
+        ]
+    }
+
+    private func decodeJSONObject(from text: String) -> [String: Any]? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
+    private func encodeJSON(_ object: [String: Any]) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return text
+    }
+
+    private func jsonObject(fromEncodable value: Encodable?) -> Any? {
+        guard let value else { return nil }
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(AnyEncodable(value)),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return nil
+        }
+        return object
+    }
+
+    private func payloadHash(_ payload: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            return UUID().uuidString
+        }
+        return SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    private func jsonResponse(statusCode: Int, body: [String: Any]) -> HTTPServerResponse {
+        let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+        return HTTPServerResponse(
+            statusCode: statusCode,
+            headers: ["Content-Type": "application/json"],
+            body: data
+        )
+    }
+
+    private func loadIdentityMapping() {
+        guard let data = UserDefaults.standard.data(forKey: mappingStoreKey),
+              let mapping = try? JSONDecoder().decode(SurfAceIdentityMapping.self, from: data) else {
+            identityMapping = SurfAceIdentityMapping()
+            return
+        }
+        identityMapping = mapping
+    }
+
+    private func persistIdentityMapping() {
+        guard let data = try? JSONEncoder().encode(identityMapping) else { return }
+        UserDefaults.standard.set(data, forKey: mappingStoreKey)
+    }
+
+    private func normalizedWindowLabel(from value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func normalizedHistoryOwnerToken(from value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func windowLabelForIndex(_ index: Int) -> String {
+        var value = index
+        var label = ""
+        repeat {
+            label = String(UnicodeScalar(97 + (value % 26))!) + label
+            value = (value / 26) - 1
+        } while value >= 0
+        return label
+    }
+
+    private func randomHex(prefix: String? = nil, byteCount: Int) -> String {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        let status = SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes)
+        let hex: String
+        if status == errSecSuccess {
+            hex = bytes.map { String(format: "%02x", $0) }.joined()
+        } else {
+            hex = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        }
+        if let prefix {
+            return "\(prefix)_\(hex)"
+        }
+        return hex
+    }
+
+    private func timestampNow() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
+    }
+}
+
+private struct AnyEncodable: Encodable {
+    private let encodeImpl: (Encoder) throws -> Void
+
+    init(_ value: Encodable) {
+        self.encodeImpl = { encoder in
+            try value.encode(to: encoder)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try encodeImpl(encoder)
+    }
+}

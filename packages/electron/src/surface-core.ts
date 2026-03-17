@@ -1,0 +1,1051 @@
+import { randomBytes, randomUUID } from "node:crypto";
+
+import { parseHTML } from "linkedom";
+
+import type {
+  ContentAppendRequest,
+  ContentClearRequest,
+  ContentPatchRequest,
+  ContentSetRequest,
+  ContentType,
+  DrawingFlushConfig,
+  DrawingFlushEvent,
+  EpochMs,
+  MutationAckResponse,
+  PaneCloseResponse,
+  PaneCreatedEvent,
+  PaneId,
+  PaneRemovedEvent,
+  PaneRenamedEvent,
+  PairResponse,
+  PanesListResponse,
+  Position,
+  Revision,
+  Selection,
+  SnapshotResponse,
+  Stroke,
+  StrokeId,
+  SurfaceId,
+  SurfaceViewport,
+} from "../../protocol/src/index.js";
+
+type ContentPayload = ContentSetRequest["payload"]["content"];
+type ContentDisplay = ContentSetRequest["payload"]["display"];
+
+type HistoryEntry = {
+  annotations: Stroke[];
+  content: ContentPayload | null;
+  contentId: string | null;
+  contentType: ContentType | null;
+  display?: ContentDisplay;
+  ownerToken: string | null;
+  revision: number;
+};
+
+type PaneSnapshot = {
+  bounds: { height: number; width: number; x: number; y: number } | null;
+  selection: Selection;
+  viewport: SnapshotResponse["payload"]["viewport"];
+  visibleText: string;
+};
+
+type PaneState = {
+  annotating: boolean;
+  dirtyStrokeIds: string[];
+  firstDirtyStrokeAt: number | null;
+  flushInFlight: boolean;
+  history: HistoryEntry[];
+  historyIndex: number;
+  lastDirtyStrokeAt: number | null;
+  lastSuccessfulFlushAt: number | null;
+  latestContentEventAt: number;
+  name: string | null;
+  paneId: number;
+  snapshot: PaneSnapshot;
+  toast: string | null;
+};
+
+type LayoutNode =
+  | {
+      paneId: number;
+      type: "pane";
+    }
+  | {
+      children: LayoutNode[];
+      direction: "horizontal" | "vertical";
+      type: "split";
+    };
+
+type SurfaceState = {
+  connectionBar: "connected" | "connecting" | "disconnected";
+  layout: LayoutNode;
+  name: string;
+  paneOrder: number[];
+  panes: Map<number, PaneState>;
+  surfaceId: string;
+  viewport: SurfaceViewport;
+  windowLabel: string;
+};
+
+export type PersistentSurfaceState = {
+  nextPaneId: number;
+  nextWindowLabelIndex: number;
+  primarySurfaceId: string | null;
+  version: 1;
+  windowLabels: Record<string, string>;
+};
+
+export type RendererPaneState = {
+  annotationBorderVisible: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  content: {
+    content: ContentPayload | null;
+    contentId: string | null;
+    contentType: ContentType | null;
+    display?: ContentDisplay;
+    revision: number;
+  };
+  drawings: Stroke[];
+  flushInFlight: boolean;
+  label: string;
+  name: string | null;
+  paneId: number;
+  showDone: boolean;
+  toast: string | null;
+};
+
+export type RendererWindowState = {
+  connectionBar: SurfaceState["connectionBar"];
+  layout: LayoutNode;
+  name: string;
+  panes: RendererPaneState[];
+  surfaceId: string;
+  viewport: SurfaceViewport;
+  windowLabel: string;
+};
+
+export type CoreEvent =
+  | { surfaceId: string; type: "surface-changed" }
+  | { surfaceId: string; type: "surface-created" }
+  | { surfaceId: string; type: "surface-removed" }
+  | { fromSplit: boolean; paneId: number; parentPaneId: number | null; surfaceId: string; type: "pane-created" }
+  | { paneId: number; surfaceId: string; type: "pane-removed" }
+  | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
+  | { paneId: number; surfaceId: string; type: "drawing-dirty" };
+
+export class SurfaceCoreError extends Error {
+  constructor(
+    readonly code:
+      | "busy"
+      | "content_too_large"
+      | "internal_error"
+      | "invalid_operation"
+      | "invalid_payload"
+      | "not_paired"
+      | "render_failed"
+      | "stale_content"
+      | "stale_revision"
+      | "unsupported_content_type"
+      | "unsupported_operation_for_content_type",
+    message: string,
+    readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "SurfaceCoreError";
+  }
+}
+
+const DEFAULT_VISIBLE_RECT = { height: 768, width: 1024, x: 0, y: 0 };
+const MAX_HISTORY_DEPTH = 20;
+const SUPPORTED_CONTENT_TYPES: ContentType[] = [
+  "html",
+  "image",
+  "pdf",
+  "terminal",
+  "markdown",
+];
+
+export class SurfaceCore {
+  private readonly surfaces = new Map<string, SurfaceState>();
+  private readonly listeners = new Set<(event: CoreEvent) => void>();
+  private readonly now: () => number;
+  private persistentState: PersistentSurfaceState;
+
+  constructor(options?: { now?: () => number; persistentState?: PersistentSurfaceState }) {
+    this.now = options?.now ?? (() => Date.now());
+    this.persistentState = options?.persistentState ?? {
+      nextPaneId: 1,
+      nextWindowLabelIndex: 0,
+      primarySurfaceId: null,
+      version: 1,
+      windowLabels: {},
+    };
+  }
+
+  subscribe(listener: (event: CoreEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  getPersistentState(): PersistentSurfaceState {
+    return structuredClone(this.persistentState);
+  }
+
+  ensurePrimarySurface(name: string, viewport: SurfaceViewport): SurfaceState {
+    const existingId = this.persistentState.primarySurfaceId;
+    if (existingId && this.surfaces.has(existingId)) {
+      const existing = this.surfaces.get(existingId)!;
+      existing.name = name;
+      existing.viewport = cloneViewport(viewport);
+      existing.connectionBar = "disconnected";
+      this.emit({ surfaceId: existing.surfaceId, type: "surface-changed" });
+      return existing;
+    }
+
+    const surfaceId = existingId ?? `sf_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const surface = this.createSurface(surfaceId, name, viewport);
+    this.persistentState.primarySurfaceId = surface.surfaceId;
+    return surface;
+  }
+
+  createAdditionalSurface(name: string, viewport: SurfaceViewport): SurfaceState {
+    return this.createSurface(
+      `sf_${randomUUID().replaceAll("-", "").slice(0, 12)}`,
+      name,
+      viewport,
+    );
+  }
+
+  removeSurface(surfaceId: string): void {
+    if (!this.surfaces.has(surfaceId)) {
+      return;
+    }
+    this.surfaces.delete(surfaceId);
+    this.emit({ surfaceId, type: "surface-removed" });
+  }
+
+  listSurfaces(): SurfaceState[] {
+    return [...this.surfaces.values()].sort((left, right) =>
+      left.windowLabel.localeCompare(right.windowLabel, "en"),
+    );
+  }
+
+  getSurface(surfaceId: string): SurfaceState {
+    const surface = this.surfaces.get(surfaceId);
+    if (!surface) {
+      throw new SurfaceCoreError("invalid_payload", `Unknown surface: ${surfaceId}`);
+    }
+    return surface;
+  }
+
+  setConnectionBar(surfaceId: string, state: SurfaceState["connectionBar"]): void {
+    const surface = this.getSurface(surfaceId);
+    if (surface.connectionBar === state) {
+      return;
+    }
+    surface.connectionBar = state;
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  getRendererWindowState(surfaceId: string): RendererWindowState {
+    const surface = this.getSurface(surfaceId);
+    return {
+      connectionBar: surface.connectionBar,
+      layout: structuredClone(surface.layout),
+      name: surface.name,
+      panes: surface.paneOrder.map((paneId) => {
+        const pane = surface.panes.get(paneId)!;
+        const current = currentEntry(pane);
+        return {
+          annotationBorderVisible: pane.annotating,
+          canGoBack: pane.historyIndex > 0,
+          canGoForward: pane.historyIndex < pane.history.length - 1,
+          content: {
+            content: cloneContent(current.content),
+            contentId: current.contentId,
+            contentType: current.contentType,
+            display: current.display ? { ...current.display } : undefined,
+            revision: current.revision,
+          },
+          drawings: structuredClone(current.annotations),
+          flushInFlight: pane.flushInFlight,
+          label: pane.name ?? String(pane.paneId),
+          name: pane.name,
+          paneId,
+          showDone: pane.annotating,
+          toast: pane.toast,
+        };
+      }),
+      surfaceId: surface.surfaceId,
+      viewport: cloneViewport(surface.viewport),
+      windowLabel: surface.windowLabel,
+    };
+  }
+
+  clearToast(surfaceId: string, paneId: number): void {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (!pane.toast) {
+      return;
+    }
+    pane.toast = null;
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  setAnnotating(surfaceId: string, paneId: number, enabled: boolean): void {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (pane.annotating === enabled) {
+      return;
+    }
+    pane.annotating = enabled;
+    pane.toast = null;
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  navigateHistory(surfaceId: string, paneId: number, direction: "back" | "forward"): void {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      return;
+    }
+
+    if (direction === "back" && pane.historyIndex > 0) {
+      pane.historyIndex -= 1;
+    } else if (direction === "forward" && pane.historyIndex < pane.history.length - 1) {
+      pane.historyIndex += 1;
+    } else {
+      return;
+    }
+
+    pane.toast = null;
+    clearDirtyState(pane);
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  panesList(surfaceId: string): PanesListResponse["payload"] {
+    const surface = this.getSurface(surfaceId);
+    return {
+      panes: surface.paneOrder.map((paneId) => {
+        const pane = surface.panes.get(paneId)!;
+        const current = currentEntry(pane);
+        return {
+          activeContentId: current.contentId,
+          contentType: current.contentType,
+          name: pane.name,
+          paneId: pane.paneId as PaneId,
+          viewport: cloneViewport(surface.viewport),
+        };
+      }),
+    };
+  }
+
+  pairState(surfaceId: string): PairResponse["payload"]["state"] {
+    const surface = this.getSurface(surfaceId);
+    return {
+      panes: surface.paneOrder.map((paneId) => {
+        const pane = surface.panes.get(paneId)!;
+        const current = currentEntry(pane);
+        return {
+          contentType: current.contentType,
+          currentContentId: current.contentId,
+          currentRevision: current.revision as Revision,
+          paneId: pane.paneId as PaneId,
+        };
+      }),
+    };
+  }
+
+  paneSplit(
+    surfaceId: string,
+    payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; paneId: number },
+  ): { panes: PaneSplitState[] } {
+    const surface = this.getSurface(surfaceId);
+    const sourcePane = this.requirePane(surfaceId, payload.paneId);
+    if (payload.count < 2 || payload.newPaneIds.length !== payload.count - 1) {
+      throw new SurfaceCoreError("invalid_payload", "pane.split count/newPaneIds mismatch");
+    }
+
+    const newPaneIds = payload.newPaneIds.map((paneId) => Math.trunc(paneId));
+    for (const paneId of newPaneIds) {
+      if (surface.panes.has(paneId)) {
+        throw new SurfaceCoreError("invalid_payload", `Pane already exists: ${paneId}`);
+      }
+    }
+
+    const newPanes = newPaneIds.map((paneId) => createPaneState(paneId, this.now()));
+    for (const pane of newPanes) {
+      surface.panes.set(pane.paneId, pane);
+      surface.paneOrder.push(pane.paneId);
+    }
+    surface.layout = splitLayoutNode(surface.layout, sourcePane.paneId, payload.direction, [
+      sourcePane.paneId,
+      ...newPaneIds,
+    ]);
+
+    this.emit({ surfaceId, type: "surface-changed" });
+    for (const paneId of newPaneIds) {
+      this.emit({
+        fromSplit: true,
+        paneId,
+        parentPaneId: payload.paneId,
+        surfaceId,
+        type: "pane-created",
+      });
+    }
+
+    return {
+      panes: flattenLayout(surface.layout).map((paneId) => ({ paneId })),
+    };
+  }
+
+  paneRename(surfaceId: string, paneId: number, name: string | null): { name: string | null; paneId: number } {
+    const pane = this.requirePane(surfaceId, paneId);
+    pane.name = name;
+    this.emit({ surfaceId, type: "surface-changed" });
+    this.emit({ name, paneId, surfaceId, type: "pane-renamed" });
+    return { name, paneId };
+  }
+
+  paneClose(surfaceId: string, paneId: number): PaneCloseResponse["payload"] {
+    const surface = this.getSurface(surfaceId);
+    if (surface.panes.size <= 1) {
+      throw new SurfaceCoreError("invalid_operation", "Cannot close the last pane");
+    }
+    if (!surface.panes.has(paneId)) {
+      throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
+    }
+
+    surface.panes.delete(paneId);
+    surface.paneOrder = surface.paneOrder.filter((entry) => entry !== paneId);
+    surface.layout = collapseLayout(removePaneFromLayout(surface.layout, paneId));
+    this.emit({ surfaceId, type: "surface-changed" });
+    this.emit({ paneId, surfaceId, type: "pane-removed" });
+    return {
+      closedFramesDiscarded: 0,
+      paneId: paneId as PaneId,
+    };
+  }
+
+  contentSet(
+    surfaceId: string,
+    payload: ContentSetRequest["payload"],
+    options?: { ownerToken?: string | null },
+  ): MutationAckResponse["payload"] {
+    const pane = this.requirePane(surfaceId, payload.paneId);
+    if (!SUPPORTED_CONTENT_TYPES.includes(payload.contentType)) {
+      throw new SurfaceCoreError(
+        "unsupported_content_type",
+        `Unsupported content type: ${payload.contentType}`,
+      );
+    }
+    assertRevision(pane, payload.revision);
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      throw new SurfaceCoreError("invalid_operation", "Cannot replace content while annotating");
+    }
+
+    if (pane.historyIndex < pane.history.length - 1) {
+      pane.history = pane.history.slice(0, pane.historyIndex + 1);
+    }
+
+    const ownerToken = options?.ownerToken ?? null;
+    const nextEntry: HistoryEntry = {
+      annotations: [],
+      content: cloneContent(payload.content),
+      contentId: payload.contentId,
+      contentType: payload.contentType,
+      display: payload.display ? { ...payload.display } : undefined,
+      ownerToken,
+      revision: payload.revision,
+    };
+    if (shouldReplaceVisibleEntry(pane, ownerToken)) {
+      pane.history[pane.historyIndex] = nextEntry;
+    } else {
+      pane.history.push(nextEntry);
+      pane.historyIndex = pane.history.length - 1;
+    }
+    trimHistory(pane);
+    pane.toast = null;
+    pane.latestContentEventAt = this.now();
+    clearDirtyState(pane);
+    this.emit({ surfaceId, type: "surface-changed" });
+
+    return currentMutationAck(pane);
+  }
+
+  contentClear(surfaceId: string, payload: ContentClearRequest["payload"]): MutationAckResponse["payload"] {
+    const pane = this.requirePane(surfaceId, payload.paneId);
+    assertRevision(pane, payload.revision);
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      throw new SurfaceCoreError("invalid_operation", "Cannot clear content while annotating");
+    }
+
+    if (pane.historyIndex < pane.history.length - 1) {
+      pane.history = pane.history.slice(0, pane.historyIndex + 1);
+    }
+
+    pane.history.push({
+      annotations: [],
+      content: null,
+      contentId: null,
+      contentType: null,
+      ownerToken: null,
+      revision: payload.revision,
+    });
+    pane.historyIndex = pane.history.length - 1;
+    trimHistory(pane);
+    pane.toast = null;
+    pane.latestContentEventAt = this.now();
+    clearDirtyState(pane);
+    this.emit({ surfaceId, type: "surface-changed" });
+    return currentMutationAck(pane);
+  }
+
+  contentAppend(surfaceId: string, payload: ContentAppendRequest["payload"]): MutationAckResponse["payload"] {
+    const pane = this.requirePane(surfaceId, payload.paneId);
+    const entry = currentEntry(pane);
+    assertRevision(pane, payload.revision);
+    if (entry.contentId !== payload.contentId) {
+      throw new SurfaceCoreError("stale_content", "content.append targeted stale content");
+    }
+    if (entry.contentType !== "terminal" || !entry.content || typeof entry.content !== "object" || !("lines" in entry.content)) {
+      throw new SurfaceCoreError(
+        "unsupported_operation_for_content_type",
+        "content.append only supports terminal content",
+      );
+    }
+
+    entry.content = {
+      ...entry.content,
+      lines: [...entry.content.lines, ...payload.lines],
+    };
+    entry.revision = payload.revision;
+    pane.toast = null;
+    pane.latestContentEventAt = this.now();
+    this.emit({ surfaceId, type: "surface-changed" });
+    return currentMutationAck(pane);
+  }
+
+  contentPatch(surfaceId: string, payload: ContentPatchRequest["payload"]): MutationAckResponse["payload"] {
+    const pane = this.requirePane(surfaceId, payload.paneId);
+    const entry = currentEntry(pane);
+    assertRevision(pane, payload.revision);
+    if (entry.contentId !== payload.contentId) {
+      throw new SurfaceCoreError("stale_content", "content.patch targeted stale content");
+    }
+    if (entry.contentType !== "html" || !entry.content || typeof entry.content !== "object" || !("html" in entry.content)) {
+      throw new SurfaceCoreError(
+        "unsupported_operation_for_content_type",
+        "content.patch only supports html content",
+      );
+    }
+
+    entry.content = {
+      ...entry.content,
+      html: patchHtml(entry.content.html, payload.patch),
+    };
+    entry.revision = payload.revision;
+    pane.latestContentEventAt = this.now();
+    this.emit({ surfaceId, type: "surface-changed" });
+    return currentMutationAck(pane);
+  }
+
+  annotationsRemove(
+    surfaceId: string,
+    payload: { contentId: string; paneId: number; strokeIds: string[] },
+  ): {
+    contentId: string;
+    notFoundStrokeIds: string[];
+    paneId: number;
+    remainingStrokeCount: number;
+    removedStrokeIds: string[];
+  } {
+    const pane = this.requirePane(surfaceId, payload.paneId);
+    const entry = currentEntry(pane);
+    if (!entry.contentId || entry.contentId !== payload.contentId) {
+      throw new SurfaceCoreError("stale_content", "annotations.remove targeted stale content");
+    }
+
+    const toRemove = new Set(payload.strokeIds);
+    const removedStrokeIds: string[] = [];
+    const notFoundStrokeIds: string[] = [];
+    const before = new Set(entry.annotations.map((stroke) => stroke.strokeId));
+    for (const strokeId of payload.strokeIds) {
+      if (before.has(strokeId as StrokeId)) {
+        removedStrokeIds.push(strokeId);
+      } else {
+        notFoundStrokeIds.push(strokeId);
+      }
+    }
+
+    entry.annotations = entry.annotations.filter((stroke) => !toRemove.has(stroke.strokeId));
+    pane.dirtyStrokeIds = pane.dirtyStrokeIds.filter((strokeId) => !toRemove.has(strokeId));
+    this.emit({ surfaceId, type: "surface-changed" });
+
+    return {
+      contentId: entry.contentId,
+      notFoundStrokeIds,
+      paneId: pane.paneId,
+      remainingStrokeCount: entry.annotations.length,
+      removedStrokeIds,
+    };
+  }
+
+  updatePaneSnapshot(
+    surfaceId: string,
+    paneId: number,
+    snapshot: Partial<PaneSnapshot>,
+  ): void {
+    const pane = this.requirePane(surfaceId, paneId);
+    pane.snapshot = {
+      bounds: snapshot.bounds ?? pane.snapshot.bounds,
+      selection: snapshot.selection ?? pane.snapshot.selection,
+      viewport: snapshot.viewport ?? pane.snapshot.viewport,
+      visibleText: snapshot.visibleText ?? pane.snapshot.visibleText,
+    };
+  }
+
+  captureSnapshot(surfaceId: string, paneId: number): SnapshotResponse["payload"] {
+    const pane = this.requirePane(surfaceId, paneId);
+    const current = currentEntry(pane);
+    return {
+      contentId: current.contentId,
+      contentType: current.contentType,
+      paneId: pane.paneId as PaneId,
+      revision: current.revision as Revision,
+      selection: pane.snapshot.selection,
+      viewport: structuredClone(pane.snapshot.viewport),
+      visibleText: pane.snapshot.visibleText,
+    };
+  }
+
+  paneBounds(surfaceId: string, paneId: number): { height: number; width: number; x: number; y: number } | null {
+    return this.requirePane(surfaceId, paneId).snapshot.bounds;
+  }
+
+  noteTap(surfaceId: string, paneId: number): void {
+    const pane = this.requirePane(surfaceId, paneId);
+    pane.toast = null;
+  }
+
+  applyNavigation(surfaceId: string, paneId: number, url: string): { blocked: boolean } {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      return { blocked: true };
+    }
+    pane.toast = null;
+    this.emit({ surfaceId, type: "surface-changed" });
+    return { blocked: false };
+  }
+
+  addStroke(
+    surfaceId: string,
+    paneId: number,
+    stroke: Stroke,
+  ): { contentId: string; revision: number } {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (!pane.annotating) {
+      throw new SurfaceCoreError("invalid_operation", "Annotation mode is not active");
+    }
+    const entry = currentEntry(pane);
+    if (!entry.contentId) {
+      throw new SurfaceCoreError("invalid_operation", "No active content for annotation");
+    }
+
+    entry.annotations = [...entry.annotations, structuredClone(stroke)];
+    pane.dirtyStrokeIds.push(stroke.strokeId);
+    pane.firstDirtyStrokeAt ??= firstPointTimestamp(stroke);
+    pane.lastDirtyStrokeAt = lastPointTimestamp(stroke);
+    pane.toast = null;
+    this.emit({ paneId, surfaceId, type: "drawing-dirty" });
+    return { contentId: entry.contentId, revision: entry.revision };
+  }
+
+  hasPendingDrawingFlush(surfaceId: string, paneId: number): boolean {
+    const pane = this.requirePane(surfaceId, paneId);
+    return pane.dirtyStrokeIds.length > 0;
+  }
+
+  flushMeta(surfaceId: string, paneId: number): {
+    firstDirtyStrokeAt: number | null;
+    lastDirtyStrokeAt: number | null;
+    lastSuccessfulFlushAt: number | null;
+  } {
+    const pane = this.requirePane(surfaceId, paneId);
+    return {
+      firstDirtyStrokeAt: pane.firstDirtyStrokeAt,
+      lastDirtyStrokeAt: pane.lastDirtyStrokeAt,
+      lastSuccessfulFlushAt: pane.lastSuccessfulFlushAt,
+    };
+  }
+
+  setFlushInFlight(surfaceId: string, paneId: number, visible: boolean): void {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (pane.flushInFlight === visible) {
+      return;
+    }
+    pane.flushInFlight = visible;
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  buildDrawingFlush(
+    surfaceId: string,
+    paneId: number,
+    config: DrawingFlushConfig,
+    flushReason: DrawingFlushEvent["payload"]["flushReason"],
+  ): DrawingFlushEvent["payload"] | null {
+    const pane = this.requirePane(surfaceId, paneId);
+    const entry = currentEntry(pane);
+    if (!entry.contentId || pane.dirtyStrokeIds.length === 0) {
+      return null;
+    }
+
+    const dirtySet = new Set(pane.dirtyStrokeIds);
+    const dirtyStrokes = entry.annotations.filter((stroke) => dirtySet.has(stroke.strokeId));
+    if (dirtyStrokes.length === 0) {
+      return null;
+    }
+
+    return {
+      contentId: entry.contentId,
+      firstStrokeAt: (pane.firstDirtyStrokeAt ?? this.now()) as EpochMs,
+      flushId: `fl_${randomBytes(6).toString("hex")}`,
+      flushReason,
+      idleWindowMs: config.idleWindowMs,
+      lastStrokeAt: (pane.lastDirtyStrokeAt ?? this.now()) as EpochMs,
+      maxIntervalMs: config.maxIntervalMs,
+      paneId: pane.paneId as PaneId,
+      pointsCount: dirtyStrokes.reduce((total, stroke) => total + stroke.points.length, 0),
+      revision: entry.revision as Revision,
+      strokeCount: dirtyStrokes.length,
+      strokes: structuredClone(dirtyStrokes),
+    };
+  }
+
+  markDrawingFlushSent(surfaceId: string, paneId: number): void {
+    const pane = this.requirePane(surfaceId, paneId);
+    pane.dirtyStrokeIds = [];
+    pane.firstDirtyStrokeAt = null;
+    pane.lastDirtyStrokeAt = null;
+    pane.lastSuccessfulFlushAt = this.now();
+    pane.flushInFlight = false;
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  surfaceName(surfaceId: string): string {
+    return this.getSurface(surfaceId).name;
+  }
+
+  viewport(surfaceId: string): SurfaceViewport {
+    return cloneViewport(this.getSurface(surfaceId).viewport);
+  }
+
+  surfaceWindowLabel(surfaceId: string): string {
+    return this.getSurface(surfaceId).windowLabel;
+  }
+
+  activePaneIds(surfaceId: string): number[] {
+    return [...this.getSurface(surfaceId).paneOrder];
+  }
+
+  supportsContentType(contentType: ContentType): boolean {
+    return SUPPORTED_CONTENT_TYPES.includes(contentType);
+  }
+
+  capabilities() {
+    return {
+      contentTypes: [...SUPPORTED_CONTENT_TYPES],
+      eventTypes: [
+        "event.drawing_flush",
+        "event.tap",
+        "event.selection",
+        "event.page",
+        "event.navigation",
+        "event.snapshot_hint",
+        "event.scroll",
+        "event.surface_appeared",
+        "event.surface_removed",
+        "event.surface_resumed",
+        "event.pane_created",
+        "event.pane_removed",
+        "event.pane_renamed",
+      ],
+    };
+  }
+
+  private createSurface(surfaceId: string, name: string, viewport: SurfaceViewport): SurfaceState {
+    const windowLabel = this.ensureWindowLabel(surfaceId);
+    const firstPaneId = this.allocateInitialPaneId();
+    const firstPane = createPaneState(firstPaneId, this.now());
+
+    const surface: SurfaceState = {
+      connectionBar: "disconnected",
+      layout: { paneId: firstPaneId, type: "pane" },
+      name,
+      paneOrder: [firstPaneId],
+      panes: new Map([[firstPaneId, firstPane]]),
+      surfaceId,
+      viewport: cloneViewport(viewport),
+      windowLabel,
+    };
+    this.surfaces.set(surfaceId, surface);
+    this.emit({ surfaceId, type: "surface-created" });
+    this.emit({ surfaceId, type: "surface-changed" });
+    return surface;
+  }
+
+  private allocateInitialPaneId(): number {
+    const paneId = this.persistentState.nextPaneId;
+    this.persistentState.nextPaneId += 1;
+    return paneId;
+  }
+
+  private ensureWindowLabel(surfaceId: string): string {
+    const existing = this.persistentState.windowLabels[surfaceId];
+    if (existing) {
+      return existing;
+    }
+    const label = windowLabelForIndex(this.persistentState.nextWindowLabelIndex);
+    this.persistentState.nextWindowLabelIndex += 1;
+    this.persistentState.windowLabels[surfaceId] = label;
+    return label;
+  }
+
+  private requirePane(surfaceId: string, paneId: number): PaneState {
+    const pane = this.getSurface(surfaceId).panes.get(paneId);
+    if (!pane) {
+      throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
+    }
+    return pane;
+  }
+
+  private emit(event: CoreEvent): void {
+    for (const listener of this.listeners) {
+      listener(event);
+    }
+  }
+}
+
+type PaneSplitState = {
+  paneId: number;
+};
+
+function createPaneState(paneId: number, now: number): PaneState {
+  return {
+    annotating: false,
+    dirtyStrokeIds: [],
+    firstDirtyStrokeAt: null,
+    flushInFlight: false,
+    history: [
+      {
+        annotations: [],
+        content: null,
+        contentId: null,
+        contentType: null,
+        ownerToken: null,
+        revision: 0,
+      },
+    ],
+    historyIndex: 0,
+    lastDirtyStrokeAt: null,
+    lastSuccessfulFlushAt: now,
+    latestContentEventAt: now,
+    name: null,
+    paneId,
+    snapshot: {
+      bounds: null,
+      selection: null,
+      viewport: {
+        contentSize: { height: DEFAULT_VISIBLE_RECT.height, width: DEFAULT_VISIBLE_RECT.width },
+        scrollOffset: { x: 0, y: 0 },
+        visibleRect: { ...DEFAULT_VISIBLE_RECT },
+        zoomLevel: 1,
+      },
+      visibleText: "",
+    },
+    toast: null,
+  };
+}
+
+function currentEntry(pane: PaneState): HistoryEntry {
+  return pane.history[pane.historyIndex]!;
+}
+
+function shouldReplaceVisibleEntry(pane: PaneState, ownerToken: string | null): boolean {
+  const current = currentEntry(pane);
+  if (isBootstrapEntry(current)) {
+    return true;
+  }
+  return ownerToken !== null && current.ownerToken === ownerToken;
+}
+
+function isBootstrapEntry(entry: HistoryEntry): boolean {
+  return entry.contentId === null && entry.contentType === null && entry.revision === 0;
+}
+
+function assertRevision(pane: PaneState, revision: number): void {
+  const expectedRevision = currentEntry(pane).revision + 1;
+  if (revision !== expectedRevision) {
+    throw new SurfaceCoreError("stale_revision", `Expected revision ${expectedRevision}`, {
+      expectedRevision,
+    });
+  }
+}
+
+function trimHistory(pane: PaneState): void {
+  if (pane.history.length <= MAX_HISTORY_DEPTH) {
+    return;
+  }
+  const overflow = pane.history.length - MAX_HISTORY_DEPTH;
+  pane.history.splice(0, overflow);
+  pane.historyIndex = Math.max(0, pane.historyIndex - overflow);
+}
+
+function clearDirtyState(pane: PaneState): void {
+  pane.dirtyStrokeIds = [];
+  pane.firstDirtyStrokeAt = null;
+  pane.lastDirtyStrokeAt = null;
+  pane.flushInFlight = false;
+}
+
+function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {
+  return { ...viewport };
+}
+
+function cloneContent(content: ContentPayload | null): ContentPayload | null {
+  return content ? structuredClone(content) : null;
+}
+
+function currentMutationAck(pane: PaneState): MutationAckResponse["payload"] {
+  const entry = currentEntry(pane);
+  return {
+    contentId: entry.contentId,
+    contentType: entry.contentType,
+    currentContentId: entry.contentId,
+    currentRevision: entry.revision as Revision,
+    paneId: pane.paneId as PaneId,
+  };
+}
+
+function flattenLayout(node: LayoutNode): number[] {
+  if (node.type === "pane") {
+    return [node.paneId];
+  }
+  return node.children.flatMap(flattenLayout);
+}
+
+function splitLayoutNode(
+  node: LayoutNode,
+  targetPaneId: number,
+  direction: "horizontal" | "vertical",
+  paneIds: number[],
+): LayoutNode {
+  if (node.type === "pane") {
+    if (node.paneId !== targetPaneId) {
+      return node;
+    }
+    return {
+      children: paneIds.map((paneId) => ({ paneId, type: "pane" })),
+      direction,
+      type: "split",
+    };
+  }
+  return {
+    ...node,
+    children: node.children.map((child) =>
+      splitLayoutNode(child, targetPaneId, direction, paneIds),
+    ),
+  };
+}
+
+function removePaneFromLayout(node: LayoutNode, paneId: number): LayoutNode | null {
+  if (node.type === "pane") {
+    return node.paneId === paneId ? null : node;
+  }
+  const nextChildren = node.children
+    .map((child) => removePaneFromLayout(child, paneId))
+    .filter((child): child is LayoutNode => child !== null);
+  if (nextChildren.length === 0) {
+    return null;
+  }
+  if (nextChildren.length === 1) {
+    return nextChildren[0]!;
+  }
+  return {
+    ...node,
+    children: nextChildren,
+  };
+}
+
+function collapseLayout(node: LayoutNode | null): LayoutNode {
+  if (!node) {
+    throw new SurfaceCoreError("internal_error", "Layout collapsed unexpectedly");
+  }
+  if (node.type === "pane") {
+    return node;
+  }
+  if (node.children.length === 1) {
+    return collapseLayout(node.children[0]!);
+  }
+  return {
+    ...node,
+    children: node.children.map(collapseLayout),
+  };
+}
+
+function patchHtml(
+  html: string,
+  patch: ContentPatchRequest["payload"]["patch"],
+): string {
+  const { document } = parseHTML(`<body>${html}</body>`);
+  const target = document.querySelector(patch.selector);
+  if (!target) {
+    throw new SurfaceCoreError("render_failed", `Patch selector not found: ${patch.selector}`);
+  }
+
+  switch (patch.action) {
+    case "replace_inner":
+      target.innerHTML = patch.html ?? "";
+      break;
+    case "replace_outer":
+      target.outerHTML = patch.html ?? "";
+      break;
+    case "insert_before":
+      target.insertAdjacentHTML("beforebegin", patch.html ?? "");
+      break;
+    case "insert_after":
+      target.insertAdjacentHTML("afterend", patch.html ?? "");
+      break;
+    case "remove":
+      target.remove();
+      break;
+  }
+
+  return document.body.innerHTML;
+}
+
+function firstPointTimestamp(stroke: Stroke): number {
+  return stroke.points[0]?.timestamp ?? Date.now();
+}
+
+function lastPointTimestamp(stroke: Stroke): number {
+  return stroke.points[stroke.points.length - 1]?.timestamp ?? Date.now();
+}
+
+function windowLabelForIndex(index: number): string {
+  let remaining = index;
+  let output = "";
+  do {
+    output = String.fromCharCode(97 + (remaining % 26)) + output;
+    remaining = Math.floor(remaining / 26) - 1;
+  } while (remaining >= 0);
+  return output;
+}
