@@ -56,6 +56,7 @@ import type {
   SurfaceId,
   SurfaceRemovedEvent,
   SurfaceResumedEvent,
+  SurfacesListResponse,
   SurfaceViewport,
   TapEvent,
   Viewport,
@@ -1649,6 +1650,59 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.ensureSurfaceWorker(surface);
   }
 
+  private async discoverSurfaceId(surface: ManagedSurface): Promise<void> {
+    const client = surface.client;
+    if (!client) {
+      return;
+    }
+
+    let response: Response;
+    try {
+      response = await client.request(
+        this.requestEnvelope("surfaces.list"),
+        REQUEST_TIMEOUT_MS,
+      );
+    } catch {
+      this.logger.warn?.(
+        `[surf-ace:runtime] surfaces.list failed for ${surface.endpointId}, using cached surfaceId`,
+      );
+      return;
+    }
+
+    if (isErrorResponse(response)) {
+      return;
+    }
+
+    const remoteSurfaces = (response as SurfacesListResponse).payload.surfaces;
+    if (remoteSurfaces.length === 0) {
+      return;
+    }
+
+    const remoteSurfaceId = asSurfaceId(remoteSurfaces[0].surfaceId);
+    if (remoteSurfaceId === surface.surfaceId) {
+      return;
+    }
+
+    // The remote endpoint reports a different surfaceId than we have stored
+    // (e.g., iOS owns its own surfaceIds). Update our tracking to match.
+    const oldSurfaceId = surface.surfaceId;
+    this.surfaces.delete(oldSurfaceId);
+    surface.surfaceId = remoteSurfaceId;
+    this.surfaces.set(remoteSurfaceId, surface);
+
+    // Migrate windowLabel to new surfaceId key
+    const existingLabel = this.persistentState.windowLabels[oldSurfaceId];
+    if (existingLabel) {
+      delete this.persistentState.windowLabels[oldSurfaceId];
+      this.persistentState.windowLabels[remoteSurfaceId] = existingLabel;
+    }
+
+    // Update endpoint→surfaceId persistent mapping
+    this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
+    this.persistentState.endpointSurfaces[surface.endpointId] = remoteSurfaceId;
+    void this.persistState();
+  }
+
   private async requestPair(surface: ManagedSurface): Promise<PairResponse> {
     const client = surface.client;
     if (!client) {
@@ -1729,6 +1783,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         });
 
         await surface.client.connect(REQUEST_TIMEOUT_MS);
+        await this.discoverSurfaceId(surface);
         const pairResponse = await this.requestPair(surface);
         surface.sessionId = asSessionId(pairResponse.payload.sessionId);
         surface.connectionState = "connected";

@@ -57,7 +57,11 @@ function txtStr(txt: Record<string, unknown>, key: string): string | undefined {
 
 function serviceToEndpoint(service: Service, now: () => number): SurfAceDiscoveryEndpoint {
   const txt = (service.txt ?? {}) as Record<string, unknown>;
-  const host = service.host.replace(/\.$/, "");
+  const rawHost = service.host.replace(/\.$/, "");
+  // Prefer a resolved IPv4 address from the mDNS A records to avoid secondary hostname
+  // resolution that can pick an unexpected interface (IPv6, Tailscale, etc.).
+  const ipv4Address = (service.addresses ?? []).find((addr) => !addr.includes(":"));
+  const host = ipv4Address ?? rawHost;
   const { port } = service;
   const wsPath = normalizeWsPath(txtStr(txt, "ws"));
   const endpointId = `${host}:${port}${wsPath}`;
