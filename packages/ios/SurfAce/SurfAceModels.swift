@@ -90,6 +90,8 @@ enum SurfAceFramePayload: Equatable {
     case pdf(data: String)
     case terminal(lines: [String], scrollback: Int)
     case markdown(markdown: String)
+    case video(url: String)
+    case canvas(color: String?, grid: Bool)
 }
 
 struct SurfAceFrame: Equatable {
@@ -154,8 +156,22 @@ struct SurfAceFrame: Equatable {
                 throw SurfAceFrameParseError.missingField("content.markdown")
             }
             payload = .markdown(markdown: markdown)
-        case .video, .canvas:
-            throw SurfAceFrameParseError.unsupportedType
+        case .video:
+            guard let url = jsonObject["content"] as? String else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
+            payload = .video(url: url)
+        case .canvas:
+            if let content = jsonObject["content"] as? [String: Any] {
+                payload = .canvas(
+                    color: content["color"] as? String,
+                    grid: content["grid"] as? Bool ?? false
+                )
+            } else if let content = jsonObject["content"] as? String, content.isEmpty {
+                payload = .canvas(color: nil, grid: false)
+            } else {
+                throw SurfAceFrameParseError.missingField("content")
+            }
         }
 
         let display = jsonObject["display"] as? [String: Any]
@@ -386,6 +402,7 @@ final class SurfAcePaneModel {
     var lastPage: (page: Int, totalPages: Int, pageText: String?)?
     var lastMeasuredSize = CGSize(width: 1, height: 1)
     var pendingFlushStrokes: [SurfAceStroke] = []
+    var deliveredClosedFrameCount = 0
     var firstPendingStrokeAt: Int64?
     var lastPendingStrokeAt: Int64?
     var lastSuccessfulFlushAt: Date?

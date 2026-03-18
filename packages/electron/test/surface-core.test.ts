@@ -125,6 +125,30 @@ test("surface core assigns pane history and split topology", () => {
   assert.equal(firstPane.canGoForward, true);
 });
 
+test("surface core reports pane-scoped viewport data in panes.list", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    viewport: {
+      contentSize: { height: 600, width: 500 },
+      scrollOffset: { x: 12, y: 24 },
+      visibleRect: { height: 320, width: 280, x: 12, y: 24 },
+      zoomLevel: 1,
+    },
+  });
+
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  assert.deepEqual(listedPane.viewport.visibleRect, { height: 320, width: 280, x: 12, y: 24 });
+});
+
 test("surface core updates terminal content in place", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -233,4 +257,41 @@ test("surface core keeps history when a different paired session displaces conte
   core.navigateHistory(surface.surfaceId, paneId, "back");
   const restored = core.getRendererWindowState(surface.surfaceId).panes[0]!;
   assert.equal(restored.content.contentId, "ct_owner_a");
+});
+
+test("surface core returns the number of flushed annotation batches discarded on pane close", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Annotate" },
+    contentId: "ct_markdown" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_markdown",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  core.setAnnotating(surface.surfaceId, paneId, true);
+  core.addStroke(surface.surfaceId, paneId, {
+    points: [{ timestamp: 1, x: 5, y: 6 }],
+    strokeId: "stroke_1" as never,
+    tool: "mouse",
+  });
+  core.markDrawingFlushSent(surface.surfaceId, paneId);
+
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [8],
+    paneId,
+  });
+
+  const response = core.paneClose(surface.surfaceId, paneId);
+  assert.equal(response.closedFramesDiscarded, 1);
 });

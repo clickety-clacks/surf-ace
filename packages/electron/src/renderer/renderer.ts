@@ -546,15 +546,7 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  if (pane.showDone) {
-    const done = createButton("Done", "done");
-    done.addEventListener("click", () => {
-      rememberPaneContext(pane.paneId);
-      window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
-    });
-    view.controlsEl.appendChild(done);
-    return;
-  }
+  const paneLabel = createButton(pane.label || `Pane ${pane.paneId}`, "pane-label-chip", true);
 
   const back = createButton("◀", "back", !pane.canGoBack);
   back.addEventListener("click", () => {
@@ -571,7 +563,18 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
   });
-  view.controlsEl.append(back, forward, annotate);
+  annotate.classList.toggle("active", pane.showDone);
+
+  view.controlsEl.append(paneLabel, back, forward, annotate);
+
+  if (pane.showDone) {
+    const done = createButton("Done", "done");
+    done.addEventListener("click", () => {
+      rememberPaneContext(pane.paneId);
+      window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
+    });
+    view.controlsEl.appendChild(done);
+  }
 }
 
 function sendNavigationIntent(view: PaneView, paneId: number, url: string): void {
@@ -839,12 +842,12 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   }
 
   if (pane.content.contentType === "video") {
-    renderCenteredState(view, "Video unavailable", "This Electron surface does not render video content.");
+    renderCenteredState(view, "Video", "No preview is available for this pane.");
     return;
   }
 
   if (pane.content.contentType === "canvas") {
-    renderCenteredState(view, "Canvas unavailable", "This Electron surface does not render canvas content.");
+    renderCenteredState(view, "Canvas", "No preview is available for this pane.");
   }
 }
 

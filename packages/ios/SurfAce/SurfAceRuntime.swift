@@ -1026,7 +1026,7 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "pane.close", id: id, code: "invalid_operation", message: "cannot close pane")
         }
 
-        let closedFramesDiscarded = pane.backStack.count + pane.forwardStack.count
+        let closedFramesDiscarded = pane.deliveredClosedFrameCount
         pane.pendingFlushTask?.cancel()
         pane.pendingFlushTask = nil
         surface.panesById.removeValue(forKey: paneId)
@@ -1578,6 +1578,7 @@ final class SurfAceRuntime {
             pane.isDrawingFlushSending = false
             if succeeded {
                 pane.pendingFlushStrokes.removeAll()
+                pane.deliveredClosedFrameCount += 1
                 pane.firstPendingStrokeAt = nil
                 pane.lastPendingStrokeAt = nil
                 pane.lastSuccessfulFlushAt = Date()

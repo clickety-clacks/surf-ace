@@ -324,6 +324,7 @@ export class SurfaceCore {
 
   panesList(surfaceId: string): PanesListResponse["payload"] {
     const surface = this.getSurface(surfaceId);
+    const paneViewports = layoutPaneViewports(surface.layout!, surface.viewport);
     return {
       panes: surface.paneOrder.map((paneId) => {
         const pane = surface.panes.get(paneId)!;
@@ -333,7 +334,7 @@ export class SurfaceCore {
           contentType: current.contentType,
           name: pane.name,
           paneId: pane.paneId as PaneId,
-          viewport: cloneViewport(surface.viewport),
+          viewport: paneViewports.get(paneId) ?? structuredClone(pane.snapshot.viewport),
         };
       }),
     };
@@ -432,9 +433,11 @@ export class SurfaceCore {
     if (surface.panes.size <= 1) {
       throw new SurfaceCoreError("invalid_operation", "Cannot close the last pane");
     }
-    if (!surface.panes.has(paneId)) {
+    const pane = surface.panes.get(paneId);
+    if (!pane) {
       throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
     }
+    const closedFramesDiscarded = Math.max(0, pane.history.length - 1);
 
     surface.panes.delete(paneId);
     surface.paneOrder = surface.paneOrder.filter((entry) => entry !== paneId);
@@ -442,7 +445,7 @@ export class SurfaceCore {
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({ paneId, surfaceId, type: "pane-removed" });
     return {
-      closedFramesDiscarded: 0,
+      closedFramesDiscarded,
       paneId: paneId as PaneId,
     };
   }
@@ -1023,6 +1026,41 @@ function collapseLayout(node: LayoutNode | null): LayoutNode {
     ...node,
     children: node.children.map(collapseLayout),
   };
+}
+
+function layoutPaneViewports(
+  node: LayoutNode,
+  viewport: SurfaceViewport,
+): Map<number, SurfaceViewport> {
+  const byPaneId = new Map<number, SurfaceViewport>();
+
+  const visit = (current: LayoutNode, currentViewport: SurfaceViewport): void => {
+    if (current.type === "pane") {
+      byPaneId.set(current.paneId, cloneViewport(currentViewport));
+      return;
+    }
+
+    const childCount = current.children.length || 1;
+    for (const child of current.children) {
+      visit(
+        child,
+        current.direction === "horizontal"
+          ? {
+              height: currentViewport.height,
+              scale: currentViewport.scale,
+              width: currentViewport.width / childCount,
+            }
+          : {
+              height: currentViewport.height / childCount,
+              scale: currentViewport.scale,
+              width: currentViewport.width,
+            },
+      );
+    }
+  };
+
+  visit(node, viewport);
+  return byPaneId;
 }
 
 function patchHtml(

@@ -603,6 +603,14 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 html = markdownHTML(markdown)
                 baseURL = nil
                 showWebView()
+            case .some(.video):
+                html = placeholderHTML(title: "Video", detail: "No preview is available for this pane.")
+                baseURL = nil
+                showWebView()
+            case .some(.canvas):
+                html = placeholderHTML(title: "Canvas", detail: "No preview is available for this pane.")
+                baseURL = nil
+                showWebView()
             case nil:
                 html = standbyHTML()
                 baseURL = nil
@@ -670,6 +678,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             lastSelection = nil
         case .terminal(let lines, _):
             lastVisibleText = lines.suffix(200).map(SurfAceANSI.strip).joined(separator: "\n")
+        case .some(.video), .some(.canvas):
+            lastVisibleText = ""
+            lastSelection = nil
         case nil:
             break
         }
