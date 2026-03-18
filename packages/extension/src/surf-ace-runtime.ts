@@ -1955,12 +1955,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private sendRequest(surface: ManagedSurface, request: Request): Promise<Response> {
+  private async sendRequest(surface: ManagedSurface, request: Request): Promise<Response> {
     const client = surface.client;
     if (!client || !client.isOpen()) {
       throw new SurfAceToolError("not_connected", `Surf Ace surface is not connected: ${surface.surfaceId}`);
     }
-    return client.request(request, REQUEST_TIMEOUT_MS).catch((error) => {
+    try {
+      return await client.request(request, REQUEST_TIMEOUT_MS);
+    } catch (error) {
       if (isSocketClosedError(error)) {
         throw new SurfAceToolError(
           "not_connected",
@@ -1968,7 +1970,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         );
       }
       throw error;
-    });
+    }
   }
 
   private startHeartbeat(surface: ManagedSurface): void {
@@ -2044,10 +2046,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!this.canSendRequests(surface)) {
       return;
     }
-    const response = await this.sendRequest(
-      surface,
-      this.requestEnvelope("panes.list"),
-    );
+    let response: Response;
+    try {
+      response = await this.sendRequest(
+        surface,
+        this.requestEnvelope("panes.list"),
+      );
+    } catch (error) {
+      if (error instanceof SurfAceToolError && error.code === "not_connected") {
+        return;
+      }
+      throw error;
+    }
 
     if (isErrorResponse(response)) {
       throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
@@ -2084,18 +2094,33 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     surface.snapshotSyncInFlight = true;
     try {
-      await this.syncPaneTopology(surface);
+      try {
+        await this.syncPaneTopology(surface);
+      } catch (error) {
+        if (error instanceof SurfAceToolError && error.code === "not_connected") {
+          return;
+        }
+        throw error;
+      }
       const panes = [...surface.panes.values()];
       for (const pane of panes) {
-        const response = await this.sendRequest(
-          surface,
-          this.requestEnvelope("snapshot.get", {
-            includeDrawings: true,
-            includeImage: true,
-            includeVisibleText: true,
-            paneId: pane.remotePaneId,
-          }),
-        );
+        let response: Response;
+        try {
+          response = await this.sendRequest(
+            surface,
+            this.requestEnvelope("snapshot.get", {
+              includeDrawings: true,
+              includeImage: true,
+              includeVisibleText: true,
+              paneId: pane.remotePaneId,
+            }),
+          );
+        } catch (error) {
+          if (error instanceof SurfAceToolError && error.code === "not_connected") {
+            return;
+          }
+          throw error;
+        }
 
         if (isErrorResponse(response)) {
           throw new SurfAceToolError(

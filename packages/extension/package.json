@@ -10,7 +10,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./surf-ace.ts"
     ]
   },
   "dependencies": {
