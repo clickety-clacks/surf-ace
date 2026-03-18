@@ -114,7 +114,6 @@ export type SurfAceFrameStroke = {
   endedAt: number;
   points: Array<{
     pressure?: number;
-    timestamp: number;
     x: number;
     y: number;
   }>;
@@ -542,13 +541,6 @@ function computeStrokeBBox(points: Stroke["points"]): SurfAceFrameStroke["bbox"]
   };
 }
 
-function contentKey(contentType: ContentType, content: unknown): string {
-  const hash = createHash("sha1");
-  hash.update(contentType);
-  hash.update(JSON.stringify(content));
-  return hash.digest("hex");
-}
-
 function ensureDirectory(dirPath: string): Promise<void> {
   return fs.mkdir(dirPath, { recursive: true }).then(() => undefined);
 }
@@ -909,7 +901,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     input: { fingerprint: string; paneId: number },
   ): Promise<SurfAceClearResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
-    this.finalizeLiveFrame(pane);
+    this.finalizeLiveFrame(surface, pane);
 
     const request: ContentClearRequest = {
       id: makeBrandedRequestId(),
@@ -1040,7 +1032,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     sessionKey?: string,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
-    this.finalizeLiveFrame(pane);
+    this.finalizeLiveFrame(surface, pane);
 
     const nextContentId =
       sessionKey && pane.ownerSessionKey === sessionKey && pane.activeContentId
@@ -1065,9 +1057,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     };
 
     const response = await this.sendRequest(surface, request);
-    return this.applyMutationResponse(surface, pane, response, request, sessionKey, {
-      contentHash: contentKey(input.contentType, request.payload.content),
-    }) as SurfAcePushResult;
+    return this.applyMutationResponse(surface, pane, response, request, sessionKey) as SurfAcePushResult;
   }
 
   private emit(event: SurfAceLocalEvent): void {
@@ -1076,13 +1066,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private finalizeLiveFrame(pane: ManagedPane): void {
+  private finalizeLiveFrame(surface: ManagedSurface, pane: ManagedPane): void {
     if (!pane.buffer.liveFrame) {
       return;
     }
     pane.buffer.closedFrames.push(structuredClone(pane.buffer.liveFrame));
     pane.buffer.liveFrame = null;
     pane.buffer.liveDirtyStrokeIds = [];
+    this.maybeFireAnnotationAlert(surface, pane);
   }
 
   private maybeFireAnnotationAlert(surface: ManagedSurface, pane: ManagedPane): void {
@@ -1144,7 +1135,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       url: event.payload.url,
     };
     pane.buffer.currentUrl = event.payload.url;
-    this.finalizeLiveFrame(pane);
+    this.finalizeLiveFrame(surface, pane);
   }
 
   private handlePaneCreatedEvent(surface: ManagedSurface, event: PaneCreatedEvent): void {
@@ -1190,7 +1181,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.buffer.selection = convertSelection(event.payload.selection);
   }
 
-  private handleSnapshotHintEvent(surface: ManagedSurface, _event: SnapshotHintEvent): void {
+  private handleSnapshotHintEvent(surface: ManagedSurface, event: SnapshotHintEvent): void {
+    if (event.payload.reason === "after_reconnect") {
+      return;
+    }
     void this.syncSurfaceSnapshots(surface);
   }
 
@@ -1281,6 +1275,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.snapshotBufferedEvents.push(event);
       if (surface.snapshotBufferedEvents.length > MAX_PENDING_EVENTS_DURING_SNAPSHOT) {
         surface.snapshotBufferedEvents.shift();
+        this.logger.warn?.(
+          `[surf-ace:runtime] snapshot event buffer overflow for ${surface.surfaceId}; dropping oldest event`,
+        );
       }
       return;
     }
@@ -1342,22 +1339,25 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private ingestDrawingFlush(surface: ManagedSurface, event: DrawingFlushEvent): void {
     const pane = this.ensurePane(surface, event.payload.paneId);
-    const contextKey = pane.buffer.currentUrl ?? event.payload.contentId;
+    const contextKey = pane.buffer.currentUrl ?? pane.activeContentId ?? event.payload.contentId;
     const now = this.now();
     if (!pane.buffer.liveFrame || pane.buffer.liveFrame.contextKey !== contextKey) {
-      const snapshot = pane.snapshot;
+      const frameId = makeFrameId();
       pane.buffer.liveFrame = {
         contentId: event.payload.contentId,
         contextKey,
-        frameId: makeFrameId(),
-        image: snapshot?.image ?? "",
+        frameId,
+        image: "",
         openedAt: event.payload.firstStrokeAt,
-        scrollOffset: snapshot?.viewport.scrollOffset ?? { x: 0, y: 0 },
+        scrollOffset: pane.buffer.scrollPosition
+          ? { x: pane.buffer.scrollPosition.x, y: pane.buffer.scrollPosition.y }
+          : { x: 0, y: 0 },
         strokes: [],
         updatedAt: event.payload.lastStrokeAt,
         url: pane.buffer.currentUrl ?? undefined,
         viewport: pane.viewport,
       };
+      void this.captureFrameOpenState(surface, pane, frameId);
     }
 
     const liveFrame = pane.buffer.liveFrame;
@@ -1369,7 +1369,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           event.payload.lastStrokeAt,
         points: stroke.points.map((point) => ({
           pressure: point.pressure,
-          timestamp: point.timestamp,
           x: point.x,
           y: point.y,
         })),
@@ -1382,6 +1381,63 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     liveFrame.updatedAt = event.payload.lastStrokeAt || now;
     pane.buffer.liveSeq += 1;
     this.maybeFireAnnotationAlert(surface, pane);
+  }
+
+  private async captureFrameOpenState(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    frameId: string,
+  ): Promise<void> {
+    if (!surface.client) {
+      return;
+    }
+
+    try {
+      const response = await this.sendRequest(
+        surface,
+        this.requestEnvelope("snapshot.get", {
+          includeImage: true,
+          includeVisibleText: true,
+          paneId: pane.remotePaneId,
+        }),
+      );
+
+      if (isErrorResponse(response)) {
+        throw new SurfAceToolError(
+          mutationErrorCode(response.error.code),
+          response.error.message,
+        );
+      }
+
+      const payload = (response as SnapshotResponse).payload;
+      if (pane.buffer.liveFrame?.frameId !== frameId) {
+        return;
+      }
+
+      pane.buffer.liveFrame.image = payload.image ?? "";
+      pane.buffer.liveFrame.scrollOffset = { ...payload.viewport.scrollOffset };
+      pane.snapshot = {
+        cachedAt: this.now(),
+        contentId: payload.contentId,
+        contentType: payload.contentType,
+        drawings: payload.drawings ? structuredClone(payload.drawings) : undefined,
+        image: payload.image,
+        revision: payload.revision,
+        selection: payload.selection,
+        viewport: structuredClone(payload.viewport),
+        visibleText: payload.visibleText,
+      };
+      pane.buffer.selection = convertSelection(payload.selection);
+      pane.buffer.scrollPosition = {
+        visibleRect: { ...payload.viewport.visibleRect },
+        x: payload.viewport.scrollOffset.x,
+        y: payload.viewport.scrollOffset.y,
+      };
+    } catch (error) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] frame-open snapshot failed for ${surface.surfaceId}/${pane.paneId}: ${String(error)}`,
+      );
+    }
   }
 
   private ensurePane(surface: ManagedSurface, remotePaneId: PaneId): ManagedPane {
@@ -1909,7 +1965,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     response: Response,
     request: ContentClearRequest | ContentSetRequest,
     sessionKey?: string,
-    extras?: { contentHash?: string },
   ): SurfAcePushResult | SurfAceClearResult {
     if (isErrorResponse(response)) {
       pane.pendingOwnerSessionKey = null;
@@ -1940,6 +1995,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       pane.activeContentId = null;
       pane.contentType = null;
       pane.ownerSessionKey = null;
+      pane.buffer.currentUrl = null;
       pane.snapshot = pane.snapshot
         ? {
             ...pane.snapshot,
@@ -1966,13 +2022,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         pane.snapshot.contentType = request.payload.contentType;
         pane.snapshot.drawings = [];
         pane.snapshot.revision = payload.currentRevision;
-        if (extras?.contentHash) {
-          pane.buffer.currentUrl =
-            request.payload.contentType === "html"
-              ? `content://${extras.contentHash}`
-              : null;
-        }
       }
+      pane.buffer.currentUrl = null;
     }
 
     pane.pendingOwnerSessionKey = null;

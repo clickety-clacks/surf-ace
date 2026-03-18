@@ -12,6 +12,8 @@
     "surf_ace_list",
     "surf_ace_push",
     "surf_ace_clear",
+    "surf_ace_split",
+    "surf_ace_close_pane",
     "surf_ace_read",
     "surf_ace_annotations_remove"
   ],

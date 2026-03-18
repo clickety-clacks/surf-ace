@@ -87,6 +87,10 @@ class FakeSurfAceWsServer {
     newPaneIds: number[];
     paneId: number;
   }> = [];
+  snapshotDelayMs = 0;
+  snapshotImage = "aGVsbG8=";
+  snapshotRequests: Array<{ includeImage: boolean; includeVisibleText: boolean; paneId: number }> = [];
+  snapshotScrollOffset = { x: 0, y: 0 };
   dropNextSplitRequest = false;
 
   pairedSocket: import("ws").WebSocket | null = null;
@@ -178,6 +182,19 @@ class FakeSurfAceWsServer {
       }),
     );
     return sentAt;
+  }
+
+  sendSnapshotHint(reason: "after_reconnect" | "after_render" | "backpressure_drop"): void {
+    this.pairedSocket?.send(
+      JSON.stringify({
+        eventId: `ev_${this.nextEventId++}`,
+        op: "event.snapshot_hint",
+        payload: { reason },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      }),
+    );
   }
 
   private async handleMessage(
@@ -292,6 +309,16 @@ class FakeSurfAceWsServer {
         const paneId = Number(message.payload?.paneId ?? 0);
         const pane = this.panes.get(paneId);
         assert.ok(pane);
+        this.snapshotRequests.push({
+          includeImage: Boolean(message.payload?.includeImage),
+          includeVisibleText: Boolean(message.payload?.includeVisibleText),
+          paneId,
+        });
+        if (this.snapshotDelayMs > 0) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, this.snapshotDelayMs);
+          });
+        }
         socket.send(
           JSON.stringify(
             this.response(message.id, "snapshot.get", {
@@ -301,13 +328,13 @@ class FakeSurfAceWsServer {
                 points: [],
                 strokeId,
               })),
-              image: "aGVsbG8=",
+              image: this.snapshotImage,
               paneId,
               revision: pane.revision,
               selection: null,
               viewport: {
                 contentSize: { height: 768, width: 1024 },
-                scrollOffset: { x: 0, y: 0 },
+                scrollOffset: { ...this.snapshotScrollOffset },
                 visibleRect: { height: 768, width: 1024, x: 0, y: 0 },
                 zoomLevel: 1,
               },
@@ -516,6 +543,7 @@ let nextPort = 22119;
 async function withRuntimeHarness(
   run: (ctx: {
     alertBodies: Array<Record<string, unknown>>;
+    warnings: string[];
     runtime: ReturnType<typeof createSurfAceRuntime>;
     server: FakeSurfAceWsServer;
   }) => Promise<void>,
@@ -539,7 +567,16 @@ async function withRuntimeHarness(
       wsPath: "/ws",
     },
   ]);
-  const runtime = createSurfAceRuntime({ discovery, stateDir });
+  const warnings: string[] = [];
+  const runtime = createSurfAceRuntime({
+    discovery,
+    logger: {
+      warn: (message: string) => {
+        warnings.push(message);
+      },
+    },
+    stateDir,
+  });
   const alertBodies: Array<Record<string, unknown>> = [];
   const originalFetch = globalThis.fetch;
 
@@ -551,7 +588,7 @@ async function withRuntimeHarness(
 
     await runtime.start();
     await waitFor(() => server.pairedSocket !== null);
-    await run({ alertBodies, runtime, server });
+    await run({ alertBodies, runtime, server, warnings });
   } finally {
     globalThis.fetch = originalFetch;
     await runtime.stop();
@@ -691,6 +728,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const read = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
         assert.ok(read.liveDirtyStrokeIds.includes("stroke_abc123"));
         assert.equal(read.liveFrame?.contentId, third.contentId);
+        assert.equal(read.liveFrame?.contextKey, third.contentId);
+        assert.deepEqual(read.liveFrame?.strokes[0]?.points[0], {
+          pressure: 0.2,
+          x: 10,
+          y: 20,
+        });
 
         server.sendDrawingFlush(server.initialRemotePaneId, third.contentId);
         await waitFor(() => alertBodies.length === 2);
@@ -834,6 +877,72 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const screens = await runtime.listScreens();
       assert.deepEqual(screens[0]?.panes.map((pane) => pane.paneId), [1]);
+    });
+  });
+
+  await t.test("provider captures frame-open state freshly, alerts on closed-frame growth, and ignores after_reconnect snapshot hints", async () => {
+    await withRuntimeHarness(async ({ alertBodies, runtime, server, warnings }) => {
+      const pushed = await runtime.push(
+        {
+          content: "<p>fresh snapshot</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        },
+        { sessionKey: "agent:test:fresh" },
+      );
+
+      const initialSnapshotCount = server.snapshotRequests.length;
+      server.snapshotImage = "ZnJhbWUtb3Blbg==";
+      server.snapshotScrollOffset = { x: 24, y: 48 };
+      server.sendDrawingFlush(server.initialRemotePaneId, pushed.contentId);
+
+      await waitFor(() => server.snapshotRequests.length > initialSnapshotCount);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+
+      const liveRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.equal(liveRead.liveFrame?.image, "ZnJhbWUtb3Blbg==");
+      assert.deepEqual(liveRead.liveFrame?.scrollOffset, { x: 24, y: 48 });
+      assert.equal(alertBodies.length, 1);
+
+      const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.equal(clear.paneId, 1);
+      await waitFor(() => alertBodies.length === 2);
+
+      const closedRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.equal(closedRead.frames.length, 1);
+
+      const beforeReconnectHint = server.snapshotRequests.length;
+      server.sendSnapshotHint("after_reconnect");
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+      assert.equal(server.snapshotRequests.length, beforeReconnectHint);
+
+      server.sendSnapshotHint("after_render");
+      await waitFor(() => server.snapshotRequests.length > beforeReconnectHint);
+
+      server.snapshotDelayMs = 250;
+      server.sendSnapshotHint("after_render");
+      await new Promise((resolve) => {
+        setTimeout(resolve, 25);
+      });
+      for (let index = 0; index <= 128; index += 1) {
+        server.sendDrawingFlush(server.initialRemotePaneId, pushed.contentId);
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+      server.snapshotDelayMs = 0;
+
+      assert.ok(
+        warnings.some((warning) => warning.includes("snapshot event buffer overflow")),
+      );
+      await new Promise((resolve) => {
+        setTimeout(resolve, 300);
+      });
     });
   });
 });

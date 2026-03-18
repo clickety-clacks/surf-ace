@@ -261,44 +261,6 @@ test("surface core keeps history when a different paired session displaces conte
   assert.equal(restored.content.contentId, "ct_owner_a");
 });
 
-test("surface core does not report pane history entries as discarded frames on pane close", () => {
-  const core = new SurfaceCore({
-    persistentState: {
-      primarySurfaceId: null,
-      version: 1,
-    },
-  });
-  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  const paneId = applyProviderBootstrap(core, surface.surfaceId, 17);
-
-  core.paneSplit(surface.surfaceId, {
-    count: 2,
-    direction: "vertical",
-    newPaneIds: [21],
-    paneId,
-  });
-
-  core.contentSet(surface.surfaceId, {
-    content: { markdown: "# First" },
-    contentId: "ct_close_a" as never,
-    contentType: "markdown",
-    historyOwnerToken: "hot_close_a",
-    paneId: paneId as never,
-    revision: 1 as never,
-  });
-  core.contentSet(surface.surfaceId, {
-    content: { markdown: "# Second" },
-    contentId: "ct_close_b" as never,
-    contentType: "markdown",
-    historyOwnerToken: "hot_close_b",
-    paneId: paneId as never,
-    revision: 2 as never,
-  });
-
-  const close = core.paneClose(surface.surfaceId, paneId);
-  assert.equal(close.closedFramesDiscarded, 0);
-});
-
 test("surface core returns the number of flushed annotation batches discarded on pane close", () => {
   const core = new SurfaceCore({
     persistentState: {

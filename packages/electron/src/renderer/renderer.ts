@@ -546,7 +546,11 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  const paneLabel = createButton(pane.label || `Pane ${pane.paneId}`, "pane-label-chip", true);
+  const paneLabel = createButton(pane.label || `Pane ${pane.paneId}`, "pane-label-chip");
+  paneLabel.addEventListener("click", () => {
+    rememberPaneContext(pane.paneId);
+    document.body.classList.remove("labels-hidden");
+  });
 
   const back = createButton("◀", "back", !pane.canGoBack);
   back.addEventListener("click", () => {
@@ -565,7 +569,13 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   });
   annotate.classList.toggle("active", pane.showDone);
 
-  view.controlsEl.append(paneLabel, back, forward, annotate);
+  view.controlsEl.appendChild(paneLabel);
+
+  if (!pane.showDone) {
+    view.controlsEl.append(back, forward);
+  }
+
+  view.controlsEl.appendChild(annotate);
 
   if (pane.showDone) {
     const done = createButton("Done", "done");
@@ -842,12 +852,12 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   }
 
   if (pane.content.contentType === "video") {
-    renderCenteredState(view, "Video", "No preview is available for this pane.");
+    renderCenteredState(view, "Video");
     return;
   }
 
   if (pane.content.contentType === "canvas") {
-    renderCenteredState(view, "Canvas", "No preview is available for this pane.");
+    renderCenteredState(view, "Canvas");
   }
 }
 
