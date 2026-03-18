@@ -603,14 +603,6 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 html = markdownHTML(markdown)
                 baseURL = nil
                 showWebView()
-            case .video(let url):
-                html = videoPlaceholderHTML(url: url)
-                baseURL = nil
-                showWebView()
-            case .canvas(let color, let grid):
-                html = canvasPlaceholderHTML(color: color, grid: grid)
-                baseURL = nil
-                showWebView()
             case nil:
                 html = standbyHTML()
                 baseURL = nil
@@ -678,12 +670,6 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             lastSelection = nil
         case .terminal(let lines, _):
             lastVisibleText = lines.suffix(200).map(SurfAceANSI.strip).joined(separator: "\n")
-        case .video, .canvas:
-            if let payload = await evaluateSnapshotPayload() {
-                lastViewport = payload.viewport
-            }
-            lastVisibleText = ""
-            lastSelection = nil
         case nil:
             break
         }
@@ -1225,33 +1211,6 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
           </div>
         </body>
         </html>
-        """
-    }
-
-    private func videoPlaceholderHTML(url: String) -> String {
-        placeholderHTML(
-            title: "Video unavailable",
-            detail: "This iOS surface is showing a placeholder for the provider's video content.\n\(url)"
-        )
-    }
-
-    private func canvasPlaceholderHTML(color: String?, grid: Bool) -> String {
-        let background = canvasBackgroundCSS(color: color, grid: grid)
-        return placeholderHTML(
-            title: "Canvas unavailable",
-            detail: "This iOS surface is showing a placeholder for the provider's canvas content.",
-            backgroundCSS: background
-        )
-    }
-
-    private func canvasBackgroundCSS(color: String?, grid: Bool) -> String {
-        let trimmedColor = color?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let baseColor = (trimmedColor?.isEmpty == false) ? trimmedColor! : "#ffffff"
-        guard grid else { return baseColor }
-        return """
-        linear-gradient(rgba(15, 23, 42, 0.10) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(15, 23, 42, 0.10) 1px, transparent 1px),
-        \(baseColor)
         """
     }
 

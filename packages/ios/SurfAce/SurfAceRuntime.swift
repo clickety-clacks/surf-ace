@@ -128,7 +128,7 @@ final class SurfAceRuntime {
     private let resumeGraceMilliseconds = 20_000
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
-    private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown, .video, .canvas]
+    private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
     private let eventTypes = [
         "event.drawing_flush",
         "event.tap",
@@ -816,6 +816,7 @@ final class SurfAceRuntime {
         }
 
         var resumed = false
+        var resumedSessionId: String?
         if let grace = resumeGraceBySurfaceId[surfaceId] {
             guard grace.providerId == providerId else {
                 return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "surface already paired")
@@ -824,10 +825,11 @@ final class SurfAceRuntime {
                 return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "resume sessionId mismatch")
             }
             resumed = true
+            resumedSessionId = grace.sessionId
             cancelResumeGrace(surfaceId: surfaceId)
         }
 
-        let sessionId = resumed ? (resumeSessionId ?? randomHex(prefix: "sa", byteCount: 12)) : randomHex(prefix: "sa", byteCount: 12)
+        let sessionId = resumed ? resumedSessionId! : randomHex(prefix: "sa", byteCount: 12)
         let session = SurfAceSessionState(
             sessionId: sessionId,
             providerId: providerId,
@@ -1024,6 +1026,7 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "pane.close", id: id, code: "invalid_operation", message: "cannot close pane")
         }
 
+        let closedFramesDiscarded = pane.backStack.count + pane.forwardStack.count
         pane.pendingFlushTask?.cancel()
         pane.pendingFlushTask = nil
         surface.panesById.removeValue(forKey: paneId)
@@ -1049,7 +1052,7 @@ final class SurfAceRuntime {
             "sentAt": timestampNow(),
             "payload": [
                 "paneId": paneId,
-                "closedFramesDiscarded": 0,
+                "closedFramesDiscarded": closedFramesDiscarded,
             ],
         ]
     }
