@@ -158,10 +158,8 @@ const DEFAULT_VISIBLE_RECT = { height: 768, width: 1024, x: 0, y: 0 };
 const MAX_HISTORY_DEPTH = 20;
 const BOOTSTRAP_PANE_ID = 0;
 const SUPPORTED_CONTENT_TYPES: ContentType[] = [
-  "canvas",
   "html",
   "image",
-  "video",
   "pdf",
   "terminal",
   "markdown",

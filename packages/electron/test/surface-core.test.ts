@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SurfaceCore } from "../src/surface-core.js";
+import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
 
 function applyProviderBootstrap(core: SurfaceCore, surfaceId: string, initialPaneId: number): number {
   core.applyProviderBootstrapTopology(surfaceId, {
@@ -47,7 +47,7 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.equal(windowState.panes[0]?.paneId, 7);
 });
 
-test("surface core accepts degraded video and canvas content types", () => {
+test("surface core rejects video and canvas content types with unsupported_content_type", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -58,25 +58,38 @@ test("surface core accepts degraded video and canvas content types", () => {
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 5);
 
-  core.contentSet(surface.surfaceId, {
-    content: "about:blank",
-    contentId: "ct_video" as never,
-    contentType: "video",
-    historyOwnerToken: "hot_video",
-    paneId: paneId as never,
-    revision: 1 as never,
-  });
-  core.contentSet(surface.surfaceId, {
-    content: { color: "#fff", grid: true },
-    contentId: "ct_canvas" as never,
-    contentType: "canvas",
-    historyOwnerToken: "hot_canvas",
-    paneId: paneId as never,
-    revision: 2 as never,
-  });
+  assert.throws(
+    () =>
+      core.contentSet(surface.surfaceId, {
+        content: "about:blank",
+        contentId: "ct_video" as never,
+        contentType: "video",
+        historyOwnerToken: "hot_video",
+        paneId: paneId as never,
+        revision: 1 as never,
+      }),
+    (err: unknown) => {
+      return err instanceof SurfaceCoreError && err.code === "unsupported_content_type";
+    },
+  );
 
-  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
-  assert.equal(pane.content.contentType, "canvas");
+  assert.throws(
+    () =>
+      core.contentSet(surface.surfaceId, {
+        content: { color: "#fff", grid: true },
+        contentId: "ct_canvas" as never,
+        contentType: "canvas",
+        historyOwnerToken: "hot_canvas",
+        paneId: paneId as never,
+        revision: 1 as never,
+      }),
+    (err: unknown) => {
+      return err instanceof SurfaceCoreError && err.code === "unsupported_content_type";
+    },
+  );
+
+  assert.equal(core.supportsContentType("video"), false);
+  assert.equal(core.supportsContentType("canvas"), false);
 });
 
 test("surface core assigns pane history and split topology", () => {
