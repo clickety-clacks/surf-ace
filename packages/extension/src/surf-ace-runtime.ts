@@ -633,6 +633,12 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function isSocketClosedError(error: unknown): boolean {
+  return error instanceof Error &&
+    (error.message.includes("Surf Ace socket is not open") ||
+      error.message.includes("Surf Ace socket closed"));
+}
+
 function windowLabelForIndex(index: number): string {
   let cursor = index + 1;
   let label = "";
@@ -1088,7 +1094,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     pane.buffer.alertFired = true;
     pane.buffer.alertFiredAt = now;
-    void this.postAnnotationAlert(`Surf Ace updates pending on ${surface.name}`);
+    this.runBackgroundTask(
+      `annotation alert for ${surface.surfaceId}`,
+      async () => {
+        await this.postAnnotationAlert(`Surf Ace updates pending on ${surface.name}`);
+      },
+    );
   }
 
   private async postAnnotationAlert(message: string): Promise<void> {
@@ -1119,7 +1130,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (!currentEndpointIds.has(surface.endpointId)) {
         surface.stopRequested = true;
         if (surface.client) {
-          void surface.client.close(1000, clampCloseReason("provider_shutdown"));
+          this.runBackgroundTask(
+            `close removed surface ${surface.surfaceId}`,
+            async () => {
+              await surface.client?.close(1000, clampCloseReason("provider_shutdown"));
+            },
+          );
         }
       }
     }
@@ -1185,7 +1201,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (event.payload.reason === "after_reconnect") {
       return;
     }
-    void this.syncSurfaceSnapshots(surface);
+    this.runBackgroundTask(
+      `snapshot hint sync for ${surface.surfaceId}`,
+      async () => {
+        await this.syncSurfaceSnapshots(surface);
+      },
+    );
   }
 
   private handleSurfaceAppearedEvent(
@@ -1238,7 +1259,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     surface.stopRequested = true;
     if (surface.client) {
-      void surface.client.close(1000, clampCloseReason("provider_shutdown"));
+      this.runBackgroundTask(
+        `close removed announced surface ${surface.surfaceId}`,
+        async () => {
+          await surface.client?.close(1000, clampCloseReason("provider_shutdown"));
+        },
+      );
     }
     this.surfaces.delete(event.payload.surfaceId);
   }
@@ -1250,7 +1276,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       type: "event.surface_resumed",
     });
     this.refreshEndpointTopology(surface.endpoint);
-    void this.syncSurfaceSnapshots(surface);
+    this.runBackgroundTask(
+      `surface resumed sync for ${surface.surfaceId}`,
+      async () => {
+        await this.syncSurfaceSnapshots(surface);
+      },
+    );
   }
 
   private handleTapEvent(surface: ManagedSurface, event: TapEvent): void {
@@ -1357,7 +1388,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         url: pane.buffer.currentUrl ?? undefined,
         viewport: pane.viewport,
       };
-      void this.captureFrameOpenState(surface, pane, frameId);
+      this.runBackgroundTask(
+        `frame-open snapshot for ${surface.surfaceId}/${pane.paneId}`,
+        async () => {
+          await this.captureFrameOpenState(surface, pane, frameId);
+        },
+      );
     }
 
     const liveFrame = pane.buffer.liveFrame;
@@ -1388,7 +1424,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane: ManagedPane,
     frameId: string,
   ): Promise<void> {
-    if (!surface.client) {
+    if (!this.canSendRequests(surface)) {
       return;
     }
 
@@ -1519,14 +1555,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const label = windowLabelForIndex(this.persistentState.nextWindowLabelIndex);
     this.persistentState.nextWindowLabelIndex += 1;
     this.persistentState.windowLabels[surfaceId] = label;
-    void this.persistState();
+    this.runBackgroundTask(
+      `persist window label for ${surfaceId}`,
+      async () => {
+        await this.persistState();
+      },
+    );
     return label;
   }
 
   private allocatePaneId(): PaneId {
     const paneId = asPaneId(this.persistentState.nextPaneId);
     this.persistentState.nextPaneId += 1;
-    void this.persistState();
+    this.runBackgroundTask(
+      "persist next pane id",
+      async () => {
+        await this.persistState();
+      },
+    );
     return paneId;
   }
 
@@ -1647,7 +1693,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!stored) {
       this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
       this.persistentState.endpointSurfaces[endpoint.endpointId] = surfaceId;
-      void this.persistState();
+      this.runBackgroundTask(
+        `persist endpoint surface ${endpoint.endpointId}`,
+        async () => {
+          await this.persistState();
+        },
+      );
     }
 
     const windowLabel = this.ensureWindowLabel(surfaceId);
@@ -1690,6 +1741,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     let response: Response;
     try {
+      if (!client.isOpen()) {
+        return;
+      }
       response = await client.request(
         this.requestEnvelope("surfaces.list"),
         REQUEST_TIMEOUT_MS,
@@ -1732,13 +1786,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     // Update endpoint→surfaceId persistent mapping
     this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
     this.persistentState.endpointSurfaces[surface.endpointId] = remoteSurfaceId;
-    void this.persistState();
+    this.runBackgroundTask(
+      `persist remapped surface id ${surface.endpointId}`,
+      async () => {
+        await this.persistState();
+      },
+    );
   }
 
   private async requestPair(surface: ManagedSurface): Promise<PairResponse> {
     const client = surface.client;
-    if (!client) {
-      throw new Error("pair_without_client");
+    if (!client || !client.isOpen()) {
+      throw new SurfAceToolError(
+        "not_connected",
+        `Surf Ace surface is not connected: ${surface.surfaceId}`,
+      );
     }
     const initialPaneId = this.ensureInitialPairPane(surface);
 
@@ -1763,13 +1825,40 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       v: 1,
     });
 
-    let response = await client.request(
-      buildPairRequest(surface.forceTakeoverOnNextPair),
-      REQUEST_TIMEOUT_MS,
-    );
+    let response: Response;
+    try {
+      response = await client.request(
+        buildPairRequest(surface.forceTakeoverOnNextPair),
+        REQUEST_TIMEOUT_MS,
+      );
+    } catch (error) {
+      if (isSocketClosedError(error)) {
+        throw new SurfAceToolError(
+          "not_connected",
+          `Surf Ace surface is not connected: ${surface.surfaceId}`,
+        );
+      }
+      throw error;
+    }
 
     if (isErrorResponse(response) && response.error.code === "busy" && surface.sessionId) {
-      response = await client.request(buildPairRequest(true), REQUEST_TIMEOUT_MS);
+      if (!client.isOpen()) {
+        throw new SurfAceToolError(
+          "not_connected",
+          `Surf Ace surface is not connected: ${surface.surfaceId}`,
+        );
+      }
+      try {
+        response = await client.request(buildPairRequest(true), REQUEST_TIMEOUT_MS);
+      } catch (error) {
+        if (isSocketClosedError(error)) {
+          throw new SurfAceToolError(
+            "not_connected",
+            `Surf Ace surface is not connected: ${surface.surfaceId}`,
+          );
+        }
+        throw error;
+      }
     }
 
     if (isErrorResponse(response)) {
@@ -1795,51 +1884,63 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async runSurfaceWorker(surface: ManagedSurface): Promise<void> {
     while (!surface.stopRequested) {
-      surface.connectionState = surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
-        ? "unreachable"
-        : "connecting";
-
       try {
-        surface.client = new SurfAceWireClient(buildWsUrl(surface.endpoint), {
-          onClose: (_code) => {
-            this.stopHeartbeat(surface);
+        surface.connectionState = surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
+          ? "unreachable"
+          : "connecting";
+
+        try {
+          surface.client = new SurfAceWireClient(buildWsUrl(surface.endpoint), {
+            onClose: (_code) => {
+              this.stopHeartbeat(surface);
+              surface.connectionState =
+                surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
+                  ? "unreachable"
+                  : "connecting";
+              surface.forceTakeoverOnNextPair = true;
+            },
+            onEvent: (event) => {
+              try {
+                this.handleWireEvent(surface, event);
+              } catch (error) {
+                this.logger.warn?.(
+                  `[surf-ace:runtime] event handler error for ${surface.surfaceId}: ${String(error)}`,
+                );
+              }
+            },
+          });
+
+          await surface.client.connect(REQUEST_TIMEOUT_MS);
+          await this.discoverSurfaceId(surface);
+          const pairResponse = await this.requestPair(surface);
+          surface.sessionId = asSessionId(pairResponse.payload.sessionId);
+          surface.connectionState = "connected";
+          surface.reconnectAttempt = 0;
+          surface.unreachableFailures = 0;
+          surface.forceTakeoverOnNextPair = false;
+          this.applyPairState(surface, pairResponse);
+          this.startHeartbeat(surface);
+          await this.syncSurfaceSnapshots(surface, true);
+          await surface.client.waitForClose();
+        } catch (error) {
+          surface.unreachableFailures += 1;
+          if (surface.connectionState !== "connected") {
             surface.connectionState =
               surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
                 ? "unreachable"
                 : "connecting";
-            surface.forceTakeoverOnNextPair = true;
-          },
-          onEvent: (event) => {
-            this.handleWireEvent(surface, event);
-          },
-        });
-
-        await surface.client.connect(REQUEST_TIMEOUT_MS);
-        await this.discoverSurfaceId(surface);
-        const pairResponse = await this.requestPair(surface);
-        surface.sessionId = asSessionId(pairResponse.payload.sessionId);
-        surface.connectionState = "connected";
-        surface.reconnectAttempt = 0;
-        surface.unreachableFailures = 0;
-        surface.forceTakeoverOnNextPair = false;
-        this.applyPairState(surface, pairResponse);
-        this.startHeartbeat(surface);
-        await this.syncSurfaceSnapshots(surface, true);
-        await surface.client.waitForClose();
-      } catch (error) {
-        surface.unreachableFailures += 1;
-        if (surface.connectionState !== "connected") {
-          surface.connectionState =
-            surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
-              ? "unreachable"
-              : "connecting";
+          }
+          this.logger.warn?.(
+            `[surf-ace:runtime] worker error for ${surface.surfaceId}: ${String(error)}`,
+          );
+        } finally {
+          this.stopHeartbeat(surface);
+          surface.client = null;
         }
+      } catch (error) {
         this.logger.warn?.(
-          `[surf-ace:runtime] worker error for ${surface.surfaceId}: ${String(error)}`,
+          `[surf-ace:runtime] worker iteration error for ${surface.surfaceId}: ${String(error)}`,
         );
-      } finally {
-        this.stopHeartbeat(surface);
-        surface.client = null;
       }
 
       if (surface.stopRequested) {
@@ -1855,10 +1956,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private sendRequest(surface: ManagedSurface, request: Request): Promise<Response> {
-    if (!surface.client) {
+    const client = surface.client;
+    if (!client || !client.isOpen()) {
       throw new SurfAceToolError("not_connected", `Surf Ace surface is not connected: ${surface.surfaceId}`);
     }
-    return surface.client.request(request, REQUEST_TIMEOUT_MS);
+    return client.request(request, REQUEST_TIMEOUT_MS).catch((error) => {
+      if (isSocketClosedError(error)) {
+        throw new SurfAceToolError(
+          "not_connected",
+          `Surf Ace surface is not connected: ${surface.surfaceId}`,
+        );
+      }
+      throw error;
+    });
   }
 
   private startHeartbeat(surface: ManagedSurface): void {
@@ -1868,14 +1978,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     surface.heartbeatInterval = setInterval(() => {
-      if (!surface.client) {
+      const client = surface.client;
+      if (!client || !client.isOpen()) {
         return;
       }
       if (surface.heartbeatNonce) {
         surface.heartbeatMisses += 1;
         if (surface.heartbeatMisses >= 2) {
           surface.forceTakeoverOnNextPair = true;
-          void surface.client.close(1000, clampCloseReason("provider_shutdown"));
+          this.runBackgroundTask(
+            `close stale heartbeat surface ${surface.surfaceId}`,
+            async () => {
+              await client.close(1000, clampCloseReason("provider_shutdown"));
+            },
+          );
           return;
         }
       }
@@ -1891,18 +2007,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         v: 1,
       };
 
-      void surface.client.request(request, REQUEST_TIMEOUT_MS).then((response) => {
-        if (isErrorResponse(response)) {
-          return;
-        }
-        const pong = response as HeartbeatPongResponse;
-        if (pong.payload.nonce === nonce) {
-          surface.heartbeatMisses = 0;
-          surface.heartbeatNonce = null;
-        }
-      }).catch(() => {
-        surface.heartbeatMisses += 1;
-      });
+      this.runBackgroundTask(
+        `heartbeat ping for ${surface.surfaceId}`,
+        async () => {
+          if (!client.isOpen()) {
+            return;
+          }
+          try {
+            const response = await client.request(request, REQUEST_TIMEOUT_MS);
+            if (isErrorResponse(response)) {
+              return;
+            }
+            const pong = response as HeartbeatPongResponse;
+            if (pong.payload.nonce === nonce) {
+              surface.heartbeatMisses = 0;
+              surface.heartbeatNonce = null;
+            }
+          } catch {
+            surface.heartbeatMisses += 1;
+          }
+        },
+      );
     }, HEARTBEAT_INTERVAL_MS);
   }
 
@@ -1916,6 +2041,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async syncPaneTopology(surface: ManagedSurface): Promise<void> {
+    if (!this.canSendRequests(surface)) {
+      return;
+    }
     const response = await this.sendRequest(
       surface,
       this.requestEnvelope("panes.list"),
@@ -1950,7 +2078,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface: ManagedSurface,
     force = false,
   ): Promise<void> {
-    if (!surface.client || (surface.snapshotSyncInFlight && !force)) {
+    if (!this.canSendRequests(surface) || (surface.snapshotSyncInFlight && !force)) {
       return;
     }
 
@@ -1979,7 +2107,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.applySnapshot(surface, pane, response as SnapshotResponse);
       }
     } catch (error) {
-      if (surface.client) {
+      if (surface.client?.isOpen()) {
         await surface.client.close(1000, clampCloseReason("provider_shutdown")).catch(() => {});
       }
       throw error;
@@ -1991,6 +2119,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.handleWireEvent(surface, event);
       }
     }
+  }
+
+  private canSendRequests(surface: ManagedSurface): boolean {
+    return Boolean(surface.client?.isOpen());
+  }
+
+  private runBackgroundTask(label: string, work: () => Promise<void>): void {
+    void Promise.resolve()
+      .then(work)
+      .catch((error) => {
+        this.logger.warn?.(
+          `[surf-ace:runtime] background task failed (${label}): ${String(error)}`,
+        );
+      });
   }
 
   private applyPairState(surface: ManagedSurface, response: PairResponse): void {

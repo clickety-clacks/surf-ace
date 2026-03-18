@@ -83,18 +83,40 @@ export class SurfAceWireClient {
   async request(request: Request, timeoutMs: number): Promise<Response> {
     const ws = this.ensureOpenSocket();
     return await new Promise<Response>((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      let settled = false;
+      const finishReject = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
         this.pending.delete(request.id);
-        reject(new Error(`Timed out waiting for ${request.op} response`));
+        clearTimeout(timeout);
+        reject(error);
+      };
+      const finishResolve = (response: Response) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.pending.delete(request.id);
+        clearTimeout(timeout);
+        resolve(response);
+      };
+      const timeout = setTimeout(() => {
+        finishReject(new Error(`Timed out waiting for ${request.op} response`));
       }, timeoutMs);
 
       this.pending.set(request.id, {
-        reject,
-        resolve,
+        reject: finishReject,
+        resolve: finishResolve,
         timeout,
       });
 
-      ws.send(JSON.stringify(request));
+      try {
+        ws.send(JSON.stringify(request));
+      } catch (error) {
+        finishReject(asError(error));
+      }
     });
   }
 
@@ -109,6 +131,10 @@ export class SurfAceWireClient {
 
   async waitForClose(): Promise<void> {
     await (this.closePromise ?? Promise.resolve());
+  }
+
+  isOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 
   private ensureOpenSocket(): WebSocket {
@@ -142,6 +168,10 @@ export class SurfAceWireClient {
       this.pending.delete(id);
     }
   }
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function toText(data: RawData): string {

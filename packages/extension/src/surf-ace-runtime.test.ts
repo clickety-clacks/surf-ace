@@ -934,4 +934,45 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
     });
   });
+
+  await t.test("background resume sync bails on closed sockets without unhandled rejections", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      const unhandled: unknown[] = [];
+      const handleUnhandled = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      process.on("unhandledRejection", handleUnhandled);
+
+      try {
+        await surface.client.close(1000, "test_close");
+        internalRuntime.handleSurfaceResumedEvent(surface, {
+          eventId: "ev_test_resume",
+          op: "event.surface_resumed",
+          payload: {
+            surfaceId: server.surfaceId,
+          },
+          sentAt: Date.now(),
+          type: "event",
+          v: 1,
+        });
+
+        await new Promise((resolve) => {
+          setTimeout(resolve, 100);
+        });
+
+        assert.deepEqual(unhandled, []);
+        assert.equal(
+          warnings.some((warning) => warning.includes("Surf Ace socket is not open")),
+          false,
+        );
+      } finally {
+        process.off("unhandledRejection", handleUnhandled);
+      }
+    });
+  });
 });
