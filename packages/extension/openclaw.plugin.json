@@ -3,7 +3,6 @@
   "name": "Surf Ace",
   "version": "0.1.0",
   "description": "Surf Ace surface discovery, persistent WS connections, pane control, and local CLU tooling.",
-  "entry": "dist/extension/src/index.js",
   "skills": [
     "skills/surf-ace-ops",
     "skills/surf-ace-markup"
