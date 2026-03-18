@@ -15,13 +15,13 @@ PKG_DIR := dist/openclaw-package
 
 package:
 	rm -rf $(PKG_DIR)
-	mkdir -p $(PKG_DIR)/extension/src $(PKG_DIR)/protocol/src $(PKG_DIR)/skills $(PKG_DIR)/node_modules
+	mkdir -p $(PKG_DIR)/extension/src $(PKG_DIR)/protocol/src $(PKG_DIR)/skills
 	cp openclaw.plugin.json $(PKG_DIR)/openclaw.plugin.json
-	printf '{\n  "type": "module",\n  "openclaw": {\n    "extensions": [\n      "./extension/src/index.ts"\n    ]\n  },\n  "dependencies": {\n    "ws": "^8.18.0"\n  }\n}\n' > $(PKG_DIR)/package.json
+	printf '{\n  "type": "module",\n  "openclaw": {\n    "extensions": [\n      "./extension/src/index.ts"\n    ]\n  },\n  "dependencies": {\n    "bonjour-service": "^1.3.0",\n    "ws": "^8.18.0"\n  }\n}\n' > $(PKG_DIR)/package.json
 	rsync -a src/ $(PKG_DIR)/extension/src/
 	rsync -a ../protocol/src/ $(PKG_DIR)/protocol/src/
 	rsync -a skills/ $(PKG_DIR)/skills/
-	cp -r node_modules/ws $(PKG_DIR)/node_modules/ws
+	npm install --prefix $(PKG_DIR) --omit=dev --silent
 
 deploy-tars: package
 	rsync -av --delete $(PKG_DIR)/ tars.tail4105e8.ts.net:~/.openclaw/extensions/surf-ace/
