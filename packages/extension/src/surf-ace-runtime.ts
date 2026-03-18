@@ -57,8 +57,6 @@ import type {
   SurfaceRemovedEvent,
   SurfaceResumedEvent,
   SurfaceViewport,
-  SurfacesListRequest,
-  SurfacesListResponse,
   TapEvent,
   Viewport,
   MutationAckResponse,
@@ -353,6 +351,7 @@ type ManagedSurface = {
 };
 
 type RuntimeStateFile = {
+  endpointSurfaces?: Record<string, string>;
   nextPaneId: number;
   nextWindowLabelIndex: number;
   providerId: string;
@@ -676,7 +675,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.stateDir =
       options.stateDir ?? path.join(os.homedir(), ".surf-ace-openclaw-extension");
     this.unsubscribeDiscovery = this.discovery.subscribe((endpoints) => {
-      void this.handleDiscoveryUpdate(endpoints);
+      this.handleDiscoveryUpdate(endpoints);
     });
   }
 
@@ -693,7 +692,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       await ensureDirectory(this.stateDir);
       await this.loadState();
       await this.discovery.start();
-      await this.handleDiscoveryUpdate(this.discovery.getSnapshot());
+      this.handleDiscoveryUpdate(this.discovery.getSnapshot());
       this.started = true;
     })();
 
@@ -1109,9 +1108,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private async handleDiscoveryUpdate(endpoints: SurfAceDiscoveryEndpoint[]): Promise<void> {
+  private handleDiscoveryUpdate(endpoints: SurfAceDiscoveryEndpoint[]): void {
     for (const endpoint of endpoints) {
-      await this.refreshEndpointTopology(endpoint);
+      this.refreshEndpointTopology(endpoint);
     }
 
     const currentEndpointIds = new Set(endpoints.map((endpoint) => endpoint.endpointId));
@@ -1249,7 +1248,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surfaceId: event.payload.surfaceId,
       type: "event.surface_resumed",
     });
-    void this.refreshEndpointTopology(surface.endpoint);
+    this.refreshEndpointTopology(surface.endpoint);
     void this.syncSurfaceSnapshots(surface);
   }
 
@@ -1591,74 +1590,63 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return pane;
   }
 
-  private async refreshEndpointTopology(endpoint: SurfAceDiscoveryEndpoint): Promise<void> {
-    let response: SurfacesListResponse | null = null;
-    const client = new SurfAceWireClient(buildWsUrl(endpoint));
-    try {
-      await client.connect(REQUEST_TIMEOUT_MS);
-      response = (await client.request(
-        this.requestEnvelope("surfaces.list"),
-        REQUEST_TIMEOUT_MS,
-      )) as SurfacesListResponse;
-    } catch (error) {
-      this.logger.warn?.(
-        `[surf-ace:runtime] surfaces.list failed for ${endpoint.host}:${endpoint.port}: ${String(error)}`,
-      );
-    } finally {
-      await client.close(1000, clampCloseReason("provider_shutdown")).catch(() => {});
-    }
+  private refreshEndpointTopology(endpoint: SurfAceDiscoveryEndpoint): void {
+    // Spec §6.1: connect → pair.request directly (surfaces.list is optional and not required
+    // for single-window endpoints; Electron returns errors on the pre-flight WS connection).
+    const existing = [...this.surfaces.values()].find((s) => s.endpointId === endpoint.endpointId);
 
-    if (!response || isErrorResponse(response)) {
+    if (existing) {
+      existing.endpoint = endpoint;
+      existing.endpointId = endpoint.endpointId;
+      existing.lastSeenAt = this.now();
+      existing.name = endpoint.name;
+      existing.viewport = cloneViewport(endpoint.viewport);
+      this.ensureSurfaceWorker(existing);
       return;
     }
 
-    const seenSurfaceIds = new Set<string>();
-    for (const summary of response.payload.surfaces) {
-      seenSurfaceIds.add(summary.surfaceId);
-      const existing = this.surfaces.get(summary.surfaceId);
-      const windowLabel = this.ensureWindowLabel(summary.surfaceId);
-      const surface: ManagedSurface = existing ?? {
-        client: null,
-        connectionState: "connecting",
-        endpoint,
-        endpointId: endpoint.endpointId,
-        forceTakeoverOnNextPair: false,
-        heartbeatInterval: null,
-        heartbeatMisses: 0,
-        heartbeatNonce: null,
-        lastSeenAt: this.now(),
-        name: summary.name,
-        paneIdsNeedingSnapshot: new Set<number>(),
-        panes: new Map<number, ManagedPane>(),
-        recentEventIds: [],
-        recentEventIdsSet: new Set<string>(),
-        reconnectAttempt: 0,
-        sessionId: null,
-        snapshotBufferedEvents: [],
-        snapshotSyncInFlight: false,
-        stopRequested: false,
-        surfaceId: summary.surfaceId,
-        unreachableFailures: 0,
-        viewport: cloneViewport(summary.viewport),
-        windowLabel,
-        workPromise: null,
-      };
+    // Assign a stable surfaceId for this endpoint (provider owns surfaceId assignment).
+    const stored = this.persistentState.endpointSurfaces?.[endpoint.endpointId];
+    const surfaceId = stored
+      ? asSurfaceId(stored)
+      : asSurfaceId(`sf_${randomBytes(8).toString("hex")}`);
 
-      surface.endpoint = endpoint;
-      surface.endpointId = endpoint.endpointId;
-      surface.lastSeenAt = this.now();
-      surface.name = summary.name;
-      surface.viewport = cloneViewport(summary.viewport);
-      surface.windowLabel = windowLabel;
-      this.surfaces.set(summary.surfaceId, surface);
-      this.ensureSurfaceWorker(surface);
+    if (!stored) {
+      this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
+      this.persistentState.endpointSurfaces[endpoint.endpointId] = surfaceId;
+      void this.persistState();
     }
 
-    for (const surface of this.surfaces.values()) {
-      if (surface.endpointId === endpoint.endpointId && !seenSurfaceIds.has(surface.surfaceId)) {
-        surface.stopRequested = true;
-      }
-    }
+    const windowLabel = this.ensureWindowLabel(surfaceId);
+    const surface: ManagedSurface = {
+      client: null,
+      connectionState: "connecting",
+      endpoint,
+      endpointId: endpoint.endpointId,
+      forceTakeoverOnNextPair: false,
+      heartbeatInterval: null,
+      heartbeatMisses: 0,
+      heartbeatNonce: null,
+      lastSeenAt: this.now(),
+      name: endpoint.name,
+      paneIdsNeedingSnapshot: new Set<number>(),
+      panes: new Map<number, ManagedPane>(),
+      recentEventIds: [],
+      recentEventIdsSet: new Set<string>(),
+      reconnectAttempt: 0,
+      sessionId: null,
+      snapshotBufferedEvents: [],
+      snapshotSyncInFlight: false,
+      stopRequested: false,
+      surfaceId,
+      unreachableFailures: 0,
+      viewport: cloneViewport(endpoint.viewport),
+      windowLabel,
+      workPromise: null,
+    };
+
+    this.surfaces.set(surfaceId, surface);
+    this.ensureSurfaceWorker(surface);
   }
 
   private async requestPair(surface: ManagedSurface): Promise<PairResponse> {
