@@ -1764,6 +1764,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
+    // Spec §6.0/§4.4: if the target surface reports paired, pair.request must use takeover.
+    const advertisedPaired = Boolean(remoteSurfaces[0]?.paired);
+    surface.forceTakeoverOnNextPair = surface.forceTakeoverOnNextPair || advertisedPaired;
+
     const remoteSurfaceId = asSurfaceId(remoteSurfaces[0].surfaceId);
     if (remoteSurfaceId === surface.surfaceId) {
       return;
@@ -1825,10 +1829,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       v: 1,
     });
 
+    const initialTakeover = surface.forceTakeoverOnNextPair;
     let response: Response;
     try {
       response = await client.request(
-        buildPairRequest(surface.forceTakeoverOnNextPair),
+        buildPairRequest(initialTakeover),
         REQUEST_TIMEOUT_MS,
       );
     } catch (error) {
@@ -1841,7 +1846,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       throw error;
     }
 
-    if (isErrorResponse(response) && response.error.code === "busy" && surface.sessionId) {
+    if (isErrorResponse(response) && response.error.code === "busy" && !initialTakeover) {
       if (!client.isOpen()) {
         throw new SurfAceToolError(
           "not_connected",
