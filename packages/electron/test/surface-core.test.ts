@@ -99,6 +99,11 @@ test("surface core assigns pane history and split topology", () => {
   });
 
   assert.deepEqual(split.panes.map((pane) => pane.paneId), [initialPaneId, 9]);
+  const paneViewports = core.panesList(surface.surfaceId).panes.map((pane) => pane.viewport);
+  assert.deepEqual(paneViewports, [
+    { height: 800, scale: 2, width: 600 },
+    { height: 800, scale: 2, width: 600 },
+  ]);
 
   core.contentSet(surface.surfaceId, {
     content: { markdown: "# First" },
@@ -135,18 +140,15 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
-
-  core.updatePaneSnapshot(surface.surfaceId, paneId, {
-    viewport: {
-      contentSize: { height: 600, width: 500 },
-      scrollOffset: { x: 12, y: 24 },
-      visibleRect: { height: 320, width: 280, x: 12, y: 24 },
-      zoomLevel: 1,
-    },
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [9],
+    paneId,
   });
 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
-  assert.deepEqual(listedPane.viewport.visibleRect, { height: 320, width: 280, x: 12, y: 24 });
+  assert.deepEqual(listedPane.viewport, { height: 800, scale: 2, width: 600 });
 });
 
 test("surface core updates terminal content in place", () => {
@@ -257,6 +259,44 @@ test("surface core keeps history when a different paired session displaces conte
   core.navigateHistory(surface.surfaceId, paneId, "back");
   const restored = core.getRendererWindowState(surface.surfaceId).panes[0]!;
   assert.equal(restored.content.contentId, "ct_owner_a");
+});
+
+test("surface core does not report pane history entries as discarded frames on pane close", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 17);
+
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "vertical",
+    newPaneIds: [21],
+    paneId,
+  });
+
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# First" },
+    contentId: "ct_close_a" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_close_a",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Second" },
+    contentId: "ct_close_b" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_close_b",
+    paneId: paneId as never,
+    revision: 2 as never,
+  });
+
+  const close = core.paneClose(surface.surfaceId, paneId);
+  assert.equal(close.closedFramesDiscarded, 0);
 });
 
 test("surface core returns the number of flushed annotation batches discarded on pane close", () => {

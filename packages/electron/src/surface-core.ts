@@ -51,6 +51,7 @@ type PaneSnapshot = {
 
 type PaneState = {
   annotating: boolean;
+  deliveredClosedFrameCount: number;
   dirtyStrokeIds: string[];
   firstDirtyStrokeAt: number | null;
   flushInFlight: boolean;
@@ -437,7 +438,7 @@ export class SurfaceCore {
     if (!pane) {
       throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
     }
-    const closedFramesDiscarded = Math.max(0, pane.history.length - 1);
+    const closedFramesDiscarded = pane.deliveredClosedFrameCount;
 
     surface.panes.delete(paneId);
     surface.paneOrder = surface.paneOrder.filter((entry) => entry !== paneId);
@@ -752,6 +753,7 @@ export class SurfaceCore {
   markDrawingFlushSent(surfaceId: string, paneId: number): void {
     const pane = this.requirePane(surfaceId, paneId);
     pane.dirtyStrokeIds = [];
+    pane.deliveredClosedFrameCount += 1;
     pane.firstDirtyStrokeAt = null;
     pane.lastDirtyStrokeAt = null;
     pane.lastSuccessfulFlushAt = this.now();
@@ -833,6 +835,7 @@ export class SurfaceCore {
 
     const replacementPane = createPaneState(initialPaneId, this.now());
     replacementPane.annotating = currentPane.annotating;
+    replacementPane.deliveredClosedFrameCount = currentPane.deliveredClosedFrameCount;
     replacementPane.dirtyStrokeIds = [...currentPane.dirtyStrokeIds];
     replacementPane.firstDirtyStrokeAt = currentPane.firstDirtyStrokeAt;
     replacementPane.flushInFlight = currentPane.flushInFlight;
@@ -872,6 +875,7 @@ type PaneSplitState = {
 function createPaneState(paneId: number, now: number): PaneState {
   return {
     annotating: false,
+    deliveredClosedFrameCount: 0,
     dirtyStrokeIds: [],
     firstDirtyStrokeAt: null,
     flushInFlight: false,
