@@ -1469,6 +1469,38 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return null;
   }
 
+  private consumeBootstrapPaneForPairState(
+    surface: ManagedSurface,
+    remotePaneId: PaneId,
+  ): ManagedPane | null {
+    if (surface.panes.size !== 1) {
+      return null;
+    }
+    if (this.findPaneByRemoteId(surface, remotePaneId)) {
+      return null;
+    }
+
+    const bootstrapPane = surface.panes.values().next().value ?? null;
+    if (!bootstrapPane) {
+      return null;
+    }
+    if (bootstrapPane.remotePaneId !== bootstrapPane.paneId) {
+      return null;
+    }
+    if (
+      bootstrapPane.activeContentId !== null ||
+      bootstrapPane.contentType !== null ||
+      bootstrapPane.currentRevision !== asRevision(0) ||
+      bootstrapPane.historySummary.visibleContentId !== null ||
+      bootstrapPane.snapshot !== null
+    ) {
+      return null;
+    }
+
+    bootstrapPane.remotePaneId = remotePaneId;
+    return bootstrapPane;
+  }
+
   private ensureSurfaceWorker(surface: ManagedSurface): void {
     if (surface.workPromise) {
       return;
@@ -1965,7 +1997,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.name = response.payload.surfaceName;
     surface.viewport = cloneViewport(response.payload.viewport);
     for (const paneState of response.payload.state.panes) {
-      const pane = this.ensurePane(surface, paneState.paneId);
+      const pane =
+        this.consumeBootstrapPaneForPairState(surface, paneState.paneId) ??
+        this.ensurePane(surface, paneState.paneId);
       pane.activeContentId = paneState.currentContentId;
       pane.contentType = paneState.contentType;
       pane.currentRevision = paneState.currentRevision;

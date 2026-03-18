@@ -219,18 +219,6 @@ class FakeSurfAceWsServer {
         );
         return;
       case "pair.request":
-        const requestedInitialPaneId = Number(message.payload?.initialPaneId ?? 0);
-        if (
-          requestedInitialPaneId > 0 &&
-          this.panes.size === 1 &&
-          !this.panes.has(requestedInitialPaneId)
-        ) {
-          const bootstrapPane = this.panes.get(this.initialRemotePaneId);
-          assert.ok(bootstrapPane);
-          this.panes.delete(this.initialRemotePaneId);
-          this.initialRemotePaneId = requestedInitialPaneId;
-          this.panes.set(this.initialRemotePaneId, bootstrapPane);
-        }
         this.pairRequests.push({
           initialPaneId: Number(message.payload?.initialPaneId ?? 0),
           windowLabel: String(message.payload?.windowLabel ?? ""),
@@ -621,6 +609,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(screen.fingerprint, server.surfaceId);
       assert.equal(screen.windowLabel, "a");
       assert.deepEqual(screen.panes.map((pane) => pane.paneId), [1]);
+      assert.equal(server.initialRemotePaneId, 41);
       assert.deepEqual(
         Object.keys(screen.panes[0] ?? {}).sort(),
         ["activeContent", "historySummary", "name", "paneId"].sort(),
