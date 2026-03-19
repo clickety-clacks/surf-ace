@@ -174,6 +174,8 @@ export type PairRequest = RequestBase<"pair.request"> & {
   };
 };
 
+export type RelinquishRequest = RequestBase<"ownership.relinquish">;
+
 export type ContentSetPayload =
   | {
       paneId: PaneId;
@@ -375,6 +377,12 @@ export type PairResponse = ResponseBase<"pair.request"> & {
   };
 };
 
+export type RelinquishResponse = ResponseBase<"ownership.relinquish"> & {
+  payload: {
+    relinquished: true;
+  };
+};
+
 export type MutationAckResponse = ResponseBase<
   "content.set" | "content.append" | "content.patch" | "content.clear"
 > & {
@@ -471,6 +479,7 @@ export type ErrorResponse = {
   op:
     | "surfaces.list"
     | "pair.request"
+    | "ownership.relinquish"
     | "content.set"
     | "content.append"
     | "content.patch"
@@ -488,6 +497,8 @@ export type ErrorResponse = {
   error: {
     code:
       | "busy"
+      | "invalid_resume"
+      | "not_lock_owner"
       | "not_paired"
       | "invalid_payload"
       | "invalid_request_id_reuse"
@@ -627,6 +638,7 @@ export type PaneRenamedEvent = EventBase<"event.pane_renamed"> & {
 export type Request =
   | SurfacesListRequest
   | PairRequest
+  | RelinquishRequest
   | ContentSetRequest
   | ContentAppendRequest
   | ContentPatchRequest
@@ -642,6 +654,7 @@ export type Request =
 export type Response =
   | SurfacesListResponse
   | PairResponse
+  | RelinquishResponse
   | MutationAckResponse
   | AnnotationsRemoveResponse
   | SnapshotResponse

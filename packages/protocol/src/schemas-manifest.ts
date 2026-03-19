@@ -14,6 +14,8 @@ import {
   pageEventSchema,
   pairRequestSchema,
   pairResponseSchema,
+  relinquishRequestSchema,
+  relinquishResponseSchema,
   paneCloseRequestSchema,
   paneCloseResponseSchema,
   paneCreatedEventSchema,
@@ -47,6 +49,11 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "pair.request": {
     request: pairRequestSchema,
     response: pairResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "ownership.relinquish": {
+    request: relinquishRequestSchema,
+    response: relinquishResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "content.set": {

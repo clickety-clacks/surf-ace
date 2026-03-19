@@ -83,6 +83,17 @@ function pairRequest(
   };
 }
 
+function relinquishRequest(): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "ownership.relinquish",
+    payload: {},
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 async function withServer(
   run: (ctx: { surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
 ): Promise<void> {
@@ -115,43 +126,105 @@ async function withServer(
   }
 }
 
-test("ws server accepts takeover from a different provider while actively paired", async () => {
+test("ws server keeps ownership lock after owner socket closes", async () => {
   await withServer(async ({ surfaceId, url }) => {
-    const original = await connect(url);
-    const first = await request(original, pairRequest(surfaceId, "pv_alpha"));
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(first.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
 
-    const originalClosed = new Promise<{ code: number; reason: string }>((resolve) => {
-      original.once("close", (code, reason) => {
-        resolve({ code, reason: String(reason) });
-      });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
     });
 
-    const takeover = await connect(url);
-    const second = await request(
-      takeover,
-      pairRequest(surfaceId, "pv_bravo", { takeover: true }),
-    );
-
-    assert.equal(second.ok, true);
-    assert.equal(second.op, "pair.request");
-    assert.equal(second.payload.resumed, false);
-    assert.notEqual(second.payload.sessionId, first.payload.sessionId);
-
-    const closed = await originalClosed;
-    assert.equal(closed.code, 1000);
-    assert.equal(closed.reason, "superseded");
-
-    await closeSocket(takeover);
+    const probe = await connect(url);
+    const listed = await request(probe, surfacesListRequest());
+    assert.equal(listed.ok, true);
+    assert.equal(listed.op, "surfaces.list");
+    assert.equal(listed.payload.surfaces[0]?.paired, true);
+    await closeSocket(probe);
   });
 });
 
-test("ws server accepts fresh takeover from a different provider during resume grace", async () => {
+test("ws server allows the lock owner to resume after disconnect", async () => {
   await withServer(async ({ surfaceId, url }) => {
-    const original = await connect(url);
-    const first = await request(original, pairRequest(surfaceId, "pv_alpha"));
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(first.ok, true);
-    await closeSocket(original, 1000, "provider_shutdown");
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+    const resumedSocket = await connect(url);
+    const resumed = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", { resumeSessionId: first.payload.sessionId }),
+    );
+
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.op, "pair.request");
+    assert.equal(resumed.payload.resumed, true);
+    assert.equal(resumed.payload.sessionId, first.payload.sessionId);
+
+    await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server rejects owner reconnect with an invalid resume token", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+    const resumedSocket = await connect(url);
+    const invalid = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", { resumeSessionId: `sa_invalid` as never }),
+    );
+
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.op, "pair.request");
+    assert.equal(invalid.error.code, "invalid_resume");
+
+    await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server rejects foreign providers without takeover while locked", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+    const foreign = await connect(url);
+    const busy = await request(foreign, pairRequest(surfaceId, "pv_bravo"));
+
+    assert.equal(busy.ok, false);
+    assert.equal(busy.op, "pair.request");
+    assert.equal(busy.error.code, "busy");
+
+    await closeSocket(foreign);
+  });
+});
+
+test("ws server accepts explicit takeover from a different provider while locked", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
 
     await new Promise((resolve) => {
       setTimeout(resolve, 25);
@@ -169,6 +242,29 @@ test("ws server accepts fresh takeover from a different provider during resume g
     assert.notEqual(second.payload.sessionId, first.payload.sessionId);
 
     await closeSocket(takeover);
+  });
+});
+
+test("ws server clears the ownership lock on ownership.relinquish", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+
+    const relinquished = await request(owner, relinquishRequest());
+    assert.equal(relinquished.ok, true);
+    assert.equal(relinquished.op, "ownership.relinquish");
+    assert.equal(relinquished.payload.relinquished, true);
+
+    await new Promise((resolve) => {
+      owner.once("close", () => resolve(undefined));
+    });
+
+    const probe = await connect(url);
+    const listed = await request(probe, surfacesListRequest());
+    assert.equal(listed.ok, true);
+    assert.equal(listed.payload.surfaces[0]?.paired, false);
+    await closeSocket(probe);
   });
 });
 

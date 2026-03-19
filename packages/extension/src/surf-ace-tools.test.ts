@@ -45,6 +45,9 @@ function createStubRuntime(): SurfAceRuntime {
       selection: null,
       taps: [],
     }),
+    relinquish: async () => ({
+      relinquished: true,
+    }),
     split: async () => [{ paneId: 1 }, { paneId: 2 }],
     snapshot: async () => ({
       fingerprint: "sf_1",
@@ -64,6 +67,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_list",
     "surf_ace_push",
     "surf_ace_clear",
+    "surf_ace_relinquish",
     "surf_ace_split",
     "surf_ace_close_pane",
     "surf_ace_read",
@@ -100,4 +104,13 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(closePaneTool.inputSchema.required, ["fingerprint", "paneId"]);
   assert.equal(closePaneTool.inputSchema.additionalProperties, false);
+
+  const relinquishTool = tools.find((tool) => tool.name === "surf_ace_relinquish");
+  assert.ok(relinquishTool);
+  assert.deepEqual(
+    Object.keys(relinquishTool.inputSchema.properties as Record<string, unknown>).sort(),
+    ["fingerprint"].sort(),
+  );
+  assert.deepEqual(relinquishTool.inputSchema.required, ["fingerprint"]);
+  assert.equal(relinquishTool.inputSchema.additionalProperties, false);
 });

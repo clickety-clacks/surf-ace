@@ -13,6 +13,7 @@ import type {
   Event,
   EventProfile,
   HeartbeatPingRequest,
+  RelinquishRequest,
   PaneCloseRequest,
   PaneRenameRequest,
   PaneSplitRequest,
@@ -41,17 +42,14 @@ type ActiveSession = {
   paneFlushTimers: Map<number, PaneFlushTimers>;
   providerId: string;
   requestCache: Map<string, SocketCacheEntry>;
-  resumeGraceTimer: NodeJS.Timeout | null;
   sessionId: string;
   socket: WebSocket;
 };
 
-type GraceSession = {
+type OwnershipLock = {
   drawingFlushConfig: DrawingFlushConfig;
   eventProfile: EventProfile;
   providerId: string;
-  resumeDeadline: number;
-  resumeGraceTimer: NodeJS.Timeout;
   sessionId: string;
 };
 
@@ -62,7 +60,7 @@ type PaneFlushTimers = {
 
 type SurfaceTransportState = {
   active: ActiveSession | null;
-  grace: GraceSession | null;
+  lock: OwnershipLock | null;
 };
 
 type SocketMeta = {
@@ -102,7 +100,6 @@ export class SurfaceWsServer {
   private readonly onBusyChanged?: () => void;
   private readonly port: number;
   private readonly protocolVersion: number;
-  private readonly resumeGraceMs: number;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
   readonly wsPath: string;
@@ -121,7 +118,6 @@ export class SurfaceWsServer {
     this.onBusyChanged = options.onBusyChanged;
     this.port = options.port;
     this.protocolVersion = options.protocolVersion ?? 1;
-    this.resumeGraceMs = options.resumeGraceMs ?? 20_000;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
 
@@ -400,19 +396,9 @@ export class SurfaceWsServer {
   disconnectSurface(surfaceId: string, reason = "provider_shutdown"): void {
     const transport = this.transport(surfaceId);
     if (transport.active) {
-      const socket = transport.active.socket;
-      clearPaneTimers(transport.active.paneFlushTimers);
-      transport.active = null;
-      const meta = this.socketMeta.get(socket);
-      if (meta) {
-        meta.pairedSurfaceId = null;
-      }
-      socket.close(1000, reason);
+      this.detachActiveSession(surfaceId, reason);
     }
-    if (transport.grace) {
-      clearTimeout(transport.grace.resumeGraceTimer);
-      transport.grace = null;
-    }
+    transport.lock = null;
     this.core.setConnectionBar(surfaceId, "disconnected");
     this.onBusyChanged?.();
   }
@@ -522,6 +508,17 @@ export class SurfaceWsServer {
     if (
       response.type === "response" &&
       response.ok &&
+      response.op === "ownership.relinquish"
+    ) {
+      const surfaceId = meta.pairedSurfaceId;
+      if (surfaceId) {
+        this.detachActiveSession(surfaceId, "relinquished");
+      }
+      return;
+    }
+    if (
+      response.type === "response" &&
+      response.ok &&
       response.op === "pair.request" &&
       response.payload.resumed
     ) {
@@ -544,6 +541,8 @@ export class SurfaceWsServer {
         return this.handleSurfacesList(request);
       case "pair.request":
         return await this.handlePairRequest(socket, request);
+      case "ownership.relinquish":
+        return this.handleRelinquish(socket, request);
       case "panes.list":
         return this.handlePanesList(socket, request);
       case "pane.split":
@@ -603,44 +602,36 @@ export class SurfaceWsServer {
     this.core.getSurface(surfaceId);
     const transport = this.transport(surfaceId);
     const existing = transport.active;
-    const grace = transport.grace;
+    const lock = transport.lock;
     const providerId = request.payload.providerId;
     const requestedProfile = request.payload.eventProfile ?? "minimum_deep";
     const drawingFlushConfig = request.payload.drawingFlushConfig ?? DEFAULT_DRAWING_FLUSH_CONFIG;
+    const resumeSessionId = request.payload.resume?.sessionId ?? null;
 
     let resumed = false;
-    if (existing) {
-      if (request.payload.takeover) {
-        existing.socket.close(1000, "superseded");
-        clearPaneTimers(existing.paneFlushTimers);
-        transport.active = null;
-      } else {
-        throw new SurfaceCoreError("busy", "Surface is already paired");
+    let sessionId: string;
+
+    if (!lock) {
+      sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+    } else if (lock.providerId === providerId) {
+      if (resumeSessionId !== lock.sessionId) {
+        throw new SurfaceCoreError("invalid_resume", "Resume session did not match active ownership lock");
       }
-    } else if (grace) {
-      if (grace.providerId !== providerId) {
-        if (!request.payload.takeover) {
-          throw new SurfaceCoreError("busy", "Surface is in resume grace");
-        }
-        clearTimeout(grace.resumeGraceTimer);
-        transport.grace = null;
-      } else if (
-        request.payload.resume?.sessionId &&
-        request.payload.resume.sessionId !== grace.sessionId
-      ) {
-        if (!request.payload.takeover) {
-          throw new SurfaceCoreError("busy", "Resume session did not match active grace session");
-        }
-        clearTimeout(grace.resumeGraceTimer);
-        transport.grace = null;
-      } else {
-        clearTimeout(grace.resumeGraceTimer);
-        transport.grace = null;
-        resumed = true;
+      resumed = true;
+      sessionId = lock.sessionId;
+      if (existing && existing.socket !== socket) {
+        this.detachActiveSession(surfaceId, "superseded");
       }
+    } else {
+      if (!request.payload.takeover) {
+        throw new SurfaceCoreError("busy", "Surface ownership lock is held by another provider");
+      }
+      if (existing && existing.socket !== socket) {
+        this.detachActiveSession(surfaceId, "superseded");
+      }
+      sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
     }
 
-    const sessionId = resumed ? grace!.sessionId : `sa_${randomUUID().replaceAll("-", "")}`;
     const session: ActiveSession = {
       connectionId: request.payload.connectionId,
       drawingFlushConfig,
@@ -648,11 +639,16 @@ export class SurfaceWsServer {
       paneFlushTimers: new Map(),
       providerId,
       requestCache: new Map(),
-      resumeGraceTimer: null,
       sessionId,
       socket,
     };
     transport.active = session;
+    transport.lock = {
+      drawingFlushConfig,
+      eventProfile: requestedProfile,
+      providerId,
+      sessionId,
+    };
     const meta = this.socketMeta.get(socket);
     if (meta) {
       meta.pairedSurfaceId = surfaceId;
@@ -663,9 +659,6 @@ export class SurfaceWsServer {
         initialPaneId: Number(request.payload.initialPaneId),
         windowLabel: request.payload.windowLabel,
       });
-    } else {
-      // On resume, only update the window label if it changed; never reset pane topology.
-      this.core.applyWindowLabelOnly(surfaceId, request.payload.windowLabel);
     }
     this.core.setConnectionBar(surfaceId, "connected");
     this.onBusyChanged?.();
@@ -683,7 +676,7 @@ export class SurfaceWsServer {
         },
         limits: {
           ...DEFAULT_LIMITS,
-          resumeGraceMs: this.resumeGraceMs,
+          resumeGraceMs: 20_000,
         },
         resumed,
         sessionId: sessionId as PairRequest["payload"]["resume"]["sessionId"],
@@ -700,6 +693,32 @@ export class SurfaceWsServer {
     this.armAllPendingFlushes(surfaceId);
 
     return response;
+  }
+
+  private handleRelinquish(socket: WebSocket, request: RelinquishRequest): Response {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    const transport = this.transport(surfaceId);
+    const active = transport.active;
+    if (!active || active.socket !== socket) {
+      throw new SurfaceCoreError("not_lock_owner", "Only the active lock owner may relinquish");
+    }
+    if (!transport.lock || transport.lock.providerId !== active.providerId) {
+      throw new SurfaceCoreError("not_lock_owner", "Only the current lock owner may relinquish");
+    }
+
+    transport.lock = null;
+    this.core.setConnectionBar(surfaceId, "disconnected");
+    this.onBusyChanged?.();
+
+    return {
+      id: request.id,
+      ok: true,
+      op: "ownership.relinquish",
+      payload: { relinquished: true },
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
   }
 
   private handlePanesList(socket: WebSocket, request: PanesListRequest): Response {
@@ -905,7 +924,7 @@ export class SurfaceWsServer {
     if (existing) {
       return existing;
     }
-    const created: SurfaceTransportState = { active: null, grace: null };
+    const created: SurfaceTransportState = { active: null, lock: null };
     this.transports.set(surfaceId, created);
     return created;
   }
@@ -928,23 +947,23 @@ export class SurfaceWsServer {
     const session = transport.active;
     clearPaneTimers(session.paneFlushTimers);
     transport.active = null;
-    transport.grace = {
-      drawingFlushConfig: session.drawingFlushConfig,
-      eventProfile: session.eventProfile,
-      providerId: session.providerId,
-      resumeDeadline: Date.now() + this.resumeGraceMs,
-      resumeGraceTimer: setTimeout(() => {
-        const current = this.transport(surfaceId);
-        if (current.grace?.sessionId === session.sessionId) {
-          current.grace = null;
-          this.core.setConnectionBar(surfaceId, "disconnected");
-          this.onBusyChanged?.();
-        }
-      }, this.resumeGraceMs),
-      sessionId: session.sessionId,
-    };
     this.core.setConnectionBar(surfaceId, "connecting");
     this.onBusyChanged?.();
+  }
+
+  private detachActiveSession(surfaceId: string, reason: string): void {
+    const transport = this.transport(surfaceId);
+    const active = transport.active;
+    if (!active) {
+      return;
+    }
+    clearPaneTimers(active.paneFlushTimers);
+    transport.active = null;
+    const meta = this.socketMeta.get(active.socket);
+    if (meta) {
+      meta.pairedSurfaceId = null;
+    }
+    active.socket.close(1000, reason);
   }
 
   private schedulePaneFlush(surfaceId: string, paneId: number): void {
@@ -1083,7 +1102,7 @@ export class SurfaceWsServer {
 
   private isSurfaceBusy(surfaceId: string): boolean {
     const transport = this.transport(surfaceId);
-    return Boolean(transport.active || transport.grace);
+    return Boolean(transport.lock);
   }
 
   private isEndpointBusy(): boolean {
@@ -1202,9 +1221,6 @@ function clearPaneTimers(map: Map<number, PaneFlushTimers>): void {
 function clearTransport(transport: SurfaceTransportState): void {
   if (transport.active) {
     clearPaneTimers(transport.active.paneFlushTimers);
-  }
-  if (transport.grace) {
-    clearTimeout(transport.grace.resumeGraceTimer);
   }
 }
 

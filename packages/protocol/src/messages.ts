@@ -7,6 +7,8 @@ export type {
   NavigationEvent,
   PairRequest,
   PairResponse,
+  RelinquishRequest,
+  RelinquishResponse,
   Request,
   Response,
   SnapshotGetRequest,

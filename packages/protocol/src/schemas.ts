@@ -7,6 +7,8 @@ type ProtocolSchemaDefName =
   | "SurfacesListResponse"
   | "PairRequest"
   | "PairResponse"
+  | "RelinquishRequest"
+  | "RelinquishResponse"
   | "ContentSetRequest"
   | "ContentAppendRequest"
   | "ContentPatchRequest"
@@ -57,6 +59,8 @@ export const surfacesListRequestSchema = getSchemaDef("SurfacesListRequest");
 export const surfacesListResponseSchema = getSchemaDef("SurfacesListResponse");
 export const pairRequestSchema = getSchemaDef("PairRequest");
 export const pairResponseSchema = getSchemaDef("PairResponse");
+export const relinquishRequestSchema = getSchemaDef("RelinquishRequest");
+export const relinquishResponseSchema = getSchemaDef("RelinquishResponse");
 export const contentSetRequestSchema = getSchemaDef("ContentSetRequest");
 export const contentAppendRequestSchema = getSchemaDef("ContentAppendRequest");
 export const contentPatchRequestSchema = getSchemaDef("ContentPatchRequest");

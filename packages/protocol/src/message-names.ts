@@ -1,6 +1,7 @@
 export const REQUEST_MESSAGES = [
   "surfaces.list",
   "pair.request",
+  "ownership.relinquish",
   "content.set",
   "content.append",
   "content.patch",
@@ -17,6 +18,7 @@ export const REQUEST_MESSAGES = [
 export const RESPONSE_MESSAGES = [
   "surfaces.list",
   "pair.request",
+  "ownership.relinquish",
   "content.set",
   "content.append",
   "content.patch",
