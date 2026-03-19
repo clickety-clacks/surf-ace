@@ -60,6 +60,7 @@ class StaticDiscoveryService implements SurfAceDiscoveryService {
 
 class FakeSurfAceWsServer {
   readonly annotationsRemoveRequests: Array<{ contentId: string; paneId: number; strokeIds: string[] }> = [];
+  busyWithoutTakeoverResponsesRemaining = 0;
   readonly clearRequests: Array<{ paneId: number; revision: number }> = [];
   readonly closePaneRequests: Array<{ paneId: number }> = [];
   readonly contentSetRequests: Array<{
@@ -248,6 +249,20 @@ class FakeSurfAceWsServer {
               : null,
           takeover: Boolean(message.payload?.takeover),
         });
+        if (this.busyWithoutTakeoverResponsesRemaining > 0 && !message.payload?.takeover) {
+          this.busyWithoutTakeoverResponsesRemaining -= 1;
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "pair.request",
+                "busy",
+                "Surface is already paired",
+              ),
+            ),
+          );
+          return;
+        }
         if (
           (this.rejectNextResumePairWithSessionMismatch ||
             this.resumePairMismatchResponsesRemaining > 0) &&
@@ -1335,7 +1350,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("single invalid_resume reconnects and retries owner resume without takeover", async () => {
+  await t.test("single invalid_resume clears the stale session and retries as a fresh owner pair", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1352,36 +1367,37 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, "sa_test_session");
       assert.equal(server.pairAttemptDetails[1]?.takeover, false);
-      assert.equal(server.pairAttemptDetails[2]?.resumeSessionId, "sa_test_session");
+      assert.equal(server.pairAttemptDetails[2]?.resumeSessionId, null);
       assert.equal(server.pairAttemptDetails[2]?.takeover, false);
       assert.equal(surface.sessionId, "sa_test_session");
     });
   });
 
-  await t.test("repeated invalid_resume keeps retrying owner resume instead of forcing fresh pair", async () => {
+  await t.test("busy after a cold-start reconnect retries once with takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
       assert.ok(surface.client);
-      assert.equal(surface.sessionId, "sa_test_session");
+      surface.hasPairedInGatewaySession = false;
+      surface.sessionId = null;
 
-      server.resumePairMismatchResponsesRemaining = 2;
-      await surface.client.close(1000, "test_resume_retry_threshold");
+      server.busyWithoutTakeoverResponsesRemaining = 1;
+      await surface.client.close(1000, "test_cold_start_busy_reclaim");
 
-      await waitFor(() => server.pairAttemptDetails.length >= 4, 20_000);
-      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 20_000);
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
       assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.resumeSessionId),
-        ["sa_test_session", "sa_test_session", "sa_test_session"],
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.resumeSessionId),
+        [null, null],
       );
       assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.takeover),
-        [false, false, false],
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
+        [false, true],
       );
       assert.ok(
-        warnings.every((warning) => !warning.includes("forcing fresh pair")),
+        warnings.some((warning) => warning.includes("retrying with takeover")),
       );
       assert.equal(surface.sessionId, "sa_test_session");
     });
