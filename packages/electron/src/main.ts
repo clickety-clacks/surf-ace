@@ -8,7 +8,11 @@ import { app, BrowserWindow, Menu, ipcMain, screen, type WebContents } from "ele
 import type { Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import { loadOrCreateIdentity } from "./identity.js";
-import { SurfaceCore, type PersistentSurfaceState } from "./surface-core.js";
+import {
+  SurfaceCore,
+  type PersistentSurfaceState,
+  type RendererWindowState,
+} from "./surface-core.js";
 import { SurfaceWsServer } from "./ws-server.js";
 
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? 18791);
@@ -16,6 +20,8 @@ const STATE_FILE_NAME = "surface-core-state.json";
 
 const windows = new Map<string, BrowserWindow>();
 const lastExplicitPaneIds = new Map<string, number>();
+const pendingWindowStates = new Map<string, RendererWindowState>();
+const readyWindows = new Set<string>();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -73,6 +79,19 @@ function surfaceIdForSender(contents: WebContents): string | null {
   return null;
 }
 
+function flushPendingWindowState(surfaceId: string): void {
+  const window = windows.get(surfaceId);
+  if (!window || window.isDestroyed() || !readyWindows.has(surfaceId)) {
+    return;
+  }
+  const pendingState = pendingWindowStates.get(surfaceId);
+  if (!pendingState) {
+    return;
+  }
+  pendingWindowStates.delete(surfaceId);
+  window.webContents.send("surface:state", pendingState);
+}
+
 function broadcastSurfaceState(surfaceId: string): void {
   const window = windows.get(surfaceId);
   if (!window || window.isDestroyed()) {
@@ -85,6 +104,10 @@ function broadcastSurfaceState(surfaceId: string): void {
   }
   const windowLabel = core.surfaceWindowLabel(surfaceId);
   window.setTitle(windowLabel ? `${endpointName()} · ${windowLabel}` : endpointName());
+  if (!readyWindows.has(surfaceId)) {
+    pendingWindowStates.set(surfaceId, state);
+    return;
+  }
   window.webContents.send("surface:state", state);
 }
 
@@ -140,13 +163,20 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   });
 
   windows.set(surfaceId, window);
+  readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);
   window.once("ready-to-show", () => {
     window.show();
   });
+  window.webContents.once("did-finish-load", () => {
+    readyWindows.add(surfaceId);
+    flushPendingWindowState(surfaceId);
+  });
   window.on("closed", () => {
     windows.delete(surfaceId);
     lastExplicitPaneIds.delete(surfaceId);
+    pendingWindowStates.delete(surfaceId);
+    readyWindows.delete(surfaceId);
     if (!isQuitting) {
       void server.broadcastSurfaceRemoved(surfaceId);
       server.disconnectSurface(surfaceId, "provider_shutdown");
@@ -223,12 +253,16 @@ function installIpc(): void {
     if (!surfaceId || !payload || typeof payload !== "object") {
       return;
     }
-    core.updatePaneSnapshot(surfaceId, Number(payload.paneId), {
-      bounds: payload.bounds as { height: number; width: number; x: number; y: number } | null,
-      selection: (payload.selection ?? null) as never,
-      viewport: payload.viewport as never,
-      visibleText: String(payload.visibleText ?? ""),
-    });
+    try {
+      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), {
+        bounds: payload.bounds as { height: number; width: number; x: number; y: number } | null,
+        selection: (payload.selection ?? null) as never,
+        viewport: payload.viewport as never,
+        visibleText: String(payload.visibleText ?? ""),
+      });
+    } catch {
+      // Renderer snapshot updates are best-effort; stale pane ids should not crash the app.
+    }
   });
 
   ipcMain.on("surface:page", (event, payload) => {
@@ -248,7 +282,11 @@ function installIpc(): void {
     if (!surfaceId) {
       return;
     }
-    core.clearToast(surfaceId, Number(payload?.paneId));
+    try {
+      core.clearToast(surfaceId, Number(payload?.paneId));
+    } catch {
+      // Renderer commands can race a pane reset during reconnect.
+    }
   });
 
   ipcMain.on("surface:command", (event, payload) => {
@@ -265,10 +303,18 @@ function installIpc(): void {
       case "focus-pane":
         break;
       case "annotate":
-        core.setAnnotating(surfaceId, paneId, Boolean(payload.enabled));
+        try {
+          core.setAnnotating(surfaceId, paneId, Boolean(payload.enabled));
+        } catch {
+          // Renderer commands can race a pane reset during reconnect.
+        }
         break;
       case "history":
-        core.navigateHistory(surfaceId, paneId, payload.direction === "forward" ? "forward" : "back");
+        try {
+          core.navigateHistory(surfaceId, paneId, payload.direction === "forward" ? "forward" : "back");
+        } catch {
+          // Renderer commands can race a pane reset during reconnect.
+        }
         break;
       case "tap":
         void server.emitTap(surfaceId, paneId, {
@@ -285,7 +331,12 @@ function installIpc(): void {
         break;
       case "navigation": {
         const url = String(payload.url ?? "");
-        const result = core.applyNavigation(surfaceId, paneId, url);
+        let result: { blocked: boolean };
+        try {
+          result = core.applyNavigation(surfaceId, paneId, url);
+        } catch {
+          break;
+        }
         if (!result.blocked) {
           void server.emitNavigation(surfaceId, paneId, url);
         }
