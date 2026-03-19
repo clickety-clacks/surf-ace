@@ -1986,19 +1986,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     };
 
-    const initialTakeover = false;
-    const response = await sendPairRequest(initialTakeover, resumeSessionId);
+    let response = await sendPairRequest(false, resumeSessionId);
 
     if (isResumeSessionMismatch(response) && resumeSessionId) {
       this.logger.warn?.(
-        `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; reconnecting`,
+        `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; retrying fresh owner pair`,
       );
       this.noteResumeFailure(surface);
-      await client.close(1000, clampCloseReason("provider_shutdown")).catch(() => {});
-      throw new SurfAceToolError(
-        "not_connected",
-        `Surf Ace surface is not connected: ${surface.surfaceId}`,
+      surface.sessionId = null;
+      response = await sendPairRequest(false, null);
+    }
+
+    if (
+      isErrorResponse(response) &&
+      response.error.code === "busy" &&
+      !surface.hasPairedInGatewaySession
+    ) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] busy on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
       );
+      response = await sendPairRequest(true, null);
     }
 
     if (isErrorResponse(response)) {
