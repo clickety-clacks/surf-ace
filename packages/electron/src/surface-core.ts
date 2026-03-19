@@ -168,10 +168,16 @@ const SUPPORTED_CONTENT_TYPES: ContentType[] = [
 export class SurfaceCore {
   private readonly surfaces = new Map<string, SurfaceState>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
+  private readonly logger: { warn?: (message: string) => void };
   private readonly now: () => number;
   private persistentState: PersistentSurfaceState;
 
-  constructor(options?: { now?: () => number; persistentState?: PersistentSurfaceState }) {
+  constructor(options?: {
+    logger?: { warn?: (message: string) => void };
+    now?: () => number;
+    persistentState?: PersistentSurfaceState;
+  }) {
+    this.logger = options?.logger ?? console;
     this.now = options?.now ?? (() => Date.now());
     this.persistentState = options?.persistentState ?? {
       primarySurfaceId: null,
@@ -283,6 +289,9 @@ export class SurfaceCore {
 
   clearToast(surfaceId: string, paneId: number): void {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return;
+    }
     if (!pane.toast) {
       return;
     }
@@ -292,6 +301,9 @@ export class SurfaceCore {
 
   setAnnotating(surfaceId: string, paneId: number, enabled: boolean): void {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return;
+    }
     if (pane.annotating === enabled) {
       return;
     }
@@ -302,6 +314,9 @@ export class SurfaceCore {
 
   navigateHistory(surfaceId: string, paneId: number, direction: "back" | "forward"): void {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return;
+    }
     if (pane.annotating) {
       pane.toast = "Finish annotation (Done) to navigate";
       this.emit({ surfaceId, type: "surface-changed" });
@@ -381,7 +396,7 @@ export class SurfaceCore {
     payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; paneId: number },
   ): { panes: PaneSplitState[] } {
     const surface = this.getSurface(surfaceId);
-    const sourcePane = this.requirePane(surfaceId, payload.paneId);
+    const sourcePane = this.expectPane(surfaceId, payload.paneId);
     if (payload.count < 2 || payload.newPaneIds.length !== payload.count - 1) {
       throw new SurfaceCoreError("invalid_payload", "pane.split count/newPaneIds mismatch");
     }
@@ -420,7 +435,7 @@ export class SurfaceCore {
   }
 
   paneRename(surfaceId: string, paneId: number, name: string | null): { name: string | null; paneId: number } {
-    const pane = this.requirePane(surfaceId, paneId);
+    const pane = this.expectPane(surfaceId, paneId);
     pane.name = name;
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({ name, paneId, surfaceId, type: "pane-renamed" });
@@ -453,7 +468,7 @@ export class SurfaceCore {
     surfaceId: string,
     payload: ContentSetRequest["payload"],
   ): MutationAckResponse["payload"] {
-    const pane = this.requirePane(surfaceId, payload.paneId);
+    const pane = this.expectPane(surfaceId, payload.paneId);
     if (!SUPPORTED_CONTENT_TYPES.includes(payload.contentType)) {
       throw new SurfaceCoreError(
         "unsupported_content_type",
@@ -496,7 +511,7 @@ export class SurfaceCore {
   }
 
   contentClear(surfaceId: string, payload: ContentClearRequest["payload"]): MutationAckResponse["payload"] {
-    const pane = this.requirePane(surfaceId, payload.paneId);
+    const pane = this.expectPane(surfaceId, payload.paneId);
     assertRevision(pane, payload.revision);
     if (pane.annotating) {
       pane.toast = "Finish annotation (Done) to navigate";
@@ -526,7 +541,7 @@ export class SurfaceCore {
   }
 
   contentAppend(surfaceId: string, payload: ContentAppendRequest["payload"]): MutationAckResponse["payload"] {
-    const pane = this.requirePane(surfaceId, payload.paneId);
+    const pane = this.expectPane(surfaceId, payload.paneId);
     const entry = currentEntry(pane);
     assertRevision(pane, payload.revision);
     if (entry.contentId !== payload.contentId) {
@@ -551,7 +566,7 @@ export class SurfaceCore {
   }
 
   contentPatch(surfaceId: string, payload: ContentPatchRequest["payload"]): MutationAckResponse["payload"] {
-    const pane = this.requirePane(surfaceId, payload.paneId);
+    const pane = this.expectPane(surfaceId, payload.paneId);
     const entry = currentEntry(pane);
     assertRevision(pane, payload.revision);
     if (entry.contentId !== payload.contentId) {
@@ -584,7 +599,7 @@ export class SurfaceCore {
     remainingStrokeCount: number;
     removedStrokeIds: string[];
   } {
-    const pane = this.requirePane(surfaceId, payload.paneId);
+    const pane = this.expectPane(surfaceId, payload.paneId);
     const entry = currentEntry(pane);
     if (!entry.contentId || entry.contentId !== payload.contentId) {
       throw new SurfaceCoreError("stale_content", "annotations.remove targeted stale content");
@@ -621,6 +636,9 @@ export class SurfaceCore {
     snapshot: Partial<PaneSnapshot>,
   ): void {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return;
+    }
     pane.snapshot = {
       bounds: snapshot.bounds ?? pane.snapshot.bounds,
       selection: snapshot.selection ?? pane.snapshot.selection,
@@ -630,7 +648,7 @@ export class SurfaceCore {
   }
 
   captureSnapshot(surfaceId: string, paneId: number): SnapshotResponse["payload"] {
-    const pane = this.requirePane(surfaceId, paneId);
+    const pane = this.expectPane(surfaceId, paneId);
     const current = currentEntry(pane);
     return {
       contentId: current.contentId,
@@ -644,16 +662,23 @@ export class SurfaceCore {
   }
 
   paneBounds(surfaceId: string, paneId: number): { height: number; width: number; x: number; y: number } | null {
-    return this.requirePane(surfaceId, paneId).snapshot.bounds;
+    const pane = this.requirePane(surfaceId, paneId);
+    return pane?.snapshot.bounds ?? null;
   }
 
   noteTap(surfaceId: string, paneId: number): void {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return;
+    }
     pane.toast = null;
   }
 
   applyNavigation(surfaceId: string, paneId: number, url: string): { blocked: boolean } {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return { blocked: false };
+    }
     if (pane.annotating) {
       pane.toast = "Finish annotation (Done) to navigate";
       this.emit({ surfaceId, type: "surface-changed" });
@@ -669,7 +694,7 @@ export class SurfaceCore {
     paneId: number,
     stroke: Stroke,
   ): { contentId: string; revision: number } {
-    const pane = this.requirePane(surfaceId, paneId);
+    const pane = this.expectPane(surfaceId, paneId);
     if (!pane.annotating) {
       throw new SurfaceCoreError("invalid_operation", "Annotation mode is not active");
     }
@@ -689,7 +714,7 @@ export class SurfaceCore {
 
   hasPendingDrawingFlush(surfaceId: string, paneId: number): boolean {
     const pane = this.requirePane(surfaceId, paneId);
-    return pane.dirtyStrokeIds.length > 0;
+    return pane ? pane.dirtyStrokeIds.length > 0 : false;
   }
 
   flushMeta(surfaceId: string, paneId: number): {
@@ -699,14 +724,17 @@ export class SurfaceCore {
   } {
     const pane = this.requirePane(surfaceId, paneId);
     return {
-      firstDirtyStrokeAt: pane.firstDirtyStrokeAt,
-      lastDirtyStrokeAt: pane.lastDirtyStrokeAt,
-      lastSuccessfulFlushAt: pane.lastSuccessfulFlushAt,
+      firstDirtyStrokeAt: pane?.firstDirtyStrokeAt ?? null,
+      lastDirtyStrokeAt: pane?.lastDirtyStrokeAt ?? null,
+      lastSuccessfulFlushAt: pane?.lastSuccessfulFlushAt ?? null,
     };
   }
 
   setFlushInFlight(surfaceId: string, paneId: number, visible: boolean): void {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return;
+    }
     if (pane.flushInFlight === visible) {
       return;
     }
@@ -721,6 +749,9 @@ export class SurfaceCore {
     flushReason: DrawingFlushEvent["payload"]["flushReason"],
   ): DrawingFlushEvent["payload"] | null {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return null;
+    }
     const entry = currentEntry(pane);
     if (!entry.contentId || pane.dirtyStrokeIds.length === 0) {
       return null;
@@ -750,6 +781,9 @@ export class SurfaceCore {
 
   markDrawingFlushSent(surfaceId: string, paneId: number): void {
     const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return;
+    }
     pane.dirtyStrokeIds = [];
     pane.deliveredClosedFrameCount += 1;
     pane.firstDirtyStrokeAt = null;
@@ -851,8 +885,23 @@ export class SurfaceCore {
     return true;
   }
 
-  private requirePane(surfaceId: string, paneId: number): PaneState {
-    const pane = this.getSurface(surfaceId).panes.get(paneId);
+  private findPane(surfaceId: string, paneId: number): PaneState | null {
+    return this.getSurface(surfaceId).panes.get(paneId) ?? null;
+  }
+
+  private requirePane(surfaceId: string, paneId: number): PaneState | null {
+    const pane = this.findPane(surfaceId, paneId);
+    if (!pane) {
+      this.logger.warn?.(
+        `[surf-ace:surface] ignoring unknown pane ${paneId} on ${surfaceId}`,
+      );
+      return null;
+    }
+    return pane;
+  }
+
+  private expectPane(surfaceId: string, paneId: number): PaneState {
+    const pane = this.requirePane(surfaceId, paneId);
     if (!pane) {
       throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
     }

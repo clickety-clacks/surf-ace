@@ -376,6 +376,7 @@ const UNREACHABLE_AFTER_FAILURES = 3;
 const ALERT_RESET_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
 const ALERT_ENDPOINT_URL = "http://localhost:18800/alert";
+const INITIAL_PAIR_PANE_ID = 1 as PaneId;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
 
 export class SurfAceToolError extends Error {
@@ -1488,12 +1489,36 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private ensureInitialPairPane(surface: ManagedSurface): PaneId {
-    const existingPaneIds = [...surface.panes.keys()].sort((left, right) => left - right);
-    const paneId = existingPaneIds[0] ? asPaneId(existingPaneIds[0]) : this.allocatePaneId();
-    if (!surface.panes.has(paneId)) {
-      surface.panes.set(paneId, createPane(paneId, paneId, surface.viewport));
+    const bootstrapPane = surface.panes.get(INITIAL_PAIR_PANE_ID);
+    if (
+      surface.panes.size === 1 &&
+      bootstrapPane &&
+      bootstrapPane.paneId === INITIAL_PAIR_PANE_ID &&
+      bootstrapPane.remotePaneId === INITIAL_PAIR_PANE_ID &&
+      bootstrapPane.activeContentId === null &&
+      bootstrapPane.contentType === null &&
+      bootstrapPane.currentRevision === asRevision(0) &&
+      bootstrapPane.historySummary.visibleContentId === null &&
+      bootstrapPane.snapshot === null
+    ) {
+      return INITIAL_PAIR_PANE_ID;
     }
-    return paneId;
+
+    if (this.persistentState.nextPaneId <= INITIAL_PAIR_PANE_ID) {
+      this.persistentState.nextPaneId = INITIAL_PAIR_PANE_ID + 1;
+      this.runBackgroundTask(
+        "persist next pane id",
+        async () => {
+          await this.persistState();
+        },
+      );
+    }
+
+    surface.panes = new Map<number, ManagedPane>([
+      [INITIAL_PAIR_PANE_ID, createPane(INITIAL_PAIR_PANE_ID, INITIAL_PAIR_PANE_ID, surface.viewport)],
+    ]);
+    surface.snapshotBufferedEvents = [];
+    return INITIAL_PAIR_PANE_ID;
   }
 
   private findPaneByRemoteId(surface: ManagedSurface, remotePaneId: PaneId): ManagedPane | null {
@@ -2168,7 +2193,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private applyPairState(surface: ManagedSurface, response: PairResponse): void {
     surface.name = response.payload.surfaceName;
     surface.viewport = cloneViewport(response.payload.viewport);
+    const seenRemotePaneIds = new Set<number>();
     for (const paneState of response.payload.state.panes) {
+      seenRemotePaneIds.add(paneState.paneId);
       const pane =
         this.consumeBootstrapPaneForPairState(surface, paneState.paneId) ??
         this.ensurePane(surface, paneState.paneId);
@@ -2176,6 +2203,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       pane.contentType = paneState.contentType;
       pane.currentRevision = paneState.currentRevision;
       pane.historySummary.visibleContentId = paneState.currentContentId;
+    }
+    for (const pane of [...surface.panes.values()]) {
+      if (!seenRemotePaneIds.has(pane.remotePaneId)) {
+        surface.panes.delete(pane.paneId);
+      }
     }
   }
 

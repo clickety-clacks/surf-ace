@@ -975,4 +975,90 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       }
     });
   });
+
+  await t.test("pair response replaces stale local panes from prior sessions", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const split = await runtime.split({
+        count: 3,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: 1,
+      });
+      assert.deepEqual(split.map((pane) => pane.paneId), [1, 2, 3]);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      internalRuntime.applyPairState(surface, {
+        id: "rq_repair",
+        ok: true,
+        op: "pair.request",
+        payload: {
+          capabilities: {
+            contentTypes: ["html", "image", "pdf", "terminal", "markdown"],
+            eventTypes: [],
+          },
+          eventConfig: {
+            activeEvents: [],
+            drawingFlushConfig: {
+              idleWindowMs: 8000,
+              maxIntervalMs: 30000,
+            },
+            profile: "minimum_deep",
+          },
+          limits: {
+            maxDrawingFlushBytes: 2 * 1024 * 1024,
+            maxFrameBytes: 10 * 1024 * 1024,
+            maxMessageBytes: 12 * 1024 * 1024,
+            maxStrokePointsPerFlush: 8192,
+            maxVisibleTextBytes: 4096,
+            resumeGraceMs: 20_000,
+          },
+          resumed: false,
+          sessionId: "sa_repaired",
+          state: {
+            panes: [
+              {
+                contentType: null,
+                currentContentId: null,
+                currentRevision: 0,
+                paneId: server.initialRemotePaneId,
+              },
+            ],
+          },
+          surfaceId: server.surfaceId,
+          surfaceName: "Surface A",
+          viewport: { height: 768, scale: 2, width: 1024 },
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      });
+
+      const screens = await runtime.listScreens();
+      assert.deepEqual(screens[0]?.panes.map((pane) => pane.paneId), [1]);
+    });
+  });
+
+  await t.test("pair bootstrap clears stale pane ids before requesting a fresh topology", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const split = await runtime.split({
+        count: 3,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: 1,
+      });
+      assert.deepEqual(split.map((pane) => pane.paneId), [1, 2, 3]);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      const bootstrapPaneId = internalRuntime.ensureInitialPairPane(surface);
+      assert.equal(bootstrapPaneId, 1);
+      assert.deepEqual([...surface.panes.keys()], [1]);
+      assert.equal(surface.panes.get(1)?.remotePaneId, 1);
+    });
+  });
 });

@@ -47,6 +47,59 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.equal(windowState.panes[0]?.paneId, 7);
 });
 
+test("surface core ignores snapshot updates for stale pane ids", () => {
+  const warnings: string[] = [];
+  const core = new SurfaceCore({
+    logger: {
+      warn: (message: string) => {
+        warnings.push(message);
+      },
+    },
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  assert.doesNotThrow(() => {
+    core.updatePaneSnapshot(surface.surfaceId, 819, {
+      visibleText: "stale",
+    });
+  });
+  assert.ok(warnings.some((warning) => warning.includes("unknown pane 819")));
+});
+
+test("surface core treats stale pane access as best-effort instead of crashing", () => {
+  const warnings: string[] = [];
+  const core = new SurfaceCore({
+    logger: {
+      warn: (message: string) => {
+        warnings.push(message);
+      },
+    },
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  assert.equal(core.paneBounds(surface.surfaceId, 819), null);
+  assert.doesNotThrow(() => {
+    core.noteTap(surface.surfaceId, 819);
+  });
+  assert.equal(
+    core.buildDrawingFlush(surface.surfaceId, 819, { idleWindowMs: 8000, maxIntervalMs: 30000 }, "idle_window"),
+    null,
+  );
+  assert.ok(warnings.some((warning) => warning.includes("unknown pane 819")));
+});
+
 test("surface core rejects video and canvas content types with unsupported_content_type", () => {
   const core = new SurfaceCore({
     persistentState: {
