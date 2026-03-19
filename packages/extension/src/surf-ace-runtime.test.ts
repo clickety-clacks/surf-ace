@@ -1191,7 +1191,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("pair bootstrap clears stale pane ids before requesting a fresh topology", async () => {
+  await t.test("pair bootstrap preserves the stable first-pane remote id across reconnects", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const split = await runtime.split({
         count: 3,
@@ -1206,9 +1206,34 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(surface);
 
       const bootstrapPaneId = internalRuntime.ensureInitialPairPane(surface);
-      assert.equal(bootstrapPaneId, 1);
-      assert.deepEqual([...surface.panes.keys()], [1]);
-      assert.equal(surface.panes.get(1)?.remotePaneId, 1);
+      assert.equal(bootstrapPaneId, server.initialRemotePaneId);
+      assert.deepEqual([...surface.panes.keys()], [1, 2, 3]);
+      assert.equal(surface.panes.get(1)?.remotePaneId, server.initialRemotePaneId);
+    });
+  });
+
+  await t.test("reconnect pair requests reuse the stable first-pane remote id", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const beforeReconnect = (await runtime.listScreens())[0]?.panes.map((pane) => pane.paneId);
+      assert.deepEqual(beforeReconnect, [1]);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      await surface.client.close(1000, "test_reconnect_stable_pane_id");
+
+      await waitFor(() => server.pairRequests.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(server.pairRequests.map((request) => request.initialPaneId), [
+        1,
+        server.initialRemotePaneId,
+      ]);
+
+      const afterReconnect = (await runtime.listScreens())[0]?.panes.map((pane) => pane.paneId);
+      assert.deepEqual(afterReconnect, beforeReconnect);
     });
   });
 
