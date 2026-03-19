@@ -5,6 +5,7 @@ import Network
 enum SurfAceHTTPServerError: LocalizedError {
     case startTimeout
     case listenerCancelled
+    case invalidBindAddress
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,8 @@ enum SurfAceHTTPServerError: LocalizedError {
             return "Server listener timed out during startup"
         case .listenerCancelled:
             return "Server listener cancelled during startup"
+        case .invalidBindAddress:
+            return "Server failed to bind to 0.0.0.0"
         }
     }
 }
@@ -311,7 +314,11 @@ actor SurfAceHTTPServer {
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         let endpointPort = port == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: port)!
-        let listener = try NWListener(using: parameters, on: endpointPort)
+        guard let bindAddress = IPv4Address("0.0.0.0") else {
+            throw SurfAceHTTPServerError.invalidBindAddress
+        }
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(bindAddress), port: endpointPort)
+        let listener = try NWListener(using: parameters)
         self.listener = listener
         self.httpHandler = httpHandler
         self.webSocketHandler = webSocketHandler

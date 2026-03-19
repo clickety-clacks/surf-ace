@@ -115,10 +115,12 @@ final class SurfAceRuntime {
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
     @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
     @ObservationIgnored private var activeSessions: [String: SurfAceSessionState] = [:]
+    @ObservationIgnored private var lastHeartbeatAtBySurfaceId: [String: Date] = [:]
     @ObservationIgnored private var resumeGraceBySurfaceId: [String: SurfAceResumeGraceState] = [:]
     @ObservationIgnored private var resumeGraceTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var surfaceNeedsResumedEvent: Set<String> = []
     @ObservationIgnored private var identityMapping = SurfAceIdentityMapping()
+    @ObservationIgnored private var heartbeatWatchdogTask: Task<Void, Never>?
 
     private let maxMessageBytes = 12 * 1024 * 1024
     private let maxFrameBytes = 10 * 1024 * 1024
@@ -126,6 +128,8 @@ final class SurfAceRuntime {
     private let maxStrokePointsPerFlush = 8_192
     private let maxDrawingFlushBytes = 2 * 1024 * 1024
     private let resumeGraceMilliseconds = 20_000
+    private let heartbeatTimeoutMilliseconds = 25_000
+    private let heartbeatWatchdogCheckMilliseconds = 5_000
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
@@ -192,6 +196,7 @@ final class SurfAceRuntime {
             )
             serverPort = Int(port)
             isStarted = true
+            startHeartbeatWatchdog()
             publishBonjour()
         } catch {
             endpointError = "Server failed: \(error.localizedDescription)"
@@ -199,6 +204,9 @@ final class SurfAceRuntime {
     }
 
     func stop() async {
+        heartbeatWatchdogTask?.cancel()
+        heartbeatWatchdogTask = nil
+
         for task in resumeGraceTasks.values {
             task.cancel()
         }
@@ -213,6 +221,7 @@ final class SurfAceRuntime {
 
         let sessions = activeSessions
         activeSessions.removeAll()
+        lastHeartbeatAtBySurfaceId.removeAll()
         for (_, session) in sessions {
             await session.socket.close(code: 1000, reason: "provider_shutdown")
         }
@@ -279,6 +288,7 @@ final class SurfAceRuntime {
         )
 
         if let session = activeSessions.removeValue(forKey: surfaceId) {
+            lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
             Task {
                 await session.socket.close(code: 1000, reason: "surface_removed")
             }
@@ -805,11 +815,12 @@ final class SurfAceRuntime {
         let resumeSessionId = resumePayload?["sessionId"] as? String
 
         if let existing = activeSessions[surfaceId] {
-            if existing.providerId == providerId, takeover {
+            if takeover {
                 Task {
                     await existing.socket.close(code: 1000, reason: "superseded")
                 }
                 activeSessions.removeValue(forKey: surfaceId)
+                lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
             } else {
                 return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "surface already paired")
             }
@@ -818,15 +829,19 @@ final class SurfAceRuntime {
         var resumed = false
         var resumedSessionId: String?
         if let grace = resumeGraceBySurfaceId[surfaceId] {
-            guard grace.providerId == providerId else {
-                return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "surface already paired")
+            if grace.providerId != providerId {
+                guard takeover else {
+                    return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "surface already paired")
+                }
+                cancelResumeGrace(surfaceId: surfaceId)
+            } else {
+                if let resumeSessionId, resumeSessionId != grace.sessionId {
+                    return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "resume sessionId mismatch")
+                }
+                resumed = true
+                resumedSessionId = grace.sessionId
+                cancelResumeGrace(surfaceId: surfaceId)
             }
-            if let resumeSessionId, resumeSessionId != grace.sessionId {
-                return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "resume sessionId mismatch")
-            }
-            resumed = true
-            resumedSessionId = grace.sessionId
-            cancelResumeGrace(surfaceId: surfaceId)
         }
 
         let sessionId = resumed ? resumedSessionId! : randomHex(prefix: "sa", byteCount: 12)
@@ -848,6 +863,7 @@ final class SurfAceRuntime {
             initialPaneId: providerInitialPaneId
         )
         activeSessions[surfaceId] = session
+        lastHeartbeatAtBySurfaceId[surfaceId] = Date()
         refreshConnectionState(surfaceId: surfaceId)
         reschedulePendingFlushes(surfaceId: surfaceId)
         refreshBonjourTXT()
@@ -1322,12 +1338,13 @@ final class SurfAceRuntime {
     }
 
     private func handleHeartbeatPing(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard pairedSurface(for: connectionUUID) != nil else {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID) else {
             return makeErrorResponse(op: "heartbeat.ping", id: id, code: "not_paired", message: "pair.request required")
         }
         guard let nonce = payload["nonce"] as? String else {
             return makeErrorResponse(op: "heartbeat.ping", id: id, code: "invalid_payload", message: "nonce is required")
         }
+        lastHeartbeatAtBySurfaceId[surfaceId] = Date()
 
         return [
             "v": 1,
@@ -1353,8 +1370,53 @@ final class SurfAceRuntime {
         let surfaceId = pair.key
         let session = pair.value
         activeSessions.removeValue(forKey: surfaceId)
+        lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
         beginResumeGrace(surfaceId: surfaceId, sessionId: session.sessionId, providerId: session.providerId)
         refreshConnectionState(surfaceId: surfaceId)
+        refreshBonjourTXT()
+    }
+
+    private func startHeartbeatWatchdog() {
+        heartbeatWatchdogTask?.cancel()
+        heartbeatWatchdogTask = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(self.heartbeatWatchdogCheckMilliseconds))
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self.expireStaleSessionsForHeartbeat()
+                }
+            }
+        }
+    }
+
+    private func expireStaleSessionsForHeartbeat() {
+        guard !activeSessions.isEmpty else { return }
+        let now = Date()
+        var expired: [(surfaceId: String, session: SurfAceSessionState)] = []
+
+        for (surfaceId, session) in activeSessions {
+            let lastHeartbeatAt = lastHeartbeatAtBySurfaceId[surfaceId] ?? session.pairedAt
+            let ageMilliseconds = now.timeIntervalSince(lastHeartbeatAt) * 1000
+            if ageMilliseconds > Double(heartbeatTimeoutMilliseconds) {
+                expired.append((surfaceId, session))
+            }
+        }
+
+        guard !expired.isEmpty else { return }
+
+        for expiredSession in expired {
+            activeSessions.removeValue(forKey: expiredSession.surfaceId)
+            lastHeartbeatAtBySurfaceId.removeValue(forKey: expiredSession.surfaceId)
+            beginResumeGrace(
+                surfaceId: expiredSession.surfaceId,
+                sessionId: expiredSession.session.sessionId,
+                providerId: expiredSession.session.providerId
+            )
+            refreshConnectionState(surfaceId: expiredSession.surfaceId)
+            Task {
+                await expiredSession.session.socket.close(code: 1000, reason: "heartbeat_timeout")
+            }
+        }
         refreshBonjourTXT()
     }
 

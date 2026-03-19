@@ -307,6 +307,18 @@ indirect enum SurfAcePaneLayoutNode {
     case leaf(Int)
     case split(direction: SurfAceLayoutDirection, children: [SurfAcePaneLayoutNode])
 
+    var layoutIdentity: String {
+        switch self {
+        case .empty:
+            return "empty"
+        case .leaf(let paneId):
+            return "leaf:\(paneId)"
+        case .split(let direction, let children):
+            let childIdentity = children.map(\.layoutIdentity).joined(separator: "|")
+            return "split:\(direction.rawValue):[\(childIdentity)]"
+        }
+    }
+
     var paneIDs: [Int] {
         switch self {
         case .empty:
