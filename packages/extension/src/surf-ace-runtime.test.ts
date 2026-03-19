@@ -94,6 +94,7 @@ class FakeSurfAceWsServer {
   snapshotScrollOffset = { x: 0, y: 0 };
   dropNextSplitRequest = false;
   rejectNextResumePairWithSessionMismatch = false;
+  resumePairMismatchResponsesRemaining = 0;
   resumePairMismatchMessage = "Resume session did not match active grace session";
 
   pairedSocket: import("ws").WebSocket | null = null;
@@ -236,10 +237,14 @@ class FakeSurfAceWsServer {
           takeover: Boolean(message.payload?.takeover),
         });
         if (
-          this.rejectNextResumePairWithSessionMismatch &&
+          (this.rejectNextResumePairWithSessionMismatch ||
+            this.resumePairMismatchResponsesRemaining > 0) &&
           this.pairAttemptDetails.at(-1)?.resumeSessionId
         ) {
           this.rejectNextResumePairWithSessionMismatch = false;
+          if (this.resumePairMismatchResponsesRemaining > 0) {
+            this.resumePairMismatchResponsesRemaining -= 1;
+          }
           socket.send(
             JSON.stringify(
               this.errorResponse(
@@ -1111,7 +1116,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("resume session mismatch falls back to a fresh pair request", async () => {
+  await t.test("single resume mismatch reconnects and retries resume before forcing fresh pair", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1128,8 +1133,35 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, "sa_test_session");
       assert.equal(server.pairAttemptDetails[1]?.takeover, true);
-      assert.equal(server.pairAttemptDetails[2]?.resumeSessionId, null);
+      assert.equal(server.pairAttemptDetails[2]?.resumeSessionId, "sa_test_session");
       assert.equal(server.pairAttemptDetails[2]?.takeover, true);
+      assert.equal(surface.sessionId, "sa_test_session");
+    });
+  });
+
+  await t.test("three resume mismatches force a fresh pair on the next reconnect", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      assert.equal(surface.sessionId, "sa_test_session");
+
+      server.resumePairMismatchResponsesRemaining = 3;
+      await surface.client.close(1000, "test_resume_retry_threshold");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 5, 6_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 6_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 5).map((attempt) => attempt.resumeSessionId),
+        ["sa_test_session", "sa_test_session", "sa_test_session", null],
+      );
+      assert.ok(
+        warnings.some((warning) =>
+          warning.includes("forcing fresh pair") && warning.includes(server.surfaceId),
+        ),
+      );
       assert.equal(surface.sessionId, "sa_test_session");
     });
   });
