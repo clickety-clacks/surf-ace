@@ -1126,6 +1126,38 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("stored surface identity reuses the existing worker when endpoint ids churn", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const replacementPort = nextPort++;
+      const replacementServer = new FakeSurfAceWsServer(replacementPort);
+
+      try {
+        const internalRuntime = runtime as any;
+        const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(originalSurface);
+
+        internalRuntime.persistentState.endpointSurfaces[`endpoint-${replacementPort}`] = server.surfaceId;
+        internalRuntime.refreshEndpointTopology({
+          ...discoveryEndpoint(replacementPort, ""),
+          endpointId: `endpoint-${replacementPort}`,
+          fingerprintPrefix: "",
+        });
+
+        assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
+        assert.equal(originalSurface.endpointId, `endpoint-${replacementPort}`);
+
+        await new Promise((resolve) => {
+          setTimeout(resolve, 100);
+        });
+
+        assert.equal(replacementServer.pairedSocket, null);
+        assert.equal(server.pairAttemptDetails.length, 1);
+      } finally {
+        await replacementServer.close();
+      }
+    });
+  });
+
   await t.test("pair response replaces stale local panes from prior sessions", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const split = await runtime.split({
