@@ -1142,6 +1142,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const currentEndpointIds = new Set(endpoints.map((endpoint) => endpoint.endpointId));
     for (const surface of this.surfaces.values()) {
       if (!currentEndpointIds.has(surface.endpointId)) {
+        if (surface.client?.isOpen() || surface.connectionState === "connected") {
+          continue;
+        }
         surface.stopRequested = true;
         if (surface.client) {
           this.runBackgroundTask(

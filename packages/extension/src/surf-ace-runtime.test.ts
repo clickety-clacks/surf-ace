@@ -24,8 +24,11 @@ type TestPane = {
 
 class StaticDiscoveryService implements SurfAceDiscoveryService {
   private readonly listeners = new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void | Promise<void>>();
+  private endpoints: SurfAceDiscoveryEndpoint[];
 
-  constructor(private readonly endpoints: SurfAceDiscoveryEndpoint[]) {}
+  constructor(endpoints: SurfAceDiscoveryEndpoint[]) {
+    this.endpoints = endpoints;
+  }
 
   async start(): Promise<void> {
     await this.refreshNow();
@@ -41,6 +44,10 @@ class StaticDiscoveryService implements SurfAceDiscoveryService {
 
   getSnapshot(): SurfAceDiscoveryEndpoint[] {
     return structuredClone(this.endpoints);
+  }
+
+  setEndpoints(endpoints: SurfAceDiscoveryEndpoint[]): void {
+    this.endpoints = structuredClone(endpoints);
   }
 
   subscribe(listener: (endpoints: SurfAceDiscoveryEndpoint[]) => void | Promise<void>): () => void {
@@ -585,6 +592,7 @@ let nextPort = 22119;
 async function withRuntimeHarness(
   run: (ctx: {
     alertBodies: Array<Record<string, unknown>>;
+    discovery: StaticDiscoveryService;
     warnings: string[];
     runtime: ReturnType<typeof createSurfAceRuntime>;
     server: FakeSurfAceWsServer;
@@ -630,7 +638,7 @@ async function withRuntimeHarness(
 
     await runtime.start();
     await waitFor(() => server.pairedSocket !== null);
-    await run({ alertBodies, runtime, server, warnings });
+    await run({ alertBodies, discovery, runtime, server, warnings });
   } finally {
     globalThis.fetch = originalFetch;
     await runtime.stop();
@@ -1027,6 +1035,24 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       } finally {
         process.off("unhandledRejection", handleUnhandled);
       }
+    });
+  });
+
+  await t.test("discovery churn does not close an already connected surface", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const initialPairAttempts = server.pairAttemptDetails.length;
+      assert.equal(initialPairAttempts, 1);
+
+      discovery.setEndpoints([]);
+      await discovery.refreshNow();
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+
+      const screens = await runtime.listScreens();
+      assert.equal(screens[0]?.connectionState, "connected");
+      assert.equal(server.pairAttemptDetails.length, initialPairAttempts);
+      assert.notEqual(server.pairedSocket, null);
     });
   });
 
