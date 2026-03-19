@@ -1762,6 +1762,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       ? asSurfaceId(stored)
       : asSurfaceId(`sf_${randomBytes(8).toString("hex")}`);
 
+    const existingByStoredSurfaceId = this.surfaces.get(surfaceId);
+    if (existingByStoredSurfaceId) {
+      this.assignEndpoint(existingByStoredSurfaceId, endpoint);
+      this.ensureSurfaceWorker(existingByStoredSurfaceId);
+      return;
+    }
+
     if (!stored) {
       this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
       this.persistentState.endpointSurfaces[endpoint.endpointId] = surfaceId;
