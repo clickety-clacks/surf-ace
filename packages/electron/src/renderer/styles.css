@@ -127,6 +127,7 @@ body {
 }
 
 .pane-shell {
+  flex: 1 1 0;
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -193,12 +194,14 @@ body {
 
 .pane-content {
   position: relative;
+  height: 100%;
   min-height: 100%;
   width: 100%;
 }
 
 .pane-content.type-html,
 .pane-content.type-pdf {
+  height: 100%;
   min-height: 100%;
 }
 
@@ -215,6 +218,7 @@ body {
 
 .content-html-webview {
   height: 100%;
+  min-height: 100%;
   border: 0;
   background: #fff;
 }
