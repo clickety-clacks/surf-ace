@@ -612,6 +612,11 @@ function sendNavigationIntent(view: PaneView, paneId: number, url: string): void
 }
 
 function wireWebView(view: PaneView, paneId: number, webview: Electron.WebviewTag): void {
+  webview.addEventListener("did-finish-load", () => {
+    const rect = webview.getBoundingClientRect();
+  });
+  webview.addEventListener("did-fail-load", (e) => {
+  });
   webview.addEventListener("ipc-message", (event) => {
     if (event.channel !== "surf-ace-content") {
       return;
@@ -1064,6 +1069,7 @@ function renderWindow(state: RendererWindowState): void {
   layoutRoot.className = "layout-root";
   if (state.layout) {
     layoutRoot.appendChild(renderLayout(state.layout, panesById));
+  } else {
   }
   wrapper.append(windowLabel, windowName, layoutRoot);
   appRoot.replaceChildren(wrapper);

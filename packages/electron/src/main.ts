@@ -19,6 +19,9 @@ const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const STATE_FILE_NAME = "surface-core-state.json";
 
+// Disable GPU compositing — required on headless/Mac ARM setups where GPU process crashes.
+app.commandLine.appendSwitch("disable-gpu");
+
 const windows = new Map<string, BrowserWindow>();
 const lastExplicitPaneIds = new Map<string, number>();
 const pendingWindowStates = new Map<string, RendererWindowState>();

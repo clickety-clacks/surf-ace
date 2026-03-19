@@ -372,6 +372,14 @@ export class SurfaceCore {
     };
   }
 
+  applyWindowLabelOnly(surfaceId: string, windowLabel: string): void {
+    const surface = this.getSurface(surfaceId);
+    if (surface.windowLabel !== windowLabel) {
+      surface.windowLabel = windowLabel;
+      this.emit({ surfaceId, type: "surface-changed" });
+    }
+  }
+
   applyProviderBootstrapTopology(
     surfaceId: string,
     payload: { initialPaneId: number; windowLabel: string },
