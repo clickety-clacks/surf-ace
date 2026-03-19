@@ -49,11 +49,12 @@ await build({
 await build({
   ...shared,
   entryPoints: [
+    path.join(rootDir, "test", "bonjour-advertiser.test.ts"),
     path.join(rootDir, "test", "identity.test.ts"),
     path.join(rootDir, "test", "surface-core.test.ts"),
     path.join(rootDir, "test", "ws-server.test.ts"),
   ],
-  external: ["ws"],
+  external: ["bonjour-service", "ws"],
   format: "esm",
   outdir: path.join(distDir, "test"),
   platform: "node",

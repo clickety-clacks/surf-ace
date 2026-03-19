@@ -1,8 +1,20 @@
 import { Bonjour, type Service } from "bonjour-service";
 
+type BonjourClient = {
+  destroy(): void;
+  publish(options: {
+    name: string;
+    port: number;
+    protocol: "tcp";
+    txt: Record<string, string>;
+    type: "surf-ace";
+  }): Service;
+  unpublishAll(callback: () => void): void;
+};
+
 export class BonjourAdvertiser {
-  private readonly bonjour = new Bonjour();
   private readonly baseName: string;
+  private readonly bonjour: BonjourClient;
   private readonly port: number;
   private readonly txtProvider: () => Record<string, string>;
   private republishAttempts = 0;
@@ -11,11 +23,13 @@ export class BonjourAdvertiser {
   private serviceName: string;
 
   constructor(options: {
+    bonjour?: BonjourClient;
     name: string;
     port: number;
     txtProvider: () => Record<string, string>;
   }) {
     this.baseName = options.name;
+    this.bonjour = options.bonjour ?? new Bonjour();
     this.port = options.port;
     this.serviceName = options.name;
     this.txtProvider = options.txtProvider;
@@ -84,6 +98,7 @@ export class BonjourAdvertiser {
     this.republishAttempts += 1;
     this.serviceName = `${this.baseName} (${this.republishAttempts + 1})`;
     try {
+      console.warn(`[surf-ace] bonjour name conflict; retrying as "${this.serviceName}"`);
       await this.restart();
     } finally {
       this.restarting = false;
