@@ -90,10 +90,9 @@ private struct SurfAceSessionState {
     let pairedAt: Date
 }
 
-private struct SurfAceResumeGraceState {
+private struct SurfAceOwnershipLockState {
     let sessionId: String
     let providerId: String
-    let expiresAt: Date
 }
 
 @MainActor
@@ -116,8 +115,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
     @ObservationIgnored private var activeSessions: [String: SurfAceSessionState] = [:]
     @ObservationIgnored private var lastHeartbeatAtBySurfaceId: [String: Date] = [:]
-    @ObservationIgnored private var resumeGraceBySurfaceId: [String: SurfAceResumeGraceState] = [:]
-    @ObservationIgnored private var resumeGraceTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var ownershipLocksBySurfaceId: [String: SurfAceOwnershipLockState] = [:]
     @ObservationIgnored private var surfaceNeedsResumedEvent: Set<String> = []
     @ObservationIgnored private var identityMapping = SurfAceIdentityMapping()
     @ObservationIgnored private var heartbeatWatchdogTask: Task<Void, Never>?
@@ -207,11 +205,6 @@ final class SurfAceRuntime {
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
 
-        for task in resumeGraceTasks.values {
-            task.cancel()
-        }
-        resumeGraceTasks.removeAll()
-
         for surface in surfaces {
             for pane in surface.panes {
                 pane.pendingFlushTask?.cancel()
@@ -222,6 +215,7 @@ final class SurfAceRuntime {
         let sessions = activeSessions
         activeSessions.removeAll()
         lastHeartbeatAtBySurfaceId.removeAll()
+        ownershipLocksBySurfaceId.removeAll()
         for (_, session) in sessions {
             await session.socket.close(code: 1000, reason: "provider_shutdown")
         }
@@ -293,7 +287,7 @@ final class SurfAceRuntime {
                 await session.socket.close(code: 1000, reason: "surface_removed")
             }
         }
-        cancelResumeGrace(surfaceId: surfaceId)
+        ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
         refreshBonjourTXT()
     }
 
@@ -556,7 +550,7 @@ final class SurfAceRuntime {
         let currentSessions = activeSessions
         for surfaceId in currentSessions.keys {
             surfaceNeedsResumedEvent.insert(surfaceId)
-            surfaceById[surfaceId]?.connectionBarState = .disconnected
+            surfaceById[surfaceId]?.connectionBarState = .connecting
         }
         for (_, session) in currentSessions {
             Task {
@@ -582,12 +576,12 @@ final class SurfAceRuntime {
                 statusCode: 200,
                 body: [
                     "status": "ok",
-                    "busy": activeSessions.isEmpty ? 0 : 1,
+                    "busy": ownershipLocksBySurfaceId.isEmpty ? 0 : 1,
                     "surfaces": surfaces.map { surface in
                         [
                             "surfaceId": surface.surfaceId,
                             "name": surface.name,
-                            "paired": activeSessions[surface.surfaceId] != nil || resumeGraceBySurfaceId[surface.surfaceId] != nil,
+                            "paired": ownershipLocksBySurfaceId[surface.surfaceId] != nil,
                         ]
                     },
                     "http": [
@@ -606,6 +600,7 @@ final class SurfAceRuntime {
                             "annotations.remove",
                             "snapshot.get",
                             "heartbeat.ping",
+                            "ownership.relinquish",
                             "panes.list",
                             "pane.split",
                             "pane.rename",
@@ -705,6 +700,11 @@ final class SurfAceRuntime {
                     if replayOrder.count > 1_024 {
                         replayCache.removeValue(forKey: replayOrder.removeFirst())
                     }
+                    if op == "ownership.relinquish",
+                       (responseObject["ok"] as? Bool) == true {
+                        await socket.close(code: 1000, reason: "relinquished")
+                        return
+                    }
                 }
             } catch {
                 await handleSocketTermination(connectionUUID: connectionUUID)
@@ -754,6 +754,8 @@ final class SurfAceRuntime {
             return await handleSnapshotGet(id: id, payload: payload, connectionUUID: connectionUUID)
         case "heartbeat.ping":
             return handleHeartbeatPing(id: id, payload: payload, connectionUUID: connectionUUID)
+        case "ownership.relinquish":
+            return handleOwnershipRelinquish(id: id, connectionUUID: connectionUUID)
         default:
             return makeErrorResponse(op: op, id: id, code: "invalid_payload", message: "unsupported operation")
         }
@@ -773,7 +775,7 @@ final class SurfAceRuntime {
                         "surfaceId": surface.surfaceId,
                         "name": surface.name,
                         "viewport": viewportPayload(for: surface),
-                        "paired": activeSessions[surface.surfaceId] != nil || resumeGraceBySurfaceId[surface.surfaceId] != nil,
+                        "paired": ownershipLocksBySurfaceId[surface.surfaceId] != nil,
                     ]
                 },
             ],
@@ -814,37 +816,54 @@ final class SurfAceRuntime {
         let resumePayload = payload["resume"] as? [String: Any]
         let resumeSessionId = resumePayload?["sessionId"] as? String
 
-        if let existing = activeSessions[surfaceId] {
-            if takeover {
-                Task {
-                    await existing.socket.close(code: 1000, reason: "superseded")
-                }
-                activeSessions.removeValue(forKey: surfaceId)
-                lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
-            } else {
-                return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "surface already paired")
-            }
-        }
+        let activeSession = activeSessions[surfaceId]
+        let ownershipLock = ownershipLocksBySurfaceId[surfaceId]
+        let resumed: Bool
+        let sessionId: String
 
-        var resumed = false
-        var resumedSessionId: String?
-        if let grace = resumeGraceBySurfaceId[surfaceId] {
-            if grace.providerId != providerId {
-                guard takeover else {
-                    return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "surface already paired")
-                }
-                cancelResumeGrace(surfaceId: surfaceId)
-            } else {
-                if let resumeSessionId, resumeSessionId != grace.sessionId {
-                    return makeErrorResponse(op: "pair.request", id: id, code: "busy", message: "resume sessionId mismatch")
+        if let ownershipLock {
+            if ownershipLock.providerId == providerId {
+                guard resumeSessionId == ownershipLock.sessionId else {
+                    return makeErrorResponse(
+                        op: "pair.request",
+                        id: id,
+                        code: "invalid_resume",
+                        message: "Resume session did not match active ownership lock"
+                    )
                 }
                 resumed = true
-                resumedSessionId = grace.sessionId
-                cancelResumeGrace(surfaceId: surfaceId)
+                sessionId = ownershipLock.sessionId
+                if let activeSession, activeSession.connectionUUID != connectionUUID {
+                    Task {
+                        await activeSession.socket.close(code: 1000, reason: "superseded")
+                    }
+                    activeSessions.removeValue(forKey: surfaceId)
+                    lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
+                }
+            } else {
+                guard takeover else {
+                    return makeErrorResponse(
+                        op: "pair.request",
+                        id: id,
+                        code: "busy",
+                        message: "surface ownership lock is held by another provider"
+                    )
+                }
+                resumed = false
+                sessionId = randomHex(prefix: "sa", byteCount: 12)
+                if let activeSession, activeSession.connectionUUID != connectionUUID {
+                    Task {
+                        await activeSession.socket.close(code: 1000, reason: "superseded")
+                    }
+                    activeSessions.removeValue(forKey: surfaceId)
+                    lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
+                }
             }
+        } else {
+            resumed = false
+            sessionId = randomHex(prefix: "sa", byteCount: 12)
         }
 
-        let sessionId = resumed ? resumedSessionId! : randomHex(prefix: "sa", byteCount: 12)
         let session = SurfAceSessionState(
             sessionId: sessionId,
             providerId: providerId,
@@ -857,12 +876,18 @@ final class SurfAceRuntime {
             pairedAt: Date()
         )
 
-        applyProviderBootstrapTopology(
-            surface: surface,
-            windowLabel: providerWindowLabel,
-            initialPaneId: providerInitialPaneId
-        )
+        if !resumed {
+            applyProviderBootstrapTopology(
+                surface: surface,
+                windowLabel: providerWindowLabel,
+                initialPaneId: providerInitialPaneId
+            )
+        }
         activeSessions[surfaceId] = session
+        ownershipLocksBySurfaceId[surfaceId] = SurfAceOwnershipLockState(
+            sessionId: sessionId,
+            providerId: providerId
+        )
         lastHeartbeatAtBySurfaceId[surfaceId] = Date()
         refreshConnectionState(surfaceId: surfaceId)
         reschedulePendingFlushes(surfaceId: surfaceId)
@@ -1357,6 +1382,47 @@ final class SurfAceRuntime {
         ]
     }
 
+    private func handleOwnershipRelinquish(id: String, connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let activeSession = activeSessions[surfaceId],
+              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
+            return makeErrorResponse(
+                op: "ownership.relinquish",
+                id: id,
+                code: "not_paired",
+                message: "pair.request required"
+            )
+        }
+        guard activeSession.connectionUUID == connectionUUID,
+              ownershipLock.providerId == activeSession.providerId else {
+            return makeErrorResponse(
+                op: "ownership.relinquish",
+                id: id,
+                code: "not_lock_owner",
+                message: "Only the current lock owner may relinquish ownership"
+            )
+        }
+
+        ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
+        activeSessions.removeValue(forKey: surfaceId)
+        lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
+        surfaceNeedsResumedEvent.remove(surfaceId)
+        refreshConnectionState(surfaceId: surfaceId)
+        refreshBonjourTXT()
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "ownership.relinquish",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "relinquished": true,
+            ],
+        ]
+    }
+
     private func pairedSurface(for connectionUUID: String) -> (String, SurfAceSurfaceModel)? {
         guard let pair = activeSessions.first(where: { $0.value.connectionUUID == connectionUUID }),
               let surface = surfaceById[pair.key] else {
@@ -1368,10 +1434,8 @@ final class SurfAceRuntime {
     private func handleSocketTermination(connectionUUID: String) async {
         guard let pair = activeSessions.first(where: { $0.value.connectionUUID == connectionUUID }) else { return }
         let surfaceId = pair.key
-        let session = pair.value
         activeSessions.removeValue(forKey: surfaceId)
         lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
-        beginResumeGrace(surfaceId: surfaceId, sessionId: session.sessionId, providerId: session.providerId)
         refreshConnectionState(surfaceId: surfaceId)
         refreshBonjourTXT()
     }
@@ -1407,11 +1471,6 @@ final class SurfAceRuntime {
         for expiredSession in expired {
             activeSessions.removeValue(forKey: expiredSession.surfaceId)
             lastHeartbeatAtBySurfaceId.removeValue(forKey: expiredSession.surfaceId)
-            beginResumeGrace(
-                surfaceId: expiredSession.surfaceId,
-                sessionId: expiredSession.session.sessionId,
-                providerId: expiredSession.session.providerId
-            )
             refreshConnectionState(surfaceId: expiredSession.surfaceId)
             Task {
                 await expiredSession.session.socket.close(code: 1000, reason: "heartbeat_timeout")
@@ -1420,39 +1479,11 @@ final class SurfAceRuntime {
         refreshBonjourTXT()
     }
 
-    private func beginResumeGrace(surfaceId: String, sessionId: String, providerId: String) {
-        let state = SurfAceResumeGraceState(
-            sessionId: sessionId,
-            providerId: providerId,
-            expiresAt: Date().addingTimeInterval(Double(resumeGraceMilliseconds) / 1000)
-        )
-        resumeGraceBySurfaceId[surfaceId] = state
-        cancelResumeGrace(surfaceId: surfaceId, clearStateOnly: true)
-        resumeGraceBySurfaceId[surfaceId] = state
-        resumeGraceTasks[surfaceId] = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(self?.resumeGraceMilliseconds ?? 20_000))
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                self?.resumeGraceBySurfaceId.removeValue(forKey: surfaceId)
-                self?.refreshConnectionState(surfaceId: surfaceId)
-                self?.refreshBonjourTXT()
-            }
-        }
-    }
-
-    private func cancelResumeGrace(surfaceId: String, clearStateOnly: Bool = false) {
-        resumeGraceTasks[surfaceId]?.cancel()
-        resumeGraceTasks.removeValue(forKey: surfaceId)
-        if !clearStateOnly {
-            resumeGraceBySurfaceId.removeValue(forKey: surfaceId)
-        }
-    }
-
     private func refreshConnectionState(surfaceId: String) {
         guard let surface = surfaceById[surfaceId] else { return }
         if activeSessions[surfaceId] != nil {
             surface.connectionBarState = .connected
-        } else if resumeGraceBySurfaceId[surfaceId] != nil {
+        } else if ownershipLocksBySurfaceId[surfaceId] != nil {
             surface.connectionBarState = .connecting
         } else {
             surface.connectionBarState = .disconnected
@@ -1774,7 +1805,7 @@ final class SurfAceRuntime {
             "h": "\(viewport["height"] ?? 1)",
             "s": "\(viewport["scale"] ?? 1)",
             "cap": "\(contentBitmask(for: supportedContentTypes))",
-            "busy": activeSessions.isEmpty && resumeGraceBySurfaceId.isEmpty ? "0" : "1",
+            "busy": ownershipLocksBySurfaceId.isEmpty ? "0" : "1",
             "pk": fingerprint,
             "ws": webSocketPath,
             "tls": "0",
