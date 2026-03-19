@@ -97,11 +97,22 @@ type PaneView = {
   currentRenderToken: number;
   currentScrollHandler: (() => void) | null;
   currentWebView: Electron.WebviewTag | null;
+  idleAnimationStop: (() => void) | null;
   lastNavigation: NavigationMemo | null;
   paneId: number;
   rootEl: HTMLDivElement;
   scrollEl: HTMLDivElement;
   toastTimeout: number | null;
+};
+
+type IdleParticle = {
+  alpha: number;
+  hue: number;
+  radius: number;
+  vx: number;
+  vy: number;
+  x: number;
+  y: number;
 };
 
 type PdfJsModule = {
@@ -511,6 +522,7 @@ function ensurePaneView(paneId: number): PaneView {
     currentRenderToken: 0,
     currentScrollHandler: null,
     currentWebView: null,
+    idleAnimationStop: null,
     lastNavigation: null,
     paneId,
     rootEl,
@@ -661,7 +673,139 @@ function wireWebView(view: PaneView, paneId: number, webview: Electron.WebviewTa
   webview.addEventListener("will-frame-navigate", handleWillNavigate as EventListener);
 }
 
+function stopIdleAnimation(view: PaneView): void {
+  view.idleAnimationStop?.();
+  view.idleAnimationStop = null;
+}
+
+function startIdleConstellation(canvas: HTMLCanvasElement, host: HTMLElement): () => void {
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return () => {};
+  }
+
+  const particleCount = 120;
+  const connectionDistance = 100;
+  const maxSpeed = 0.22;
+  const particles: IdleParticle[] = [];
+  let frameId = 0;
+  let width = 1;
+  let height = 1;
+
+  const randomBetween = (min: number, max: number) => min + Math.random() * (max - min);
+  const seedParticle = (): IdleParticle => ({
+    alpha: randomBetween(0.55, 0.95),
+    hue: randomBetween(180, 240),
+    radius: randomBetween(1.4, 3.4),
+    vx: randomBetween(-maxSpeed, maxSpeed),
+    vy: randomBetween(-maxSpeed, maxSpeed),
+    x: randomBetween(0, width),
+    y: randomBetween(0, height),
+  });
+
+  const resize = () => {
+    const rect = host.getBoundingClientRect();
+    width = Math.max(1, Math.floor(rect.width));
+    height = Math.max(1, Math.floor(rect.height));
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(width * dpr));
+    canvas.height = Math.max(1, Math.floor(height * dpr));
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+
+  resize();
+  for (let index = 0; index < particleCount; index += 1) {
+    particles.push(seedParticle());
+  }
+
+  const draw = () => {
+    resize();
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, width, height);
+
+    for (const particle of particles) {
+      particle.x += particle.vx;
+      particle.y += particle.vy;
+      if (particle.x <= 0 || particle.x >= width) {
+        particle.vx *= -1;
+        particle.x = Math.max(0, Math.min(width, particle.x));
+      }
+      if (particle.y <= 0 || particle.y >= height) {
+        particle.vy *= -1;
+        particle.y = Math.max(0, Math.min(height, particle.y));
+      }
+    }
+
+    for (let left = 0; left < particles.length; left += 1) {
+      const source = particles[left]!;
+      for (let right = left + 1; right < particles.length; right += 1) {
+        const target = particles[right]!;
+        const dx = target.x - source.x;
+        const dy = target.y - source.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance > connectionDistance) {
+          continue;
+        }
+        const intensity = 1 - distance / connectionDistance;
+        const hue = (source.hue + target.hue) / 2;
+        context.beginPath();
+        context.moveTo(source.x, source.y);
+        context.lineTo(target.x, target.y);
+        context.strokeStyle = `hsla(${hue}, 90%, 70%, ${0.1 + intensity * 0.3})`;
+        context.lineWidth = 0.7 + intensity * 0.9;
+        context.shadowBlur = 12 * intensity;
+        context.shadowColor = `hsla(${hue}, 100%, 72%, ${0.35 * intensity})`;
+        context.stroke();
+      }
+    }
+
+    context.shadowBlur = 0;
+    for (const particle of particles) {
+      context.beginPath();
+      context.fillStyle = `hsla(${particle.hue}, 100%, 72%, ${particle.alpha})`;
+      context.arc(particle.x, particle.y, particle.radius, 0, Math.PI * 2);
+      context.shadowBlur = 14;
+      context.shadowColor = `hsla(${particle.hue}, 100%, 72%, ${particle.alpha * 0.5})`;
+      context.fill();
+    }
+    context.shadowBlur = 0;
+
+    frameId = window.requestAnimationFrame(draw);
+  };
+
+  frameId = window.requestAnimationFrame(draw);
+  return () => {
+    window.cancelAnimationFrame(frameId);
+  };
+}
+
+function renderIdleState(view: PaneView, title: string, detail?: string): void {
+  stopIdleAnimation(view);
+  const empty = document.createElement("div");
+  empty.className = "content-empty content-empty-idle";
+  const canvas = document.createElement("canvas");
+  canvas.className = "content-idle-canvas";
+  const overlay = document.createElement("div");
+  overlay.className = "content-empty-copy";
+  const titleEl = document.createElement("strong");
+  titleEl.textContent = title;
+  overlay.appendChild(titleEl);
+  if (detail) {
+    const detailEl = document.createElement("p");
+    detailEl.textContent = detail;
+    overlay.appendChild(detailEl);
+  }
+  empty.append(canvas, overlay);
+  view.contentEl.appendChild(empty);
+  view.idleAnimationStop = startIdleConstellation(canvas, empty);
+  reportPaneSnapshot(view);
+}
+
 function renderCenteredState(view: PaneView, title: string, detail?: string): void {
+  stopIdleAnimation(view);
   const empty = document.createElement("div");
   empty.className = "content-empty";
   const titleEl = document.createElement("strong");
@@ -781,6 +925,7 @@ function resetDynamicContent(view: PaneView): number {
   view.currentRenderToken += 1;
   view.currentWebView = null;
   view.currentScrollHandler = null;
+  stopIdleAnimation(view);
   view.rootEl.dataset.pdfReportKey = "";
   view.contentEl.replaceChildren();
   return view.currentRenderToken;
@@ -797,7 +942,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   view.contentEl.className = `pane-content type-${pane.content.contentType ?? "empty"}`;
 
   if (!pane.content.contentType || pane.content.content === null) {
-    renderCenteredState(view, "Surface ready");
+    renderIdleState(view, "Surface ready", "Waiting for content.");
     return;
   }
 
