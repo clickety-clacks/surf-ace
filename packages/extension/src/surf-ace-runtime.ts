@@ -330,6 +330,7 @@ type ManagedSurface = {
   consecutiveResumeFailures: number;
   endpoint: SurfAceDiscoveryEndpoint;
   endpointId: string;
+  fingerprintPrefix: string;
   forceTakeoverOnNextPair: boolean;
   hasPairedInGatewaySession: boolean;
   heartbeatInterval: ReturnType<typeof setInterval> | null;
@@ -651,6 +652,15 @@ function isSocketClosedError(error: unknown): boolean {
   return error instanceof Error &&
     (error.message.includes("Surf Ace socket is not open") ||
       error.message.includes("Surf Ace socket closed"));
+}
+
+function isEndpointRefreshableConnectionError(error: unknown): boolean {
+  return error instanceof Error &&
+    (
+      error.message.includes("ECONNREFUSED") ||
+      error.message.includes("Timed out connecting to") ||
+      error.message.includes("Opening handshake timed out")
+    );
 }
 
 function windowLabelForIndex(index: number): string {
@@ -1238,6 +1248,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       consecutiveResumeFailures: 0,
       endpoint: sourceSurface.endpoint,
       endpointId: sourceSurface.endpointId,
+      fingerprintPrefix: sourceSurface.fingerprintPrefix,
       forceTakeoverOnNextPair: false,
       hasPairedInGatewaySession: false,
       heartbeatInterval: null,
@@ -1263,6 +1274,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     surface.endpoint = sourceSurface.endpoint;
     surface.endpointId = sourceSurface.endpointId;
+    surface.fingerprintPrefix = sourceSurface.fingerprintPrefix;
     surface.lastSeenAt = this.now();
     surface.name = event.payload.name;
     surface.viewport = cloneViewport(event.payload.viewport);
@@ -1718,12 +1730,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const existing = [...this.surfaces.values()].find((s) => s.endpointId === endpoint.endpointId);
 
     if (existing) {
-      existing.endpoint = endpoint;
-      existing.endpointId = endpoint.endpointId;
-      existing.lastSeenAt = this.now();
-      existing.name = endpoint.name;
-      existing.viewport = cloneViewport(endpoint.viewport);
+      this.assignEndpoint(existing, endpoint);
       this.ensureSurfaceWorker(existing);
+      return;
+    }
+
+    const existingByFingerprint = endpoint.fingerprintPrefix
+      ? [...this.surfaces.values()].find((s) => s.fingerprintPrefix === endpoint.fingerprintPrefix)
+      : undefined;
+
+    if (existingByFingerprint) {
+      this.assignEndpoint(existingByFingerprint, endpoint);
+      this.ensureSurfaceWorker(existingByFingerprint);
       return;
     }
 
@@ -1751,6 +1769,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       consecutiveResumeFailures: 0,
       endpoint,
       endpointId: endpoint.endpointId,
+      fingerprintPrefix: endpoint.fingerprintPrefix,
       forceTakeoverOnNextPair: false,
       hasPairedInGatewaySession: false,
       heartbeatInterval: null,
@@ -1776,6 +1795,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     this.surfaces.set(surfaceId, surface);
     this.ensureSurfaceWorker(surface);
+  }
+
+  private assignEndpoint(surface: ManagedSurface, endpoint: SurfAceDiscoveryEndpoint): void {
+    const previousEndpointId = surface.endpointId;
+    surface.endpoint = endpoint;
+    surface.endpointId = endpoint.endpointId;
+    surface.fingerprintPrefix = endpoint.fingerprintPrefix;
+    surface.lastSeenAt = this.now();
+    surface.name = endpoint.name;
+    surface.viewport = cloneViewport(endpoint.viewport);
+
+    if (previousEndpointId === endpoint.endpointId) {
+      return;
+    }
+
+    this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
+    if (this.persistentState.endpointSurfaces[previousEndpointId] === surface.surfaceId) {
+      delete this.persistentState.endpointSurfaces[previousEndpointId];
+    }
+    this.persistentState.endpointSurfaces[endpoint.endpointId] = surface.surfaceId;
+    this.runBackgroundTask(
+      `persist endpoint remap ${previousEndpointId} -> ${endpoint.endpointId}`,
+      async () => {
+        await this.persistState();
+      },
+    );
   }
 
   private async discoverSurfaceId(surface: ManagedSurface): Promise<void> {
@@ -1986,6 +2031,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           await surface.client.waitForClose();
         } catch (error) {
           surface.unreachableFailures += 1;
+          await this.refreshEndpointAfterConnectFailure(surface, error);
           if (surface.connectionState !== "connected") {
             surface.connectionState =
               surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
@@ -2015,6 +2061,36 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const jitter = Math.floor(Math.random() * 250);
       await sleep(delay + jitter);
     }
+  }
+
+  private async refreshEndpointAfterConnectFailure(
+    surface: ManagedSurface,
+    error: unknown,
+  ): Promise<void> {
+    if (!isEndpointRefreshableConnectionError(error) || !surface.fingerprintPrefix) {
+      return;
+    }
+
+    try {
+      await this.discovery.refreshNow();
+    } catch (refreshError) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] discovery refresh failed for ${surface.surfaceId}: ${String(refreshError)}`,
+      );
+      return;
+    }
+
+    const replacement = this.discovery.getSnapshot().find(
+      (endpoint) => endpoint.fingerprintPrefix === surface.fingerprintPrefix,
+    );
+    if (!replacement || replacement.endpointId === surface.endpointId) {
+      return;
+    }
+
+    this.logger.warn?.(
+      `[surf-ace:runtime] refreshed stale endpoint for ${surface.surfaceId}: ${surface.endpointId} -> ${replacement.endpointId}`,
+    );
+    this.assignEndpoint(surface, replacement);
   }
 
   private async sendRequest(surface: ManagedSurface, request: Request): Promise<Response> {

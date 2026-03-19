@@ -107,6 +107,7 @@ class FakeSurfAceWsServer {
   pairedSocket: import("ws").WebSocket | null = null;
   readonly surfaceId = "sf_surface-a";
 
+  private closed = false;
   private nextEventId = 1;
   private readonly wss: WebSocketServer;
 
@@ -125,6 +126,10 @@ class FakeSurfAceWsServer {
   }
 
   async close(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
     await new Promise<void>((resolve, reject) => {
       this.wss.close((error) => {
         if (error) {
@@ -589,6 +594,23 @@ async function waitFor(
 
 let nextPort = 22119;
 
+function discoveryEndpoint(port: number, fingerprintPrefix = "abcd1234"): SurfAceDiscoveryEndpoint {
+  return {
+    busy: false,
+    capabilitiesBitmask: 31,
+    endpointId: `endpoint-${port}`,
+    fingerprintPrefix,
+    host: "127.0.0.1",
+    instanceName: "Test Surface",
+    lastSeenAt: Date.now(),
+    name: "Test Surface",
+    port,
+    protocolVersion: 1,
+    viewport: { height: 768, scale: 2, width: 1024 },
+    wsPath: "/ws",
+  };
+}
+
 async function withRuntimeHarness(
   run: (ctx: {
     alertBodies: Array<Record<string, unknown>>;
@@ -601,22 +623,7 @@ async function withRuntimeHarness(
   const port = nextPort++;
   const server = new FakeSurfAceWsServer(port);
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-"));
-  const discovery = new StaticDiscoveryService([
-    {
-      busy: false,
-      capabilitiesBitmask: 31,
-      endpointId: `endpoint-${port}`,
-      fingerprintPrefix: "abcd1234",
-      host: "127.0.0.1",
-      instanceName: "Test Surface",
-      lastSeenAt: Date.now(),
-      name: "Test Surface",
-      port,
-      protocolVersion: 1,
-      viewport: { height: 768, scale: 2, width: 1024 },
-      wsPath: "/ws",
-    },
-  ]);
+  const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
   const warnings: string[] = [];
   const runtime = createSurfAceRuntime({
     discovery,
@@ -1053,6 +1060,34 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(screens[0]?.connectionState, "connected");
       assert.equal(server.pairAttemptDetails.length, initialPairAttempts);
       assert.notEqual(server.pairedSocket, null);
+    });
+  });
+
+  await t.test("connect refusal refreshes discovery and rebinds the surface to the new endpoint", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server, warnings }) => {
+      const replacementPort = nextPort++;
+      const replacementServer = new FakeSurfAceWsServer(replacementPort);
+
+      try {
+        discovery.setEndpoints([discoveryEndpoint(replacementPort)]);
+
+        server.pairedSocket?.close(1000, "test_endpoint_rollover");
+        await new Promise((resolve) => {
+          setTimeout(resolve, 50);
+        });
+        await server.close();
+
+        await waitFor(() => replacementServer.pairedSocket !== null, 6_000);
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 6_000);
+
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(replacementServer.surfaceId);
+        assert.ok(surface);
+        assert.equal(surface.endpointId, `endpoint-${replacementPort}`);
+        assert.ok(warnings.some((warning) => warning.includes("refreshed stale endpoint")));
+      } finally {
+        await replacementServer.close();
+      }
     });
   });
 
