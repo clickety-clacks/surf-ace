@@ -234,6 +234,10 @@ export type SurfAceClearResult = {
   revision: number;
 };
 
+export type SurfAceRelinquishResult = {
+  relinquished: true;
+};
+
 export type SurfAceSplitInput = {
   count: number;
   direction: "horizontal" | "vertical";
@@ -280,6 +284,7 @@ export interface SurfAceRuntime {
   listScreens(): Promise<SurfAceScreenSummary[]>;
   push(input: SurfAcePushInput, context?: { sessionKey?: string }): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: number }): Promise<SurfAceReadResult>;
+  relinquish(input: { fingerprint: string }): Promise<SurfAceRelinquishResult>;
   split(input: SurfAceSplitInput): Promise<SurfAceSplitResult>;
   snapshot(input: { fingerprint: string; paneId: number }): Promise<SurfAceSnapshotResult>;
   start(): Promise<void>;
@@ -325,6 +330,7 @@ type ManagedPane = {
 };
 
 type ManagedSurface = {
+  autoRetryEnabled: boolean;
   client: SurfAceWireClient | null;
   connectionState: SurfAceConnectionState;
   consecutiveResumeFailures: number;
@@ -332,7 +338,6 @@ type ManagedSurface = {
   endpoint: SurfAceDiscoveryEndpoint;
   endpointId: string;
   fingerprintPrefix: string;
-  forceTakeoverOnNextPair: boolean;
   hasPairedInGatewaySession: boolean;
   heartbeatInterval: ReturnType<typeof setInterval> | null;
   heartbeatMisses: number;
@@ -393,6 +398,7 @@ export class SurfAceToolError extends Error {
       | "content_too_large"
       | "internal_error"
       | "not_connected"
+      | "not_lock_owner"
       | "screen_not_found"
       | "stale_content"
       | "unsupported_content_type"
@@ -573,6 +579,7 @@ function mutationErrorCode(
     case "invalid_operation":
     case "rate_limited":
     case "render_failed":
+    case "not_lock_owner":
     case "stale_content":
     case "stale_revision":
     case "unsupported_content_type":
@@ -584,12 +591,9 @@ function mutationErrorCode(
 }
 
 function isResumeSessionMismatch(response: Response): response is ErrorResponse {
-  const message = isErrorResponse(response) ? response.error.message.toLowerCase() : "";
   return (
     isErrorResponse(response) &&
-    response.error.code === "busy" &&
-    message.includes("resume") &&
-    (message.includes("mismatch") || message.includes("did not match"))
+    response.error.code === "invalid_resume"
   );
 }
 
@@ -821,6 +825,30 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.start();
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.paneClose(surface, input);
+  }
+
+  async relinquish(input: { fingerprint: string }): Promise<SurfAceRelinquishResult> {
+    await this.start();
+    const surface = this.requireConnectedSurface(input.fingerprint);
+    const response = await this.sendRequest(
+      surface,
+      this.requestEnvelope("ownership.relinquish"),
+    );
+    if (isErrorResponse(response)) {
+      throw new SurfAceToolError(
+        mutationErrorCode(response.error.code),
+        response.error.message,
+      );
+    }
+
+    surface.autoRetryEnabled = false;
+    surface.connectionState = "unreachable";
+    surface.hasPairedInGatewaySession = false;
+    surface.sessionId = null;
+    surface.stopRequested = true;
+    this.stopHeartbeat(surface);
+    await surface.client?.close(1000, clampCloseReason("provider_shutdown")).catch(() => {});
+    return { relinquished: true };
   }
 
   async read(input: { fingerprint: string; paneId: number }): Promise<SurfAceReadResult> {
@@ -1251,6 +1279,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const existing = this.surfaces.get(event.payload.surfaceId);
     const windowLabel = this.ensureWindowLabel(event.payload.surfaceId);
     const surface = existing ?? {
+      autoRetryEnabled: true,
       client: null,
       connectionState: "connecting" as SurfAceConnectionState,
       consecutiveResumeFailures: 0,
@@ -1258,7 +1287,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       endpoint: sourceSurface.endpoint,
       endpointId: sourceSurface.endpointId,
       fingerprintPrefix: sourceSurface.fingerprintPrefix,
-      forceTakeoverOnNextPair: false,
       hasPairedInGatewaySession: false,
       heartbeatInterval: null,
       heartbeatMisses: 0,
@@ -1604,7 +1632,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private ensureSurfaceWorker(surface: ManagedSurface): void {
-    if (surface.workPromise) {
+    if (!surface.autoRetryEnabled || surface.workPromise) {
       return;
     }
     surface.stopRequested = false;
@@ -1782,6 +1810,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const windowLabel = this.ensureWindowLabel(surfaceId);
     const surface: ManagedSurface = {
+      autoRetryEnabled: true,
       client: null,
       connectionState: "connecting",
       consecutiveResumeFailures: 0,
@@ -1789,7 +1818,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       endpoint,
       endpointId: endpoint.endpointId,
       fingerprintPrefix: endpoint.fingerprintPrefix,
-      forceTakeoverOnNextPair: false,
       hasPairedInGatewaySession: false,
       heartbeatInterval: null,
       heartbeatMisses: 0,
@@ -1872,14 +1900,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (remoteSurfaces.length === 0) {
       return;
     }
-
-    // Spec §6.0/§4.4: if the target surface reports paired, a fresh provider must use takeover.
-    // Once this gateway session has paired successfully, the surface is self-owned for takeover
-    // decisions even if resume state later falls back to a fresh pair.
-    const advertisedPaired = Boolean(remoteSurfaces[0]?.paired);
-    const alreadyOwnPairedSession = surface.hasPairedInGatewaySession;
-    surface.forceTakeoverOnNextPair = surface.forceTakeoverOnNextPair ||
-      (advertisedPaired && !alreadyOwnPairedSession);
 
     const remoteSurfaceId = asSurfaceId(remoteSurfaces[0].surfaceId);
     if (remoteSurfaceId === surface.surfaceId) {
@@ -1966,8 +1986,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     };
 
-    const initialTakeover = surface.forceTakeoverOnNextPair;
-    let response = await sendPairRequest(initialTakeover, resumeSessionId);
+    const initialTakeover = false;
+    const response = await sendPairRequest(initialTakeover, resumeSessionId);
 
     if (isResumeSessionMismatch(response) && resumeSessionId) {
       this.logger.warn?.(
@@ -1979,16 +1999,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         "not_connected",
         `Surf Ace surface is not connected: ${surface.surfaceId}`,
       );
-    }
-
-    if (isErrorResponse(response) && response.error.code === "busy" && !initialTakeover) {
-      if (!client.isOpen()) {
-        throw new SurfAceToolError(
-          "not_connected",
-          `Surf Ace surface is not connected: ${surface.surfaceId}`,
-        );
-      }
-      response = await sendPairRequest(true, resumeSessionId);
     }
 
     if (isErrorResponse(response)) {
@@ -2028,11 +2038,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                   `[surf-ace:runtime] socket closed for ${surface.surfaceId}: code=${code} reason=${reason || "<none>"}`,
                 );
               }
+              if (!surface.autoRetryEnabled) {
+                surface.connectionState = "unreachable";
+                return;
+              }
               surface.connectionState =
                 surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
                   ? "unreachable"
                   : "connecting";
-              surface.forceTakeoverOnNextPair = true;
             },
             onEvent: (event) => {
               try {
@@ -2051,7 +2064,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId));
           surface.connectionState = "connected";
           surface.unreachableFailures = 0;
-          surface.forceTakeoverOnNextPair = false;
           this.applyPairState(surface, pairResponse);
           this.startHeartbeat(surface);
           await this.syncSurfaceSnapshots(surface, true);
@@ -2154,7 +2166,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (surface.heartbeatNonce) {
         surface.heartbeatMisses += 1;
         if (surface.heartbeatMisses >= 2) {
-          surface.forceTakeoverOnNextPair = true;
           this.runBackgroundTask(
             `close stale heartbeat surface ${surface.surfaceId}`,
             async () => {
@@ -2320,6 +2331,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private markPairConnected(surface: ManagedSurface, sessionId: SessionId): void {
     surface.consecutiveResumeFailures = 0;
     surface.connectedAt = this.now();
+    surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
     surface.sessionId = sessionId;
   }
@@ -2334,21 +2346,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private noteResumeFailure(surface: ManagedSurface): void {
     surface.consecutiveResumeFailures += 1;
-    surface.forceTakeoverOnNextPair = true;
     if (surface.consecutiveResumeFailures < MAX_CONSECUTIVE_RESUME_FAILURES) {
       return;
     }
-    surface.sessionId = null;
     this.logger.warn?.(
-      `[surf-ace:runtime] forcing fresh pair for ${surface.surfaceId} after ${surface.consecutiveResumeFailures} resume failures`,
+      `[surf-ace:runtime] owner resume still failing for ${surface.surfaceId} after ${surface.consecutiveResumeFailures} attempts`,
     );
   }
 
   private shouldAttemptResume(surface: ManagedSurface): boolean {
     return Boolean(
       surface.hasPairedInGatewaySession &&
-      surface.sessionId &&
-      surface.consecutiveResumeFailures < MAX_CONSECUTIVE_RESUME_FAILURES,
+      surface.sessionId,
     );
   }
 

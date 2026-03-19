@@ -12,6 +12,7 @@ export const surfAceToolNames = [
   "surf_ace_list",
   "surf_ace_push",
   "surf_ace_clear",
+  "surf_ace_relinquish",
   "surf_ace_split",
   "surf_ace_close_pane",
   "surf_ace_read",
@@ -96,6 +97,19 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_clear",
+    },
+    {
+      description: "Relinquish ownership of a Surf Ace surface and stop automatic reconnects for it.",
+      execute: async (args: { fingerprint: string }) => await runtime.relinquish(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          fingerprint: fingerprintParam,
+        },
+        required: ["fingerprint"],
+        type: "object",
+      },
+      name: "surf_ace_relinquish",
     },
     {
       description: "Split an existing Surf Ace pane into a larger pane layout.",
