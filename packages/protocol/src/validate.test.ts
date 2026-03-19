@@ -67,8 +67,17 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   });
   assert.deepEqual(panesListRequest, { ok: true });
 
-  const pairResponse = validateEnvelopeType("pair.request", {
+  const relinquishRequest = validateEnvelopeType("ownership.relinquish", {
     id: "req_3",
+    op: "ownership.relinquish",
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+  assert.deepEqual(relinquishRequest, { ok: true });
+
+  const pairResponse = validateEnvelopeType("pair.request", {
+    id: "req_4",
     ok: true,
     op: "pair.request",
     payload: {},
@@ -78,12 +87,25 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   });
   assert.deepEqual(pairResponse, { ok: true });
 
+  const relinquishResponse = validateEnvelopeType("ownership.relinquish", {
+    id: "req_5",
+    ok: true,
+    op: "ownership.relinquish",
+    payload: {
+      relinquished: true,
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(relinquishResponse, { ok: true });
+
   const errorResponse = validateEnvelopeType("pair.request", {
     error: {
       code: "internal_error",
       message: "boom",
     },
-    id: "req_4",
+    id: "req_6",
     ok: false,
     op: "pair.request",
     sentAt: Date.now(),

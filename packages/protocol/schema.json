@@ -6,6 +6,7 @@
   "oneOf": [
     { "$ref": "#/$defs/SurfacesListRequest" },
     { "$ref": "#/$defs/PairRequest" },
+    { "$ref": "#/$defs/RelinquishRequest" },
     { "$ref": "#/$defs/ContentSetRequest" },
     { "$ref": "#/$defs/ContentAppendRequest" },
     { "$ref": "#/$defs/ContentPatchRequest" },
@@ -16,6 +17,7 @@
 
     { "$ref": "#/$defs/SurfacesListResponse" },
     { "$ref": "#/$defs/PairResponse" },
+    { "$ref": "#/$defs/RelinquishResponse" },
     { "$ref": "#/$defs/MutationAckResponse" },
     { "$ref": "#/$defs/AnnotationsRemoveResponse" },
     { "$ref": "#/$defs/SnapshotResponse" },
@@ -256,6 +258,8 @@
           "type": "string",
           "enum": [
             "busy",
+            "invalid_resume",
+            "not_lock_owner",
             "not_paired",
             "invalid_payload",
             "invalid_request_id_reuse",
@@ -377,7 +381,7 @@
                   "surfaceId": { "$ref": "#/$defs/SurfaceId" },
                   "name": { "type": "string" },
                   "viewport": { "$ref": "#/$defs/SurfaceViewport" },
-                  "paired": { "type": "boolean", "description": "true if actively paired or in resume grace (mirrors mDNS busy=1). pair.request requires takeover=true, but only same-provider takeover succeeds during grace. A different provider will receive busy." }
+                  "paired": { "type": "boolean", "description": "true if the surface currently has an ownership lock, whether or not the owner socket is presently live. New providers need explicit takeover while locked." }
                 }
               }
             }
@@ -408,7 +412,7 @@
             "initialPaneId": { "$ref": "#/$defs/PaneId" },
             "providerName": { "type": "string" },
             "protocolVersion": { "const": 1 },
-            "takeover": { "type": "boolean" },
+            "takeover": { "type": "boolean", "description": "Explicit ownership transfer request. Normal reconnect/resume by the current owner MUST NOT rely on takeover." },
             "eventProfile": { "$ref": "#/$defs/EventProfile" },
             "drawingFlushConfig": { "$ref": "#/$defs/DrawingFlushConfig" },
             "resume": {
@@ -421,6 +425,18 @@
             }
           }
         }
+      }
+    },
+    "RelinquishRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "ownership.relinquish" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" }
       }
     },
     "ContentSetRequest": {
@@ -773,7 +789,7 @@
                 "maxVisibleTextBytes": { "type": "integer", "minimum": 256 },
                 "maxStrokePointsPerFlush": { "type": "integer", "minimum": 1 },
                 "maxDrawingFlushBytes": { "type": "integer", "minimum": 1024 },
-                "resumeGraceMs": { "type": "integer", "minimum": 5000, "default": 20000, "description": "Session continuity grace window in ms. The same provider must reconnect within this window to resume the session with the same providerId. New providers may connect after grace expiry." }
+                "resumeGraceMs": { "type": "integer", "minimum": 5000, "default": 20000, "description": "Deprecated compatibility field. Implementations MAY advertise a preferred owner-resume retry budget in ms, but ownership lock itself does not auto-expire; another provider still requires explicit takeover or prior relinquish." }
               }
             },
             "state": {
@@ -801,6 +817,27 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "RelinquishResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "ownership.relinquish" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["relinquished"],
+          "properties": {
+            "relinquished": { "const": true }
           }
         }
       }
@@ -953,6 +990,7 @@
           "enum": [
             "surfaces.list",
             "pair.request",
+            "ownership.relinquish",
             "content.set",
             "content.append",
             "content.patch",
