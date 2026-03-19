@@ -110,14 +110,16 @@ private struct SurfAcePaneTreeView: View {
             Group {
                 if direction == .vertical {
                     HStack(spacing: 1) {
-                        ForEach(Array(children.enumerated()), id: \.offset) { _, child in
+                        ForEach(children, id: \.layoutIdentity) { child in
                             SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                 } else {
                     VStack(spacing: 1) {
-                        ForEach(Array(children.enumerated()), id: \.offset) { _, child in
+                        ForEach(children, id: \.layoutIdentity) { child in
                             SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                 }
