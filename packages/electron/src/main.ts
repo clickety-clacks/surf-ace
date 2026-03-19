@@ -15,7 +15,8 @@ import {
 } from "./surface-core.js";
 import { SurfaceWsServer } from "./ws-server.js";
 
-const WS_PORT = Number(process.env.SURF_ACE_PORT ?? 19001);
+const DEFAULT_WS_PORT = 19001;
+const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const STATE_FILE_NAME = "surface-core-state.json";
 
 // Disable GPU compositing — required on headless/Mac ARM setups where GPU process crashes.
