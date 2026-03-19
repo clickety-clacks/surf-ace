@@ -1874,9 +1874,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     // Spec §6.0/§4.4: if the target surface reports paired, a fresh provider must use takeover.
-    // If we already own a resumable session for this surface, let the normal resume path run.
+    // Once this gateway session has paired successfully, the surface is self-owned for takeover
+    // decisions even if resume state later falls back to a fresh pair.
     const advertisedPaired = Boolean(remoteSurfaces[0]?.paired);
-    const alreadyOwnPairedSession = surface.hasPairedInGatewaySession && Boolean(surface.sessionId);
+    const alreadyOwnPairedSession = surface.hasPairedInGatewaySession;
     surface.forceTakeoverOnNextPair = surface.forceTakeoverOnNextPair ||
       (advertisedPaired && !alreadyOwnPairedSession);
 

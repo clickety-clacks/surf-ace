@@ -1060,6 +1060,22 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("rediscovery after resume fallback does not re-arm takeover from paired advertisement", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.equal(surface.sessionId, "sa_test_session");
+      assert.equal(surface.hasPairedInGatewaySession, true);
+
+      surface.sessionId = null;
+      surface.forceTakeoverOnNextPair = false;
+      await internalRuntime.discoverSurfaceId(surface);
+
+      assert.equal(surface.forceTakeoverOnNextPair, false);
+    });
+  });
+
   await t.test("discovery churn does not close an already connected surface", async () => {
     await withRuntimeHarness(async ({ discovery, runtime, server }) => {
       const initialPairAttempts = server.pairAttemptDetails.length;
