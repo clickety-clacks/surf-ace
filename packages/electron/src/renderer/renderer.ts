@@ -951,11 +951,13 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     const webview = document.createElement("webview");
     webview.className = "content-html-webview";
     webview.setAttribute("preload", bootstrap!.guestPreloadUrl);
-    webview.src = `data:text/html;charset=utf-8,${encodeURIComponent(
-      `<!doctype html><html><head>${
-        html.baseUrl ? `<base href="${html.baseUrl}">` : ""
-      }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${html.html}</body></html>`,
-    )}`;
+    const isFullDocument = /^\s*<!doctype\s+html/i.test(html.html) || /^\s*<html[\s>]/i.test(html.html);
+    const finalHtml = isFullDocument
+      ? html.html
+      : `<!doctype html><html><head>${
+          html.baseUrl ? `<base href="${html.baseUrl}">` : ""
+        }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${html.html}</body></html>`;
+    webview.src = `data:text/html;charset=utf-8,${encodeURIComponent(finalHtml)}`;
     view.contentEl.appendChild(webview);
     view.currentWebView = webview;
     wireWebView(view, pane.paneId, webview);
