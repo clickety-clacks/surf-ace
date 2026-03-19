@@ -13,14 +13,38 @@ class FakeService extends EventEmitter {
 }
 
 class FakeBonjour {
+  private readonly discoveredNames: string[][];
   readonly publishNames: string[] = [];
   readonly services: FakeService[] = [];
+  findCalls = 0;
   unpublishCalls = 0;
   destroyed = false;
+
+  constructor(discoveredNames: string[][] = []) {
+    this.discoveredNames = discoveredNames;
+  }
+
+  find(
+    _options: { protocol: "tcp"; type: "surf-ace" },
+    listener?: (service: { name: string }) => void,
+  ) {
+    const browser = new EventEmitter() as EventEmitter & { stop(): void };
+    const names = this.discoveredNames[this.findCalls] ?? [];
+    this.findCalls += 1;
+    queueMicrotask(() => {
+      for (const name of names) {
+        listener?.({ name });
+        browser.emit("up", { name });
+      }
+    });
+    browser.stop = () => {};
+    return browser;
+  }
 
   publish(options: {
     name: string;
     port: number;
+    probe?: boolean;
     protocol: "tcp";
     txt: Record<string, string>;
     type: "surf-ace";
@@ -46,7 +70,7 @@ class FakeBonjour {
 }
 
 test("bonjour advertiser republishes with a suffixed name after a name conflict", async () => {
-  const bonjour = new FakeBonjour();
+  const bonjour = new FakeBonjour([["TARS Surf Ace"]]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
     name: "TARS Surf Ace",
@@ -55,17 +79,19 @@ test("bonjour advertiser republishes with a suffixed name after a name conflict"
   });
 
   advertiser.start();
-  bonjour.services[0]?.triggerError("Service name is already in use on the network");
   await new Promise((resolve) => {
-    setTimeout(resolve, 0);
+    setTimeout(resolve, 800);
   });
 
-  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace", "TARS Surf Ace (2)"]);
-  assert.equal(bonjour.unpublishCalls, 1);
+  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace (2)"]);
+  assert.equal(bonjour.findCalls, 1);
 });
 
 test("bonjour advertiser keeps incrementing the suffix across repeated conflicts", async () => {
-  const bonjour = new FakeBonjour();
+  const bonjour = new FakeBonjour([
+    ["TARS Surf Ace"],
+    ["TARS Surf Ace", "TARS Surf Ace (2)"],
+  ]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
     name: "TARS Surf Ace",
@@ -74,19 +100,17 @@ test("bonjour advertiser keeps incrementing the suffix across repeated conflicts
   });
 
   advertiser.start();
-  bonjour.services[0]?.triggerError("Service name is already in use on the network");
   await new Promise((resolve) => {
-    setTimeout(resolve, 0);
+    setTimeout(resolve, 800);
   });
-  bonjour.services[1]?.triggerError("Service name is already in use on the network");
+  advertiser.refresh();
   await new Promise((resolve) => {
-    setTimeout(resolve, 0);
+    setTimeout(resolve, 800);
   });
 
   assert.deepEqual(bonjour.publishNames, [
-    "TARS Surf Ace",
     "TARS Surf Ace (2)",
     "TARS Surf Ace (3)",
   ]);
-  assert.equal(bonjour.unpublishCalls, 2);
+  assert.equal(bonjour.unpublishCalls, 1);
 });
