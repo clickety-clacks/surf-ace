@@ -382,7 +382,16 @@ export class SurfaceCore {
       didChange = true;
     }
 
-    if (this.ensureInitialPane(surface, payload.initialPaneId)) {
+    // If there are stale panes from a previous session, reset to a clean
+    // single-pane topology so ensureInitialPane can succeed.
+    if (payload.initialPaneId >= 1 && surface.panes.size > 1) {
+      const fresh = createPaneState(payload.initialPaneId, this.now());
+      surface.panes.clear();
+      surface.panes.set(payload.initialPaneId, fresh);
+      surface.paneOrder = [payload.initialPaneId];
+      surface.layout = { paneId: payload.initialPaneId, type: "pane" };
+      didChange = true;
+    } else if (this.ensureInitialPane(surface, payload.initialPaneId)) {
       didChange = true;
     }
 
