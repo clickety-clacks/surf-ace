@@ -71,7 +71,7 @@ Constraint: annotation semantics in §§13–14 are normative architecture and m
 4. **`paneId` is required** on all pane-scoped tool calls. CLU MUST always specify which pane it is targeting. There is no default-pane fallback.
 5. `surfaces.list` (or equivalent pane-aware listing) can enumerate panes and active content per pane.
 6. Content operations are isolated per pane (push/clear in pane A does not mutate pane B).
-7. Connection/session ownership semantics remain unchanged at window level (`surfaceId`), with pane routing handled inside that session.
+7. Ownership lock semantics are defined at the window/surface level (`surfaceId`), with pane routing handled inside the lock owner's paired session.
 8. At least one iOS and one Electron implementation pass topology tests for pane isolation and routing.
 9. History model is active: `content.set` makes content immediately visible (single-visible-owner). Prior visible content enters a per-pane Back stack (max 20, LRU eviction). Surface provides Back/Forward navigation. `event.content_superseded` is provider-generated when a new session displaces visible content.
 10. Annotation reads are pane-scoped at the CLU boundary; any finer-grained history bookkeeping needed for Back/Forward restore is implementation-internal to the surface/provider.
@@ -118,8 +118,8 @@ Before the protocol details, these terms are used consistently throughout this s
 These are normative, settled statements about Surf Ace behavior. Implementations MUST conform to every invariant listed here. These statements are not subject to the open topics in `## Open Topics`.
 
 1. **WebSocket-only transport.** All provider↔surface communication runs over a persistent WebSocket connection. The provider is the WS client; the surface app runs the WS server. There is no REST API.
-2. **One connection per surface.** Exactly one paired provider connection is active per surface at a time. Additional providers are rejected with `busy` until the current session expires or is explicitly taken over by the same provider.
-3. **Content persistence through reconnect.** Connection state MUST NOT affect displayed content. Content is never cleared by a disconnect, grace expiry, restart, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`.
+2. **One ownership lock per surface.** Each surface is either unlocked or locked to exactly one `providerId`. While locked, only the lock owner may pair or resume normally; other providers are rejected with `busy` unless they explicitly request a user-directed takeover.
+3. **Content persistence through reconnect.** Connection state MUST NOT affect displayed content or release ownership. Content is never cleared by a disconnect, restart, relinquish, or takeover. Ownership lock changes only through explicit relinquish or explicit takeover; content changes only when CLU explicitly calls `content.set` or `content.clear`.
 4. **Reads are local-only.** CLU reads exclusively from the provider's local buffer. No `surf_ace_*` read operation triggers a live network call to a surface.
 5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a globally unique numeric `paneId`. CLU MUST always specify the target `paneId` explicitly — there is no concept of a "focused pane" and no default-pane resolution.
 6. **Single-visible-owner with history.** Each pane shows one piece of content at a time (the most recent `content.set`). Prior content enters the Back stack. The user can navigate Back/Forward. Subsequent pushes from the same session update the current view in-place. A push from a different session displaces the current view (supersede).
@@ -180,7 +180,7 @@ TXT keys used by WS protocol:
 | `h` | int | `1080` | Viewport height (points) |
 | `s` | int | `2` | Scale factor |
 | `cap` | int | `31` | Content type bitmask |
-| `busy` | `0|1` | `0` | Paired/occupied or in resume grace |
+| `busy` | `0|1` | `0` | Ownership lock currently held by some provider |
 | `pk` | hex8 | `a1b2c3d4` | Device public key fingerprint prefix (endpoint identity only; not used as screen selector in CLU tools) |
 | `ws` | path | `/ws` | WS upgrade path |
 | `tls` | `0|1` | `0` | Reserved for future WSS profile; ignored by v1 |
@@ -204,11 +204,13 @@ The surface runs a WebSocket server. There is no REST HTTP API — the only HTTP
 1. Provider is WS client and reconnect owner.
 2. Surface is WS server and session authority.
 
-### 4.2 Single-Connection Rule
-1. Exactly one paired provider connection is active per surface.
-2. If another provider tries to pair while occupied, surface rejects pairing with `busy`.
-3. Surface advertises `busy=1` while paired or in reconnect grace.
-4. Same-provider takeover is explicit: if a new `pair.request` has the same `providerId` and `takeover=true`, surface accepts the new socket and closes the old one as `1000` reason `superseded`.
+### 4.2 Ownership Lock Model
+1. Each surface has exactly one ownership state: `unlocked`, `locked + connected`, or `locked + disconnected`.
+2. In the normal product path, one OpenClaw/provider starts, discovers available surfaces, and claims each desired surface by sending `pair.request`. That provider becomes the lock owner for each claimed `surfaceId`.
+3. Ownership is bound to `providerId`, not to transient socket liveness. A dropped socket does not release the lock.
+4. While a surface is locked, only the lock owner may hold the active paired socket. Other providers receive `busy` unless they explicitly request takeover.
+5. The surface MUST preserve displayed content, pane topology, annotations, and provider-visible state across transitions between `locked + connected` and `locked + disconnected`.
+6. `takeover=true` is an explicit ownership-transfer request. Providers MUST NOT use it as routine reconnect or stale-socket recovery.
 
 **Multi-session CLU routing** is settled in v1: the newest `content.set` for a pane becomes visible immediately. If that write comes from a different session than the currently visible pane content, the displaced content remains available through the pane's Back stack and the provider emits `event.content_superseded` locally for the displaced session.
 
@@ -216,24 +218,26 @@ The surface runs a WebSocket server. There is no REST HTTP API — the only HTTP
 
 All operations other than `surfaces.list` and `pair.request` are invalid until pairing succeeds.
 
-`surfaces.list` is a pre-pair discovery operation used only on multi-window endpoints to enumerate active window surfaces and their stable IDs.
+`surfaces.list` remains the pre-pair discovery operation for multi-window endpoints. It is always allowed, even when a surface is already locked, so providers can discover which surfaces exist and whether ownership is available before attempting to claim them. Pane topology discovery still follows successful pair/resume: once the lock owner is paired, it uses `panes.list` to learn the authoritative pane layout for that surface.
 
-### 4.4 Reconnect Behavior
+### 4.4 Reconnect, Resume, Relinquish, and Takeover
 
 Provider reconnect policy:
 1. Exponential backoff with jitter: 0.5s, 1s, 2s, 4s, 8s, 16s, max 30s.
 2. Reconnect uses the same discovered surface address.
-3. Provider sends `pair.request` again after each reconnect.
-4. Provider sets `takeover=true` on reconnect attempts after any missed heartbeat window to evict stale half-open sockets owned by itself.
-5. If provider receives `busy` but has a prior session for the same surface, provider SHOULD retry once with `takeover=true` before continuing backoff.
+3. Normal recovery sends `pair.request` again with the same `providerId` and, when available, `resume.sessionId` from the prior paired session.
+4. Providers MUST treat `takeover=true` as a user-directed escalation path, not as standard reconnect logic. Routine owner recovery is always resume/reconnect by the current lock owner.
+5. If resume fails because the surface no longer recognizes the resumable session, the provider continues retrying or prompts for operator action; the lock still remains reserved for the existing owner until explicit relinquish or explicit takeover occurs.
 
-Surface reconnect grace:
-1. On any disconnect (abnormal OR normal close), surface keeps displayed content and all registers intact — indefinitely.
-2. During the grace window (`resumeGraceMs`, default 20000), only the same `providerId` may resume with session continuity.
-3. If grace expires without resume, surface invalidates session and sets `busy=0` so new providers can connect — but displayed content is NOT cleared.
-4. On normal close with reason `superseded`, surface accepts the takeover — but displayed content is NOT cleared. The new provider decides what to show.
+Surface ownership behavior:
+1. On any disconnect (abnormal or normal close), the surface keeps displayed content, pane topology, annotations, and ownership lock intact indefinitely. Socket death does not free the surface for another provider.
+2. Only the lock owner may reconnect and resume normal control without takeover. A successful owner resume restores the active session and MAY emit `event.surface_resumed`.
+3. A different provider connecting without `takeover=true` receives `busy` while the lock is held, regardless of whether the owner socket is currently live.
+4. A different provider connecting with `takeover=true` is requesting explicit ownership transfer. The surface MUST treat this as exceptional control transfer, not routine recovery semantics.
+5. On accepted takeover, the surface transfers the lock to the new `providerId`, closes any still-live old owner socket with `1000` reason `superseded`, and preserves displayed content/state until the new owner changes it.
+6. On accepted `ownership.relinquish`, the surface clears the lock immediately, preserves displayed content/state, and becomes available for a later fresh claim by any provider. The relinquishing provider MUST disable its auto-retry loop for that surface after success.
 
-**Invariant: connection state MUST NOT affect displayed content.** Content is never cleared by a disconnect, grace expiry, restart, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`. A surface showing content will continue showing that content indefinitely until told otherwise.
+**Invariant: connection state MUST NOT affect displayed content.** Content is never cleared by a disconnect, restart, relinquish, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`. A surface showing content will continue showing that content indefinitely until told otherwise.
 
 ### 4.5 Keepalive
 
@@ -256,13 +260,10 @@ The surface MUST display a persistent visual indicator of connection state via t
 Content is never cleared by any of these states (see §4.4 invariant).
 
 ### 4.6 iOS / iPadOS Background Behavior
-
-When the Surf Ace app moves to the iOS/iPadOS background:
-
-1. **On background:** The WebSocket connection drops immediately. The surface transitions to `disconnected` state. Displayed content and annotation strokes are preserved in memory for the lifetime of the process.
-2. **On foreground return:** The surface immediately attempts to reconnect. Content remains visible during reconnect. Once reconnected, the surface emits `event.surface_resumed`.
-3. **Provider response to `event.surface_resumed`:** The provider SHOULD call `surf_ace_list` to verify pane topology and content state, then re-push content as needed.
-4. **Content durability:** Pane content and strokes survive background/foreground cycles for the lifetime of the process. They are NOT written to disk — a full process kill clears all pane state.
+1. When the app backgrounds, the OS may suspend or terminate the WS socket. The surface MUST keep the ownership lock, displayed content, pane state, and provider-visible registers intact.
+2. On foreground return, the lock owner reconnects and resumes using the normal owner-reconnect path (§4.4).
+3. If the prior socket is gone, the surface still treats the same `providerId` as the owner. Another provider may not claim the surface unless the owner relinquishes or a user-directed takeover occurs.
+4. If the surface app process itself restarts, it SHOULD restore persisted ownership metadata when available so the lock still reflects the prior owner; if persistence is unavailable, the implementation MUST document that restart as a lock-loss boundary.
 
 ### 4.7 Runtime Window Lifecycle (Multi-Window Endpoints)
 
@@ -323,22 +324,27 @@ Severe violation threshold:
 
 Rules:
 1. Provider MAY call `surfaces.list` immediately after WS connect.
-2. Response contains `{ surfaceId, name, viewport, paired }[]`. `paired: true` when the surface is either actively connected to a provider OR is in resume grace for a prior session — mirroring `busy=1` mDNS semantics. When `paired: true`, `pair.request` requires `takeover=true`, but note: only the **same** `providerId` that owns the current session can successfully take over during the grace window (§4.2). A different provider sending `takeover=true` will still receive a `busy` error. `paired: false` means the surface is fully available and any provider may connect.
-3. Provider selects a `surfaceId` and sends `pair.request` for that surface.
+2. Response contains `{ surfaceId, name, viewport, paired }[]`. `paired: true` means the surface currently has an ownership lock, whether or not the owner's socket is currently live. `paired: false` means the surface is unlocked and available to be claimed.
+3. `surfaces.list` is discovery-only. It allows any provider to learn what windows exist and whether they appear locked, but it does not grant pane control or topology mutation rights.
+4. When `paired: false`, any provider may send `pair.request` to claim the surface.
+5. When `paired: true`, only the current lock owner may pair/resume normally. Other providers require explicit `takeover=true`.
+6. Full pane topology discovery still happens after successful pair/resume via `panes.list`; pre-pair callers do not receive pane state from `surfaces.list`.
+
 ### 6.1 Pair Handshake
 
 Flow:
 1. Provider opens WS.
-2. Provider sends `pair.request`.
-3. Surface replies `pair.response` (success or error).
-4. If success, connection enters active mode and event streaming starts immediately.
+2. Provider may call `surfaces.list` to discover available surfaces.
+3. Provider sends `pair.request`.
+4. Surface replies `pair.response` (success or error). Success means one of: fresh claim of an unlocked surface, resume by the existing lock owner, or explicit takeover accepted.
+5. If success, connection enters active mode and event streaming starts immediately.
 
 `pair.request` fields include:
-1. `providerId` (stable identity for resume).
+1. `providerId` (stable ownership identity).
 2. `connectionId` (unique per socket attempt).
 3. `surfaceId` (target window surface on multi-window endpoints).
-4. `resume` (optional prior `sessionId`).
-5. `takeover` (optional bool, same-provider stale-connection eviction).
+4. `resume` (optional prior `sessionId`, owner-only reconnect path).
+5. `takeover` (optional bool, explicit ownership transfer request; MUST only be used for user-directed takeover, not routine recovery).
 6. `providerName` (optional human-readable session/chat label for UI indicators).
 7. `eventProfile` (optional, default `minimum_deep`).
 8. `drawingFlushConfig` (optional, provider-preferred idle/max interval values).
@@ -354,9 +360,22 @@ Flow:
 5. Limits.
 6. Current pane state summary (`panes[]` with per-pane `paneId`, `currentContentId`, `currentRevision`, and `contentType`).
 
-### 6.1.1 Pane Lifecycle and History Operations (Phase 1)
+### 6.1.1 Ownership, Pane Lifecycle, and History Operations (Phase 1)
 
-These operations are post-pair and scoped to a paired `surfaceId`. They implement the pane topology committed in §2.3 Phase 1 and §3.1.1.
+These operations are post-pair and scoped to a paired `surfaceId`. They implement the ownership model in §4 and the pane topology committed in §2.3 Phase 1 and §3.1.1.
+
+#### `ownership.relinquish`
+Voluntarily clears ownership for the currently paired surface.
+
+**Request fields:** none.
+
+**Behavior:**
+1. Only the current lock owner may call `ownership.relinquish`. Non-owners receive `not_lock_owner`.
+2. On success, the surface clears ownership immediately but preserves displayed content, pane topology, and annotations.
+3. After success, the relinquishing provider MUST disable auto-retry for that surface. Reconnect after relinquish requires a new fresh claim, not owner resume.
+4. `ownership.relinquish` is the normal, voluntary way to make a surface available for another provider later. It is distinct from `takeover`, which is an explicit transfer initiated by another provider.
+
+**Response fields:** `relinquished: true`.
 
 #### `panes.list`
 Returns current pane layout for the paired surface.
@@ -554,7 +573,9 @@ Required behavior:
 
 | Code | Meaning |
 |---|---|
-| `busy` | Surface already paired with another provider |
+| `busy` | Surface ownership lock is held by another provider and no takeover was granted |
+| `invalid_resume` | Resume token/session is invalid for the current ownership state |
+| `not_lock_owner` | Ownership-changing operation attempted by a non-owner provider |
 | `not_paired` | Operation attempted before successful pair |
 | `invalid_payload` | JSON shape/type invalid |
 | `invalid_request_id_reuse` | Duplicate request ID with different payload |
@@ -573,8 +594,9 @@ Required behavior:
 
 | Code | Reason |
 |---|---|
-| `1000` + `provider_shutdown` | Provider-initiated graceful shutdown. Content is preserved indefinitely (per §4.4 invariant). Session continuity available to same provider during grace window (`resumeGraceMs`). |
-| `1000` + `superseded` | Same-provider takeover accepted. Old socket closed; displayed content preserved. New provider decides what to show next. |
+| `1000` + `provider_shutdown` | Provider-initiated graceful shutdown. Content is preserved indefinitely and the ownership lock remains with the same `providerId` until explicit relinquish or explicit takeover. |
+| `1000` + `superseded` | Explicit takeover accepted. Prior owner socket closed; displayed content preserved. New owner decides what to show next. |
+| `1000` + `relinquished` | Current owner voluntarily cleared ownership. Surface becomes claimable without clearing displayed content. |
 | `4401` | Pair/auth failure |
 | `4409` | Busy/occupied |
 | `4410` | Protocol violation (malformed envelope/op mismatch) |
@@ -599,9 +621,10 @@ Required behavior:
 3. Implementations MAY experiment with WSS privately, but v1 interoperability requirements are defined only for `ws`.
 
 ### 9.4 Session and Ownership
-1. Session is bound to paired socket and `providerId`.
-2. No callback token model exists.
-3. No watch subscription tokens exist.
+1. Ownership lock is bound to `surfaceId` + `providerId` and survives socket loss until explicit relinquish or explicit takeover.
+2. Session is bound to an individual paired socket and may be resumed only by the current lock owner.
+3. No callback token model exists.
+4. No watch subscription tokens exist.
 
 ## 10. JSON Schemas (All Message Types)
 
@@ -616,6 +639,7 @@ The schema below defines every v1 application message type over WS.
   "oneOf": [
     { "$ref": "#/$defs/SurfacesListRequest" },
     { "$ref": "#/$defs/PairRequest" },
+    { "$ref": "#/$defs/RelinquishRequest" },
     { "$ref": "#/$defs/ContentSetRequest" },
     { "$ref": "#/$defs/ContentAppendRequest" },
     { "$ref": "#/$defs/ContentPatchRequest" },
@@ -626,6 +650,7 @@ The schema below defines every v1 application message type over WS.
 
     { "$ref": "#/$defs/SurfacesListResponse" },
     { "$ref": "#/$defs/PairResponse" },
+    { "$ref": "#/$defs/RelinquishResponse" },
     { "$ref": "#/$defs/MutationAckResponse" },
     { "$ref": "#/$defs/AnnotationsRemoveResponse" },
     { "$ref": "#/$defs/SnapshotResponse" },
@@ -866,6 +891,8 @@ The schema below defines every v1 application message type over WS.
           "type": "string",
           "enum": [
             "busy",
+            "invalid_resume",
+            "not_lock_owner",
             "not_paired",
             "invalid_payload",
             "invalid_request_id_reuse",
@@ -987,7 +1014,7 @@ The schema below defines every v1 application message type over WS.
                   "surfaceId": { "$ref": "#/$defs/SurfaceId" },
                   "name": { "type": "string" },
                   "viewport": { "$ref": "#/$defs/SurfaceViewport" },
-                  "paired": { "type": "boolean", "description": "true if actively paired or in resume grace (mirrors mDNS busy=1). pair.request requires takeover=true, but only same-provider takeover succeeds during grace. A different provider will receive busy." }
+                  "paired": { "type": "boolean", "description": "true if the surface currently has an ownership lock, whether or not the owner socket is presently live. New providers need explicit takeover while locked." }
                 }
               }
             }
@@ -1018,7 +1045,7 @@ The schema below defines every v1 application message type over WS.
             "initialPaneId": { "$ref": "#/$defs/PaneId" },
             "providerName": { "type": "string" },
             "protocolVersion": { "const": 1 },
-            "takeover": { "type": "boolean" },
+            "takeover": { "type": "boolean", "description": "Explicit ownership transfer request. Normal reconnect/resume by the current owner MUST NOT rely on takeover." },
             "eventProfile": { "$ref": "#/$defs/EventProfile" },
             "drawingFlushConfig": { "$ref": "#/$defs/DrawingFlushConfig" },
             "resume": {
@@ -1029,6 +1056,39 @@ The schema below defines every v1 application message type over WS.
                 "sessionId": { "$ref": "#/$defs/SessionId" }
               }
             }
+          }
+        }
+      }
+    },
+    "RelinquishRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "ownership.relinquish" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+    "RelinquishResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "ownership.relinquish" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["relinquished"],
+          "properties": {
+            "relinquished": { "const": true }
           }
         }
       }
@@ -1383,7 +1443,7 @@ The schema below defines every v1 application message type over WS.
                 "maxVisibleTextBytes": { "type": "integer", "minimum": 256 },
                 "maxStrokePointsPerFlush": { "type": "integer", "minimum": 1 },
                 "maxDrawingFlushBytes": { "type": "integer", "minimum": 1024 },
-                "resumeGraceMs": { "type": "integer", "minimum": 5000, "default": 20000, "description": "Session continuity grace window in ms. The same provider must reconnect within this window to resume the session with the same providerId. New providers may connect after grace expiry." }
+                "resumeGraceMs": { "type": "integer", "minimum": 5000, "default": 20000, "description": "Deprecated compatibility field. Implementations MAY advertise a preferred owner-resume retry budget in ms, but ownership lock itself does not auto-expire; another provider still requires explicit takeover or prior relinquish." }
               }
             },
             "state": {
@@ -2188,7 +2248,7 @@ The schema below defines every v1 application message type over WS.
 This section documents the hardening decisions locked into the protocol.
 
 1. Race: duplicate sockets from reconnect overlap.
-Resolution: pair handshake includes `providerId` + per-attempt `connectionId`; one paired session only; busy rejection for non-owner providers; explicit same-provider `takeover=true` closes stale socket and hands ownership to the new socket.
+Resolution: pair handshake includes `providerId` + per-attempt `connectionId`; ownership is bound to `providerId`, not the old socket; owner resume is the normal recovery path; takeover is reserved for explicit control transfer and is not routine stale-socket cleanup.
 
 2. Out-of-order or retried content mutations.
 Resolution: mandatory monotonic `revision`; strict `expectedRevision` gate; request-ID idempotency cache.
@@ -2197,7 +2257,7 @@ Resolution: mandatory monotonic `revision`; strict `expectedRevision` gate; requ
 Resolution: event stream is best-effort across reconnect by design; provider must issue `snapshot.get` after reconnect; backpressure coalesces high-rate events and emits `event.snapshot_hint`; drawing flushes are dual-gated (idle + max interval) to bound send frequency.
 
 4. Ghost occupancy after crash.
-Resolution: any disconnect enters bounded resume grace; if not resumed in `resumeGraceMs` (default 20s), surface releases `busy` so new providers can connect. Displayed content is NEVER cleared by grace expiry — content persists until CLU explicitly changes it.
+Resolution: socket loss does not release ownership. The surface remains locked to the same provider until explicit relinquish or explicit takeover, and displayed content is NEVER cleared by disconnect.
 
 5. Payload abuse and parser risk.
 Resolution: explicit max-byte limits in pair response; typed schemas; `content_too_large` and WS close `4413`; malformed envelope closes `4410`.
@@ -2255,7 +2315,7 @@ Protocol is ready for implementation when these checks pass in integration tests
 3. Surface flushes drawings only under dual-gate timing (`idleWindowMs` + `maxIntervalMs`) and never flushes unchanged data.
 4. Every stroke in `event.drawing_flush` and `snapshot.get` has stable `strokeId` and retains ID stability until explicitly removed.
 5. `annotations.remove` removes only requested stroke IDs, reports `removedStrokeIds`/`notFoundStrokeIds`, and preserves all unspecified strokes.
-6. Reconnect path resumes within grace for same provider; after grace expiry the session is invalidated and `busy=0` (new providers may connect), but displayed content is unchanged.
+6. Reconnect path allows only the current lock owner to resume normal control; socket loss does not clear content or release ownership, and another provider can gain control only after relinquish or explicit takeover.
 7. Revision errors and idempotency replay behave exactly as specified.
 8. Visual send indicator is visible while each drawing flush transmission is in-flight.
 9. `content.set` and `content.clear` both clear drawing overlay state.
