@@ -1528,19 +1528,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private ensureInitialPairPane(surface: ManagedSurface): PaneId {
-    const bootstrapPane = surface.panes.get(INITIAL_PAIR_PANE_ID);
-    if (
-      surface.panes.size === 1 &&
-      bootstrapPane &&
-      bootstrapPane.paneId === INITIAL_PAIR_PANE_ID &&
-      bootstrapPane.remotePaneId === INITIAL_PAIR_PANE_ID &&
-      bootstrapPane.activeContentId === null &&
-      bootstrapPane.contentType === null &&
-      bootstrapPane.currentRevision === asRevision(0) &&
-      bootstrapPane.historySummary.visibleContentId === null &&
-      bootstrapPane.snapshot === null
-    ) {
-      return INITIAL_PAIR_PANE_ID;
+    const existingFirstPane = this.firstPane(surface);
+    if (existingFirstPane && existingFirstPane.remotePaneId > 0) {
+      return existingFirstPane.remotePaneId;
     }
 
     if (this.persistentState.nextPaneId <= INITIAL_PAIR_PANE_ID) {
@@ -1553,11 +1543,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
-    surface.panes = new Map<number, ManagedPane>([
-      [INITIAL_PAIR_PANE_ID, createPane(INITIAL_PAIR_PANE_ID, INITIAL_PAIR_PANE_ID, surface.viewport)],
-    ]);
-    surface.snapshotBufferedEvents = [];
+    if (surface.panes.size === 0) {
+      surface.panes = new Map<number, ManagedPane>([
+        [INITIAL_PAIR_PANE_ID, createPane(INITIAL_PAIR_PANE_ID, INITIAL_PAIR_PANE_ID, surface.viewport)],
+      ]);
+      surface.snapshotBufferedEvents = [];
+    }
     return INITIAL_PAIR_PANE_ID;
+  }
+
+  private firstPane(surface: ManagedSurface): ManagedPane | null {
+    let first: ManagedPane | null = null;
+    for (const pane of surface.panes.values()) {
+      if (!first || pane.paneId < first.paneId) {
+        first = pane;
+      }
+    }
+    return first;
   }
 
   private findPaneByRemoteId(surface: ManagedSurface, remotePaneId: PaneId): ManagedPane | null {
