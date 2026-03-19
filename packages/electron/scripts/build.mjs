@@ -51,7 +51,9 @@ await build({
   entryPoints: [
     path.join(rootDir, "test", "identity.test.ts"),
     path.join(rootDir, "test", "surface-core.test.ts"),
+    path.join(rootDir, "test", "ws-server.test.ts"),
   ],
+  external: ["ws"],
   format: "esm",
   outdir: path.join(distDir, "test"),
   platform: "node",

@@ -1,7 +1,7 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 import type {
   AnnotationsRemoveRequest,
@@ -149,7 +149,7 @@ export class SurfaceWsServer {
     this.wss.on("connection", (socket) => {
       this.socketMeta.set(socket, { cache: new Map(), pairedSurfaceId: null });
       socket.on("message", (data) => {
-        void this.handleMessage(socket, data.toString("utf8"));
+        void this.handleMessage(socket, data.toString("utf8")).catch(() => {});
       });
       socket.on("close", () => {
         this.handleSocketClosed(socket);
@@ -157,7 +157,7 @@ export class SurfaceWsServer {
     });
 
     this.core.subscribe((event) => {
-      void this.handleCoreEvent(event);
+      void this.handleCoreEvent(event).catch(() => {});
     });
   }
 
@@ -218,7 +218,10 @@ export class SurfaceWsServer {
     if (!session || !isEventEnabled(session.eventProfile, "event.tap")) {
       return;
     }
-    const state = this.core.captureSnapshot(surfaceId, paneId);
+    const state = this.tryCaptureSnapshot(surfaceId, paneId);
+    if (!state) {
+      return;
+    }
     if (!state.contentId) {
       return;
     }
@@ -248,7 +251,10 @@ export class SurfaceWsServer {
     if (!session || !isEventEnabled(session.eventProfile, "event.selection")) {
       return;
     }
-    const state = this.core.captureSnapshot(surfaceId, paneId);
+    const state = this.tryCaptureSnapshot(surfaceId, paneId);
+    if (!state) {
+      return;
+    }
     if (!state.contentId) {
       return;
     }
@@ -277,7 +283,10 @@ export class SurfaceWsServer {
     if (!session || !isEventEnabled(session.eventProfile, "event.scroll")) {
       return;
     }
-    const state = this.core.captureSnapshot(surfaceId, paneId);
+    const state = this.tryCaptureSnapshot(surfaceId, paneId);
+    if (!state) {
+      return;
+    }
     if (!state.contentId) {
       return;
     }
@@ -303,7 +312,10 @@ export class SurfaceWsServer {
     if (!session || !isEventEnabled(session.eventProfile, "event.navigation")) {
       return;
     }
-    const state = this.core.captureSnapshot(surfaceId, paneId);
+    const state = this.tryCaptureSnapshot(surfaceId, paneId);
+    if (!state) {
+      return;
+    }
     if (!state.contentId || state.contentType !== "html") {
       return;
     }
@@ -331,7 +343,10 @@ export class SurfaceWsServer {
     if (!session || !isEventEnabled(session.eventProfile, "event.page")) {
       return;
     }
-    const state = this.core.captureSnapshot(surfaceId, paneId);
+    const state = this.tryCaptureSnapshot(surfaceId, paneId);
+    if (!state) {
+      return;
+    }
     if (!state.contentId) {
       return;
     }
@@ -595,7 +610,7 @@ export class SurfaceWsServer {
 
     let resumed = false;
     if (existing) {
-      if (existing.providerId === providerId && request.payload.takeover) {
+      if (request.payload.takeover) {
         existing.socket.close(1000, "superseded");
         clearPaneTimers(existing.paneFlushTimers);
         transport.active = null;
@@ -604,14 +619,25 @@ export class SurfaceWsServer {
       }
     } else if (grace) {
       if (grace.providerId !== providerId) {
-        throw new SurfaceCoreError("busy", "Surface is in resume grace");
+        if (!request.payload.takeover) {
+          throw new SurfaceCoreError("busy", "Surface is in resume grace");
+        }
+        clearTimeout(grace.resumeGraceTimer);
+        transport.grace = null;
+      } else if (
+        request.payload.resume?.sessionId &&
+        request.payload.resume.sessionId !== grace.sessionId
+      ) {
+        if (!request.payload.takeover) {
+          throw new SurfaceCoreError("busy", "Resume session did not match active grace session");
+        }
+        clearTimeout(grace.resumeGraceTimer);
+        transport.grace = null;
+      } else {
+        clearTimeout(grace.resumeGraceTimer);
+        transport.grace = null;
+        resumed = true;
       }
-      if (request.payload.resume?.sessionId && request.payload.resume.sessionId !== grace.sessionId) {
-        throw new SurfaceCoreError("busy", "Resume session did not match active grace session");
-      }
-      clearTimeout(grace.resumeGraceTimer);
-      transport.grace = null;
-      resumed = true;
     }
 
     const sessionId = resumed ? grace!.sessionId : `sa_${randomUUID().replaceAll("-", "")}`;
@@ -1032,9 +1058,16 @@ export class SurfaceWsServer {
   }
 
   private async send(socket: WebSocket, payload: string): Promise<void> {
+    if (socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
     await new Promise<void>((resolve, reject) => {
       socket.send(payload, (error) => {
         if (error) {
+          if (socket.readyState !== WebSocket.OPEN || isSocketClosedError(error)) {
+            resolve();
+            return;
+          }
           reject(error);
           return;
         }
@@ -1050,6 +1083,17 @@ export class SurfaceWsServer {
 
   private isEndpointBusy(): boolean {
     return this.core.listSurfaces().some((surface) => this.isSurfaceBusy(surface.surfaceId));
+  }
+
+  private tryCaptureSnapshot(surfaceId: string, paneId: number): SnapshotResponse["payload"] | null {
+    try {
+      return this.core.captureSnapshot(surfaceId, paneId);
+    } catch (error) {
+      if (error instanceof SurfaceCoreError && error.code === "invalid_payload") {
+        return null;
+      }
+      throw error;
+    }
   }
 }
 
@@ -1069,6 +1113,13 @@ function errorResponse(
     type: "response",
     v: 1,
   };
+}
+
+function isSocketClosedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message.includes("WebSocket is not open");
 }
 
 function trimCache(cache: Map<string, SocketCacheEntry>): void {
