@@ -658,10 +658,15 @@ export class SurfaceWsServer {
       meta.pairedSurfaceId = surfaceId;
     }
 
-    this.core.applyProviderBootstrapTopology(surfaceId, {
-      initialPaneId: Number(request.payload.initialPaneId),
-      windowLabel: request.payload.windowLabel,
-    });
+    if (!resumed) {
+      this.core.applyProviderBootstrapTopology(surfaceId, {
+        initialPaneId: Number(request.payload.initialPaneId),
+        windowLabel: request.payload.windowLabel,
+      });
+    } else {
+      // On resume, only update the window label if it changed; never reset pane topology.
+      this.core.applyWindowLabelOnly(surfaceId, request.payload.windowLabel);
+    }
     this.core.setConnectionBar(surfaceId, "connected");
     this.onBusyChanged?.();
 
