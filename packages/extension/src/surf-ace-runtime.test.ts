@@ -63,6 +63,7 @@ class FakeSurfAceWsServer {
     revision: number;
   }> = [];
   initialRemotePaneId = 41;
+  readonly pairAttemptDetails: Array<{ resumeSessionId: string | null; takeover: boolean }> = [];
   readonly pairRequests: Array<{ initialPaneId: number; windowLabel: string }> = [];
   readonly panes = new Map<number, TestPane>([
     [
@@ -92,6 +93,8 @@ class FakeSurfAceWsServer {
   snapshotRequests: Array<{ includeImage: boolean; includeVisibleText: boolean; paneId: number }> = [];
   snapshotScrollOffset = { x: 0, y: 0 };
   dropNextSplitRequest = false;
+  rejectNextResumePairWithSessionMismatch = false;
+  resumePairMismatchMessage = "Resume session did not match active grace session";
 
   pairedSocket: import("ws").WebSocket | null = null;
   readonly surfaceId = "sf_surface-a";
@@ -223,6 +226,32 @@ class FakeSurfAceWsServer {
           initialPaneId: Number(message.payload?.initialPaneId ?? 0),
           windowLabel: String(message.payload?.windowLabel ?? ""),
         });
+        this.pairAttemptDetails.push({
+          resumeSessionId:
+            typeof message.payload?.resume === "object" &&
+            message.payload?.resume &&
+            typeof (message.payload.resume as { sessionId?: unknown }).sessionId === "string"
+              ? String((message.payload.resume as { sessionId: string }).sessionId)
+              : null,
+          takeover: Boolean(message.payload?.takeover),
+        });
+        if (
+          this.rejectNextResumePairWithSessionMismatch &&
+          this.pairAttemptDetails.at(-1)?.resumeSessionId
+        ) {
+          this.rejectNextResumePairWithSessionMismatch = false;
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "pair.request",
+                "busy",
+                this.resumePairMismatchMessage,
+              ),
+            ),
+          );
+          return;
+        }
         this.pairedSocket = socket;
         socket.send(
           JSON.stringify(
@@ -504,6 +533,26 @@ class FakeSurfAceWsServer {
       ok: true,
       op,
       payload,
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private errorResponse(
+    id: string,
+    op: string,
+    code: string,
+    message: string,
+  ) {
+    return {
+      error: {
+        code,
+        message,
+      },
+      id,
+      ok: false,
+      op,
       sentAt: Date.now(),
       type: "response",
       v: 1,
@@ -1059,6 +1108,29 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(bootstrapPaneId, 1);
       assert.deepEqual([...surface.panes.keys()], [1]);
       assert.equal(surface.panes.get(1)?.remotePaneId, 1);
+    });
+  });
+
+  await t.test("resume session mismatch falls back to a fresh pair request", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      assert.equal(surface.sessionId, "sa_test_session");
+
+      server.resumePairMismatchMessage = "Resume session did not match active grace session";
+      server.rejectNextResumePairWithSessionMismatch = true;
+      await surface.client.close(1000, "test_resume_restart");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 3);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected");
+
+      assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, "sa_test_session");
+      assert.equal(server.pairAttemptDetails[1]?.takeover, true);
+      assert.equal(server.pairAttemptDetails[2]?.resumeSessionId, null);
+      assert.equal(server.pairAttemptDetails[2]?.takeover, true);
+      assert.equal(surface.sessionId, "sa_test_session");
     });
   });
 });

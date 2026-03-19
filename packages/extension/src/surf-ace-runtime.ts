@@ -575,6 +575,16 @@ function mutationErrorCode(
   }
 }
 
+function isResumeSessionMismatch(response: Response): response is ErrorResponse {
+  const message = isErrorResponse(response) ? response.error.message.toLowerCase() : "";
+  return (
+    isErrorResponse(response) &&
+    response.error.code === "busy" &&
+    message.includes("resume") &&
+    (message.includes("mismatch") || message.includes("did not match"))
+  );
+}
+
 function normalizeContent(
   contentType: ContentType,
   content: unknown,
@@ -1854,32 +1864,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       v: 1,
     });
 
-    const initialTakeover = surface.forceTakeoverOnNextPair;
-    let response: Response;
-    try {
-      response = await client.request(
-        buildPairRequest(initialTakeover),
-        REQUEST_TIMEOUT_MS,
-      );
-    } catch (error) {
-      if (isSocketClosedError(error)) {
-        throw new SurfAceToolError(
-          "not_connected",
-          `Surf Ace surface is not connected: ${surface.surfaceId}`,
-        );
-      }
-      throw error;
-    }
-
-    if (isErrorResponse(response) && response.error.code === "busy" && !initialTakeover) {
-      if (!client.isOpen()) {
-        throw new SurfAceToolError(
-          "not_connected",
-          `Surf Ace surface is not connected: ${surface.surfaceId}`,
-        );
-      }
+    const sendPairRequest = async (takeover: boolean): Promise<Response> => {
       try {
-        response = await client.request(buildPairRequest(true), REQUEST_TIMEOUT_MS);
+        return await client.request(
+          buildPairRequest(takeover),
+          REQUEST_TIMEOUT_MS,
+        );
       } catch (error) {
         if (isSocketClosedError(error)) {
           throw new SurfAceToolError(
@@ -1889,6 +1879,33 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         }
         throw error;
       }
+    };
+
+    const initialTakeover = surface.forceTakeoverOnNextPair;
+    let response = await sendPairRequest(initialTakeover);
+
+    if (isResumeSessionMismatch(response) && surface.sessionId) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; retrying fresh pair`,
+      );
+      surface.sessionId = null;
+      if (!client.isOpen()) {
+        throw new SurfAceToolError(
+          "not_connected",
+          `Surf Ace surface is not connected: ${surface.surfaceId}`,
+        );
+      }
+      response = await sendPairRequest(true);
+    }
+
+    if (isErrorResponse(response) && response.error.code === "busy" && !initialTakeover) {
+      if (!client.isOpen()) {
+        throw new SurfAceToolError(
+          "not_connected",
+          `Surf Ace surface is not connected: ${surface.surfaceId}`,
+        );
+      }
+      response = await sendPairRequest(true);
     }
 
     if (isErrorResponse(response)) {
