@@ -328,6 +328,7 @@ type ManagedSurface = {
   client: SurfAceWireClient | null;
   connectionState: SurfAceConnectionState;
   consecutiveResumeFailures: number;
+  connectedAt: number | null;
   endpoint: SurfAceDiscoveryEndpoint;
   endpointId: string;
   fingerprintPrefix: string;
@@ -374,7 +375,10 @@ const MAX_PENDING_EVENTS_DURING_SNAPSHOT = 128;
 const MAX_READ_FRAME_BATCH = 5;
 const MAX_READ_FRAME_IMAGE_BYTES = 4 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 10_000;
+const RECONNECT_BACKOFF_BASE_MS = 2_000;
+const RECONNECT_BACKOFF_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 10_000;
+const STABLE_CONNECTION_RESET_MS = 30_000;
 const UNREACHABLE_AFTER_FAILURES = 3;
 const ALERT_RESET_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
@@ -646,6 +650,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function nextReconnectDelayMs(attempt: number): number {
+  return Math.min(RECONNECT_BACKOFF_CAP_MS, RECONNECT_BACKOFF_BASE_MS * 2 ** attempt);
 }
 
 function isSocketClosedError(error: unknown): boolean {
@@ -1246,6 +1254,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       client: null,
       connectionState: "connecting" as SurfAceConnectionState,
       consecutiveResumeFailures: 0,
+      connectedAt: null,
       endpoint: sourceSurface.endpoint,
       endpointId: sourceSurface.endpointId,
       fingerprintPrefix: sourceSurface.fingerprintPrefix,
@@ -1767,6 +1776,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       client: null,
       connectionState: "connecting",
       consecutiveResumeFailures: 0,
+      connectedAt: null,
       endpoint,
       endpointId: endpoint.endpointId,
       fingerprintPrefix: endpoint.fingerprintPrefix,
@@ -1998,8 +2008,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
         try {
           surface.client = new SurfAceWireClient(buildWsUrl(surface.endpoint), {
-            onClose: (_code) => {
+            onClose: (code, reason) => {
               this.stopHeartbeat(surface);
+              if (!surface.stopRequested && (code !== 1000 || reason !== "provider_shutdown")) {
+                this.logger.warn?.(
+                  `[surf-ace:runtime] socket closed for ${surface.surfaceId}: code=${code} reason=${reason || "<none>"}`,
+                );
+              }
               surface.connectionState =
                 surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
                   ? "unreachable"
@@ -2022,14 +2037,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           const pairResponse = await this.requestPair(surface);
           this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId));
           surface.connectionState = "connected";
-          surface.reconnectAttempt = 0;
           surface.unreachableFailures = 0;
           surface.forceTakeoverOnNextPair = false;
           this.applyPairState(surface, pairResponse);
           this.startHeartbeat(surface);
           await this.syncSurfaceSnapshots(surface, true);
           await surface.client.waitForClose();
+          this.noteConnectionEnded(surface);
         } catch (error) {
+          this.noteConnectionEnded(surface);
           surface.unreachableFailures += 1;
           await this.refreshEndpointAfterConnectFailure(surface, error);
           if (surface.connectionState !== "connected") {
@@ -2057,7 +2073,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
       const attempt = surface.reconnectAttempt;
       surface.reconnectAttempt += 1;
-      const delay = Math.min(30_000, 500 * 2 ** attempt);
+      const delay = nextReconnectDelayMs(attempt);
       const jitter = Math.floor(Math.random() * 250);
       await sleep(delay + jitter);
     }
@@ -2290,14 +2306,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private markPairConnected(surface: ManagedSurface, sessionId: SessionId): void {
     surface.consecutiveResumeFailures = 0;
+    surface.connectedAt = this.now();
     surface.hasPairedInGatewaySession = true;
     surface.sessionId = sessionId;
+  }
+
+  private noteConnectionEnded(surface: ManagedSurface): void {
+    if (surface.connectedAt && this.now() - surface.connectedAt >= STABLE_CONNECTION_RESET_MS) {
+      surface.reconnectAttempt = 0;
+      surface.unreachableFailures = 0;
+    }
+    surface.connectedAt = null;
   }
 
   private noteResumeFailure(surface: ManagedSurface): void {
     surface.consecutiveResumeFailures += 1;
     surface.forceTakeoverOnNextPair = true;
-    surface.reconnectAttempt = 0;
     if (surface.consecutiveResumeFailures < MAX_CONSECUTIVE_RESUME_FAILURES) {
       return;
     }

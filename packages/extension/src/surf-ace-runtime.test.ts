@@ -1063,6 +1063,41 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("brief reconnects preserve backoff until a connection has been stable for 30s", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      surface.reconnectAttempt = 4;
+      surface.unreachableFailures = 2;
+      surface.connectedAt = Date.now() - 5_000;
+      internalRuntime.noteConnectionEnded(surface);
+      assert.equal(surface.reconnectAttempt, 4);
+      assert.equal(surface.unreachableFailures, 2);
+
+      surface.reconnectAttempt = 4;
+      surface.unreachableFailures = 2;
+      surface.connectedAt = Date.now() - 31_000;
+      internalRuntime.noteConnectionEnded(surface);
+      assert.equal(surface.reconnectAttempt, 0);
+      assert.equal(surface.unreachableFailures, 0);
+    });
+  });
+
+  await t.test("resume failures do not collapse reconnect backoff", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      surface.reconnectAttempt = 3;
+      internalRuntime.noteResumeFailure(surface);
+      assert.equal(surface.reconnectAttempt, 3);
+      assert.equal(surface.forceTakeoverOnNextPair, true);
+    });
+  });
+
   await t.test("connect refusal refreshes discovery and rebinds the surface to the new endpoint", async () => {
     await withRuntimeHarness(async ({ discovery, runtime, server, warnings }) => {
       const replacementPort = nextPort++;
@@ -1077,8 +1112,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         });
         await server.close();
 
-        await waitFor(() => replacementServer.pairedSocket !== null, 6_000);
-        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 6_000);
+        await waitFor(() => replacementServer.pairedSocket !== null, 12_000);
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
         const internalRuntime = runtime as any;
         const surface = internalRuntime.surfaces.get(replacementServer.surfaceId);
@@ -1189,8 +1224,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       server.rejectNextResumePairWithSessionMismatch = true;
       await surface.client.close(1000, "test_resume_restart");
 
-      await waitFor(() => server.pairAttemptDetails.length >= 3);
-      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected");
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
       assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, "sa_test_session");
       assert.equal(server.pairAttemptDetails[1]?.takeover, true);
@@ -1211,8 +1246,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       server.resumePairMismatchResponsesRemaining = 3;
       await surface.client.close(1000, "test_resume_retry_threshold");
 
-      await waitFor(() => server.pairAttemptDetails.length >= 5, 6_000);
-      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 6_000);
+      await waitFor(() => server.pairAttemptDetails.length >= 5, 20_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 20_000);
 
       assert.deepEqual(
         server.pairAttemptDetails.slice(1, 5).map((attempt) => attempt.resumeSessionId),
