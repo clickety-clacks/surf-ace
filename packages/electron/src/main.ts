@@ -15,7 +15,8 @@ import {
 } from "./surface-core.js";
 import { SurfaceWsServer } from "./ws-server.js";
 
-const WS_PORT = Number(process.env.SURF_ACE_PORT ?? 18791);
+const DEFAULT_WS_PORT = 19001;
+const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const STATE_FILE_NAME = "surface-core-state.json";
 
 const windows = new Map<string, BrowserWindow>();
