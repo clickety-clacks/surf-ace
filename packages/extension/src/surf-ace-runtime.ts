@@ -2204,9 +2204,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           ? "unreachable"
           : "connecting";
 
+        let client: SurfAceWireClient | null = null;
         try {
-          surface.client = new SurfAceWireClient(buildWsUrl(surface.endpoint), {
+          client = new SurfAceWireClient(buildWsUrl(surface.endpoint), {
             onClose: (code, reason) => {
+              if (surface.client !== client) {
+                return;
+              }
               this.stopHeartbeat(surface);
               if (!surface.stopRequested && (code !== 1000 || reason !== "provider_shutdown")) {
                 this.logger.warn?.(
@@ -2223,6 +2227,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                   : "connecting";
             },
             onEvent: (event) => {
+              if (surface.client !== client) {
+                return;
+              }
               try {
                 this.handleWireEvent(surface, event);
               } catch (error) {
@@ -2233,7 +2240,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             },
           });
 
-          await surface.client.connect(REQUEST_TIMEOUT_MS);
+          await this.assignSurfaceClient(surface, client);
+          await client.connect(REQUEST_TIMEOUT_MS);
           await this.discoverSurfaceId(surface);
           const pairResponse = await this.requestPair(surface);
           this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId));
@@ -2242,7 +2250,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           this.applyPairState(surface, pairResponse);
           this.startHeartbeat(surface);
           await this.syncSurfaceSnapshots(surface, true);
-          await surface.client.waitForClose();
+          await client.waitForClose();
           this.noteConnectionEnded(surface);
         } catch (error) {
           this.noteConnectionEnded(surface);
@@ -2259,7 +2267,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           );
         } finally {
           this.stopHeartbeat(surface);
-          surface.client = null;
+          if (client) {
+            await this.closeSurfaceClient(surface, client, clampCloseReason("provider_shutdown"));
+          }
         }
       } catch (error) {
         this.logger.warn?.(
@@ -2277,6 +2287,28 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const jitter = Math.floor(Math.random() * 250);
       await sleep(delay + jitter);
     }
+  }
+
+  private async assignSurfaceClient(surface: ManagedSurface, nextClient: SurfAceWireClient): Promise<void> {
+    const previousClient = surface.client;
+    if (previousClient === nextClient) {
+      return;
+    }
+    if (previousClient) {
+      await this.closeSurfaceClient(surface, previousClient, clampCloseReason("provider_shutdown"));
+    }
+    surface.client = nextClient;
+  }
+
+  private async closeSurfaceClient(
+    surface: ManagedSurface,
+    client: SurfAceWireClient,
+    reason: string,
+  ): Promise<void> {
+    if (surface.client === client) {
+      surface.client = null;
+    }
+    await client.close(1000, reason).catch(() => {});
   }
 
   private async refreshEndpointAfterConnectFailure(

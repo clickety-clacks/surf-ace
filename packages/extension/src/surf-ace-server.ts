@@ -40,6 +40,17 @@ export class SurfAceWireClient {
       this.closeResolver = resolve;
     });
 
+    ws.once("close", (code, reason) => {
+      const text = reason.toString();
+      this.rejectPending(new Error(`Surf Ace socket closed (${text || code})`));
+      this.onClose?.(code, text);
+      this.closeResolver?.();
+      this.closeResolver = null;
+      if (this.ws === ws) {
+        this.ws = null;
+      }
+    });
+
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         ws.close();
@@ -68,15 +79,6 @@ export class SurfAceWireClient {
 
     ws.on("message", (data) => {
       this.handleMessage(data);
-    });
-
-    ws.once("close", (code, reason) => {
-      const text = reason.toString();
-      this.rejectPending(new Error(`Surf Ace socket closed (${text || code})`));
-      this.onClose?.(code, text);
-      this.closeResolver?.();
-      this.closeResolver = null;
-      this.ws = null;
     });
   }
 

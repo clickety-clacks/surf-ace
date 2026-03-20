@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { WebSocketServer } from "ws";
+import type WebSocket from "ws";
 
 import type { SurfAceDiscoveryEndpoint, SurfAceDiscoveryService } from "./surf-ace-discovery.js";
 import { createSurfAceRuntime } from "./surf-ace-runtime.js";
@@ -59,6 +60,7 @@ class StaticDiscoveryService implements SurfAceDiscoveryService {
 }
 
 class FakeSurfAceWsServer {
+  activeSocketCount = 0;
   readonly annotationsRemoveRequests: Array<{ contentId: string; paneId: number; strokeIds: string[] }> = [];
   busyWithoutTakeoverResponsesRemaining = 0;
   readonly clearRequests: Array<{ paneId: number; revision: number }> = [];
@@ -101,6 +103,8 @@ class FakeSurfAceWsServer {
   snapshotRequests: Array<{ includeImage: boolean; includeVisibleText: boolean; paneId: number }> = [];
   snapshotScrollOffset = { x: 0, y: 0 };
   dropNextSplitRequest = false;
+  forcedPairErrors: Array<{ code: string; message: string }> = [];
+  maxConcurrentSocketCount = 0;
   rejectNextResumePairWithSessionMismatch = false;
   resumePairMismatchResponsesRemaining = 0;
   resumePairMismatchMessage = "Resume session did not match active ownership lock";
@@ -110,11 +114,22 @@ class FakeSurfAceWsServer {
 
   private closed = false;
   private nextEventId = 1;
+  private readonly sockets = new Set<WebSocket>();
   private readonly wss: WebSocketServer;
 
   constructor(port: number) {
     this.wss = new WebSocketServer({ port });
     this.wss.on("connection", (socket) => {
+      this.sockets.add(socket);
+      this.activeSocketCount = this.sockets.size;
+      this.maxConcurrentSocketCount = Math.max(this.maxConcurrentSocketCount, this.activeSocketCount);
+      socket.once("close", () => {
+        this.sockets.delete(socket);
+        this.activeSocketCount = this.sockets.size;
+        if (this.pairedSocket === socket) {
+          this.pairedSocket = null;
+        }
+      });
       socket.on("message", (data) => {
         const message = JSON.parse(data.toString("utf8")) as {
           id: string;
@@ -279,6 +294,20 @@ class FakeSurfAceWsServer {
                 "pair.request",
                 "invalid_resume",
                 this.resumePairMismatchMessage,
+              ),
+            ),
+          );
+          return;
+        }
+        const forcedPairError = this.forcedPairErrors.shift();
+        if (forcedPairError) {
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "pair.request",
+                forcedPairError.code,
+                forcedPairError.message,
               ),
             ),
           );
@@ -1217,6 +1246,52 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         process.off("unhandledRejection", handleUnhandled);
       }
     });
+  });
+
+  await t.test("worker closes stale sockets before retrying failed pair attempts", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port);
+    server.forcedPairErrors = [
+      {
+        code: "invalid_resume",
+        message: "Resume session did not match active ownership lock",
+      },
+      {
+        code: "invalid_resume",
+        message: "Resume session did not match active ownership lock",
+      },
+      {
+        code: "invalid_resume",
+        message: "Resume session did not match active ownership lock",
+      },
+    ];
+
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-retry-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({
+      discovery,
+      logger: {
+        warn: () => {},
+      },
+      stateDir,
+    });
+
+    try {
+      await runtime.start();
+      await waitFor(() => server.pairRequests.length >= 3, 12_000);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 100);
+      });
+
+      assert.ok(server.activeSocketCount <= 1);
+      assert.ok(server.maxConcurrentSocketCount <= 1);
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+
+    assert.equal(server.activeSocketCount, 0);
   });
 
   await t.test("rediscovery on an already paired surface does not re-arm takeover from paired advertisement", async () => {
