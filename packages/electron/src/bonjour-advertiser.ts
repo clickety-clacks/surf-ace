@@ -27,7 +27,7 @@ type BonjourClient = {
 };
 
 export class BonjourAdvertiser {
-  private static readonly VISIBILITY_CHECK_DELAY_MS = 1_000;
+  private static readonly VISIBILITY_CHECK_DELAY_MS = 7_500;
   private static readonly VISIBILITY_CHECK_INTERVAL_MS = 15_000;
   private static readonly VISIBILITY_FAILURES_BEFORE_ISOLATION = 3;
   private readonly baseName: string;
