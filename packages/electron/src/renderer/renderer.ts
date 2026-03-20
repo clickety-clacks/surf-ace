@@ -612,11 +612,6 @@ function sendNavigationIntent(view: PaneView, paneId: number, url: string): void
 }
 
 function wireWebView(view: PaneView, paneId: number, webview: Electron.WebviewTag): void {
-  webview.addEventListener("did-finish-load", () => {
-    const rect = webview.getBoundingClientRect();
-  });
-  webview.addEventListener("did-fail-load", (e) => {
-  });
   webview.addEventListener("ipc-message", (event) => {
     if (event.channel !== "surf-ace-content") {
       return;

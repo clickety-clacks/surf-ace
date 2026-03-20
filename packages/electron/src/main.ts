@@ -26,6 +26,7 @@ const windows = new Map<string, BrowserWindow>();
 const lastExplicitPaneIds = new Map<string, number>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const readyWindows = new Set<string>();
+const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -113,6 +114,20 @@ function broadcastSurfaceState(surfaceId: string): void {
     return;
   }
   window.webContents.send("surface:state", state);
+}
+
+function focusExistingWindow(): void {
+  for (const window of windows.values()) {
+    if (window.isDestroyed()) {
+      continue;
+    }
+    if (window.isMinimized()) {
+      window.restore();
+    }
+    window.show();
+    window.focus();
+    return;
+  }
 }
 
 function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
@@ -245,9 +260,10 @@ function installIpc(): void {
     if (!surfaceId) {
       return null;
     }
+    const state = core.getRendererWindowState(surfaceId);
     return {
       guestPreloadUrl,
-      state: core.getRendererWindowState(surfaceId),
+      state,
       surfaceId,
     };
   });
@@ -403,20 +419,29 @@ async function boot(): Promise<void> {
   await createWindowForSurface(primarySurface.surfaceId);
 }
 
-app.whenReady().then(async () => {
-  await boot();
-  app.on("activate", async () => {
-    if (windows.size > 0) {
-      return;
-    }
-    const primary = core.ensurePrimarySurface(endpointName(), displayViewport());
-    await createWindowForSurface(primary.surfaceId);
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    focusExistingWindow();
   });
-});
 
-app.on("before-quit", async () => {
-  isQuitting = true;
-  advertiser?.refresh();
-  await advertiser?.stop();
-  await server.stop();
-});
+  app.whenReady().then(async () => {
+    await boot();
+    app.on("activate", async () => {
+      if (windows.size > 0) {
+        focusExistingWindow();
+        return;
+      }
+      const primary = core.ensurePrimarySurface(endpointName(), displayViewport());
+      await createWindowForSurface(primary.surfaceId);
+    });
+  });
+
+  app.on("before-quit", async () => {
+    isQuitting = true;
+    advertiser?.refresh();
+    await advertiser?.stop();
+    await server.stop();
+  });
+}
