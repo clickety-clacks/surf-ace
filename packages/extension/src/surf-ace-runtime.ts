@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -391,6 +392,7 @@ const ALERT_ENDPOINT_URL = "http://localhost:18800/alert";
 const INITIAL_PAIR_PANE_ID = 1 as PaneId;
 const MAX_CONSECUTIVE_RESUME_FAILURES = 3;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
+const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
 
 export class SurfAceToolError extends Error {
   constructor(
@@ -706,7 +708,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private started = false;
   private startPromise: Promise<void> | null = null;
   private stateWrite: Promise<void> = Promise.resolve();
-  private readonly unsubscribeDiscovery: (() => void) | null;
+  private unsubscribeDiscovery: (() => void) | null = null;
+  private runtimeLease: FileHandle | null = null;
+  private ownsRuntimeLease = false;
 
   constructor(options: SurfAceRuntimeOptions = {}) {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ logger: options.logger });
@@ -717,9 +721,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.providerName = options.providerName;
     this.stateDir =
       options.stateDir ?? path.join(os.homedir(), ".surf-ace-openclaw-extension");
-    this.unsubscribeDiscovery = this.discovery.subscribe((endpoints) => {
-      this.handleDiscoveryUpdate(endpoints);
-    });
   }
 
   async start(): Promise<void> {
@@ -734,6 +735,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.startPromise = (async () => {
       await ensureDirectory(this.stateDir);
       await this.loadState();
+      this.ownsRuntimeLease = await this.acquireRuntimeLease();
+      if (!this.ownsRuntimeLease) {
+        this.logger.info?.(
+          "[surf-ace:runtime] passive process; another OpenClaw process owns the Surf Ace runtime lease",
+        );
+        this.started = true;
+        return;
+      }
+      this.unsubscribeDiscovery = this.discovery.subscribe((endpoints) => {
+        this.handleDiscoveryUpdate(endpoints);
+      });
       await this.discovery.start();
       this.handleDiscoveryUpdate(this.discovery.getSnapshot());
       this.started = true;
@@ -748,8 +760,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   async stop(): Promise<void> {
     this.started = false;
+    if (!this.ownsRuntimeLease) {
+      this.unsubscribeDiscovery?.();
+      this.unsubscribeDiscovery = null;
+      await this.releaseRuntimeLease();
+      return;
+    }
+
     await this.discovery.stop();
     this.unsubscribeDiscovery?.();
+    this.unsubscribeDiscovery = null;
 
     const stopPromises = [...this.surfaces.values()].map(async (surface) => {
       surface.stopRequested = true;
@@ -762,6 +782,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     await Promise.all(stopPromises);
     this.surfaces.clear();
+    await this.releaseRuntimeLease();
   }
 
   subscribe(listener: (event: SurfAceLocalEvent) => void): () => void {
@@ -1716,6 +1737,88 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private providerId(): ProviderId {
     return makeProviderId(this.persistentState.providerId);
+  }
+
+  private async acquireRuntimeLease(): Promise<boolean> {
+    const leasePath = path.join(this.stateDir, RUNTIME_LEASE_FILE_NAME);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const handle = await fs.open(leasePath, "wx");
+        await handle.writeFile(
+          JSON.stringify(
+            {
+              pid: process.pid,
+              startedAt: this.now(),
+            },
+            null,
+            2,
+          ),
+        );
+        this.runtimeLease = handle;
+        return true;
+      } catch (error) {
+        const nodeError = error as NodeJS.ErrnoException;
+        if (nodeError.code !== "EEXIST") {
+          throw error;
+        }
+        if (!(await this.clearStaleRuntimeLease(leasePath))) {
+          return false;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private async clearStaleRuntimeLease(leasePath: string): Promise<boolean> {
+    let contents = "";
+    try {
+      contents = await fs.readFile(leasePath, "utf8");
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError.code === "ENOENT") {
+        return true;
+      }
+      return false;
+    }
+
+    let ownerPid: number | null = null;
+    try {
+      const parsed = JSON.parse(contents) as { pid?: number };
+      ownerPid = typeof parsed.pid === "number" ? parsed.pid : null;
+    } catch {
+      ownerPid = null;
+    }
+
+    if (ownerPid !== null) {
+      try {
+        process.kill(ownerPid, 0);
+        return false;
+      } catch {
+        // Stale lock owner.
+      }
+    }
+
+    try {
+      await fs.unlink(leasePath);
+      return true;
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      return nodeError.code === "ENOENT";
+    }
+  }
+
+  private async releaseRuntimeLease(): Promise<void> {
+    const lease = this.runtimeLease;
+    this.runtimeLease = null;
+    this.ownsRuntimeLease = false;
+    if (!lease) {
+      return;
+    }
+
+    const leasePath = path.join(this.stateDir, RUNTIME_LEASE_FILE_NAME);
+    await lease.close().catch(() => {});
+    await fs.unlink(leasePath).catch(() => {});
   }
 
   private removeStrokesFromLiveState(pane: ManagedPane, removedStrokeIds: Set<string>): void {
