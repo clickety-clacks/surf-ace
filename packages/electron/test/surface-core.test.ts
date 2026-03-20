@@ -363,3 +363,45 @@ test("surface core returns the number of flushed annotation batches discarded on
   const response = core.paneClose(surface.surfaceId, paneId);
   assert.equal(response.closedFramesDiscarded, 1);
 });
+
+test("surface core rebroadcasts committed strokes into renderer state immediately", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const events: Array<string> = [];
+  const unsubscribe = core.subscribe((event) => {
+    events.push(event.type);
+  });
+
+  try {
+    core.contentSet(surface.surfaceId, {
+      content: { markdown: "# Annotate" },
+      contentId: "ct_markdown" as never,
+      contentType: "markdown",
+      historyOwnerToken: "hot_markdown",
+      paneId: paneId as never,
+      revision: 1 as never,
+    });
+    core.setAnnotating(surface.surfaceId, paneId, true);
+
+    core.addStroke(surface.surfaceId, paneId, {
+      points: [{ timestamp: 1, x: 5, y: 6 }],
+      strokeId: "stroke_live" as never,
+      tool: "mouse",
+    });
+
+    const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+    assert.deepEqual(
+      pane.drawings.map((stroke) => stroke.strokeId),
+      ["stroke_live"],
+    );
+    assert.deepEqual(events.slice(-2), ["surface-changed", "drawing-dirty"]);
+  } finally {
+    unsubscribe();
+  }
+});

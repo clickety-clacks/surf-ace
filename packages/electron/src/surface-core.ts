@@ -718,6 +718,7 @@ export class SurfaceCore {
     pane.firstDirtyStrokeAt ??= firstPointTimestamp(stroke);
     pane.lastDirtyStrokeAt = lastPointTimestamp(stroke);
     pane.toast = null;
+    this.emit({ surfaceId, type: "surface-changed" });
     this.emit({ paneId, surfaceId, type: "drawing-dirty" });
     return { contentId: entry.contentId, revision: entry.revision };
   }
