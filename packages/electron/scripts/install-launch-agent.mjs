@@ -13,6 +13,8 @@ const label = "ai.surf-ace.electron.dev";
 const plistPath = path.join(os.homedir(), "Library", "LaunchAgents", `${label}.plist`);
 const stdoutPath = "/tmp/surf-ace-electron-launchd.out.log";
 const stderrPath = "/tmp/surf-ace-electron-launchd.err.log";
+// Use the packaged .app if it exists in ~/Applications; fall back to dev binary.
+const appBundle = path.join(os.homedir(), "Applications", "Surf Ace.app");
 const electronPackageDir = path.dirname(require.resolve("electron/package.json"));
 const electronBin = path.join(
   electronPackageDir,
@@ -42,6 +44,15 @@ async function uninstall() {
 
 async function install() {
   await fs.mkdir(path.dirname(plistPath), { recursive: true });
+
+  // Prefer launching via `open` on the packaged .app — this uses LaunchServices,
+  // which sets up the full app environment (Bonjour, entitlements, etc.) correctly.
+  // Fall back to direct binary invocation for dev-only runs without a packaged app.
+  const useOpen = await fs.access(appBundle).then(() => true).catch(() => false);
+  const programArgs = useOpen
+    ? `<string>/usr/bin/open</string>\n    <string>-a</string>\n    <string>${appBundle}</string>`
+    : `<string>${electronBin}</string>\n    <string>${packageDir}</string>`;
+
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -50,11 +61,8 @@ async function install() {
   <string>${label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${electronBin}</string>
-    <string>${packageDir}</string>
+    ${programArgs}
   </array>
-  <key>WorkingDirectory</key>
-  <string>${packageDir}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SURF_ACE_PORT</key>
@@ -80,9 +88,13 @@ async function install() {
   console.log(plistPath);
 }
 
-await fs.access(electronBin).catch(() => {
-  throw new Error(`Electron binary not found at ${electronBin}. Run pnpm install first.`);
-});
+// Only require the dev binary if no packaged .app exists
+const hasApp = await fs.access(appBundle).then(() => true).catch(() => false);
+if (!hasApp) {
+  await fs.access(electronBin).catch(() => {
+    throw new Error(`Electron binary not found at ${electronBin}. Run pnpm install or build the .app first.`);
+  });
+}
 
 if (shouldUninstall) {
   await uninstall();
