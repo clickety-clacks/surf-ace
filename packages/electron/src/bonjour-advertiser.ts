@@ -1,3 +1,7 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+
 import { Bonjour, type Service } from "bonjour-service";
 
 type BonjourBrowser = {
@@ -23,15 +27,23 @@ type BonjourClient = {
 };
 
 export class BonjourAdvertiser {
+  private static readonly VISIBILITY_CHECK_DELAY_MS = 1_000;
+  private static readonly VISIBILITY_CHECK_INTERVAL_MS = 15_000;
+  private static readonly VISIBILITY_FAILURES_BEFORE_ISOLATION = 3;
   private readonly baseName: string;
   private readonly bonjour: BonjourClient;
   private readonly port: number;
   private readonly txtProvider: () => Record<string, string>;
+  private destroyed = false;
+  private isolatedPublisher: ChildProcess | null = null;
   private republishAttempts = 0;
   private publishing = false;
   private restarting = false;
   private service: Service | null = null;
   private serviceName: string;
+  private started = false;
+  private visibilityFailures = 0;
+  private visibilityTimer: NodeJS.Timeout | null = null;
 
   constructor(options: {
     bonjour?: BonjourClient;
@@ -47,6 +59,7 @@ export class BonjourAdvertiser {
   }
 
   start(): void {
+    this.started = true;
     if (this.service || this.publishing) {
       return;
     }
@@ -54,13 +67,17 @@ export class BonjourAdvertiser {
   }
 
   refresh(): void {
-    if (!this.service) {
+    if (!this.started) {
       return;
     }
     void this.restart();
   }
 
   async stop(): Promise<void> {
+    this.destroyed = true;
+    this.started = false;
+    this.clearVisibilityTimer();
+    this.stopIsolatedPublisher();
     await new Promise<void>((resolve) => {
       this.bonjour.unpublishAll(() => resolve());
     });
@@ -69,10 +86,18 @@ export class BonjourAdvertiser {
   }
 
   private async restart(): Promise<void> {
+    if (this.destroyed) {
+      return;
+    }
+    this.clearVisibilityTimer();
     await new Promise<void>((resolve) => {
       this.bonjour.unpublishAll(() => resolve());
     });
     this.service = null;
+    if (this.isolatedPublisher) {
+      await this.publishWithIsolatedPublisher(this.serviceName);
+      return;
+    }
     await this.publishNextAvailableName(this.serviceName);
   }
 
@@ -90,16 +115,20 @@ export class BonjourAdvertiser {
   }
 
   private publish(name: string): void {
+    if (this.isolatedPublisher) {
+      void this.publishWithIsolatedPublisher(name);
+      return;
+    }
     const service = this.bonjour.publish({
       name,
       port: this.port,
-      probe: false,
       protocol: "tcp",
       txt: this.txtProvider(),
       type: "surf-ace",
     });
     this.serviceName = name;
     this.service = service;
+    this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_DELAY_MS);
     service.on("error", (error: Error) => {
       if (this.service !== service) {
         return;
@@ -110,6 +139,51 @@ export class BonjourAdvertiser {
       }
       void this.republishWithFallbackName();
     });
+  }
+
+  private scheduleVisibilityCheck(delayMs: number): void {
+    this.clearVisibilityTimer();
+    if (this.destroyed) {
+      return;
+    }
+    this.visibilityTimer = setTimeout(() => {
+      this.visibilityTimer = null;
+      void this.verifyPublishedService();
+    }, delayMs);
+    this.visibilityTimer.unref?.();
+  }
+
+  private clearVisibilityTimer(): void {
+    if (this.visibilityTimer) {
+      clearTimeout(this.visibilityTimer);
+      this.visibilityTimer = null;
+    }
+  }
+
+  private async verifyPublishedService(): Promise<void> {
+    if (this.destroyed || !this.service || this.restarting) {
+      return;
+    }
+    const publishedName = this.serviceName;
+    const activeNames = await this.discoverPublishedNames();
+    if (this.destroyed || !this.service || this.restarting || this.serviceName !== publishedName) {
+      return;
+    }
+    if (!activeNames.has(publishedName)) {
+      this.visibilityFailures += 1;
+      console.warn(`[surf-ace] bonjour publish not visible for "${publishedName}"; retrying`);
+      if (
+        !this.isolatedPublisher &&
+        this.visibilityFailures >= BonjourAdvertiser.VISIBILITY_FAILURES_BEFORE_ISOLATION
+      ) {
+        await this.switchToIsolatedPublisher();
+        return;
+      }
+      await this.restart();
+      return;
+    }
+    this.visibilityFailures = 0;
+    this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
   }
 
   private isNameConflict(error: Error): boolean {
@@ -166,5 +240,82 @@ export class BonjourAdvertiser {
     });
     browser.stop();
     return names;
+  }
+
+  private async switchToIsolatedPublisher(): Promise<void> {
+    if (this.destroyed) {
+      return;
+    }
+    console.warn("[surf-ace] switching bonjour publishing to isolated node helper");
+    await new Promise<void>((resolve) => {
+      this.bonjour.unpublishAll(() => resolve());
+    });
+    this.service = null;
+    await this.publishWithIsolatedPublisher(this.serviceName);
+  }
+
+  private async publishWithIsolatedPublisher(name: string): Promise<void> {
+    const publisher = this.ensureIsolatedPublisher();
+    this.serviceName = name;
+    publisher.send({
+      name,
+      port: this.port,
+      txt: this.txtProvider(),
+      type: "publish",
+    });
+    this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_DELAY_MS);
+  }
+
+  private ensureIsolatedPublisher(): ChildProcess {
+    if (this.isolatedPublisher && !this.isolatedPublisher.killed) {
+      return this.isolatedPublisher;
+    }
+    const publisherScript = path.join(__dirname, "bonjour-publisher.cjs");
+    const child = spawn(
+      this.isolatedPublisherExecutable(),
+      [publisherScript],
+      {
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "1",
+        },
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      },
+    );
+    child.stderr?.on("data", (chunk) => {
+      process.stderr.write(chunk);
+    });
+    child.on("exit", () => {
+      if (this.isolatedPublisher === child) {
+        this.isolatedPublisher = null;
+      }
+    });
+    this.isolatedPublisher = child;
+    return child;
+  }
+
+  private isolatedPublisherExecutable(): string {
+    const preferredNodePaths = [
+      "/opt/homebrew/bin/node",
+      "/usr/local/bin/node",
+    ];
+    for (const candidate of preferredNodePaths) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    return process.execPath;
+  }
+
+  private stopIsolatedPublisher(): void {
+    const child = this.isolatedPublisher;
+    this.isolatedPublisher = null;
+    if (!child || child.killed) {
+      return;
+    }
+    child.send({ type: "stop" });
+    setTimeout(() => {
+      child.kill();
+    }, 500).unref?.();
   }
 }

@@ -1998,6 +1998,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     if (
+      isResumeSessionMismatch(response) &&
+      !surface.hasPairedInGatewaySession
+    ) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
+      );
+      response = await sendPairRequest(true, null);
+    }
+
+    if (
       isErrorResponse(response) &&
       response.error.code === "busy" &&
       !surface.hasPairedInGatewaySession
