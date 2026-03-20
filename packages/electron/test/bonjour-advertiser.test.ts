@@ -70,7 +70,10 @@ class FakeBonjour {
 }
 
 test("bonjour advertiser republishes with a suffixed name after a name conflict", async () => {
-  const bonjour = new FakeBonjour([["TARS Surf Ace"]]);
+  const bonjour = new FakeBonjour([
+    ["TARS Surf Ace"],
+    ["TARS Surf Ace (2)"],
+  ]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
     name: "TARS Surf Ace",
@@ -85,12 +88,15 @@ test("bonjour advertiser republishes with a suffixed name after a name conflict"
 
   assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace (2)"]);
   assert.equal(bonjour.findCalls, 1);
+  await advertiser.stop();
 });
 
 test("bonjour advertiser keeps incrementing the suffix across repeated conflicts", async () => {
   const bonjour = new FakeBonjour([
     ["TARS Surf Ace"],
+    ["TARS Surf Ace (2)"],
     ["TARS Surf Ace", "TARS Surf Ace (2)"],
+    ["TARS Surf Ace (3)"],
   ]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
@@ -113,4 +119,5 @@ test("bonjour advertiser keeps incrementing the suffix across repeated conflicts
     "TARS Surf Ace (3)",
   ]);
   assert.equal(bonjour.unpublishCalls, 1);
+  await advertiser.stop();
 });
