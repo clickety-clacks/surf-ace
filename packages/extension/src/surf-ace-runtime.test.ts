@@ -681,6 +681,55 @@ async function withRuntimeHarness(
 }
 
 test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
+  await t.test("only one process owns the shared runtime lease", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port);
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-lease-"));
+    const discoveryA = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const discoveryB = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const infoMessagesA: string[] = [];
+    const infoMessagesB: string[] = [];
+    const runtimeA = createSurfAceRuntime({
+      discovery: discoveryA,
+      logger: {
+        info: (message: string) => {
+          infoMessagesA.push(message);
+        },
+      },
+      stateDir,
+    });
+    const runtimeB = createSurfAceRuntime({
+      discovery: discoveryB,
+      logger: {
+        info: (message: string) => {
+          infoMessagesB.push(message);
+        },
+      },
+      stateDir,
+    });
+
+    try {
+      await runtimeA.start();
+      await waitFor(() => server.pairedSocket !== null);
+      await runtimeB.start();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const screensA = await runtimeA.listScreens();
+      const screensB = await runtimeB.listScreens();
+      assert.equal(server.pairRequests.length, 1);
+      assert.equal(screensA[0]?.connectionState, "connected");
+      assert.deepEqual(screensB, []);
+      assert.ok(
+        infoMessagesB.some((message) => message.includes("passive process")),
+      );
+    } finally {
+      await runtimeB.stop();
+      await runtimeA.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("listScreens exposes only the CLU surface fields and local pane ids", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const screens = await runtime.listScreens();
