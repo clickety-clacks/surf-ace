@@ -294,8 +294,6 @@ export interface SurfAceRuntime {
 }
 
 type MutablePaneBuffer = {
-  alertFired: boolean;
-  alertFiredAt: number | null;
   closedFrames: SurfAceFrame[];
   currentUrl: string | null;
   liveDirtyStrokeIds: string[];
@@ -331,6 +329,8 @@ type ManagedPane = {
 };
 
 type ManagedSurface = {
+  alertFired: boolean;
+  alertFiredAt: number | null;
   autoRetryEnabled: boolean;
   client: SurfAceWireClient | null;
   connectionState: SurfAceConnectionState;
@@ -471,8 +471,6 @@ function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {
 
 function createPaneBuffer(): MutablePaneBuffer {
   return {
-    alertFired: false,
-    alertFiredAt: null,
     closedFrames: [],
     currentUrl: null,
     lastNavigation: null,
@@ -920,8 +918,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       taps: structuredClone(pane.buffer.taps),
     };
 
-    pane.buffer.alertFired = false;
-    pane.buffer.alertFiredAt = null;
+    const surface = this.surfaces.get(input.fingerprint);
+    if (surface) {
+      surface.alertFired = false;
+      surface.alertFiredAt = null;
+    }
     pane.buffer.liveDirtyStrokeIds = [];
     pane.buffer.overflowed = false;
     pane.buffer.lastNavigation = null;
@@ -1164,23 +1165,73 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private maybeFireAnnotationAlert(surface: ManagedSurface, pane: ManagedPane): void {
+    void pane;
     const now = this.now();
+    const { liveDirtyStrokeCount, queuedFrameCount } = this.countUnreadAnnotationActivity(surface);
+    if (liveDirtyStrokeCount === 0 && queuedFrameCount === 0) {
+      return;
+    }
     if (
-      pane.buffer.alertFired &&
-      pane.buffer.alertFiredAt !== null &&
-      now - pane.buffer.alertFiredAt < ALERT_RESET_TIMEOUT_MS
+      surface.alertFired &&
+      surface.alertFiredAt !== null &&
+      now - surface.alertFiredAt >= ALERT_RESET_TIMEOUT_MS
+    ) {
+      surface.alertFired = false;
+      surface.alertFiredAt = null;
+    }
+    if (
+      surface.alertFired &&
+      surface.alertFiredAt !== null &&
+      now - surface.alertFiredAt < ALERT_RESET_TIMEOUT_MS
     ) {
       return;
     }
 
-    pane.buffer.alertFired = true;
-    pane.buffer.alertFiredAt = now;
+    surface.alertFired = true;
+    surface.alertFiredAt = now;
     this.runBackgroundTask(
       `annotation alert for ${surface.surfaceId}`,
       async () => {
-        await this.postAnnotationAlert(`Surf Ace updates pending on ${surface.name}`);
+        await this.postAnnotationAlert(
+          this.buildAnnotationAlertMessage(surface.name, liveDirtyStrokeCount, queuedFrameCount),
+        );
       },
     );
+  }
+
+  private countUnreadAnnotationActivity(surface: ManagedSurface): {
+    liveDirtyStrokeCount: number;
+    queuedFrameCount: number;
+  } {
+    let liveDirtyStrokeCount = 0;
+    let queuedFrameCount = 0;
+    for (const pane of surface.panes.values()) {
+      liveDirtyStrokeCount += pane.buffer.liveDirtyStrokeIds.length;
+      queuedFrameCount += pane.buffer.closedFrames.length;
+    }
+    return { liveDirtyStrokeCount, queuedFrameCount };
+  }
+
+  private buildAnnotationAlertMessage(
+    surfaceName: string,
+    liveDirtyStrokeCount: number,
+    queuedFrameCount: number,
+  ): string {
+    const details: string[] = [];
+    if (liveDirtyStrokeCount > 0) {
+      details.push(
+        `${liveDirtyStrokeCount} live ${liveDirtyStrokeCount === 1 ? "dirty stroke" : "dirty strokes"}`,
+      );
+    }
+    if (queuedFrameCount > 0) {
+      details.push(
+        `${queuedFrameCount} queued ${queuedFrameCount === 1 ? "frame" : "frames"}`,
+      );
+    }
+    if (details.length === 0) {
+      return `Surf Ace updates pending on ${surfaceName}`;
+    }
+    return `Surf Ace updates pending on ${surfaceName} (${details.join(", ")})`;
   }
 
   private async postAnnotationAlert(message: string): Promise<void> {
@@ -1300,6 +1351,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const existing = this.surfaces.get(event.payload.surfaceId);
     const windowLabel = this.ensureWindowLabel(event.payload.surfaceId);
     const surface = existing ?? {
+      alertFired: false,
+      alertFiredAt: null,
       autoRetryEnabled: true,
       client: null,
       connectionState: "connecting" as SurfAceConnectionState,
@@ -1913,6 +1966,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const windowLabel = this.ensureWindowLabel(surfaceId);
     const surface: ManagedSurface = {
+      alertFired: false,
+      alertFiredAt: null,
       autoRetryEnabled: true,
       client: null,
       connectionState: "connecting",
