@@ -1165,7 +1165,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private maybeFireAnnotationAlert(surface: ManagedSurface, pane: ManagedPane): void {
-    void pane;
     const now = this.now();
     const { liveDirtyStrokeCount, queuedFrameCount } = this.countUnreadAnnotationActivity(surface);
     if (liveDirtyStrokeCount === 0 && queuedFrameCount === 0) {
@@ -1194,6 +1193,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       async () => {
         await this.postAnnotationAlert(
           this.buildAnnotationAlertMessage(surface.name, liveDirtyStrokeCount, queuedFrameCount),
+          pane.ownerSessionKey ?? DEFAULT_ALERT_SESSION_KEY,
         );
       },
     );
@@ -1234,7 +1234,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return `Surf Ace updates pending on ${surfaceName} (${details.join(", ")})`;
   }
 
-  private async postAnnotationAlert(message: string): Promise<void> {
+  private async postAnnotationAlert(message: string, sessionKey: string): Promise<void> {
     try {
       await fetch(ALERT_ENDPOINT_URL, {
         method: "POST",
@@ -1244,7 +1244,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         body: JSON.stringify({
           message,
           noOverlay: true,
-          sessionKey: DEFAULT_ALERT_SESSION_KEY,
+          sessionKey,
         }),
       });
     } catch {

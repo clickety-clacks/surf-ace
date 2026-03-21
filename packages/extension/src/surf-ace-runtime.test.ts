@@ -911,7 +911,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.deepEqual(alertBodies[0], {
           message: "Surf Ace updates pending on Surface A (1 live dirty stroke)",
           noOverlay: true,
-          sessionKey: "agent:main:main",
+          sessionKey: "agent:test:2",
         });
 
         server.sendDrawingFlush(server.initialRemotePaneId, third.contentId);
@@ -1103,7 +1103,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(alertBodies[0], {
         message: "Surf Ace updates pending on Surface A (1 live dirty stroke)",
         noOverlay: true,
-        sessionKey: "agent:main:main",
+        sessionKey: "agent:test:fresh",
       });
 
       const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: 1 });
@@ -1170,7 +1170,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.deepEqual(alertBodies[0], {
           message: "Surf Ace updates pending on Surface A (1 live dirty stroke)",
           noOverlay: true,
-          sessionKey: "agent:main:main",
+          sessionKey: "agent:test:alert-1",
         });
 
         const split = await runtime.split({
@@ -1206,7 +1206,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.deepEqual(alertBodies[1], {
           message: "Surf Ace updates pending on Surface A (2 live dirty strokes)",
           noOverlay: true,
-          sessionKey: "agent:main:main",
+          sessionKey: "agent:test:alert-2",
         });
 
         await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
@@ -1216,7 +1216,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.deepEqual(alertBodies[2], {
           message: "Surf Ace updates pending on Surface A (3 live dirty strokes)",
           noOverlay: true,
-          sessionKey: "agent:main:main",
+          sessionKey: "agent:test:alert-2",
         });
       },
     });
