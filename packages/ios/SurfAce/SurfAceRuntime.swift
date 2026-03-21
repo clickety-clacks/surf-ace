@@ -822,7 +822,17 @@ final class SurfAceRuntime {
         let sessionId: String
 
         if let ownershipLock {
-            if ownershipLock.providerId == providerId {
+            if takeover {
+                resumed = false
+                sessionId = randomHex(prefix: "sa", byteCount: 12)
+                if let activeSession, activeSession.connectionUUID != connectionUUID {
+                    Task {
+                        await activeSession.socket.close(code: 1000, reason: "superseded")
+                    }
+                    activeSessions.removeValue(forKey: surfaceId)
+                    lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
+                }
+            } else if ownershipLock.providerId == providerId {
                 guard resumeSessionId == ownershipLock.sessionId else {
                     return makeErrorResponse(
                         op: "pair.request",
@@ -841,23 +851,12 @@ final class SurfAceRuntime {
                     lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
                 }
             } else {
-                guard takeover else {
-                    return makeErrorResponse(
-                        op: "pair.request",
-                        id: id,
-                        code: "busy",
-                        message: "surface ownership lock is held by another provider"
-                    )
-                }
-                resumed = false
-                sessionId = randomHex(prefix: "sa", byteCount: 12)
-                if let activeSession, activeSession.connectionUUID != connectionUUID {
-                    Task {
-                        await activeSession.socket.close(code: 1000, reason: "superseded")
-                    }
-                    activeSessions.removeValue(forKey: surfaceId)
-                    lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
-                }
+                return makeErrorResponse(
+                    op: "pair.request",
+                    id: id,
+                    code: "busy",
+                    message: "surface ownership lock is held by another provider"
+                )
             }
         } else {
             resumed = false
