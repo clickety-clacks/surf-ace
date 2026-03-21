@@ -350,6 +350,7 @@ type ManagedSurface = {
   recentEventIds: string[];
   recentEventIdsSet: Set<string>;
   reconnectAttempt: number;
+  retryDelayResolver: (() => void) | null;
   sessionId: SessionId | null;
   snapshotBufferedEvents: Event[];
   snapshotSyncInFlight: boolean;
@@ -1372,6 +1373,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       recentEventIds: [],
       recentEventIdsSet: new Set<string>(),
       reconnectAttempt: 0,
+      retryDelayResolver: null,
       sessionId: null,
       snapshotBufferedEvents: [],
       snapshotSyncInFlight: false,
@@ -1991,6 +1993,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       recentEventIds: [],
       recentEventIdsSet: new Set<string>(),
       reconnectAttempt: 0,
+      retryDelayResolver: null,
       sessionId: null,
       snapshotBufferedEvents: [],
       snapshotSyncInFlight: false,
@@ -2019,6 +2022,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private assignEndpoint(surface: ManagedSurface, endpoint: SurfAceDiscoveryEndpoint): void {
     const previousEndpointId = surface.endpointId;
+    const endpointChanged = previousEndpointId !== endpoint.endpointId;
     surface.endpoint = endpoint;
     surface.endpointId = endpoint.endpointId;
     surface.fingerprintPrefix = endpoint.fingerprintPrefix;
@@ -2026,9 +2030,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.name = endpoint.name;
     surface.viewport = cloneViewport(endpoint.viewport);
 
-    if (previousEndpointId === endpoint.endpointId) {
+    if (!endpointChanged) {
       return;
     }
+
+    surface.reconnectAttempt = 0;
+    surface.unreachableFailures = 0;
+    if (surface.connectionState !== "connected") {
+      surface.connectionState = "connecting";
+    }
+    if (surface.connectionState !== "connected") {
+      this.runBackgroundTask(
+        `refresh surface client after endpoint change ${surface.surfaceId}`,
+        async () => {
+          if (surface.client) {
+            await this.closeSurfaceClient(surface, surface.client, clampCloseReason("provider_shutdown"));
+          }
+        },
+      );
+    }
+    this.wakeSurfaceRetry(surface);
 
     this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
     if (this.persistentState.endpointSurfaces[previousEndpointId] === surface.surfaceId) {
@@ -2341,8 +2362,30 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.reconnectAttempt += 1;
       const delay = nextReconnectDelayMs(attempt);
       const jitter = Math.floor(Math.random() * 250);
-      await sleep(delay + jitter);
+      await this.waitForSurfaceRetry(surface, delay + jitter);
     }
+  }
+
+  private async waitForSurfaceRetry(surface: ManagedSurface, delayMs: number): Promise<void> {
+    await Promise.race([
+      sleep(delayMs),
+      new Promise<void>((resolve) => {
+        const wake = () => {
+          if (surface.retryDelayResolver === wake) {
+            surface.retryDelayResolver = null;
+          }
+          resolve();
+        };
+        surface.retryDelayResolver = wake;
+      }),
+    ]);
+    surface.retryDelayResolver = null;
+  }
+
+  private wakeSurfaceRetry(surface: ManagedSurface): void {
+    const resolve = surface.retryDelayResolver;
+    surface.retryDelayResolver = null;
+    resolve?.();
   }
 
   private async assignSurfaceClient(surface: ManagedSurface, nextClient: SurfAceWireClient): Promise<void> {

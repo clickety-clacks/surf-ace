@@ -1445,6 +1445,38 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("endpoint url changes reset backoff and wake a sleeping worker immediately", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const replacementPort = nextPort++;
+      const replacementServer = new FakeSurfAceWsServer(replacementPort);
+
+      try {
+        const internalRuntime = runtime as any;
+        const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(originalSurface);
+        assert.ok(originalSurface.client);
+
+        await originalSurface.client.close(1000, "test_endpoint_url_change_wake");
+        await server.close();
+
+        await waitFor(() => originalSurface.reconnectAttempt >= 1, 12_000);
+        originalSurface.reconnectAttempt = 4;
+        originalSurface.unreachableFailures = 3;
+
+        internalRuntime.refreshEndpointTopology(discoveryEndpoint(replacementPort));
+
+        assert.equal(originalSurface.endpointId, `endpoint-${replacementPort}`);
+        assert.equal(originalSurface.reconnectAttempt, 0);
+        assert.equal(originalSurface.unreachableFailures, 0);
+
+        await waitFor(() => replacementServer.pairedSocket !== null, 3_000);
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 3_000);
+      } finally {
+        await replacementServer.close();
+      }
+    });
+  });
+
   await t.test("stored surface identity reuses the existing worker when endpoint ids churn", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const replacementPort = nextPort++;
