@@ -1462,6 +1462,23 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("discovery recreates a stopped surface when the endpoint reappears", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(originalSurface);
+
+      originalSurface.stopRequested = true;
+      internalRuntime.refreshEndpointTopology(structuredClone(originalSurface.endpoint));
+
+      const recreatedSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(recreatedSurface);
+      assert.notEqual(recreatedSurface, originalSurface);
+      assert.equal(recreatedSurface.stopRequested, false);
+      assert.equal(recreatedSurface.endpointId, originalSurface.endpointId);
+    });
+  });
+
   await t.test("pair response replaces stale local panes from prior sessions", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const split = await runtime.split({

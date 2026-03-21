@@ -1922,7 +1922,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private refreshEndpointTopology(endpoint: SurfAceDiscoveryEndpoint): void {
     // Spec §6.1: connect → pair.request directly (surfaces.list is optional and not required
     // for single-window endpoints; Electron returns errors on the pre-flight WS connection).
-    const existing = [...this.surfaces.values()].find((s) => s.endpointId === endpoint.endpointId);
+    const existing = this.reusableSurface(
+      [...this.surfaces.values()].find((s) => s.endpointId === endpoint.endpointId),
+    );
 
     if (existing) {
       this.assignEndpoint(existing, endpoint);
@@ -1930,9 +1932,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    const existingByFingerprint = endpoint.fingerprintPrefix
-      ? [...this.surfaces.values()].find((s) => s.fingerprintPrefix === endpoint.fingerprintPrefix)
-      : undefined;
+    const existingByFingerprint = this.reusableSurface(
+      endpoint.fingerprintPrefix
+        ? [...this.surfaces.values()].find((s) => s.fingerprintPrefix === endpoint.fingerprintPrefix)
+        : undefined,
+    );
 
     if (existingByFingerprint) {
       this.assignEndpoint(existingByFingerprint, endpoint);
@@ -1946,7 +1950,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       ? asSurfaceId(stored)
       : asSurfaceId(`sf_${randomBytes(8).toString("hex")}`);
 
-    const existingByStoredSurfaceId = this.surfaces.get(surfaceId);
+    const existingByStoredSurfaceId = this.reusableSurface(this.surfaces.get(surfaceId));
     if (existingByStoredSurfaceId) {
       this.assignEndpoint(existingByStoredSurfaceId, endpoint);
       this.ensureSurfaceWorker(existingByStoredSurfaceId);
@@ -2000,6 +2004,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     this.surfaces.set(surfaceId, surface);
     this.ensureSurfaceWorker(surface);
+  }
+
+  private reusableSurface(surface: ManagedSurface | undefined): ManagedSurface | undefined {
+    if (!surface) {
+      return undefined;
+    }
+    if (!surface.stopRequested) {
+      return surface;
+    }
+    this.surfaces.delete(surface.surfaceId);
+    return undefined;
   }
 
   private assignEndpoint(surface: ManagedSurface, endpoint: SurfAceDiscoveryEndpoint): void {
