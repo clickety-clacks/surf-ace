@@ -2244,20 +2244,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     this.logger.warn?.(
-      `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; clearing stored endpoint surface mapping and retrying fresh pair`,
+      `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
     );
-    if (this.persistentState.endpointSurfaces?.[surface.endpointId]) {
-      delete this.persistentState.endpointSurfaces[surface.endpointId];
-      this.runBackgroundTask(
-        `persist cleared stale endpoint mapping ${surface.endpointId}`,
-        async () => {
-          await this.persistState();
-        },
-      );
-    }
     surface.sessionId = null;
-    await this.discoverSurfaceId(surface);
-    return sendPairRequest(false, null);
+    return sendPairRequest(true, null);
   }
 
   private requestEnvelope<TOp extends Request["op"]>(

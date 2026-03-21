@@ -1690,7 +1690,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("invalid_resume after a cold-start reconnect immediately falls through to a fresh pair", async () => {
+  await t.test("invalid_resume after a cold-start reconnect retries once with takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1711,17 +1711,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
-        [false, false],
+        [false, true],
       );
       assert.ok(
         warnings.some((warning) =>
-          warning.includes("clearing stored endpoint surface mapping and retrying fresh pair")),
+          warning.includes("retrying with takeover")),
       );
       assert.equal(surface.sessionId, "sa_test_session");
     });
   });
 
-  await t.test("cold-start invalid_resume clears stale endpoint mapping before the first fresh-pair fallback", async () => {
+  await t.test("cold-start invalid_resume preserves endpoint mapping while reclaiming with takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1742,15 +1742,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.deepEqual(
         server.pairAttemptDetails.slice(1).map((attempt) => attempt.takeover),
-        [false, false],
+        [false, true],
       );
       assert.ok(
         warnings.some((warning) =>
-          warning.includes("clearing stored endpoint surface mapping and retrying fresh pair")),
+          warning.includes("retrying with takeover")),
       );
       assert.equal(
         internalRuntime.persistentState.endpointSurfaces?.[surface.endpointId],
-        server.surfaceId,
+        "sf_stale_surface",
       );
       assert.equal(surface.sessionId, "sa_test_session");
     });
