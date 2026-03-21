@@ -120,12 +120,27 @@ actor SurfAceWebSocket {
     private let connection: NWConnection
     private let queue: DispatchQueue
     private var buffer = Data()
+    private var closeHandlers: [@Sendable () -> Void] = []
     private var isClosed = false
     private let maxFrameBytes = 16 * 1024 * 1024
 
     init(connection: NWConnection, queue: DispatchQueue) {
         self.connection = connection
         self.queue = queue
+    }
+
+    func setCloseHandler(_ handler: @escaping @Sendable () -> Void) {
+        closeHandlers.append(handler)
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .failed, .cancelled:
+                Task {
+                    await self.markClosedIfNeeded()
+                }
+            default:
+                break
+            }
+        }
     }
 
     func receive() async throws -> Message? {
@@ -138,7 +153,7 @@ actor SurfAceWebSocket {
                     }
                     return .text(text)
                 case 0x8:
-                    isClosed = true
+                    markClosedIfNeeded()
                     return .close(code: closeCode(from: parsed.payload), reason: closeReason(from: parsed.payload))
                 case 0x9:
                     try await sendFrame(opcode: 0xA, payload: parsed.payload)
@@ -152,7 +167,7 @@ actor SurfAceWebSocket {
 
             let chunk = try await receiveChunk()
             guard let chunk else {
-                isClosed = true
+                markClosedIfNeeded()
                 return nil
             }
             buffer.append(chunk)
@@ -171,7 +186,7 @@ actor SurfAceWebSocket {
             connection.cancel()
             return
         }
-        isClosed = true
+        markClosedIfNeeded()
         var payload = Data()
         payload.appendUInt16(code)
         if !reason.isEmpty {
@@ -210,6 +225,16 @@ actor SurfAceWebSocket {
                     continuation.resume()
                 }
             })
+        }
+    }
+
+    private func markClosedIfNeeded() {
+        guard !isClosed else { return }
+        isClosed = true
+        let handlers = closeHandlers
+        closeHandlers.removeAll()
+        for handler in handlers {
+            handler()
         }
     }
 
