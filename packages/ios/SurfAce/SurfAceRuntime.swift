@@ -98,6 +98,7 @@ private struct SurfAceOwnershipLockState {
 @MainActor
 @Observable
 final class SurfAceRuntime {
+    private let fixedServerPort: UInt16 = 19_001
     var screenName: String
     var fingerprint: String
     var instanceDisambiguator: String
@@ -179,6 +180,7 @@ final class SurfAceRuntime {
 
         do {
             let port = try await server.start(
+                port: fixedServerPort,
                 webSocketPath: webSocketPath,
                 httpHandler: { [weak self] request in
                     guard let self else { return HTTPServerResponse(statusCode: 500) }
@@ -197,7 +199,7 @@ final class SurfAceRuntime {
             startHeartbeatWatchdog()
             publishBonjour()
         } catch {
-            endpointError = "Server failed: \(error.localizedDescription)"
+            endpointError = "Server failed on port \(fixedServerPort): \(error.localizedDescription)"
         }
     }
 
