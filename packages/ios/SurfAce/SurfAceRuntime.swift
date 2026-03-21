@@ -620,6 +620,12 @@ final class SurfAceRuntime {
         var replayCache: [String: SurfAceRequestReplayEntry] = [:]
         var replayOrder: [String] = []
 
+        await socket.setCloseHandler { [weak self] in
+            Task { @MainActor in
+                await self?.handleSocketTermination(connectionUUID: connectionUUID)
+            }
+        }
+
         while true {
             do {
                 guard let message = try await socket.receive() else {
@@ -1480,13 +1486,21 @@ final class SurfAceRuntime {
 
     private func refreshConnectionState(surfaceId: String) {
         guard let surface = surfaceById[surfaceId] else { return }
-        if activeSessions[surfaceId] != nil {
+        if hasLiveActiveSession(surfaceId: surfaceId) {
             surface.connectionBarState = .connected
         } else if ownershipLocksBySurfaceId[surfaceId] != nil {
             surface.connectionBarState = .connecting
         } else {
             surface.connectionBarState = .disconnected
         }
+    }
+
+    private func hasLiveActiveSession(surfaceId: String) -> Bool {
+        guard let session = activeSessions[surfaceId],
+              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
+            return false
+        }
+        return ownershipLock.providerId == session.providerId && ownershipLock.sessionId == session.sessionId
     }
 
     private func mutationAck(id: String, op: String, paneId: Int, entry: SurfAcePaneEntry) -> [String: Any] {

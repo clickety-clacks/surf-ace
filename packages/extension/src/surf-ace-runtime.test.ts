@@ -105,6 +105,8 @@ class FakeSurfAceWsServer {
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
   maxConcurrentSocketCount = 0;
+  invalidResumeTakeoverResponsesRemaining = 0;
+  invalidResumeWithoutTakeoverResponsesRemaining = 0;
   rejectNextResumePairWithSessionMismatch = false;
   resumePairMismatchResponsesRemaining = 0;
   resumePairMismatchMessage = "Resume session did not match active ownership lock";
@@ -273,6 +275,34 @@ class FakeSurfAceWsServer {
                 "pair.request",
                 "busy",
                 "Surface is already paired",
+              ),
+            ),
+          );
+          return;
+        }
+        if (this.invalidResumeWithoutTakeoverResponsesRemaining > 0 && !message.payload?.takeover) {
+          this.invalidResumeWithoutTakeoverResponsesRemaining -= 1;
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "pair.request",
+                "invalid_resume",
+                this.resumePairMismatchMessage,
+              ),
+            ),
+          );
+          return;
+        }
+        if (this.invalidResumeTakeoverResponsesRemaining > 0 && message.payload?.takeover) {
+          this.invalidResumeTakeoverResponsesRemaining -= 1;
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "pair.request",
+                "invalid_resume",
+                this.resumePairMismatchMessage,
               ),
             ),
           );
@@ -1668,6 +1698,42 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.ok(
         warnings.some((warning) => warning.includes("invalid_resume on cold-start reconnect")),
+      );
+      assert.equal(surface.sessionId, "sa_test_session");
+    });
+  });
+
+  await t.test("repeated cold-start takeover failures clear stale endpoint mapping and retry as a fresh pair", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      surface.hasPairedInGatewaySession = false;
+      surface.sessionId = null;
+      internalRuntime.persistentState.endpointSurfaces = {
+        ...(internalRuntime.persistentState.endpointSurfaces ?? {}),
+        [surface.endpointId]: "sf_stale_surface",
+      };
+
+      server.invalidResumeWithoutTakeoverResponsesRemaining = 3;
+      server.invalidResumeTakeoverResponsesRemaining = 3;
+      await surface.client.close(1000, "test_stale_endpoint_surface_mapping");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 8, 20_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 20_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1).map((attempt) => attempt.takeover),
+        [false, true, false, true, false, true, false],
+      );
+      assert.ok(
+        warnings.some((warning) =>
+          warning.includes("clearing stored endpoint surface mapping and retrying fresh pair")),
+      );
+      assert.equal(
+        internalRuntime.persistentState.endpointSurfaces?.[surface.endpointId],
+        server.surfaceId,
       );
       assert.equal(surface.sessionId, "sa_test_session");
     });
