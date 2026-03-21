@@ -334,7 +334,6 @@ type ManagedSurface = {
   autoRetryEnabled: boolean;
   client: SurfAceWireClient | null;
   connectionState: SurfAceConnectionState;
-  consecutiveColdStartTakeoverFailures: number;
   consecutiveResumeFailures: number;
   connectedAt: number | null;
   endpoint: SurfAceDiscoveryEndpoint;
@@ -391,7 +390,6 @@ const ALERT_RESET_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
 const ALERT_ENDPOINT_URL = "http://localhost:18800/alert";
 const INITIAL_PAIR_PANE_ID = 1 as PaneId;
-const MAX_CONSECUTIVE_COLD_START_TAKEOVER_FAILURES = 3;
 const MAX_CONSECUTIVE_RESUME_FAILURES = 3;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
 const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
@@ -1358,7 +1356,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       autoRetryEnabled: true,
       client: null,
       connectionState: "connecting" as SurfAceConnectionState,
-      consecutiveColdStartTakeoverFailures: 0,
       consecutiveResumeFailures: 0,
       connectedAt: null,
       endpoint: sourceSurface.endpoint,
@@ -1978,7 +1975,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       autoRetryEnabled: true,
       client: null,
       connectionState: "connecting",
-      consecutiveColdStartTakeoverFailures: 0,
       consecutiveResumeFailures: 0,
       connectedAt: null,
       endpoint,
@@ -2029,7 +2025,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.lastSeenAt = this.now();
     surface.name = endpoint.name;
     surface.viewport = cloneViewport(endpoint.viewport);
-    surface.consecutiveColdStartTakeoverFailures = 0;
 
     if (previousEndpointId === endpoint.endpointId) {
       return;
@@ -2167,23 +2162,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     let response = await sendPairRequest(false, resumeSessionId);
 
     if (isResumeSessionMismatch(response) && resumeSessionId) {
-      this.logger.warn?.(
-        `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; retrying fresh owner pair`,
-      );
       this.noteResumeFailure(surface);
-      surface.sessionId = null;
-      response = await sendPairRequest(false, null);
+      response = await this.maybeRecoverFromColdStartInvalidResume(
+        surface,
+        response,
+        sendPairRequest,
+      );
+      if (isResumeSessionMismatch(response)) {
+        this.logger.warn?.(
+          `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; retrying fresh owner pair`,
+        );
+        surface.sessionId = null;
+        response = await sendPairRequest(false, null);
+      }
     }
 
     if (
       isResumeSessionMismatch(response) &&
       !surface.hasPairedInGatewaySession
     ) {
-      this.logger.warn?.(
-        `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
-      );
-      response = await sendPairRequest(true, null);
-      response = await this.maybeRecoverFromColdStartTakeoverFailure(
+      response = await this.maybeRecoverFromColdStartInvalidResume(
         surface,
         response,
         sendPairRequest,
@@ -2199,11 +2197,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         `[surf-ace:runtime] busy on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
       );
       response = await sendPairRequest(true, null);
-      response = await this.maybeRecoverFromColdStartTakeoverFailure(
-        surface,
-        response,
-        sendPairRequest,
-      );
     }
 
     if (isErrorResponse(response)) {
@@ -2213,7 +2206,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return response as PairResponse;
   }
 
-  private async maybeRecoverFromColdStartTakeoverFailure(
+  private async maybeRecoverFromColdStartInvalidResume(
     surface: ManagedSurface,
     response: Response,
     sendPairRequest: (
@@ -2221,19 +2214,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       requestedResumeSessionId: SessionId | null,
     ) => Promise<Response>,
   ): Promise<Response> {
-    if (!isErrorResponse(response) || response.error.code !== "invalid_resume") {
-      surface.consecutiveColdStartTakeoverFailures = 0;
+    if (
+      !isErrorResponse(response) ||
+      response.error.code !== "invalid_resume" ||
+      surface.hasPairedInGatewaySession
+    ) {
       return response;
     }
 
-    surface.consecutiveColdStartTakeoverFailures += 1;
-    if (surface.consecutiveColdStartTakeoverFailures < MAX_CONSECUTIVE_COLD_START_TAKEOVER_FAILURES) {
-      return response;
-    }
-
-    surface.consecutiveColdStartTakeoverFailures = 0;
     this.logger.warn?.(
-      `[surf-ace:runtime] cold-start takeover still failing for ${surface.surfaceId} on ${surface.endpointId}; clearing stored endpoint surface mapping and retrying fresh pair`,
+      `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; clearing stored endpoint surface mapping and retrying fresh pair`,
     );
     if (this.persistentState.endpointSurfaces?.[surface.endpointId]) {
       delete this.persistentState.endpointSurfaces[surface.endpointId];
@@ -2602,7 +2592,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private markPairConnected(surface: ManagedSurface, sessionId: SessionId): void {
-    surface.consecutiveColdStartTakeoverFailures = 0;
     surface.consecutiveResumeFailures = 0;
     surface.connectedAt = this.now();
     surface.autoRetryEnabled = true;

@@ -104,9 +104,8 @@ class FakeSurfAceWsServer {
   snapshotScrollOffset = { x: 0, y: 0 };
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
-  maxConcurrentSocketCount = 0;
-  invalidResumeTakeoverResponsesRemaining = 0;
   invalidResumeWithoutTakeoverResponsesRemaining = 0;
+  maxConcurrentSocketCount = 0;
   rejectNextResumePairWithSessionMismatch = false;
   resumePairMismatchResponsesRemaining = 0;
   resumePairMismatchMessage = "Resume session did not match active ownership lock";
@@ -282,20 +281,6 @@ class FakeSurfAceWsServer {
         }
         if (this.invalidResumeWithoutTakeoverResponsesRemaining > 0 && !message.payload?.takeover) {
           this.invalidResumeWithoutTakeoverResponsesRemaining -= 1;
-          socket.send(
-            JSON.stringify(
-              this.errorResponse(
-                message.id,
-                "pair.request",
-                "invalid_resume",
-                this.resumePairMismatchMessage,
-              ),
-            ),
-          );
-          return;
-        }
-        if (this.invalidResumeTakeoverResponsesRemaining > 0 && message.payload?.takeover) {
-          this.invalidResumeTakeoverResponsesRemaining -= 1;
           socket.send(
             JSON.stringify(
               this.errorResponse(
@@ -1673,7 +1658,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("invalid_resume after a cold-start reconnect retries once with takeover", async () => {
+  await t.test("invalid_resume after a cold-start reconnect immediately falls through to a fresh pair", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1682,7 +1667,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.hasPairedInGatewaySession = false;
       surface.sessionId = null;
 
-      server.resumePairMismatchResponsesRemaining = 1;
+      server.invalidResumeWithoutTakeoverResponsesRemaining = 1;
       await surface.client.close(1000, "test_cold_start_invalid_resume_reclaim");
 
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
@@ -1694,16 +1679,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
-        [false, true],
+        [false, false],
       );
       assert.ok(
-        warnings.some((warning) => warning.includes("invalid_resume on cold-start reconnect")),
+        warnings.some((warning) =>
+          warning.includes("clearing stored endpoint surface mapping and retrying fresh pair")),
       );
       assert.equal(surface.sessionId, "sa_test_session");
     });
   });
 
-  await t.test("repeated cold-start takeover failures clear stale endpoint mapping and retry as a fresh pair", async () => {
+  await t.test("cold-start invalid_resume clears stale endpoint mapping before the first fresh-pair fallback", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1716,16 +1702,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         [surface.endpointId]: "sf_stale_surface",
       };
 
-      server.invalidResumeWithoutTakeoverResponsesRemaining = 3;
-      server.invalidResumeTakeoverResponsesRemaining = 3;
+      server.invalidResumeWithoutTakeoverResponsesRemaining = 1;
       await surface.client.close(1000, "test_stale_endpoint_surface_mapping");
 
-      await waitFor(() => server.pairAttemptDetails.length >= 8, 20_000);
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 20_000);
 
       assert.deepEqual(
         server.pairAttemptDetails.slice(1).map((attempt) => attempt.takeover),
-        [false, true, false, true, false, true, false],
+        [false, false],
       );
       assert.ok(
         warnings.some((warning) =>
