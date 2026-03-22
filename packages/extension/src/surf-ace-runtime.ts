@@ -349,6 +349,7 @@ type ManagedSurface = {
   panes: Map<number, ManagedPane>;
   recentEventIds: string[];
   recentEventIdsSet: Set<string>;
+  reclaimTakeoverOnBusy: boolean;
   reconnectAttempt: number;
   retryDelayResolver: (() => void) | null;
   sessionId: SessionId | null;
@@ -1372,6 +1373,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       panes: new Map<number, ManagedPane>(),
       recentEventIds: [],
       recentEventIdsSet: new Set<string>(),
+      reclaimTakeoverOnBusy: false,
       reconnectAttempt: 0,
       retryDelayResolver: null,
       sessionId: null,
@@ -1992,6 +1994,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       panes: new Map<number, ManagedPane>(),
       recentEventIds: [],
       recentEventIdsSet: new Set<string>(),
+      reclaimTakeoverOnBusy: false,
       reconnectAttempt: 0,
       retryDelayResolver: null,
       sessionId: null,
@@ -2220,6 +2223,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       response = await sendPairRequest(true, null);
     }
 
+    if (
+      isErrorResponse(response) &&
+      response.error.code === "busy" &&
+      surface.reclaimTakeoverOnBusy
+    ) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] busy after a live-session drop for ${surface.surfaceId}; reclaiming with takeover`,
+      );
+      surface.reclaimTakeoverOnBusy = false;
+      response = await sendPairRequest(true, null);
+    }
+
     if (isErrorResponse(response)) {
       throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
     }
@@ -2244,20 +2259,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     this.logger.warn?.(
-      `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; clearing stored endpoint surface mapping and retrying fresh pair`,
+      `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
     );
-    if (this.persistentState.endpointSurfaces?.[surface.endpointId]) {
-      delete this.persistentState.endpointSurfaces[surface.endpointId];
-      this.runBackgroundTask(
-        `persist cleared stale endpoint mapping ${surface.endpointId}`,
-        async () => {
-          await this.persistState();
-        },
-      );
-    }
     surface.sessionId = null;
-    await this.discoverSurfaceId(surface);
-    return sendPairRequest(false, null);
+    return sendPairRequest(true, null);
   }
 
   private requestEnvelope<TOp extends Request["op"]>(
@@ -2639,15 +2644,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.connectedAt = this.now();
     surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
+    surface.reclaimTakeoverOnBusy = false;
     surface.sessionId = sessionId;
   }
 
   private noteConnectionEnded(surface: ManagedSurface): void {
+    const hadLiveSession = surface.connectedAt !== null;
     if (surface.connectedAt && this.now() - surface.connectedAt >= STABLE_CONNECTION_RESET_MS) {
       surface.reconnectAttempt = 0;
       surface.unreachableFailures = 0;
     }
     surface.connectedAt = null;
+    if (hadLiveSession && surface.hasPairedInGatewaySession && surface.autoRetryEnabled) {
+      surface.reclaimTakeoverOnBusy = true;
+    }
   }
 
   private noteResumeFailure(surface: ManagedSurface): void {

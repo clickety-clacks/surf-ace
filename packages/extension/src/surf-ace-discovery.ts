@@ -1,4 +1,5 @@
 import { Bonjour, type Browser, type Service } from "bonjour-service";
+import { spawn } from "node:child_process";
 import type { SurfaceViewport } from "../../protocol/src/index.js";
 
 const SURF_ACE_SERVICE_TYPE = "surf-ace";
@@ -71,6 +72,155 @@ function rawServiceHost(service: Service): string {
   return service.host.replace(/\.$/, "").trim();
 }
 
+function decodeDnsSdEscapes(value: string): string {
+  return value
+    .replace(/\\([0-7]{3})/g, (_match, octal: string) =>
+      String.fromCharCode(Number.parseInt(octal, 8)))
+    .replace(/\\(.)/g, "$1");
+}
+
+function parseDnsSdTxtRecord(line: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const matcher = /(^|\s)([A-Za-z0-9_-]+)=((?:\\.|[^\s])+)/g;
+  for (const match of line.matchAll(matcher)) {
+    const key = match[2];
+    const rawValue = match[3];
+    if (!key || rawValue === undefined) {
+      continue;
+    }
+    result[key] = decodeDnsSdEscapes(rawValue);
+  }
+  return result;
+}
+
+function endpointFromResolvedService(params: {
+  host: string;
+  instanceName: string;
+  now: () => number;
+  port: number;
+  txt: Record<string, string>;
+}): SurfAceDiscoveryEndpoint {
+  const host = params.host.replace(/\.$/, "").trim();
+  const wsPath = normalizeWsPath(params.txt.ws);
+  const endpointId = `${host}:${params.port}${wsPath}`;
+
+  return {
+    busy: params.txt.busy === "1",
+    capabilitiesBitmask: parseIntSafe(params.txt.cap, 0),
+    endpointId,
+    fingerprintPrefix: params.txt.pk?.trim().toLowerCase() ?? "",
+    host,
+    instanceName: params.instanceName,
+    lastSeenAt: params.now(),
+    name: params.txt.name?.trim() || params.instanceName,
+    port: params.port,
+    protocolVersion: parseIntSafe(params.txt.v, 1),
+    viewport: {
+      height: parseIntSafe(params.txt.h, 0),
+      scale: parseIntSafe(params.txt.s, 1),
+      width: parseIntSafe(params.txt.w, 0),
+    },
+    wsPath,
+  };
+}
+
+async function runDnsSd(args: string[], timeoutMs: number): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn("dns-sd", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      finish(() => reject(error));
+    });
+    child.on("close", (code, signal) => {
+      finish(() => {
+        if (code === 0 || signal === "SIGTERM") {
+          resolve(stdout);
+          return;
+        }
+        reject(new Error(`dns-sd ${args.join(" ")} failed (${code ?? signal}): ${stderr.trim() || stdout.trim()}`));
+      });
+    });
+  });
+}
+
+function parseDnsSdBrowseOutput(output: string): string[] {
+  const names = new Set<string>();
+  for (const rawLine of output.split(/\r?\n/)) {
+    if (!rawLine.includes("_surf-ace._tcp.") || !rawLine.includes("Add")) {
+      continue;
+    }
+    const match = rawLine.match(/_surf-ace\._tcp\.\s+(.*)$/);
+    if (!match?.[1]) {
+      continue;
+    }
+    names.add(decodeDnsSdEscapes(match[1].trim()));
+  }
+  return [...names];
+}
+
+function parseDnsSdLookupOutput(
+  instanceName: string,
+  output: string,
+  now: () => number,
+): SurfAceDiscoveryEndpoint | null {
+  let host: string | null = null;
+  let port: number | null = null;
+  let txt: Record<string, string> | null = null;
+
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.includes("can be reached at ")) {
+      const match = line.match(/can be reached at (.+):(\d+)\s+\(interface/i);
+      if (match?.[1] && match[2]) {
+        host = decodeDnsSdEscapes(match[1]);
+        port = Number.parseInt(match[2], 10);
+      }
+      continue;
+    }
+
+    if (line.includes(" ws=") || line.startsWith("ws=") || line.includes(" busy=") || line.includes(" pk=")) {
+      txt = parseDnsSdTxtRecord(line);
+    }
+  }
+
+  if (!host || !port) {
+    return null;
+  }
+
+  return endpointFromResolvedService({
+    host,
+    instanceName,
+    now,
+    port,
+    txt: txt ?? {},
+  });
+}
+
 function resolveServiceHost(service: Service): string | null {
   const resolvedAddresses = (service.addresses ?? []).map((address) => address.trim()).filter(Boolean);
   const ipv4Address = resolvedAddresses.find(isIpv4Address);
@@ -91,28 +241,23 @@ function serviceToEndpoint(
   if (!host) {
     return null;
   }
-  const { port } = service;
-  const wsPath = normalizeWsPath(txtStr(txt, "ws"));
-  const endpointId = `${host}:${port}${wsPath}`;
-
-  return {
-    busy: txtStr(txt, "busy") === "1",
-    capabilitiesBitmask: parseIntSafe(txtStr(txt, "cap"), 0),
-    endpointId,
-    fingerprintPrefix: txtStr(txt, "pk")?.trim().toLowerCase() ?? "",
+  return endpointFromResolvedService({
     host,
     instanceName: service.name,
-    lastSeenAt: now(),
-    name: txtStr(txt, "name")?.trim() || service.name,
-    port,
-    protocolVersion: parseIntSafe(txtStr(txt, "v"), 1),
-    viewport: {
-      height: parseIntSafe(txtStr(txt, "h"), 0),
-      scale: parseIntSafe(txtStr(txt, "s"), 1),
-      width: parseIntSafe(txtStr(txt, "w"), 0),
+    now,
+    port: service.port,
+    txt: {
+      busy: txtStr(txt, "busy") ?? "",
+      cap: txtStr(txt, "cap") ?? "",
+      h: txtStr(txt, "h") ?? "",
+      name: txtStr(txt, "name") ?? "",
+      pk: txtStr(txt, "pk") ?? "",
+      s: txtStr(txt, "s") ?? "",
+      v: txtStr(txt, "v") ?? "",
+      w: txtStr(txt, "w") ?? "",
+      ws: txtStr(txt, "ws") ?? "",
     },
-    wsPath,
-  };
+  });
 }
 
 class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
@@ -312,9 +457,48 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
     browser.stop();
     bonjour.destroy();
 
-    return [...services.values()]
+    const endpoints = [...services.values()]
       .map((service) => serviceToEndpoint(service, this.now))
       .filter((endpoint): endpoint is SurfAceDiscoveryEndpoint => endpoint !== null);
+    if (endpoints.length > 0 || process.platform !== "darwin") {
+      return endpoints;
+    }
+
+    return await this.queryCurrentEndpointsViaDnsSd();
+  }
+
+  private async queryCurrentEndpointsViaDnsSd(): Promise<SurfAceDiscoveryEndpoint[]> {
+    try {
+      const browseOutput = await runDnsSd(
+        ["-B", `_${SURF_ACE_SERVICE_TYPE}._tcp`, "local."],
+        this.timeoutMs,
+      );
+      const instanceNames = parseDnsSdBrowseOutput(browseOutput);
+      if (instanceNames.length === 0) {
+        return [];
+      }
+
+      const endpoints = await Promise.all(instanceNames.map(async (instanceName) => {
+        const lookupOutput = await runDnsSd(
+          ["-L", instanceName, `_${SURF_ACE_SERVICE_TYPE}._tcp`, "local."],
+          this.timeoutMs,
+        );
+        return parseDnsSdLookupOutput(instanceName, lookupOutput, this.now);
+      }));
+
+      const resolved = endpoints.filter((endpoint): endpoint is SurfAceDiscoveryEndpoint => endpoint !== null);
+      if (resolved.length > 0) {
+        this.logger.info?.(
+          `[surf-ace:discovery] dns-sd fallback resolved ${resolved.length} surf ace endpoint(s)`,
+        );
+      }
+      return resolved;
+    } catch (error) {
+      this.logger.warn?.(
+        `[surf-ace:discovery] dns-sd fallback failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
   }
 }
 
@@ -347,3 +531,9 @@ export function createBonjourSurfAceDiscoveryService(params?: {
 }): SurfAceDiscoveryService {
   return new BonjourSurfAceDiscoveryService(params);
 }
+
+export const __test = {
+  decodeDnsSdEscapes,
+  parseDnsSdBrowseOutput,
+  parseDnsSdLookupOutput,
+};
