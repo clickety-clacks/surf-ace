@@ -460,11 +460,25 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
     const endpoints = [...services.values()]
       .map((service) => serviceToEndpoint(service, this.now))
       .filter((endpoint): endpoint is SurfAceDiscoveryEndpoint => endpoint !== null);
-    if (endpoints.length > 0 || process.platform !== "darwin") {
+
+    if (process.platform !== "darwin") {
       return endpoints;
     }
 
-    return await this.queryCurrentEndpointsViaDnsSd();
+    // Always supplement with dns-sd on macOS — the JS Bonjour library
+    // conflicts with mDNSResponder and can miss services on other
+    // interfaces or subnets.
+    const dnsSdEndpoints = await this.queryCurrentEndpointsViaDnsSd();
+    if (dnsSdEndpoints.length === 0) {
+      return endpoints;
+    }
+    const knownIds = new Set(endpoints.map((ep) => ep.endpointId));
+    for (const ep of dnsSdEndpoints) {
+      if (!knownIds.has(ep.endpointId)) {
+        endpoints.push(ep);
+      }
+    }
+    return endpoints;
   }
 
   private async queryCurrentEndpointsViaDnsSd(): Promise<SurfAceDiscoveryEndpoint[]> {
@@ -489,13 +503,13 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       const resolved = endpoints.filter((endpoint): endpoint is SurfAceDiscoveryEndpoint => endpoint !== null);
       if (resolved.length > 0) {
         this.logger.info?.(
-          `[surf-ace:discovery] dns-sd fallback resolved ${resolved.length} surf ace endpoint(s)`,
+          `[surf-ace:discovery] dns-sd resolved ${resolved.length} surf ace endpoint(s)`,
         );
       }
       return resolved;
     } catch (error) {
       this.logger.warn?.(
-        `[surf-ace:discovery] dns-sd fallback failed: ${error instanceof Error ? error.message : String(error)}`,
+        `[surf-ace:discovery] dns-sd supplement failed: ${error instanceof Error ? error.message : String(error)}`,
       );
       return [];
     }
