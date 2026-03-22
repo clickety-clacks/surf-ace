@@ -1112,7 +1112,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(alertBodies[1], {
         message: "Surf Ace updates pending on Surface A (1 queued frame)",
         noOverlay: true,
-        sessionKey: "agent:main:main",
+        sessionKey: "agent:test:fresh",
       });
 
       const closedRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
@@ -1358,6 +1358,32 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("discovery churn does not cull a previously paired disconnected surface", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      await surface.client.close(1000, "test_discovery_gap_after_drop");
+      await waitFor(async () => {
+        const screen = (await runtime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
+        return screen ? screen.connectionState !== "connected" : false;
+      }, 12_000);
+
+      discovery.setEndpoints([]);
+      await discovery.refreshNow();
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+
+      const screen = (await runtime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      assert.deepEqual(screen.panes.map((pane) => pane.paneId), [1]);
+      assert.equal(surface.stopRequested, false);
+    });
+  });
+
   await t.test("brief reconnects preserve backoff until a connection has been stable for 30s", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
@@ -1477,7 +1503,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("stored surface identity reuses the existing worker when endpoint ids churn", async () => {
+  await t.test("fingerprint identity reuses the existing worker when endpoint ids churn", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const replacementPort = nextPort++;
       const replacementServer = new FakeSurfAceWsServer(replacementPort);
@@ -1487,11 +1513,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
         assert.ok(originalSurface);
 
-        internalRuntime.persistentState.endpointSurfaces[`endpoint-${replacementPort}`] = server.surfaceId;
         internalRuntime.refreshEndpointTopology({
-          ...discoveryEndpoint(replacementPort, ""),
+          ...discoveryEndpoint(replacementPort, originalSurface.fingerprintPrefix),
           endpointId: `endpoint-${replacementPort}`,
-          fingerprintPrefix: "",
         });
 
         assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
@@ -1752,7 +1776,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("cold-start invalid_resume preserves endpoint mapping while reclaiming with takeover", async () => {
+  await t.test("cold-start invalid_resume ignores legacy endpoint mapping state while reclaiming with takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1761,7 +1785,6 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.hasPairedInGatewaySession = false;
       surface.sessionId = null;
       internalRuntime.persistentState.endpointSurfaces = {
-        ...(internalRuntime.persistentState.endpointSurfaces ?? {}),
         [surface.endpointId]: "sf_stale_surface",
       };
 
@@ -1778,10 +1801,6 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(
         warnings.some((warning) =>
           warning.includes("retrying with takeover")),
-      );
-      assert.equal(
-        internalRuntime.persistentState.endpointSurfaces?.[surface.endpointId],
-        "sf_stale_surface",
       );
       assert.equal(surface.sessionId, "sa_test_session");
     });
