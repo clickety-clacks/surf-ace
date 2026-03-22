@@ -2340,6 +2340,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         } catch (error) {
           this.noteConnectionEnded(surface);
           surface.unreachableFailures += 1;
+          // If the pair failed due to a stale resume/ownership lock, clear the
+          // stale sessionId so the next attempt goes in fresh with no resume.
+          // Without this, the worker loops forever re-sending the same rejected
+          // sessionId every retry interval.
+          if (
+            error instanceof SurfAceToolError &&
+            (error.code === "busy" || error.message.toLowerCase().includes("ownership lock") || error.message.toLowerCase().includes("resume"))
+          ) {
+            if (surface.sessionId !== null) {
+              this.logger.warn?.(
+                `[surf-ace:runtime] clearing stale sessionId for ${surface.surfaceId} after ownership lock / resume mismatch`,
+              );
+              surface.sessionId = null;
+              surface.hasPairedInGatewaySession = false;
+            }
+          }
           await this.refreshEndpointAfterConnectFailure(surface, error);
           if (surface.connectionState !== "connected") {
             surface.connectionState =
