@@ -364,7 +364,6 @@ type ManagedSurface = {
 };
 
 type RuntimeStateFile = {
-  endpointSurfaces?: Record<string, string>;
   nextPaneId: number;
   nextWindowLabelIndex: number;
   providerId: string;
@@ -449,6 +448,11 @@ function makeConnectionId(): ConnectionId {
 
 function makeProviderId(value: string): ProviderId {
   return value as ProviderId;
+}
+
+function makeProvisionalSurfaceId(endpointId: string): SurfaceId {
+  const digest = createHash("sha256").update(endpointId).digest("hex").slice(0, 16);
+  return `sf_disc_${digest}` as SurfaceId;
 }
 
 function makeContentId(): ContentId {
@@ -1262,7 +1266,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const currentEndpointIds = new Set(endpoints.map((endpoint) => endpoint.endpointId));
     for (const surface of this.surfaces.values()) {
       if (!currentEndpointIds.has(surface.endpointId)) {
-        if (surface.client?.isOpen() || surface.connectionState === "connected") {
+        const preserveOwnedSurface =
+          surface.client?.isOpen() ||
+          surface.connectionState === "connected" ||
+          surface.hasPairedInGatewaySession ||
+          surface.panes.size > 0;
+        if (preserveOwnedSurface) {
           continue;
         }
         surface.stopRequested = true;
@@ -1736,6 +1745,34 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return label;
   }
 
+  private reconcileWindowLabel(
+    previousSurfaceId: string,
+    nextSurfaceId: string,
+    currentWindowLabel: string,
+  ): string {
+    const existingNextLabel = this.persistentState.windowLabels[nextSurfaceId];
+    if (existingNextLabel) {
+      if (previousSurfaceId !== nextSurfaceId) {
+        delete this.persistentState.windowLabels[previousSurfaceId];
+      }
+      return existingNextLabel;
+    }
+
+    const migratedLabel = currentWindowLabel || this.persistentState.windowLabels[previousSurfaceId];
+    if (migratedLabel) {
+      this.persistentState.windowLabels[nextSurfaceId] = migratedLabel;
+      if (previousSurfaceId !== nextSurfaceId) {
+        delete this.persistentState.windowLabels[previousSurfaceId];
+      }
+      return migratedLabel;
+    }
+
+    if (previousSurfaceId !== nextSurfaceId) {
+      delete this.persistentState.windowLabels[previousSurfaceId];
+    }
+    return this.ensureWindowLabel(nextSurfaceId);
+  }
+
   private allocatePaneId(): PaneId {
     const paneId = asPaneId(this.persistentState.nextPaneId);
     this.persistentState.nextPaneId += 1;
@@ -1752,9 +1789,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const statePath = path.join(this.stateDir, STATE_FILE_NAME);
     try {
       const raw = await fs.readFile(statePath, "utf8");
-      const parsed = JSON.parse(raw) as RuntimeStateFile;
+      const parsed = JSON.parse(raw) as RuntimeStateFile & { endpointSurfaces?: Record<string, string> };
       if (parsed.version === 1) {
-        this.persistentState = parsed;
+        this.persistentState = {
+          nextPaneId: parsed.nextPaneId,
+          nextWindowLabelIndex: parsed.nextWindowLabelIndex,
+          providerId: parsed.providerId,
+          version: 1,
+          windowLabels: parsed.windowLabels ?? {},
+        };
       }
     } catch {
       this.persistentState.providerId = `pv_${randomUUID().replaceAll("-", "")}`;
@@ -1948,31 +1991,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    // Assign a stable surfaceId for this endpoint (provider owns surfaceId assignment).
-    const stored = this.persistentState.endpointSurfaces?.[endpoint.endpointId];
-    const surfaceId = stored
-      ? asSurfaceId(stored)
-      : asSurfaceId(`sf_${randomBytes(8).toString("hex")}`);
-
-    const existingByStoredSurfaceId = this.reusableSurface(this.surfaces.get(surfaceId));
-    if (existingByStoredSurfaceId) {
-      this.assignEndpoint(existingByStoredSurfaceId, endpoint);
-      this.ensureSurfaceWorker(existingByStoredSurfaceId);
-      return;
-    }
-
-    if (!stored) {
-      this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
-      this.persistentState.endpointSurfaces[endpoint.endpointId] = surfaceId;
-      this.runBackgroundTask(
-        `persist endpoint surface ${endpoint.endpointId}`,
-        async () => {
-          await this.persistState();
-        },
-      );
-    }
-
-    const windowLabel = this.ensureWindowLabel(surfaceId);
+    const surfaceId = makeProvisionalSurfaceId(endpoint.endpointId);
     const surface: ManagedSurface = {
       alertFired: false,
       alertFiredAt: null,
@@ -2004,7 +2023,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surfaceId,
       unreachableFailures: 0,
       viewport: cloneViewport(endpoint.viewport),
-      windowLabel,
+      windowLabel: "",
       workPromise: null,
     };
 
@@ -2054,17 +2073,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     this.wakeSurfaceRetry(surface);
 
-    this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
-    if (this.persistentState.endpointSurfaces[previousEndpointId] === surface.surfaceId) {
-      delete this.persistentState.endpointSurfaces[previousEndpointId];
-    }
-    this.persistentState.endpointSurfaces[endpoint.endpointId] = surface.surfaceId;
-    this.runBackgroundTask(
-      `persist endpoint remap ${previousEndpointId} -> ${endpoint.endpointId}`,
-      async () => {
-        await this.persistState();
-      },
-    );
   }
 
   private async discoverSurfaceId(surface: ManagedSurface): Promise<void> {
@@ -2100,26 +2108,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const remoteSurfaceId = asSurfaceId(remoteSurfaces[0].surfaceId);
     if (remoteSurfaceId === surface.surfaceId) {
+      if (!surface.windowLabel) {
+        surface.windowLabel = this.ensureWindowLabel(remoteSurfaceId);
+      }
       return;
     }
 
-    // The remote endpoint reports a different surfaceId than we have stored
-    // (e.g., iOS owns its own surfaceIds). Update our tracking to match.
     const oldSurfaceId = surface.surfaceId;
-    this.surfaces.delete(oldSurfaceId);
-    surface.surfaceId = remoteSurfaceId;
-    this.surfaces.set(remoteSurfaceId, surface);
-
-    // Migrate windowLabel to new surfaceId key
-    const existingLabel = this.persistentState.windowLabels[oldSurfaceId];
-    if (existingLabel) {
-      delete this.persistentState.windowLabels[oldSurfaceId];
-      this.persistentState.windowLabels[remoteSurfaceId] = existingLabel;
+    if (this.surfaces.get(oldSurfaceId) === surface) {
+      this.surfaces.delete(oldSurfaceId);
     }
-
-    // Update endpoint→surfaceId persistent mapping
-    this.persistentState.endpointSurfaces = this.persistentState.endpointSurfaces ?? {};
-    this.persistentState.endpointSurfaces[surface.endpointId] = remoteSurfaceId;
+    surface.surfaceId = remoteSurfaceId;
+    surface.windowLabel = this.reconcileWindowLabel(oldSurfaceId, remoteSurfaceId, surface.windowLabel);
+    this.surfaces.set(remoteSurfaceId, surface);
     this.runBackgroundTask(
       `persist remapped surface id ${surface.endpointId}`,
       async () => {
@@ -2137,6 +2138,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
     const initialPaneId = this.ensureInitialPairPane(surface);
+    const windowLabel = surface.windowLabel || this.ensureWindowLabel(surface.surfaceId);
+    surface.windowLabel = windowLabel;
     const resumeSessionId = this.shouldAttemptResume(surface) ? surface.sessionId : null;
 
     const buildPairRequest = (takeover: boolean, requestedResumeSessionId: SessionId | null): PairRequest => ({
@@ -2153,7 +2156,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         resume: requestedResumeSessionId ? { sessionId: requestedResumeSessionId } : undefined,
         surfaceId: surface.surfaceId,
         takeover,
-        windowLabel: surface.windowLabel,
+        windowLabel,
       },
       sentAt: asEpochMs(this.now()),
       type: "request",
