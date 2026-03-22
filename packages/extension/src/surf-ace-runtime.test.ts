@@ -1690,6 +1690,37 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("busy after a live-session drop retries once with takeover", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      assert.equal(surface.hasPairedInGatewaySession, true);
+
+      server.busyWithoutTakeoverResponsesRemaining = 1;
+      await surface.client.close(1000, "test_live_session_busy_reclaim");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.resumeSessionId),
+        ["sa_test_session", null],
+      );
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
+        [false, true],
+      );
+      assert.ok(
+        warnings.some((warning) =>
+          warning.includes("busy after a live-session drop") && warning.includes("reclaiming with takeover")),
+      );
+      assert.equal(surface.reclaimTakeoverOnBusy, false);
+      assert.equal(surface.sessionId, "sa_test_session");
+    });
+  });
+
   await t.test("invalid_resume after a cold-start reconnect retries once with takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;

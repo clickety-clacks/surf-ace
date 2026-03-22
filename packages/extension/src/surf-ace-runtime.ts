@@ -349,6 +349,7 @@ type ManagedSurface = {
   panes: Map<number, ManagedPane>;
   recentEventIds: string[];
   recentEventIdsSet: Set<string>;
+  reclaimTakeoverOnBusy: boolean;
   reconnectAttempt: number;
   retryDelayResolver: (() => void) | null;
   sessionId: SessionId | null;
@@ -1372,6 +1373,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       panes: new Map<number, ManagedPane>(),
       recentEventIds: [],
       recentEventIdsSet: new Set<string>(),
+      reclaimTakeoverOnBusy: false,
       reconnectAttempt: 0,
       retryDelayResolver: null,
       sessionId: null,
@@ -1992,6 +1994,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       panes: new Map<number, ManagedPane>(),
       recentEventIds: [],
       recentEventIdsSet: new Set<string>(),
+      reclaimTakeoverOnBusy: false,
       reconnectAttempt: 0,
       retryDelayResolver: null,
       sessionId: null,
@@ -2217,6 +2220,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.logger.warn?.(
         `[surf-ace:runtime] busy on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
       );
+      response = await sendPairRequest(true, null);
+    }
+
+    if (
+      isErrorResponse(response) &&
+      response.error.code === "busy" &&
+      surface.reclaimTakeoverOnBusy
+    ) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] busy after a live-session drop for ${surface.surfaceId}; reclaiming with takeover`,
+      );
+      surface.reclaimTakeoverOnBusy = false;
       response = await sendPairRequest(true, null);
     }
 
@@ -2629,15 +2644,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.connectedAt = this.now();
     surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
+    surface.reclaimTakeoverOnBusy = false;
     surface.sessionId = sessionId;
   }
 
   private noteConnectionEnded(surface: ManagedSurface): void {
+    const hadLiveSession = surface.connectedAt !== null;
     if (surface.connectedAt && this.now() - surface.connectedAt >= STABLE_CONNECTION_RESET_MS) {
       surface.reconnectAttempt = 0;
       surface.unreachableFailures = 0;
     }
     surface.connectedAt = null;
+    if (hadLiveSession && surface.hasPairedInGatewaySession && surface.autoRetryEnabled) {
+      surface.reclaimTakeoverOnBusy = true;
+    }
   }
 
   private noteResumeFailure(surface: ManagedSurface): void {
