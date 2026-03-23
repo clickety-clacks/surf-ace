@@ -10,8 +10,15 @@ const plugin = {
   description: "Surf Ace discovery, persistent surface connections, and pane tools for OpenClaw.",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
-    const runtime = createSurfAceRuntime({
-      logger: (api.logger ?? console) as never,
+    const logger = (api.logger ?? console) as never;
+    const runtime = createSurfAceRuntime({ logger });
+
+    // Start eagerly — the gateway does not call registerService lifecycle
+    // hooks, so relying on them leaves the runtime uninitialized.
+    runtime.start().catch((error) => {
+      (logger as Console).warn?.(
+        `[surf-ace] runtime.start() failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     });
 
     api.registerService({
