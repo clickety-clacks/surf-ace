@@ -423,7 +423,7 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       }
     }
 
-    for (const endpoint of endpoints) {
+    for (const endpoint of endpointsByInstance.values()) {
       const existing = this.snapshot.get(endpoint.endpointId);
       if (!existing || !sameEndpoint(existing, endpoint)) {
         this.snapshot.set(endpoint.endpointId, endpoint);
