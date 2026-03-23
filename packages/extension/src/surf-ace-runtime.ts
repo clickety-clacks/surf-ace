@@ -397,6 +397,7 @@ const RECONNECT_BACKOFF_BASE_MS = 2_000;
 const RECONNECT_BACKOFF_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const STABLE_CONNECTION_RESET_MS = 30_000;
+const MIN_STABLE_FOR_RECLAIM_MS = 5_000;
 const UNREACHABLE_AFTER_FAILURES = 3;
 const ALERT_RESET_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
@@ -2772,13 +2773,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private noteConnectionEnded(surface: ManagedSurface): void {
     const hadLiveSession = surface.connectedAt !== null;
-    if (surface.connectedAt && this.now() - surface.connectedAt >= STABLE_CONNECTION_RESET_MS) {
+    const connectionDurationMs = surface.connectedAt ? this.now() - surface.connectedAt : 0;
+    if (connectionDurationMs >= STABLE_CONNECTION_RESET_MS) {
       surface.reconnectAttempt = 0;
       surface.unreachableFailures = 0;
     }
     surface.connectedAt = null;
-    if (hadLiveSession && surface.hasPairedInGatewaySession && surface.autoRetryEnabled) {
+    // Only set reclaimTakeoverOnBusy if the connection was stable long
+    // enough to rule out a pathological takeover-then-immediate-close
+    // loop. If the socket dropped within seconds of pairing, the
+    // takeover itself is the problem — retrying won't help.
+    if (hadLiveSession && surface.hasPairedInGatewaySession && surface.autoRetryEnabled
+        && connectionDurationMs >= MIN_STABLE_FOR_RECLAIM_MS) {
       surface.reclaimTakeoverOnBusy = true;
+    } else if (hadLiveSession && connectionDurationMs < MIN_STABLE_FOR_RECLAIM_MS) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] connection for ${surface.surfaceId} lasted ${connectionDurationMs}ms (< ${MIN_STABLE_FOR_RECLAIM_MS}ms); suppressing takeover reclaim`,
+      );
     }
   }
 
