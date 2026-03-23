@@ -391,6 +391,8 @@ const MAX_PENDING_EVENTS_DURING_SNAPSHOT = 128;
 const MAX_READ_FRAME_BATCH = 5;
 const MAX_READ_FRAME_IMAGE_BYTES = 4 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 10_000;
+const LEASE_HEARTBEAT_INTERVAL_MS = 30_000;
+const LEASE_STALE_THRESHOLD_MS = 90_000;
 const RECONNECT_BACKOFF_BASE_MS = 2_000;
 const RECONNECT_BACKOFF_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -723,6 +725,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private stateWrite: Promise<void> = Promise.resolve();
   private unsubscribeDiscovery: (() => void) | null = null;
   private runtimeLease: FileHandle | null = null;
+  private leaseHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private ownsRuntimeLease = false;
 
   constructor(options: SurfAceRuntimeOptions = {}) {
@@ -1891,17 +1894,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const handle = await fs.open(leasePath, "wx");
-        await handle.writeFile(
-          JSON.stringify(
-            {
-              pid: process.pid,
-              startedAt: this.now(),
-            },
-            null,
-            2,
-          ),
-        );
+        await this.writeLeaseContent(handle);
         this.runtimeLease = handle;
+        this.startLeaseHeartbeat();
         return true;
       } catch (error) {
         const nodeError = error as NodeJS.ErrnoException;
@@ -1917,6 +1912,39 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return false;
   }
 
+  private async writeLeaseContent(handle: FileHandle): Promise<void> {
+    const content = JSON.stringify(
+      {
+        pid: process.pid,
+        startedAt: this.now(),
+        lastActiveAt: this.now(),
+      },
+      null,
+      2,
+    );
+    await handle.truncate(0);
+    await handle.write(content, 0, "utf8");
+  }
+
+  private startLeaseHeartbeat(): void {
+    this.stopLeaseHeartbeat();
+    this.leaseHeartbeatInterval = setInterval(() => {
+      const handle = this.runtimeLease;
+      if (!handle) {
+        this.stopLeaseHeartbeat();
+        return;
+      }
+      this.writeLeaseContent(handle).catch(() => {});
+    }, LEASE_HEARTBEAT_INTERVAL_MS);
+  }
+
+  private stopLeaseHeartbeat(): void {
+    if (this.leaseHeartbeatInterval) {
+      clearInterval(this.leaseHeartbeatInterval);
+      this.leaseHeartbeatInterval = null;
+    }
+  }
+
   private async clearStaleRuntimeLease(leasePath: string): Promise<boolean> {
     let contents = "";
     try {
@@ -1930,20 +1958,40 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     let ownerPid: number | null = null;
+    let lastActiveAt: number | null = null;
     try {
-      const parsed = JSON.parse(contents) as { pid?: number };
+      const parsed = JSON.parse(contents) as { pid?: number; lastActiveAt?: number };
       ownerPid = typeof parsed.pid === "number" ? parsed.pid : null;
+      lastActiveAt = typeof parsed.lastActiveAt === "number" ? parsed.lastActiveAt : null;
     } catch {
       ownerPid = null;
     }
 
+    // Check if the owner PID is dead — always stale.
+    let ownerAlive = false;
     if (ownerPid !== null) {
       try {
         process.kill(ownerPid, 0);
-        return false;
+        ownerAlive = true;
       } catch {
-        // Stale lock owner.
+        // PID is dead — stale.
       }
+    }
+
+    // If the owner process is alive, check the heartbeat timestamp.
+    // A lease without a recent lastActiveAt is stale — the holder's
+    // runtime is no longer actively managing surfaces.
+    if (ownerAlive) {
+      const age = lastActiveAt !== null ? this.now() - lastActiveAt : Infinity;
+      if (age < LEASE_STALE_THRESHOLD_MS) {
+        this.logger.info?.(
+          `[surf-ace:runtime] lease held by live PID ${ownerPid}, lastActive ${Math.round(age / 1000)}s ago — deferring`,
+        );
+        return false;
+      }
+      this.logger.info?.(
+        `[surf-ace:runtime] lease held by PID ${ownerPid} but lastActive ${lastActiveAt !== null ? `${Math.round(age / 1000)}s ago` : "never"} (stale threshold ${LEASE_STALE_THRESHOLD_MS / 1000}s) — evicting`,
+      );
     }
 
     try {
@@ -1956,6 +2004,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async releaseRuntimeLease(): Promise<void> {
+    this.stopLeaseHeartbeat();
     const lease = this.runtimeLease;
     this.runtimeLease = null;
     this.ownsRuntimeLease = false;
