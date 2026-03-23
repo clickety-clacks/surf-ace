@@ -1684,7 +1684,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("busy after a cold-start reconnect retries once with takeover", async () => {
+  await t.test("busy after a cold-start reconnect backs off without takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1693,28 +1693,25 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.hasPairedInGatewaySession = false;
       surface.sessionId = null;
 
+      // Return busy once, then succeed — validates no takeover on retry
       server.busyWithoutTakeoverResponsesRemaining = 1;
-      await surface.client.close(1000, "test_cold_start_busy_reclaim");
+      await surface.client.close(1000, "test_cold_start_busy_backoff");
 
+      // Wait for reconnect: first attempt gets busy, second succeeds
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
-      assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.resumeSessionId),
-        [null, null],
-      );
-      assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
-        [false, true],
+      assert.ok(
+        server.pairAttemptDetails.slice(1).every((attempt) => attempt.takeover === false),
+        "no reconnect attempt should use takeover",
       );
       assert.ok(
-        warnings.some((warning) => warning.includes("retrying with takeover")),
+        warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
       );
-      assert.equal(surface.sessionId, "sa_test_session");
     });
   });
 
-  await t.test("busy after a live-session drop retries once with takeover", async () => {
+  await t.test("busy after a live-session drop backs off without takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1722,30 +1719,25 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(surface.client);
       assert.equal(surface.hasPairedInGatewaySession, true);
 
+      // Return busy once, then succeed — validates no takeover on retry
       server.busyWithoutTakeoverResponsesRemaining = 1;
-      await surface.client.close(1000, "test_live_session_busy_reclaim");
+      await surface.client.close(1000, "test_live_session_busy_backoff");
 
+      // Wait for reconnect: first attempt gets busy, second succeeds
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
-      assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.resumeSessionId),
-        ["sa_test_session", null],
-      );
-      assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
-        [false, true],
+      assert.ok(
+        server.pairAttemptDetails.slice(1).every((attempt) => attempt.takeover === false),
+        "no reconnect attempt should use takeover",
       );
       assert.ok(
-        warnings.some((warning) =>
-          warning.includes("busy after a live-session drop") && warning.includes("reclaiming with takeover")),
+        warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
       );
-      assert.equal(surface.reclaimTakeoverOnBusy, false);
-      assert.equal(surface.sessionId, "sa_test_session");
     });
   });
 
-  await t.test("invalid_resume after a cold-start reconnect retries once with takeover", async () => {
+  await t.test("invalid_resume after a cold-start reconnect retries fresh without takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1755,7 +1747,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.sessionId = null;
 
       server.invalidResumeWithoutTakeoverResponsesRemaining = 1;
-      await surface.client.close(1000, "test_cold_start_invalid_resume_reclaim");
+      await surface.client.close(1000, "test_cold_start_invalid_resume_fresh");
 
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
@@ -1766,17 +1758,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
-        [false, true],
+        [false, false],
       );
       assert.ok(
         warnings.some((warning) =>
-          warning.includes("retrying with takeover")),
+          warning.includes("retrying fresh (no takeover)")),
       );
       assert.equal(surface.sessionId, "sa_test_session");
     });
   });
 
-  await t.test("cold-start invalid_resume ignores legacy endpoint mapping state while reclaiming with takeover", async () => {
+  await t.test("cold-start invalid_resume ignores legacy endpoint mapping state without takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1796,11 +1788,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.deepEqual(
         server.pairAttemptDetails.slice(1).map((attempt) => attempt.takeover),
-        [false, true],
+        [false, false],
       );
       assert.ok(
         warnings.some((warning) =>
-          warning.includes("retrying with takeover")),
+          warning.includes("retrying fresh (no takeover)")),
       );
       assert.equal(surface.sessionId, "sa_test_session");
     });
