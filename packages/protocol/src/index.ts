@@ -25,6 +25,14 @@ export type ContentType =
   | "canvas";
 
 // `surf_ace_list` exposes provider-side connectivity with this enum in DESIGN.md.
+//
+// KNOWN BUG (iOS client): The connection status indicator (green bar) on
+// device surfaces should only show "connected" (green) AFTER a successful
+// pair handshake (pair.request → PairResponse with ok:true). It must show
+// "disconnected" (red/grey) any time the socket is closed OR a pair is
+// pending/in-flight. The current iOS client turns green on raw socket open,
+// which is incorrect — it stays green during crash loops because the
+// provider retries faster than the UI updates.
 export type ConnectionState = "connected" | "connecting" | "unreachable";
 
 export type EventProfile = "minimum_deep" | "deep_plus_scroll";
