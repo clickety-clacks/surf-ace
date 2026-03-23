@@ -102,6 +102,15 @@ export type SurfAceScreenSummary = {
   pendingEvents: number;
   viewport: SurfaceViewport;
   windowLabel: string;
+  _debug?: {
+    autoRetryEnabled: boolean;
+    endpointId: string;
+    hasPairedInGatewaySession: boolean;
+    reconnectAttempt: number;
+    sessionId: string | null;
+    unreachableFailures: number;
+    wsOpen: boolean;
+  };
 };
 
 export type SurfAceFrameStroke = {
@@ -798,6 +807,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   async listScreens(): Promise<SurfAceScreenSummary[]> {
     await this.start();
+    const discoverySnapshot = this.discovery.getSnapshot();
+    this.logger.info?.(
+      `[surf-ace:runtime] listScreens: ${this.surfaces.size} surface(s) in map, ${discoverySnapshot.length} discovery endpoint(s): ${discoverySnapshot.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}`,
+    );
     return [...this.surfaces.values()]
       .sort((left, right) => left.windowLabel.localeCompare(right.windowLabel, "en"))
       .map((surface) => ({
@@ -822,6 +835,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         pendingEvents: this.pendingEventCount(surface),
         viewport: cloneViewport(surface.viewport),
         windowLabel: surface.windowLabel,
+        _debug: {
+          autoRetryEnabled: surface.autoRetryEnabled,
+          endpointId: surface.endpointId,
+          hasPairedInGatewaySession: surface.hasPairedInGatewaySession,
+          reconnectAttempt: surface.reconnectAttempt,
+          sessionId: surface.sessionId,
+          unreachableFailures: surface.unreachableFailures,
+          wsOpen: surface.client?.isOpen() ?? false,
+        },
       }));
   }
 
@@ -1127,6 +1149,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     this.finalizeLiveFrame(surface, pane);
+    const normalizedContent = normalizeContent(input.contentType, input.content);
+    const contentPreview = typeof normalizedContent === "string"
+      ? normalizedContent.slice(0, 200)
+      : JSON.stringify(normalizedContent).slice(0, 200);
+    this.logger.info?.(
+      `[surf-ace:runtime] contentSet pane=${pane.paneId}(remote=${pane.remotePaneId}) type=${input.contentType} contentPreview=${contentPreview}`,
+    );
 
     const nextContentId =
       sessionKey && pane.ownerSessionKey === sessionKey && pane.activeContentId
@@ -1138,7 +1167,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       id: makeBrandedRequestId(),
       op: "content.set",
       payload: {
-        content: normalizeContent(input.contentType, input.content),
+        content: normalizedContent,
         contentId: nextContentId,
         contentType: input.contentType,
         historyOwnerToken: historyOwnerTokenForSession(sessionKey),
@@ -1259,6 +1288,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private handleDiscoveryUpdate(endpoints: SurfAceDiscoveryEndpoint[]): void {
+    this.logger.info?.(
+      `[surf-ace:runtime] discoveryUpdate: ${endpoints.length} endpoint(s): ${endpoints.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}; surfaces in map: ${this.surfaces.size}`,
+    );
     for (const endpoint of endpoints) {
       this.refreshEndpointTopology(endpoint);
     }
@@ -1266,11 +1298,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const currentEndpointIds = new Set(endpoints.map((endpoint) => endpoint.endpointId));
     for (const surface of this.surfaces.values()) {
       if (!currentEndpointIds.has(surface.endpointId)) {
+        const wsOpen = surface.client?.isOpen() ?? false;
         const preserveOwnedSurface =
-          surface.client?.isOpen() ||
+          wsOpen ||
           surface.connectionState === "connected" ||
           surface.hasPairedInGatewaySession ||
           surface.panes.size > 0;
+        this.logger.info?.(
+          `[surf-ace:runtime] surface ${surface.surfaceId} (${surface.name}) missing from discovery; preserve=${preserveOwnedSurface} wsOpen=${wsOpen} state=${surface.connectionState} paired=${surface.hasPairedInGatewaySession} panes=${surface.panes.size}`,
+        );
         if (preserveOwnedSurface) {
           continue;
         }
@@ -2326,11 +2362,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           });
 
           await this.assignSurfaceClient(surface, client);
+          this.logger.info?.(`[surf-ace:runtime] worker connecting to ${buildWsUrl(surface.endpoint)} for ${surface.surfaceId}`);
           await client.connect(REQUEST_TIMEOUT_MS);
+          this.logger.info?.(`[surf-ace:runtime] worker WS open for ${surface.surfaceId}, discovering surfaceId`);
           await this.discoverSurfaceId(surface);
+          this.logger.info?.(`[surf-ace:runtime] worker pairing ${surface.surfaceId}`);
           const pairResponse = await this.requestPair(surface);
           this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId));
           surface.connectionState = "connected";
+          this.logger.info?.(`[surf-ace:runtime] worker CONNECTED ${surface.surfaceId} session=${pairResponse.payload.sessionId} panes=${pairResponse.payload.state.panes.length}`);
           surface.unreachableFailures = 0;
           this.applyPairState(surface, pairResponse);
           this.startHeartbeat(surface);
@@ -2469,9 +2509,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!client || !client.isOpen()) {
       throw new SurfAceToolError("not_connected", `Surf Ace surface is not connected: ${surface.surfaceId}`);
     }
+    const payloadBytes = JSON.stringify(request).length;
+    this.logger.info?.(
+      `[surf-ace:runtime] sendRequest ${request.op} id=${request.id} to ${surface.endpointId} (${payloadBytes} bytes, wsOpen=${client.isOpen()})`,
+    );
     try {
-      return await client.request(request, REQUEST_TIMEOUT_MS);
+      const response = await client.request(request, REQUEST_TIMEOUT_MS);
+      const responseOk = !isErrorResponse(response);
+      this.logger.info?.(
+        `[surf-ace:runtime] sendRequest ${request.op} id=${request.id} response ok=${responseOk}${!responseOk ? ` error=${(response as ErrorResponse).error.code}` : ""}`,
+      );
+      return response;
     } catch (error) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] sendRequest ${request.op} id=${request.id} threw: ${String(error)}`,
+      );
       if (isSocketClosedError(error)) {
         throw new SurfAceToolError(
           "not_connected",
