@@ -746,9 +746,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     this.startPromise = (async () => {
+      this.logger.info?.("[surf-ace:runtime] start() — loading state");
       await ensureDirectory(this.stateDir);
       await this.loadState();
       this.ownsRuntimeLease = await this.acquireRuntimeLease();
+      this.logger.info?.(`[surf-ace:runtime] start() — lease acquired: ${this.ownsRuntimeLease}`);
       if (!this.ownsRuntimeLease) {
         this.logger.info?.(
           "[surf-ace:runtime] passive process; another OpenClaw process owns the Surf Ace runtime lease",
@@ -759,8 +761,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.unsubscribeDiscovery = this.discovery.subscribe((endpoints) => {
         this.handleDiscoveryUpdate(endpoints);
       });
+      this.logger.info?.("[surf-ace:runtime] start() — starting discovery");
       await this.discovery.start();
-      this.handleDiscoveryUpdate(this.discovery.getSnapshot());
+      const snapshot = this.discovery.getSnapshot();
+      this.logger.info?.(`[surf-ace:runtime] start() — discovery started, snapshot has ${snapshot.length} endpoint(s), calling handleDiscoveryUpdate`);
+      this.handleDiscoveryUpdate(snapshot);
+      this.logger.info?.(`[surf-ace:runtime] start() — complete, ${this.surfaces.size} surface(s) in map`);
       this.started = true;
     })();
 
@@ -1756,11 +1762,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private ensureSurfaceWorker(surface: ManagedSurface): void {
     if (!surface.autoRetryEnabled || surface.workPromise) {
+      this.logger.info?.(
+        `[surf-ace:runtime] ensureSurfaceWorker SKIPPED for ${surface.surfaceId}: autoRetry=${surface.autoRetryEnabled} hasWork=${!!surface.workPromise}`,
+      );
       return;
     }
+    this.logger.info?.(`[surf-ace:runtime] ensureSurfaceWorker STARTING worker for ${surface.surfaceId}`);
     surface.stopRequested = false;
     surface.workPromise = this.runSurfaceWorker(surface).finally(() => {
       surface.workPromise = null;
+      this.logger.info?.(`[surf-ace:runtime] worker exited for ${surface.surfaceId}`);
     });
   }
 
@@ -2005,11 +2016,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private refreshEndpointTopology(endpoint: SurfAceDiscoveryEndpoint): void {
     // Spec §6.1: connect → pair.request directly (surfaces.list is optional and not required
     // for single-window endpoints; Electron returns errors on the pre-flight WS connection).
+    this.logger.info?.(
+      `[surf-ace:runtime] refreshEndpointTopology for ${endpoint.name}@${endpoint.endpointId} (fp=${endpoint.fingerprintPrefix || "none"})`,
+    );
     const existing = this.reusableSurface(
       [...this.surfaces.values()].find((s) => s.endpointId === endpoint.endpointId),
     );
 
     if (existing) {
+      this.logger.info?.(`[surf-ace:runtime] refreshEndpointTopology → reuse existing by endpointId: ${existing.surfaceId}`);
       this.assignEndpoint(existing, endpoint);
       this.ensureSurfaceWorker(existing);
       return;
@@ -2022,12 +2037,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
 
     if (existingByFingerprint) {
+      this.logger.info?.(`[surf-ace:runtime] refreshEndpointTopology → reuse existing by fingerprint: ${existingByFingerprint.surfaceId}`);
       this.assignEndpoint(existingByFingerprint, endpoint);
       this.ensureSurfaceWorker(existingByFingerprint);
       return;
     }
 
     const surfaceId = makeProvisionalSurfaceId(endpoint.endpointId);
+    this.logger.info?.(`[surf-ace:runtime] refreshEndpointTopology → NEW surface ${surfaceId} for ${endpoint.name}`);
     const surface: ManagedSurface = {
       alertFired: false,
       alertFiredAt: null,
@@ -2319,6 +2336,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async runSurfaceWorker(surface: ManagedSurface): Promise<void> {
+    this.logger.info?.(`[surf-ace:runtime] runSurfaceWorker ENTERED for ${surface.surfaceId} endpoint=${surface.endpointId}`);
     while (!surface.stopRequested) {
       try {
         surface.connectionState = surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
