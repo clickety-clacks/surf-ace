@@ -1791,10 +1791,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private ensureSurfaceWorker(surface: ManagedSurface): void {
-    if (!surface.autoRetryEnabled || surface.workPromise) {
+    if (!surface.autoRetryEnabled) {
       this.logger.info?.(
-        `[surf-ace:runtime] ensureSurfaceWorker SKIPPED for ${surface.surfaceId}: autoRetry=${surface.autoRetryEnabled} hasWork=${!!surface.workPromise}`,
+        `[surf-ace:runtime] ensureSurfaceWorker SKIPPED for ${surface.surfaceId}: autoRetry=false`,
       );
+      return;
+    }
+    if (surface.workPromise) {
+      if (surface.stopRequested) {
+        // Worker is stopping (e.g. after extension reload) — revive it so it
+        // reconnects after the current iteration instead of exiting the loop.
+        surface.stopRequested = false;
+        this.wakeSurfaceRetry(surface);
+        this.logger.info?.(
+          `[surf-ace:runtime] ensureSurfaceWorker REVIVED for ${surface.surfaceId}: cleared stopRequested on running worker`,
+        );
+      } else {
+        this.logger.info?.(
+          `[surf-ace:runtime] ensureSurfaceWorker SKIPPED for ${surface.surfaceId}: worker already running`,
+        );
+      }
       return;
     }
     this.logger.info?.(`[surf-ace:runtime] ensureSurfaceWorker STARTING worker for ${surface.surfaceId}`);
