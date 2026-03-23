@@ -479,7 +479,35 @@ function makeNonce(): string {
   return randomUUID().replaceAll("-", "");
 }
 
+/**
+ * Build the WebSocket URL for a discovery endpoint, applying host overrides
+ * from SURF_ACE_HOST_MAP when present.
+ *
+ * SURF_ACE_HOST_MAP is a comma-separated list of `host:port=host:port` pairs.
+ * Example: `Aleph.local:19001=127.0.0.1:19002`
+ */
+const hostMap: Map<string, { host: string; port: number }> = (() => {
+  const map = new Map<string, { host: string; port: number }>();
+  const raw = process.env["SURF_ACE_HOST_MAP"] ?? "";
+  for (const entry of raw.split(",").filter(Boolean)) {
+    const [from, to] = entry.split("=");
+    if (from && to) {
+      const [toHost, toPortStr] = to.split(":");
+      const toPort = Number(toPortStr);
+      if (toHost && !Number.isNaN(toPort)) {
+        map.set(from.trim(), { host: toHost.trim(), port: toPort });
+      }
+    }
+  }
+  return map;
+})();
+
 function buildWsUrl(endpoint: SurfAceDiscoveryEndpoint): string {
+  const key = `${endpoint.host}:${endpoint.port}`;
+  const override = hostMap.get(key);
+  if (override) {
+    return `ws://${override.host}:${override.port}${endpoint.wsPath}`;
+  }
   return `ws://${endpoint.host}:${endpoint.port}${endpoint.wsPath}`;
 }
 
