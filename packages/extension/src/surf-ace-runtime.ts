@@ -2631,7 +2631,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    surface.heartbeatInterval = setInterval(() => {
+    const sendHeartbeat = () => {
       const client = surface.client;
       if (!client || !client.isOpen()) {
         return;
@@ -2681,7 +2681,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           }
         },
       );
-    }, HEARTBEAT_INTERVAL_MS);
+    };
+
+    // Send first heartbeat immediately — the device's heartbeat watchdog
+    // may expire sessions before the first interval-based ping fires.
+    sendHeartbeat();
+    surface.heartbeatInterval = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
   }
 
   private stopHeartbeat(surface: ManagedSurface): void {
