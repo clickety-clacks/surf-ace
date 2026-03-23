@@ -117,6 +117,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var activeSessions: [String: SurfAceSessionState] = [:]
     @ObservationIgnored private var lastHeartbeatAtBySurfaceId: [String: Date] = [:]
     @ObservationIgnored private var ownershipLocksBySurfaceId: [String: SurfAceOwnershipLockState] = [:]
+    @ObservationIgnored private var ownershipLockOrphanedAt: [String: Date] = [:]
     @ObservationIgnored private var surfaceNeedsResumedEvent: Set<String> = []
     @ObservationIgnored private var identityMapping = SurfAceIdentityMapping()
     @ObservationIgnored private var heartbeatWatchdogTask: Task<Void, Never>?
@@ -129,6 +130,7 @@ final class SurfAceRuntime {
     private let resumeGraceMilliseconds = 20_000
     private let heartbeatTimeoutMilliseconds = 25_000
     private let heartbeatWatchdogCheckMilliseconds = 5_000
+    private let ownershipLockExpiryMilliseconds = 60_000
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
@@ -896,6 +898,7 @@ final class SurfAceRuntime {
             providerId: providerId
         )
         lastHeartbeatAtBySurfaceId[surfaceId] = Date()
+        ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
         refreshConnectionState(surfaceId: surfaceId)
         reschedulePendingFlushes(surfaceId: surfaceId)
         refreshBonjourTXT()
@@ -1411,6 +1414,7 @@ final class SurfAceRuntime {
         }
 
         ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
+        ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
         activeSessions.removeValue(forKey: surfaceId)
         lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
         surfaceNeedsResumedEvent.remove(surfaceId)
@@ -1443,6 +1447,12 @@ final class SurfAceRuntime {
         let surfaceId = pair.key
         activeSessions.removeValue(forKey: surfaceId)
         lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
+        // Track when the ownership lock became orphaned (session gone, lock stays
+        // for resume support).  The heartbeat watchdog will expire the lock if no
+        // new session arrives within ownershipLockExpiryMilliseconds.
+        if ownershipLocksBySurfaceId[surfaceId] != nil {
+            ownershipLockOrphanedAt[surfaceId] = Date()
+        }
         refreshConnectionState(surfaceId: surfaceId)
         refreshBonjourTXT()
     }
@@ -1455,6 +1465,7 @@ final class SurfAceRuntime {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.expireStaleSessionsForHeartbeat()
+                    self.expireOrphanedOwnershipLocks()
                 }
             }
         }
@@ -1482,6 +1493,38 @@ final class SurfAceRuntime {
             Task {
                 await expiredSession.session.socket.close(code: 1000, reason: "heartbeat_timeout")
             }
+        }
+        refreshBonjourTXT()
+    }
+
+    private func expireOrphanedOwnershipLocks() {
+        guard !ownershipLockOrphanedAt.isEmpty else { return }
+        let now = Date()
+        var expiredSurfaceIds: [String] = []
+        var reconciledSurfaceIds: [String] = []
+
+        for (surfaceId, orphanedAt) in ownershipLockOrphanedAt {
+            // If a session was re-established, the orphan record is stale.
+            guard activeSessions[surfaceId] == nil else {
+                reconciledSurfaceIds.append(surfaceId)
+                continue
+            }
+            let ageMilliseconds = now.timeIntervalSince(orphanedAt) * 1000
+            if ageMilliseconds > Double(ownershipLockExpiryMilliseconds) {
+                expiredSurfaceIds.append(surfaceId)
+            }
+        }
+
+        for surfaceId in reconciledSurfaceIds {
+            ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
+        }
+
+        guard !expiredSurfaceIds.isEmpty else { return }
+
+        for surfaceId in expiredSurfaceIds {
+            ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
+            ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
+            refreshConnectionState(surfaceId: surfaceId)
         }
         refreshBonjourTXT()
     }
