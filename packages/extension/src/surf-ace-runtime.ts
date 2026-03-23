@@ -358,7 +358,6 @@ type ManagedSurface = {
   panes: Map<number, ManagedPane>;
   recentEventIds: string[];
   recentEventIdsSet: Set<string>;
-  reclaimTakeoverOnBusy: boolean;
   reconnectAttempt: number;
   retryDelayResolver: (() => void) | null;
   sessionId: SessionId | null;
@@ -397,7 +396,6 @@ const RECONNECT_BACKOFF_BASE_MS = 2_000;
 const RECONNECT_BACKOFF_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const STABLE_CONNECTION_RESET_MS = 30_000;
-const MIN_STABLE_FOR_RECLAIM_MS = 5_000;
 const UNREACHABLE_AFTER_FAILURES = 3;
 const ALERT_RESET_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
@@ -825,6 +823,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const stopPromises = [...this.surfaces.values()].map(async (surface) => {
       surface.stopRequested = true;
       this.stopHeartbeat(surface);
+      this.wakeSurfaceRetry(surface);
       if (surface.client) {
         await surface.client.close(1000, clampCloseReason("provider_shutdown"));
       }
@@ -1456,7 +1455,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       panes: new Map<number, ManagedPane>(),
       recentEventIds: [],
       recentEventIdsSet: new Set<string>(),
-      reclaimTakeoverOnBusy: false,
       reconnectAttempt: 0,
       retryDelayResolver: null,
       sessionId: null,
@@ -2148,7 +2146,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       panes: new Map<number, ManagedPane>(),
       recentEventIds: [],
       recentEventIdsSet: new Set<string>(),
-      reclaimTakeoverOnBusy: false,
       reconnectAttempt: 0,
       retryDelayResolver: null,
       sessionId: null,
@@ -2350,36 +2347,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
-    if (
-      isErrorResponse(response) &&
-      response.error.code === "busy" &&
-      !surface.hasPairedInGatewaySession
-    ) {
-      this.logger.warn?.(
-        `[surf-ace:runtime] busy on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
-      );
-      response = await sendPairRequest(true, null);
-    }
-
-    if (
-      isErrorResponse(response) &&
-      response.error.code === "busy" &&
-      surface.reclaimTakeoverOnBusy
-    ) {
-      this.logger.warn?.(
-        `[surf-ace:runtime] busy after a live-session drop for ${surface.surfaceId}; reclaiming with takeover`,
-      );
-      surface.reclaimTakeoverOnBusy = false;
-      response = await sendPairRequest(true, null);
-    }
-
     if (isErrorResponse(response)) {
-      // If we get "busy" despite having paired before, the ownership was
-      // taken by another provider.  Reset so next worker iteration falls
-      // into the cold-start takeover path.
-      if (response.error.code === "busy" && surface.hasPairedInGatewaySession) {
-        surface.hasPairedInGatewaySession = false;
-        surface.sessionId = null;
+      if (response.error.code === "busy") {
+        this.logger.warn?.(
+          `[surf-ace:runtime] busy for ${surface.surfaceId}; backing off (takeover requires explicit user action)`,
+        );
       }
       throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
     }
@@ -2404,10 +2376,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     this.logger.warn?.(
-      `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; retrying with takeover`,
+      `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; retrying fresh (no takeover)`,
     );
     surface.sessionId = null;
-    return sendPairRequest(true, null);
+    return sendPairRequest(false, null);
   }
 
   private requestEnvelope<TOp extends Request["op"]>(
@@ -2811,7 +2783,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.connectedAt = this.now();
     surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
-    surface.reclaimTakeoverOnBusy = false;
     surface.sessionId = sessionId;
   }
 
@@ -2823,18 +2794,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.unreachableFailures = 0;
     }
     surface.connectedAt = null;
-    // Only set reclaimTakeoverOnBusy if the connection was stable long
-    // enough to rule out a pathological takeover-then-immediate-close
-    // loop. If the socket dropped within seconds of pairing, the
-    // takeover itself is the problem — retrying won't help.
-    if (hadLiveSession && surface.hasPairedInGatewaySession && surface.autoRetryEnabled
-        && connectionDurationMs >= MIN_STABLE_FOR_RECLAIM_MS) {
-      surface.reclaimTakeoverOnBusy = true;
-    } else if (hadLiveSession && connectionDurationMs < MIN_STABLE_FOR_RECLAIM_MS) {
-      this.logger.warn?.(
-        `[surf-ace:runtime] connection for ${surface.surfaceId} lasted ${connectionDurationMs}ms (< ${MIN_STABLE_FOR_RECLAIM_MS}ms); suppressing takeover reclaim`,
-      );
-    }
   }
 
   private noteResumeFailure(surface: ManagedSurface): void {
