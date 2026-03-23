@@ -1326,7 +1326,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private handleDiscoveryUpdate(endpoints: SurfAceDiscoveryEndpoint[]): void {
-    this.logger.info?.(
+    this.logger.warn?.(
       `[surf-ace:runtime] discoveryUpdate: ${endpoints.length} endpoint(s): ${endpoints.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}; surfaces in map: ${this.surfaces.size}`,
     );
     for (const endpoint of endpoints) {
