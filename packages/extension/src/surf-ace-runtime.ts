@@ -1935,7 +1935,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.stopLeaseHeartbeat();
         return;
       }
-      this.writeLeaseContent(handle).catch(() => {});
+      this.writeLeaseContent(handle).catch((error) => {
+        this.logger.warn?.(
+          `[surf-ace:runtime] lease heartbeat write failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     }, LEASE_HEARTBEAT_INTERVAL_MS);
   }
 
@@ -2342,6 +2346,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     if (isErrorResponse(response)) {
+      // If we get "busy" despite having paired before, the ownership was
+      // taken by another provider.  Reset so next worker iteration falls
+      // into the cold-start takeover path.
+      if (response.error.code === "busy" && surface.hasPairedInGatewaySession) {
+        surface.hasPairedInGatewaySession = false;
+        surface.sessionId = null;
+      }
       throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
     }
 
