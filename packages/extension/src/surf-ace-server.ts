@@ -80,6 +80,14 @@ export class SurfAceWireClient {
     ws.on("message", (data) => {
       this.handleMessage(data);
     });
+
+    ws.on("error", (error) => {
+      console.warn(
+        `[surf-ace:wire] WebSocket error after connect: ${String(error)}`,
+      );
+      // The 'close' event will follow; the onClose handler deals with
+      // reconnection.  We only need to prevent the unhandled-error crash.
+    });
   }
 
   async request(request: Request, timeoutMs: number): Promise<Response> {
@@ -147,9 +155,24 @@ export class SurfAceWireClient {
   }
 
   private handleMessage(data: RawData): void {
-    const parsed = JSON.parse(toText(data)) as Event | Response;
+    let parsed: Event | Response;
+    try {
+      parsed = JSON.parse(toText(data)) as Event | Response;
+    } catch (error) {
+      console.warn(
+        `[surf-ace:wire] failed to parse incoming message: ${String(error)}`,
+      );
+      return;
+    }
+
     if (parsed.type === "event") {
-      this.onEvent?.(parsed);
+      try {
+        this.onEvent?.(parsed);
+      } catch (error) {
+        console.warn(
+          `[surf-ace:wire] unhandled error in onEvent callback (op=${parsed.op}): ${String(error)}`,
+        );
+      }
       return;
     }
 
