@@ -1610,6 +1610,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private ingestDrawingFlush(surface: ManagedSurface, event: DrawingFlushEvent): void {
+    this.logger.info?.(
+      `[surf-ace:runtime] ingestDrawingFlush for ${surface.surfaceId} pane=${event.payload.paneId} strokes=${event.payload.strokes?.length ?? "MISSING"}`,
+    );
     const pane = this.ensurePane(surface, event.payload.paneId);
     const contextKey = pane.buffer.currentUrl ?? pane.activeContentId ?? event.payload.contentId;
     const now = this.now();
