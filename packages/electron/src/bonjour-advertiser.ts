@@ -1,6 +1,4 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import path from "node:path";
 
 import { Bonjour, type Service } from "bonjour-service";
 
@@ -161,12 +159,12 @@ export class BonjourAdvertiser {
   }
 
   private async verifyPublishedService(): Promise<void> {
-    if (this.destroyed || !this.service || this.restarting) {
+    if (this.destroyed || (!this.service && !this.isolatedPublisher) || this.restarting) {
       return;
     }
     const publishedName = this.serviceName;
     const activeNames = await this.discoverPublishedNames();
-    if (this.destroyed || !this.service || this.restarting || this.serviceName !== publishedName) {
+    if (this.destroyed || (!this.service && !this.isolatedPublisher) || this.restarting || this.serviceName !== publishedName) {
       return;
     }
     if (!activeNames.has(publishedName)) {
@@ -246,7 +244,7 @@ export class BonjourAdvertiser {
     if (this.destroyed) {
       return;
     }
-    console.warn("[surf-ace] switching bonjour publishing to isolated node helper");
+    console.warn("[surf-ace] switching bonjour publishing to dns-sd");
     await new Promise<void>((resolve) => {
       this.bonjour.unpublishAll(() => resolve());
     });
@@ -255,56 +253,23 @@ export class BonjourAdvertiser {
   }
 
   private async publishWithIsolatedPublisher(name: string): Promise<void> {
-    const publisher = this.ensureIsolatedPublisher();
+    this.stopIsolatedPublisher();
     this.serviceName = name;
-    publisher.send({
-      name,
-      port: this.port,
-      txt: this.txtProvider(),
-      type: "publish",
-    });
-    this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_DELAY_MS);
-  }
-
-  private ensureIsolatedPublisher(): ChildProcess {
-    if (this.isolatedPublisher && !this.isolatedPublisher.killed) {
-      return this.isolatedPublisher;
-    }
-    const publisherScript = path.join(__dirname, "bonjour-publisher.cjs");
+    const txt = this.txtProvider();
+    const txtArgs = Object.entries(txt).map(([k, v]) => `${k}=${v}`);
     const child = spawn(
-      this.isolatedPublisherExecutable(),
-      [publisherScript],
-      {
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: "1",
-        },
-        stdio: ["ignore", "ignore", "pipe", "ipc"],
-      },
+      "dns-sd",
+      ["-R", name, "_surf-ace._tcp", "local.", String(this.port), ...txtArgs],
+      { stdio: ["ignore", "ignore", "ignore"] },
     );
-    child.stderr?.on("data", (chunk) => {
-      process.stderr.write(chunk);
-    });
-    child.on("exit", () => {
+    child.on("exit", (code) => {
       if (this.isolatedPublisher === child) {
+        console.warn(`[surf-ace] dns-sd publisher exited (code=${code})`);
         this.isolatedPublisher = null;
       }
     });
     this.isolatedPublisher = child;
-    return child;
-  }
-
-  private isolatedPublisherExecutable(): string {
-    const preferredNodePaths = [
-      "/opt/homebrew/bin/node",
-      "/usr/local/bin/node",
-    ];
-    for (const candidate of preferredNodePaths) {
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
-    return process.execPath;
+    this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_DELAY_MS);
   }
 
   private stopIsolatedPublisher(): void {
@@ -313,9 +278,6 @@ export class BonjourAdvertiser {
     if (!child || child.killed) {
       return;
     }
-    child.send({ type: "stop" });
-    setTimeout(() => {
-      child.kill();
-    }, 500).unref?.();
+    child.kill();
   }
 }
