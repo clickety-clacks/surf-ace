@@ -788,6 +788,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.started = true;
         return;
       }
+      // Clear stale workPromises left over from a previous lifecycle (e.g.
+      // stop() was called but start() fires before its await-all resolves).
+      // Surfaces with a stale workPromise would cause ensureSurfaceWorker to
+      // skip, so new workers would never start.
+      for (const surface of this.surfaces.values()) {
+        if (surface.workPromise) {
+          this.logger.info?.(
+            `[surf-ace:runtime] start() — clearing stale workPromise for ${surface.surfaceId}`,
+          );
+          surface.workPromise = null;
+          surface.stopRequested = false;
+        }
+      }
+
       this.unsubscribeDiscovery = this.discovery.subscribe((endpoints) => {
         this.handleDiscoveryUpdate(endpoints);
       });
@@ -1791,26 +1805,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private ensureSurfaceWorker(surface: ManagedSurface): void {
-    if (!surface.autoRetryEnabled) {
+    if (!surface.autoRetryEnabled || surface.workPromise) {
       this.logger.info?.(
-        `[surf-ace:runtime] ensureSurfaceWorker SKIPPED for ${surface.surfaceId}: autoRetry=false`,
+        `[surf-ace:runtime] ensureSurfaceWorker SKIPPED for ${surface.surfaceId}: autoRetry=${surface.autoRetryEnabled} hasWork=${!!surface.workPromise}`,
       );
-      return;
-    }
-    if (surface.workPromise) {
-      if (surface.stopRequested) {
-        // Worker is stopping (e.g. after extension reload) — revive it so it
-        // reconnects after the current iteration instead of exiting the loop.
-        surface.stopRequested = false;
-        this.wakeSurfaceRetry(surface);
-        this.logger.info?.(
-          `[surf-ace:runtime] ensureSurfaceWorker REVIVED for ${surface.surfaceId}: cleared stopRequested on running worker`,
-        );
-      } else {
-        this.logger.info?.(
-          `[surf-ace:runtime] ensureSurfaceWorker SKIPPED for ${surface.surfaceId}: worker already running`,
-        );
-      }
       return;
     }
     this.logger.info?.(`[surf-ace:runtime] ensureSurfaceWorker STARTING worker for ${surface.surfaceId}`);
