@@ -78,6 +78,20 @@ private struct SurfAceRequestReplayEntry {
     let responseJSON: String
 }
 
+private struct SurfAcePairCommitPlan {
+    let surfaceId: String
+    let session: SurfAceSessionState
+    let resumed: Bool
+    let providerInitialPaneId: Int
+    let providerWindowLabel: String
+    let shouldEnqueuePostReconnectEvents: Bool
+}
+
+private struct SurfAceProcessedRequestResult {
+    let responseObject: [String: Any]
+    let postSendPairCommit: SurfAcePairCommitPlan?
+}
+
 private struct SurfAceSessionState {
     let sessionId: String
     let providerId: String
@@ -88,6 +102,7 @@ private struct SurfAceSessionState {
     let eventProfile: SurfAceEventProfile
     let drawingFlushConfig: SurfAceDrawingFlushConfig
     let pairedAt: Date
+    var pairConfirmed: Bool
 }
 
 private struct SurfAceOwnershipLockState {
@@ -119,6 +134,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var ownershipLocksBySurfaceId: [String: SurfAceOwnershipLockState] = [:]
     @ObservationIgnored private var ownershipLockOrphanedAt: [String: Date] = [:]
     @ObservationIgnored private var surfaceNeedsResumedEvent: Set<String> = []
+    @ObservationIgnored private var terminatedConnectionUUIDs: Set<String> = []
     @ObservationIgnored private var identityMapping = SurfAceIdentityMapping()
     @ObservationIgnored private var heartbeatWatchdogTask: Task<Void, Never>?
 
@@ -623,6 +639,7 @@ final class SurfAceRuntime {
         let sender = SurfAceOutboundSender(socket: socket)
         var replayCache: [String: SurfAceRequestReplayEntry] = [:]
         var replayOrder: [String] = []
+        terminatedConnectionUUIDs.remove(connectionUUID)
 
         await socket.setCloseHandler { [weak self] in
             Task { @MainActor in
@@ -689,7 +706,7 @@ final class SurfAceRuntime {
                         continue
                     }
 
-                    let responseObject = await processRequest(
+                    let processed = await processRequest(
                         op: op,
                         id: id,
                         payload: payload,
@@ -697,7 +714,7 @@ final class SurfAceRuntime {
                         sender: sender,
                         connectionUUID: connectionUUID
                     )
-                    guard let responseJSON = encodeJSON(responseObject) else {
+                    guard let responseJSON = encodeJSON(processed.responseObject) else {
                         await socket.close(code: 4500, reason: "internal_error")
                         await handleSocketTermination(connectionUUID: connectionUUID)
                         return
@@ -705,13 +722,17 @@ final class SurfAceRuntime {
 
                     let priority: SurfAceOutboundSender.Priority = (op == "heartbeat.ping") ? .heartbeat : .response
                     try await sender.send(text: responseJSON, priority: priority)
+                    if let pairCommit = processed.postSendPairCommit,
+                       !terminatedConnectionUUIDs.contains(connectionUUID) {
+                        commitPairRequest(pairCommit)
+                    }
                     replayCache[id] = SurfAceRequestReplayEntry(payloadDigest: payloadDigest, responseJSON: responseJSON)
                     replayOrder.append(id)
                     if replayOrder.count > 1_024 {
                         replayCache.removeValue(forKey: replayOrder.removeFirst())
                     }
                     if op == "ownership.relinquish",
-                       (responseObject["ok"] as? Bool) == true {
+                       (processed.responseObject["ok"] as? Bool) == true {
                         await socket.close(code: 1000, reason: "relinquished")
                         return
                     }
@@ -730,10 +751,10 @@ final class SurfAceRuntime {
         socket: SurfAceWebSocket,
         sender: SurfAceOutboundSender,
         connectionUUID: String
-    ) async -> [String: Any] {
+    ) async -> SurfAceProcessedRequestResult {
         switch op {
         case "surfaces.list":
-            return handleSurfacesList(id: id)
+            return SurfAceProcessedRequestResult(responseObject: handleSurfacesList(id: id), postSendPairCommit: nil)
         case "pair.request":
             return await handlePairRequest(
                 id: id,
@@ -743,31 +764,70 @@ final class SurfAceRuntime {
                 connectionUUID: connectionUUID
             )
         case "panes.list":
-            return handlePanesList(id: id, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: handlePanesList(id: id, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "pane.split":
-            return handlePaneSplit(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: handlePaneSplit(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "pane.rename":
-            return handlePaneRename(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: handlePaneRename(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "pane.close":
-            return handlePaneClose(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: handlePaneClose(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "content.set":
-            return await handleContentSet(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: await handleContentSet(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "content.append":
-            return await handleContentAppend(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: await handleContentAppend(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "content.patch":
-            return await handleContentPatch(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: await handleContentPatch(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "content.clear":
-            return handleContentClear(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: handleContentClear(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "annotations.remove":
-            return handleAnnotationsRemove(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: handleAnnotationsRemove(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "snapshot.get":
-            return await handleSnapshotGet(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: await handleSnapshotGet(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "heartbeat.ping":
-            return handleHeartbeatPing(id: id, payload: payload, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: handleHeartbeatPing(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "ownership.relinquish":
-            return handleOwnershipRelinquish(id: id, connectionUUID: connectionUUID)
+            return SurfAceProcessedRequestResult(
+                responseObject: handleOwnershipRelinquish(id: id, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         default:
-            return makeErrorResponse(op: op, id: id, code: "invalid_payload", message: "unsupported operation")
+            return SurfAceProcessedRequestResult(
+                responseObject: makeErrorResponse(op: op, id: id, code: "invalid_payload", message: "unsupported operation"),
+                postSendPairCommit: nil
+            )
         }
     }
 
@@ -798,17 +858,33 @@ final class SurfAceRuntime {
         socket: SurfAceWebSocket,
         sender: SurfAceOutboundSender,
         connectionUUID: String
-    ) async -> [String: Any] {
+    ) async -> SurfAceProcessedRequestResult {
         guard let providerId = payload["providerId"] as? String,
               let connectionId = payload["connectionId"] as? String,
               let protocolVersion = payload["protocolVersion"] as? Int,
               let surfaceId = payload["surfaceId"] as? String,
               let surface = surfaceById[surfaceId] else {
-            return makeErrorResponse(op: "pair.request", id: id, code: "invalid_payload", message: "providerId, connectionId, protocolVersion, surfaceId are required")
+            return SurfAceProcessedRequestResult(
+                responseObject: makeErrorResponse(
+                    op: "pair.request",
+                    id: id,
+                    code: "invalid_payload",
+                    message: "providerId, connectionId, protocolVersion, surfaceId are required"
+                ),
+                postSendPairCommit: nil
+            )
         }
 
         guard protocolVersion == 1 else {
-            return makeErrorResponse(op: "pair.request", id: id, code: "unsupported_protocol_version", message: "protocolVersion must be 1")
+            return SurfAceProcessedRequestResult(
+                responseObject: makeErrorResponse(
+                    op: "pair.request",
+                    id: id,
+                    code: "unsupported_protocol_version",
+                    message: "protocolVersion must be 1"
+                ),
+                postSendPairCommit: nil
+            )
         }
 
         let eventProfile = SurfAceEventProfile(rawValue: payload["eventProfile"] as? String ?? "") ?? .minimumDeep
@@ -820,7 +896,15 @@ final class SurfAceRuntime {
         guard let providerWindowLabel = normalizedWindowLabel(from: payload["windowLabel"]),
               let providerInitialPaneId = payload["initialPaneId"] as? Int,
               providerInitialPaneId > 0 else {
-            return makeErrorResponse(op: "pair.request", id: id, code: "invalid_payload", message: "windowLabel and initialPaneId are required")
+            return SurfAceProcessedRequestResult(
+                responseObject: makeErrorResponse(
+                    op: "pair.request",
+                    id: id,
+                    code: "invalid_payload",
+                    message: "windowLabel and initialPaneId are required"
+                ),
+                postSendPairCommit: nil
+            )
         }
         let takeover = payload["takeover"] as? Bool ?? false
         let resumePayload = payload["resume"] as? [String: Any]
@@ -844,11 +928,14 @@ final class SurfAceRuntime {
                 }
             } else if ownershipLock.providerId == providerId {
                 guard resumeSessionId == ownershipLock.sessionId else {
-                    return makeErrorResponse(
-                        op: "pair.request",
-                        id: id,
-                        code: "invalid_resume",
-                        message: "Resume session did not match active ownership lock"
+                    return SurfAceProcessedRequestResult(
+                        responseObject: makeErrorResponse(
+                            op: "pair.request",
+                            id: id,
+                            code: "invalid_resume",
+                            message: "Resume session did not match active ownership lock"
+                        ),
+                        postSendPairCommit: nil
                     )
                 }
                 resumed = true
@@ -861,11 +948,14 @@ final class SurfAceRuntime {
                     lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
                 }
             } else {
-                return makeErrorResponse(
-                    op: "pair.request",
-                    id: id,
-                    code: "busy",
-                    message: "surface ownership lock is held by another provider"
+                return SurfAceProcessedRequestResult(
+                    responseObject: makeErrorResponse(
+                        op: "pair.request",
+                        id: id,
+                        code: "busy",
+                        message: "surface ownership lock is held by another provider"
+                    ),
+                    postSendPairCommit: nil
                 )
             }
         } else {
@@ -882,26 +972,9 @@ final class SurfAceRuntime {
             sender: sender,
             eventProfile: eventProfile,
             drawingFlushConfig: drawingFlushConfig,
-            pairedAt: Date()
+            pairedAt: Date(),
+            pairConfirmed: false
         )
-
-        if !resumed {
-            applyProviderBootstrapTopology(
-                surface: surface,
-                windowLabel: providerWindowLabel,
-                initialPaneId: providerInitialPaneId
-            )
-        }
-        activeSessions[surfaceId] = session
-        ownershipLocksBySurfaceId[surfaceId] = SurfAceOwnershipLockState(
-            sessionId: sessionId,
-            providerId: providerId
-        )
-        lastHeartbeatAtBySurfaceId[surfaceId] = Date()
-        ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
-        refreshConnectionState(surfaceId: surfaceId)
-        reschedulePendingFlushes(surfaceId: surfaceId)
-        refreshBonjourTXT()
 
         let response: [String: Any] = [
             "v": 1,
@@ -949,12 +1022,43 @@ final class SurfAceRuntime {
             ],
         ]
 
-        if resumed || surfaceNeedsResumedEvent.contains(surfaceId) {
-            surfaceNeedsResumedEvent.remove(surfaceId)
-            enqueuePostReconnectEvents(surfaceId: surfaceId)
-        }
+        return SurfAceProcessedRequestResult(
+            responseObject: response,
+            postSendPairCommit: SurfAcePairCommitPlan(
+                surfaceId: surfaceId,
+                session: session,
+                resumed: resumed,
+                providerInitialPaneId: providerInitialPaneId,
+                providerWindowLabel: providerWindowLabel,
+                shouldEnqueuePostReconnectEvents: resumed || surfaceNeedsResumedEvent.contains(surfaceId)
+            )
+        )
+    }
 
-        return response
+    private func commitPairRequest(_ plan: SurfAcePairCommitPlan) {
+        guard let surface = surfaceById[plan.surfaceId] else { return }
+        if !plan.resumed {
+            applyProviderBootstrapTopology(
+                surface: surface,
+                windowLabel: plan.providerWindowLabel,
+                initialPaneId: plan.providerInitialPaneId
+            )
+        }
+        activeSessions[plan.surfaceId] = plan.session
+        ownershipLocksBySurfaceId[plan.surfaceId] = SurfAceOwnershipLockState(
+            sessionId: plan.session.sessionId,
+            providerId: plan.session.providerId
+        )
+        lastHeartbeatAtBySurfaceId[plan.surfaceId] = Date()
+        ownershipLockOrphanedAt.removeValue(forKey: plan.surfaceId)
+        refreshConnectionState(surfaceId: plan.surfaceId)
+        reschedulePendingFlushes(surfaceId: plan.surfaceId)
+        refreshBonjourTXT()
+
+        if plan.shouldEnqueuePostReconnectEvents {
+            surfaceNeedsResumedEvent.remove(plan.surfaceId)
+            enqueuePostReconnectEvents(surfaceId: plan.surfaceId)
+        }
     }
 
     private func handlePanesList(id: String, connectionUUID: String) -> [String: Any] {
@@ -1380,6 +1484,12 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "heartbeat.ping", id: id, code: "invalid_payload", message: "nonce is required")
         }
         lastHeartbeatAtBySurfaceId[surfaceId] = Date()
+        if var session = activeSessions[surfaceId],
+           !session.pairConfirmed {
+            session.pairConfirmed = true
+            activeSessions[surfaceId] = session
+            refreshConnectionState(surfaceId: surfaceId)
+        }
 
         return [
             "v": 1,
@@ -1443,6 +1553,7 @@ final class SurfAceRuntime {
     }
 
     private func handleSocketTermination(connectionUUID: String) async {
+        terminatedConnectionUUIDs.insert(connectionUUID)
         guard let pair = activeSessions.first(where: { $0.value.connectionUUID == connectionUUID }) else { return }
         let surfaceId = pair.key
         activeSessions.removeValue(forKey: surfaceId)
@@ -1545,7 +1656,9 @@ final class SurfAceRuntime {
               let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
             return false
         }
-        return ownershipLock.providerId == session.providerId && ownershipLock.sessionId == session.sessionId
+        return session.pairConfirmed
+            && ownershipLock.providerId == session.providerId
+            && ownershipLock.sessionId == session.sessionId
     }
 
     private func mutationAck(id: String, op: String, paneId: Int, entry: SurfAcePaneEntry) -> [String: Any] {
