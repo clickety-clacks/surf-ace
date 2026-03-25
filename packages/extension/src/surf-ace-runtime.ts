@@ -580,6 +580,15 @@ function cloneFrame(frame: SurfAceFrame | null): SurfAceFrame | null {
 }
 
 function computeStrokeBBox(points: Stroke["points"]): SurfAceFrameStroke["bbox"] {
+  if (points.length === 0) {
+    return {
+      height: 0,
+      width: 0,
+      x: 0,
+      y: 0,
+    };
+  }
+
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
@@ -597,6 +606,25 @@ function computeStrokeBBox(points: Stroke["points"]): SurfAceFrameStroke["bbox"]
     width: maxX - minX,
     x: minX,
     y: minY,
+  };
+}
+
+function convertStrokeToFrameStroke(
+  stroke: Stroke,
+  fallbackTimestamp: number,
+): SurfAceFrameStroke {
+  const firstPoint = stroke.points[0];
+  const lastPoint = stroke.points[stroke.points.length - 1];
+  return {
+    bbox: computeStrokeBBox(stroke.points),
+    endedAt: lastPoint?.timestamp ?? fallbackTimestamp,
+    points: stroke.points.map((point) => ({
+      pressure: point.pressure,
+      x: point.x,
+      y: point.y,
+    })),
+    startedAt: firstPoint?.timestamp ?? fallbackTimestamp,
+    strokeId: stroke.strokeId,
   };
 }
 
@@ -2878,7 +2906,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private applySnapshot(
-    _surface: ManagedSurface,
+    surface: ManagedSurface,
     pane: ManagedPane,
     response: SnapshotResponse,
   ): void {
@@ -2904,6 +2932,76 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       x: payload.viewport.scrollOffset.x,
       y: payload.viewport.scrollOffset.y,
     };
+    this.materializeSnapshotDrawings(surface, pane, payload);
+  }
+
+  private materializeSnapshotDrawings(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    payload: SnapshotResponse["payload"],
+  ): void {
+    if (!payload.contentId || !payload.drawings || payload.drawings.length === 0) {
+      return;
+    }
+
+    const now = this.now();
+    const contextKey = pane.buffer.currentUrl ?? payload.contentId;
+    const snapshotStrokes = payload.drawings.map((stroke) => convertStrokeToFrameStroke(stroke, now));
+    const snapshotStrokeIds = new Set(snapshotStrokes.map((stroke) => stroke.strokeId));
+    const existingLiveFrame = pane.buffer.liveFrame;
+    const sameContext = existingLiveFrame?.contextKey === contextKey;
+    const previousStrokeIds = new Set(
+      sameContext ? existingLiveFrame.strokes.map((stroke) => stroke.strokeId) : [],
+    );
+
+    const openedAt = snapshotStrokes.reduce(
+      (minimum, stroke) => Math.min(minimum, stroke.startedAt),
+      snapshotStrokes[0]?.startedAt ?? now,
+    );
+    const updatedAt = snapshotStrokes.reduce(
+      (maximum, stroke) => Math.max(maximum, stroke.endedAt),
+      snapshotStrokes[0]?.endedAt ?? now,
+    );
+
+    if (!sameContext) {
+      pane.buffer.liveFrame = {
+        contentId: payload.contentId,
+        contextKey,
+        frameId: makeFrameId(),
+        image: payload.image ?? "",
+        openedAt,
+        scrollOffset: { ...payload.viewport.scrollOffset },
+        strokes: snapshotStrokes,
+        updatedAt,
+        url: pane.buffer.currentUrl ?? undefined,
+        viewport: pane.viewport,
+      };
+      pane.buffer.liveDirtyStrokeIds = snapshotStrokes.map((stroke) => stroke.strokeId);
+      pane.buffer.liveSeq += 1;
+      this.maybeFireAnnotationAlert(surface, pane);
+      return;
+    }
+
+    existingLiveFrame.contentId = payload.contentId;
+    existingLiveFrame.image = payload.image ?? existingLiveFrame.image;
+    existingLiveFrame.openedAt = Math.min(existingLiveFrame.openedAt, openedAt);
+    existingLiveFrame.scrollOffset = { ...payload.viewport.scrollOffset };
+    existingLiveFrame.strokes = snapshotStrokes;
+    existingLiveFrame.updatedAt = Math.max(existingLiveFrame.updatedAt, updatedAt);
+    existingLiveFrame.viewport = pane.viewport;
+
+    const existingDirty = pane.buffer.liveDirtyStrokeIds.filter((strokeId) =>
+      snapshotStrokeIds.has(strokeId)
+    );
+    const newDirtyStrokeIds = snapshotStrokes
+      .map((stroke) => stroke.strokeId)
+      .filter((strokeId) => !previousStrokeIds.has(strokeId));
+
+    pane.buffer.liveDirtyStrokeIds = [...existingDirty, ...newDirtyStrokeIds];
+    if (newDirtyStrokeIds.length > 0) {
+      pane.buffer.liveSeq += 1;
+      this.maybeFireAnnotationAlert(surface, pane);
+    }
   }
 
   private applyMutationResponse(
