@@ -30,14 +30,36 @@ async function closeSocket(socket: WebSocket, code = 1000, reason = "test_done")
 
 async function request(socket: WebSocket, payload: Request): Promise<Response> {
   const response = new Promise<Response>((resolve, reject) => {
-    socket.once("message", (data) => {
+    const onMessage = (data: WebSocket.RawData) => {
       try {
-        resolve(JSON.parse(String(data)) as Response);
+        const message = JSON.parse(String(data)) as Response | { id?: string; type?: string };
+        if (message.type !== "response" || message.id !== payload.id) {
+          return;
+        }
+        cleanup();
+        resolve(message as Response);
       } catch (error) {
+        cleanup();
         reject(error);
       }
-    });
-    socket.once("error", reject);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error(`socket closed before response ${payload.id}`));
+    };
+    const cleanup = () => {
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+    socket.on("close", onClose);
   });
   socket.send(JSON.stringify(payload));
   return await response;
@@ -94,8 +116,42 @@ function relinquishRequest(): Request {
   };
 }
 
+function contentSetRequest(paneId: number): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "content.set",
+    payload: {
+      content: { html: "<p>annotate</p>" },
+      contentId: "ct_snapshot" as never,
+      contentType: "html",
+      historyOwnerToken: "hot_snapshot" as never,
+      paneId: paneId as never,
+      revision: 1 as never,
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
+function snapshotGetRequest(paneId: number): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "snapshot.get",
+    payload: {
+      includeDrawings: true,
+      includeImage: false,
+      includeVisibleText: true,
+      paneId: paneId as never,
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 async function withServer(
-  run: (ctx: { surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
+  run: (ctx: { core: SurfaceCore; surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
 ): Promise<void> {
   const core = new SurfaceCore({
     persistentState: {
@@ -117,6 +173,7 @@ async function withServer(
   await server.start();
   try {
     await run({
+      core,
       server,
       surfaceId: surface.surfaceId,
       url: `ws://127.0.0.1:${port}${server.wsPath}`,
@@ -283,5 +340,56 @@ test("ws server ignores reply races when the requester closes before the respons
     assert.equal(response.ok, true);
     assert.equal(response.op, "surfaces.list");
     await closeSocket(stable);
+  });
+});
+
+test("ws server snapshot.get preserves pane drawings across owner resume", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const contentSet = await request(owner, contentSetRequest(1));
+    assert.equal(contentSet.ok, true);
+
+    core.setAnnotating(surfaceId, 1, true);
+    core.addStroke(surfaceId, 1, {
+      points: [
+        { pressure: 0.2, timestamp: 100, x: 10, y: 20 },
+        { pressure: 0.3, timestamp: 120, x: 30, y: 40 },
+      ],
+      strokeId: "stroke_reconnect" as never,
+      tool: "mouse",
+    });
+
+    const beforeDisconnect = await request(owner, snapshotGetRequest(1));
+    assert.equal(beforeDisconnect.ok, true);
+    assert.deepEqual(
+      beforeDisconnect.payload.drawings?.map((stroke) => stroke.strokeId),
+      ["stroke_reconnect"],
+    );
+
+    await closeSocket(owner, 1000, "provider_shutdown");
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+    const resumedSocket = await connect(url);
+    const resumed = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", { resumeSessionId: paired.payload.sessionId }),
+    );
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.payload.resumed, true);
+
+    const afterResume = await request(resumedSocket, snapshotGetRequest(1));
+    assert.equal(afterResume.ok, true);
+    assert.equal(afterResume.payload.contentId, "ct_snapshot");
+    assert.deepEqual(
+      afterResume.payload.drawings?.map((stroke) => stroke.strokeId),
+      ["stroke_reconnect"],
+    );
+
+    await closeSocket(resumedSocket);
   });
 });
