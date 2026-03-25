@@ -94,9 +94,11 @@ type PaneView = {
   controlsEl: HTMLDivElement;
   currentContentKey: string;
   currentDrawingsKey: string;
+  currentHtmlFrameCleanup: (() => void) | null;
   currentRenderToken: number;
   currentScrollHandler: (() => void) | null;
   currentWebView: Electron.WebviewTag | null;
+  currentWebViewResizeObserver: ResizeObserver | null;
   idleAnimationStop: (() => void) | null;
   lastNavigation: NavigationMemo | null;
   paneId: number;
@@ -519,9 +521,11 @@ function ensurePaneView(paneId: number): PaneView {
     controlsEl,
     currentContentKey: "",
     currentDrawingsKey: "",
+    currentHtmlFrameCleanup: null,
     currentRenderToken: 0,
     currentScrollHandler: null,
     currentWebView: null,
+    currentWebViewResizeObserver: null,
     idleAnimationStop: null,
     lastNavigation: null,
     paneId,
@@ -611,6 +615,197 @@ function sendNavigationIntent(view: PaneView, paneId: number, url: string): void
   window.surfAce.command({ paneId, type: "navigation", url });
 }
 
+function htmlFrameBridgeScript(): string {
+  return `
+<script>
+(() => {
+  const MAX_VISIBLE_TEXT_BYTES = 4096;
+  let longPressTimer = null;
+  let scrollTimer = null;
+  let resizeTimer = null;
+
+  const emit = (payload) => {
+    window.parent.postMessage({ channel: "surf-ace-content", payload }, "*");
+  };
+
+  const visibleText = () => (document.body?.innerText ?? "").slice(0, MAX_VISIBLE_TEXT_BYTES);
+  const currentViewport = () => {
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    return {
+      contentSize: { height: scrolling.scrollHeight, width: scrolling.scrollWidth },
+      scrollOffset: { x: scrolling.scrollLeft, y: scrolling.scrollTop },
+      visibleRect: {
+        height: window.innerHeight,
+        width: window.innerWidth,
+        x: scrolling.scrollLeft,
+        y: scrolling.scrollTop,
+      },
+      zoomLevel: window.visualViewport?.scale ?? 1,
+    };
+  };
+  const currentSelection = () => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+    const text = selection.toString().trim();
+    if (!text) {
+      return null;
+    }
+    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    return {
+      boundingRect: { height: rect.height, width: rect.width, x: rect.x, y: rect.y },
+      kind: "text",
+      text: text.slice(0, MAX_VISIBLE_TEXT_BYTES),
+    };
+  };
+  const nearestText = (target) => {
+    if (!(target instanceof HTMLElement)) {
+      return undefined;
+    }
+    const text = (target.innerText || target.textContent || "").trim();
+    return text ? text.slice(0, 240) : undefined;
+  };
+  const navigationTarget = (target) => {
+    if (!(target instanceof HTMLElement)) {
+      return null;
+    }
+    return target.closest("a[href],button,[role='button'],input[type='button'],input[type='submit'],summary");
+  };
+  const linkTarget = (target) => {
+    if (!(target instanceof HTMLElement)) {
+      return null;
+    }
+    const match = target.closest("a[href]");
+    return match instanceof HTMLAnchorElement ? match : null;
+  };
+
+  window.addEventListener("scroll", () => {
+    if (scrollTimer) {
+      clearTimeout(scrollTimer);
+    }
+    scrollTimer = setTimeout(() => {
+      emit({ type: "scroll", viewport: currentViewport(), visibleText: visibleText() });
+    }, 120);
+  }, { passive: true });
+
+  window.addEventListener("resize", () => {
+    if (resizeTimer) {
+      clearTimeout(resizeTimer);
+    }
+    resizeTimer = setTimeout(() => {
+      emit({ type: "scroll", viewport: currentViewport(), visibleText: visibleText() });
+    }, 120);
+  });
+
+  document.addEventListener("selectionchange", () => {
+    emit({ selection: currentSelection(), type: "selection" });
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    if (navigationTarget(event.target)) {
+      return;
+    }
+    longPressTimer = setTimeout(() => {
+      emit({
+        kind: "long_press",
+        nearestContent: nearestText(event.target),
+        position: { x: event.clientX, y: event.clientY },
+        type: "tap",
+      });
+      longPressTimer = null;
+    }, 500);
+  });
+
+  document.addEventListener("pointerup", (event) => {
+    if (navigationTarget(event.target)) {
+      if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+      return;
+    }
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+      emit({
+        kind: "tap",
+        nearestContent: nearestText(event.target),
+        position: { x: event.clientX, y: event.clientY },
+        type: "tap",
+      });
+    }
+  });
+
+  document.addEventListener("pointercancel", () => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    const link = linkTarget(event.target);
+    if (!link?.href) {
+      return;
+    }
+    event.preventDefault();
+    emit({ type: "navigation", url: link.href });
+  }, { capture: true });
+
+  document.addEventListener("submit", (event) => {
+    if (!(event.target instanceof HTMLFormElement)) {
+      return;
+    }
+    event.preventDefault();
+    emit({ type: "navigation", url: event.target.action || window.location.href });
+  }, { capture: true });
+
+  window.addEventListener("DOMContentLoaded", () => {
+    emit({ type: "ready", viewport: currentViewport(), visibleText: visibleText() });
+  });
+})();
+</script>`;
+}
+
+function injectHtmlFrameBridge(html: string): string {
+  const bridge = htmlFrameBridgeScript();
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, `${bridge}</body>`);
+  }
+  if (/<\/html>/i.test(html)) {
+    return html.replace(/<\/html>/i, `${bridge}</html>`);
+  }
+  return `${html}${bridge}`;
+}
+
+function clearWebViewSizer(view: PaneView): void {
+  view.currentWebViewResizeObserver?.disconnect();
+  view.currentWebViewResizeObserver = null;
+}
+
+function sizeWebViewToPane(view: PaneView, element: HTMLElement): void {
+  clearWebViewSizer(view);
+
+  const applySize = () => {
+    const rect = view.scrollEl.getBoundingClientRect();
+    view.contentEl.style.height = `${Math.max(1, Math.floor(rect.height))}px`;
+    view.contentEl.style.minHeight = `${Math.max(1, Math.floor(rect.height))}px`;
+    element.style.width = `${Math.max(1, Math.floor(rect.width))}px`;
+    element.style.height = `${Math.max(1, Math.floor(rect.height))}px`;
+  };
+
+  applySize();
+  const observer = new ResizeObserver(() => {
+    applySize();
+  });
+  observer.observe(view.scrollEl);
+  view.currentWebViewResizeObserver = observer;
+  window.requestAnimationFrame(() => {
+    applySize();
+  });
+}
+
 function wireWebView(view: PaneView, paneId: number, webview: Electron.WebviewTag): void {
   webview.addEventListener("ipc-message", (event) => {
     if (event.channel !== "surf-ace-content") {
@@ -671,6 +866,65 @@ function wireWebView(view: PaneView, paneId: number, webview: Electron.WebviewTa
 
   webview.addEventListener("will-navigate", handleWillNavigate as EventListener);
   webview.addEventListener("will-frame-navigate", handleWillNavigate as EventListener);
+}
+
+function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement): void {
+  const onMessage = (event: MessageEvent) => {
+    if (event.source !== frame.contentWindow) {
+      return;
+    }
+    if (!event.data || typeof event.data !== "object" || event.data.channel !== "surf-ace-content") {
+      return;
+    }
+    const payload = event.data.payload as Record<string, unknown> | undefined;
+    if (!payload) {
+      return;
+    }
+    if (payload.type === "scroll") {
+      window.surfAce.command({
+        paneId,
+        type: "scroll",
+        viewport: payload.viewport,
+        visibleText: payload.visibleText,
+      });
+      window.surfAce.reportSnapshot({
+        bounds: paneBounds(view),
+        paneId,
+        selection: null,
+        viewport: payload.viewport,
+        visibleText: payload.visibleText,
+      });
+    } else if (payload.type === "selection") {
+      window.surfAce.command({
+        paneId,
+        selection: payload.selection ?? null,
+        type: "selection",
+      });
+    } else if (payload.type === "tap") {
+      window.surfAce.command({
+        kind: payload.kind,
+        nearestContent: payload.nearestContent,
+        paneId,
+        position: payload.position,
+        type: "tap",
+      });
+    } else if (payload.type === "navigation") {
+      sendNavigationIntent(view, paneId, String(payload.url ?? ""));
+    } else if (payload.type === "ready") {
+      window.surfAce.reportSnapshot({
+        bounds: paneBounds(view),
+        paneId,
+        selection: null,
+        viewport: payload.viewport,
+        visibleText: payload.visibleText,
+      });
+    }
+  };
+
+  window.addEventListener("message", onMessage);
+  view.currentHtmlFrameCleanup = () => {
+    window.removeEventListener("message", onMessage);
+  };
 }
 
 function stopIdleAnimation(view: PaneView): void {
@@ -923,10 +1177,15 @@ async function renderPdfContent(view: PaneView, pane: RendererPaneState, token: 
 
 function resetDynamicContent(view: PaneView): number {
   view.currentRenderToken += 1;
+  view.currentHtmlFrameCleanup?.();
+  view.currentHtmlFrameCleanup = null;
+  clearWebViewSizer(view);
   view.currentWebView = null;
   view.currentScrollHandler = null;
   stopIdleAnimation(view);
   view.rootEl.dataset.pdfReportKey = "";
+  view.contentEl.style.height = "";
+  view.contentEl.style.minHeight = "";
   view.contentEl.replaceChildren();
   return view.currentRenderToken;
 }
@@ -948,19 +1207,19 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
 
   if (pane.content.contentType === "html") {
     const html = pane.content.content as HtmlContent;
-    const webview = document.createElement("webview");
-    webview.className = "content-html-webview";
-    webview.setAttribute("preload", bootstrap!.guestPreloadUrl);
+    const frame = document.createElement("iframe");
+    frame.className = "content-html-frame";
+    frame.setAttribute("sandbox", "allow-forms allow-popups-to-escape-sandbox allow-same-origin allow-scripts");
     const isFullDocument = /^\s*<!doctype\s+html/i.test(html.html) || /^\s*<html[\s>]/i.test(html.html);
     const finalHtml = isFullDocument
       ? html.html
       : `<!doctype html><html><head>${
           html.baseUrl ? `<base href="${html.baseUrl}">` : ""
         }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${html.html}</body></html>`;
-    webview.src = `data:text/html;charset=utf-8,${encodeURIComponent(finalHtml)}`;
-    view.contentEl.appendChild(webview);
-    view.currentWebView = webview;
-    wireWebView(view, pane.paneId, webview);
+    frame.srcdoc = injectHtmlFrameBridge(finalHtml);
+    view.contentEl.appendChild(frame);
+    sizeWebViewToPane(view, frame);
+    wireHtmlFrame(view, pane.paneId, frame);
     return;
   }
 
