@@ -1150,6 +1150,51 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("reconnect snapshot materializes visible pane drawings back into surf_ace_read", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const pushed = await runtime.push(
+        {
+          content: "<p>reconnect state</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        },
+        { sessionKey: "agent:test:reconnect" },
+      );
+
+      const pane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(pane);
+      pane.drawings = ["stroke_recovered"];
+      server.snapshotImage = "cmVjb25uZWN0LWZyYW1l";
+      server.snapshotScrollOffset = { x: 12, y: 34 };
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      await surface.client.close(1000, "test_reconnect_snapshot_materialization");
+
+      await waitFor(() => server.pairRequests.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      const recovered = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.equal(recovered.liveFrame?.contentId, pushed.contentId);
+      assert.equal(recovered.liveFrame?.image, "cmVjb25uZWN0LWZyYW1l");
+      assert.deepEqual(recovered.liveFrame?.scrollOffset, { x: 12, y: 34 });
+      assert.deepEqual(recovered.liveFrame?.strokes.map((stroke) => stroke.strokeId), [
+        "stroke_recovered",
+      ]);
+      assert.deepEqual(recovered.liveDirtyStrokeIds, ["stroke_recovered"]);
+
+      const afterRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.deepEqual(afterRead.liveFrame?.strokes.map((stroke) => stroke.strokeId), [
+        "stroke_recovered",
+      ]);
+      assert.deepEqual(afterRead.liveDirtyStrokeIds, []);
+    });
+  });
+
   await t.test("annotation alert gate is surface-scoped and resets on read or timeout", async () => {
     let currentTime = Date.now();
     await withRuntimeHarness({
