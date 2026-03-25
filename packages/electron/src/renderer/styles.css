@@ -217,20 +217,28 @@ body {
   min-height: 100%;
 }
 
+.pane-content.type-html {
+  overflow: hidden;
+}
+
 .pane-content.type-image {
   display: flex;
   min-height: 100%;
 }
 
+.content-html-frame,
 .content-html-webview,
 .content-pdf-stack {
   display: block;
   width: 100%;
 }
 
+.content-html-frame,
 .content-html-webview {
-  height: 100%;
-  min-height: 100%;
+  position: absolute;
+  inset: 0;
+  height: auto;
+  min-height: 0;
   border: 0;
   background: #fff;
 }
