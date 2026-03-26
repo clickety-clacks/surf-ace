@@ -686,6 +686,7 @@ async function withRuntimeHarness(
     | ((
         ctx: {
           alertBodies: Array<Record<string, unknown>>;
+          annotationTurns: import("./surf-ace-runtime.js").SurfAceAnnotationIntentTurn[];
           discovery: StaticDiscoveryService;
           warnings: string[];
           runtime: ReturnType<typeof createSurfAceRuntime>;
@@ -696,6 +697,7 @@ async function withRuntimeHarness(
         now?: () => number;
         run: (ctx: {
           alertBodies: Array<Record<string, unknown>>;
+          annotationTurns: import("./surf-ace-runtime.js").SurfAceAnnotationIntentTurn[];
           discovery: StaticDiscoveryService;
           warnings: string[];
           runtime: ReturnType<typeof createSurfAceRuntime>;
@@ -712,7 +714,11 @@ async function withRuntimeHarness(
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-"));
   const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
   const warnings: string[] = [];
+  const annotationTurns: import("./surf-ace-runtime.js").SurfAceAnnotationIntentTurn[] = [];
   const runtime = createSurfAceRuntime({
+    deliverSettledAnnotationTurn: async (turn) => {
+      annotationTurns.push(structuredClone(turn));
+    },
     discovery,
     logger: {
       warn: (message: string) => {
@@ -733,7 +739,7 @@ async function withRuntimeHarness(
 
     await runtime.start();
     await waitFor(() => server.pairedSocket !== null);
-    await options.run({ alertBodies, discovery, runtime, server, warnings });
+    await options.run({ alertBodies, annotationTurns, discovery, runtime, server, warnings });
   } finally {
     globalThis.fetch = originalFetch;
     await runtime.stop();
@@ -802,6 +808,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(
         Object.keys(screen).sort(),
         [
+          "_debug",
           "connectionState",
           "fingerprint",
           "lastSeenAt",
@@ -1075,8 +1082,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("provider captures frame-open state freshly, alerts on closed-frame growth, and ignores after_reconnect snapshot hints", async () => {
-    await withRuntimeHarness(async ({ alertBodies, runtime, server, warnings }) => {
+  await t.test("provider captures frame-open state freshly, delivers settled annotation turns, and ignores after_reconnect snapshot hints", async () => {
+    await withRuntimeHarness(async ({ alertBodies, annotationTurns, runtime, server, warnings }) => {
       const pushed = await runtime.push(
         {
           content: "<p>fresh snapshot</p>",
@@ -1108,12 +1115,49 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: 1 });
       assert.equal(clear.paneId, 1);
-      await waitFor(() => alertBodies.length === 2);
-      assert.deepEqual(alertBodies[1], {
-        message: "Surf Ace updates pending on Surface A (1 queued frame)",
-        noOverlay: true,
-        sessionKey: "agent:test:fresh",
+      await waitFor(() => annotationTurns.length === 1);
+      assert.equal(alertBodies.length, 1);
+      const turn = annotationTurns[0];
+      assert.ok(turn);
+      assert.equal(turn.fingerprint, server.surfaceId);
+      assert.equal(turn.paneId, 1);
+      assert.equal(turn.sessionKey, "agent:test:fresh");
+      assert.equal(turn.surfaceName, "Surface A");
+      assert.equal(turn.attachment.content, "ZnJhbWUtb3Blbg==");
+      assert.equal(turn.attachment.mimeType, "image/png");
+      assert.equal(turn.attachment.type, "file");
+      assert.equal(
+        turn.attachment.fileName,
+        `surf-ace-${server.surfaceId}-pane-1-${turn.frame.frameId}.png`,
+      );
+      assert.equal(turn.frame.contentId, pushed.contentId);
+      assert.equal(turn.frame.contextKey, pushed.contentId);
+      assert.equal(turn.frame.image, "ZnJhbWUtb3Blbg==");
+      assert.deepEqual(turn.frame.scrollOffset, { x: 24, y: 48 });
+      assert.deepEqual(turn.frame.viewport, {
+        height: 768,
+        scale: 2,
+        width: 1024,
       });
+      assert.equal(turn.frame.url, undefined);
+      assert.deepEqual(turn.frame.strokes, [
+        {
+          bbox: { height: 20, width: 20, x: 10, y: 20 },
+          endedAt: 120,
+          points: [
+            { pressure: 0.2, x: 10, y: 20 },
+            { pressure: 0.4, x: 30, y: 40 },
+          ],
+          startedAt: 100,
+          strokeId: "stroke_abc123",
+        },
+      ]);
+      assert.equal(
+        turn.idempotencyKey,
+        `surf-ace-annotation-intent:${server.surfaceId}:1:${turn.frame.frameId}`,
+      );
+      assert.match(turn.message, /Treat the attached image as the primary annotation input\./);
+      assert.match(turn.message, /Use the stroke metadata below as secondary context only\./);
 
       const closedRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
       assert.equal(closedRead.frames.length, 1);
@@ -1147,6 +1191,43 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await new Promise((resolve) => {
         setTimeout(resolve, 300);
       });
+    });
+  });
+
+  await t.test("provider leaves settled annotation frames queued when the snapshot image is missing", async () => {
+    await withRuntimeHarness(async ({ annotationTurns, runtime, server, warnings }) => {
+      const pushed = await runtime.push(
+        {
+          content: "<p>missing image</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        },
+        { sessionKey: "agent:test:missing-image" },
+      );
+
+      const initialSnapshotCount = server.snapshotRequests.length;
+      server.snapshotImage = "";
+      server.sendDrawingFlush(server.initialRemotePaneId, pushed.contentId);
+
+      await waitFor(() => server.snapshotRequests.length > initialSnapshotCount);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+
+      const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.equal(clear.paneId, 1);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+
+      assert.equal(annotationTurns.length, 0);
+      const closedRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.equal(closedRead.frames.length, 1);
+      assert.equal(closedRead.frames[0]?.image, "");
+      assert.ok(
+        warnings.some((warning) => warning.includes("settled annotation frame missing image")),
+      );
     });
   });
 
@@ -1249,7 +1330,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         server.sendDrawingFlush(secondRemotePaneId as number, secondPush.contentId);
         await waitFor(() => alertBodies.length === 2);
         assert.deepEqual(alertBodies[1], {
-          message: "Surf Ace updates pending on Surface A (2 live dirty strokes)",
+          message: "Surf Ace updates pending on Surface A (3 live dirty strokes)",
           noOverlay: true,
           sessionKey: "agent:test:alert-2",
         });
