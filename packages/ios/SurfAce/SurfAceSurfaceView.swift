@@ -84,8 +84,11 @@ private struct SurfAceWindowView: View {
                         .transition(.opacity)
                 }
             }
-            .overlay(alignment: .bottom) {
-                SurfAceConnectionStateBar(state: surface.connectionBarState)
+            .overlay(alignment: .top) {
+                SurfAceConnectionDebugBar(
+                    state: surface.connectionBarState,
+                    serviceName: runtime.screenName
+                )
             }
         }
     }
@@ -352,6 +355,26 @@ private struct SurfAceConnectionStateBar: View {
         case .disconnected:
             return Color(red: 0.94, green: 0.27, blue: 0.27)
         }
+    }
+}
+
+private struct SurfAceConnectionDebugBar: View {
+    let state: SurfAceConnectionBarState
+    let serviceName: String
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            SurfAceConnectionStateBar(state: state)
+
+            Text(serviceName)
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.5))
+                .lineLimit(1)
+                .padding(.top, 4)
+                .padding(.trailing, 8)
+        }
+        .frame(maxWidth: .infinity, alignment: .topTrailing)
+        .allowsHitTesting(false)
     }
 }
 
