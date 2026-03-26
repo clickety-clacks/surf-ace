@@ -2,6 +2,10 @@ import CryptoKit
 import Foundation
 import Network
 
+private func surfAceServerLog(_ message: String) {
+    print("[SurfAce-Server] \(message)")
+}
+
 enum SurfAceHTTPServerError: LocalizedError {
     case startTimeout
     case listenerCancelled
@@ -336,6 +340,7 @@ actor SurfAceHTTPServer {
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
+        surfAceServerLog("listener start requested port=\(port) webSocketPath=\(webSocketPath)")
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         let endpointPort = port == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: port)!
@@ -355,14 +360,17 @@ actor SurfAceHTTPServer {
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
+                    surfAceServerLog("listener ready port=\(listener.port?.rawValue ?? 0)")
                     guard startupState.markResumedIfNeeded() else { return }
                     listener.stateUpdateHandler = nil
                     continuation.resume(returning: listener.port?.rawValue ?? 0)
                 case .failed(let error):
+                    surfAceServerLog("listener failed error=\(error.localizedDescription)")
                     guard startupState.markResumedIfNeeded() else { return }
                     listener.stateUpdateHandler = nil
                     continuation.resume(throwing: error)
                 case .cancelled:
+                    surfAceServerLog("listener cancelled")
                     guard startupState.markResumedIfNeeded() else { return }
                     listener.stateUpdateHandler = nil
                     continuation.resume(throwing: SurfAceHTTPServerError.listenerCancelled)
@@ -380,6 +388,7 @@ actor SurfAceHTTPServer {
             listener.start(queue: self.listenerQueue)
             self.listenerQueue.asyncAfter(deadline: .now() + 5) {
                 guard startupState.markResumedIfNeeded() else { return }
+                surfAceServerLog("listener start timed out after 5s")
                 listener.cancel()
                 listener.stateUpdateHandler = nil
                 continuation.resume(throwing: SurfAceHTTPServerError.startTimeout)
@@ -388,6 +397,7 @@ actor SurfAceHTTPServer {
     }
 
     func stop() {
+        surfAceServerLog("listener stop requested")
         listener?.cancel()
         listener = nil
         httpHandler = nil
@@ -395,14 +405,17 @@ actor SurfAceHTTPServer {
     }
 
     private func handle(connection: NWConnection) async {
+        surfAceServerLog("accepted connection endpoint=\(String(describing: connection.endpoint))")
         connection.start(queue: listenerQueue)
         do {
             guard let request = try await readHTTPRequest(from: connection) else {
+                surfAceServerLog("connection closed before full HTTP request endpoint=\(String(describing: connection.endpoint))")
                 connection.cancel()
                 return
             }
 
             if shouldUpgradeToWebSocket(request: request) {
+                surfAceServerLog("websocket upgrade request path=\(request.path) endpoint=\(String(describing: connection.endpoint))")
                 guard let webSocketHandler else {
                     await send(response: HTTPServerResponse(statusCode: 500), to: connection)
                     connection.cancel()
@@ -439,9 +452,11 @@ actor SurfAceHTTPServer {
             }
 
             let response = await httpHandler(request)
+            surfAceServerLog("http response status=\(response.statusCode) path=\(request.path) endpoint=\(String(describing: connection.endpoint))")
             await send(response: response, to: connection)
             connection.cancel()
         } catch {
+            surfAceServerLog("connection handling failed endpoint=\(String(describing: connection.endpoint)) error=\(error.localizedDescription)")
             connection.cancel()
         }
     }

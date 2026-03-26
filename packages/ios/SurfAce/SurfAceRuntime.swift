@@ -3,6 +3,14 @@ import Foundation
 import Observation
 import UIKit
 
+private func surfAceServerRuntimeLog(_ message: String) {
+    print("[SurfAce-Server] \(message)")
+}
+
+private func surfAceGatewayLog(_ message: String) {
+    print("[SurfAce-Gateway] \(message)")
+}
+
 actor SurfAceOutboundSender {
     enum Priority: Int {
         case event = 0
@@ -195,6 +203,7 @@ final class SurfAceRuntime {
     func start() async {
         guard !isStarted else { return }
         observeLifecycle()
+        surfAceServerRuntimeLog("runtime start requested fixedPort=\(fixedServerPort) healthPath=\(healthPath) wsPath=\(webSocketPath)")
 
         do {
             let port = try await server.start(
@@ -214,14 +223,17 @@ final class SurfAceRuntime {
             )
             serverPort = Int(port)
             isStarted = true
+            surfAceServerRuntimeLog("runtime start succeeded port=\(serverPort) screenName=\(screenName) fingerprint=\(fingerprint)")
             startHeartbeatWatchdog()
             publishBonjour()
         } catch {
+            surfAceServerRuntimeLog("runtime start failed port=\(fixedServerPort) error=\(error.localizedDescription)")
             endpointError = "Server failed on port \(fixedServerPort): \(error.localizedDescription)"
         }
     }
 
     func stop() async {
+        surfAceServerRuntimeLog("runtime stop requested activeSessions=\(activeSessions.count) surfaces=\(surfaces.count)")
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
 
@@ -243,6 +255,7 @@ final class SurfAceRuntime {
         await server.stop()
         bonjourPublisher.stop()
         isStarted = false
+        surfAceServerRuntimeLog("runtime stop completed")
     }
 
     func registerSurface(sceneKey: String) -> SurfAceSurfaceModel {
@@ -636,6 +649,7 @@ final class SurfAceRuntime {
 
     private func handleWebSocket(_ socket: SurfAceWebSocket) async {
         let connectionUUID = randomHex(prefix: "cn", byteCount: 8)
+        surfAceGatewayLog("socket opened connectionUUID=\(connectionUUID)")
         let sender = SurfAceOutboundSender(socket: socket)
         var replayCache: [String: SurfAceRequestReplayEntry] = [:]
         var replayOrder: [String] = []
@@ -656,6 +670,7 @@ final class SurfAceRuntime {
 
                 switch message {
                 case .close:
+                    surfAceGatewayLog("socket close frame received connectionUUID=\(connectionUUID)")
                     await handleSocketTermination(connectionUUID: connectionUUID)
                     return
                 case .text(let text):
@@ -679,6 +694,7 @@ final class SurfAceRuntime {
                           type == "request",
                           let op = requestObject["op"] as? String,
                           let id = requestObject["id"] as? String else {
+                        surfAceGatewayLog("protocol violation connectionUUID=\(connectionUUID) invalid request envelope")
                         await socket.close(code: 4410, reason: "protocol_violation")
                         await handleSocketTermination(connectionUUID: connectionUUID)
                         return
@@ -738,6 +754,7 @@ final class SurfAceRuntime {
                     }
                 }
             } catch {
+                surfAceGatewayLog("socket loop failed connectionUUID=\(connectionUUID) error=\(error.localizedDescription)")
                 await handleSocketTermination(connectionUUID: connectionUUID)
                 return
             }
@@ -859,11 +876,16 @@ final class SurfAceRuntime {
         sender: SurfAceOutboundSender,
         connectionUUID: String
     ) async -> SurfAceProcessedRequestResult {
+        let takeover = payload["takeover"] as? Bool ?? false
+        let resumePayload = payload["resume"] as? [String: Any]
+        let resumeSessionId = resumePayload?["sessionId"] as? String
+        surfAceGatewayLog("pair.request received connectionUUID=\(connectionUUID) surfaceId=\(payload["surfaceId"] as? String ?? "nil") providerId=\(payload["providerId"] as? String ?? "nil") takeover=\(takeover) resumeSessionId=\(resumeSessionId ?? "nil")")
         guard let providerId = payload["providerId"] as? String,
               let connectionId = payload["connectionId"] as? String,
               let protocolVersion = payload["protocolVersion"] as? Int,
               let surfaceId = payload["surfaceId"] as? String,
               let surface = surfaceById[surfaceId] else {
+            surfAceGatewayLog("pair.request invalid payload connectionUUID=\(connectionUUID)")
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(
                     op: "pair.request",
@@ -906,10 +928,6 @@ final class SurfAceRuntime {
                 postSendPairCommit: nil
             )
         }
-        let takeover = payload["takeover"] as? Bool ?? false
-        let resumePayload = payload["resume"] as? [String: Any]
-        let resumeSessionId = resumePayload?["sessionId"] as? String
-
         let activeSession = activeSessions[surfaceId]
         let ownershipLock = ownershipLocksBySurfaceId[surfaceId]
         let resumed: Bool
@@ -917,6 +935,7 @@ final class SurfAceRuntime {
 
         if let ownershipLock {
             if takeover {
+                surfAceGatewayLog("pair.request takeover surfaceId=\(surfaceId) providerId=\(providerId)")
                 resumed = false
                 sessionId = randomHex(prefix: "sa", byteCount: 12)
                 if let activeSession, activeSession.connectionUUID != connectionUUID {
@@ -928,6 +947,7 @@ final class SurfAceRuntime {
                 }
             } else if ownershipLock.providerId == providerId {
                 guard resumeSessionId == ownershipLock.sessionId else {
+                    surfAceGatewayLog("pair.request invalid_resume surfaceId=\(surfaceId) providerId=\(providerId) expectedSessionId=\(ownershipLock.sessionId) receivedSessionId=\(resumeSessionId ?? "nil")")
                     return SurfAceProcessedRequestResult(
                         responseObject: makeErrorResponse(
                             op: "pair.request",
@@ -940,6 +960,7 @@ final class SurfAceRuntime {
                 }
                 resumed = true
                 sessionId = ownershipLock.sessionId
+                surfAceGatewayLog("pair.request resumed surfaceId=\(surfaceId) providerId=\(providerId) sessionId=\(sessionId)")
                 if let activeSession, activeSession.connectionUUID != connectionUUID {
                     Task {
                         await activeSession.socket.close(code: 1000, reason: "superseded")
@@ -948,6 +969,7 @@ final class SurfAceRuntime {
                     lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
                 }
             } else {
+                surfAceGatewayLog("pair.request busy surfaceId=\(surfaceId) requestedProviderId=\(providerId) lockProviderId=\(ownershipLock.providerId)")
                 return SurfAceProcessedRequestResult(
                     responseObject: makeErrorResponse(
                         op: "pair.request",
@@ -961,6 +983,7 @@ final class SurfAceRuntime {
         } else {
             resumed = false
             sessionId = randomHex(prefix: "sa", byteCount: 12)
+            surfAceGatewayLog("pair.request new session surfaceId=\(surfaceId) providerId=\(providerId) sessionId=\(sessionId)")
         }
 
         let session = SurfAceSessionState(
@@ -1037,6 +1060,7 @@ final class SurfAceRuntime {
 
     private func commitPairRequest(_ plan: SurfAcePairCommitPlan) {
         guard let surface = surfaceById[plan.surfaceId] else { return }
+        surfAceGatewayLog("pair committed surfaceId=\(plan.surfaceId) providerId=\(plan.session.providerId) sessionId=\(plan.session.sessionId) resumed=\(plan.resumed)")
         if !plan.resumed {
             applyProviderBootstrapTopology(
                 surface: surface,
@@ -1556,6 +1580,7 @@ final class SurfAceRuntime {
         terminatedConnectionUUIDs.insert(connectionUUID)
         guard let pair = activeSessions.first(where: { $0.value.connectionUUID == connectionUUID }) else { return }
         let surfaceId = pair.key
+        surfAceGatewayLog("socket terminated connectionUUID=\(connectionUUID) surfaceId=\(surfaceId) providerId=\(pair.value.providerId) sessionId=\(pair.value.sessionId)")
         activeSessions.removeValue(forKey: surfaceId)
         lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
         // Track when the ownership lock became orphaned (session gone, lock stays
@@ -1958,11 +1983,13 @@ final class SurfAceRuntime {
     }
 
     private func publishBonjour() {
+        surfAceServerRuntimeLog("publishing bonjour name=\(screenName) port=\(serverPort)")
         bonjourPublisher.publish(name: screenName, port: serverPort, txtRecord: bonjourTXTRecord())
     }
 
     private func refreshBonjourTXT() {
         guard isStarted else { return }
+        surfAceServerRuntimeLog("refresh bonjour TXT busy=\(ownershipLocksBySurfaceId.isEmpty ? 0 : 1) surfaceCount=\(surfaces.count)")
         bonjourPublisher.updateTXTRecord(bonjourTXTRecord())
     }
 
