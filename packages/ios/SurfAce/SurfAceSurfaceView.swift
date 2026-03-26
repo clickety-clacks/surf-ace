@@ -84,11 +84,11 @@ private struct SurfAceWindowView: View {
                         .transition(.opacity)
                 }
             }
-            .overlay(alignment: .top) {
-                SurfAceConnectionDebugBar(
-                    state: surface.connectionBarState,
-                    serviceName: runtime.screenName
-                )
+            .overlay(alignment: .bottom) {
+                SurfAceConnectionStateBar(state: surface.connectionBarState)
+            }
+            .overlay(alignment: .topTrailing) {
+                SurfAceServiceNameDebugLabel(serviceName: runtime.screenName)
             }
         }
     }
@@ -358,23 +358,20 @@ private struct SurfAceConnectionStateBar: View {
     }
 }
 
-private struct SurfAceConnectionDebugBar: View {
-    let state: SurfAceConnectionBarState
+private struct SurfAceServiceNameDebugLabel: View {
     let serviceName: String
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            SurfAceConnectionStateBar(state: state)
-
-            Text(serviceName)
-                .font(.system(size: 10, weight: .regular, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.5))
-                .lineLimit(1)
-                .padding(.top, 4)
-                .padding(.trailing, 8)
-        }
-        .frame(maxWidth: .infinity, alignment: .topTrailing)
-        .allowsHitTesting(false)
+        Text(serviceName)
+            .font(.system(size: 10, weight: .regular, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.5))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.black.opacity(0.18), in: Capsule())
+            .padding(.top, 8)
+            .padding(.trailing, 8)
+            .allowsHitTesting(false)
     }
 }
 

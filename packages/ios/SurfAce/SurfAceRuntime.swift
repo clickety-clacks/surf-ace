@@ -176,7 +176,10 @@ final class SurfAceRuntime {
 
     init() {
         let fallbackName = "Surf Ace"
-        self.screenName = "\(fallbackName) - \(UIDevice.current.name)"
+        let deviceName = UIDevice.current.name
+        let hostName = ProcessInfo.processInfo.hostName
+        let shortHostName = hostName.split(separator: ".").first.map(String.init) ?? hostName
+        self.screenName = "\(fallbackName) - \(deviceName) (\(shortHostName))"
         self.fingerprint = "00000000"
         let vendorID = UIDevice.current.identifierForVendor?
             .uuidString
