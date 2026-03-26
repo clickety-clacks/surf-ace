@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 private func surfAceBonjourLog(_ message: String) {
     print("[SurfAce-Bonjour] \(message)")
@@ -11,6 +12,7 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
     func publish(name: String, port: Int, txtRecord: [String: String]) {
         surfAceBonjourLog("publish requested name=\(name) port=\(port) txtKeys=\(txtRecord.keys.sorted())")
         stop()
+        triggerLocalNetworkPermissionPrompt()
         let service = NetService(
             domain: "local.",
             type: "_surf-ace._tcp.",
@@ -57,5 +59,47 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
 
     func netServiceDidStop(_ sender: NetService) {
         surfAceBonjourLog("service stopped name=\(sender.name)")
+    }
+
+    private func triggerLocalNetworkPermissionPrompt() {
+        surfAceBonjourLog("permission trigger start")
+        let parameters = NWParameters()
+        parameters.includePeerToPeer = true
+        let browser = NWBrowser(
+            for: .bonjour(type: "_surf-ace._tcp", domain: nil),
+            using: parameters
+        )
+        browser.stateUpdateHandler = { [browser] state in
+            switch state {
+            case .setup:
+                surfAceBonjourLog("permission trigger setup")
+            case .ready:
+                surfAceBonjourLog("permission trigger ready")
+                browser.stateUpdateHandler = nil
+                browser.browseResultsChangedHandler = nil
+                browser.cancel()
+            case .waiting(let error):
+                surfAceBonjourLog("permission trigger waiting error=\(error.localizedDescription)")
+            case .failed(let error):
+                surfAceBonjourLog("permission trigger failed error=\(error.localizedDescription)")
+                browser.stateUpdateHandler = nil
+                browser.browseResultsChangedHandler = nil
+                browser.cancel()
+            case .cancelled:
+                surfAceBonjourLog("permission trigger cancelled")
+            @unknown default:
+                surfAceBonjourLog("permission trigger unknown state")
+                browser.stateUpdateHandler = nil
+                browser.browseResultsChangedHandler = nil
+                browser.cancel()
+            }
+        }
+        browser.browseResultsChangedHandler = { _, _ in }
+        browser.start(queue: .main)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [browser] in
+            browser.stateUpdateHandler = nil
+            browser.browseResultsChangedHandler = nil
+            browser.cancel()
+        }
     }
 }
