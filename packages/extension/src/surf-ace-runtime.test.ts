@@ -73,7 +73,11 @@ class FakeSurfAceWsServer {
     revision: number;
   }> = [];
   initialRemotePaneId = 41;
-  readonly pairAttemptDetails: Array<{ resumeSessionId: string | null; takeover: boolean }> = [];
+  readonly pairAttemptDetails: Array<{
+    providerId: string | null;
+    resumeSessionId: string | null;
+    takeover: boolean;
+  }> = [];
   readonly pairRequests: Array<{ initialPaneId: number; windowLabel: string }> = [];
   readonly panes = new Map<number, TestPane>([
     [
@@ -105,6 +109,8 @@ class FakeSurfAceWsServer {
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
   invalidResumeWithoutTakeoverResponsesRemaining = 0;
+  lockUntilNewProviderIdCode: "busy" | "invalid_resume" | null = null;
+  lockUntilNewProviderIdProviderId: string | null = null;
   maxConcurrentSocketCount = 0;
   rejectNextResumePairWithSessionMismatch = false;
   resumePairMismatchResponsesRemaining = 0;
@@ -257,6 +263,10 @@ class FakeSurfAceWsServer {
           windowLabel: String(message.payload?.windowLabel ?? ""),
         });
         this.pairAttemptDetails.push({
+          providerId:
+            typeof message.payload?.providerId === "string"
+              ? String(message.payload.providerId)
+              : null,
           resumeSessionId:
             typeof message.payload?.resume === "object" &&
             message.payload?.resume &&
@@ -265,6 +275,27 @@ class FakeSurfAceWsServer {
               : null,
           takeover: Boolean(message.payload?.takeover),
         });
+        if (
+          this.lockUntilNewProviderIdCode &&
+          this.lockUntilNewProviderIdProviderId &&
+          this.pairAttemptDetails.at(-1)?.providerId === this.lockUntilNewProviderIdProviderId &&
+          !message.payload?.takeover
+        ) {
+          const errorCode = this.lockUntilNewProviderIdCode;
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "pair.request",
+                errorCode,
+                errorCode === "busy"
+                  ? "Surface is already paired"
+                  : this.resumePairMismatchMessage,
+              ),
+            ),
+          );
+          return;
+        }
         if (this.busyWithoutTakeoverResponsesRemaining > 0 && !message.payload?.takeover) {
           this.busyWithoutTakeoverResponsesRemaining -= 1;
           socket.send(
@@ -1569,6 +1600,80 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("repeated busy reconnect failures rotate provider identity and recover automatically", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      const initialProviderId = server.pairAttemptDetails[0]?.providerId;
+      assert.equal(typeof initialProviderId, "string");
+      server.lockUntilNewProviderIdCode = "busy";
+      server.lockUntilNewProviderIdProviderId = initialProviderId ?? null;
+
+      await surface.client.close(1000, "test_busy_provider_rotation");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      internalRuntime.wakeSurfaceRetry(surface);
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      internalRuntime.wakeSurfaceRetry(surface);
+      await waitFor(() => server.pairAttemptDetails.length >= 5, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      const reconnectAttempts = server.pairAttemptDetails.slice(1);
+      assert.deepEqual(
+        reconnectAttempts.slice(0, 3).map((attempt) => attempt.providerId),
+        [initialProviderId, initialProviderId, initialProviderId],
+      );
+      assert.notEqual(reconnectAttempts[3]?.providerId, initialProviderId);
+      assert.ok(reconnectAttempts.every((attempt) => attempt.takeover === false));
+      assert.ok(
+        warnings.some((warning) => warning.includes("rotating provider identity")),
+      );
+      assert.ok(
+        warnings.some((warning) => warning.includes("rotated provider identity")),
+      );
+    });
+  });
+
+  await t.test("repeated invalid_resume reconnect failures rotate provider identity and recover automatically", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      const initialProviderId = server.pairAttemptDetails[0]?.providerId;
+      assert.equal(typeof initialProviderId, "string");
+      server.lockUntilNewProviderIdCode = "invalid_resume";
+      server.lockUntilNewProviderIdProviderId = initialProviderId ?? null;
+
+      await surface.client.close(1000, "test_invalid_resume_provider_rotation");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      internalRuntime.wakeSurfaceRetry(surface);
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      internalRuntime.wakeSurfaceRetry(surface);
+      await waitFor(() => server.pairAttemptDetails.length >= 5, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      const reconnectAttempts = server.pairAttemptDetails.slice(1);
+      assert.deepEqual(
+        reconnectAttempts.slice(0, 3).map((attempt) => attempt.providerId),
+        [initialProviderId, initialProviderId, initialProviderId],
+      );
+      assert.notEqual(reconnectAttempts[3]?.providerId, initialProviderId);
+      assert.ok(reconnectAttempts.every((attempt) => attempt.takeover === false));
+      assert.ok(
+        warnings.some((warning) => warning.includes("rotating provider identity")),
+      );
+      assert.ok(
+        warnings.some((warning) => warning.includes("rotated provider identity")),
+      );
+    });
+  });
+
   await t.test("connect refusal refreshes discovery and rebinds the surface to the new endpoint", async () => {
     await withRuntimeHarness(async ({ discovery, runtime, server, warnings }) => {
       const replacementPort = nextPort++;
@@ -1923,4 +2028,5 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(surface.sessionId, "sa_test_session");
     });
   });
+
 });
