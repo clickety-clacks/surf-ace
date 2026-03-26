@@ -17,6 +17,7 @@ const plugin = {
         await deliverSettledAnnotationIntentTurn(api.runtime, turn);
       },
       logger,
+      providerName: "CLU / Surf Ace",
     });
 
     // Start eagerly — the gateway does not call registerService lifecycle

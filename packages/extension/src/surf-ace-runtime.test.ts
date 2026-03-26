@@ -75,6 +75,7 @@ class FakeSurfAceWsServer {
   initialRemotePaneId = 41;
   readonly pairAttemptDetails: Array<{
     providerId: string | null;
+    providerName: string | null;
     resumeSessionId: string | null;
     takeover: boolean;
   }> = [];
@@ -266,6 +267,10 @@ class FakeSurfAceWsServer {
           providerId:
             typeof message.payload?.providerId === "string"
               ? String(message.payload.providerId)
+              : null,
+          providerName:
+            typeof message.payload?.providerName === "string"
+              ? String(message.payload.providerName)
               : null,
           resumeSessionId:
             typeof message.payload?.resume === "object" &&
@@ -726,6 +731,7 @@ async function withRuntimeHarness(
       ) => Promise<void>)
     | {
         now?: () => number;
+        providerName?: string;
         run: (ctx: {
           alertBodies: Array<Record<string, unknown>>;
           annotationTurns: import("./surf-ace-runtime.js").SurfAceAnnotationIntentTurn[];
@@ -738,7 +744,7 @@ async function withRuntimeHarness(
 ): Promise<void> {
   const options =
     typeof optionsOrRun === "function"
-      ? { run: optionsOrRun, now: undefined }
+      ? { run: optionsOrRun, now: undefined, providerName: undefined }
       : optionsOrRun;
   const port = nextPort++;
   const server = new FakeSurfAceWsServer(port);
@@ -757,6 +763,7 @@ async function withRuntimeHarness(
       },
     },
     now: options.now,
+    providerName: options.providerName,
     stateDir,
   });
   const alertBodies: Array<Record<string, unknown>> = [];
@@ -1843,6 +1850,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const screens = await runtime.listScreens();
       assert.deepEqual(screens[0]?.panes.map((pane) => pane.paneId), [1]);
+    });
+  });
+
+  await t.test("pair.request includes configured providerName", async () => {
+    await withRuntimeHarness({
+      providerName: "CLU / Surf Ace",
+      run: async ({ server }) => {
+        assert.equal(server.pairAttemptDetails[0]?.providerName, "CLU / Surf Ace");
+      },
     });
   });
 

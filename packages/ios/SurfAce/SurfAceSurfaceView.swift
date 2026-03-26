@@ -73,22 +73,17 @@ private struct SurfAceWindowView: View {
                         runtime.updateViewport(surfaceId: surface.surfaceId, size: newSize, scale: displayScale)
                     }
 
-                if surface.labelsVisible, !surface.windowLabel.isEmpty {
-                    Text(surface.windowLabel)
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 8)
-                        .background(.black.opacity(0.44), in: Capsule())
+                if surface.labelsVisible {
+                    SurfAceWindowTitlePill(
+                        name: surface.name,
+                        providerName: surface.connectionBarState == .connected ? surface.providerName : nil
+                    )
                         .padding(.top, 18)
                         .transition(.opacity)
                 }
             }
             .overlay(alignment: .bottom) {
                 SurfAceConnectionStateBar(state: surface.connectionBarState)
-            }
-            .overlay(alignment: .topTrailing) {
-                SurfAceServiceNameDebugLabel(serviceName: runtime.screenName)
             }
         }
     }
@@ -358,20 +353,41 @@ private struct SurfAceConnectionStateBar: View {
     }
 }
 
-private struct SurfAceServiceNameDebugLabel: View {
-    let serviceName: String
+private struct SurfAceWindowTitlePill: View {
+    let name: String
+    let providerName: String?
 
     var body: some View {
-        Text(serviceName)
-            .font(.system(size: 10, weight: .regular, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.5))
-            .lineLimit(1)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.black.opacity(0.18), in: Capsule())
-            .padding(.top, 8)
-            .padding(.trailing, 8)
-            .allowsHitTesting(false)
+        VStack(spacing: providerNameText == nil ? 0 : 2) {
+            Text(name)
+                .font(.system(.title2, design: .rounded).weight(.semibold))
+                .foregroundStyle(.white.opacity(0.94))
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            if let providerNameText {
+                Text(providerNameText)
+                    .font(.system(.caption, design: .rounded).weight(.medium))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .frame(maxWidth: 520)
+        .padding(.horizontal, 20)
+        .padding(.vertical, providerNameText == nil ? 10 : 12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(.white.opacity(0.12), lineWidth: 0.8)
+        }
+        .padding(.horizontal, 20)
+        .allowsHitTesting(false)
+    }
+
+    private var providerNameText: String? {
+        guard let providerName, !providerName.isEmpty else { return nil }
+        return providerName
     }
 }
 

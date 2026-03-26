@@ -445,6 +445,7 @@ final class SurfAceSurfaceModel {
     let surfaceId: String
     var windowLabel: String
     var name: String
+    var providerName: String?
     var paneLayout: SurfAcePaneLayoutNode
     var panesById: [Int: SurfAcePaneModel]
     var providerTopologyInitialized = false

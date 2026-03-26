@@ -80,6 +80,7 @@ function pairRequest(
   surfaceId: string,
   providerId: string,
   options: {
+    providerName?: string;
     resumeSessionId?: string;
     takeover?: boolean;
   } = {},
@@ -92,6 +93,7 @@ function pairRequest(
       initialPaneId: 1 as never,
       protocolVersion: 1,
       providerId: providerId as never,
+      providerName: options.providerName,
       resume: options.resumeSessionId
         ? { sessionId: options.resumeSessionId as never }
         : undefined,
@@ -322,6 +324,21 @@ test("ws server clears the ownership lock on ownership.relinquish", async () => 
     assert.equal(listed.ok, true);
     assert.equal(listed.payload.surfaces[0]?.paired, false);
     await closeSocket(probe);
+  });
+});
+
+test("ws server exposes providerName while connected and clears it on relinquish", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", { providerName: "CLU / Surf Ace" }));
+    assert.equal(paired.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, "CLU / Surf Ace");
+
+    const relinquished = await request(owner, relinquishRequest());
+    assert.equal(relinquished.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
+
+    await closeSocket(owner);
   });
 });
 

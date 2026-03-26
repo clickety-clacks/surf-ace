@@ -660,6 +660,10 @@ export class SurfaceWsServer {
         windowLabel: request.payload.windowLabel,
       });
     }
+    this.core.setProviderName(
+      surfaceId,
+      typeof request.payload.providerName === "string" ? request.payload.providerName : null,
+    );
     this.core.setConnectionBar(surfaceId, "connected");
     this.onBusyChanged?.();
 

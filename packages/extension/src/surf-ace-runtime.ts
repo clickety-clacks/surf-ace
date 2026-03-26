@@ -2438,6 +2438,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const windowLabel = surface.windowLabel || this.ensureWindowLabel(surface.surfaceId);
     surface.windowLabel = windowLabel;
     const resumeSessionId = this.shouldAttemptResume(surface) ? surface.sessionId : null;
+    const providerName = this.providerNameForSurface(surface);
 
     const buildPairRequest = (takeover: boolean, requestedResumeSessionId: SessionId | null): PairRequest => ({
       id: makeBrandedRequestId(),
@@ -2449,7 +2450,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         initialPaneId,
         protocolVersion: 1,
         providerId: this.providerId(),
-        providerName: this.providerName,
+        providerName,
         resume: requestedResumeSessionId ? { sessionId: requestedResumeSessionId } : undefined,
         surfaceId: surface.surfaceId,
         takeover,
@@ -2535,6 +2536,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     return response as PairResponse;
+  }
+
+  private providerNameForSurface(surface: ManagedSurface): string | undefined {
+    for (const pane of surface.panes.values()) {
+      if (pane.pendingOwnerSessionKey) {
+        return pane.pendingOwnerSessionKey;
+      }
+      if (pane.ownerSessionKey) {
+        return pane.ownerSessionKey;
+      }
+    }
+    return this.providerName;
   }
 
   private async maybeRecoverFromColdStartInvalidResume(

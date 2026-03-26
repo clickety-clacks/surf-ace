@@ -83,6 +83,7 @@ type SurfaceState = {
   name: string;
   paneOrder: number[];
   panes: Map<number, PaneState>;
+  providerName: string | null;
   surfaceId: string;
   viewport: SurfaceViewport;
   windowLabel: string;
@@ -118,6 +119,7 @@ export type RendererWindowState = {
   layout: LayoutNode | null;
   name: string;
   panes: RendererPaneState[];
+  providerName: string | null;
   surfaceId: string;
   viewport: SurfaceViewport;
   windowLabel: string;
@@ -205,6 +207,7 @@ export class SurfaceCore {
       existing.name = name;
       existing.viewport = cloneViewport(viewport);
       existing.connectionBar = "disconnected";
+      existing.providerName = null;
       this.emit({ surfaceId: existing.surfaceId, type: "surface-changed" });
       return existing;
     }
@@ -247,10 +250,22 @@ export class SurfaceCore {
 
   setConnectionBar(surfaceId: string, state: SurfaceState["connectionBar"]): void {
     const surface = this.getSurface(surfaceId);
-    if (surface.connectionBar === state) {
+    if (surface.connectionBar === state && (state === "connected" || surface.providerName === null)) {
       return;
     }
     surface.connectionBar = state;
+    if (state !== "connected") {
+      surface.providerName = null;
+    }
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  setProviderName(surfaceId: string, providerName: string | null): void {
+    const surface = this.getSurface(surfaceId);
+    if (surface.providerName === providerName) {
+      return;
+    }
+    surface.providerName = providerName;
     this.emit({ surfaceId, type: "surface-changed" });
   }
 
@@ -283,6 +298,7 @@ export class SurfaceCore {
           toast: pane.toast,
         };
       }),
+      providerName: surface.providerName,
       surfaceId: surface.surfaceId,
       viewport: cloneViewport(surface.viewport),
       windowLabel: surface.windowLabel,
@@ -866,6 +882,7 @@ export class SurfaceCore {
       name,
       paneOrder: [BOOTSTRAP_PANE_ID],
       panes: new Map([[BOOTSTRAP_PANE_ID, bootstrapPane]]),
+      providerName: null,
       surfaceId,
       viewport: cloneViewport(viewport),
       windowLabel: "",

@@ -71,6 +71,7 @@ type RendererWindowState = {
   layout: LayoutNode | null;
   name: string;
   panes: RendererPaneState[];
+  providerName: string | null;
   surfaceId: string;
   viewport: { height: number; scale: number; width: number };
   windowLabel: string;
@@ -1312,20 +1313,23 @@ function renderWindow(state: RendererWindowState): void {
   const panesById = new Map(state.panes.map((pane) => [pane.paneId, pane]));
   const wrapper = document.createElement("div");
   wrapper.className = `surface-window connection-${state.connectionBar}`;
-  const windowLabel = document.createElement("div");
-  windowLabel.className = "window-label";
-  windowLabel.textContent = state.windowLabel;
-  windowLabel.hidden = !state.windowLabel;
-  const windowName = document.createElement("div");
-  windowName.className = "window-name";
-  windowName.textContent = state.name;
+  const windowTitlePill = document.createElement("div");
+  windowTitlePill.className = "window-title-pill";
+  const windowTitle = document.createElement("div");
+  windowTitle.className = "window-title-pill__title";
+  windowTitle.textContent = state.name;
+  const providerName = document.createElement("div");
+  providerName.className = "window-title-pill__subtitle";
+  providerName.textContent = state.providerName ?? "";
+  providerName.hidden = state.connectionBar !== "connected" || !state.providerName;
+  windowTitlePill.append(windowTitle, providerName);
   const layoutRoot = document.createElement("div");
   layoutRoot.className = "layout-root";
   if (state.layout) {
     layoutRoot.appendChild(renderLayout(state.layout, panesById));
   } else {
   }
-  wrapper.append(windowLabel, windowName, layoutRoot);
+  wrapper.append(windowTitlePill, layoutRoot);
   appRoot.replaceChildren(wrapper);
 }
 

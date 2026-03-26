@@ -76,40 +76,51 @@ body {
   }
 }
 
-.window-label {
+.window-title-pill {
   position: absolute;
   top: 14px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 40;
-  padding: 10px 18px;
-  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  max-width: min(72vw, 720px);
+  padding: 12px 20px;
+  border-radius: 22px;
   background: var(--glass);
   border: 1px solid rgba(160, 186, 236, 0.36);
-  color: rgba(243, 248, 255, 0.9);
-  font-size: 28px;
-  font-family: var(--ui-font-family);
-  font-weight: 100;
-  letter-spacing: 0.14em;
   backdrop-filter: blur(14px);
   transition: opacity 0.18s ease;
-  text-transform: uppercase;
+  pointer-events: none;
 }
 
-.window-name {
-  position: absolute;
-  top: 24px;
-  right: 22px;
-  z-index: 30;
-  color: var(--muted);
-  font-size: 11px;
+.window-title-pill__title {
+  max-width: 100%;
+  overflow: hidden;
+  color: rgba(243, 248, 255, 0.94);
+  font-size: 24px;
   font-family: var(--ui-font-family);
-  font-weight: var(--ui-font-weight);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.labels-hidden .window-label,
+.window-title-pill__subtitle {
+  max-width: 100%;
+  overflow: hidden;
+  color: rgba(243, 248, 255, 0.68);
+  font-family: var(--ui-font-family);
+  font-size: 12px;
+  font-weight: 450;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.labels-hidden .window-title-pill,
 .labels-hidden .pane-label {
   opacity: 0;
   pointer-events: none;

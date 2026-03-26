@@ -90,6 +90,7 @@ private struct SurfAcePairCommitPlan {
     let surfaceId: String
     let session: SurfAceSessionState
     let resumed: Bool
+    let providerName: String?
     let providerInitialPaneId: Int
     let providerWindowLabel: String
     let shouldEnqueuePostReconnectEvents: Bool
@@ -935,6 +936,7 @@ final class SurfAceRuntime {
         let ownershipLock = ownershipLocksBySurfaceId[surfaceId]
         let resumed: Bool
         let sessionId: String
+        let providerName = payload["providerName"] as? String
 
         if let ownershipLock {
             if takeover {
@@ -1054,6 +1056,7 @@ final class SurfAceRuntime {
                 surfaceId: surfaceId,
                 session: session,
                 resumed: resumed,
+                providerName: providerName,
                 providerInitialPaneId: providerInitialPaneId,
                 providerWindowLabel: providerWindowLabel,
                 shouldEnqueuePostReconnectEvents: resumed || surfaceNeedsResumedEvent.contains(surfaceId)
@@ -1072,6 +1075,7 @@ final class SurfAceRuntime {
             )
         }
         activeSessions[plan.surfaceId] = plan.session
+        surface.providerName = plan.providerName
         ownershipLocksBySurfaceId[plan.surfaceId] = SurfAceOwnershipLockState(
             sessionId: plan.session.sessionId,
             providerId: plan.session.providerId
@@ -1555,6 +1559,7 @@ final class SurfAceRuntime {
         activeSessions.removeValue(forKey: surfaceId)
         lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
         surfaceNeedsResumedEvent.remove(surfaceId)
+        surfaceById[surfaceId]?.providerName = nil
         refreshConnectionState(surfaceId: surfaceId)
         refreshBonjourTXT()
 
@@ -1586,6 +1591,7 @@ final class SurfAceRuntime {
         surfAceGatewayLog("socket terminated connectionUUID=\(connectionUUID) surfaceId=\(surfaceId) providerId=\(pair.value.providerId) sessionId=\(pair.value.sessionId)")
         activeSessions.removeValue(forKey: surfaceId)
         lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
+        surfaceById[surfaceId]?.providerName = nil
         // Track when the ownership lock became orphaned (session gone, lock stays
         // for resume support).  The heartbeat watchdog will expire the lock if no
         // new session arrives within ownershipLockExpiryMilliseconds.
@@ -1628,6 +1634,7 @@ final class SurfAceRuntime {
         for expiredSession in expired {
             activeSessions.removeValue(forKey: expiredSession.surfaceId)
             lastHeartbeatAtBySurfaceId.removeValue(forKey: expiredSession.surfaceId)
+            surfaceById[expiredSession.surfaceId]?.providerName = nil
             refreshConnectionState(surfaceId: expiredSession.surfaceId)
             Task {
                 await expiredSession.session.socket.close(code: 1000, reason: "heartbeat_timeout")
@@ -1663,6 +1670,7 @@ final class SurfAceRuntime {
         for surfaceId in expiredSurfaceIds {
             ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
             ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
+            surfaceById[surfaceId]?.providerName = nil
             refreshConnectionState(surfaceId: surfaceId)
         }
         refreshBonjourTXT()
@@ -1676,6 +1684,7 @@ final class SurfAceRuntime {
             surface.connectionBarState = .connecting
         } else {
             surface.connectionBarState = .disconnected
+            surface.providerName = nil
         }
     }
 
