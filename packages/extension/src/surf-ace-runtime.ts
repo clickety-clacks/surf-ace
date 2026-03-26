@@ -277,7 +277,24 @@ export type SurfAceLocalEvent =
       type: "event.surface_resumed";
     };
 
+export type SurfAceAnnotationIntentTurn = {
+  attachment: {
+    content: string;
+    fileName: string;
+    mimeType: "image/png";
+    type: "file";
+  };
+  fingerprint: string;
+  frame: SurfAceFrame;
+  idempotencyKey: string;
+  message: string;
+  paneId: number;
+  sessionKey: string;
+  surfaceName: string;
+};
+
 export type SurfAceRuntimeOptions = {
+  deliverSettledAnnotationTurn?: (turn: SurfAceAnnotationIntentTurn) => Promise<void>;
   discovery?: SurfAceDiscoveryService;
   drawingFlushConfig?: DrawingFlushConfig;
   eventProfile?: EventProfile;
@@ -759,6 +776,9 @@ function windowLabelForIndex(index: number): string {
 }
 
 export class DefaultSurfAceRuntime implements SurfAceRuntime {
+  private readonly deliverSettledAnnotationTurn?: (
+    turn: SurfAceAnnotationIntentTurn,
+  ) => Promise<void>;
   private readonly discovery: SurfAceDiscoveryService;
   private readonly drawingFlushConfig: DrawingFlushConfig;
   private readonly eventProfile: EventProfile;
@@ -784,6 +804,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private ownsRuntimeLease = false;
 
   constructor(options: SurfAceRuntimeOptions = {}) {
+    this.deliverSettledAnnotationTurn = options.deliverSettledAnnotationTurn;
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ logger: options.logger });
     this.drawingFlushConfig = options.drawingFlushConfig ?? DEFAULT_DRAWING_FLUSH_CONFIG;
     this.eventProfile = options.eventProfile ?? "minimum_deep";
@@ -1272,10 +1293,98 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!pane.buffer.liveFrame) {
       return;
     }
-    pane.buffer.closedFrames.push(structuredClone(pane.buffer.liveFrame));
+    const finalizedFrame = structuredClone(pane.buffer.liveFrame);
+    pane.buffer.closedFrames.push(finalizedFrame);
     pane.buffer.liveFrame = null;
     pane.buffer.liveDirtyStrokeIds = [];
-    this.maybeFireAnnotationAlert(surface, pane);
+    this.maybeDeliverSettledAnnotationTurn(surface, pane, finalizedFrame);
+  }
+
+  private maybeDeliverSettledAnnotationTurn(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    frame: SurfAceFrame,
+  ): void {
+    const turn = this.buildSettledAnnotationIntentTurn(surface, pane, frame);
+    if (!turn) {
+      return;
+    }
+    if (!this.deliverSettledAnnotationTurn) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] settled annotation delivery unavailable for ${surface.surfaceId}/${pane.paneId}; leaving frame queued`,
+      );
+      return;
+    }
+
+    this.runBackgroundTask(
+      `settled annotation turn for ${surface.surfaceId}/${pane.paneId}/${frame.frameId}`,
+      async () => {
+        await this.deliverSettledAnnotationTurn?.(turn);
+      },
+    );
+  }
+
+  private buildSettledAnnotationIntentTurn(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    frame: SurfAceFrame,
+  ): SurfAceAnnotationIntentTurn | null {
+    const image = frame.image.trim();
+    if (!image) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] settled annotation frame missing image for ${surface.surfaceId}/${pane.paneId}/${frame.frameId}; leaving frame queued`,
+      );
+      return null;
+    }
+
+    const sessionKey = pane.ownerSessionKey ?? DEFAULT_ALERT_SESSION_KEY;
+    const strokeSummary = frame.strokes.map((stroke) => ({
+      bbox: stroke.bbox,
+      endedAt: stroke.endedAt,
+      pointCount: stroke.points.length,
+      startedAt: stroke.startedAt,
+      strokeId: stroke.strokeId,
+    }));
+
+    return {
+      attachment: {
+        content: image,
+        fileName: `surf-ace-${surface.surfaceId}-pane-${pane.paneId}-${frame.frameId}.png`,
+        mimeType: "image/png",
+        type: "file",
+      },
+      fingerprint: surface.surfaceId,
+      frame: structuredClone(frame),
+      idempotencyKey: `surf-ace-annotation-intent:${surface.surfaceId}:${pane.paneId}:${frame.frameId}`,
+      message: [
+        `Surf Ace settled annotation on surface "${surface.name}", pane ${pane.paneId}.`,
+        "Treat the attached image as the primary annotation input.",
+        "Use the stroke metadata below as secondary context only.",
+        "",
+        JSON.stringify(
+          {
+            contentId: frame.contentId,
+            contextKey: frame.contextKey,
+            fingerprint: surface.surfaceId,
+            frameId: frame.frameId,
+            openedAt: frame.openedAt,
+            paneId: pane.paneId,
+            scrollOffset: frame.scrollOffset,
+            strokeCount: frame.strokes.length,
+            strokes: strokeSummary,
+            surfaceName: surface.name,
+            updatedAt: frame.updatedAt,
+            url: frame.url,
+            viewport: frame.viewport,
+          },
+          null,
+          2,
+        ),
+      ].join("\n"),
+      paneId: pane.paneId,
+      sessionKey,
+      surfaceName: surface.name,
+    };
   }
 
   private maybeFireAnnotationAlert(surface: ManagedSurface, pane: ManagedPane): void {

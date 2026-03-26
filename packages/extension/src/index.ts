@@ -1,8 +1,9 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
-import { createSurfAceTools } from "./surf-ace-tools.js";
+import { deliverSettledAnnotationIntentTurn } from "./annotation-intent-delivery.js";
 import { createSurfAceRuntime } from "./surf-ace-runtime.js";
+import { createSurfAceTools } from "./surf-ace-tools.js";
 
 const plugin = {
   id: "surf-ace",
@@ -11,7 +12,12 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     const logger = (api.logger ?? console) as never;
-    const runtime = createSurfAceRuntime({ logger });
+    const runtime = createSurfAceRuntime({
+      deliverSettledAnnotationTurn: async (turn) => {
+        await deliverSettledAnnotationIntentTurn(api.runtime, turn);
+      },
+      logger,
+    });
 
     // Start eagerly — the gateway does not call registerService lifecycle
     // hooks, so relying on them leaves the runtime uninitialized.
@@ -63,6 +69,11 @@ export default plugin;
 
 export { buildSurfAceAgentInstructions } from "./agent-instructions.js";
 export {
+  deliverSettledAnnotationIntentTurn,
+  __test as annotationIntentDeliveryTestHelpers,
+} from "./annotation-intent-delivery.js";
+export {
+  type SurfAceAnnotationIntentTurn,
   type SurfAceConnectionState,
   type SurfAceClosePaneResult,
   type SurfAceLocalEvent,
