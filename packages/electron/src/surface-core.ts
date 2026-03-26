@@ -812,6 +812,19 @@ export class SurfaceCore {
     return cloneViewport(this.getSurface(surfaceId).viewport);
   }
 
+  setViewport(surfaceId: string, viewport: SurfaceViewport): void {
+    const surface = this.getSurface(surfaceId);
+    if (
+      surface.viewport.width === viewport.width &&
+      surface.viewport.height === viewport.height &&
+      surface.viewport.scale === viewport.scale
+    ) {
+      return;
+    }
+    surface.viewport = cloneViewport(viewport);
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
   surfaceWindowLabel(surfaceId: string): string {
     return this.getSurface(surfaceId).windowLabel;
   }

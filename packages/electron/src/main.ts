@@ -55,6 +55,19 @@ function shortHostName(): string {
   return os.hostname().replace(/\..*$/, "");
 }
 
+function syncWindowViewport(surfaceId: string, window: BrowserWindow): void {
+  if (window.isDestroyed()) {
+    return;
+  }
+  const bounds = window.getContentBounds();
+  const display = screen.getDisplayMatching(bounds);
+  core.setViewport(surfaceId, {
+    height: Math.max(1, Math.floor(bounds.height)),
+    scale: display.scaleFactor || 1,
+    width: Math.max(1, Math.floor(bounds.width)),
+  });
+}
+
 async function loadPersistentState(): Promise<PersistentSurfaceState | undefined> {
   try {
     return JSON.parse(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8")) as PersistentSurfaceState;
@@ -173,6 +186,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     height: Math.max(720, surface.viewport.height),
     show: false,
     title: surface.windowLabel ? `${endpointName()} · ${surface.windowLabel}` : endpointName(),
+    useContentSize: true,
     webPreferences: {
       contextIsolation: true,
       preload: path.join(distDir, "preload.cjs"),
@@ -185,11 +199,28 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);
   window.once("ready-to-show", () => {
+    syncWindowViewport(surfaceId, window);
     window.show();
   });
   window.webContents.once("did-finish-load", () => {
+    syncWindowViewport(surfaceId, window);
     readyWindows.add(surfaceId);
     flushPendingWindowState(surfaceId);
+  });
+  window.on("resize", () => {
+    syncWindowViewport(surfaceId, window);
+  });
+  window.on("maximize", () => {
+    syncWindowViewport(surfaceId, window);
+  });
+  window.on("unmaximize", () => {
+    syncWindowViewport(surfaceId, window);
+  });
+  window.on("enter-full-screen", () => {
+    syncWindowViewport(surfaceId, window);
+  });
+  window.on("leave-full-screen", () => {
+    syncWindowViewport(surfaceId, window);
   });
   window.on("closed", () => {
     windows.delete(surfaceId);
