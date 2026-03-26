@@ -361,6 +361,7 @@ type ManagedSurface = {
   client: SurfAceWireClient | null;
   connectionState: SurfAceConnectionState;
   consecutiveResumeFailures: number;
+  consecutiveOwnershipLockFailures: number;
   connectedAt: number | null;
   endpoint: SurfAceDiscoveryEndpoint;
   endpointId: string;
@@ -419,6 +420,7 @@ const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
 const ALERT_ENDPOINT_URL = "http://localhost:18800/alert";
 const INITIAL_PAIR_PANE_ID = 1 as PaneId;
 const MAX_CONSECUTIVE_RESUME_FAILURES = 3;
+const MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES = 3;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
 const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
 
@@ -683,6 +685,13 @@ function isResumeSessionMismatch(response: Response): response is ErrorResponse 
   return (
     isErrorResponse(response) &&
     response.error.code === "invalid_resume"
+  );
+}
+
+function isOwnershipLockResponse(response: Response): response is ErrorResponse {
+  return (
+    isErrorResponse(response) &&
+    (response.error.code === "busy" || response.error.code === "invalid_resume")
   );
 }
 
@@ -1592,6 +1601,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       client: null,
       connectionState: "connecting" as SurfAceConnectionState,
       consecutiveResumeFailures: 0,
+      consecutiveOwnershipLockFailures: 0,
       connectedAt: null,
       endpoint: sourceSurface.endpoint,
       endpointId: sourceSurface.endpointId,
@@ -2286,6 +2296,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       client: null,
       connectionState: "connecting",
       consecutiveResumeFailures: 0,
+      consecutiveOwnershipLockFailures: 0,
       connectedAt: null,
       endpoint,
       endpointId: endpoint.endpointId,
@@ -2476,6 +2487,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     if (isResumeSessionMismatch(response) && resumeSessionId) {
       this.noteResumeFailure(surface);
+      this.noteOwnershipLockFailure(surface, "invalid_resume");
       response = await this.maybeRecoverFromColdStartInvalidResume(
         surface,
         response,
@@ -2501,6 +2513,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
+    if (isErrorResponse(response)) {
+      if (isOwnershipLockResponse(response)) {
+        const ownershipLockCode = response.error.code === "busy" ? "busy" : "invalid_resume";
+        const shouldRotateIdentity = this.noteOwnershipLockFailure(surface, ownershipLockCode);
+        if (shouldRotateIdentity) {
+          await this.rotateProviderIdentityForOwnershipLock(surface, ownershipLockCode);
+          response = await sendPairRequest(false, null);
+        }
+      } else {
+        surface.consecutiveOwnershipLockFailures = 0;
+      }
+    }
     if (isErrorResponse(response)) {
       if (response.error.code === "busy") {
         this.logger.warn?.(
@@ -2532,7 +2556,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.logger.warn?.(
       `[surf-ace:runtime] invalid_resume on cold-start reconnect for ${surface.surfaceId}; retrying fresh (no takeover)`,
     );
-    surface.sessionId = null;
+    this.clearSurfaceResumeState(surface);
     return sendPairRequest(false, null);
   }
 
@@ -2950,6 +2974,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private markPairConnected(surface: ManagedSurface, sessionId: SessionId): void {
     surface.consecutiveResumeFailures = 0;
+    surface.consecutiveOwnershipLockFailures = 0;
     surface.connectedAt = this.now();
     surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
@@ -2973,6 +2998,42 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     this.logger.warn?.(
       `[surf-ace:runtime] owner resume still failing for ${surface.surfaceId} after ${surface.consecutiveResumeFailures} attempts`,
+    );
+  }
+
+  private noteOwnershipLockFailure(
+    surface: ManagedSurface,
+    code: "busy" | "invalid_resume",
+  ): boolean {
+    surface.consecutiveOwnershipLockFailures += 1;
+    if (
+      surface.consecutiveOwnershipLockFailures <
+      MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES
+    ) {
+      return false;
+    }
+    this.logger.warn?.(
+      `[surf-ace:runtime] ${code} persisted for ${surface.surfaceId} with provider ${this.persistentState.providerId}; rotating provider identity`,
+    );
+    return true;
+  }
+
+  private clearSurfaceResumeState(surface: ManagedSurface): void {
+    surface.sessionId = null;
+    surface.hasPairedInGatewaySession = false;
+    surface.consecutiveResumeFailures = 0;
+  }
+
+  private async rotateProviderIdentityForOwnershipLock(
+    surface: ManagedSurface,
+    code: "busy" | "invalid_resume",
+  ): Promise<void> {
+    this.persistentState.providerId = `pv_${randomUUID().replaceAll("-", "")}`;
+    surface.consecutiveOwnershipLockFailures = 0;
+    this.clearSurfaceResumeState(surface);
+    await this.persistState();
+    this.logger.warn?.(
+      `[surf-ace:runtime] rotated provider identity after repeated ${code} for ${surface.surfaceId}`,
     );
   }
 
