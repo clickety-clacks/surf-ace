@@ -3361,22 +3361,26 @@ Dedicated native-overlay model markups may eventually become full interactive UI
 
 ### 15.8 Provider Name Display
 
-When the paired provider sends a `providerName` in `pair.request`, the surface MUST display it. When no provider is paired or `providerName` is absent, the surface MUST NOT show a provider label.
+When the paired provider sends a  in , the surface MUST display it in the window title area. When no provider is paired or  is absent, the subtitle is omitted.
 
-**Display requirements:**
-- Rendered as a small muted text label trailing the connection state bar (§15.7) — same horizontal row, right-aligned, or immediately adjacent to the bar in whichever corner does not conflict with existing persistent labels.
-- Visible when connected; hidden when disconnected or connecting/reconnecting.
-- Truncated with ellipsis if text is too long to fit in available space; MUST NOT wrap.
-- Font: smallest readable size, monospaced or system, muted opacity (≤60%).
+**Layout — Liquid Glass pill (iOS/iPadOS/macOS):**
+The window title area renders as a Liquid Glass pill containing two lines:
+1. **Window name** — large font, primary weight. This is the surface own display name (e.g. "Surf Ace - Emanator (host)").
+2. **Connected agent name** () — smaller font, secondary/muted weight, below the window name.
+
+When  is absent or the surface is disconnected, the pill shows only the window name on one line (no empty subtitle row).
+
+**Behavior:**
+- Subtitle line visible only when connected and  is present; hidden when disconnected or connecting/reconnecting.
+- Truncated with ellipsis if text is too long to fit; MUST NOT wrap.
 - MUST NOT be interactive (no tap target).
 - MUST persist during annotation mode.
 - If the provider name changes mid-session (e.g. reconnect with different name), update immediately.
 
 **Protocol integration:**
-- Surface stores the most recently received `providerName` from `pair.request`.
+- Surface stores the most recently received  from .
 - Clears stored name on ownership relinquish or socket disconnect.
-- Re-applies name on next successful `pair.response`.
+- Re-applies name on next successful .
 
 **Invariant index entry:**
-- **Provider Name Display** — "When paired and `providerName` is present, surface MUST display it trailing the connection state bar. Cleared on disconnect/relinquish." Source: §15.8
-
+- **Provider Name Display** — "Window title pill: large window name + smaller connected agent name below. Agent name visible only when connected and providerName present. Cleared on disconnect/relinquish." Source: §15.8
