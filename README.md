@@ -21,6 +21,8 @@ UI flows reference: [docs/design/surf-ace-ui-flows.html](./docs/design/surf-ace-
 
 `clickety-clacks/surf-ace`
 
+After making extension changes, run `pnpm deploy:extension` on TARS to deploy to the live gateway.
+
 ## Status
 
 - [x] Wire protocol spec (DESIGN.md)

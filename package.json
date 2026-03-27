@@ -1,6 +1,9 @@
 {
   "name": "@surf-ace/monorepo",
   "private": true,
+  "scripts": {
+    "deploy:extension": "bash scripts/deploy-extension.sh"
+  },
   "workspaces": [
     "packages/*"
   ]
