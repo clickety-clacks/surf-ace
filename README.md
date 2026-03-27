@@ -21,7 +21,9 @@ UI flows reference: [docs/design/surf-ace-ui-flows.html](./docs/design/surf-ace-
 
 `clickety-clacks/surf-ace`
 
-After making extension changes, run `pnpm deploy:extension` on TARS to deploy to the live gateway.
+## Development Workflow
+
+Extension changes: after committing, always rsync `packages/extension/src/` to `/Users/mike/.openclaw/extensions/surf-ace/extension/src/` on TARS and restart the gateway (`launchctl stop ai.openclaw.gateway` / `launchctl start ai.openclaw.gateway`).
 
 ## Status
 
