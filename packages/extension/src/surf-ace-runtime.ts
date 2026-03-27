@@ -1407,6 +1407,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       `annotation alert for ${surface.surfaceId}`,
       async () => {
         await this.postAnnotationAlert(
+          surface,
+          pane,
           this.buildAnnotationAlertMessage(surface.name, liveDirtyStrokeCount, queuedFrameCount),
           pane.ownerSessionKey ?? DEFAULT_ALERT_SESSION_KEY,
         );
@@ -1449,14 +1451,79 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return `Surf Ace updates pending on ${surfaceName} (${details.join(", ")})`;
   }
 
-  private async postAnnotationAlert(message: string, sessionKey: string): Promise<void> {
+  private buildAnnotationAlertAttachment(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    frameId: string,
+    image: string,
+  ): SurfAceAnnotationIntentTurn["attachment"] {
+    return {
+      content: image,
+      fileName: `surf-ace-${surface.surfaceId}-pane-${pane.paneId}-${frameId}.png`,
+      mimeType: "image/png",
+      type: "file",
+    };
+  }
+
+  private async resolveAnnotationAlertAttachment(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+  ): Promise<SurfAceAnnotationIntentTurn["attachment"] | null> {
+    const liveFrame = pane.buffer.liveFrame;
+    const liveImage = liveFrame?.image.trim();
+    if (liveFrame && liveImage) {
+      return this.buildAnnotationAlertAttachment(surface, pane, liveFrame.frameId, liveImage);
+    }
+
+    if (liveFrame && this.canSendRequests(surface)) {
+      await this.captureFrameOpenState(surface, pane, liveFrame.frameId);
+      const refreshedFrame = pane.buffer.liveFrame;
+      const refreshedImage =
+        refreshedFrame?.frameId === liveFrame.frameId ? refreshedFrame.image.trim() : "";
+      if (refreshedFrame && refreshedImage) {
+        return this.buildAnnotationAlertAttachment(
+          surface,
+          pane,
+          refreshedFrame.frameId,
+          refreshedImage,
+        );
+      }
+    }
+
+    const snapshotImage = pane.snapshot?.image?.trim();
+    if (snapshotImage) {
+      return this.buildAnnotationAlertAttachment(
+        surface,
+        pane,
+        liveFrame?.frameId ?? "snapshot",
+        snapshotImage,
+      );
+    }
+
+    return null;
+  }
+
+  private async postAnnotationAlert(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    message: string,
+    sessionKey: string,
+  ): Promise<void> {
     try {
+      const attachment = await this.resolveAnnotationAlertAttachment(surface, pane);
+      if (!attachment) {
+        this.logger.warn?.(
+          `[surf-ace:runtime] annotation alert missing image for ${surface.surfaceId}/${pane.paneId}; skipping alert`,
+        );
+        return;
+      }
       await fetch(ALERT_ENDPOINT_URL, {
         method: "POST",
         headers: {
           "content-type": "application/json",
         },
         body: JSON.stringify({
+          attachments: [attachment],
           message,
           noOverlay: true,
           sessionKey,

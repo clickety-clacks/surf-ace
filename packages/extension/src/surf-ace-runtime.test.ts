@@ -786,6 +786,32 @@ async function withRuntimeHarness(
   }
 }
 
+function assertAnnotationAlertBody(
+  body: Record<string, unknown>,
+  params: {
+    image: string;
+    message: string;
+    paneId: number;
+    sessionKey: string;
+    surfaceId: string;
+  },
+): void {
+  assert.equal(body.message, params.message);
+  assert.equal(body.noOverlay, true);
+  assert.equal(body.sessionKey, params.sessionKey);
+  assert.ok(Array.isArray(body.attachments));
+  assert.equal(body.attachments.length, 1);
+  const [attachment] = body.attachments as Array<Record<string, unknown>>;
+  assert.equal(attachment.type, "file");
+  assert.equal(attachment.mimeType, "image/png");
+  assert.equal(attachment.content, params.image);
+  assert.equal(typeof attachment.fileName, "string");
+  assert.match(
+    String(attachment.fileName),
+    new RegExp(`^surf-ace-${params.surfaceId}-pane-${params.paneId}-.+\\.png$`),
+  );
+}
+
 test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
   await t.test("passive processes read the active owner's shared screen snapshot", async () => {
     const port = nextPort++;
@@ -955,10 +981,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
         server.sendDrawingFlush(server.initialRemotePaneId, third.contentId);
         await waitFor(() => alertBodies.length === 1);
-        assert.deepEqual(alertBodies[0], {
+        assertAnnotationAlertBody(alertBodies[0], {
+          image: "aGVsbG8=",
           message: "Surf Ace updates pending on Surface A (1 live dirty stroke)",
-          noOverlay: true,
+          paneId: 1,
           sessionKey: "agent:test:2",
+          surfaceId: server.surfaceId,
         });
 
         server.sendDrawingFlush(server.initialRemotePaneId, third.contentId);
@@ -1147,10 +1175,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const liveRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
       assert.equal(liveRead.liveFrame?.image, "ZnJhbWUtb3Blbg==");
       assert.deepEqual(liveRead.liveFrame?.scrollOffset, { x: 24, y: 48 });
-      assert.deepEqual(alertBodies[0], {
+      assertAnnotationAlertBody(alertBodies[0], {
+        image: "ZnJhbWUtb3Blbg==",
         message: "Surf Ace updates pending on Surface A (1 live dirty stroke)",
-        noOverlay: true,
+        paneId: 1,
         sessionKey: "agent:test:fresh",
+        surfaceId: server.surfaceId,
       });
 
       const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: 1 });
@@ -1333,10 +1363,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
         server.sendDrawingFlush(server.initialRemotePaneId, firstPush.contentId);
         await waitFor(() => alertBodies.length === 1);
-        assert.deepEqual(alertBodies[0], {
+        assertAnnotationAlertBody(alertBodies[0], {
+          image: "aGVsbG8=",
           message: "Surf Ace updates pending on Surface A (1 live dirty stroke)",
-          noOverlay: true,
+          paneId: 1,
           sessionKey: "agent:test:alert-1",
+          surfaceId: server.surfaceId,
         });
 
         const split = await runtime.split({
@@ -1369,20 +1401,24 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         currentTime += 10 * 60_000 + 1;
         server.sendDrawingFlush(secondRemotePaneId as number, secondPush.contentId);
         await waitFor(() => alertBodies.length === 2);
-        assert.deepEqual(alertBodies[1], {
+        assertAnnotationAlertBody(alertBodies[1], {
+          image: "aGVsbG8=",
           message: "Surf Ace updates pending on Surface A (3 live dirty strokes)",
-          noOverlay: true,
+          paneId: 2,
           sessionKey: "agent:test:alert-2",
+          surfaceId: server.surfaceId,
         });
 
         await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
 
         server.sendDrawingFlush(secondRemotePaneId as number, secondPush.contentId);
         await waitFor(() => alertBodies.length === 3);
-        assert.deepEqual(alertBodies[2], {
+        assertAnnotationAlertBody(alertBodies[2], {
+          image: "aGVsbG8=",
           message: "Surf Ace updates pending on Surface A (3 live dirty strokes)",
-          noOverlay: true,
+          paneId: 2,
           sessionKey: "agent:test:alert-2",
+          surfaceId: server.surfaceId,
         });
       },
     });
