@@ -225,6 +225,7 @@ export type SurfAceAnnotateRemoveResult = {
 
 export type SurfAcePushInput =
   {
+    baseUrl?: string;
     content: string;
     contentType: ContentType;
     fingerprint: string;
@@ -705,10 +706,18 @@ function isOwnershipLockResponse(response: Response): response is ErrorResponse 
 function normalizeContent(
   contentType: ContentType,
   content: unknown,
+  baseUrl?: string,
 ): ContentSetRequest["payload"]["content"] {
   if (contentType === "html") {
     if (typeof content === "string") {
-      return { html: content };
+      return baseUrl ? { baseUrl, html: content } : { html: content };
+    }
+    if (baseUrl && content && typeof content === "object") {
+      const htmlContent = content as { baseUrl?: string; html: string };
+      return {
+        ...htmlContent,
+        baseUrl,
+      };
     }
     return content as ContentSetRequest["payload"]["content"];
   }
@@ -1240,7 +1249,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     this.finalizeLiveFrame(surface, pane);
-    const normalizedContent = normalizeContent(input.contentType, input.content);
+    const normalizedContent = normalizeContent(input.contentType, input.content, input.baseUrl);
     const contentPreview = typeof normalizedContent === "string"
       ? normalizedContent.slice(0, 200)
       : JSON.stringify(normalizedContent).slice(0, 200);

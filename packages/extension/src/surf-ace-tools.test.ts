@@ -82,7 +82,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.ok(pushTool);
   assert.deepEqual(
     Object.keys(pushTool.inputSchema.properties as Record<string, unknown>).sort(),
-    ["content", "contentType", "fingerprint", "paneId"].sort(),
+    ["baseUrl", "content", "contentType", "fingerprint", "paneId"].sort(),
   );
   assert.deepEqual(pushTool.inputSchema.required, ["fingerprint", "paneId", "contentType", "content"]);
   assert.equal(pushTool.inputSchema.additionalProperties, false);

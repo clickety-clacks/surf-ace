@@ -66,6 +66,7 @@ class FakeSurfAceWsServer {
   readonly clearRequests: Array<{ paneId: number; revision: number }> = [];
   readonly closePaneRequests: Array<{ paneId: number }> = [];
   readonly contentSetRequests: Array<{
+    baseUrl?: string;
     contentId: string;
     contentType: string;
     historyOwnerToken: string;
@@ -482,6 +483,9 @@ class FakeSurfAceWsServer {
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
         pane.drawings = [];
         this.contentSetRequests.push({
+          baseUrl: typeof message.payload?.content?.baseUrl === "string"
+            ? message.payload.content.baseUrl
+            : undefined,
           contentId: pane.contentId,
           contentType: pane.contentType,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
@@ -1056,6 +1060,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const htmlPush = await runtime.push(
         {
+          baseUrl: "https://example.com/base/",
           content: "<p>html</p>",
           contentType: "html",
           fingerprint: server.surfaceId,
@@ -1078,6 +1083,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         navigatedAt,
         url: "https://example.com/live",
       });
+      assert.equal(
+        server.contentSetRequests.at(-1)?.baseUrl,
+        "https://example.com/base/",
+      );
 
       const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: 1 });
       assert.deepEqual(clear, {

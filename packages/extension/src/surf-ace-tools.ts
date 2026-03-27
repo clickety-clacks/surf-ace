@@ -68,6 +68,10 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       inputSchema: {
         additionalProperties: false,
         properties: {
+          baseUrl: {
+            description: "Optional base URL for HTML content so relative URLs and fetches resolve against a real origin.",
+            type: "string",
+          },
           content: {
             description: "Required content payload string, encoded per content type as defined in the spec.",
             type: "string",
