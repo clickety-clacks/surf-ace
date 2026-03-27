@@ -397,6 +397,12 @@ type RuntimeStateFile = {
   windowLabels: Record<string, string>;
 };
 
+type PersistedScreenSnapshotFile = {
+  screens: SurfAceScreenSummary[];
+  updatedAt: number;
+  version: 1;
+};
+
 const DEFAULT_DRAWING_FLUSH_CONFIG: DrawingFlushConfig = {
   idleWindowMs: 8_000,
   maxIntervalMs: 30_000,
@@ -422,6 +428,7 @@ const INITIAL_PAIR_PANE_ID = 1 as PaneId;
 const MAX_CONSECUTIVE_RESUME_FAILURES = 3;
 const MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES = 3;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
+const SCREEN_SNAPSHOT_FILE_NAME = "surf-ace-runtime-screens.json";
 const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
 
 export class SurfAceToolError extends Error {
@@ -811,6 +818,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private runtimeLease: FileHandle | null = null;
   private leaseHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private ownsRuntimeLease = false;
+  private screenSnapshotWrite: Promise<void> = Promise.resolve();
 
   constructor(options: SurfAceRuntimeOptions = {}) {
     this.deliverSettledAnnotationTurn = options.deliverSettledAnnotationTurn;
@@ -904,6 +912,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     await Promise.all(stopPromises);
     this.surfaces.clear();
+    await this.persistScreenSnapshot();
     await this.releaseRuntimeLease();
   }
 
@@ -920,40 +929,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.logger.info?.(
       `[surf-ace:runtime] listScreens: ${this.surfaces.size} surface(s) in map, ${discoverySnapshot.length} discovery endpoint(s): ${discoverySnapshot.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}`,
     );
-    return [...this.surfaces.values()]
-      .sort((left, right) => left.windowLabel.localeCompare(right.windowLabel, "en"))
-      .map((surface) => ({
-        connectionState: surface.connectionState,
-        fingerprint: surface.surfaceId,
-        lastSeenAt: surface.lastSeenAt,
-        name: surface.name,
-        panes: [...surface.panes.values()]
-          .sort((left, right) => left.paneId - right.paneId)
-          .map((pane) => ({
-            activeContent: pane.activeContentId && pane.contentType
-              ? {
-                  contentId: pane.activeContentId,
-                  contentType: pane.contentType,
-                  revision: pane.currentRevision,
-                }
-              : null,
-            historySummary: structuredClone(pane.historySummary),
-            name: pane.name,
-            paneId: pane.paneId,
-          })),
-        pendingEvents: this.pendingEventCount(surface),
-        viewport: cloneViewport(surface.viewport),
-        windowLabel: surface.windowLabel,
-        _debug: {
-          autoRetryEnabled: surface.autoRetryEnabled,
-          endpointId: surface.endpointId,
-          hasPairedInGatewaySession: surface.hasPairedInGatewaySession,
-          reconnectAttempt: surface.reconnectAttempt,
-          sessionId: surface.sessionId,
-          unreachableFailures: surface.unreachableFailures,
-          wsOpen: surface.client?.isOpen() ?? false,
-        },
-      }));
+    if (this.ownsRuntimeLease) {
+      return this.buildScreenSummaries();
+    }
+    return await this.loadPersistedScreenSnapshot();
   }
 
   async push(
@@ -1004,6 +983,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.stopRequested = true;
     this.stopHeartbeat(surface);
     await surface.client?.close(1000, clampCloseReason("provider_shutdown")).catch(() => {});
+    this.queuePersistScreenSnapshot("ownership relinquish");
     return { relinquished: true };
   }
 
@@ -1215,6 +1195,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
 
+    this.queuePersistScreenSnapshot("pane split");
     return panes;
   }
 
@@ -1248,6 +1229,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.panes.delete(removedPane.paneId);
     }
 
+    this.queuePersistScreenSnapshot("pane close");
     return { ok: true };
   }
 
@@ -1293,6 +1275,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private emit(event: SurfAceLocalEvent): void {
+    this.queuePersistScreenSnapshot("emit");
     for (const listener of this.listeners) {
       listener(event);
     }
@@ -1518,6 +1501,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         }
       }
     }
+    this.queuePersistScreenSnapshot("discovery update");
   }
 
   private handleNavigationEvent(surface: ManagedSurface, event: NavigationEvent): void {
@@ -1754,6 +1738,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.handleTapEvent(surface, event);
         break;
     }
+    this.queuePersistScreenSnapshot(`wire event ${event.op}`);
   }
 
   private ingestDrawingFlush(surface: ManagedSurface, event: DrawingFlushEvent): void {
@@ -2066,6 +2051,47 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return total;
   }
 
+  private buildScreenSummaries(): SurfAceScreenSummary[] {
+    return [...this.surfaces.values()]
+      .sort((left, right) => left.windowLabel.localeCompare(right.windowLabel, "en"))
+      .map((surface) => this.buildScreenSummary(surface));
+  }
+
+  private buildScreenSummary(surface: ManagedSurface): SurfAceScreenSummary {
+    return {
+      connectionState: surface.connectionState,
+      fingerprint: surface.surfaceId,
+      lastSeenAt: surface.lastSeenAt,
+      name: surface.name,
+      panes: [...surface.panes.values()]
+        .sort((left, right) => left.paneId - right.paneId)
+        .map((pane) => ({
+          activeContent: pane.activeContentId && pane.contentType
+            ? {
+                contentId: pane.activeContentId,
+                contentType: pane.contentType,
+                revision: pane.currentRevision,
+              }
+            : null,
+          historySummary: structuredClone(pane.historySummary),
+          name: pane.name,
+          paneId: pane.paneId,
+        })),
+      pendingEvents: this.pendingEventCount(surface),
+      viewport: cloneViewport(surface.viewport),
+      windowLabel: surface.windowLabel,
+      _debug: {
+        autoRetryEnabled: surface.autoRetryEnabled,
+        endpointId: surface.endpointId,
+        hasPairedInGatewaySession: surface.hasPairedInGatewaySession,
+        reconnectAttempt: surface.reconnectAttempt,
+        sessionId: surface.sessionId,
+        unreachableFailures: surface.unreachableFailures,
+        wsOpen: surface.client?.isOpen() ?? false,
+      },
+    };
+  }
+
   private async persistState(): Promise<void> {
     const statePath = path.join(this.stateDir, STATE_FILE_NAME);
     this.stateWrite = this.stateWrite
@@ -2074,6 +2100,54 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         await fs.writeFile(statePath, JSON.stringify(this.persistentState, null, 2));
       });
     await this.stateWrite;
+  }
+
+  private async loadPersistedScreenSnapshot(): Promise<SurfAceScreenSummary[]> {
+    const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
+    try {
+      const raw = await fs.readFile(snapshotPath, "utf8");
+      const parsed = JSON.parse(raw) as PersistedScreenSnapshotFile;
+      if (parsed.version !== 1 || !Array.isArray(parsed.screens)) {
+        return [];
+      }
+      const ageMs = this.now() - (parsed.updatedAt ?? 0);
+      if (ageMs > LEASE_STALE_THRESHOLD_MS) {
+        return [];
+      }
+      return parsed.screens;
+    } catch {
+      return [];
+    }
+  }
+
+  private queuePersistScreenSnapshot(reason: string): void {
+    if (!this.ownsRuntimeLease) {
+      return;
+    }
+    this.runBackgroundTask(
+      `persist screen snapshot (${reason})`,
+      async () => {
+        await this.persistScreenSnapshot();
+      },
+    );
+  }
+
+  private async persistScreenSnapshot(): Promise<void> {
+    if (!this.ownsRuntimeLease) {
+      return;
+    }
+    const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
+    const payload: PersistedScreenSnapshotFile = {
+      screens: this.buildScreenSummaries(),
+      updatedAt: this.now(),
+      version: 1,
+    };
+    this.screenSnapshotWrite = this.screenSnapshotWrite
+      .catch(() => {})
+      .then(async () => {
+        await fs.writeFile(snapshotPath, JSON.stringify(payload, null, 2));
+      });
+    await this.screenSnapshotWrite;
   }
 
   private providerId(): ProviderId {
@@ -2992,6 +3066,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
     surface.sessionId = sessionId;
+    this.queuePersistScreenSnapshot("pair connected");
   }
 
   private noteConnectionEnded(surface: ManagedSurface): void {
@@ -3002,6 +3077,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.unreachableFailures = 0;
     }
     surface.connectedAt = null;
+    this.queuePersistScreenSnapshot("connection ended");
   }
 
   private noteResumeFailure(surface: ManagedSurface): void {
@@ -3086,6 +3162,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         surface.panes.delete(pane.paneId);
       }
     }
+    this.queuePersistScreenSnapshot("apply pair state");
   }
 
   private applySnapshot(
@@ -3256,6 +3333,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     pane.pendingOwnerSessionKey = null;
     pane.currentRevision = payload.currentRevision;
+    this.queuePersistScreenSnapshot(`mutation ${request.op}`);
 
     if (request.op === "content.clear") {
       return {

@@ -76,7 +76,8 @@ private struct SurfAceWindowView: View {
                 if surface.labelsVisible {
                     SurfAceWindowTitlePill(
                         name: surface.name,
-                        providerName: surface.connectionBarState == .connected ? surface.providerName : nil
+                        providerName: surface.providerName,
+                        showsProviderName: surface.connectionBarState == .connected
                     )
                         .padding(.top, 18)
                         .transition(.opacity)
@@ -356,26 +357,25 @@ private struct SurfAceConnectionStateBar: View {
 private struct SurfAceWindowTitlePill: View {
     let name: String
     let providerName: String?
+    let showsProviderName: Bool
 
     var body: some View {
-        VStack(spacing: providerNameText == nil ? 0 : 2) {
+        VStack(spacing: 2) {
             Text(name)
                 .font(.system(.title2, design: .rounded).weight(.semibold))
                 .foregroundStyle(.white.opacity(0.94))
                 .lineLimit(1)
                 .truncationMode(.tail)
 
-            if let providerNameText {
-                Text(providerNameText)
-                    .font(.system(.caption, design: .rounded).weight(.medium))
-                    .foregroundStyle(.white.opacity(0.68))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
+            Text(subtitleText)
+                .font(.system(.caption, design: .rounded).weight(.medium))
+                .foregroundStyle(.white.opacity(0.68))
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
         .frame(maxWidth: 520)
         .padding(.horizontal, 20)
-        .padding(.vertical, providerNameText == nil ? 10 : 12)
+        .padding(.vertical, 12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -385,9 +385,13 @@ private struct SurfAceWindowTitlePill: View {
         .allowsHitTesting(false)
     }
 
-    private var providerNameText: String? {
-        guard let providerName, !providerName.isEmpty else { return nil }
-        return providerName
+    private var subtitleText: String {
+        if showsProviderName,
+           let providerName,
+           !providerName.isEmpty {
+            return providerName
+        }
+        return "not connected"
     }
 }
 

@@ -787,7 +787,7 @@ async function withRuntimeHarness(
 }
 
 test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
-  await t.test("only one process owns the shared runtime lease", async () => {
+  await t.test("passive processes read the active owner's shared screen snapshot", async () => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port);
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-lease-"));
@@ -818,13 +818,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await runtimeA.start();
       await waitFor(() => server.pairedSocket !== null);
       await runtimeB.start();
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await waitFor(async () => (await runtimeB.listScreens()).length === 1);
 
       const screensA = await runtimeA.listScreens();
       const screensB = await runtimeB.listScreens();
       assert.equal(server.pairRequests.length, 1);
       assert.equal(screensA[0]?.connectionState, "connected");
-      assert.deepEqual(screensB, []);
+      assert.equal(screensB[0]?.connectionState, "connected");
+      assert.equal(screensB[0]?.fingerprint, screensA[0]?.fingerprint);
+      assert.equal(screensB[0]?.windowLabel, screensA[0]?.windowLabel);
       assert.ok(
         infoMessagesB.some((message) => message.includes("passive process")),
       );
