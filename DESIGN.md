@@ -3361,21 +3361,21 @@ Dedicated native-overlay model markups may eventually become full interactive UI
 
 ### 15.8 Provider Name Display
 
-When the paired provider sends a `providerName` in `pair.request`, the surface MUST display it in the window title area. When no provider is paired or `providerName` is absent, the subtitle MUST show `not connected`.
+When the paired provider sends a `providerName` in `pair.request`, the surface MUST display it in the window title area. The subtitle text MUST follow the current connection state instead of collapsing all missing-name cases into `not connected`.
 
 **Layout — Liquid Glass pill (iOS/iPadOS/macOS):**
 The window title area renders as a Liquid Glass pill containing two lines:
 1. **Window name** — large font, primary weight. This is the surface own display name (e.g. "Surf Ace - Emanator (host)").
 2. **Connected agent name** (`providerName`) — smaller font, secondary/muted weight, below the window name.
 
-The subtitle row is always present. When `providerName` is absent, the subtitle text is `not connected`.
+The subtitle row is always present.
 
 **Behavior:**
 - Subtitle line is always visible.
 - Disconnected -> subtitle shows `not connected`.
-- Connecting / reconnecting -> subtitle shows `not connected` (or `connecting...` if a platform chooses to specialize it).
+- Connecting / reconnecting -> subtitle shows `connecting…`.
 - Connected with `providerName` -> subtitle shows the `providerName` value.
-- Connected without `providerName` -> subtitle shows `not connected`.
+- Connected without `providerName` -> subtitle shows `unknown agent`.
 - Truncated with ellipsis if text is too long to fit; MUST NOT wrap.
 - MUST NOT be interactive (no tap target).
 - MUST persist during annotation mode.
@@ -3387,4 +3387,4 @@ The subtitle row is always present. When `providerName` is absent, the subtitle 
 - Re-applies name on next successful `pair.request`.
 
 **Invariant index entry:**
-- **Provider Name Display** — "Window title pill: large window name + smaller subtitle below. Subtitle always visible; shows providerName when connected and present, otherwise `not connected`. Cleared on disconnect/relinquish." Source: §15.8
+- **Provider Name Display** — "Window title pill: large window name + smaller subtitle below. Subtitle always visible; `not connected` when disconnected, `connecting…` while reconnecting, `providerName` when connected and present, otherwise `unknown agent`. Cleared on disconnect/relinquish." Source: §15.8

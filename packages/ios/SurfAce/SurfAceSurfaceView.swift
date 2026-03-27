@@ -77,7 +77,7 @@ private struct SurfAceWindowView: View {
                     SurfAceWindowTitlePill(
                         name: surface.name,
                         providerName: surface.providerName,
-                        showsProviderName: surface.connectionBarState == .connected
+                        connectionState: surface.connectionBarState
                     )
                         .padding(.top, 18)
                         .transition(.opacity)
@@ -357,7 +357,7 @@ private struct SurfAceConnectionStateBar: View {
 private struct SurfAceWindowTitlePill: View {
     let name: String
     let providerName: String?
-    let showsProviderName: Bool
+    let connectionState: SurfAceConnectionBarState
 
     var body: some View {
         VStack(spacing: 2) {
@@ -386,12 +386,18 @@ private struct SurfAceWindowTitlePill: View {
     }
 
     private var subtitleText: String {
-        if showsProviderName,
-           let providerName,
-           !providerName.isEmpty {
-            return providerName
+        switch connectionState {
+        case .connected:
+            if let providerName,
+               !providerName.isEmpty {
+                return providerName
+            }
+            return "unknown agent"
+        case .connecting:
+            return "connecting…"
+        case .disconnected:
+            return "not connected"
         }
-        return "not connected"
     }
 }
 
