@@ -90,7 +90,7 @@ enum SurfAceFramePayload: Equatable {
     case pdf(data: String)
     case terminal(lines: [String], scrollback: Int)
     case markdown(markdown: String)
-    case video(url: String)
+    case video(url: String?, data: String?, mediaType: String?)
     case canvas(color: String?, grid: Bool)
 }
 
@@ -157,10 +157,19 @@ struct SurfAceFrame: Equatable {
             }
             payload = .markdown(markdown: markdown)
         case .video:
-            guard let url = jsonObject["content"] as? String else {
+            if let url = jsonObject["content"] as? String {
+                payload = .video(url: url, data: nil, mediaType: nil)
+            } else if let content = jsonObject["content"] as? [String: Any] {
+                let data = content["data"] as? String
+                let url = content["url"] as? String
+                let mediaType = content["mediaType"] as? String
+                guard data != nil || url != nil else {
+                    throw SurfAceFrameParseError.missingField("content.data/url")
+                }
+                payload = .video(url: url, data: data, mediaType: mediaType)
+            } else {
                 throw SurfAceFrameParseError.missingField("content")
             }
-            payload = .video(url: url)
         case .canvas:
             if let content = jsonObject["content"] as? [String: Any] {
                 payload = .canvas(

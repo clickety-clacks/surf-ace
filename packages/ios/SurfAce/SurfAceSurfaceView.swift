@@ -607,6 +607,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
         config.userContentController = contentController
+        config.allowsInlineMediaPlayback = true
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         webView = WKWebView(frame: .zero, configuration: config)
         super.init(frame: frame)
@@ -651,9 +652,21 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 html = markdownHTML(markdown)
                 baseURL = nil
                 showWebView()
-            case .some(.video):
-                html = placeholderHTML(title: "Video", detail: "No preview is available for this pane.")
-                baseURL = nil
+            case .video(let url, let data, let mediaType):
+                let source: String
+                if let data {
+                    source = "data:\(mediaType ?? "video/mp4");base64,\(data)"
+                    baseURL = nil
+                } else if let url {
+                    source = url
+                    baseURL = videoBaseURL(for: url)
+                } else {
+                    html = placeholderHTML(title: "Video unavailable", detail: "This video payload could not be rendered on iOS.")
+                    baseURL = nil
+                    showWebView()
+                    break
+                }
+                html = videoHTML(source: source)
                 showWebView()
             case .some(.canvas):
                 html = placeholderHTML(title: "Canvas", detail: "No preview is available for this pane.")
@@ -1206,6 +1219,36 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         """
     }
 
+    private func videoHTML(source: String) -> String {
+        let escapedSource = escapeHTML(source)
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=3.0,user-scalable=yes" />
+          <style>
+            html, body { margin: 0; min-height: 100%; background: #0a0f14; }
+            body {
+              min-height: 100vh;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+            }
+            video {
+              width: 100%;
+              max-width: 100%;
+              max-height: 100vh;
+              background: #000;
+            }
+          </style>
+        </head>
+        <body>
+          <video controls playsinline preload="metadata" src="\(escapedSource)"></video>
+        </body>
+        </html>
+        """
+    }
+
     private func markdownHTML(_ markdown: String) -> String {
         if let attributed = try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full)),
            let htmlData = try? NSAttributedString(attributed).data(
@@ -1271,6 +1314,13 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         </body>
         </html>
         """
+    }
+
+    private func videoBaseURL(for urlString: String) -> URL? {
+        guard let url = URL(string: urlString) else {
+            return nil
+        }
+        return url.deletingLastPathComponent()
     }
 
     private func terminalHTML(lines: [String]) -> String {
