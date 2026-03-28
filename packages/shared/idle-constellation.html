@@ -93,6 +93,7 @@
       }
 
       const particles = [];
+      const spatialGrid = new Map();
       let frameId = 0;
       let width = 0;
       let height = 0;
@@ -105,6 +106,7 @@
         Math.max(180, Math.min(280, Math.min(nextWidth, nextHeight) * 0.34));
       const maxSpeedFor = (nextWidth, nextHeight) =>
         Math.max(0.12, Math.min(0.24, Math.min(nextWidth, nextHeight) / 4200));
+      const gridKey = (cellX, cellY) => `${cellX},${cellY}`;
       const frameInterval = () => {
         if (document.hidden) {
           return Infinity;
@@ -175,6 +177,22 @@
         }
       };
 
+      const rebuildSpatialGrid = (cellSize) => {
+        spatialGrid.clear();
+        for (let index = 0; index < particles.length; index += 1) {
+          const particle = particles[index];
+          const cellX = Math.floor(particle.x / cellSize);
+          const cellY = Math.floor(particle.y / cellSize);
+          const key = gridKey(cellX, cellY);
+          let bucket = spatialGrid.get(key);
+          if (!bucket) {
+            bucket = [];
+            spatialGrid.set(key, bucket);
+          }
+          bucket.push(index);
+        }
+      };
+
       const draw = (delta) => {
         context.clearRect(0, 0, width, height);
 
@@ -193,24 +211,38 @@
           }
         }
 
+        rebuildSpatialGrid(connectionDistance);
         for (let left = 0; left < particles.length; left += 1) {
           const source = particles[left];
-          for (let right = left + 1; right < particles.length; right += 1) {
-            const target = particles[right];
-            const dx = target.x - source.x;
-            const dy = target.y - source.y;
-            const distance = Math.hypot(dx, dy);
-            if (distance > connectionDistance) {
-              continue;
+          const cellX = Math.floor(source.x / connectionDistance);
+          const cellY = Math.floor(source.y / connectionDistance);
+          for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+            for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+              const bucket = spatialGrid.get(gridKey(cellX + offsetX, cellY + offsetY));
+              if (!bucket) {
+                continue;
+              }
+              for (const right of bucket) {
+                if (right <= left) {
+                  continue;
+                }
+                const target = particles[right];
+                const dx = target.x - source.x;
+                const dy = target.y - source.y;
+                const distance = Math.hypot(dx, dy);
+                if (distance > connectionDistance) {
+                  continue;
+                }
+                const intensity = 1 - distance / connectionDistance;
+                const hue = (source.hue + target.hue) / 2;
+                context.beginPath();
+                context.moveTo(source.x, source.y);
+                context.lineTo(target.x, target.y);
+                context.strokeStyle = `hsla(${hue}, 90%, 72%, ${0.06 + intensity * 0.34})`;
+                context.lineWidth = 0.6 + intensity * 1.4;
+                context.stroke();
+              }
             }
-            const intensity = 1 - distance / connectionDistance;
-            const hue = (source.hue + target.hue) / 2;
-            context.beginPath();
-            context.moveTo(source.x, source.y);
-            context.lineTo(target.x, target.y);
-            context.strokeStyle = `hsla(${hue}, 90%, 72%, ${0.06 + intensity * 0.34})`;
-            context.lineWidth = 0.6 + intensity * 1.4;
-            context.stroke();
           }
         }
 
