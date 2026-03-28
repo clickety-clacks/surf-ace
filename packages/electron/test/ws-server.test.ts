@@ -65,6 +65,53 @@ async function request(socket: WebSocket, payload: Request): Promise<Response> {
   return await response;
 }
 
+async function collectEvents(
+  socket: WebSocket,
+  count: number,
+  acceptedOps: string[],
+): Promise<Array<{ op: string; payload: Record<string, unknown> }>> {
+  return await new Promise((resolve, reject) => {
+    const events: Array<{ op: string; payload: Record<string, unknown> }> = [];
+    const onMessage = (data: WebSocket.RawData) => {
+      try {
+        const message = JSON.parse(String(data)) as {
+          op?: string;
+          payload?: Record<string, unknown>;
+          type?: string;
+        };
+        if (message.type !== "event" || !message.op || !acceptedOps.includes(message.op)) {
+          return;
+        }
+        events.push({ op: message.op, payload: message.payload ?? {} });
+        if (events.length >= count) {
+          cleanup();
+          resolve(events);
+        }
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("socket closed before expected events"));
+    };
+    const cleanup = () => {
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+    socket.on("close", onClose);
+  });
+}
+
 function surfacesListRequest(): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
@@ -427,5 +474,41 @@ test("ws server snapshot.get preserves pane drawings across owner resume", async
     );
 
     await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server emits annotation_committed after the final drawing flush when annotation exits", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const contentSet = await request(owner, contentSetRequest(1));
+    assert.equal(contentSet.ok, true);
+
+    core.setAnnotating(surfaceId, 1, true);
+    core.addStroke(surfaceId, 1, {
+      points: [
+        { pressure: 0.2, timestamp: 100, x: 10, y: 20 },
+        { pressure: 0.3, timestamp: 120, x: 30, y: 40 },
+      ],
+      strokeId: "stroke_commit" as never,
+      tool: "mouse",
+    });
+
+    const eventsPromise = collectEvents(owner, 2, [
+      "event.drawing_flush",
+      "event.annotation_committed",
+    ]);
+    core.setAnnotating(surfaceId, 1, false);
+
+    const events = await eventsPromise;
+    assert.equal(events[0]?.op, "event.drawing_flush");
+    assert.equal(events[1]?.op, "event.annotation_committed");
+    assert.equal(events[0]?.payload.paneId, 1);
+    assert.equal(events[1]?.payload.paneId, 1);
+    assert.equal(events[1]?.payload.contentId, "ct_snapshot");
+
+    await closeSocket(owner);
   });
 });

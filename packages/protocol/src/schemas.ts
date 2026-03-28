@@ -30,6 +30,7 @@ type ProtocolSchemaDefName =
   | "PaneCloseResponse"
   | "ErrorResponse"
   | "DrawingFlushEvent"
+  | "AnnotationCommittedEvent"
   | "TapEvent"
   | "ScrollEvent"
   | "SelectionEvent"
@@ -84,6 +85,7 @@ export const paneCloseResponseSchema = getSchemaDef("PaneCloseResponse");
 export const errorResponseSchema = getSchemaDef("ErrorResponse");
 
 export const drawingFlushEventSchema = getSchemaDef("DrawingFlushEvent");
+export const annotationCommittedEventSchema = getSchemaDef("AnnotationCommittedEvent");
 export const tapEventSchema = getSchemaDef("TapEvent");
 export const scrollEventSchema = getSchemaDef("ScrollEvent");
 export const selectionEventSchema = getSchemaDef("SelectionEvent");

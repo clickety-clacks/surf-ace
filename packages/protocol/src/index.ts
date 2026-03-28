@@ -542,6 +542,15 @@ export type DrawingFlushEvent = EventBase<"event.drawing_flush"> & {
   };
 };
 
+export type AnnotationCommittedEvent = EventBase<"event.annotation_committed"> & {
+  payload: {
+    paneId: PaneId;
+    contentId: ContentId;
+    revision: Revision;
+    committedAt: EpochMs;
+  };
+};
+
 export type TapEvent = EventBase<"event.tap"> & {
   payload: {
     paneId: PaneId;
@@ -675,6 +684,7 @@ export type Response =
 
 export type Event =
   | DrawingFlushEvent
+  | AnnotationCommittedEvent
   | TapEvent
   | ScrollEvent
   | SelectionEvent

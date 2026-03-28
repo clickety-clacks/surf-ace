@@ -28,6 +28,7 @@ enum SurfAceEventProfile: String {
         case .minimumDeep:
             return [
                 "event.drawing_flush",
+                "event.annotation_committed",
                 "event.tap",
                 "event.selection",
                 "event.page",
@@ -37,6 +38,7 @@ enum SurfAceEventProfile: String {
         case .deepPlusScroll:
             return [
                 "event.drawing_flush",
+                "event.annotation_committed",
                 "event.tap",
                 "event.selection",
                 "event.page",
@@ -418,6 +420,7 @@ final class SurfAcePaneModel {
     var firstPendingStrokeAt: Int64?
     var lastPendingStrokeAt: Int64?
     var lastSuccessfulFlushAt: Date?
+    var pendingAnnotationCommit = false
     @ObservationIgnored var pendingFlushTask: Task<Void, Never>?
     @ObservationIgnored weak var bridge: (any SurfAcePaneBridging)?
 

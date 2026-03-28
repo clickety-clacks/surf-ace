@@ -54,6 +54,7 @@ type OwnershipLock = {
 };
 
 type PaneFlushTimers = {
+  commitAfterFlush: boolean;
   idleTimer: NodeJS.Timeout | null;
   maxTimer: NodeJS.Timeout | null;
 };
@@ -405,6 +406,9 @@ export class SurfaceWsServer {
 
   private async handleCoreEvent(event: CoreEvent): Promise<void> {
     switch (event.type) {
+      case "annotation-committed":
+        await this.maybeSendAnnotationCommitted(event.surfaceId, event.paneId);
+        return;
       case "drawing-dirty":
         this.schedulePaneFlush(event.surfaceId, event.paneId);
         return;
@@ -513,6 +517,14 @@ export class SurfaceWsServer {
     ) {
       socket.close(1008, "missing_provider_name");
       return;
+    }
+    if (
+      response.type === "response" &&
+      response.ok &&
+      response.op === "pair.request"
+    ) {
+      this.armAllPendingFlushes(response.payload.surfaceId);
+      this.armAllPendingAnnotationCommits(response.payload.surfaceId);
     }
     if (
       response.type === "response" &&
@@ -708,8 +720,6 @@ export class SurfaceWsServer {
       type: "response",
       v: 1,
     };
-
-    this.armAllPendingFlushes(surfaceId);
 
     return response;
   }
@@ -1016,6 +1026,56 @@ export class SurfaceWsServer {
     }
   }
 
+  private armAllPendingAnnotationCommits(surfaceId: string): void {
+    for (const paneId of this.core.activePaneIds(surfaceId)) {
+      if (this.core.hasPendingAnnotationCommit(surfaceId, paneId)) {
+        void this.maybeSendAnnotationCommitted(surfaceId, paneId);
+      }
+    }
+  }
+
+  private async maybeSendAnnotationCommitted(surfaceId: string, paneId: number): Promise<void> {
+    const session = this.activeSession(surfaceId);
+    if (!session) {
+      return;
+    }
+    const timers = ensurePaneTimers(session.paneFlushTimers, paneId);
+    const meta = this.core.flushMeta(surfaceId, paneId);
+    if (meta.flushInFlight) {
+      timers.commitAfterFlush = true;
+      return;
+    }
+    if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
+      timers.commitAfterFlush = true;
+      if (timers.idleTimer) {
+        clearTimeout(timers.idleTimer);
+        timers.idleTimer = null;
+      }
+      if (timers.maxTimer) {
+        clearTimeout(timers.maxTimer);
+        timers.maxTimer = null;
+      }
+      await this.flushPane(surfaceId, paneId, "idle_window");
+      return;
+    }
+
+    const payload = this.core.buildAnnotationCommitted(surfaceId, paneId);
+    if (!payload) {
+      return;
+    }
+
+    await this.sendEvent(session.socket, {
+      eventId: makeEventId(),
+      op: "event.annotation_committed",
+      payload,
+      sentAt: Date.now(),
+      type: "event",
+      v: 1,
+    });
+    timers.commitAfterFlush = false;
+    this.core.markAnnotationCommittedSent(surfaceId, paneId);
+  }
+
   private async flushPane(
     surfaceId: string,
     paneId: number,
@@ -1059,6 +1119,9 @@ export class SurfaceWsServer {
       if (timers.maxTimer) {
         clearTimeout(timers.maxTimer);
         timers.maxTimer = null;
+      }
+      if (timers.commitAfterFlush) {
+        await this.maybeSendAnnotationCommitted(surfaceId, paneId);
       }
     } catch {
       this.core.setFlushInFlight(surfaceId, paneId, false);
@@ -1178,6 +1241,7 @@ function trimCache(cache: Map<string, SocketCacheEntry>): void {
 function activeEventsForProfile(profile: EventProfile) {
   if (profile === "deep_plus_scroll") {
     return [
+      "event.annotation_committed",
       "event.drawing_flush",
       "event.tap",
       "event.scroll",
@@ -1188,6 +1252,7 @@ function activeEventsForProfile(profile: EventProfile) {
     ] as const;
   }
   return [
+    "event.annotation_committed",
     "event.drawing_flush",
     "event.tap",
     "event.selection",
@@ -1220,7 +1285,7 @@ function ensurePaneTimers(map: Map<number, PaneFlushTimers>, paneId: number): Pa
   if (existing) {
     return existing;
   }
-  const created = { idleTimer: null, maxTimer: null };
+  const created = { commitAfterFlush: false, idleTimer: null, maxTimer: null };
   map.set(paneId, created);
   return created;
 }

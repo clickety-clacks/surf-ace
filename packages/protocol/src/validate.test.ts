@@ -6,7 +6,7 @@ import {
   REQUEST_MESSAGES,
 } from "./message-names.js";
 import { SURF_ACE_PROTOCOL_SCHEMAS } from "./schemas-manifest.js";
-import { drawingFlushEventSchema } from "./schemas.js";
+import { annotationCommittedEventSchema, drawingFlushEventSchema } from "./schemas.js";
 import { validateEnvelopeType } from "./validate.js";
 
 test("validateEnvelopeType accepts current request envelopes", () => {
@@ -171,6 +171,24 @@ test("validateEnvelopeType requires event ids on current event envelopes", () =>
   assert.deepEqual(missingEventId, { ok: false, reason: "event_id_missing" });
 });
 
+test("validateEnvelopeType accepts annotation committed events", () => {
+  const result = validateEnvelopeType("event.annotation_committed", {
+    eventId: "ev_1",
+    op: "event.annotation_committed",
+    payload: {
+      committedAt: Date.now(),
+      contentId: "ct_1",
+      paneId: 1,
+      revision: 2,
+    },
+    sentAt: Date.now(),
+    type: "event",
+    v: 1,
+  });
+
+  assert.deepEqual(result, { ok: true });
+});
+
 test("drawingFlushEventSchema matches the canonical schema bounds", () => {
   const payload = (
     drawingFlushEventSchema as {
@@ -195,4 +213,18 @@ test("drawingFlushEventSchema matches the canonical schema bounds", () => {
   assert.equal(payload.strokeCount.minimum, 1);
   assert.equal(payload.pointsCount.minimum, 1);
   assert.equal(payload.strokes.minItems, 1);
+});
+
+test("annotationCommittedEventSchema requires the settlement payload fields", () => {
+  const payload = (
+    annotationCommittedEventSchema as {
+      properties: {
+        payload: {
+          required: string[];
+        };
+      };
+    }
+  ).properties.payload;
+
+  assert.deepEqual(payload.required, ["paneId", "contentId", "revision", "committedAt"]);
 });

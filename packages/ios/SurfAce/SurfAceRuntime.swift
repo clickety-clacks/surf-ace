@@ -161,6 +161,7 @@ final class SurfAceRuntime {
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
     private let eventTypes = [
         "event.drawing_flush",
+        "event.annotation_committed",
         "event.tap",
         "event.scroll",
         "event.selection",
@@ -349,10 +350,14 @@ final class SurfAceRuntime {
 
     func setAnnotationMode(surfaceId: String, paneId: Int, enabled: Bool, fingerDrawEnabled: Bool) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        let wasEnabled = pane.annotationMode
         pane.annotationMode = enabled
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
         pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
         noteInteraction(surfaceId: surfaceId)
+        if wasEnabled && !enabled {
+            requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
+        }
     }
 
     func toggleLabelsVisibility(surfaceId: String) {
@@ -1916,10 +1921,54 @@ final class SurfAceRuntime {
                 pane.firstPendingStrokeAt = nil
                 pane.lastPendingStrokeAt = nil
                 pane.lastSuccessfulFlushAt = Date()
+                self.drainPendingAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
             } else {
                 self.scheduleDrawingFlush(surfaceId: surfaceId, paneId: paneId)
             }
         }
+    }
+
+    private func requestAnnotationCommit(surfaceId: String, paneId: Int) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              pane.currentEntry.contentId != nil else {
+            return
+        }
+        pane.pendingAnnotationCommit = true
+        if pane.isDrawingFlushSending {
+            return
+        }
+        if !pane.pendingFlushStrokes.isEmpty {
+            flushDrawing(surfaceId: surfaceId, paneId: paneId)
+            return
+        }
+        drainPendingAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
+    }
+
+    private func drainPendingAnnotationCommit(surfaceId: String, paneId: Int) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              pane.pendingAnnotationCommit else {
+            return
+        }
+        guard eventIsEnabled(surfaceId: surfaceId, eventName: "event.annotation_committed"),
+              let contentId = pane.currentEntry.contentId else {
+            pane.pendingAnnotationCommit = false
+            return
+        }
+        guard !pane.isDrawingFlushSending, pane.pendingFlushStrokes.isEmpty else {
+            return
+        }
+
+        pane.pendingAnnotationCommit = false
+        sendEvent(
+            surfaceId: surfaceId,
+            op: "event.annotation_committed",
+            payload: [
+                "paneId": paneId,
+                "contentId": contentId,
+                "revision": pane.currentEntry.revision,
+                "committedAt": timestampNow(),
+            ]
+        )
     }
 
     private func pane(surfaceId: String, paneId: Int) -> SurfAcePaneModel? {

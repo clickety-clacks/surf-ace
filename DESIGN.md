@@ -3252,20 +3252,23 @@ In v2+, restore-on-revisit will require a new wire operation (e.g. `content.rest
 
 ---
 
-### A.8 Frame Lifecycle When Context Never Changes (No Forced Frame Finalization)
+### A.8 Frame Lifecycle When Context Never Changes (Explicit Annotation Settlement)
 
-**Decision:** No forced frame finalization. In the dual-channel context-keyed model, an open frame may remain open indefinitely while context remains the same.
+**Decision:** Frame finalization uses an explicit surface signal, not a provider timeout heuristic. When the user exits annotation mode for a pane, the surface MUST emit `event.annotation_committed` after the final `event.drawing_flush` for that annotation session has been delivered. That event is the authoritative settlement boundary for same-context work.
 
 Rules:
-1. Live channel remains authoritative for in-context work-in-progress (strokes + screenshot context while annotating).
-2. Closed-frame queue exists to preserve older context when user moves on to a different context.
-3. Same-context re-entry appends to the same open frame.
-4. Frame finalization occurs only on context switch (different URL/content context with annotation starting there) or explicit content replacement/clear (`content.set`/`content.clear`).
-5. No timeout-based or size-based forced finalization in v1.
+1. Live channel remains authoritative for in-context work-in-progress while annotation mode is active.
+2. Closed-frame queue exists to preserve settled annotation sessions and older contexts until `surf_ace_read` consumes them.
+3. Same-context annotation re-entry starts a new live frame after the prior session has been explicitly committed.
+4. Frame finalization occurs on one of:
+   - explicit `event.annotation_committed` from the surface,
+   - context switch (different URL/content context with annotation starting there),
+   - explicit content replacement/clear (`content.set`/`content.clear`).
+5. Timeout-based finalization is not product truth. If a provider keeps a timer temporarily for backward compatibility with older surfaces, it MUST be fallback-only and MUST NOT override an explicit settle signal.
 
-Transport note: this does **not** change `event.drawing_flush` transport cadence (Section 7.1 flush gates still apply).
+Transport note: `event.drawing_flush` cadence remains independent. Flush events carry live stroke deltas during annotation mode; `event.annotation_committed` closes the session.
 
-Rationale: Frames are preservation/backlog artifacts, not mandatory segmentation units. If CLU is already receiving live updates, forced frame finalization adds complexity without user value.
+Rationale: Annotation settlement is a surface-owned state transition ("Done"/annotation exit), not something the provider should guess from silence on the wire.
 
 ---
 

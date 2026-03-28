@@ -34,6 +34,7 @@ export const RESPONSE_MESSAGES = [
 
 export const EVENT_MESSAGES = [
   "event.drawing_flush",
+  "event.annotation_committed",
   "event.tap",
   "event.scroll",
   "event.selection",

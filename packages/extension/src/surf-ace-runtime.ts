@@ -7,6 +7,7 @@ import path from "node:path";
 import type {
   AnnotationsRemoveRequest,
   AnnotationsRemoveResponse,
+  AnnotationCommittedEvent,
   ConnectionId,
   ContentAppendRequest,
   ContentClearRequest,
@@ -341,7 +342,6 @@ type CachedSnapshot = NonNullable<SurfAceSnapshotResult["snapshot"]> & {
 
 type ManagedPane = {
   activeContentId: ContentId | null;
-  annotationIdleFinalizeTimer: ReturnType<typeof setTimeout> | null;
   contentType: ContentType | null;
   currentRevision: Revision;
   historySummary: SurfAceHistorySummary;
@@ -425,7 +425,6 @@ const UNREACHABLE_AFTER_FAILURES = 3;
 const ALERT_RESET_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
 const ALERT_ENDPOINT_URL = "http://localhost:18800/alert";
-const ANNOTATION_IDLE_FINALIZE_MS = 3_000;
 const INITIAL_PAIR_PANE_ID = 1 as PaneId;
 const MAX_CONSECUTIVE_RESUME_FAILURES = 3;
 const MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES = 3;
@@ -566,7 +565,6 @@ function createPane(
 ): ManagedPane {
   return {
     activeContentId: null,
-    annotationIdleFinalizeTimer: null,
     buffer: createPaneBuffer(),
     contentType: null,
     currentRevision: asRevision(0),
@@ -907,9 +905,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.stopRequested = true;
       this.stopHeartbeat(surface);
       this.wakeSurfaceRetry(surface);
-      for (const pane of surface.panes.values()) {
-        this.stopAnnotationIdleFinalize(pane);
-      }
       if (surface.client) {
         await surface.client.close(1000, clampCloseReason("provider_shutdown"));
       }
@@ -988,9 +983,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.sessionId = null;
     surface.stopRequested = true;
     this.stopHeartbeat(surface);
-    for (const pane of surface.panes.values()) {
-      this.stopAnnotationIdleFinalize(pane);
-    }
     await surface.client?.close(1000, clampCloseReason("provider_shutdown")).catch(() => {});
     this.queuePersistScreenSnapshot("ownership relinquish");
     return { relinquished: true };
@@ -1200,7 +1192,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     for (const managedPane of [...surface.panes.values()]) {
       if (!seenRemotePaneIds.has(managedPane.remotePaneId)) {
-        this.stopAnnotationIdleFinalize(managedPane);
         surface.panes.delete(managedPane.paneId);
       }
     }
@@ -1236,7 +1227,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const payload = (response as PaneCloseResponse).payload;
     const removedPane = this.findPaneByRemoteId(surface, payload.paneId);
     if (removedPane) {
-      this.stopAnnotationIdleFinalize(removedPane);
       surface.panes.delete(removedPane.paneId);
     }
 
@@ -1292,37 +1282,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private stopAnnotationIdleFinalize(pane: ManagedPane): void {
-    if (pane.annotationIdleFinalizeTimer) {
-      clearTimeout(pane.annotationIdleFinalizeTimer);
-      pane.annotationIdleFinalizeTimer = null;
-    }
-  }
-
-  private scheduleAnnotationIdleFinalize(surface: ManagedSurface, pane: ManagedPane): void {
-    this.stopAnnotationIdleFinalize(pane);
-    const frameId = pane.buffer.liveFrame?.frameId;
-    if (!frameId) {
-      return;
-    }
-    pane.annotationIdleFinalizeTimer = setTimeout(() => {
-      pane.annotationIdleFinalizeTimer = null;
-      if (surface.stopRequested) {
-        return;
-      }
-      if (pane.buffer.liveFrame?.frameId !== frameId) {
-        return;
-      }
-      this.finalizeLiveFrame(surface, pane);
-      this.queuePersistScreenSnapshot(`annotation idle finalize ${surface.surfaceId}/${pane.paneId}`);
-    }, ANNOTATION_IDLE_FINALIZE_MS);
-  }
-
   private finalizeLiveFrame(surface: ManagedSurface, pane: ManagedPane): void {
     if (!pane.buffer.liveFrame) {
       return;
     }
-    this.stopAnnotationIdleFinalize(pane);
     const finalizedFrame = structuredClone(pane.buffer.liveFrame);
     pane.buffer.closedFrames.push(finalizedFrame);
     pane.buffer.liveFrame = null;
@@ -1514,7 +1477,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     if (liveFrame && this.canSendRequests(surface)) {
-      await this.captureFrameOpenState(surface, pane, liveFrame.frameId);
+      await this.captureLiveFrameSnapshot(surface, pane, liveFrame.frameId, "annotation alert snapshot");
       const refreshedFrame = pane.buffer.liveFrame;
       const refreshedImage =
         refreshedFrame?.frameId === liveFrame.frameId ? refreshedFrame.image.trim() : "";
@@ -1595,9 +1558,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           continue;
         }
         surface.stopRequested = true;
-        for (const pane of surface.panes.values()) {
-          this.stopAnnotationIdleFinalize(pane);
-        }
         if (surface.client) {
           this.runBackgroundTask(
             `close removed surface ${surface.surfaceId}`,
@@ -1632,7 +1592,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private handlePaneRemovedEvent(surface: ManagedSurface, event: PaneRemovedEvent): void {
     const pane = this.findPaneByRemoteId(surface, event.payload.paneId);
     if (pane) {
-      this.stopAnnotationIdleFinalize(pane);
       surface.panes.delete(pane.paneId);
     }
   }
@@ -1738,9 +1697,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
     surface.stopRequested = true;
-    for (const pane of surface.panes.values()) {
-      this.stopAnnotationIdleFinalize(pane);
-    }
     if (surface.client) {
       this.runBackgroundTask(
         `close removed announced surface ${surface.surfaceId}`,
@@ -1809,6 +1765,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     switch (event.op) {
+      case "event.annotation_committed":
+        this.handleAnnotationCommittedEvent(surface, event);
+        break;
       case "event.drawing_flush":
         this.ingestDrawingFlush(surface, event);
         break;
@@ -1878,7 +1837,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.runBackgroundTask(
         `frame-open snapshot for ${surface.surfaceId}/${pane.paneId}`,
         async () => {
-          await this.captureFrameOpenState(surface, pane, frameId);
+          await this.captureLiveFrameSnapshot(surface, pane, frameId, "frame-open snapshot");
         },
       );
     }
@@ -1904,13 +1863,41 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     liveFrame.updatedAt = event.payload.lastStrokeAt || now;
     pane.buffer.liveSeq += 1;
     this.maybeFireAnnotationAlert(surface, pane);
-    this.scheduleAnnotationIdleFinalize(surface, pane);
   }
 
-  private async captureFrameOpenState(
+  private handleAnnotationCommittedEvent(
+    surface: ManagedSurface,
+    event: AnnotationCommittedEvent,
+  ): void {
+    const pane = this.ensurePane(surface, event.payload.paneId);
+    const liveFrame = pane.buffer.liveFrame;
+    if (!liveFrame || liveFrame.contentId !== event.payload.contentId) {
+      return;
+    }
+    const frameId = liveFrame.frameId;
+    this.runBackgroundTask(
+      `annotation commit snapshot for ${surface.surfaceId}/${pane.paneId}/${frameId}`,
+      async () => {
+        await this.captureLiveFrameSnapshot(surface, pane, frameId, "annotation commit");
+        if (surface.stopRequested) {
+          return;
+        }
+        if (pane.buffer.liveFrame?.frameId !== frameId) {
+          return;
+        }
+        this.finalizeLiveFrame(surface, pane);
+        this.queuePersistScreenSnapshot(
+          `annotation committed ${surface.surfaceId}/${pane.paneId}/${frameId}`,
+        );
+      },
+    );
+  }
+
+  private async captureLiveFrameSnapshot(
     surface: ManagedSurface,
     pane: ManagedPane,
     frameId: string,
+    reason: string,
   ): Promise<void> {
     if (!this.canSendRequests(surface)) {
       return;
@@ -1940,6 +1927,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
       pane.buffer.liveFrame.image = payload.image ?? "";
       pane.buffer.liveFrame.scrollOffset = { ...payload.viewport.scrollOffset };
+      pane.buffer.liveFrame.updatedAt = this.now();
       pane.snapshot = {
         cachedAt: this.now(),
         contentId: payload.contentId,
@@ -1959,7 +1947,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       };
     } catch (error) {
       this.logger.warn?.(
-        `[surf-ace:runtime] frame-open snapshot failed for ${surface.surfaceId}/${pane.paneId}: ${String(error)}`,
+        `[surf-ace:runtime] ${reason} failed for ${surface.surfaceId}/${pane.paneId}: ${String(error)}`,
       );
     }
   }
@@ -3131,7 +3119,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     for (const pane of [...surface.panes.values()]) {
       if (!seenRemotePaneIds.has(pane.remotePaneId)) {
-        this.stopAnnotationIdleFinalize(pane);
         surface.panes.delete(pane.paneId);
       }
     }
@@ -3303,7 +3290,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     for (const pane of [...surface.panes.values()]) {
       if (!seenRemotePaneIds.has(pane.remotePaneId)) {
-        this.stopAnnotationIdleFinalize(pane);
         surface.panes.delete(pane.paneId);
       }
     }

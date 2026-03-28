@@ -202,6 +202,26 @@ class FakeSurfAceWsServer {
     pane.drawings = ["stroke_abc123"];
   }
 
+  sendAnnotationCommitted(paneId: number, contentId: string): void {
+    const pane = this.panes.get(paneId);
+    assert.ok(pane);
+    this.pairedSocket?.send(
+      JSON.stringify({
+        eventId: `ev_${this.nextEventId++}`,
+        op: "event.annotation_committed",
+        payload: {
+          committedAt: Date.now(),
+          contentId,
+          paneId,
+          revision: pane.revision,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      }),
+    );
+  }
+
   sendNavigation(paneId: number, contentId: string, url: string): number {
     const pane = this.panes.get(paneId);
     assert.ok(pane);
@@ -371,6 +391,7 @@ class FakeSurfAceWsServer {
               capabilities: {
                 contentTypes: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"],
                 eventTypes: [
+                  "event.annotation_committed",
                   "event.drawing_flush",
                   "event.tap",
                   "event.selection",
@@ -381,6 +402,7 @@ class FakeSurfAceWsServer {
               },
               eventConfig: {
                 activeEvents: [
+                  "event.annotation_committed",
                   "event.drawing_flush",
                   "event.tap",
                   "event.selection",
@@ -1264,26 +1286,27 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("idle timeout finalizes live annotation frames without a pane mutation", async () => {
+  await t.test("annotation committed finalizes live annotation frames without a pane mutation", async () => {
     await withRuntimeHarness(async ({ annotationTurns, runtime, server }) => {
       const pushed = await runtime.push(
         {
-          content: "<p>idle finalize</p>",
+          content: "<p>annotation committed</p>",
           contentType: "html",
           fingerprint: server.surfaceId,
           paneId: 1,
         },
-        { sessionKey: "agent:test:idle-finalize" },
+        { sessionKey: "agent:test:annotation-committed" },
       );
 
-      server.snapshotImage = "aWRsZS1maW5hbGl6ZQ==";
+      server.snapshotImage = "Y29tbWl0dGVkLWZyYW1l";
       server.sendDrawingFlush(server.initialRemotePaneId, pushed.contentId);
+      server.sendAnnotationCommitted(server.initialRemotePaneId, pushed.contentId);
 
-      await waitFor(() => annotationTurns.length === 1, 4_500);
+      await waitFor(() => annotationTurns.length === 1);
       const turn = annotationTurns[0];
       assert.ok(turn);
-      assert.equal(turn.sessionKey, "agent:test:idle-finalize");
-      assert.equal(turn.attachment.content, "aWRsZS1maW5hbGl6ZQ==");
+      assert.equal(turn.sessionKey, "agent:test:annotation-committed");
+      assert.equal(turn.attachment.content, "Y29tbWl0dGVkLWZyYW1l");
       assert.equal(turn.frame.contentId, pushed.contentId);
 
       const read = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });

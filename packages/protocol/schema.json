@@ -25,6 +25,7 @@
     { "$ref": "#/$defs/ErrorResponse" },
 
     { "$ref": "#/$defs/DrawingFlushEvent" },
+    { "$ref": "#/$defs/AnnotationCommittedEvent" },
     { "$ref": "#/$defs/TapEvent" },
     { "$ref": "#/$defs/ScrollEvent" },
     { "$ref": "#/$defs/SelectionEvent" },
@@ -107,6 +108,7 @@
       "type": "string",
       "enum": [
         "event.drawing_flush",
+        "event.annotation_committed",
         "event.tap",
         "event.scroll",
         "event.selection",
@@ -126,6 +128,7 @@
       "description": "Event types that are governed by eventProfile. Excludes lifecycle events (surface and pane lifecycle) which are always active and never appear in activeEvents.",
       "enum": [
         "event.drawing_flush",
+        "event.annotation_committed",
         "event.tap",
         "event.scroll",
         "event.selection",
@@ -1085,6 +1088,29 @@
             "pointsCount": { "type": "integer", "minimum": 1 },
             "firstStrokeAt": { "$ref": "#/$defs/EpochMs" },
             "lastStrokeAt": { "$ref": "#/$defs/EpochMs" }
+          }
+        }
+      }
+    },
+    "AnnotationCommittedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.annotation_committed" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paneId", "contentId", "revision", "committedAt"],
+          "properties": {
+            "paneId": { "$ref": "#/$defs/PaneId" },
+            "contentId": { "$ref": "#/$defs/ContentId" },
+            "revision": { "$ref": "#/$defs/Revision" },
+            "committedAt": { "$ref": "#/$defs/EpochMs" }
           }
         }
       }

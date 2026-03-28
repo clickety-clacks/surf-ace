@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { parseHTML } from "linkedom";
 
 import type {
+  AnnotationCommittedEvent,
   ContentAppendRequest,
   ContentClearRequest,
   ContentPatchRequest,
@@ -51,6 +52,7 @@ type PaneSnapshot = {
 
 type PaneState = {
   annotating: boolean;
+  annotationFrameOpen: boolean;
   deliveredClosedFrameCount: number;
   dirtyStrokeIds: string[];
   firstDirtyStrokeAt: number | null;
@@ -62,6 +64,7 @@ type PaneState = {
   latestContentEventAt: number;
   name: string | null;
   paneId: number;
+  pendingAnnotationCommit: boolean;
   snapshot: PaneSnapshot;
   toast: string | null;
 };
@@ -132,6 +135,7 @@ export type CoreEvent =
   | { fromSplit: boolean; paneId: number; parentPaneId: number | null; surfaceId: string; type: "pane-created" }
   | { paneId: number; surfaceId: string; type: "pane-removed" }
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
+  | { paneId: number; surfaceId: string; type: "annotation-committed" }
   | { paneId: number; surfaceId: string; type: "drawing-dirty" };
 
 export class SurfaceCoreError extends Error {
@@ -329,6 +333,10 @@ export class SurfaceCore {
     pane.annotating = enabled;
     pane.toast = null;
     this.emit({ surfaceId, type: "surface-changed" });
+    if (!enabled && pane.annotationFrameOpen) {
+      pane.pendingAnnotationCommit = true;
+      this.emit({ paneId, surfaceId, type: "annotation-committed" });
+    }
   }
 
   navigateHistory(surfaceId: string, paneId: number, direction: "back" | "forward"): void {
@@ -731,6 +739,7 @@ export class SurfaceCore {
     }
 
     entry.annotations = [...entry.annotations, structuredClone(stroke)];
+    pane.annotationFrameOpen = true;
     pane.dirtyStrokeIds.push(stroke.strokeId);
     pane.firstDirtyStrokeAt ??= firstPointTimestamp(stroke);
     pane.lastDirtyStrokeAt = lastPointTimestamp(stroke);
@@ -747,12 +756,14 @@ export class SurfaceCore {
 
   flushMeta(surfaceId: string, paneId: number): {
     firstDirtyStrokeAt: number | null;
+    flushInFlight: boolean;
     lastDirtyStrokeAt: number | null;
     lastSuccessfulFlushAt: number | null;
   } {
     const pane = this.requirePane(surfaceId, paneId);
     return {
       firstDirtyStrokeAt: pane?.firstDirtyStrokeAt ?? null,
+      flushInFlight: pane?.flushInFlight ?? false,
       lastDirtyStrokeAt: pane?.lastDirtyStrokeAt ?? null,
       lastSuccessfulFlushAt: pane?.lastSuccessfulFlushAt ?? null,
     };
@@ -819,6 +830,40 @@ export class SurfaceCore {
     pane.lastSuccessfulFlushAt = this.now();
     pane.flushInFlight = false;
     this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  hasPendingAnnotationCommit(surfaceId: string, paneId: number): boolean {
+    const pane = this.requirePane(surfaceId, paneId);
+    return pane?.pendingAnnotationCommit ?? false;
+  }
+
+  buildAnnotationCommitted(
+    surfaceId: string,
+    paneId: number,
+  ): AnnotationCommittedEvent["payload"] | null {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (!pane || !pane.pendingAnnotationCommit || pane.flushInFlight || pane.dirtyStrokeIds.length > 0) {
+      return null;
+    }
+    const entry = currentEntry(pane);
+    if (!entry.contentId) {
+      return null;
+    }
+    return {
+      committedAt: this.now() as EpochMs,
+      contentId: entry.contentId,
+      paneId: pane.paneId as PaneId,
+      revision: entry.revision as Revision,
+    };
+  }
+
+  markAnnotationCommittedSent(surfaceId: string, paneId: number): void {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (!pane) {
+      return;
+    }
+    pane.pendingAnnotationCommit = false;
+    pane.annotationFrameOpen = false;
   }
 
   surfaceName(surfaceId: string): string {
@@ -909,6 +954,7 @@ export class SurfaceCore {
 
     const replacementPane = createPaneState(initialPaneId, this.now());
     replacementPane.annotating = currentPane.annotating;
+    replacementPane.annotationFrameOpen = currentPane.annotationFrameOpen;
     replacementPane.deliveredClosedFrameCount = currentPane.deliveredClosedFrameCount;
     replacementPane.dirtyStrokeIds = [...currentPane.dirtyStrokeIds];
     replacementPane.firstDirtyStrokeAt = currentPane.firstDirtyStrokeAt;
@@ -917,6 +963,7 @@ export class SurfaceCore {
     replacementPane.lastSuccessfulFlushAt = currentPane.lastSuccessfulFlushAt;
     replacementPane.latestContentEventAt = currentPane.latestContentEventAt;
     replacementPane.name = currentPane.name;
+    replacementPane.pendingAnnotationCommit = currentPane.pendingAnnotationCommit;
     replacementPane.snapshot = structuredClone(currentPane.snapshot);
     replacementPane.toast = currentPane.toast;
 
@@ -964,6 +1011,7 @@ type PaneSplitState = {
 function createPaneState(paneId: number, now: number): PaneState {
   return {
     annotating: false,
+    annotationFrameOpen: false,
     deliveredClosedFrameCount: 0,
     dirtyStrokeIds: [],
     firstDirtyStrokeAt: null,
@@ -984,6 +1032,7 @@ function createPaneState(paneId: number, now: number): PaneState {
     latestContentEventAt: now,
     name: null,
     paneId,
+    pendingAnnotationCommit: false,
     snapshot: {
       bounds: null,
       selection: null,
@@ -1030,10 +1079,12 @@ function trimHistory(pane: PaneState): void {
 }
 
 function clearDirtyState(pane: PaneState): void {
+  pane.annotationFrameOpen = false;
   pane.dirtyStrokeIds = [];
   pane.firstDirtyStrokeAt = null;
   pane.lastDirtyStrokeAt = null;
   pane.flushInFlight = false;
+  pane.pendingAnnotationCommit = false;
 }
 
 function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {

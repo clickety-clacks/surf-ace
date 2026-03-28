@@ -1,4 +1,5 @@
 import {
+  annotationCommittedEventSchema,
   annotationsRemoveRequestSchema,
   annotationsRemoveResponseSchema,
   contentAppendRequestSchema,
@@ -113,6 +114,9 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   },
   "event.drawing_flush": {
     event: drawingFlushEventSchema,
+  },
+  "event.annotation_committed": {
+    event: annotationCommittedEventSchema,
   },
   "event.tap": {
     event: tapEventSchema,
