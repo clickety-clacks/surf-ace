@@ -1,0 +1,236 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 12% -10%, rgba(89, 132, 227, 0.45), transparent 34%),
+        radial-gradient(circle at 88% 6%, rgba(43, 214, 204, 0.18), transparent 28%),
+        linear-gradient(180deg, #08111f 0%, #07111b 100%);
+      color: #eef4ff;
+      font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      position: relative;
+      display: grid;
+      place-items: center;
+      isolation: isolate;
+    }
+
+    canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      z-index: 0;
+    }
+
+    .copy {
+      position: relative;
+      z-index: 1;
+      max-width: min(32rem, calc(100vw - 3rem));
+      padding: 24px 28px;
+      border-radius: 18px;
+      background: rgba(0, 0, 0, 0.28);
+      border: 1px solid rgba(130, 199, 255, 0.18);
+      backdrop-filter: blur(14px);
+      text-align: center;
+    }
+
+    .copy[data-hidden="true"] {
+      display: none;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      color: rgba(243, 248, 255, 0.94);
+      font-size: clamp(28px, 4vw, 44px);
+      font-weight: 100;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    p {
+      margin: 0;
+      max-width: 32ch;
+      color: rgba(220, 232, 255, 0.76);
+      font-size: 14px;
+      font-weight: 200;
+      letter-spacing: 0.1em;
+      line-height: 1.45;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="constellation"></canvas>
+  <div class="copy" data-hidden="__SURF_ACE_HIDE_COPY__">
+    <h1>__SURF_ACE_TITLE__</h1>
+    <p>__SURF_ACE_DETAIL__</p>
+  </div>
+  <script>
+    (() => {
+      const canvas = document.getElementById("constellation");
+      const context = canvas.getContext("2d");
+      if (!context) {
+        return;
+      }
+
+      const particles = [];
+      let frameId = 0;
+      let width = 0;
+      let height = 0;
+
+      const randomBetween = (min, max) => min + Math.random() * (max - min);
+      const particleCountFor = (nextWidth, nextHeight) =>
+        Math.max(120, Math.min(220, Math.round((nextWidth * nextHeight) / 12000)));
+      const connectionDistanceFor = (nextWidth, nextHeight) =>
+        Math.max(160, Math.min(240, Math.min(nextWidth, nextHeight) * 0.26));
+      const maxSpeedFor = (nextWidth, nextHeight) =>
+        Math.max(0.16, Math.min(0.34, Math.min(nextWidth, nextHeight) / 3600));
+
+      const seedParticle = (nextWidth, nextHeight, maxSpeed) => ({
+        alpha: randomBetween(0.55, 0.95),
+        hue: randomBetween(180, 240),
+        radius: randomBetween(1.4, 3.4),
+        vx: randomBetween(-maxSpeed, maxSpeed),
+        vy: randomBetween(-maxSpeed, maxSpeed),
+        x: randomBetween(0, nextWidth),
+        y: randomBetween(0, nextHeight),
+      });
+
+      const reseedParticles = (nextWidth, nextHeight) => {
+        const nextCount = particleCountFor(nextWidth, nextHeight);
+        const maxSpeed = maxSpeedFor(nextWidth, nextHeight);
+        particles.length = 0;
+        for (let index = 0; index < nextCount; index += 1) {
+          particles.push(seedParticle(nextWidth, nextHeight, maxSpeed));
+        }
+      };
+
+      const resize = () => {
+        const nextWidth = Math.max(1, Math.floor(window.innerWidth));
+        const nextHeight = Math.max(1, Math.floor(window.innerHeight));
+        const previousWidth = width;
+        const previousHeight = height;
+
+        width = nextWidth;
+        height = nextHeight;
+
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(width * dpr));
+        canvas.height = Math.max(1, Math.floor(height * dpr));
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        if (particles.length === 0 || previousWidth <= 1 || previousHeight <= 1) {
+          reseedParticles(width, height);
+          return;
+        }
+
+        const scaleX = width / previousWidth;
+        const scaleY = height / previousHeight;
+        for (const particle of particles) {
+          particle.x *= scaleX;
+          particle.y *= scaleY;
+        }
+
+        const desiredCount = particleCountFor(width, height);
+        const maxSpeed = maxSpeedFor(width, height);
+        while (particles.length < desiredCount) {
+          particles.push(seedParticle(width, height, maxSpeed));
+        }
+        if (particles.length > desiredCount) {
+          particles.length = desiredCount;
+        }
+        for (const particle of particles) {
+          particle.vx = Math.max(-maxSpeed, Math.min(maxSpeed, particle.vx));
+          particle.vy = Math.max(-maxSpeed, Math.min(maxSpeed, particle.vy));
+          particle.x = Math.max(0, Math.min(width, particle.x));
+          particle.y = Math.max(0, Math.min(height, particle.y));
+        }
+      };
+
+      const draw = () => {
+        resize();
+        context.clearRect(0, 0, width, height);
+
+        const connectionDistance = connectionDistanceFor(width, height);
+        const maxSpeed = maxSpeedFor(width, height);
+        for (const particle of particles) {
+          particle.x += particle.vx;
+          particle.y += particle.vy;
+          if (particle.x <= 0 || particle.x >= width) {
+            particle.vx = Math.sign(particle.vx || 1) * -randomBetween(maxSpeed * 0.35, maxSpeed);
+            particle.x = Math.max(0, Math.min(width, particle.x));
+          }
+          if (particle.y <= 0 || particle.y >= height) {
+            particle.vy = Math.sign(particle.vy || 1) * -randomBetween(maxSpeed * 0.35, maxSpeed);
+            particle.y = Math.max(0, Math.min(height, particle.y));
+          }
+        }
+
+        for (let left = 0; left < particles.length; left += 1) {
+          const source = particles[left];
+          for (let right = left + 1; right < particles.length; right += 1) {
+            const target = particles[right];
+            const dx = target.x - source.x;
+            const dy = target.y - source.y;
+            const distance = Math.hypot(dx, dy);
+            if (distance > connectionDistance) {
+              continue;
+            }
+            const intensity = 1 - distance / connectionDistance;
+            const hue = (source.hue + target.hue) / 2;
+            context.beginPath();
+            context.moveTo(source.x, source.y);
+            context.lineTo(target.x, target.y);
+            context.strokeStyle = `hsla(${hue}, 90%, 72%, ${0.06 + intensity * 0.34})`;
+            context.lineWidth = 0.6 + intensity * 1.4;
+            context.shadowBlur = 16 * intensity;
+            context.shadowColor = `hsla(${hue}, 100%, 72%, ${0.42 * intensity})`;
+            context.stroke();
+          }
+        }
+
+        context.shadowBlur = 0;
+        for (const particle of particles) {
+          context.beginPath();
+          context.fillStyle = `hsla(${particle.hue}, 100%, 72%, ${particle.alpha})`;
+          context.arc(particle.x, particle.y, particle.radius, 0, Math.PI * 2);
+          context.shadowBlur = 14;
+          context.shadowColor = `hsla(${particle.hue}, 100%, 72%, ${particle.alpha * 0.5})`;
+          context.fill();
+        }
+        context.shadowBlur = 0;
+
+        frameId = window.requestAnimationFrame(draw);
+      };
+
+      window.addEventListener("resize", resize, { passive: true });
+      resize();
+      frameId = window.requestAnimationFrame(draw);
+      window.addEventListener("beforeunload", () => {
+        window.cancelAnimationFrame(frameId);
+      }, { once: true });
+    })();
+  </script>
+</body>
+</html>

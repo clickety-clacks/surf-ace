@@ -42,6 +42,9 @@ await build({
   ...shared,
   entryPoints: [path.join(srcDir, "renderer", "renderer.ts")],
   format: "esm",
+  loader: {
+    ".html": "text",
+  },
   outdir: path.join(distDir, "renderer"),
   platform: "browser",
   target: "chrome138",
