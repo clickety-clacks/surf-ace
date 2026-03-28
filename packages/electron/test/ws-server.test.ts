@@ -80,27 +80,31 @@ function pairRequest(
   surfaceId: string,
   providerId: string,
   options: {
-    providerName?: string;
+    providerName?: string | null;
     resumeSessionId?: string;
     takeover?: boolean;
   } = {},
 ): PairRequest {
+  const payload: PairRequest["payload"] = {
+    connectionId: `conn_${Math.random().toString(16).slice(2)}` as never,
+    initialPaneId: 1 as never,
+    protocolVersion: 1,
+    providerId: providerId as never,
+    providerName: options.providerName ?? "test-harness",
+    resume: options.resumeSessionId
+      ? { sessionId: options.resumeSessionId as never }
+      : undefined,
+    surfaceId: surfaceId as never,
+    takeover: options.takeover ?? false,
+    windowLabel: "a",
+  };
+  if (options.providerName === null) {
+    delete (payload as { providerName?: string }).providerName;
+  }
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "pair.request",
-    payload: {
-      connectionId: `conn_${Math.random().toString(16).slice(2)}` as never,
-      initialPaneId: 1 as never,
-      protocolVersion: 1,
-      providerId: providerId as never,
-      providerName: options.providerName,
-      resume: options.resumeSessionId
-        ? { sessionId: options.resumeSessionId as never }
-        : undefined,
-      surfaceId: surfaceId as never,
-      takeover: options.takeover ?? false,
-      windowLabel: "a",
-    },
+    payload,
     sentAt: Date.now() as never,
     type: "request",
     v: 1,
@@ -339,6 +343,21 @@ test("ws server exposes providerName while connected and clears it on relinquish
     assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
 
     await closeSocket(owner);
+  });
+});
+
+test("ws server rejects pair requests without providerName", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    const rejected = await request(socket, pairRequest(surfaceId, "pv_alpha", { providerName: null }));
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.op, "pair.request");
+    assert.equal(rejected.error.code, "missing_provider_name");
+
+    await new Promise<void>((resolve) => {
+      socket.once("close", () => resolve());
+    });
   });
 });
 

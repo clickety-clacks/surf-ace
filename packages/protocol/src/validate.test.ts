@@ -18,6 +18,7 @@ test("validateEnvelopeType accepts current request envelopes", () => {
       initialPaneId: 1,
       protocolVersion: 1,
       providerId: "prov_1",
+      providerName: "test-harness",
       surfaceId: "sf_1",
       windowLabel: "a",
     },
@@ -27,6 +28,26 @@ test("validateEnvelopeType accepts current request envelopes", () => {
   });
 
   assert.deepEqual(result, { ok: true });
+});
+
+test("validateEnvelopeType rejects pair requests without providerName", () => {
+  const result = validateEnvelopeType("pair.request", {
+    id: "req_missing_provider_name",
+    op: "pair.request",
+    payload: {
+      connectionId: "cn_1",
+      initialPaneId: 1,
+      protocolVersion: 1,
+      providerId: "prov_1",
+      surfaceId: "sf_1",
+      windowLabel: "a",
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+
+  assert.equal(result.ok, false);
 });
 
 test("manifest covers every spec-defined request, response, and event op", () => {

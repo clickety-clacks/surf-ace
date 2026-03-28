@@ -403,14 +403,14 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId", "windowLabel", "initialPaneId"],
+          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId", "windowLabel", "initialPaneId", "providerName"],
           "properties": {
             "providerId": { "$ref": "#/$defs/ProviderId" },
             "connectionId": { "$ref": "#/$defs/ConnectionId" },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "windowLabel": { "type": "string", "minLength": 1 },
             "initialPaneId": { "$ref": "#/$defs/PaneId" },
-            "providerName": { "type": "string" },
+            "providerName": { "type": "string", "minLength": 1 },
             "protocolVersion": { "const": 1 },
             "takeover": { "type": "boolean", "description": "Explicit ownership transfer request. Normal reconnect/resume by the current owner MUST NOT rely on takeover." },
             "eventProfile": { "$ref": "#/$defs/EventProfile" },

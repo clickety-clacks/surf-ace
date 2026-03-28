@@ -173,7 +173,7 @@ export type PairRequest = RequestBase<"pair.request"> & {
     surfaceId: SurfaceId;
     windowLabel: string;
     initialPaneId: PaneId;
-    providerName?: string;
+    providerName: string;
     protocolVersion: 1;
     takeover?: boolean;
     eventProfile?: EventProfile;

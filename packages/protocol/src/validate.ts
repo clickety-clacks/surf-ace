@@ -7,6 +7,59 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function validateObjectAgainstSchema(
+  schema: Record<string, unknown>,
+  value: unknown,
+): string | null {
+  if (!isObject(value)) {
+    return "payload_not_object";
+  }
+
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  for (const key of required) {
+    if (!(key in value)) {
+      return `missing_required:${key}`;
+    }
+  }
+
+  const properties = isObject(schema.properties) ? schema.properties : null;
+  if (!properties) {
+    return null;
+  }
+
+  for (const [key, propertySchemaValue] of Object.entries(properties)) {
+    if (!(key in value) || !isObject(propertySchemaValue)) {
+      continue;
+    }
+    const propertyValue = value[key];
+    const propertyType = typeof propertySchemaValue.type === "string"
+      ? propertySchemaValue.type
+      : null;
+    if (propertyType === "string") {
+      if (typeof propertyValue !== "string") {
+        return `invalid_type:${key}`;
+      }
+      const minLength = typeof propertySchemaValue.minLength === "number"
+        ? propertySchemaValue.minLength
+        : null;
+      if (minLength !== null && propertyValue.length < minLength) {
+        return `min_length:${key}`;
+      }
+      continue;
+    }
+    if (propertyType === "object") {
+      const nestedReason = validateObjectAgainstSchema(propertySchemaValue, propertyValue);
+      if (nestedReason) {
+        return nestedReason;
+      }
+    }
+  }
+
+  return null;
+}
+
 function schemaRequiresPayload(schema: Record<string, unknown>): boolean {
   return Array.isArray(schema.required) && schema.required.includes("payload");
 }
@@ -56,7 +109,15 @@ export function validateEnvelopeType(
     return { ok: false, reason: "request_id_missing" };
   }
   if ("payload" in envelope) {
-    if (!isObject(envelope.payload)) {
+    if (actualType === "request") {
+      const validationFailure = validateObjectAgainstSchema(
+        selectedSchema as Record<string, unknown>,
+        envelope,
+      );
+      if (validationFailure) {
+        return { ok: false, reason: validationFailure };
+      }
+    } else if (!isObject(envelope.payload)) {
       return { ok: false, reason: "payload_not_object" };
     }
     return { ok: true };

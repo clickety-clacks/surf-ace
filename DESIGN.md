@@ -345,7 +345,7 @@ Flow:
 3. `surfaceId` (target window surface on multi-window endpoints).
 4. `resume` (optional prior `sessionId`, owner-only reconnect path).
 5. `takeover` (optional bool, explicit ownership transfer request; MUST only be used for user-directed takeover, not routine recovery).
-6. `providerName` (optional human-readable session/chat label for UI indicators).
+6. `providerName` (required human-readable session/chat label for UI indicators). Surfaces MUST reject `pair.request` with `missing_provider_name` if absent.
 7. `eventProfile` (optional, default `minimum_deep`).
 8. `drawingFlushConfig` (optional, provider-preferred idle/max interval values).
 9. `windowLabel` (required provider-assigned window label for this surface bootstrap).
@@ -3361,7 +3361,7 @@ Dedicated native-overlay model markups may eventually become full interactive UI
 
 ### 15.8 Provider Name Display
 
-When the paired provider sends a `providerName` in `pair.request`, the surface MUST display it in the window title area. The subtitle text MUST follow the current connection state instead of collapsing all missing-name cases into `not connected`.
+When the paired provider sends a `providerName` in `pair.request`, the surface MUST display it in the window title area. `providerName` is required for successful pairing, so every paired surface has one. The subtitle text MUST follow the current connection state instead of collapsing all missing-name cases into `not connected`.
 
 **Layout — Liquid Glass pill (iOS/iPadOS/macOS):**
 The window title area renders as a Liquid Glass pill containing two lines:
@@ -3374,17 +3374,16 @@ The subtitle row is always present.
 - Subtitle line is always visible.
 - Disconnected -> subtitle shows `not connected`.
 - Connecting / reconnecting -> subtitle shows `connecting…`.
-- Connected with `providerName` -> subtitle shows the `providerName` value.
-- Connected without `providerName` -> subtitle shows `unknown agent`.
+- Connected -> subtitle shows the paired `providerName` value.
 - Truncated with ellipsis if text is too long to fit; MUST NOT wrap.
 - MUST NOT be interactive (no tap target).
 - MUST persist during annotation mode.
 - If the provider name changes mid-session (e.g. reconnect with different name), update immediately.
 
 **Protocol integration:**
-- Surface stores the most recently received `providerName` from `pair.request`.
+- Surface stores the most recently received required `providerName` from `pair.request`.
 - Clears stored name on ownership relinquish or socket disconnect.
 - Re-applies name on next successful `pair.request`.
 
 **Invariant index entry:**
-- **Provider Name Display** — "Window title pill: large window name + smaller subtitle below. Subtitle always visible; `not connected` when disconnected, `connecting…` while reconnecting, `providerName` when connected and present, otherwise `unknown agent`. Cleared on disconnect/relinquish." Source: §15.8
+- **Provider Name Display** — "Window title pill: large window name + smaller subtitle below. Subtitle always visible; `not connected` when disconnected, `connecting…` while reconnecting, and the required paired `providerName` when connected. Cleared on disconnect/relinquish." Source: §15.8

@@ -14,6 +14,7 @@ export function buildExamplePairRequest(): PairRequest {
       initialPaneId: 1 as PairRequest["payload"]["initialPaneId"],
       protocolVersion: 1,
       providerId: "pv_example_provider" as PairRequest["payload"]["providerId"],
+      providerName: "test-harness",
       surfaceId: "sf_surface_a" as PairRequest["payload"]["surfaceId"],
       windowLabel: "a",
     },

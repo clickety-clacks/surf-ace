@@ -507,6 +507,15 @@ export class SurfaceWsServer {
     await this.reply(socket, response);
     if (
       response.type === "response" &&
+      !response.ok &&
+      response.op === "pair.request" &&
+      response.error.code === "missing_provider_name"
+    ) {
+      socket.close(1008, "missing_provider_name");
+      return;
+    }
+    if (
+      response.type === "response" &&
       response.ok &&
       response.op === "ownership.relinquish"
     ) {
@@ -591,6 +600,12 @@ export class SurfaceWsServer {
     if (request.payload.protocolVersion !== 1) {
       throw new SurfaceCoreError("unsupported_protocol_version", "Unsupported protocol version");
     }
+    if (
+      typeof request.payload.providerName !== "string" ||
+      !request.payload.providerName.trim()
+    ) {
+      throw new SurfaceCoreError("missing_provider_name", "providerName is required");
+    }
     if (!request.payload.windowLabel || request.payload.initialPaneId < 1) {
       throw new SurfaceCoreError(
         "invalid_payload",
@@ -662,7 +677,7 @@ export class SurfaceWsServer {
     }
     this.core.setProviderName(
       surfaceId,
-      typeof request.payload.providerName === "string" ? request.payload.providerName : null,
+      request.payload.providerName,
     );
     this.core.setConnectionBar(surfaceId, "connected");
     this.onBusyChanged?.();

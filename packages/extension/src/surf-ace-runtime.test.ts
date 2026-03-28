@@ -1264,8 +1264,37 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("idle timeout finalizes live annotation frames without a pane mutation", async () => {
+    await withRuntimeHarness(async ({ annotationTurns, runtime, server }) => {
+      const pushed = await runtime.push(
+        {
+          content: "<p>idle finalize</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        },
+        { sessionKey: "agent:test:idle-finalize" },
+      );
+
+      server.snapshotImage = "aWRsZS1maW5hbGl6ZQ==";
+      server.sendDrawingFlush(server.initialRemotePaneId, pushed.contentId);
+
+      await waitFor(() => annotationTurns.length === 1, 4_500);
+      const turn = annotationTurns[0];
+      assert.ok(turn);
+      assert.equal(turn.sessionKey, "agent:test:idle-finalize");
+      assert.equal(turn.attachment.content, "aWRsZS1maW5hbGl6ZQ==");
+      assert.equal(turn.frame.contentId, pushed.contentId);
+
+      const read = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
+      assert.equal(read.liveFrame, null);
+      assert.equal(read.frames.length, 1);
+      assert.equal(read.frames[0]?.image, "aWRsZS1maW5hbGl6ZQ==");
+    });
+  });
+
   await t.test("provider leaves settled annotation frames queued when the snapshot image is missing", async () => {
-    await withRuntimeHarness(async ({ annotationTurns, runtime, server, warnings }) => {
+    await withRuntimeHarness(async ({ alertBodies, annotationTurns, runtime, server, warnings }) => {
       const pushed = await runtime.push(
         {
           content: "<p>missing image</p>",
@@ -1291,6 +1320,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         setTimeout(resolve, 50);
       });
 
+      assert.deepEqual(alertBodies[0], {
+        attachments: undefined,
+        message: "Surf Ace updates pending on Surface A (1 live dirty stroke)",
+        noOverlay: true,
+        sessionKey: "agent:test:missing-image",
+      });
       assert.equal(annotationTurns.length, 0);
       const closedRead = await runtime.read({ fingerprint: server.surfaceId, paneId: 1 });
       assert.equal(closedRead.frames.length, 1);
@@ -1969,7 +2004,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("busy after a cold-start reconnect backs off without takeover", async () => {
+  await t.test("busy after a cold-start reconnect retries with takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1978,20 +2013,20 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.hasPairedInGatewaySession = false;
       surface.sessionId = null;
 
-      // Return busy once, then succeed — validates no takeover on retry
+      // Return busy once, then succeed when the cold-start retry escalates to takeover.
       server.busyWithoutTakeoverResponsesRemaining = 1;
       await surface.client.close(1000, "test_cold_start_busy_backoff");
 
-      // Wait for reconnect: first attempt gets busy, second succeeds
+      // Wait for reconnect: first attempt gets busy, second retries with takeover and succeeds.
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
-      assert.ok(
-        server.pairAttemptDetails.slice(1).every((attempt) => attempt.takeover === false),
-        "no reconnect attempt should use takeover",
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
+        [false, true],
       );
       assert.ok(
-        warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
+        warnings.some((warning) => warning.includes("busy on cold-start connect") && warning.includes("retrying with takeover")),
       );
     });
   });

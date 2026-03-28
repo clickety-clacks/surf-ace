@@ -756,6 +756,14 @@ final class SurfAceRuntime {
                         await socket.close(code: 1000, reason: "relinquished")
                         return
                     }
+                    if op == "pair.request",
+                       (processed.responseObject["ok"] as? Bool) == false,
+                       let error = processed.responseObject["error"] as? [String: Any],
+                       let code = error["code"] as? String,
+                       code == "missing_provider_name" {
+                        await socket.close(code: 1008, reason: "missing_provider_name")
+                        return
+                    }
                 }
             } catch {
                 surfAceGatewayLog("socket loop failed connectionUUID=\(connectionUUID) error=\(error.localizedDescription)")
@@ -932,11 +940,36 @@ final class SurfAceRuntime {
                 postSendPairCommit: nil
             )
         }
+        guard let rawProviderName = payload["providerName"] as? String else {
+            surfAceGatewayLog("pair.request missing providerName connectionUUID=\(connectionUUID)")
+            return SurfAceProcessedRequestResult(
+                responseObject: makeErrorResponse(
+                    op: "pair.request",
+                    id: id,
+                    code: "missing_provider_name",
+                    message: "providerName is required"
+                ),
+                postSendPairCommit: nil
+            )
+        }
+        let providerName = rawProviderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !providerName.isEmpty else {
+            surfAceGatewayLog("pair.request empty providerName connectionUUID=\(connectionUUID)")
+            return SurfAceProcessedRequestResult(
+                responseObject: makeErrorResponse(
+                    op: "pair.request",
+                    id: id,
+                    code: "missing_provider_name",
+                    message: "providerName is required"
+                ),
+                postSendPairCommit: nil
+            )
+        }
+
         let activeSession = activeSessions[surfaceId]
         let ownershipLock = ownershipLocksBySurfaceId[surfaceId]
         let resumed: Bool
         let sessionId: String
-        let providerName = payload["providerName"] as? String
 
         if let ownershipLock {
             if takeover {
