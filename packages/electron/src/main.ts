@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { app, BrowserWindow, Menu, ipcMain, screen, type WebContents } from "electron";
 
@@ -38,7 +37,6 @@ const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
 let distDir = "";
-let guestPreloadUrl = "";
 let identityFingerprint = "";
 let isQuitting = false;
 let server: SurfaceWsServer;
@@ -207,7 +205,6 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     webPreferences: {
       contextIsolation: true,
       preload: path.join(distDir, "preload.cjs"),
-      webviewTag: true,
     },
     width: Math.max(960, surface.viewport.width),
   });
@@ -310,7 +307,6 @@ function installIpc(): void {
     }
     const state = core.getRendererWindowState(surfaceId);
     return {
-      guestPreloadUrl,
       state,
       surfaceId,
     };
@@ -427,7 +423,6 @@ async function boot(): Promise<void> {
   stateDir = app.getPath("userData");
   await fs.mkdir(stateDir, { recursive: true });
   distDir = path.resolve(__dirname);
-  guestPreloadUrl = pathToFileURL(path.join(distDir, "content-guest-preload.cjs")).toString();
 
   const persistentState = await loadPersistentState();
   const identity = await loadOrCreateIdentity(stateDir);

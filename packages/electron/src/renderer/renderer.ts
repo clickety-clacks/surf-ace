@@ -80,7 +80,6 @@ type RendererWindowState = {
 };
 
 type Bootstrap = {
-  guestPreloadUrl: string;
   state: RendererWindowState;
   surfaceId: string;
 };
@@ -100,7 +99,6 @@ type PaneView = {
   currentHtmlFrameCleanup: (() => void) | null;
   currentRenderToken: number;
   currentScrollHandler: (() => void) | null;
-  currentWebView: Electron.WebviewTag | null;
   currentWebViewResizeObserver: ResizeObserver | null;
   idleAnimationStop: (() => void) | null;
   lastNavigation: NavigationMemo | null;
@@ -272,9 +270,6 @@ function currentVisiblePdfPage(view: PaneView): HTMLElement | null {
 }
 
 function currentVisibleText(view: PaneView): string {
-  if (view.currentWebView) {
-    return "";
-  }
   const currentPdfPage = currentVisiblePdfPage(view);
   if (currentPdfPage) {
     return (currentPdfPage.dataset.pageText ?? "").slice(0, 4096);
@@ -517,7 +512,6 @@ function ensurePaneView(paneId: number): PaneView {
     currentHtmlFrameCleanup: null,
     currentRenderToken: 0,
     currentScrollHandler: null,
-    currentWebView: null,
     currentWebViewResizeObserver: null,
     idleAnimationStop: null,
     lastNavigation: null,
@@ -799,68 +793,6 @@ function sizeWebViewToPane(view: PaneView, element: HTMLElement): void {
   });
 }
 
-function wireWebView(view: PaneView, paneId: number, webview: Electron.WebviewTag): void {
-  webview.addEventListener("ipc-message", (event) => {
-    if (event.channel !== "surf-ace-content") {
-      return;
-    }
-    const [payload] = event.args as Array<Record<string, unknown>>;
-    if (!payload) {
-      return;
-    }
-    if (payload.type === "scroll") {
-      window.surfAce.command({
-        paneId,
-        type: "scroll",
-        viewport: payload.viewport,
-        visibleText: payload.visibleText,
-      });
-      window.surfAce.reportSnapshot({
-        bounds: paneBounds(view),
-        paneId,
-        selection: null,
-        viewport: payload.viewport,
-        visibleText: payload.visibleText,
-      });
-    } else if (payload.type === "selection") {
-      window.surfAce.command({
-        paneId,
-        selection: payload.selection ?? null,
-        type: "selection",
-      });
-    } else if (payload.type === "tap") {
-      window.surfAce.command({
-        kind: payload.kind,
-        nearestContent: payload.nearestContent,
-        paneId,
-        position: payload.position,
-        type: "tap",
-      });
-    } else if (payload.type === "navigation") {
-      sendNavigationIntent(view, paneId, String(payload.url ?? ""));
-    } else if (payload.type === "ready") {
-      window.surfAce.reportSnapshot({
-        bounds: paneBounds(view),
-        paneId,
-        selection: null,
-        viewport: payload.viewport,
-        visibleText: payload.visibleText,
-      });
-    }
-  });
-
-  const handleWillNavigate = (event: Event & { preventDefault?: () => void; url?: string }) => {
-    const url = String(event.url ?? "");
-    if (paneStateById(paneId)?.annotationBorderVisible) {
-      event.preventDefault?.();
-    }
-    sendNavigationIntent(view, paneId, url);
-  };
-
-  webview.addEventListener("will-navigate", handleWillNavigate as EventListener);
-  webview.addEventListener("will-frame-navigate", handleWillNavigate as EventListener);
-}
-
 function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement): void {
   const onMessage = (event: MessageEvent) => {
     if (event.source !== frame.contentWindow) {
@@ -1084,7 +1016,6 @@ function resetDynamicContent(view: PaneView): number {
   view.currentHtmlFrameCleanup?.();
   view.currentHtmlFrameCleanup = null;
   clearWebViewSizer(view);
-  view.currentWebView = null;
   view.currentScrollHandler = null;
   stopIdleAnimation(view);
   view.rootEl.dataset.pdfReportKey = "";

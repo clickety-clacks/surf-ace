@@ -28,7 +28,6 @@ await build({
   entryPoints: [
     path.join(srcDir, "main.ts"),
     path.join(srcDir, "preload.ts"),
-    path.join(srcDir, "content-guest-preload.ts"),
   ],
   external: ["electron"],
   format: "cjs",

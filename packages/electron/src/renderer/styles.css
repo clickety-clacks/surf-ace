@@ -244,14 +244,12 @@ body {
 }
 
 .content-html-frame,
-.content-html-webview,
 .content-pdf-stack {
   display: block;
   width: 100%;
 }
 
-.content-html-frame,
-.content-html-webview {
+.content-html-frame {
   position: absolute;
   inset: 0;
   height: auto;
