@@ -2002,6 +2002,20 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("providerNameForSurface never falls back to pane session keys", async () => {
+    await withRuntimeHarness({
+      providerName: "CLU / Surf Ace",
+      run: async ({ runtime, server }) => {
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        surface.panes.get(1).pendingOwnerSessionKey = "agent:main:clawline:flynn:main";
+        surface.panes.get(1).ownerSessionKey = "agent:main:clawline:flynn:main";
+        assert.equal(internalRuntime.providerNameForSurface(surface), "CLU / Surf Ace");
+      },
+    });
+  });
+
   await t.test("pair bootstrap preserves the stable first-pane remote id across reconnects", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const split = await runtime.split({

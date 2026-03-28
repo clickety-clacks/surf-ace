@@ -2717,14 +2717,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private providerNameForSurface(surface: ManagedSurface): string {
-    for (const pane of surface.panes.values()) {
-      if (pane.pendingOwnerSessionKey) {
-        return pane.pendingOwnerSessionKey;
-      }
-      if (pane.ownerSessionKey) {
-        return pane.ownerSessionKey;
-      }
-    }
+    void surface;
     return this.providerName;
   }
 
