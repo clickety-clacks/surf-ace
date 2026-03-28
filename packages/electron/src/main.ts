@@ -19,8 +19,16 @@ const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const STATE_FILE_NAME = "surface-core-state.json";
 
-// Disable GPU compositing — required on headless/Mac ARM setups where GPU process crashes.
-app.commandLine.appendSwitch("disable-gpu");
+function gpuDisableRequested(): boolean {
+  const value = process.env.SURF_ACE_DISABLE_GPU?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+// Prefer GPU compositing by default. Set SURF_ACE_DISABLE_GPU=1 only on hosts that
+// reproduce the original GPU-process crash path.
+if (gpuDisableRequested()) {
+  app.commandLine.appendSwitch("disable-gpu");
+}
 
 const windows = new Map<string, BrowserWindow>();
 const lastExplicitPaneIds = new Map<string, number>();
@@ -36,6 +44,15 @@ let isQuitting = false;
 let server: SurfaceWsServer;
 let stateDir = "";
 let stateWrite = Promise.resolve();
+
+app.on("child-process-gone", (_event, details) => {
+  if (details.type !== "GPU") {
+    return;
+  }
+  console.warn(
+    `[surf-ace] GPU process exited (${details.reason}); relaunch with SURF_ACE_DISABLE_GPU=1 if this host cannot keep GPU compositing alive.`,
+  );
+});
 
 function displayViewport() {
   const display = screen.getPrimaryDisplay();
