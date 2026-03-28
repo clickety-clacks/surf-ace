@@ -25,6 +25,6 @@
 		<string>_surf-ace._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>SurfAce uses your local network to advertise and accept provider connections.</string>
+	<string>Surf Ace uses your local network to advertise and accept provider connections.</string>
 </dict>
 </plist>

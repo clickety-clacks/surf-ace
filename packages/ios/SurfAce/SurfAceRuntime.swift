@@ -1314,10 +1314,14 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "invalid content.set payload")
         }
 
+        if frame.contentType == .canvas {
+            return makeErrorResponse(op: "content.set", id: id, code: "unsupported_content_type", message: "unsupported contentType")
+        }
+
         guard let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"]) else {
             return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "historyOwnerToken is required")
         }
-        applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
+        let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
 
         pane.pendingFlushStrokes.removeAll()
         pane.firstPendingStrokeAt = nil
@@ -1333,7 +1337,8 @@ final class SurfAceRuntime {
             id: id,
             op: "content.set",
             paneId: paneId,
-            entry: pane.currentEntry
+            entry: pane.currentEntry,
+            historyInfo: historyInfo
         )
     }
 
@@ -1392,7 +1397,7 @@ final class SurfAceRuntime {
         guard revision == pane.currentEntry.revision + 1 else {
             return staleRevisionResponse(op: "content.patch", id: id, expectedRevision: pane.currentEntry.revision + 1)
         }
-        guard case .html = pane.currentEntry.payload else {
+        guard case .html(_, let baseURL) = pane.currentEntry.payload else {
             return makeErrorResponse(op: "content.patch", id: id, code: "unsupported_operation_for_content_type", message: "patch is html-only")
         }
         guard let bridge = pane.bridge else {
@@ -1408,7 +1413,7 @@ final class SurfAceRuntime {
 
         switch await bridge.applyHTMLPatch(patch) {
         case .success(let updatedHTML):
-            pane.currentEntry.payload = .html(html: updatedHTML, baseURL: nil)
+            pane.currentEntry.payload = .html(html: updatedHTML, baseURL: baseURL)
             pane.currentEntry.revision = revision
             return mutationAck(id: id, op: "content.patch", paneId: paneId, entry: pane.currentEntry)
         case .selectorNotFound:
@@ -1736,21 +1741,30 @@ final class SurfAceRuntime {
             && ownershipLock.sessionId == session.sessionId
     }
 
-    private func mutationAck(id: String, op: String, paneId: Int, entry: SurfAcePaneEntry) -> [String: Any] {
-        [
+    private func mutationAck(
+        id: String,
+        op: String,
+        paneId: Int,
+        entry: SurfAcePaneEntry,
+        historyInfo: [String: Any]? = nil
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "paneId": paneId,
+            "currentContentId": entry.contentId as Any,
+            "currentRevision": entry.revision,
+            "contentType": entry.contentType?.rawValue as Any,
+            "contentId": entry.contentId as Any,
+        ]
+        historyInfo?.forEach { payload[$0.key] = $0.value }
+
+        return [
             "v": 1,
             "type": "response",
             "op": op,
             "id": id,
             "ok": true,
             "sentAt": timestampNow(),
-            "payload": [
-                "paneId": paneId,
-                "currentContentId": entry.contentId as Any,
-                "currentRevision": entry.revision,
-                "contentType": entry.contentType?.rawValue as Any,
-                "contentId": entry.contentId as Any,
-            ],
+            "payload": payload,
         ]
     }
 
@@ -1975,24 +1989,39 @@ final class SurfAceRuntime {
         surfaceById[surfaceId]?.panesById[paneId]
     }
 
-    private func applyContentSet(frame: SurfAceFrame, to pane: SurfAcePaneModel, historyOwnerToken: String) {
+    private func applyContentSet(frame: SurfAceFrame, to pane: SurfAcePaneModel, historyOwnerToken: String) -> [String: Any]? {
         let nextEntry = SurfAcePaneEntry.from(frame: frame, historyOwnerToken: historyOwnerToken)
         let shouldReplaceInPlace = pane.currentEntry.contentId != nil
             && pane.currentEntry.historyOwnerToken == historyOwnerToken
 
         if shouldReplaceInPlace {
             pane.currentEntry = nextEntry
-            return
+            return nil
         }
 
+        var historyInfo: [String: Any]?
         if pane.currentEntry.contentId != nil {
-            pane.backStack.append(pane.currentEntry)
+            let displacedEntry = pane.currentEntry
+            pane.backStack.append(displacedEntry)
             if pane.backStack.count > 20 {
                 pane.backStack.removeFirst(pane.backStack.count - 20)
+            }
+
+            if let displacedContentId = displacedEntry.contentId,
+               let displacedHistoryOwnerToken = displacedEntry.historyOwnerToken,
+               displacedHistoryOwnerToken != historyOwnerToken {
+                historyInfo = [
+                    "historyAction": "displaced",
+                    "displaced": [
+                        "contentId": displacedContentId,
+                        "historyOwnerToken": displacedHistoryOwnerToken,
+                    ],
+                ]
             }
         }
         pane.forwardStack.removeAll()
         pane.currentEntry = nextEntry
+        return historyInfo
     }
 
     private func applyProviderBootstrapTopology(surface: SurfAceSurfaceModel, windowLabel: String, initialPaneId: Int) {
