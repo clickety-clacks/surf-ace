@@ -57,21 +57,28 @@ body {
 }
 
 .surface-window.connection-connecting::after {
-  background: var(--warn);
-  animation: connection-pulse 1.8s ease-in-out infinite alternate;
+  background:
+    linear-gradient(
+      90deg,
+      rgba(245, 158, 11, 0.24) 0%,
+      rgba(255, 244, 222, 0.96) 50%,
+      rgba(245, 158, 11, 0.24) 100%
+    ) 0 0 / 22% 100% no-repeat,
+    var(--warn);
+  animation: connection-sweep 1.4s ease-in-out infinite alternate;
 }
 
 .surface-window.connection-disconnected::after {
   background: var(--destructive);
 }
 
-@keyframes connection-pulse {
+@keyframes connection-sweep {
   from {
-    opacity: 0.35;
+    background-position: 0 0, 0 0;
   }
 
   to {
-    opacity: 1;
+    background-position: 100% 0, 0 0;
   }
 }
 
