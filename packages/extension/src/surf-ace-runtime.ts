@@ -425,7 +425,6 @@ const UNREACHABLE_AFTER_FAILURES = 3;
 const ALERT_RESET_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
 const ALERT_ENDPOINT_URL = "http://localhost:18800/alert";
-const INITIAL_PAIR_PANE_ID = 1 as PaneId;
 const MAX_CONSECUTIVE_RESUME_FAILURES = 3;
 const MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES = 3;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
@@ -1969,23 +1968,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return existingFirstPane.remotePaneId;
     }
 
-    if (this.persistentState.nextPaneId <= INITIAL_PAIR_PANE_ID) {
-      this.persistentState.nextPaneId = INITIAL_PAIR_PANE_ID + 1;
-      this.runBackgroundTask(
-        "persist next pane id",
-        async () => {
-          await this.persistState();
-        },
-      );
+    if (existingFirstPane) {
+      existingFirstPane.remotePaneId = existingFirstPane.paneId;
+      return existingFirstPane.remotePaneId;
     }
 
     if (surface.panes.size === 0) {
+      const initialPaneId = this.allocatePaneId();
       surface.panes = new Map<number, ManagedPane>([
-        [INITIAL_PAIR_PANE_ID, createPane(INITIAL_PAIR_PANE_ID, INITIAL_PAIR_PANE_ID, surface.viewport)],
+        [initialPaneId, createPane(initialPaneId, initialPaneId, surface.viewport)],
       ]);
       surface.snapshotBufferedEvents = [];
+      return initialPaneId;
     }
-    return INITIAL_PAIR_PANE_ID;
+
+    throw new SurfAceToolError("internal_error", `Surface ${surface.surfaceId} has no initial pane`);
   }
 
   private firstPane(surface: ManagedSurface): ManagedPane | null {

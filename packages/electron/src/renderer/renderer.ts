@@ -1317,12 +1317,15 @@ function renderWindow(state: RendererWindowState): void {
   windowTitlePill.className = "window-title-pill";
   const windowTitle = document.createElement("div");
   windowTitle.className = "window-title-pill__title";
-  windowTitle.textContent = state.name;
-  const providerName = document.createElement("div");
-  providerName.className = "window-title-pill__subtitle";
-  providerName.textContent = state.providerName ?? "";
-  providerName.hidden = state.connectionBar !== "connected" || !state.providerName;
-  windowTitlePill.append(windowTitle, providerName);
+  windowTitle.textContent = state.windowLabel || state.name;
+  const windowSubtitle = document.createElement("div");
+  windowSubtitle.className = "window-title-pill__subtitle";
+  const subtitleText = state.windowLabel
+    ? state.name
+    : (state.providerName ?? "");
+  windowSubtitle.textContent = subtitleText;
+  windowSubtitle.hidden = !subtitleText;
+  windowTitlePill.append(windowTitle, windowSubtitle);
   const layoutRoot = document.createElement("div");
   layoutRoot.className = "layout-root";
   if (state.layout) {

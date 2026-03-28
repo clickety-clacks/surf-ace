@@ -72,7 +72,7 @@ class FakeSurfAceWsServer {
     paneId: number;
     revision: number;
   }> = [];
-  initialRemotePaneId = 41;
+  initialRemotePaneId: number;
   readonly pairAttemptDetails: Array<{
     providerId: string | null;
     providerName: string | null;
@@ -80,23 +80,7 @@ class FakeSurfAceWsServer {
     takeover: boolean;
   }> = [];
   readonly pairRequests: Array<{ initialPaneId: number; windowLabel: string }> = [];
-  readonly panes = new Map<number, TestPane>([
-    [
-      41,
-      {
-        contentId: null,
-        contentType: null,
-        drawings: [],
-        name: null,
-        revision: 0,
-        viewport: {
-          height: 768,
-          scale: 2,
-          width: 1024,
-        },
-      },
-    ],
-  ]);
+  readonly panes: Map<number, TestPane>;
   readonly splitRequests: Array<{
     count: number;
     direction: string;
@@ -118,14 +102,33 @@ class FakeSurfAceWsServer {
   resumePairMismatchMessage = "Resume session did not match active ownership lock";
 
   pairedSocket: import("ws").WebSocket | null = null;
-  readonly surfaceId = "sf_surface-a";
+  readonly surfaceId: string;
 
   private closed = false;
   private nextEventId = 1;
   private readonly sockets = new Set<WebSocket>();
   private readonly wss: WebSocketServer;
 
-  constructor(port: number) {
+  constructor(port: number, options?: { initialRemotePaneId?: number; surfaceId?: string }) {
+    this.initialRemotePaneId = options?.initialRemotePaneId ?? 41;
+    this.surfaceId = options?.surfaceId ?? "sf_surface-a";
+    this.panes = new Map<number, TestPane>([
+      [
+        this.initialRemotePaneId,
+        {
+          contentId: null,
+          contentType: null,
+          drawings: [],
+          name: null,
+          revision: 0,
+          viewport: {
+            height: 768,
+            scale: 2,
+            width: 1024,
+          },
+        },
+      ],
+    ]);
     this.wss = new WebSocketServer({ port });
     this.wss.on("connection", (socket) => {
       this.sockets.add(socket);
@@ -916,6 +919,47 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         ["activeContent", "historySummary", "name", "paneId"].sort(),
       );
     });
+  });
+
+  await t.test("multiple surfaces get unique window labels and globally unique first pane ids", async () => {
+    const portA = nextPort++;
+    const portB = nextPort++;
+    const serverA = new FakeSurfAceWsServer(portA, { surfaceId: "sf_surface-a" });
+    const serverB = new FakeSurfAceWsServer(portB, { surfaceId: "sf_surface-b" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-multi-"));
+    const discovery = new StaticDiscoveryService([
+      discoveryEndpoint(portA, "aaaabbbb"),
+      discoveryEndpoint(portB, "ccccdddd"),
+    ]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtime.start();
+      await waitFor(() => serverA.pairedSocket !== null && serverB.pairedSocket !== null);
+
+      const screens = await runtime.listScreens();
+      assert.deepEqual(
+        screens.map((screen) => ({
+          panes: screen.panes.map((pane) => pane.paneId),
+          windowLabel: screen.windowLabel,
+        })),
+        [
+          { panes: [1], windowLabel: "a" },
+          { panes: [2], windowLabel: "b" },
+        ],
+      );
+      assert.equal(serverA.pairRequests[0]?.windowLabel, "a");
+      assert.equal(serverB.pairRequests[0]?.windowLabel, "b");
+      assert.deepEqual(
+        [serverA.pairRequests[0]?.initialPaneId, serverB.pairRequests[0]?.initialPaneId].sort(),
+        [1, 2],
+      );
+    } finally {
+      await runtime.stop();
+      await serverB.close();
+      await serverA.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
   });
 
   await t.test("provider keeps pane identity local and reuses content ownership per injected session", async () => {
