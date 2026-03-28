@@ -1314,6 +1314,10 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "invalid content.set payload")
         }
 
+        if frame.contentType == .canvas {
+            return makeErrorResponse(op: "content.set", id: id, code: "unsupported_content_type", message: "unsupported contentType")
+        }
+
         guard let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"]) else {
             return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "historyOwnerToken is required")
         }
