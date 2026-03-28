@@ -607,6 +607,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
         config.userContentController = contentController
+        config.allowsInlineMediaPlayback = true
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         webView = WKWebView(frame: .zero, configuration: config)
         super.init(frame: frame)
@@ -651,8 +652,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 html = markdownHTML(markdown)
                 baseURL = nil
                 showWebView()
-            case .some(.video):
-                html = placeholderHTML(title: "Video", detail: "No preview is available for this pane.")
+            case .video(let url):
+                html = videoHTML(url: url)
                 baseURL = nil
                 showWebView()
             case .some(.canvas):
@@ -1202,6 +1203,35 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
           </style>
         </head>
         <body><img alt="\(escapedAlt)" src="data:\(mediaType);base64,\(data)" /></body>
+        </html>
+        """
+    }
+
+    private func videoHTML(url: String) -> String {
+        let escapedURL = escapeHTML(url)
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=3.0,user-scalable=yes" />
+          <style>
+            html, body { margin: 0; min-height: 100%; background: #05080c; }
+            body {
+              min-height: 100vh;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+            }
+            video {
+              width: 100%;
+              max-height: 100vh;
+              background: #000;
+            }
+          </style>
+        </head>
+        <body>
+          <video controls playsinline preload="metadata" src="\(escapedURL)"></video>
+        </body>
         </html>
         """
     }
