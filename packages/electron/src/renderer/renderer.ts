@@ -1223,11 +1223,12 @@ function renderWindow(state: RendererWindowState): void {
   windowTitle.textContent = state.windowLabel || state.name;
   const windowSubtitle = document.createElement("div");
   windowSubtitle.className = "window-title-pill__subtitle";
-  const subtitleText = state.windowLabel
-    ? state.name
-    : (state.providerName ?? "");
+  const subtitleText = state.connectionBar === "connected"
+    ? (state.providerName ?? "")
+    : state.connectionBar === "connecting"
+      ? "connecting…"
+      : "not connected";
   windowSubtitle.textContent = subtitleText;
-  windowSubtitle.hidden = !subtitleText;
   windowTitlePill.append(windowTitle, windowSubtitle);
   const layoutRoot = document.createElement("div");
   layoutRoot.className = "layout-root";
