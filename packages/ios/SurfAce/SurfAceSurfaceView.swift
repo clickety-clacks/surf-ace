@@ -909,7 +909,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     }
 
     private func setupScripts() {
-        let script = WKUserScript(source: bridgeScript(), injectionTime: .atDocumentEnd, forMainFrameOnly: false)
+        let script = WKUserScript(source: bridgeScript(), injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         let controller = webView.configuration.userContentController
         controller.addUserScript(script)
         controller.add(SurfAceWeakScriptMessageHandler(target: self), name: selectionMessageName)
