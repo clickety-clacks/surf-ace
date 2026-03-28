@@ -1392,7 +1392,7 @@ final class SurfAceRuntime {
         guard revision == pane.currentEntry.revision + 1 else {
             return staleRevisionResponse(op: "content.patch", id: id, expectedRevision: pane.currentEntry.revision + 1)
         }
-        guard case .html = pane.currentEntry.payload else {
+        guard case .html(_, let baseURL) = pane.currentEntry.payload else {
             return makeErrorResponse(op: "content.patch", id: id, code: "unsupported_operation_for_content_type", message: "patch is html-only")
         }
         guard let bridge = pane.bridge else {
@@ -1408,7 +1408,7 @@ final class SurfAceRuntime {
 
         switch await bridge.applyHTMLPatch(patch) {
         case .success(let updatedHTML):
-            pane.currentEntry.payload = .html(html: updatedHTML, baseURL: nil)
+            pane.currentEntry.payload = .html(html: updatedHTML, baseURL: baseURL)
             pane.currentEntry.revision = revision
             return mutationAck(id: id, op: "content.patch", paneId: paneId, entry: pane.currentEntry)
         case .selectorNotFound:
