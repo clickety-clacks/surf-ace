@@ -566,6 +566,19 @@ private struct SurfAceSceneProbeRepresentable: UIViewControllerRepresentable {
 }
 
 @MainActor
+private final class SurfAceWeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var target: WKScriptMessageHandler?
+
+    init(target: WKScriptMessageHandler) {
+        self.target = target
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(userContentController, didReceive: message)
+    }
+}
+
+@MainActor
 final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler {
     var onInteractionBegan: (() -> Void)?
     var onSelectionChanged: ((String, CGRect?) -> Void)?
@@ -899,10 +912,10 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         let script = WKUserScript(source: bridgeScript(), injectionTime: .atDocumentEnd, forMainFrameOnly: false)
         let controller = webView.configuration.userContentController
         controller.addUserScript(script)
-        controller.add(self, name: selectionMessageName)
-        controller.add(self, name: scrollMessageName)
-        controller.add(self, name: tapMessageName)
-        controller.add(self, name: navigationMessageName)
+        controller.add(SurfAceWeakScriptMessageHandler(target: self), name: selectionMessageName)
+        controller.add(SurfAceWeakScriptMessageHandler(target: self), name: scrollMessageName)
+        controller.add(SurfAceWeakScriptMessageHandler(target: self), name: tapMessageName)
+        controller.add(SurfAceWeakScriptMessageHandler(target: self), name: navigationMessageName)
     }
 
     private func setupPDFTracking() {
