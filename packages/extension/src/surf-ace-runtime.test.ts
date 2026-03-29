@@ -971,7 +971,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [41, 41],
+        [1, 2],
       );
     } finally {
       await runtime.stop();
@@ -1029,7 +1029,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.deepEqual(server.pairRequests, [
           {
             initialPaneId: 1,
-            initialPaneLabel: 41,
+            initialPaneLabel: 1,
             windowLabel: "a",
           },
         ]);
@@ -1188,15 +1188,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.deepEqual(split, [
         { paneId: 1, paneLabel: 41 },
-        { paneId: 2, paneLabel: 2 },
-        { paneId: 3, paneLabel: 3 },
+        { paneId: 2, paneLabel: 42 },
+        { paneId: 3, paneLabel: 43 },
       ]);
       assert.deepEqual(server.splitRequests, [
         {
           count: 3,
           direction: "horizontal",
           newPaneIds: [2, 3],
-          newPaneLabels: [2, 3],
+          newPaneLabels: [42, 43],
           paneId: server.initialRemotePaneId,
         },
       ]);
@@ -1206,8 +1206,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         splitScreens[0]?.panes.map((pane) => ({ paneId: pane.paneId, paneLabel: pane.paneLabel })),
         [
           { paneId: 1, paneLabel: 41 },
-          { paneId: 2, paneLabel: 2 },
-          { paneId: 3, paneLabel: 3 },
+          { paneId: 2, paneLabel: 42 },
+          { paneId: 3, paneLabel: 43 },
         ],
       );
 
@@ -1215,7 +1215,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         fingerprint: server.surfaceId,
         paneId: 2,
       });
-      assert.deepEqual(close, { ok: true, paneId: 2, paneLabel: 2 });
+      assert.deepEqual(close, { ok: true, paneId: 2, paneLabel: 42 });
       assert.deepEqual(server.closePaneRequests, [{ paneId: 2 }]);
 
       const afterCloseScreens = await runtime.listScreens();
@@ -1223,7 +1223,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         afterCloseScreens[0]?.panes.map((pane) => ({ paneId: pane.paneId, paneLabel: pane.paneLabel })),
         [
           { paneId: 1, paneLabel: 41 },
-          { paneId: 3, paneLabel: 3 },
+          { paneId: 3, paneLabel: 43 },
         ],
       );
     });
