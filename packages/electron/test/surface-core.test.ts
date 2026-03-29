@@ -6,6 +6,7 @@ import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
 function applyProviderBootstrap(core: SurfaceCore, surfaceId: string, initialPaneId: number): number {
   core.applyProviderBootstrapTopology(surfaceId, {
     initialPaneId,
+    initialPaneLabel: initialPaneId,
     windowLabel: "a",
   });
   return core.getRendererWindowState(surfaceId).panes[0]!.paneId;
@@ -45,6 +46,27 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.deepEqual(windowState.layout, { paneId: 7, type: "pane" });
   assert.equal(windowState.panes.length, 1);
   assert.equal(windowState.panes[0]?.paneId, 7);
+  assert.equal(windowState.panes[0]?.label, "7");
+});
+
+test("surface core renders the visible pane label separately from paneId", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 7,
+    initialPaneLabel: 41,
+    windowLabel: "a",
+  });
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(windowState.panes[0]?.paneId, 7);
+  assert.equal(windowState.panes[0]?.label, "41");
 });
 
 test("surface core ignores snapshot updates for stale pane ids", () => {
@@ -161,6 +183,7 @@ test("surface core assigns pane history and split topology", () => {
     count: 2,
     direction: "horizontal",
     newPaneIds: [9],
+    newPaneLabels: [9],
     paneId: initialPaneId,
   });
 
@@ -210,6 +233,7 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
     count: 2,
     direction: "horizontal",
     newPaneIds: [9],
+    newPaneLabels: [9],
     paneId,
   });
 
@@ -357,6 +381,7 @@ test("surface core returns the number of flushed annotation batches discarded on
     count: 2,
     direction: "horizontal",
     newPaneIds: [8],
+    newPaneLabels: [8],
     paneId,
   });
 

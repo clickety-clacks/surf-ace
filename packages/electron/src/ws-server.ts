@@ -419,6 +419,7 @@ export class SurfaceWsServer {
           payload: {
             fromSplit: event.fromSplit,
             paneId: event.paneId,
+            paneLabel: event.paneLabel,
             parentPaneId: event.parentPaneId,
             surfaceId: event.surfaceId,
           },
@@ -618,10 +619,14 @@ export class SurfaceWsServer {
     ) {
       throw new SurfaceCoreError("missing_provider_name", "providerName is required");
     }
-    if (!request.payload.windowLabel || request.payload.initialPaneId < 1) {
+    if (
+      !request.payload.windowLabel ||
+      request.payload.initialPaneId < 1 ||
+      request.payload.initialPaneLabel < 1
+    ) {
       throw new SurfaceCoreError(
         "invalid_payload",
-        "pair.request requires windowLabel and initialPaneId",
+        "pair.request requires windowLabel, initialPaneId, and initialPaneLabel",
       );
     }
 
@@ -684,6 +689,7 @@ export class SurfaceWsServer {
     if (!resumed) {
       this.core.applyProviderBootstrapTopology(surfaceId, {
         initialPaneId: Number(request.payload.initialPaneId),
+        initialPaneLabel: Number(request.payload.initialPaneLabel),
         windowLabel: request.payload.windowLabel,
       });
     }
@@ -769,6 +775,7 @@ export class SurfaceWsServer {
       count: request.payload.count,
       direction: request.payload.direction,
       newPaneIds: request.payload.newPaneIds.map(Number),
+      newPaneLabels: request.payload.newPaneLabels.map(Number),
       paneId: Number(request.payload.paneId),
     });
     return {

@@ -64,6 +64,7 @@ type PaneState = {
   latestContentEventAt: number;
   name: string | null;
   paneId: number;
+  paneLabel: number;
   pendingAnnotationCommit: boolean;
   snapshot: PaneSnapshot;
   toast: string | null;
@@ -132,7 +133,7 @@ export type CoreEvent =
   | { surfaceId: string; type: "surface-changed" }
   | { surfaceId: string; type: "surface-created" }
   | { surfaceId: string; type: "surface-removed" }
-  | { fromSplit: boolean; paneId: number; parentPaneId: number | null; surfaceId: string; type: "pane-created" }
+  | { fromSplit: boolean; paneId: number; paneLabel: number; parentPaneId: number | null; surfaceId: string; type: "pane-created" }
   | { paneId: number; surfaceId: string; type: "pane-removed" }
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
@@ -296,7 +297,7 @@ export class SurfaceCore {
         },
         drawings: structuredClone(current.annotations),
         flushInFlight: pane.flushInFlight,
-        label: pane.name ?? (pane.paneId > BOOTSTRAP_PANE_ID ? String(pane.paneId) : ""),
+        label: pane.name ?? (pane.paneLabel > 0 ? String(pane.paneLabel) : ""),
         name: pane.name,
         paneId,
         showDone: pane.annotating,
@@ -375,6 +376,7 @@ export class SurfaceCore {
           contentType: current.contentType,
           name: pane.name,
           paneId: pane.paneId as PaneId,
+          paneLabel: pane.paneLabel,
           viewport: paneViewports.get(paneId) ?? structuredClone(pane.snapshot.viewport),
         };
       }),
@@ -392,6 +394,7 @@ export class SurfaceCore {
           currentContentId: current.contentId,
           currentRevision: current.revision as Revision,
           paneId: pane.paneId as PaneId,
+          paneLabel: pane.paneLabel,
         };
       }),
     };
@@ -407,7 +410,7 @@ export class SurfaceCore {
 
   applyProviderBootstrapTopology(
     surfaceId: string,
-    payload: { initialPaneId: number; windowLabel: string },
+    payload: { initialPaneId: number; initialPaneLabel: number; windowLabel: string },
   ): void {
     const surface = this.getSurface(surfaceId);
     let didChange = false;
@@ -417,7 +420,7 @@ export class SurfaceCore {
       didChange = true;
     }
 
-    if (this.ensureInitialPane(surface, payload.initialPaneId)) {
+    if (this.ensureInitialPane(surface, payload.initialPaneId, payload.initialPaneLabel)) {
       didChange = true;
     }
 
@@ -428,22 +431,27 @@ export class SurfaceCore {
 
   paneSplit(
     surfaceId: string,
-    payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; paneId: number },
+    payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; newPaneLabels: number[]; paneId: number },
   ): { panes: PaneSplitState[] } {
     const surface = this.getSurface(surfaceId);
     const sourcePane = this.expectPane(surfaceId, payload.paneId);
-    if (payload.count < 2 || payload.newPaneIds.length !== payload.count - 1) {
-      throw new SurfaceCoreError("invalid_payload", "pane.split count/newPaneIds mismatch");
+    if (
+      payload.count < 2 ||
+      payload.newPaneIds.length !== payload.count - 1 ||
+      payload.newPaneLabels.length !== payload.count - 1
+    ) {
+      throw new SurfaceCoreError("invalid_payload", "pane.split count/newPaneIds/newPaneLabels mismatch");
     }
 
     const newPaneIds = payload.newPaneIds.map((paneId) => Math.trunc(paneId));
+    const newPaneLabels = payload.newPaneLabels.map((paneLabel) => Math.trunc(paneLabel));
     for (const paneId of newPaneIds) {
       if (surface.panes.has(paneId)) {
         throw new SurfaceCoreError("invalid_payload", `Pane already exists: ${paneId}`);
       }
     }
 
-    const newPanes = newPaneIds.map((paneId) => createPaneState(paneId, this.now()));
+    const newPanes = newPaneIds.map((paneId, index) => createPaneState(paneId, newPaneLabels[index]!, this.now()));
     for (const pane of newPanes) {
       surface.panes.set(pane.paneId, pane);
       surface.paneOrder.push(pane.paneId);
@@ -458,6 +466,7 @@ export class SurfaceCore {
       this.emit({
         fromSplit: true,
         paneId,
+        paneLabel: newPanes.find((pane) => pane.paneId === paneId)!.paneLabel,
         parentPaneId: payload.paneId,
         surfaceId,
         type: "pane-created",
@@ -465,7 +474,10 @@ export class SurfaceCore {
     }
 
     return {
-      panes: flattenLayout(surface.layout!).map((paneId) => ({ paneId })),
+      panes: flattenLayout(surface.layout!).map((paneId) => ({
+        paneId,
+        paneLabel: surface.panes.get(paneId)!.paneLabel,
+      })),
     };
   }
 
@@ -921,7 +933,7 @@ export class SurfaceCore {
   }
 
   private createSurface(surfaceId: string, name: string, viewport: SurfaceViewport): SurfaceState {
-    const bootstrapPane = createPaneState(BOOTSTRAP_PANE_ID, this.now());
+    const bootstrapPane = createPaneState(BOOTSTRAP_PANE_ID, 0, this.now());
     const surface: SurfaceState = {
       connectionBar: "disconnected",
       layout: { paneId: BOOTSTRAP_PANE_ID, type: "pane" },
@@ -939,7 +951,7 @@ export class SurfaceCore {
     return surface;
   }
 
-  private ensureInitialPane(surface: SurfaceState, initialPaneId: number): boolean {
+  private ensureInitialPane(surface: SurfaceState, initialPaneId: number, initialPaneLabel: number): boolean {
     if (initialPaneId < 1 || surface.panes.has(initialPaneId) || surface.panes.size !== 1) {
       return false;
     }
@@ -952,7 +964,7 @@ export class SurfaceCore {
       return false;
     }
 
-    const replacementPane = createPaneState(initialPaneId, this.now());
+    const replacementPane = createPaneState(initialPaneId, initialPaneLabel, this.now());
     replacementPane.annotating = currentPane.annotating;
     replacementPane.annotationFrameOpen = currentPane.annotationFrameOpen;
     replacementPane.deliveredClosedFrameCount = currentPane.deliveredClosedFrameCount;
@@ -1006,9 +1018,10 @@ export class SurfaceCore {
 
 type PaneSplitState = {
   paneId: number;
+  paneLabel: number;
 };
 
-function createPaneState(paneId: number, now: number): PaneState {
+function createPaneState(paneId: number, paneLabel: number, now: number): PaneState {
   return {
     annotating: false,
     annotationFrameOpen: false,
@@ -1032,6 +1045,7 @@ function createPaneState(paneId: number, now: number): PaneState {
     latestContentEventAt: now,
     name: null,
     paneId,
+    paneLabel,
     pendingAnnotationCommit: false,
     snapshot: {
       bounds: null,
@@ -1103,6 +1117,7 @@ function currentMutationAck(pane: PaneState): MutationAckResponse["payload"] {
     currentContentId: entry.contentId,
     currentRevision: entry.revision as Revision,
     paneId: pane.paneId as PaneId,
+    paneLabel: pane.paneLabel,
   };
 }
 

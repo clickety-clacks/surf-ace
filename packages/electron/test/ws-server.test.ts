@@ -135,6 +135,7 @@ function pairRequest(
   const payload: PairRequest["payload"] = {
     connectionId: `conn_${Math.random().toString(16).slice(2)}` as never,
     initialPaneId: 1 as never,
+    initialPaneLabel: 1,
     protocolVersion: 1,
     providerId: providerId as never,
     providerName: options.providerName ?? "test-harness",
