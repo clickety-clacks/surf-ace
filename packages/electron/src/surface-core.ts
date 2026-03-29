@@ -1117,7 +1117,6 @@ function currentMutationAck(pane: PaneState): MutationAckResponse["payload"] {
     currentContentId: entry.contentId,
     currentRevision: entry.revision as Revision,
     paneId: pane.paneId as PaneId,
-    paneLabel: pane.paneLabel,
   };
 }
 

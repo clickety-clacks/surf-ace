@@ -864,10 +864,9 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["paneId", "paneLabel", "currentContentId", "currentRevision", "contentId"],
+          "required": ["paneId", "currentContentId", "currentRevision", "contentId"],
           "properties": {
             "paneId": { "$ref": "#/$defs/PaneId" },
-            "paneLabel": { "type": "integer", "minimum": 1 },
             "currentContentId": {
               "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
             },

@@ -399,7 +399,6 @@ export type MutationAckResponse = ResponseBase<
 > & {
   payload: {
     paneId: PaneId;
-    paneLabel: number;
     currentContentId: ContentId | null;
     currentRevision: Revision;
     contentType?: ContentType | null;
