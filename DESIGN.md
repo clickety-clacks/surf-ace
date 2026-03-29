@@ -53,7 +53,7 @@ Implementation order is explicitly phased:
 
 **Phase 1 — Surface topology first (before annotations):**
 1. Multi-window support (already in protocol).
-2. Multi-pane support inside a window (`paneId`, pane split/resize/close lifecycle).
+2. Multi-pane support inside a window (internal `paneId`, visible `paneLabel`, pane split/resize/close lifecycle).
 3. Stable read/write targeting by `{surfaceId, paneId}`.
 4. **Surface-owned pane history routing** — when multiple CLU sessions target the same pane, the newest `content.set` becomes visible immediately. The previously visible pane content remains navigable via the surface's Back stack, and the displaced session receives a provider-generated `event.content_superseded`.
 
@@ -65,10 +65,10 @@ Implementation order is explicitly phased:
 Constraint: annotation semantics in §§13–14 are normative architecture and may be implemented in parallel, but release/priority gating is: Phase 1 topology work (multi-window + multi-pane targeting) must ship before annotation-priority milestones are considered complete.
 
 **Phase 1 done checklist (must all be true):**
-1. A single window can be split into multiple panes, each with stable `paneId`.
+1. A single window can be split into multiple panes, each with stable internal `paneId` and stable visible `paneLabel`.
 2. Pane lifecycle exists: create/split, resize, rename, close.
-3. All screen-scoped tool operations can target `{surfaceId, paneId}`.
-4. **`paneId` is required** on all pane-scoped tool calls. CLU MUST always specify which pane it is targeting. There is no default-pane fallback.
+3. All screen-scoped tool operations can target `{surfaceId, paneId}` after resolving human references through `surf_ace_list`.
+4. **`paneId` is required** on all pane-scoped tool calls. CLU MUST always specify which pane it is targeting once it has resolved the intended pane from `windowLabel` / `paneLabel`. There is no default-pane fallback.
 5. `surfaces.list` (or equivalent pane-aware listing) can enumerate panes and active content per pane.
 6. Content operations are isolated per pane (push/clear in pane A does not mutate pane B).
 7. Ownership lock semantics are defined at the window/surface level (`surfaceId`), with pane routing handled inside the lock owner's paired session.
@@ -95,13 +95,19 @@ Ownership: `extensions/surf-ace/` owns the Surf Ace provider runtime — mDNS di
 
 Before the protocol details, these terms are used consistently throughout this spec:
 
-**Surface** — a render-target context addressable by stable identity. In v1 multi-window topology, each window is a distinct surface (`surfaceId`) even when hosted by one app instance/device endpoint. Within each window, pane routing is nested under the surface via globally unique numeric `paneId` values.
+**Surface** — a render-target context addressable by stable identity. In v1 multi-window topology, each window is a distinct surface (`surfaceId`) even when hosted by one app instance/device endpoint.
+
+**Window label** — the provider-assigned user-visible identifier for a surface window (`a`, `b`, `aa`, ...). `windowLabel` is distinct from `surfaceId`.
+
+**Pane** — a rendering scope nested inside a surface window. Each pane has a stable internal identity (`paneId`) and a separate stable visible identity (`paneLabel`).
+
+**Pane label** — the provider-assigned user-visible identifier for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from `paneId`.
 
 **Endpoint** — the app/device WS host:port advertised via mDNS. One endpoint may host multiple surfaces (windows).
 
 **Provider** — the Clawline server-side component that manages connections to surfaces. It is the WS client and reconnect owner. It maintains local state for each surface.
 
-**Content** — the item currently displayed in a rendering scope. Content has a type (`html`, `image`, `pdf`, `terminal`, `markdown`, `video`, `canvas`) and a stable payload identity (`contentId`). A window always has one or more panes. Each pane displays one content item independently (scoped by `paneId`). CLU pushes content to a target scope and can clear it. Content is distinct from annotations. `video` and `canvas` remain optional protocol content types for forward compatibility; draw-capable CLU workflows can already use normal HTML/SVG content without depending on a dedicated `canvas` wire feature.
+**Content** — the item currently displayed in a rendering scope. Content has a type (`html`, `image`, `pdf`, `terminal`, `markdown`, `video`, `canvas`) and a stable payload identity (`contentId`). A window always has one or more panes. Each pane displays one content item independently (scoped internally by `paneId`, displayed to humans via `paneLabel`). CLU pushes content to a target scope and can clear it. Content is distinct from annotations. `video` and `canvas` remain optional protocol content types for forward compatibility; draw-capable CLU workflows can already use normal HTML/SVG content without depending on a dedicated `canvas` wire feature.
 
 **Annotations** — drawing strokes the user has made on top of the current content using the stylus or finger. Annotations are layered over content and persist until the provider explicitly removes them. Annotations are not content and are not cleared when content changes unless the spec says so.
 
@@ -121,7 +127,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 2. **One ownership lock per surface.** Each surface is either unlocked or locked to exactly one `providerId`. While locked, only the lock owner may pair or resume normally; other providers are rejected with `busy` unless they explicitly request a user-directed takeover.
 3. **Content persistence through reconnect.** Connection state MUST NOT affect displayed content or release ownership. Content is never cleared by a disconnect, restart, relinquish, or takeover. Ownership lock changes only through explicit relinquish or explicit takeover; content changes only when CLU explicitly calls `content.set` or `content.clear`.
 4. **Reads are local-only.** CLU reads exclusively from the provider's local buffer. No `surf_ace_*` read operation triggers a live network call to a surface.
-5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a globally unique numeric `paneId`. CLU MUST always specify the target `paneId` explicitly — there is no concept of a "focused pane" and no default-pane resolution.
+5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a stable internal `paneId` and a stable visible `paneLabel`. CLU resolves human references through `surf_ace_list` using `windowLabel` / `paneLabel`, then targets the pane explicitly by `paneId`. There is no concept of a "focused pane" and no default-pane resolution.
 6. **Single-visible-owner with history.** Each pane shows one piece of content at a time (the most recent `content.set`). Prior content enters the Back stack. The user can navigate Back/Forward. Subsequent pushes from the same session update the current view in-place. A push from a different session displaces the current view (supersede).
 7. **Provider-injected session identity.** `sessionId` is injected by the provider from the authenticated WS session context. CLU MUST NOT pass `sessionId` as a wire field on any operation. Surface implementations MUST NOT accept `sessionId` from the wire payload.
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
@@ -142,7 +148,7 @@ Surfaces continue advertising `_surf-ace._tcp` over Bonjour/mDNS.
 
 A single app instance may host multiple surface windows simultaneously. Each window is an independent Surf Ace surface. Within each window, one or more panes provide independent content and annotation contexts. Within each pane, one or more history entries allow multiple CLU sessions to coexist without overwriting each other.
 
-**Topology hierarchy:** Surface → Window (letter-labeled a/b/aa…) → Pane (globally unique number-labeled 1/2/3/4…) → Content (history-stacked)
+**Topology hierarchy:** Surface (`surfaceId`) → Window (`windowLabel`) → Pane (`paneId` internal, `paneLabel` visible) → Content (history-stacked)
 
 > **Phasing note:** History navigation is Phase 1 scope — it ships alongside multi-pane topology, before any annotation-semantics work (Phase 2). See §2.3 for the full phasing plan.
 
@@ -154,20 +160,22 @@ Window rules:
 5. Creating/removing a window does not require mDNS rebroadcast; only app endpoint lifecycle affects mDNS advertisement/goodbye.
 
 Pane rules (Phase 1 committed work, see §2.3):
-1. Each window may contain one or more panes, each identified by a stable globally unique numeric `paneId`.
-2. Pane IDs are allocated from one surface-instance-wide numeric sequence shared across every window in that app instance.
+1. Each window may contain one or more panes, each with a stable internal numeric `paneId` and a stable visible numeric `paneLabel`.
+2. `paneId` is the internal routing key. `paneLabel` is the user-visible addressing token shown on the surface.
 3. Each pane has independent content, capture frame queue, taps, selection, scroll, and annotation state.
-4. All screen-scoped CLU tools target `{ surfaceId, paneId }`. `paneId` is **required**. CLU must always specify the target pane explicitly.
+4. All screen-scoped CLU tools target `{ surfaceId, paneId }`. `paneId` is **required**. CLU first resolves the intended pane from `windowLabel` / `paneLabel` via `surf_ace_list`, then keeps using internal `paneId`.
 5. Pane lifecycle (create/split/resize/rename/close) is managed in-band; pane changes do not affect window-level session or mDNS state.
 
 Naming system:
 1. **Window labels** (a, b, c … z, aa, ab …) are assigned by the **provider/extension**, not the surface.
-2. **Pane IDs** are assigned by the **provider/extension** and sent to the surface in topology commands. They are globally unique integers across all windows managed by that provider instance. The surface never generates pane IDs independently.
-3. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. CLU addresses panes by numeric `paneId` only.
-4. The extension is the sole authority on topology. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
-5. When a pane is split, the extension specifies the new `paneId` values in the request. The surface creates the panes as directed and emits `event.pane_created` for each.
-6. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the window label and initial `paneId`. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
-7. Labels are displayed on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
+2. `windowLabel` allocation is monotonic and provider-owned. It is persisted by `surfaceId`, survives reconnect/remap, and MUST NOT be recycled while the provider's persisted Surf Ace state remains intact. It resets only when that persisted label state is explicitly reset.
+3. **Pane IDs** are assigned by the **provider/extension** and sent to the surface in topology commands. They are stable internal routing identifiers. The surface never generates pane IDs independently.
+4. **Pane labels** are assigned by the **provider/extension** and are the user-visible pane identifiers. They use a monotonic numeric sequence (`1`, `2`, `3`, ...), are persisted by internal `paneId`, and MUST NOT be recycled while the provider's persisted Surf Ace state remains intact. Closing a pane retires its `paneLabel`; a newly created pane consumes the next label.
+5. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. Pane names are optional metadata and MUST NOT replace `paneLabel` as the visible identity or addressing token.
+6. The extension is the sole authority on topology and visible labeling. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
+7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each.
+8. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the `windowLabel`, initial internal `paneId`, and initial visible `paneLabel`. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
+9. Labels are displayed on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
 
 
 TXT keys used by WS protocol:
@@ -350,7 +358,8 @@ Flow:
 8. `drawingFlushConfig` (optional, provider-preferred idle/max interval values).
 9. `windowLabel` (required provider-assigned window label for this surface bootstrap).
 10. `initialPaneId` (required provider-assigned initial pane id for this surface bootstrap).
-11. `protocolVersion` (`1` for this spec).
+11. `initialPaneLabel` (required provider-assigned initial visible pane label for this surface bootstrap).
+12. `protocolVersion` (`1` for this spec).
 
 `pair.response` success includes:
 1. `sessionId`.
@@ -358,7 +367,7 @@ Flow:
 3. Surface metadata (id/name/viewport/capabilities).
 4. `eventConfig` (active event profile, active event list, and effective drawing flush config).
 5. Limits.
-6. Current pane state summary (`panes[]` with per-pane `paneId`, `currentContentId`, `currentRevision`, and `contentType`).
+6. Current pane state summary (`panes[]` with per-pane `paneId`, `paneLabel`, `currentContentId`, `currentRevision`, and `contentType`).
 
 ### 6.1.1 Ownership, Pane Lifecycle, and History Operations (Phase 1)
 
@@ -380,16 +389,16 @@ Voluntarily clears ownership for the currently paired surface.
 #### `panes.list`
 Returns current pane layout for the paired surface.
 
-**Response fields per pane:** `paneId`, `name` (extension-assigned or null), `activeContentId` (or null), `contentType` (or null), `viewport`.
+**Response fields per pane:** `paneId`, `paneLabel`, `name` (extension-assigned or null), `activeContentId` (or null), `contentType` (or null), `viewport`.
 
 #### `pane.split`
 Splits an existing pane into N panes.
 
-**Request fields:** `paneId` (required — pane to split), `count` (total pane count after split, including the source pane; min 2), `direction` (`horizontal` | `vertical`), `newPaneIds` (required array of extension-assigned pane IDs for the newly created panes, length `count - 1`).
+**Request fields:** `paneId` (required — pane to split), `count` (total pane count after split, including the source pane; min 2), `direction` (`horizontal` | `vertical`), `newPaneIds` (required array of extension-assigned internal pane IDs for the newly created panes, length `count - 1`), `newPaneLabels` (required array of extension-assigned visible pane labels for the newly created panes, length `count - 1`).
 
-**Behavior:** The source pane retains its `paneId` and content. The extension specifies the `paneId` values for each new pane in the request. The surface creates the panes as directed and emits `event.pane_created` for each.
+**Behavior:** The source pane retains its `paneId`, `paneLabel`, and content. The extension specifies the `paneId` and `paneLabel` values for each new pane in the request. The surface creates the panes as directed and emits `event.pane_created` for each.
 
-**Response fields:** `panes` — array of `{ paneId }` for all panes in the window after the split (including existing panes).
+**Response fields:** `panes` — array of `{ paneId, paneLabel }` for all panes in the window after the split (including existing panes).
 
 #### `pane.rename`
 Assigns or clears a name for a pane. This is an **extension-to-surface** operation — the extension names panes. There is no user-facing rename UI on the surface.
@@ -398,7 +407,7 @@ Assigns or clears a name for a pane. This is an **extension-to-surface** operati
 
 **Response fields:** `paneId`, `name` (new name or null).
 
-**Behavior:** Pane names are display metadata only. CLU pane targeting uses numeric `paneId` only.
+**Behavior:** Pane names are display metadata only. They do not replace `paneLabel`. CLU resolves human pane references through `paneLabel` in `surf_ace_list`, then targets the pane by internal `paneId`.
 
 **Surface default affordance:** The surface displays pane names as assigned by the extension. Topology is fully extension-controlled — no user-initiated rename or split UI is provided.
 
@@ -414,7 +423,7 @@ Closes a pane and removes it from the layout.
 ---
 
 **Pane lifecycle events (surface → provider):**
-- `event.pane_created` — `{ surfaceId, paneId, parentPaneId (pane that was split, or null if created standalone), fromSplit: bool }`
+- `event.pane_created` — `{ surfaceId, paneId, paneLabel, parentPaneId (pane that was split, or null if created standalone), fromSplit: bool }`
 - `event.pane_removed` — `{ surfaceId, paneId }`
 - `event.pane_renamed` — `{ surfaceId, paneId, name }`
 
@@ -2571,7 +2580,7 @@ CLU's tool surface has a strict read/write split:
 
 ### 14.3 CLU Tool Surface
 
-CLU interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector. `paneId` is **required** on all pane-scoped calls — CLU must always specify the target pane explicitly. All pane-aware tool responses echo the effective numeric `paneId`.
+CLU interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector. `paneId` is **required** on all pane-scoped calls — CLU resolves human references through `surf_ace_list` (`windowLabel` / `paneLabel`), then specifies the target pane explicitly by internal `paneId`. All pane-aware tool responses echo both the effective internal `paneId` and the visible `paneLabel`.
 
 ---
 
@@ -2590,6 +2599,7 @@ connectionState   enum      "connected" | "connecting" | "unreachable"
 lastSeenAt        epochMs   When screen was last seen in mDNS or active
 viewport          object    { width, height, scale }
 panes             array     Full current pane topology: [{ paneId, name, activeContent, historySummary }]
+                          Each pane record also includes `paneLabel`, the visible human-facing pane identifier.
                           activeContent: { contentId, contentType, revision } or null if idle
                           historySummary: { visibleContentId, backCount, forwardCount }
 pendingEvents     int       Count of buffered events not yet read by CLU
@@ -2619,6 +2629,7 @@ content        string   Content payload. Encoding by type:
 ```
 fingerprint    string
 paneId         integer  Target pane
+paneLabel      integer  Visible label of the target pane
 contentId      string   Stable content payload ID assigned by provider (ct_<8hex>)
 revision       int      Revision after push
 ```
@@ -2641,6 +2652,7 @@ paneId         integer  Required.
 ```
 fingerprint    string
 paneId         integer
+paneLabel      integer
 revision       int      Revision after clear
 ```
 
@@ -2665,6 +2677,7 @@ direction      enum     "horizontal" | "vertical"
 **Returns:** array of pane records:
 ```
 paneId         integer  Effective pane id after the split. Includes the source pane and each newly created pane.
+paneLabel      integer  Visible pane label for that pane.
 ```
 
 **Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
@@ -2684,6 +2697,8 @@ paneId         integer  Required pane to close.
 **Returns:**
 ```
 ok             bool     Always true on success.
+paneId         integer  Closed pane's internal id.
+paneLabel      integer  Closed pane's visible label at the moment it was closed.
 ```
 
 **Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
@@ -2711,6 +2726,7 @@ paneId         integer  Required.
 ```
 fingerprint       string
 paneId            integer  Effective pane read by the provider
+paneLabel         integer  Visible label for the pane returned by the provider
 
 // Channel A: live dirty (newest / active context)
 liveFrame         object?  Current mutable context frame, or null if no active frame.
@@ -2875,10 +2891,10 @@ The window label is the primary addressing handle. It MUST be visible when the s
 
 #### Pane label
 
-Each pane is assigned a globally unique numeric identifier for the entire surface instance. If the extension assigns a pane name, that name MUST be displayed instead of the number. The pane label MUST be:
+Each pane is assigned a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier. Optional pane names do not replace it. The pane label MUST be:
 - Displayed as a large floating translucent overlay centered within the pane content area.
 - Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
-- On touch interfaces: a control in the bottom bar displays the pane's assigned label text (numeric `paneId` or custom name). This control is both the pane label identifier and the manual re-show affordance; tapping it re-shows all labels, and any tap while labels are visible hides them again.
+- On touch interfaces: a control in the bottom bar displays the pane's assigned `paneLabel`. This control is both the pane label identifier and the manual re-show affordance; tapping it re-shows all labels, and any tap while labels are visible hides them again.
 - On pointer interfaces: moving the pointer hides labels; hovering the pane control bar restores them.
 
 #### All platforms
@@ -2924,7 +2940,7 @@ Required defaults:
 - Back/Forward controls appear only when history exists in that direction; hidden otherwise.
 - Done appears only while annotation mode is active; hidden otherwise.
 - 👆 (drawing input) button is always present in the control cluster.
-- On touch interfaces, the pane-label control uses the pane's assigned label text (numeric `paneId` or custom name) as its visible button text.
+- On touch interfaces, the pane-label control uses the pane's assigned `paneLabel` as its visible button text.
 - Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. There is no focused-pane concept — all panes are visually equal when not in annotation mode.
 
 #### Icon assets
@@ -3011,7 +3027,8 @@ A 2px overlay line MUST be rendered at the bottom edge of each window, spanning 
 This section is a consolidated copy/reference index of existing UI/UX mentions elsewhere in the document; it does not supersede the original normative or contextual locations.
 
 - **Window Letter Labels** — "Window labels (a, b, c…) are assigned by provider/extension, not the surface." Source: §3.1.1
-- **Pane Name Authority** — "Pane names assigned by extension via `pane.rename`. No user-facing rename UI. CLU addresses panes by paneId only." Source: §3.1.1
+- **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
+- **Pane Label Authority** — "Pane labels are provider-assigned visible numeric identifiers distinct from internal `paneId`." Source: §3.1.1
 - **Prominent Surface Labels** — "Window label: centered-top floating overlay. Pane label: centered floating overlay within pane. Visibility rules: visible at rest, hidden on active interaction." Source: §3.1.1 / §15.1
 - **Displayed Content Persistence** — "The surface renders content and keeps it displayed until CLU explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
@@ -3301,9 +3318,9 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
 
 **Design direction:**
 1. Keep multi-window model unchanged (`surfaceId` stays window identity).
-2. Add pane identity inside a surface: `paneId`.
+2. Add pane identity inside a surface: internal `paneId` plus visible `paneLabel`.
 3. Scope all mutable state by `contextScope = { surfaceId, paneId }`.
-4. Even a single-pane surface uses the same globally unique numeric `paneId` model as multi-pane layouts.
+4. Even a single-pane surface uses the same internal `paneId` model plus visible `paneLabel` model as multi-pane layouts.
 5. Pane-aware operations (split/resize/close/focus) are Phase 1 committed topology operations.
 6. Read/write tools become pane-aware through explicit pane targeting:
    - `paneId` required on all pane-scoped calls
