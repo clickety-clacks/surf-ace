@@ -733,6 +733,11 @@ The schema below defines every v1 application message type over WS.
       "type": "integer",
       "minimum": 1
     },
+    "PaneLabel": {
+      "description": "Visible pane label assigned by the provider/extension. Distinct from internal paneId and used for human-facing pane identity.",
+      "type": "integer",
+      "minimum": 1
+    },
     "Revision": {
       "type": "integer",
       "minimum": 0
@@ -1045,13 +1050,14 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId", "windowLabel", "initialPaneId"],
+          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId", "windowLabel", "initialPaneId", "initialPaneLabel"],
           "properties": {
             "providerId": { "$ref": "#/$defs/ProviderId" },
             "connectionId": { "$ref": "#/$defs/ConnectionId" },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "windowLabel": { "type": "string", "minLength": 1 },
             "initialPaneId": { "$ref": "#/$defs/PaneId" },
+            "initialPaneLabel": { "$ref": "#/$defs/PaneLabel" },
             "providerName": { "type": "string" },
             "protocolVersion": { "const": 1 },
             "takeover": { "type": "boolean", "description": "Explicit ownership transfer request. Normal reconnect/resume by the current owner MUST NOT rely on takeover." },
@@ -1465,9 +1471,10 @@ The schema below defines every v1 application message type over WS.
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["paneId", "currentContentId", "currentRevision", "contentType"],
+                    "required": ["paneId", "paneLabel", "currentContentId", "currentRevision", "contentType"],
                     "properties": {
                       "paneId": { "$ref": "#/$defs/PaneId" },
+                      "paneLabel": { "$ref": "#/$defs/PaneLabel" },
                       "currentContentId": {
                         "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
                       },
@@ -1970,9 +1977,10 @@ The schema below defines every v1 application message type over WS.
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["paneId", "name", "activeContentId", "contentType", "viewport"],
+                "required": ["paneId", "paneLabel", "name", "activeContentId", "contentType", "viewport"],
                 "properties": {
                   "paneId": { "$ref": "#/$defs/PaneId" },
+                  "paneLabel": { "$ref": "#/$defs/PaneLabel" },
                   "name": {
                     "oneOf": [
                       { "type": "string", "minLength": 1 },
@@ -2008,7 +2016,7 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["paneId", "count", "direction", "newPaneIds"],
+          "required": ["paneId", "count", "direction", "newPaneIds", "newPaneLabels"],
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
@@ -2029,6 +2037,13 @@ The schema below defines every v1 application message type over WS.
               "minItems": 1,
               "uniqueItems": true,
               "description": "Extension-assigned pane IDs for the newly created panes. Must contain exactly count - 1 entries."
+            },
+            "newPaneLabels": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/PaneLabel" },
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "Extension-assigned visible pane labels for the newly created panes. Must contain exactly count - 1 entries."
             }
           }
         }
@@ -2057,9 +2072,10 @@ The schema below defines every v1 application message type over WS.
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["paneId"],
+                "required": ["paneId", "paneLabel"],
                 "properties": {
-                  "paneId": { "$ref": "#/$defs/PaneId" }
+                  "paneId": { "$ref": "#/$defs/PaneId" },
+                  "paneLabel": { "$ref": "#/$defs/PaneLabel" }
                 }
               }
             }
@@ -2183,10 +2199,11 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["surfaceId", "paneId", "fromSplit"],
+          "required": ["surfaceId", "paneId", "paneLabel", "fromSplit"],
           "properties": {
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "paneId": { "$ref": "#/$defs/PaneId" },
+            "paneLabel": { "$ref": "#/$defs/PaneLabel" },
             "parentPaneId": {
               "oneOf": [{ "$ref": "#/$defs/PaneId" }, { "type": "null" }],
               "description": "The pane that was split to produce this new pane, or null if created standalone."
@@ -2672,7 +2689,7 @@ count          integer  Required total pane count after split, including the sou
 direction      enum     "horizontal" | "vertical"
 ```
 
-**Behavior:** The provider sends `pane.split` to the surface and assigns the `paneId` values for the newly created panes.
+**Behavior:** The provider sends `pane.split` to the surface and assigns both the internal `paneId` values and the visible `paneLabel` values for the newly created panes.
 
 **Returns:** array of pane records:
 ```
