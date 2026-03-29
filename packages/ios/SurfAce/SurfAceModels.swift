@@ -395,6 +395,7 @@ protocol SurfAcePaneBridging: AnyObject {
 @Observable
 final class SurfAcePaneModel {
     var paneId: Int
+    var paneLabel: Int
     var name: String?
     var backStack: [SurfAcePaneEntry]
     var currentEntry: SurfAcePaneEntry
@@ -424,15 +425,16 @@ final class SurfAcePaneModel {
     @ObservationIgnored var pendingFlushTask: Task<Void, Never>?
     @ObservationIgnored weak var bridge: (any SurfAcePaneBridging)?
 
-    init(paneId: Int, name: String? = nil) {
+    init(paneId: Int, paneLabel: Int? = nil, name: String? = nil) {
         self.paneId = paneId
+        self.paneLabel = paneLabel ?? paneId
         self.name = name
         self.backStack = []
         self.currentEntry = .empty()
         self.forwardStack = []
     }
 
-    var labelText: String { name ?? "\(paneId)" }
+    var labelText: String { name ?? "\(paneLabel)" }
     var activeContentId: String? { currentEntry.contentId }
     var activeContentType: SurfAceContentType? { currentEntry.contentType }
     var currentRevision: Int { currentEntry.revision }
@@ -464,7 +466,7 @@ final class SurfAceSurfaceModel {
         self.surfaceId = surfaceId
         self.windowLabel = windowLabel
         self.name = name
-        let initialPane = SurfAcePaneModel(paneId: 1)
+        let initialPane = SurfAcePaneModel(paneId: 1, paneLabel: 1)
         self.panesById = [initialPane.paneId: initialPane]
         self.paneLayout = .leaf(initialPane.paneId)
     }
