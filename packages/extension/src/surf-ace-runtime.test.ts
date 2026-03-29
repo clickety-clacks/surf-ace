@@ -15,6 +15,7 @@ type TestPane = {
   contentType: string | null;
   drawings: string[];
   name: string | null;
+  paneLabel: number;
   revision: number;
   viewport: {
     height: number;
@@ -79,12 +80,13 @@ class FakeSurfAceWsServer {
     resumeSessionId: string | null;
     takeover: boolean;
   }> = [];
-  readonly pairRequests: Array<{ initialPaneId: number; windowLabel: string }> = [];
+  readonly pairRequests: Array<{ initialPaneId: number; initialPaneLabel: number; windowLabel: string }> = [];
   readonly panes: Map<number, TestPane>;
   readonly splitRequests: Array<{
     count: number;
     direction: string;
     newPaneIds: number[];
+    newPaneLabels: number[];
     paneId: number;
   }> = [];
   snapshotDelayMs = 0;
@@ -120,6 +122,7 @@ class FakeSurfAceWsServer {
           contentType: null,
           drawings: [],
           name: null,
+          paneLabel: this.initialRemotePaneId,
           revision: 0,
           viewport: {
             height: 768,
@@ -284,6 +287,7 @@ class FakeSurfAceWsServer {
       case "pair.request":
         this.pairRequests.push({
           initialPaneId: Number(message.payload?.initialPaneId ?? 0),
+          initialPaneLabel: Number(message.payload?.initialPaneLabel ?? 0),
           windowLabel: String(message.payload?.windowLabel ?? ""),
         });
         this.pairAttemptDetails.push({
@@ -435,6 +439,7 @@ class FakeSurfAceWsServer {
                   currentContentId: pane.contentId,
                   currentRevision: pane.revision,
                   paneId,
+                  paneLabel: pane.paneLabel,
                 })),
               },
               surfaceId: this.surfaceId,
@@ -453,6 +458,7 @@ class FakeSurfAceWsServer {
                 contentType: pane.contentType,
                 name: pane.name,
                 paneId,
+                paneLabel: pane.paneLabel,
                 viewport: pane.viewport,
               })),
             }),
@@ -521,6 +527,7 @@ class FakeSurfAceWsServer {
               currentContentId: pane.contentId,
               currentRevision: pane.revision,
               paneId,
+              paneLabel: pane.paneLabel,
             }),
           ),
         );
@@ -545,6 +552,7 @@ class FakeSurfAceWsServer {
               currentContentId: null,
               currentRevision: pane.revision,
               paneId,
+              paneLabel: pane.paneLabel,
             }),
           ),
         );
@@ -562,18 +570,23 @@ class FakeSurfAceWsServer {
         const newPaneIds = Array.isArray(message.payload?.newPaneIds)
           ? message.payload.newPaneIds.map((value) => Number(value))
           : [];
+        const newPaneLabels = Array.isArray(message.payload?.newPaneLabels)
+          ? message.payload.newPaneLabels.map((value) => Number(value))
+          : [];
         this.splitRequests.push({
           count: Number(message.payload?.count ?? 0),
           direction: String(message.payload?.direction ?? ""),
           newPaneIds,
+          newPaneLabels,
           paneId,
         });
-        for (const newPaneId of newPaneIds) {
+        for (const [index, newPaneId] of newPaneIds.entries()) {
           this.panes.set(newPaneId, {
             contentId: null,
             contentType: null,
             drawings: [],
             name: null,
+            paneLabel: newPaneLabels[index] ?? newPaneId,
             revision: 0,
             viewport: {
               ...sourcePane.viewport,
@@ -585,6 +598,7 @@ class FakeSurfAceWsServer {
             this.response(message.id, "pane.split", {
               panes: [...this.panes.keys()].map((currentPaneId) => ({
                 paneId: currentPaneId,
+                paneLabel: this.panes.get(currentPaneId)?.paneLabel ?? currentPaneId,
               })),
             }),
           ),
@@ -889,7 +903,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("listScreens exposes only the CLU surface fields and local pane ids", async () => {
+  await t.test("listScreens exposes only the CLU surface fields and local pane identities", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const screens = await runtime.listScreens();
       assert.equal(screens.length, 1);
@@ -913,10 +927,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(screen.fingerprint, server.surfaceId);
       assert.equal(screen.windowLabel, "a");
       assert.deepEqual(screen.panes.map((pane) => pane.paneId), [1]);
+      assert.deepEqual(screen.panes.map((pane) => pane.paneLabel), [41]);
       assert.equal(server.initialRemotePaneId, 41);
       assert.deepEqual(
         Object.keys(screen.panes[0] ?? {}).sort(),
-        ["activeContent", "historySummary", "name", "paneId"].sort(),
+        ["activeContent", "historySummary", "name", "paneId", "paneLabel"].sort(),
       );
     });
   });
@@ -953,6 +968,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneId, serverB.pairRequests[0]?.initialPaneId].sort(),
         [1, 2],
+      );
+      assert.deepEqual(
+        [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
+        [41, 41],
       );
     } finally {
       await runtime.stop();
@@ -1010,6 +1029,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.deepEqual(server.pairRequests, [
           {
             initialPaneId: 1,
+            initialPaneLabel: 41,
             windowLabel: "a",
           },
         ]);
@@ -1084,6 +1104,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           fingerprint: server.surfaceId,
           notFoundStrokeIds: [],
           paneId: 1,
+          paneLabel: 41,
           remainingStrokeCount: 0,
           removedStrokeIds: ["stroke_abc123"],
         });
@@ -1149,6 +1170,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(clear, {
         fingerprint: server.surfaceId,
         paneId: 1,
+        paneLabel: 41,
         revision: clear.revision,
       });
       assert.deepEqual(server.clearRequests.map((request) => request.paneId), [server.initialRemotePaneId]);
@@ -1164,28 +1186,46 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         paneId: 1,
       });
 
-      assert.deepEqual(split, [{ paneId: 1 }, { paneId: 2 }, { paneId: 3 }]);
+      assert.deepEqual(split, [
+        { paneId: 1, paneLabel: 41 },
+        { paneId: 2, paneLabel: 2 },
+        { paneId: 3, paneLabel: 3 },
+      ]);
       assert.deepEqual(server.splitRequests, [
         {
           count: 3,
           direction: "horizontal",
           newPaneIds: [2, 3],
+          newPaneLabels: [2, 3],
           paneId: server.initialRemotePaneId,
         },
       ]);
 
       const splitScreens = await runtime.listScreens();
-      assert.deepEqual(splitScreens[0]?.panes.map((pane) => pane.paneId), [1, 2, 3]);
+      assert.deepEqual(
+        splitScreens[0]?.panes.map((pane) => ({ paneId: pane.paneId, paneLabel: pane.paneLabel })),
+        [
+          { paneId: 1, paneLabel: 41 },
+          { paneId: 2, paneLabel: 2 },
+          { paneId: 3, paneLabel: 3 },
+        ],
+      );
 
       const close = await runtime.closePane({
         fingerprint: server.surfaceId,
         paneId: 2,
       });
-      assert.deepEqual(close, { ok: true });
+      assert.deepEqual(close, { ok: true, paneId: 2, paneLabel: 2 });
       assert.deepEqual(server.closePaneRequests, [{ paneId: 2 }]);
 
       const afterCloseScreens = await runtime.listScreens();
-      assert.deepEqual(afterCloseScreens[0]?.panes.map((pane) => pane.paneId), [1, 3]);
+      assert.deepEqual(
+        afterCloseScreens[0]?.panes.map((pane) => ({ paneId: pane.paneId, paneLabel: pane.paneLabel })),
+        [
+          { paneId: 1, paneLabel: 41 },
+          { paneId: 3, paneLabel: 3 },
+        ],
+      );
     });
   });
 

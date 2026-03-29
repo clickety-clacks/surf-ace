@@ -1,6 +1,6 @@
 export function buildSurfAceAgentInstructions(): string {
   return [
-    "Surf Ace is pane-scoped. Always call `surf_ace_list` first, then target a specific `{ fingerprint, windowLabel, paneId }`.",
+    "Surf Ace is pane-scoped. Always call `surf_ace_list` first, resolve the intended `{ fingerprint, windowLabel, paneLabel }`, then use the returned internal `paneId` for subsequent pane-scoped calls.",
     "Use `surf_ace_push` for full `content.set` replacements only.",
     "Use `surf_ace_clear` to clear the currently visible content in a pane.",
     "Use `surf_ace_relinquish` to voluntarily release a surface lock; after that, the provider will not auto-reconnect until it is explicitly claimed again.",
