@@ -2159,6 +2159,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       remotePaneId && remotePaneId > 0
         ? Number(remotePaneId)
         : this.allocatePaneLabel();
+    if (paneLabel >= this.persistentState.nextPaneLabel) {
+      this.persistentState.nextPaneLabel = paneLabel + 1;
+    }
     this.persistentState.paneLabelsByPaneId[key] = paneLabel;
     this.runBackgroundTask(
       `persist pane label for ${paneId}`,

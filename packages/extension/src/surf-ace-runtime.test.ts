@@ -963,6 +963,49 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("migration-seeded pane labels advance the allocator before later splits", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      server.panes.set(2, {
+        contentId: null,
+        contentType: null,
+        drawings: [],
+        name: null,
+        paneLabel: 2,
+        revision: 0,
+        viewport: {
+          height: 768,
+          scale: 2,
+          width: 1024,
+        },
+      });
+
+      await waitFor(async () => (await runtime.listScreens())[0]?.panes.length === 2, 12_000);
+
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: 1,
+      });
+
+      assert.deepEqual(server.splitRequests.at(-1), {
+        count: 2,
+        direction: "horizontal",
+        newPaneIds: [3],
+        newPaneLabels: [3],
+        paneId: server.initialRemotePaneId,
+      });
+      assert.deepEqual(
+        split.map((pane) => ({ paneId: pane.paneId, paneLabel: pane.paneLabel })),
+        [
+          { paneId: 1, paneLabel: 1 },
+          { paneId: 2, paneLabel: 2 },
+          { paneId: 3, paneLabel: 3 },
+        ],
+      );
+    });
+  });
+
   await t.test("multiple surfaces get unique window labels and globally unique first pane ids", async () => {
     const portA = nextPort++;
     const portB = nextPort++;
