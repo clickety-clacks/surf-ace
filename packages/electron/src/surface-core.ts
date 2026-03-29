@@ -952,16 +952,26 @@ export class SurfaceCore {
   }
 
   private ensureInitialPane(surface: SurfaceState, initialPaneId: number, initialPaneLabel: number): boolean {
-    if (initialPaneId < 1 || surface.panes.has(initialPaneId) || surface.panes.size !== 1) {
+    if (initialPaneId < 1 || surface.panes.size !== 1) {
       return false;
     }
     const currentPaneId = surface.paneOrder[0];
-    if (currentPaneId === undefined || currentPaneId === initialPaneId) {
+    if (currentPaneId === undefined) {
       return false;
     }
     const currentPane = surface.panes.get(currentPaneId);
     if (!currentPane || currentEntry(currentPane).contentId !== null || currentPane.history.length !== 1) {
       return false;
+    }
+    if (surface.panes.has(initialPaneId) && currentPaneId !== initialPaneId) {
+      return false;
+    }
+    if (currentPaneId === initialPaneId) {
+      if (currentPane.paneLabel === initialPaneLabel) {
+        return false;
+      }
+      currentPane.paneLabel = initialPaneLabel;
+      return true;
     }
 
     const replacementPane = createPaneState(initialPaneId, initialPaneLabel, this.now());

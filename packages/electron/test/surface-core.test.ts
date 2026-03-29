@@ -74,6 +74,31 @@ test("surface core renders the visible pane label separately from paneId", () =>
   assert.equal(renamedState.panes[0]?.label, "41");
 });
 
+test("same pane id, different initial pane label - Electron bootstrap enforces provider label", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 7,
+    initialPaneLabel: 7,
+    windowLabel: "a",
+  });
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 7,
+    initialPaneLabel: 41,
+    windowLabel: "a",
+  });
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(windowState.panes[0]?.paneId, 7);
+  assert.equal(windowState.panes[0]?.label, "41");
+});
+
 test("surface core ignores snapshot updates for stale pane ids", () => {
   const warnings: string[] = [];
   const core = new SurfaceCore({
