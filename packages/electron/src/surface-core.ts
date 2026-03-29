@@ -297,7 +297,7 @@ export class SurfaceCore {
         },
         drawings: structuredClone(current.annotations),
         flushInFlight: pane.flushInFlight,
-        label: pane.name ?? (pane.paneLabel > 0 ? String(pane.paneLabel) : ""),
+        label: pane.paneLabel > 0 ? String(pane.paneLabel) : "",
         name: pane.name,
         paneId,
         showDone: pane.annotating,
