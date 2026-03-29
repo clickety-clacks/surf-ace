@@ -44,7 +44,7 @@ const fingerprintParam = {
 };
 
 const paneIdParam = {
-  description: "Required numeric pane id.",
+  description: "Required internal numeric pane id returned by `surf_ace_list` after resolving the visible `paneLabel`.",
   minimum: 1,
   type: "integer",
 };
@@ -52,7 +52,7 @@ const paneIdParam = {
 export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefinition<any>[] {
   return [
     {
-      description: "List all discovered Surf Ace surfaces, visible window labels, pane topology, and local provider state.",
+      description: "List all discovered Surf Ace surfaces, including visible `windowLabel` / `paneLabel` values plus internal pane ids for subsequent pane-scoped calls.",
       execute: async () => await runtime.listScreens(),
       inputSchema: {
         additionalProperties: false,

@@ -549,7 +549,7 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  const paneLabel = createButton(pane.label || `Pane ${pane.paneId}`, "pane-label-chip");
+  const paneLabel = createButton(pane.label, "pane-label-chip");
   paneLabel.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     document.body.classList.remove("labels-hidden");
