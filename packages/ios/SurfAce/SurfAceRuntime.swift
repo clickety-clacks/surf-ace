@@ -481,7 +481,7 @@ final class SurfAceRuntime {
                 "revision": pane.currentEntry.revision,
                 "page": page,
                 "totalPages": totalPages,
-                "pageText": normalizedText as Any,
+                "pageText": jsonValue(normalizedText),
             ]
         )
     }
@@ -935,15 +935,25 @@ final class SurfAceRuntime {
         )
         guard let providerWindowLabel = normalizedWindowLabel(from: payload["windowLabel"]),
               let providerInitialPaneId = payload["initialPaneId"] as? Int,
-              let providerInitialPaneLabel = payload["initialPaneLabel"] as? Int,
-              providerInitialPaneLabel > 0,
               providerInitialPaneId > 0 else {
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(
                     op: "pair.request",
                     id: id,
                     code: "invalid_payload",
-                    message: "windowLabel, initialPaneId, and initialPaneLabel are required"
+                    message: "windowLabel and initialPaneId are required"
+                ),
+                postSendPairCommit: nil
+            )
+        }
+        let providerInitialPaneLabel = (payload["initialPaneLabel"] as? Int) ?? providerInitialPaneId
+        guard providerInitialPaneLabel > 0 else {
+            return SurfAceProcessedRequestResult(
+                responseObject: makeErrorResponse(
+                    op: "pair.request",
+                    id: id,
+                    code: "invalid_payload",
+                    message: "initialPaneLabel must be greater than zero"
                 ),
                 postSendPairCommit: nil
             )
@@ -1083,9 +1093,9 @@ final class SurfAceRuntime {
                         [
                             "paneId": pane.paneId,
                             "paneLabel": pane.paneLabel,
-                            "currentContentId": pane.currentEntry.contentId as Any,
+                            "currentContentId": jsonValue(pane.currentEntry.contentId),
                             "currentRevision": pane.currentEntry.revision,
-                            "contentType": pane.currentEntry.contentType?.rawValue as Any,
+                            "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
                         ]
                     },
                 ],
@@ -1153,9 +1163,9 @@ final class SurfAceRuntime {
                     [
                         "paneId": pane.paneId,
                         "paneLabel": pane.paneLabel,
-                        "name": pane.name as Any,
-                        "activeContentId": pane.currentEntry.contentId as Any,
-                        "contentType": pane.currentEntry.contentType?.rawValue as Any,
+                        "name": jsonValue(pane.name),
+                        "activeContentId": jsonValue(pane.currentEntry.contentId),
+                        "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
                         "viewport": paneViewportPayload(surfaceId: surfaceId, paneId: pane.paneId),
                     ]
                 },
@@ -1173,11 +1183,13 @@ final class SurfAceRuntime {
               let directionRaw = payload["direction"] as? String,
               let direction = SurfAceLayoutDirection(rawValue: directionRaw),
               let newPaneIds = payload["newPaneIds"] as? [Int],
-              let newPaneLabels = payload["newPaneLabels"] as? [Int],
               count >= 2,
-              newPaneLabels.count == count - 1,
               newPaneIds.count == count - 1,
               let _ = surface.panesById[paneId] else {
+            return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "invalid pane.split payload")
+        }
+        let newPaneLabels = (payload["newPaneLabels"] as? [Int]) ?? newPaneIds
+        guard newPaneLabels.count == count - 1 else {
             return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "invalid pane.split payload")
         }
 
@@ -1234,7 +1246,7 @@ final class SurfAceRuntime {
             payload: [
                 "surfaceId": surfaceId,
                 "paneId": paneId,
-                "name": pane.name as Any,
+                "name": jsonValue(pane.name),
             ]
         )
 
@@ -1247,7 +1259,7 @@ final class SurfAceRuntime {
             "sentAt": timestampNow(),
             "payload": [
                 "paneId": paneId,
-                "name": pane.name as Any,
+                "name": jsonValue(pane.name),
             ],
         ]
     }
@@ -1533,9 +1545,9 @@ final class SurfAceRuntime {
 
         var responsePayload: [String: Any] = [
             "paneId": paneId,
-            "contentId": pane.currentEntry.contentId as Any,
+            "contentId": jsonValue(pane.currentEntry.contentId),
             "revision": pane.currentEntry.revision,
-            "contentType": pane.currentEntry.contentType?.rawValue as Any,
+            "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
             "viewport": jsonObject(fromEncodable: pane.lastViewport) ?? NSNull(),
             "selection": jsonObject(fromEncodable: pane.lastSelection) ?? NSNull(),
         ]
@@ -1760,10 +1772,10 @@ final class SurfAceRuntime {
     ) -> [String: Any] {
         var payload: [String: Any] = [
             "paneId": paneId,
-            "currentContentId": entry.contentId as Any,
+            "currentContentId": jsonValue(entry.contentId),
             "currentRevision": entry.revision,
-            "contentType": entry.contentType?.rawValue as Any,
-            "contentId": entry.contentId as Any,
+            "contentType": jsonValue(entry.contentType?.rawValue),
+            "contentId": jsonValue(entry.contentId),
         ]
         historyInfo?.forEach { payload[$0.key] = $0.value }
 
@@ -2059,6 +2071,7 @@ final class SurfAceRuntime {
             }
             bootstrapPane.paneLabel = initialPaneLabel
         }
+        surface.panesById[initialPaneId]?.paneLabel = initialPaneLabel
         surface.providerTopologyInitialized = true
     }
 
@@ -2211,6 +2224,10 @@ final class SurfAceRuntime {
             return nil
         }
         return object
+    }
+
+    private func jsonValue<T>(_ value: T?) -> Any {
+        value ?? NSNull()
     }
 
     private func encodeJSON(_ object: [String: Any]) -> String? {

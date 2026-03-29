@@ -20,6 +20,8 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>UIApplicationSupportsMultipleScenes</key>
+	<true/>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_surf-ace._tcp</string>
