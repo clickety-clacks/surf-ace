@@ -2175,6 +2175,71 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("reconnect remap preserves the existing local pane label for a non-pristine sole pane", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      await runtime.push(
+        {
+          content: "<p>persist me</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        },
+        { sessionKey: "agent:test:reconnect-remap" },
+      );
+
+      const originalPane = surface.panes.get(1);
+      assert.ok(originalPane);
+      assert.equal(originalPane.paneLabel, 1);
+      assert.notEqual(originalPane.activeContentId, null);
+
+      server.panes.clear();
+      server.panes.set(900, {
+        contentId: null,
+        contentType: null,
+        drawings: [],
+        name: null,
+        paneLabel: 900,
+        revision: 0,
+        viewport: {
+          height: 768,
+          scale: 2,
+          width: 1024,
+        },
+      });
+
+      await surface.client.close(1000, "test_reconnect_preserve_local_pane_label");
+
+      await waitFor(() => server.pairRequests.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      const afterReconnect = (await runtime.listScreens())[0];
+      assert.deepEqual(
+        afterReconnect?.panes.map((pane) => ({ paneId: pane.paneId, paneLabel: pane.paneLabel })),
+        [{ paneId: 1, paneLabel: 1 }],
+      );
+
+      const remappedPane = surface.panes.get(1);
+      assert.ok(remappedPane);
+      assert.equal(remappedPane.remotePaneId, 900);
+
+      await runtime.push(
+        {
+          content: "<p>after reconnect</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: 1,
+        },
+        { sessionKey: "agent:test:reconnect-remap" },
+      );
+      assert.equal(server.contentSetRequests.at(-1)?.paneId, 900);
+    });
+  });
+
   await t.test("single invalid_resume clears the stale session and retries as a fresh owner pair", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;

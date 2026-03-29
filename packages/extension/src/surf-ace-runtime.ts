@@ -2064,6 +2064,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return bootstrapPane;
   }
 
+  private recoverSolePaneForTopologySync(
+    surface: ManagedSurface,
+    remotePaneId: PaneId,
+  ): ManagedPane | null {
+    if (surface.panes.size !== 1) {
+      return null;
+    }
+    if (this.findPaneByRemoteId(surface, remotePaneId)) {
+      return null;
+    }
+
+    const existingPane = surface.panes.values().next().value ?? null;
+    if (!existingPane) {
+      return null;
+    }
+
+    existingPane.remotePaneId = remotePaneId;
+    return existingPane;
+  }
+
   private ensureSurfaceWorker(surface: ManagedSurface): void {
     if (!surface.autoRetryEnabled || surface.workPromise) {
       this.logger.info?.(
@@ -3169,7 +3189,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const seenRemotePaneIds = new Set<number>();
     for (const paneSummary of payload.panes) {
       seenRemotePaneIds.add(paneSummary.paneId);
-      const pane = this.ensurePane(surface, paneSummary.paneId);
+      const pane =
+        this.recoverSolePaneForTopologySync(surface, paneSummary.paneId) ??
+        this.ensurePane(surface, paneSummary.paneId);
       pane.name = paneSummary.name;
       pane.viewport = cloneViewport(paneSummary.viewport);
       if (paneSummary.activeContentId) {
@@ -3344,6 +3366,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       seenRemotePaneIds.add(paneState.paneId);
       const pane =
         this.consumeBootstrapPaneForPairState(surface, paneState.paneId) ??
+        this.recoverSolePaneForTopologySync(surface, paneState.paneId) ??
         this.ensurePane(surface, paneState.paneId);
       pane.activeContentId = paneState.currentContentId;
       pane.contentType = paneState.contentType;
