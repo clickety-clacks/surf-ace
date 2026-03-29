@@ -173,6 +173,7 @@ export type PairRequest = RequestBase<"pair.request"> & {
     surfaceId: SurfaceId;
     windowLabel: string;
     initialPaneId: PaneId;
+    initialPaneLabel: number;
     providerName: string;
     protocolVersion: 1;
     takeover?: boolean;
@@ -313,6 +314,7 @@ export type PaneSplitRequest = RequestBase<"pane.split"> & {
     count: number;
     direction: "horizontal" | "vertical";
     newPaneIds: PaneId[];
+    newPaneLabels: number[];
   };
 };
 
@@ -377,6 +379,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
     state: {
       panes: Array<{
         paneId: PaneId;
+        paneLabel: number;
         currentContentId: ContentId | null;
         currentRevision: Revision;
         contentType: ContentType | null;
@@ -396,6 +399,7 @@ export type MutationAckResponse = ResponseBase<
 > & {
   payload: {
     paneId: PaneId;
+    paneLabel: number;
     currentContentId: ContentId | null;
     currentRevision: Revision;
     contentType?: ContentType | null;
@@ -451,6 +455,7 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
   payload: {
     panes: Array<{
       paneId: PaneId;
+      paneLabel: number;
       name: string | null;
       activeContentId: ContentId | null;
       contentType: ContentType | null;
@@ -463,6 +468,7 @@ export type PaneSplitResponse = ResponseBase<"pane.split"> & {
   payload: {
     panes: Array<{
       paneId: PaneId;
+      paneLabel: number;
     }>;
   };
 };
@@ -632,6 +638,7 @@ export type PaneCreatedEvent = EventBase<"event.pane_created"> & {
   payload: {
     surfaceId: SurfaceId;
     paneId: PaneId;
+    paneLabel: number;
     parentPaneId?: PaneId | null;
     fromSplit: boolean;
   };

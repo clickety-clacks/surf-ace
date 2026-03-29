@@ -16,6 +16,7 @@ test("validateEnvelopeType accepts current request envelopes", () => {
     payload: {
       connectionId: "cn_1",
       initialPaneId: 1,
+      initialPaneLabel: 1,
       protocolVersion: 1,
       providerId: "prov_1",
       providerName: "test-harness",
@@ -37,6 +38,7 @@ test("validateEnvelopeType rejects pair requests without providerName", () => {
     payload: {
       connectionId: "cn_1",
       initialPaneId: 1,
+      initialPaneLabel: 1,
       protocolVersion: 1,
       providerId: "prov_1",
       surfaceId: "sf_1",
@@ -101,7 +103,44 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
     id: "req_4",
     ok: true,
     op: "pair.request",
-    payload: {},
+    payload: {
+      capabilities: {
+        contentTypes: ["html"],
+        eventTypes: ["event.drawing_flush"],
+      },
+      eventConfig: {
+        activeEvents: ["event.drawing_flush"],
+        drawingFlushConfig: {
+          idleWindowMs: 8000,
+          maxIntervalMs: 30000,
+        },
+        profile: "minimum_deep",
+      },
+      limits: {
+        maxDrawingFlushBytes: 1024,
+        maxFrameBytes: 1024,
+        maxMessageBytes: 1024,
+        maxStrokePointsPerFlush: 1024,
+        maxVisibleTextBytes: 1024,
+        resumeGraceMs: 20_000,
+      },
+      resumed: false,
+      sessionId: "sa_pair_session",
+      state: {
+        panes: [
+          {
+            contentType: null,
+            currentContentId: null,
+            currentRevision: 0,
+            paneId: 1,
+            paneLabel: 1,
+          },
+        ],
+      },
+      surfaceId: "sf_1",
+      surfaceName: "Surface A",
+      viewport: { height: 768, scale: 2, width: 1024 },
+    },
     sentAt: Date.now(),
     type: "response",
     v: 1,

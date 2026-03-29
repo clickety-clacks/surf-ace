@@ -406,13 +406,14 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId", "windowLabel", "initialPaneId", "providerName"],
+          "required": ["providerId", "connectionId", "protocolVersion", "surfaceId", "windowLabel", "initialPaneId", "initialPaneLabel", "providerName"],
           "properties": {
             "providerId": { "$ref": "#/$defs/ProviderId" },
             "connectionId": { "$ref": "#/$defs/ConnectionId" },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "windowLabel": { "type": "string", "minLength": 1 },
             "initialPaneId": { "$ref": "#/$defs/PaneId" },
+            "initialPaneLabel": { "type": "integer", "minimum": 1 },
             "providerName": { "type": "string", "minLength": 1 },
             "protocolVersion": { "const": 1 },
             "takeover": { "type": "boolean", "description": "Explicit ownership transfer request. Normal reconnect/resume by the current owner MUST NOT rely on takeover." },
@@ -805,9 +806,10 @@
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["paneId", "currentContentId", "currentRevision", "contentType"],
+                    "required": ["paneId", "paneLabel", "currentContentId", "currentRevision", "contentType"],
                     "properties": {
                       "paneId": { "$ref": "#/$defs/PaneId" },
+                      "paneLabel": { "type": "integer", "minimum": 1 },
                       "currentContentId": {
                         "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
                       },
@@ -862,9 +864,10 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["paneId", "currentContentId", "currentRevision", "contentId"],
+          "required": ["paneId", "paneLabel", "currentContentId", "currentRevision", "contentId"],
           "properties": {
             "paneId": { "$ref": "#/$defs/PaneId" },
+            "paneLabel": { "type": "integer", "minimum": 1 },
             "currentContentId": {
               "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
             },
@@ -1355,9 +1358,10 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["paneId", "name", "activeContentId", "contentType", "viewport"],
+                "required": ["paneId", "paneLabel", "name", "activeContentId", "contentType", "viewport"],
                 "properties": {
                   "paneId": { "$ref": "#/$defs/PaneId" },
+                  "paneLabel": { "type": "integer", "minimum": 1 },
                   "name": {
                     "oneOf": [
                       { "type": "string", "minLength": 1 },
@@ -1393,7 +1397,7 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["paneId", "count", "direction", "newPaneIds"],
+          "required": ["paneId", "count", "direction", "newPaneIds", "newPaneLabels"],
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
@@ -1414,6 +1418,12 @@
               "minItems": 1,
               "uniqueItems": true,
               "description": "Extension-assigned pane IDs for the newly created panes. Must contain exactly count - 1 entries."
+            },
+            "newPaneLabels": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 },
+              "minItems": 1,
+              "description": "Extension-assigned visible pane labels for the newly created panes. Must contain exactly count - 1 entries."
             }
           }
         }
@@ -1442,9 +1452,10 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["paneId"],
+                "required": ["paneId", "paneLabel"],
                 "properties": {
-                  "paneId": { "$ref": "#/$defs/PaneId" }
+                  "paneId": { "$ref": "#/$defs/PaneId" },
+                  "paneLabel": { "type": "integer", "minimum": 1 }
                 }
               }
             }
@@ -1568,10 +1579,11 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["surfaceId", "paneId", "fromSplit"],
+          "required": ["surfaceId", "paneId", "paneLabel", "fromSplit"],
           "properties": {
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "paneId": { "$ref": "#/$defs/PaneId" },
+            "paneLabel": { "type": "integer", "minimum": 1 },
             "parentPaneId": {
               "oneOf": [{ "$ref": "#/$defs/PaneId" }, { "type": "null" }],
               "description": "The pane that was split to produce this new pane, or null if created standalone."
