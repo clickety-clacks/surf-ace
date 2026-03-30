@@ -121,6 +121,45 @@ private struct SurfAceOwnershipLockState {
     let providerId: String
 }
 
+final class SurfAceSceneDisconnectObserver {
+    private let notificationCenter: NotificationCenter
+    private let onDisconnect: @MainActor () -> Void
+    private var observer: NSObjectProtocol?
+
+    init(
+        notificationCenter: NotificationCenter = .default,
+        onDisconnect: @escaping @MainActor () -> Void
+    ) {
+        self.notificationCenter = notificationCenter
+        self.onDisconnect = onDisconnect
+    }
+
+    func observe(sceneObject: AnyObject) {
+        invalidate()
+        let onDisconnect = self.onDisconnect
+        observer = notificationCenter.addObserver(
+            forName: UIScene.didDisconnectNotification,
+            object: sceneObject,
+            queue: nil
+        ) { _ in
+            Task { @MainActor in
+                onDisconnect()
+            }
+        }
+    }
+
+    func invalidate() {
+        if let observer {
+            notificationCenter.removeObserver(observer)
+            self.observer = nil
+        }
+    }
+
+    deinit {
+        invalidate()
+    }
+}
+
 @MainActor
 @Observable
 final class SurfAceRuntime {
@@ -140,6 +179,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
     @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
+    @ObservationIgnored private var sceneDisconnectObserversBySceneKey: [String: SurfAceSceneDisconnectObserver] = [:]
     @ObservationIgnored private var activeSessions: [String: SurfAceSessionState] = [:]
     @ObservationIgnored private var lastHeartbeatAtBySurfaceId: [String: Date] = [:]
     @ObservationIgnored private var ownershipLocksBySurfaceId: [String: SurfAceOwnershipLockState] = [:]
@@ -268,7 +308,8 @@ final class SurfAceRuntime {
         surfAceServerRuntimeLog("runtime stop completed")
     }
 
-    func registerSurface(sceneKey: String) -> SurfAceSurfaceModel {
+    func registerSurface(sceneKey: String, scene: UIScene) -> SurfAceSurfaceModel {
+        ensureSceneDisconnectObservation(sceneKey: sceneKey, scene: scene)
         if let existingSurfaceId = surfaceIdBySceneKey[sceneKey],
            let existing = surfaceById[existingSurfaceId] {
             return existing
@@ -307,6 +348,7 @@ final class SurfAceRuntime {
     }
 
     func unregisterSurface(sceneKey: String) {
+        sceneDisconnectObserversBySceneKey.removeValue(forKey: sceneKey)?.invalidate()
         guard let surfaceId = surfaceIdBySceneKey.removeValue(forKey: sceneKey),
               let surface = surfaceById.removeValue(forKey: surfaceId) else {
             return
@@ -332,6 +374,19 @@ final class SurfAceRuntime {
         }
         ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
         refreshBonjourTXT()
+    }
+
+    private func ensureSceneDisconnectObservation(sceneKey: String, scene: UIScene) {
+        if let observer = sceneDisconnectObserversBySceneKey[sceneKey] {
+            observer.observe(sceneObject: scene)
+            return
+        }
+
+        let observer = SurfAceSceneDisconnectObserver { [weak self] in
+            self?.unregisterSurface(sceneKey: sceneKey)
+        }
+        observer.observe(sceneObject: scene)
+        sceneDisconnectObserversBySceneKey[sceneKey] = observer
     }
 
     func updateViewport(surfaceId: String, size: CGSize, scale: CGFloat) {

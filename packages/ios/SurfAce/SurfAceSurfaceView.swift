@@ -30,20 +30,11 @@ struct SurfAceRootView: View {
         .ignoresSafeArea()
         .background {
             SurfAceSceneProbeRepresentable(
-                onConnect: { key in
+                onConnect: { key, scene in
                     Task { @MainActor in
                         sceneKey = key
-                        let surface = runtime.registerSurface(sceneKey: key)
+                        let surface = runtime.registerSurface(sceneKey: key, scene: scene)
                         surfaceId = surface.surfaceId
-                    }
-                },
-                onDisconnect: { key in
-                    Task { @MainActor in
-                        runtime.unregisterSurface(sceneKey: key)
-                        if sceneKey == key {
-                            sceneKey = nil
-                            surfaceId = nil
-                        }
                     }
                 }
             )
@@ -520,8 +511,7 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
 
 @MainActor
 final class SurfAceSceneProbeController: UIViewController {
-    var onConnect: (@Sendable (String) -> Void)?
-    var onDisconnect: (@Sendable (String) -> Void)?
+    var onConnect: (@Sendable (String, UIScene) -> Void)?
     private var connectedSceneKey: String?
 
     override func viewDidAppear(_ animated: Bool) {
@@ -536,29 +526,22 @@ final class SurfAceSceneProbeController: UIViewController {
 
     private func resolveSceneKeyIfNeeded() {
         guard connectedSceneKey == nil,
-              let sceneKey = view.window?.windowScene?.session.persistentIdentifier else {
+              let scene = view.window?.windowScene else {
             return
         }
+        let sceneKey = scene.session.persistentIdentifier
         connectedSceneKey = sceneKey
-        onConnect?(sceneKey)
-    }
-
-    deinit {
-        if let connectedSceneKey {
-            onDisconnect?(connectedSceneKey)
-        }
+        onConnect?(sceneKey, scene)
     }
 }
 
 private struct SurfAceSceneProbeRepresentable: UIViewControllerRepresentable {
-    let onConnect: @Sendable (String) -> Void
-    let onDisconnect: @Sendable (String) -> Void
+    let onConnect: @Sendable (String, UIScene) -> Void
 
     func makeUIViewController(context: Context) -> SurfAceSceneProbeController {
         let controller = SurfAceSceneProbeController()
         controller.view.isHidden = true
         controller.onConnect = onConnect
-        controller.onDisconnect = onDisconnect
         return controller
     }
 

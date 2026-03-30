@@ -1,7 +1,43 @@
+import UIKit
 import XCTest
 @testable import SurfAce
 
+@MainActor
 final class SurfAceViewportPreservationTests: XCTestCase {
+    func testSceneDisconnectObserverFiresOnDisconnectNotification() async {
+        let notificationCenter = NotificationCenter()
+        let sceneObject = NSObject()
+        let expectation = expectation(description: "disconnect callback")
+
+        let observer = SurfAceSceneDisconnectObserver(notificationCenter: notificationCenter) {
+            expectation.fulfill()
+        }
+
+        observer.observe(sceneObject: sceneObject)
+        notificationCenter.post(name: UIScene.didDisconnectNotification, object: sceneObject)
+
+        await fulfillment(of: [expectation], timeout: 1)
+    }
+
+    func testSceneDisconnectObserverDoesNotFireOnDeinitWithoutDisconnect() async {
+        let notificationCenter = NotificationCenter()
+        let sceneObject = NSObject()
+        var disconnectCount = 0
+
+        var observer: SurfAceSceneDisconnectObserver? = SurfAceSceneDisconnectObserver(
+            notificationCenter: notificationCenter
+        ) {
+            disconnectCount += 1
+        }
+
+        observer?.observe(sceneObject: sceneObject)
+        observer = nil
+        notificationCenter.post(name: UIScene.didDisconnectNotification, object: sceneObject)
+        await Task.yield()
+
+        XCTAssertEqual(disconnectCount, 0)
+    }
+
     func testPreservesViewportForReplaceInPlaceHTMLUpdates() {
         let runtime = SurfAceRuntime()
         let currentEntry = SurfAcePaneEntry(
