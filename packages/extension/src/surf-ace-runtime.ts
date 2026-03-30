@@ -2181,7 +2181,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (preservedSurface === remappedSurface) {
       return;
     }
-    remappedSurface.panes = preservedSurface.panes;
+    remappedSurface.panes = new Map(preservedSurface.panes);
   }
 
   private allocatePaneId(): PaneId {
