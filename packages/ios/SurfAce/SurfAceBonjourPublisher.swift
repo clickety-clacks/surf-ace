@@ -175,7 +175,7 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
         }
     }
 
-    private func triggerLocalNetworkPermissionPrompt() {
+    private static func triggerLocalNetworkPermissionPrompt() {
         surfAceBonjourLog(surfAceBonjourDiagnostic("permission_probe_start"))
         let parameters = NWParameters()
         parameters.includePeerToPeer = true
