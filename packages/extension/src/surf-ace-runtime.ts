@@ -27,7 +27,7 @@ import type {
   PaneCloseRequest,
   PaneCloseResponse,
   PaneCreatedEvent,
-  PaneId,
+  PaneId as RemotePaneId,
   PaneRemovedEvent,
   PaneRenameRequest,
   PaneRenamedEvent,
@@ -74,6 +74,8 @@ import {
 import { SurfAceWireClient } from "./surf-ace-server.js";
 
 export type SurfAceConnectionState = "connected" | "connecting" | "unreachable";
+type Brand<T, TName extends string> = T & { readonly __brand: TName };
+export type PaneId = Brand<string, "PaneId">;
 
 export type SurfAceHistorySummary = {
   backCount: number;
@@ -82,7 +84,7 @@ export type SurfAceHistorySummary = {
 };
 
 export type SurfAcePaneSummary = {
-  paneId: number;
+  paneId: PaneId;
   paneLabel: number;
   name: string | null;
   activeContent:
@@ -164,7 +166,7 @@ export type SurfAceReadResult = {
     pageLabel?: string;
     pageNumber: number;
   } | null;
-  paneId: number;
+  paneId: PaneId;
   paneLabel: number;
   pendingFrames?: number;
   playbackPosition: number | null;
@@ -198,7 +200,7 @@ export type SurfAceReadResult = {
 
 export type SurfAceSnapshotResult = {
   fingerprint: string;
-  paneId: number;
+  paneId: PaneId;
   paneLabel: number;
   snapshot: {
     contentId: string | null;
@@ -215,14 +217,14 @@ export type SurfAceSnapshotResult = {
 export type SurfAceAnnotateRemoveInput = {
   contentId: string;
   fingerprint: string;
-  paneId: number;
+  paneId: PaneId;
   strokeIds: string[];
 };
 
 export type SurfAceAnnotateRemoveResult = {
   fingerprint: string;
   notFoundStrokeIds: string[];
-  paneId: number;
+  paneId: PaneId;
   paneLabel: number;
   remainingStrokeCount: number;
   removedStrokeIds: string[];
@@ -233,20 +235,20 @@ export type SurfAcePushInput =
     content: string;
     contentType: ContentType;
     fingerprint: string;
-    paneId: number;
+    paneId: PaneId;
   };
 
 export type SurfAcePushResult = {
   contentId: string;
   fingerprint: string;
-  paneId: number;
+  paneId: PaneId;
   paneLabel: number;
   revision: number;
 };
 
 export type SurfAceClearResult = {
   fingerprint: string;
-  paneId: number;
+  paneId: PaneId;
   paneLabel: number;
   revision: number;
 };
@@ -259,30 +261,30 @@ export type SurfAceSplitInput = {
   count: number;
   direction: "horizontal" | "vertical";
   fingerprint: string;
-  paneId: number;
+  paneId: PaneId;
 };
 
 export type SurfAceSplitResult = Array<{
-  paneId: number;
+  paneId: PaneId;
   paneLabel: number;
 }>;
 
 export type SurfAceClosePaneResult = {
   ok: true;
-  paneId: number;
+  paneId: PaneId;
   paneLabel: number;
 };
 
 export type SurfAceLocalEvent =
   | {
-      paneId: number;
+      paneId: PaneId;
       previousSessionKey: string;
       surfaceId: string;
       type: "event.content_superseded";
       visibleContentId: string | null;
     }
   | {
-      paneId: number;
+      paneId: PaneId;
       surfaceId: string;
       type: "event.surface_resumed";
     };
@@ -298,7 +300,7 @@ export type SurfAceAnnotationIntentTurn = {
   frame: SurfAceFrame;
   idempotencyKey: string;
   message: string;
-  paneId: number;
+  paneId: PaneId;
   sessionKey: string;
   surfaceName: string;
 };
@@ -316,14 +318,14 @@ export type SurfAceRuntimeOptions = {
 
 export interface SurfAceRuntime {
   annotateRemove(input: SurfAceAnnotateRemoveInput): Promise<SurfAceAnnotateRemoveResult>;
-  clear(input: { fingerprint: string; paneId: number }): Promise<SurfAceClearResult>;
-  closePane(input: { fingerprint: string; paneId: number }): Promise<SurfAceClosePaneResult>;
+  clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult>;
+  closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult>;
   listScreens(): Promise<SurfAceScreenSummary[]>;
   push(input: SurfAcePushInput, context?: { sessionKey?: string }): Promise<SurfAcePushResult>;
-  read(input: { fingerprint: string; paneId: number }): Promise<SurfAceReadResult>;
+  read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
   relinquish(input: { fingerprint: string }): Promise<SurfAceRelinquishResult>;
   split(input: SurfAceSplitInput): Promise<SurfAceSplitResult>;
-  snapshot(input: { fingerprint: string; paneId: number }): Promise<SurfAceSnapshotResult>;
+  snapshot(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceSnapshotResult>;
   start(): Promise<void>;
   stop(): Promise<void>;
   subscribe(listener: (event: SurfAceLocalEvent) => void): () => void;
@@ -359,7 +361,7 @@ type ManagedPane = {
   paneId: PaneId;
   paneLabel: number;
   pendingOwnerSessionKey: string | null;
-  remotePaneId: PaneId;
+  remotePaneId: RemotePaneId;
   snapshot: CachedSnapshot | null;
   viewport: SurfaceViewport;
   buffer: MutablePaneBuffer;
@@ -383,8 +385,8 @@ type ManagedSurface = {
   heartbeatNonce: string | null;
   lastSeenAt: number;
   name: string;
-  paneIdsNeedingSnapshot: Set<number>;
-  panes: Map<number, ManagedPane>;
+  paneIdsNeedingSnapshot: Set<PaneId>;
+  panes: Map<PaneId, ManagedPane>;
   recentEventIds: string[];
   recentEventIdsSet: Set<string>;
   reconnectAttempt: number;
@@ -401,7 +403,7 @@ type ManagedSurface = {
 };
 
 type RuntimeStateFile = {
-  nextPaneId: number;
+  nextRemotePaneId: number;
   nextPaneLabel: number;
   nextWindowLabelIndex: number;
   paneLabelsByPaneId: Record<string, number>;
@@ -470,8 +472,12 @@ function asEpochMs(value: number): EpochMs {
   return value as EpochMs;
 }
 
-function asPaneId(value: number): PaneId {
+function asPaneId(value: string): PaneId {
   return value as PaneId;
+}
+
+function asRemotePaneId(value: number): RemotePaneId {
+  return value as RemotePaneId;
 }
 
 function asRevision(value: number): Revision {
@@ -572,7 +578,7 @@ function createPaneBuffer(): MutablePaneBuffer {
 function createPane(
   paneId: PaneId,
   paneLabel: number,
-  remotePaneId: PaneId = paneId,
+  remotePaneId: RemotePaneId = asRemotePaneId(0),
   viewport: SurfaceViewport = DEFAULT_VIEWPORT,
 ): ManagedPane {
   return {
@@ -622,8 +628,8 @@ function createManagedSurface(
     heartbeatNonce: null,
     lastSeenAt: now,
     name,
-    paneIdsNeedingSnapshot: new Set<number>(),
-    panes: new Map<number, ManagedPane>(),
+    paneIdsNeedingSnapshot: new Set<PaneId>(),
+    panes: new Map<PaneId, ManagedPane>(),
     recentEventIds: [],
     recentEventIdsSet: new Set<string>(),
     reconnectAttempt: 0,
@@ -849,8 +855,19 @@ function windowLabelForIndex(index: number): string {
   return label;
 }
 
-function paneLabelStorageKey(surfaceId: string, remotePaneId: PaneId): string {
+function paneLabelStorageKey(surfaceId: string, remotePaneId: RemotePaneId): string {
   return `${surfaceId}::${Number(remotePaneId)}`;
+}
+
+function migratePersistedPaneId(fingerprint: string, legacyPaneId: unknown, paneLabel: number): PaneId {
+  if (typeof legacyPaneId === "string") {
+    return asPaneId(legacyPaneId);
+  }
+  const digest = createHash("sha256")
+    .update(`${fingerprint}:${Number(legacyPaneId ?? 0)}:${paneLabel}`)
+    .digest("hex")
+    .slice(0, 32);
+  return asPaneId(`pn_${digest}`);
 }
 
 export class DefaultSurfAceRuntime implements SurfAceRuntime {
@@ -867,7 +884,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly stateDir: string;
   private readonly surfaces = new Map<string, ManagedSurface>();
   private persistentState: RuntimeStateFile = {
-    nextPaneId: 1,
+    nextRemotePaneId: 1,
     nextPaneLabel: 1,
     nextWindowLabelIndex: 0,
     paneLabelsByPaneId: {},
@@ -1008,7 +1025,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return await this.contentSet(surface, input, context?.sessionKey);
   }
 
-  async clear(input: { fingerprint: string; paneId: number }): Promise<SurfAceClearResult> {
+  async clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult> {
     await this.start();
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.contentClear(surface, input);
@@ -1020,7 +1037,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return await this.paneSplit(surface, input);
   }
 
-  async closePane(input: { fingerprint: string; paneId: number }): Promise<SurfAceClosePaneResult> {
+  async closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult> {
     await this.start();
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.paneClose(surface, input);
@@ -1051,7 +1068,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return { relinquished: true };
   }
 
-  async read(input: { fingerprint: string; paneId: number }): Promise<SurfAceReadResult> {
+  async read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult> {
     await this.start();
     const pane = this.requirePane(input.fingerprint, input.paneId);
     const returnedFrames: SurfAceFrame[] = [];
@@ -1116,7 +1133,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return result;
   }
 
-  async snapshot(input: { fingerprint: string; paneId: number }): Promise<SurfAceSnapshotResult> {
+  async snapshot(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceSnapshotResult> {
     await this.start();
     const pane = this.requirePane(input.fingerprint, input.paneId);
     return {
@@ -1170,7 +1187,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async contentClear(
     surface: ManagedSurface,
-    input: { fingerprint: string; paneId: number },
+    input: { fingerprint: string; paneId: PaneId },
   ): Promise<SurfAceClearResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     this.finalizeLiveFrame(surface, pane);
@@ -1205,13 +1222,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     const reservedPanes: ManagedPane[] = [];
     const additionalPaneCount = input.count - 1;
-    const newPaneIds = Array.from({ length: additionalPaneCount }, () => {
+    Array.from({ length: additionalPaneCount }, () => {
       const paneId = this.allocatePaneId();
+      const remotePaneId = this.allocateRemotePaneId();
       const paneLabel = this.ensurePaneLabel(surface, null);
-      const created = createPane(paneId, paneLabel, paneId, surface.viewport);
+      const created = createPane(paneId, paneLabel, remotePaneId, surface.viewport);
       surface.panes.set(created.paneId, created);
       reservedPanes.push(created);
-      return paneId;
     });
 
     const request: PaneSplitRequest = {
@@ -1220,7 +1237,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       payload: {
         count: input.count,
         direction: input.direction,
-        newPaneIds: newPaneIds.map((paneId) => asPaneId(paneId)),
+        newPaneIds: reservedPanes.map((reservedPane) => reservedPane.remotePaneId),
         newPaneLabels: reservedPanes.map((reservedPane) => reservedPane.paneLabel),
         paneId: pane.remotePaneId,
       },
@@ -1250,7 +1267,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     const payload = (response as PaneSplitResponse).payload;
-    const seenRemotePaneIds = new Set<number>();
+    const seenRemotePaneIds = new Set<RemotePaneId>();
     const panes = payload.panes.map(({ paneId: remotePaneId }) => {
       seenRemotePaneIds.add(remotePaneId);
       const managedPane = this.ensurePane(surface, remotePaneId);
@@ -1270,7 +1287,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async paneClose(
     surface: ManagedSurface,
-    input: { fingerprint: string; paneId: number },
+    input: { fingerprint: string; paneId: PaneId },
   ): Promise<SurfAceClosePaneResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     const request: PaneCloseRequest = {
@@ -1422,7 +1439,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       frame: structuredClone(frame),
       idempotencyKey: `surf-ace-annotation-intent:${surface.surfaceId}:${pane.paneId}:${frame.frameId}`,
       message: [
-        `Surf Ace settled annotation on surface "${surface.name}", pane ${pane.paneId}.`,
+        `Surf Ace settled annotation on surface "${surface.name}", pane ${pane.paneLabel}.`,
         "Treat the attached image as the primary annotation input.",
         "Use the stroke metadata below as secondary context only.",
         "",
@@ -1434,6 +1451,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             frameId: frame.frameId,
             openedAt: frame.openedAt,
             paneId: pane.paneId,
+            paneLabel: pane.paneLabel,
             scrollOffset: frame.scrollOffset,
             strokeCount: frame.strokes.length,
             strokes: strokeSummary,
@@ -1755,8 +1773,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private handleSurfaceResumedEvent(surface: ManagedSurface, event: SurfaceResumedEvent): void {
+    const resumedPaneId = this.firstPane(surface)?.paneId ?? this.allocatePaneId();
     this.emit({
-      paneId: 0,
+      paneId: resumedPaneId,
       surfaceId: event.payload.surfaceId,
       type: "event.surface_resumed",
     });
@@ -1998,7 +2017,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private ensurePane(surface: ManagedSurface, remotePaneId: PaneId): ManagedPane {
+  private ensurePane(surface: ManagedSurface, remotePaneId: RemotePaneId): ManagedPane {
+    this.noteObservedRemotePaneId(remotePaneId);
     const existing = this.findPaneByRemoteId(surface, remotePaneId);
     if (existing) {
       existing.paneLabel = this.ensurePaneLabel(surface, existing, remotePaneId);
@@ -2011,9 +2031,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return created;
   }
 
-  private ensureInitialPairPane(surface: ManagedSurface): PaneId {
+  private ensureInitialPairPane(surface: ManagedSurface): RemotePaneId {
     const existingFirstPane = this.firstPane(surface);
-    if (existingFirstPane && existingFirstPane.remotePaneId > 0) {
+    if (existingFirstPane && existingFirstPane.remotePaneId > asRemotePaneId(0)) {
+      this.noteObservedRemotePaneId(existingFirstPane.remotePaneId);
       existingFirstPane.paneLabel = this.ensurePaneLabel(
         surface,
         existingFirstPane,
@@ -2023,19 +2044,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     if (existingFirstPane) {
-      existingFirstPane.remotePaneId = existingFirstPane.paneId;
+      existingFirstPane.remotePaneId = this.allocateRemotePaneId();
       existingFirstPane.paneLabel = this.ensurePaneLabel(surface, existingFirstPane);
       return existingFirstPane.remotePaneId;
     }
 
     if (surface.panes.size === 0) {
       const initialPaneId = this.allocatePaneId();
+      const initialRemotePaneId = this.allocateRemotePaneId();
       const initialPaneLabel = this.ensurePaneLabel(surface, null);
-      surface.panes = new Map<number, ManagedPane>([
-        [initialPaneId, createPane(initialPaneId, initialPaneLabel, initialPaneId, surface.viewport)],
+      surface.panes = new Map<PaneId, ManagedPane>([
+        [initialPaneId, createPane(initialPaneId, initialPaneLabel, initialRemotePaneId, surface.viewport)],
       ]);
       surface.snapshotBufferedEvents = [];
-      return initialPaneId;
+      return initialRemotePaneId;
     }
 
     throw new SurfAceToolError("internal_error", `Surface ${surface.surfaceId} has no initial pane`);
@@ -2044,14 +2066,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private firstPane(surface: ManagedSurface): ManagedPane | null {
     let first: ManagedPane | null = null;
     for (const pane of surface.panes.values()) {
-      if (!first || pane.paneId < first.paneId) {
+      if (
+        !first ||
+        pane.paneLabel < first.paneLabel ||
+        (pane.paneLabel === first.paneLabel && pane.paneId < first.paneId)
+      ) {
         first = pane;
       }
     }
     return first;
   }
 
-  private findPaneByRemoteId(surface: ManagedSurface, remotePaneId: PaneId): ManagedPane | null {
+  private findPaneByRemoteId(surface: ManagedSurface, remotePaneId: RemotePaneId): ManagedPane | null {
     for (const pane of surface.panes.values()) {
       if (pane.remotePaneId === remotePaneId) {
         return pane;
@@ -2062,7 +2088,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private consumeBootstrapPaneForPairState(
     surface: ManagedSurface,
-    remotePaneId: PaneId,
+    remotePaneId: RemotePaneId,
   ): ManagedPane | null {
     if (surface.panes.size !== 1) {
       return null;
@@ -2073,9 +2099,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const bootstrapPane = surface.panes.values().next().value ?? null;
     if (!bootstrapPane) {
-      return null;
-    }
-    if (bootstrapPane.remotePaneId !== bootstrapPane.paneId) {
       return null;
     }
     if (
@@ -2089,15 +2112,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     bootstrapPane.remotePaneId = remotePaneId;
+    this.noteObservedRemotePaneId(remotePaneId);
     bootstrapPane.paneLabel = this.ensurePaneLabel(surface, bootstrapPane, remotePaneId);
     return bootstrapPane;
   }
 
   private recoverSolePaneForTopologySync(
     surface: ManagedSurface,
-    remotePaneId: PaneId,
+    remotePaneId: RemotePaneId,
+    remotePaneCount: number,
   ): ManagedPane | null {
-    if (surface.panes.size !== 1) {
+    if (remotePaneCount !== 1 || surface.panes.size !== 1) {
       return null;
     }
     if (this.findPaneByRemoteId(surface, remotePaneId)) {
@@ -2110,6 +2135,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     existingPane.remotePaneId = remotePaneId;
+    this.noteObservedRemotePaneId(remotePaneId);
     existingPane.paneLabel = this.ensurePaneLabel(surface, existingPane, remotePaneId);
     return existingPane;
   }
@@ -2185,15 +2211,33 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private allocatePaneId(): PaneId {
-    const paneId = asPaneId(this.persistentState.nextPaneId);
-    this.persistentState.nextPaneId += 1;
+    return asPaneId(`pn_${randomUUID().replaceAll("-", "")}`);
+  }
+
+  private allocateRemotePaneId(): RemotePaneId {
+    const remotePaneId = asRemotePaneId(this.persistentState.nextRemotePaneId);
+    this.persistentState.nextRemotePaneId += 1;
     this.runBackgroundTask(
-      "persist next pane id",
+      "persist next remote pane id",
       async () => {
         await this.persistState();
       },
     );
-    return paneId;
+    return remotePaneId;
+  }
+
+  private noteObservedRemotePaneId(remotePaneId: RemotePaneId): void {
+    const numericRemotePaneId = Number(remotePaneId);
+    if (numericRemotePaneId < this.persistentState.nextRemotePaneId) {
+      return;
+    }
+    this.persistentState.nextRemotePaneId = numericRemotePaneId + 1;
+    this.runBackgroundTask(
+      "persist observed remote pane id",
+      async () => {
+        await this.persistState();
+      },
+    );
   }
 
   private allocatePaneLabel(): number {
@@ -2211,9 +2255,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private ensurePaneLabel(
     surface: ManagedSurface,
     pane: ManagedPane | null,
-    remotePaneId?: PaneId,
+    remotePaneId?: RemotePaneId,
   ): number {
-    if (remotePaneId && remotePaneId > 0) {
+    if (remotePaneId && remotePaneId > asRemotePaneId(0)) {
       const key = paneLabelStorageKey(surface.surfaceId, remotePaneId);
       const existing = this.persistentState.paneLabelsByPaneId[key];
       if (typeof existing === "number" && existing > 0) {
@@ -2281,7 +2325,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const parsed = JSON.parse(raw) as RuntimeStateFile & { endpointSurfaces?: Record<string, string> };
       if (parsed.version === 1) {
         this.persistentState = {
-          nextPaneId: parsed.nextPaneId,
+          nextRemotePaneId: parsed.nextRemotePaneId ?? (parsed as { nextPaneId?: number }).nextPaneId ?? 1,
           nextPaneLabel: parsed.nextPaneLabel ?? 1,
           nextWindowLabelIndex: parsed.nextWindowLabelIndex,
           paneLabelsByPaneId: parsed.paneLabelsByPaneId ?? {},
@@ -2380,7 +2424,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (ageMs > LEASE_STALE_THRESHOLD_MS) {
         return [];
       }
-      return parsed.screens;
+      return parsed.screens.map((screen) => ({
+        ...screen,
+        panes: screen.panes.map((pane) => ({
+          ...pane,
+          paneId: migratePersistedPaneId(screen.fingerprint, pane.paneId, pane.paneLabel),
+        })),
+      }));
     } catch {
       return [];
     }
@@ -2582,12 +2632,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return surface;
   }
 
-  private requirePane(fingerprint: string, paneId: number): ManagedPane {
+  private requirePane(fingerprint: string, paneId: PaneId): ManagedPane {
     const surface = this.surfaces.get(fingerprint);
     if (!surface) {
       throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
     }
-    const pane = surface.panes.get(paneId as PaneId);
+    const pane = surface.panes.get(paneId);
     if (!pane) {
       throw new SurfAceToolError(
         "invalid_operation",
@@ -3283,11 +3333,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     const payload = (response as PanesListResponse).payload;
-    const seenRemotePaneIds = new Set<number>();
+    const seenRemotePaneIds = new Set<RemotePaneId>();
     for (const paneSummary of payload.panes) {
       seenRemotePaneIds.add(paneSummary.paneId);
       const pane =
-        this.recoverSolePaneForTopologySync(surface, paneSummary.paneId) ??
+        this.recoverSolePaneForTopologySync(surface, paneSummary.paneId, payload.panes.length) ??
         this.ensurePane(surface, paneSummary.paneId);
       pane.name = paneSummary.name;
       pane.viewport = cloneViewport(paneSummary.viewport);
@@ -3458,12 +3508,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private applyPairState(surface: ManagedSurface, response: PairResponse): void {
     surface.name = response.payload.surfaceName;
     surface.viewport = cloneViewport(response.payload.viewport);
-    const seenRemotePaneIds = new Set<number>();
+    const seenRemotePaneIds = new Set<RemotePaneId>();
     for (const paneState of response.payload.state.panes) {
       seenRemotePaneIds.add(paneState.paneId);
       const pane =
         this.consumeBootstrapPaneForPairState(surface, paneState.paneId) ??
-        this.recoverSolePaneForTopologySync(surface, paneState.paneId) ??
+        this.recoverSolePaneForTopologySync(surface, paneState.paneId, response.payload.state.panes.length) ??
         this.ensurePane(surface, paneState.paneId);
       pane.activeContentId = paneState.currentContentId;
       pane.contentType = paneState.contentType;

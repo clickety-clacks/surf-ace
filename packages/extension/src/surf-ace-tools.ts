@@ -1,6 +1,7 @@
 import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
 import {
   type SurfAceAnnotateRemoveInput,
+  type PaneId,
   type SurfAceSplitInput,
   type SurfAcePushInput,
   type SurfAceRuntime,
@@ -44,9 +45,8 @@ const fingerprintParam = {
 };
 
 const paneIdParam = {
-  description: "Required internal numeric pane id returned by `surf_ace_list` after resolving the visible `paneLabel`.",
-  minimum: 1,
-  type: "integer",
+  description: "Required internal opaque pane id returned by `surf_ace_list` after resolving the visible `paneLabel`.",
+  type: "string",
 };
 
 export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefinition<any>[] {
@@ -86,7 +86,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
     },
     {
       description: "Clear the currently visible content in a pane.",
-      execute: async (args: { fingerprint: string; paneId: number }) => await runtime.clear(args),
+      execute: async (args: { fingerprint: string; paneId: PaneId }) => await runtime.clear(args),
       inputSchema: {
         additionalProperties: false,
         properties: {
@@ -135,7 +135,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
     },
     {
       description: "Close an existing Surf Ace pane.",
-      execute: async (args: { fingerprint: string; paneId: number }) => await runtime.closePane(args),
+      execute: async (args: { fingerprint: string; paneId: PaneId }) => await runtime.closePane(args),
       inputSchema: {
         additionalProperties: false,
         properties: {
@@ -149,7 +149,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
     },
     {
       description: "Read the local dual-channel Surf Ace buffer for a pane. No live network call is made.",
-      execute: async (args: { fingerprint: string; paneId: number }) => await runtime.read(args),
+      execute: async (args: { fingerprint: string; paneId: PaneId }) => await runtime.read(args),
       inputSchema: {
         additionalProperties: false,
         properties: {
