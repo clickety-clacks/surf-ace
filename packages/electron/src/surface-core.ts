@@ -460,6 +460,13 @@ export class SurfaceCore {
       sourcePane.paneId,
       ...newPaneIds,
     ]);
+    const knownPaneIds = new Set(surface.panes.keys());
+    if (flattenLayout(surface.layout).some((paneId) => !knownPaneIds.has(paneId))) {
+      const sanitizedLayout = sanitizeLayoutNode(surface.layout, knownPaneIds);
+      if (sanitizedLayout) {
+        surface.layout = collapseLayout(sanitizedLayout);
+      }
+    }
 
     this.emit({ surfaceId, type: "surface-changed" });
     for (const paneId of newPaneIds) {
@@ -1167,6 +1174,25 @@ function removePaneFromLayout(node: LayoutNode, paneId: number): LayoutNode | nu
   }
   const nextChildren = node.children
     .map((child) => removePaneFromLayout(child, paneId))
+    .filter((child): child is LayoutNode => child !== null);
+  if (nextChildren.length === 0) {
+    return null;
+  }
+  if (nextChildren.length === 1) {
+    return nextChildren[0]!;
+  }
+  return {
+    ...node,
+    children: nextChildren,
+  };
+}
+
+function sanitizeLayoutNode(node: LayoutNode, knownPaneIds: Set<number>): LayoutNode | null {
+  if (node.type === "pane") {
+    return knownPaneIds.has(node.paneId) ? node : null;
+  }
+  const nextChildren = node.children
+    .map((child) => sanitizeLayoutNode(child, knownPaneIds))
     .filter((child): child is LayoutNode => child !== null);
   if (nextChildren.length === 0) {
     return null;

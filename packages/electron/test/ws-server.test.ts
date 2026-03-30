@@ -188,6 +188,45 @@ function contentSetRequest(paneId: number): Request {
   };
 }
 
+function contentClearRequest(paneId: number, revision: number): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "content.clear",
+    payload: {
+      paneId: paneId as never,
+      revision: revision as never,
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
+function paneSplitRequest(
+  paneId: number,
+  options: {
+    count?: number;
+    direction?: "horizontal" | "vertical";
+    newPaneIds?: number[];
+    newPaneLabels?: number[];
+  } = {},
+): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "pane.split",
+    payload: {
+      count: options.count ?? 2,
+      direction: options.direction ?? "horizontal",
+      newPaneIds: (options.newPaneIds ?? [2]).map((value) => value as never),
+      newPaneLabels: options.newPaneLabels ?? [2],
+      paneId: paneId as never,
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 function snapshotGetRequest(paneId: number): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
@@ -424,6 +463,46 @@ test("ws server ignores reply races when the requester closes before the respons
     assert.equal(response.ok, true);
     assert.equal(response.op, "surfaces.list");
     await closeSocket(stable);
+  });
+});
+
+test("ws server sanitizes stale layout pane ids before pane.split responds", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const surface = core.getSurface(surfaceId) as unknown as {
+      layout: {
+        children: Array<{ paneId: number; type: "pane" }>;
+        direction: "horizontal" | "vertical";
+        type: "split";
+      };
+    };
+    surface.layout = {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 9999, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    };
+
+    const contentSet = await request(owner, contentSetRequest(1));
+    assert.equal(contentSet.ok, true);
+
+    const contentClear = await request(owner, contentClearRequest(1, 2));
+    assert.equal(contentClear.ok, true);
+
+    const split = await request(owner, paneSplitRequest(1, { newPaneIds: [2], newPaneLabels: [2] }));
+    assert.equal(split.ok, true);
+    assert.equal(split.op, "pane.split");
+    assert.deepEqual(split.payload.panes, [
+      { paneId: 1, paneLabel: 1 },
+      { paneId: 2, paneLabel: 2 },
+    ]);
+
+    await closeSocket(owner);
   });
 });
 
