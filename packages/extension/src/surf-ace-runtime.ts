@@ -2174,6 +2174,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return this.ensureWindowLabel(nextSurfaceId);
   }
 
+  private preserveSurfaceStateUntilPairResponse(
+    remappedSurface: ManagedSurface,
+    preservedSurface: ManagedSurface,
+  ): void {
+    if (preservedSurface === remappedSurface) {
+      return;
+    }
+    remappedSurface.panes = preservedSurface.panes;
+  }
+
   private allocatePaneId(): PaneId {
     const paneId = asPaneId(this.persistentState.nextPaneId);
     this.persistentState.nextPaneId += 1;
@@ -2714,8 +2724,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     if (matchedRemoteSurfaceId !== surface.surfaceId) {
       const oldSurfaceId = surface.surfaceId;
+      const preservedSurface = this.surfaces.get(matchedRemoteSurfaceId);
       if (this.surfaces.get(oldSurfaceId) === surface) {
         this.surfaces.delete(oldSurfaceId);
+      }
+      if (preservedSurface) {
+        this.preserveSurfaceStateUntilPairResponse(surface, preservedSurface);
       }
       surface.surfaceId = matchedRemoteSurfaceId;
       surface.windowLabel = this.reconcileWindowLabel(

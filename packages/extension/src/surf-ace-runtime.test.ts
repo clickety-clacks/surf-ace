@@ -2494,6 +2494,75 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("surface-id remap preserves existing pane topology until pair response arrives", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const split = await runtime.split({
+        count: 3,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: 1,
+      });
+      assert.deepEqual(split.map((pane) => pane.paneId), [1, 2, 3]);
+
+      const internalRuntime = runtime as any;
+      const preservedSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(preservedSurface);
+
+      const bootstrapPane = structuredClone(preservedSurface.panes.get(1));
+      assert.ok(bootstrapPane);
+
+      const provisionalSurface = {
+        ...preservedSurface,
+        client: {
+          isOpen: () => true,
+          request: async () => ({
+            id: "rq_surfaces_list",
+            ok: true,
+            op: "surfaces.list",
+            payload: {
+              surfaces: [
+                {
+                  name: preservedSurface.name,
+                  paired: false,
+                  surfaceId: server.surfaceId,
+                  viewport: preservedSurface.viewport,
+                },
+              ],
+            },
+            sentAt: Date.now(),
+            type: "response",
+            v: 1,
+          }),
+        },
+        connectedAt: null,
+        endpoint: {
+          ...preservedSurface.endpoint,
+          endpointId: "endpoint-reconnect",
+          fingerprintPrefix: "",
+        },
+        endpointId: "endpoint-reconnect",
+        fingerprintPrefix: "",
+        hasPairedInGatewaySession: false,
+        panes: new Map([[bootstrapPane.paneId, bootstrapPane]]),
+        recentEventIds: [...preservedSurface.recentEventIds],
+        recentEventIdsSet: new Set(preservedSurface.recentEventIdsSet),
+        retryDelayResolver: null,
+        sessionId: null,
+        snapshotBufferedEvents: [...preservedSurface.snapshotBufferedEvents],
+        stopRequested: false,
+        surfaceId: "sf_disc_reconnect" as any,
+        workPromise: null,
+      };
+
+      internalRuntime.surfaces.set(provisionalSurface.surfaceId, provisionalSurface);
+      await internalRuntime.discoverSurfaceId(provisionalSurface);
+
+      const screen = (await runtime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      assert.deepEqual(screen.panes.map((pane) => pane.paneId), [1, 2, 3]);
+    });
+  });
+
   await t.test("stable surfaceId plus remotePaneId preserves paneLabel across reconnect bootstrap", async () => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port, {
