@@ -14,11 +14,23 @@
 		7440C200D139A9CDEB4071DA /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
 		78FE925CC623EE70BD36510C /* SurfAceSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */; };
 		AB13C11EA76DDA755EEEED0A /* SurfAceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */; };
+		B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */; };
 		D615F803FC49278657471A62 /* SurfAceIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */; };
 		E2B2E9631F0835BD39E2B839 /* SurfAceHTTPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		1DB5F752E8413BF0CF2234E7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 27A23E2B5424EC1D613A125D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E78D6E7B48D8F200079A1C31;
+			remoteInfo = SurfAce;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServerTests.swift; sourceTree = "<group>"; };
 		2A8249A9765412039C07EDD5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
 		4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceSurfaceView.swift; sourceTree = "<group>"; };
@@ -27,6 +39,7 @@
 		AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServer.swift; sourceTree = "<group>"; };
 		C230CE2F392C57A940FD796E /* SurfAceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceModels.swift; sourceTree = "<group>"; };
 		DA0B8CE0B10CC8BE7F94EC21 /* SurfAce.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SurfAce.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E1026649686E370A8442CA40 /* SurfAceTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SurfAceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceRuntime.swift; sourceTree = "<group>"; };
 		F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceApp.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -36,6 +49,7 @@
 			isa = PBXGroup;
 			children = (
 				4CF5D060294BE463D8CACA33 /* SurfAce */,
+				6897A8D003370E2CC8B694CB /* SurfAceTests */,
 				EE59F87F57539D75E6853D10 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -56,10 +70,19 @@
 			path = SurfAce;
 			sourceTree = "<group>";
 		};
+		6897A8D003370E2CC8B694CB /* SurfAceTests */ = {
+			isa = PBXGroup;
+			children = (
+				176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */,
+			);
+			path = SurfAceTests;
+			sourceTree = "<group>";
+		};
 		EE59F87F57539D75E6853D10 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				DA0B8CE0B10CC8BE7F94EC21 /* SurfAce.app */,
+				E1026649686E370A8442CA40 /* SurfAceTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -67,6 +90,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		67A9D8D88698454C7C5A7802 /* SurfAceTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8844C2C5F00C007C81697FD5 /* Build configuration list for PBXNativeTarget "SurfAceTests" */;
+			buildPhases = (
+				2CE0AE1F202FC9159047705E /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				939CAD971356B56D4A53BD0E /* PBXTargetDependency */,
+			);
+			name = SurfAceTests;
+			packageProductDependencies = (
+			);
+			productName = SurfAceTests;
+			productReference = E1026649686E370A8442CA40 /* SurfAceTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		E78D6E7B48D8F200079A1C31 /* SurfAce */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 2372B8D345411B55D131DE6B /* Build configuration list for PBXNativeTarget "SurfAce" */;
@@ -94,6 +135,9 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					67A9D8D88698454C7C5A7802 = {
+						DevelopmentTeam = "";
+					};
 					E78D6E7B48D8F200079A1C31 = {
 						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
@@ -115,6 +159,7 @@
 			projectRoot = "";
 			targets = (
 				E78D6E7B48D8F200079A1C31 /* SurfAce */,
+				67A9D8D88698454C7C5A7802 /* SurfAceTests */,
 			);
 		};
 /* End PBXProject section */
@@ -131,6 +176,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		2CE0AE1F202FC9159047705E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		CFFA189DF77DAD2A89023AC6 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -148,7 +201,32 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		939CAD971356B56D4A53BD0E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E78D6E7B48D8F200079A1C31 /* SurfAce */;
+			targetProxy = 1DB5F752E8413BF0CF2234E7 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		0F78BF2A3D58CDFA37F20E28 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAceTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SurfAce.app/SurfAce";
+			};
+			name = Debug;
+		};
 		3369AE2D0B7D3366E43DA82B /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -297,6 +375,23 @@
 			};
 			name = Release;
 		};
+		6202D685367E778C29D13B85 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAceTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SurfAce.app/SurfAce";
+			};
+			name = Release;
+		};
 		DB1806C9953B7D8945A08618 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -335,6 +430,15 @@
 			buildConfigurations = (
 				DB1806C9953B7D8945A08618 /* Debug */,
 				42DE4C0A4EF62197BC705AF9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8844C2C5F00C007C81697FD5 /* Build configuration list for PBXNativeTarget "SurfAceTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0F78BF2A3D58CDFA37F20E28 /* Debug */,
+				6202D685367E778C29D13B85 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

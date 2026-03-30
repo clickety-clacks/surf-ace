@@ -484,8 +484,8 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             hostView = nil
         }
 
-        func render(entry: SurfAcePaneEntry?) {
-            hostView?.render(entry: entry)
+        func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
+            hostView?.render(entry: entry, restoreViewport: restoreViewport)
         }
 
         func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool) {
@@ -579,7 +579,7 @@ private final class SurfAceWeakScriptMessageHandler: NSObject, WKScriptMessageHa
 }
 
 @MainActor
-final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler {
+final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     var onInteractionBegan: (() -> Void)?
     var onSelectionChanged: ((String, CGRect?) -> Void)?
     var onScrollSettled: ((SurfAceViewport, String) -> Void)?
@@ -607,6 +607,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private var fingerDrawEnabled = false
     private var trackedStrokes: [TrackedStroke] = []
     private var isApplyingProgrammaticDrawingChange = false
+    private var pendingViewportRestore: SurfAceViewport?
+    private var pendingHTMLRenderTask: Task<Void, Never>?
+    private var pendingHTMLRenderContinuation: CheckedContinuation<Void, Never>?
     private var lastViewport = SurfAceViewport(
         scrollOffset: SurfAcePoint(x: 0, y: 0),
         visibleRect: SurfAceRect(x: 0, y: 0, width: 1, height: 1),
@@ -624,10 +627,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         webView = WKWebView(frame: .zero, configuration: config)
         super.init(frame: frame)
+        webView.navigationDelegate = self
         setupViewHierarchy()
         setupScripts()
         setupPDFTracking()
-        render(entry: nil)
+        render(entry: nil, restoreViewport: nil)
     }
 
     required init?(coder: NSCoder) {
@@ -638,8 +642,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         NotificationCenter.default.removeObserver(self)
     }
 
-    func render(entry: SurfAcePaneEntry?) {
+    func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
         currentEntry = entry
+        pendingViewportRestore = nil
         let html: String
         let baseURL: URL?
 
@@ -648,37 +653,47 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             case .html(let rawHTML, let suppliedBaseURL):
                 html = rawHTML
                 baseURL = suppliedBaseURL.flatMap(URL.init(string:))
+                pendingViewportRestore = restoreViewport
+                beginPendingHTMLRender()
                 showWebView()
             case .image(let data, let mediaType, let alt):
+                finishPendingHTMLRender()
                 html = imageHTML(data: data, mediaType: mediaType, alt: alt)
                 baseURL = nil
                 showWebView()
             case .pdf(let data):
+                finishPendingHTMLRender()
                 renderPDF(data)
                 applyCurrentInteractionState()
                 return
             case .terminal(let lines, _):
+                finishPendingHTMLRender()
                 html = terminalHTML(lines: lines)
                 baseURL = nil
                 showWebView()
             case .markdown(let markdown):
+                finishPendingHTMLRender()
                 html = markdownHTML(markdown)
                 baseURL = nil
                 showWebView()
             case .video(let url):
+                finishPendingHTMLRender()
                 html = videoHTML(url: url)
                 baseURL = nil
                 showWebView()
             case .some(.canvas):
+                finishPendingHTMLRender()
                 html = placeholderHTML(title: "Canvas", detail: "No preview is available for this pane.")
                 baseURL = nil
                 showWebView()
             case nil:
+                finishPendingHTMLRender()
                 html = standbyHTML()
                 baseURL = nil
                 showWebView()
             }
         } else {
+            finishPendingHTMLRender()
             html = standbyHTML()
             baseURL = nil
             showWebView()
@@ -721,10 +736,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     }
 
     func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot? {
-        let imageBase64 = includeImage ? captureFullScreenshotBase64() : nil
-
         switch currentEntry?.payload {
         case .html:
+            await waitForPendingHTMLRenderIfNeeded()
             if let payload = await evaluateSnapshotPayload() {
                 lastViewport = payload.viewport
                 lastVisibleText = payload.visibleText
@@ -746,6 +760,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         case nil:
             break
         }
+
+        let imageBase64 = includeImage ? captureFullScreenshotBase64() : nil
 
         return SurfAceSurfaceSnapshot(
             viewport: lastViewport,
@@ -930,6 +946,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private func applyCurrentInteractionState() {
         let entryScrollable = currentEntry?.scrollable ?? true
         let entryInteractive = currentEntry?.interactive ?? true
+        canvasView.isUserInteractionEnabled = annotationMode
         if annotationMode {
             webView.scrollView.isScrollEnabled = false
             webView.isUserInteractionEnabled = false
@@ -943,6 +960,23 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             pdfScrollView()?.isScrollEnabled = entryScrollable
             canvasView.drawingPolicy = .pencilOnly
         }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.restorePendingViewportIfNeeded()
+            await self.publishCurrentWebViewportIfNeeded()
+            self.finishPendingHTMLRender()
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        finishPendingHTMLRender()
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        finishPendingHTMLRender()
     }
 
     private func showWebView() {
@@ -1121,6 +1155,69 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 continuation.resume(returning: object)
             }
         }
+    }
+
+    private func evaluateJavaScriptVoid(_ script: String) async {
+        await withCheckedContinuation { continuation in
+            webView.evaluateJavaScript(script) { _, _ in
+                continuation.resume()
+            }
+        }
+    }
+
+    private func beginPendingHTMLRender() {
+        finishPendingHTMLRender()
+        pendingHTMLRenderTask = Task { @MainActor [weak self] in
+            await withCheckedContinuation { continuation in
+                self?.pendingHTMLRenderContinuation = continuation
+            }
+        }
+    }
+
+    private func waitForPendingHTMLRenderIfNeeded() async {
+        await pendingHTMLRenderTask?.value
+    }
+
+    private func finishPendingHTMLRender() {
+        pendingHTMLRenderContinuation?.resume()
+        pendingHTMLRenderContinuation = nil
+        pendingHTMLRenderTask = nil
+    }
+
+    private func restorePendingViewportIfNeeded() async {
+        guard let viewport = pendingViewportRestore else { return }
+        pendingViewportRestore = nil
+
+        let script = """
+        (function() {
+          const doc = document.documentElement;
+          const body = document.body;
+          const maxX = Math.max(
+            (doc ? doc.scrollWidth : 0),
+            (body ? body.scrollWidth : 0),
+            window.innerWidth || 0
+          ) - (window.innerWidth || 0);
+          const maxY = Math.max(
+            (doc ? doc.scrollHeight : 0),
+            (body ? body.scrollHeight : 0),
+            window.innerHeight || 0
+          ) - (window.innerHeight || 0);
+          window.scrollTo(
+            Math.max(0, Math.min(\(viewport.scrollOffset.x), Math.max(maxX, 0))),
+            Math.max(0, Math.min(\(viewport.scrollOffset.y), Math.max(maxY, 0)))
+          );
+        })();
+        """
+        await evaluateJavaScriptVoid(script)
+    }
+
+    private func publishCurrentWebViewportIfNeeded() async {
+        guard case .some(.html) = currentEntry?.payload else { return }
+        guard let payload = await evaluateSnapshotPayload() else { return }
+        lastViewport = payload.viewport
+        lastVisibleText = payload.visibleText
+        lastSelection = payload.selection ?? lastSelection
+        onScrollSettled?(payload.viewport, payload.visibleText)
     }
 
     private func parseViewport(_ object: [String: Any]?) -> SurfAceViewport? {

@@ -29,3 +29,14 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
+  SurfAceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: SurfAceTests
+    dependencies:
+      - target: SurfAce
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAceTests
+        GENERATE_INFOPLIST_FILE: YES

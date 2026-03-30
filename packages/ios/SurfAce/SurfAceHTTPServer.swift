@@ -10,6 +10,8 @@ enum SurfAceHTTPServerError: LocalizedError {
     case startTimeout
     case listenerCancelled
     case invalidBindAddress
+    case invalidRequestedPort(UInt16)
+    case boundPortMismatch(requested: UInt16, actual: UInt16)
 
     var errorDescription: String? {
         switch self {
@@ -19,6 +21,10 @@ enum SurfAceHTTPServerError: LocalizedError {
             return "Server listener cancelled during startup"
         case .invalidBindAddress:
             return "Server failed to bind to 0.0.0.0"
+        case .invalidRequestedPort(let port):
+            return "Server requires a fixed port; invalid bind request for port \(port)"
+        case .boundPortMismatch(let requested, let actual):
+            return "Server bound to unexpected port \(actual); expected fixed port \(requested)"
         }
     }
 }
@@ -327,6 +333,7 @@ actor SurfAceWebSocket {
 actor SurfAceHTTPServer {
     typealias HTTPHandler = @Sendable (HTTPServerRequest) async -> HTTPServerResponse
     typealias WebSocketHandler = @Sendable (SurfAceWebSocket) async -> Void
+    static let fixedPort: UInt16 = 19_001
 
     private var listener: NWListener?
     private let listenerQueue = DispatchQueue(label: "co.clicketyclacks.SurfAce.HTTPServer")
@@ -335,15 +342,35 @@ actor SurfAceHTTPServer {
     private var webSocketPath: String = "/ws"
 
     func start(
-        port: UInt16 = 0,
+        webSocketPath: String = "/ws",
+        httpHandler: @escaping HTTPHandler,
+        webSocketHandler: @escaping WebSocketHandler
+    ) async throws -> UInt16 {
+        try await startForTesting(
+            port: Self.fixedPort,
+            webSocketPath: webSocketPath,
+            httpHandler: httpHandler,
+            webSocketHandler: webSocketHandler
+        )
+    }
+
+    func startForTesting(
+        port: UInt16,
         webSocketPath: String = "/ws",
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
         surfAceServerLog("listener start requested port=\(port) webSocketPath=\(webSocketPath)")
+        guard port != 0 else {
+            surfAceServerLog("listener rejected invalid ephemeral port request")
+            throw SurfAceHTTPServerError.invalidRequestedPort(port)
+        }
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        let endpointPort = port == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: port)!
+        guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
+            surfAceServerLog("listener rejected unsupported port=\(port)")
+            throw SurfAceHTTPServerError.invalidRequestedPort(port)
+        }
         guard let bindAddress = IPv4Address("0.0.0.0") else {
             throw SurfAceHTTPServerError.invalidBindAddress
         }
@@ -360,10 +387,19 @@ actor SurfAceHTTPServer {
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    surfAceServerLog("listener ready port=\(listener.port?.rawValue ?? 0)")
+                    let boundPort = listener.port?.rawValue ?? 0
+                    surfAceServerLog("listener ready requestedPort=\(port) actualPort=\(boundPort)")
                     guard startupState.markResumedIfNeeded() else { return }
                     listener.stateUpdateHandler = nil
-                    continuation.resume(returning: listener.port?.rawValue ?? 0)
+                    guard boundPort == port else {
+                        surfAceServerLog("listener bound unexpected port requested=\(port) actual=\(boundPort)")
+                        listener.cancel()
+                        continuation.resume(
+                            throwing: SurfAceHTTPServerError.boundPortMismatch(requested: port, actual: boundPort)
+                        )
+                        return
+                    }
+                    continuation.resume(returning: boundPort)
                 case .failed(let error):
                     surfAceServerLog("listener failed error=\(error.localizedDescription)")
                     guard startupState.markResumedIfNeeded() else { return }

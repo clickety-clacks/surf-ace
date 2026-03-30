@@ -381,7 +381,7 @@ indirect enum SurfAcePaneLayoutNode {
 
 @MainActor
 protocol SurfAcePaneBridging: AnyObject {
-    func render(entry: SurfAcePaneEntry?)
+    func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?)
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool)
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool
     func captureDrawingData() -> Data
@@ -413,6 +413,7 @@ final class SurfAcePaneModel {
     )
     var lastVisibleText = ""
     var lastSelection: SurfAceSelection?
+    var pendingSnapshotHintReason: String?
     var lastNavigationURL: String?
     var lastPage: (page: Int, totalPages: Int, pageText: String?)?
     var lastMeasuredSize = CGSize(width: 1, height: 1)

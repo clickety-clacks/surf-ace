@@ -340,7 +340,7 @@ final class SurfAceRuntime {
     func attachPaneBridge(surfaceId: String, paneId: Int, bridge: any SurfAcePaneBridging) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         pane.bridge = bridge
-        bridge.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry)
+        bridge.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry, restoreViewport: nil)
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         bridge.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
     }
@@ -389,7 +389,7 @@ final class SurfAceRuntime {
             pane.currentEntry = next
         }
 
-        pane.bridge?.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry)
+        pane.bridge?.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry, restoreViewport: nil)
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         pane.lastNavigationURL = pane.currentEntry.url
         noteInteraction(surfaceId: surfaceId)
@@ -453,6 +453,10 @@ final class SurfAceRuntime {
                     "visibleText": visibleText.prefix(maxVisibleTextBytes).description,
                 ]
             )
+        }
+        if let reason = pane.pendingSnapshotHintReason {
+            pane.pendingSnapshotHintReason = nil
+            sendSnapshotHint(surfaceId: surfaceId, reason: reason)
         }
     }
 
@@ -1343,6 +1347,23 @@ final class SurfAceRuntime {
         guard let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"]) else {
             return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "historyOwnerToken is required")
         }
+        let shouldRestoreViewport = shouldPreserveHTMLViewportAcrossContentSet(
+            currentEntry: pane.currentEntry,
+            incomingFrame: frame,
+            historyOwnerToken: historyOwnerToken
+        )
+        let restoreViewport: SurfAceViewport?
+        if shouldRestoreViewport,
+           let snapshot = await pane.bridge?.fetchSnapshot(includeImage: false) {
+            pane.lastViewport = snapshot.viewport
+            pane.lastVisibleText = snapshot.visibleText
+            pane.lastSelection = snapshot.selection ?? pane.lastSelection
+            restoreViewport = snapshot.viewport
+        } else if shouldRestoreViewport {
+            restoreViewport = pane.lastViewport
+        } else {
+            restoreViewport = nil
+        }
         let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
 
         pane.pendingFlushStrokes.removeAll()
@@ -1351,9 +1372,12 @@ final class SurfAceRuntime {
         pane.lastSelection = nil
         pane.lastNavigationURL = nil
         pane.lastPage = nil
-        pane.bridge?.render(entry: pane.currentEntry)
+        pane.pendingSnapshotHintReason = frame.contentType == .html ? "after_render" : nil
+        pane.bridge?.render(entry: pane.currentEntry, restoreViewport: restoreViewport)
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
-        sendSnapshotHint(surfaceId: surfaceId, reason: "after_render")
+        if frame.contentType != .html {
+            sendSnapshotHint(surfaceId: surfaceId, reason: "after_render")
+        }
 
         return mutationAck(
             id: id,
@@ -1392,7 +1416,7 @@ final class SurfAceRuntime {
         let nextPayload = SurfAceFramePayload.terminal(lines: nextLines, scrollback: scrollback)
         pane.currentEntry.payload = nextPayload
         pane.currentEntry.revision = revision
-        pane.bridge?.render(entry: pane.currentEntry)
+        pane.bridge?.render(entry: pane.currentEntry, restoreViewport: nil)
 
         return mutationAck(id: id, op: "content.append", paneId: paneId, entry: pane.currentEntry)
     }
@@ -1475,7 +1499,7 @@ final class SurfAceRuntime {
         pane.pendingFlushStrokes.removeAll()
         pane.firstPendingStrokeAt = nil
         pane.lastPendingStrokeAt = nil
-        pane.bridge?.render(entry: nil)
+        pane.bridge?.render(entry: nil, restoreViewport: nil)
         pane.bridge?.clearDrawings()
 
         return mutationAck(id: id, op: "content.clear", paneId: paneId, entry: pane.currentEntry)
@@ -2044,6 +2068,17 @@ final class SurfAceRuntime {
         pane.forwardStack.removeAll()
         pane.currentEntry = nextEntry
         return historyInfo
+    }
+
+    func shouldPreserveHTMLViewportAcrossContentSet(
+        currentEntry: SurfAcePaneEntry,
+        incomingFrame: SurfAceFrame,
+        historyOwnerToken: String
+    ) -> Bool {
+        currentEntry.contentId != nil
+            && currentEntry.contentType == .html
+            && incomingFrame.contentType == .html
+            && currentEntry.historyOwnerToken == historyOwnerToken
     }
 
     private func applyProviderBootstrapTopology(
