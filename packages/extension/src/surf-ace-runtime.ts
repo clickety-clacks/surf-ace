@@ -596,6 +596,50 @@ function createPane(
   };
 }
 
+function createManagedSurface(
+  surfaceId: SurfaceId,
+  endpoint: SurfAceDiscoveryEndpoint,
+  name: string,
+  viewport: SurfaceViewport,
+  windowLabel: string,
+  now: number,
+): ManagedSurface {
+  return {
+    alertFired: false,
+    alertFiredAt: null,
+    autoRetryEnabled: true,
+    client: null,
+    connectionState: "connecting",
+    consecutiveResumeFailures: 0,
+    consecutiveOwnershipLockFailures: 0,
+    connectedAt: null,
+    endpoint,
+    endpointId: endpoint.endpointId,
+    fingerprintPrefix: endpoint.fingerprintPrefix,
+    hasPairedInGatewaySession: false,
+    heartbeatInterval: null,
+    heartbeatMisses: 0,
+    heartbeatNonce: null,
+    lastSeenAt: now,
+    name,
+    paneIdsNeedingSnapshot: new Set<number>(),
+    panes: new Map<number, ManagedPane>(),
+    recentEventIds: [],
+    recentEventIdsSet: new Set<string>(),
+    reconnectAttempt: 0,
+    retryDelayResolver: null,
+    sessionId: null,
+    snapshotBufferedEvents: [],
+    snapshotSyncInFlight: false,
+    stopRequested: false,
+    surfaceId,
+    unreachableFailures: 0,
+    viewport: cloneViewport(viewport),
+    windowLabel,
+    workPromise: null,
+  };
+}
+
 function clampCloseReason(reason: string): string {
   return reason.slice(0, 123);
 }
@@ -1668,41 +1712,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     event: SurfaceAppearedEvent,
   ): void {
     const existing = this.surfaces.get(event.payload.surfaceId);
-    const windowLabel = this.ensureWindowLabel(event.payload.surfaceId);
-    const surface = existing ?? {
-      alertFired: false,
-      alertFiredAt: null,
-      autoRetryEnabled: true,
-      client: null,
-      connectionState: "connecting" as SurfAceConnectionState,
-      consecutiveResumeFailures: 0,
-      consecutiveOwnershipLockFailures: 0,
-      connectedAt: null,
-      endpoint: sourceSurface.endpoint,
-      endpointId: sourceSurface.endpointId,
-      fingerprintPrefix: sourceSurface.fingerprintPrefix,
-      hasPairedInGatewaySession: false,
-      heartbeatInterval: null,
-      heartbeatMisses: 0,
-      heartbeatNonce: null,
-      lastSeenAt: this.now(),
-      name: event.payload.name,
-      paneIdsNeedingSnapshot: new Set<number>(),
-      panes: new Map<number, ManagedPane>(),
-      recentEventIds: [],
-      recentEventIdsSet: new Set<string>(),
-      reconnectAttempt: 0,
-      retryDelayResolver: null,
-      sessionId: null,
-      snapshotBufferedEvents: [],
-      snapshotSyncInFlight: false,
-      stopRequested: false,
-      surfaceId: event.payload.surfaceId,
-      unreachableFailures: 0,
-      viewport: cloneViewport(event.payload.viewport),
+    const windowLabel = existing?.windowLabel || this.ensureWindowLabel(event.payload.surfaceId);
+    const surface = existing ?? createManagedSurface(
+      event.payload.surfaceId,
+      sourceSurface.endpoint,
+      event.payload.name,
+      event.payload.viewport,
       windowLabel,
-      workPromise: null,
-    };
+      this.now(),
+    );
 
     surface.endpoint = sourceSurface.endpoint;
     surface.endpointId = sourceSurface.endpointId;
@@ -2547,40 +2565,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const surfaceId = makeProvisionalSurfaceId(endpoint.endpointId);
     this.logger.info?.(`[surf-ace:runtime] refreshEndpointTopology → NEW surface ${surfaceId} for ${endpoint.name}`);
-    const surface: ManagedSurface = {
-      alertFired: false,
-      alertFiredAt: null,
-      autoRetryEnabled: true,
-      client: null,
-      connectionState: "connecting",
-      consecutiveResumeFailures: 0,
-      consecutiveOwnershipLockFailures: 0,
-      connectedAt: null,
-      endpoint,
-      endpointId: endpoint.endpointId,
-      fingerprintPrefix: endpoint.fingerprintPrefix,
-      hasPairedInGatewaySession: false,
-      heartbeatInterval: null,
-      heartbeatMisses: 0,
-      heartbeatNonce: null,
-      lastSeenAt: this.now(),
-      name: endpoint.name,
-      paneIdsNeedingSnapshot: new Set<number>(),
-      panes: new Map<number, ManagedPane>(),
-      recentEventIds: [],
-      recentEventIdsSet: new Set<string>(),
-      reconnectAttempt: 0,
-      retryDelayResolver: null,
-      sessionId: null,
-      snapshotBufferedEvents: [],
-      snapshotSyncInFlight: false,
-      stopRequested: false,
+    const surface = createManagedSurface(
       surfaceId,
-      unreachableFailures: 0,
-      viewport: cloneViewport(endpoint.viewport),
-      windowLabel: "",
-      workPromise: null,
-    };
+      endpoint,
+      endpoint.name,
+      endpoint.viewport,
+      "",
+      this.now(),
+    );
 
     this.surfaces.set(surfaceId, surface);
     this.ensureSurfaceWorker(surface);
@@ -2661,27 +2653,63 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    const remoteSurfaceId = asSurfaceId(remoteSurfaces[0].surfaceId);
-    if (remoteSurfaceId === surface.surfaceId) {
-      if (!surface.windowLabel) {
-        surface.windowLabel = this.ensureWindowLabel(remoteSurfaceId);
+    const matchedRemoteSurface =
+      remoteSurfaces.find((remoteSurface) => remoteSurface.surfaceId === surface.surfaceId) ??
+      remoteSurfaces[0];
+    const matchedRemoteSurfaceId = asSurfaceId(matchedRemoteSurface.surfaceId);
+
+    if (matchedRemoteSurfaceId !== surface.surfaceId) {
+      const oldSurfaceId = surface.surfaceId;
+      if (this.surfaces.get(oldSurfaceId) === surface) {
+        this.surfaces.delete(oldSurfaceId);
       }
-      return;
+      surface.surfaceId = matchedRemoteSurfaceId;
+      surface.windowLabel = this.reconcileWindowLabel(
+        oldSurfaceId,
+        matchedRemoteSurfaceId,
+        surface.windowLabel,
+      );
+      this.surfaces.set(matchedRemoteSurfaceId, surface);
+      this.runBackgroundTask(
+        `persist remapped surface id ${surface.endpointId}`,
+        async () => {
+          await this.persistState();
+        },
+      );
+    } else if (!surface.windowLabel) {
+      surface.windowLabel = this.ensureWindowLabel(matchedRemoteSurfaceId);
     }
 
-    const oldSurfaceId = surface.surfaceId;
-    if (this.surfaces.get(oldSurfaceId) === surface) {
-      this.surfaces.delete(oldSurfaceId);
+    surface.lastSeenAt = this.now();
+    surface.name = matchedRemoteSurface.name;
+    surface.viewport = cloneViewport(matchedRemoteSurface.viewport);
+
+    for (const remoteSurface of remoteSurfaces) {
+      const remoteSurfaceId = asSurfaceId(remoteSurface.surfaceId);
+      if (remoteSurfaceId === surface.surfaceId) {
+        continue;
+      }
+
+      const existing = this.surfaces.get(remoteSurfaceId);
+      const discoveredSurface = existing ?? createManagedSurface(
+        remoteSurfaceId,
+        surface.endpoint,
+        remoteSurface.name,
+        remoteSurface.viewport,
+        this.ensureWindowLabel(remoteSurfaceId),
+        this.now(),
+      );
+
+      discoveredSurface.endpoint = surface.endpoint;
+      discoveredSurface.endpointId = surface.endpointId;
+      discoveredSurface.fingerprintPrefix = surface.fingerprintPrefix;
+      discoveredSurface.lastSeenAt = this.now();
+      discoveredSurface.name = remoteSurface.name;
+      discoveredSurface.viewport = cloneViewport(remoteSurface.viewport);
+      discoveredSurface.stopRequested = false;
+      this.surfaces.set(remoteSurfaceId, discoveredSurface);
+      this.ensureSurfaceWorker(discoveredSurface);
     }
-    surface.surfaceId = remoteSurfaceId;
-    surface.windowLabel = this.reconcileWindowLabel(oldSurfaceId, remoteSurfaceId, surface.windowLabel);
-    this.surfaces.set(remoteSurfaceId, surface);
-    this.runBackgroundTask(
-      `persist remapped surface id ${surface.endpointId}`,
-      async () => {
-        await this.persistState();
-      },
-    );
   }
 
   private async requestPair(surface: ManagedSurface): Promise<PairResponse> {

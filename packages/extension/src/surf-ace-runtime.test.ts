@@ -24,6 +24,17 @@ type TestPane = {
   };
 };
 
+type TestSurfaceState = {
+  name: string;
+  panes: Map<number, TestPane>;
+  surfaceId: string;
+  viewport: {
+    height: number;
+    scale: number;
+    width: number;
+  };
+};
+
 class StaticDiscoveryService implements SurfAceDiscoveryService {
   private readonly listeners = new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void | Promise<void>>();
   private endpoints: SurfAceDiscoveryEndpoint[];
@@ -81,6 +92,7 @@ class FakeSurfAceWsServer {
     takeover: boolean;
   }> = [];
   readonly pairRequests: Array<{ initialPaneId: number; initialPaneLabel: number; windowLabel: string }> = [];
+  readonly pairRequestSurfaceIds: string[] = [];
   readonly panes: Map<number, TestPane>;
   readonly splitRequests: Array<{
     count: number;
@@ -108,7 +120,10 @@ class FakeSurfAceWsServer {
 
   private closed = false;
   private nextEventId = 1;
+  private readonly pairedSocketsBySurfaceId = new Map<string, WebSocket>();
+  private readonly socketSurfaceIds = new Map<WebSocket, string>();
   private readonly sockets = new Set<WebSocket>();
+  private readonly surfaces = new Map<string, TestSurfaceState>();
   private readonly wss: WebSocketServer;
 
   constructor(port: number, options?: { initialRemotePaneId?: number; surfaceId?: string }) {
@@ -132,6 +147,16 @@ class FakeSurfAceWsServer {
         },
       ],
     ]);
+    this.surfaces.set(this.surfaceId, {
+      name: "Surface A",
+      panes: this.panes,
+      surfaceId: this.surfaceId,
+      viewport: {
+        height: 768,
+        scale: 2,
+        width: 1024,
+      },
+    });
     this.wss = new WebSocketServer({ port });
     this.wss.on("connection", (socket) => {
       this.sockets.add(socket);
@@ -140,6 +165,11 @@ class FakeSurfAceWsServer {
       socket.once("close", () => {
         this.sockets.delete(socket);
         this.activeSocketCount = this.sockets.size;
+        const surfaceId = this.socketSurfaceIds.get(socket);
+        if (surfaceId && this.pairedSocketsBySurfaceId.get(surfaceId) === socket) {
+          this.pairedSocketsBySurfaceId.delete(surfaceId);
+        }
+        this.socketSurfaceIds.delete(socket);
         if (this.pairedSocket === socket) {
           this.pairedSocket = null;
         }
@@ -169,6 +199,106 @@ class FakeSurfAceWsServer {
         resolve();
       });
     });
+  }
+
+  addSurface(options: {
+    initialRemotePaneId?: number;
+    name?: string;
+    surfaceId: string;
+    viewport?: {
+      height: number;
+      scale: number;
+      width: number;
+    };
+  }): void {
+    const viewport = options.viewport ?? {
+      height: 768,
+      scale: 2,
+      width: 1024,
+    };
+    const initialRemotePaneId = options.initialRemotePaneId ?? 41;
+    this.surfaces.set(options.surfaceId, {
+      name: options.name ?? `Surface ${options.surfaceId}`,
+      panes: new Map<number, TestPane>([
+        [
+          initialRemotePaneId,
+          {
+            contentId: null,
+            contentType: null,
+            drawings: [],
+            name: null,
+            paneLabel: initialRemotePaneId,
+            revision: 0,
+            viewport: { ...viewport },
+          },
+        ],
+      ]),
+      surfaceId: options.surfaceId,
+      viewport,
+    });
+  }
+
+  pairedSocketFor(surfaceId: string): import("ws").WebSocket | null {
+    return this.pairedSocketsBySurfaceId.get(surfaceId) ?? null;
+  }
+
+  sendSurfaceAppeared(options: {
+    fromSurfaceId?: string;
+    initialRemotePaneId?: number;
+    name?: string;
+    surfaceId: string;
+    viewport?: {
+      height: number;
+      scale: number;
+      width: number;
+    };
+  }): void {
+    if (!this.surfaces.has(options.surfaceId)) {
+      this.addSurface(options);
+    }
+    const surface = this.requireSurface(options.surfaceId);
+    this.pairedSocketFor(options.fromSurfaceId ?? this.surfaceId)?.send(
+      JSON.stringify({
+        eventId: `ev_${this.nextEventId++}`,
+        op: "event.surface_appeared",
+        payload: {
+          name: surface.name,
+          surfaceId: surface.surfaceId,
+          viewport: surface.viewport,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      }),
+    );
+  }
+
+  sendSurfaceRemoved(options: { fromSurfaceId?: string; surfaceId: string }): void {
+    this.pairedSocketFor(options.fromSurfaceId ?? this.surfaceId)?.send(
+      JSON.stringify({
+        eventId: `ev_${this.nextEventId++}`,
+        op: "event.surface_removed",
+        payload: {
+          surfaceId: options.surfaceId,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      }),
+    );
+    this.pairedSocketsBySurfaceId.get(options.surfaceId)?.close(1000, "surface_removed");
+    this.surfaces.delete(options.surfaceId);
+  }
+
+  private requireSurface(surfaceId: string): TestSurfaceState {
+    const surface = this.surfaces.get(surfaceId);
+    assert.ok(surface, `unknown test surface ${surfaceId}`);
+    return surface;
+  }
+
+  private requirePairedSurface(socket: import("ws").WebSocket): TestSurfaceState {
+    const surfaceId = this.socketSurfaceIds.get(socket) ?? this.surfaceId;
+    return this.requireSurface(surfaceId);
   }
 
   sendDrawingFlush(paneId: number, contentId: string): void {
@@ -272,19 +402,18 @@ class FakeSurfAceWsServer {
         socket.send(
           JSON.stringify(
             this.response(message.id, "surfaces.list", {
-              surfaces: [
-                {
-                  name: "Surface A",
-                  paired: Boolean(this.pairedSocket),
-                  surfaceId: this.surfaceId,
-                  viewport: { height: 768, scale: 2, width: 1024 },
-                },
-              ],
+              surfaces: [...this.surfaces.values()].map((surface) => ({
+                name: surface.name,
+                paired: this.pairedSocketsBySurfaceId.has(surface.surfaceId),
+                surfaceId: surface.surfaceId,
+                viewport: surface.viewport,
+              })),
             }),
           ),
         );
         return;
       case "pair.request":
+        this.pairRequestSurfaceIds.push(String(message.payload?.surfaceId ?? this.surfaceId));
         this.pairRequests.push({
           initialPaneId: Number(message.payload?.initialPaneId ?? 0),
           initialPaneLabel: Number(message.payload?.initialPaneLabel ?? 0),
@@ -391,7 +520,12 @@ class FakeSurfAceWsServer {
           );
           return;
         }
-        this.pairedSocket = socket;
+        const requestedSurface = this.requireSurface(String(message.payload?.surfaceId ?? this.surfaceId));
+        this.pairedSocketsBySurfaceId.set(requestedSurface.surfaceId, socket);
+        this.socketSurfaceIds.set(socket, requestedSurface.surfaceId);
+        if (requestedSurface.surfaceId === this.surfaceId) {
+          this.pairedSocket = socket;
+        }
         socket.send(
           JSON.stringify(
             this.response(message.id, "pair.request", {
@@ -434,7 +568,7 @@ class FakeSurfAceWsServer {
               resumed: false,
               sessionId: "sa_test_session",
               state: {
-                panes: [...this.panes.entries()].map(([paneId, pane]) => ({
+                panes: [...requestedSurface.panes.entries()].map(([paneId, pane]) => ({
                   contentType: pane.contentType,
                   currentContentId: pane.contentId,
                   currentRevision: pane.revision,
@@ -442,18 +576,19 @@ class FakeSurfAceWsServer {
                   paneLabel: pane.paneLabel,
                 })),
               },
-              surfaceId: this.surfaceId,
-              surfaceName: "Surface A",
-              viewport: { height: 768, scale: 2, width: 1024 },
+              surfaceId: requestedSurface.surfaceId,
+              surfaceName: requestedSurface.name,
+              viewport: requestedSurface.viewport,
             }),
           ),
         );
         return;
-      case "panes.list":
+      case "panes.list": {
+        const targetSurface = this.requirePairedSurface(socket);
         socket.send(
           JSON.stringify(
             this.response(message.id, "panes.list", {
-              panes: [...this.panes.entries()].map(([paneId, pane]) => ({
+              panes: [...targetSurface.panes.entries()].map(([paneId, pane]) => ({
                 activeContentId: pane.contentId,
                 contentType: pane.contentType,
                 name: pane.name,
@@ -465,9 +600,11 @@ class FakeSurfAceWsServer {
           ),
         );
         return;
+      }
       case "snapshot.get": {
+        const targetSurface = this.requirePairedSurface(socket);
         const paneId = Number(message.payload?.paneId ?? 0);
-        const pane = this.panes.get(paneId);
+        const pane = targetSurface.panes.get(paneId);
         assert.ok(pane);
         this.snapshotRequests.push({
           includeImage: Boolean(message.payload?.includeImage),
@@ -505,8 +642,9 @@ class FakeSurfAceWsServer {
         return;
       }
       case "content.set": {
+        const targetSurface = this.requirePairedSurface(socket);
         const paneId = Number(message.payload?.paneId ?? 0);
-        const pane = this.panes.get(paneId);
+        const pane = targetSurface.panes.get(paneId);
         assert.ok(pane);
         pane.contentId = String(message.payload?.contentId);
         pane.contentType = String(message.payload?.contentType);
@@ -534,8 +672,9 @@ class FakeSurfAceWsServer {
         return;
       }
       case "content.clear": {
+        const targetSurface = this.requirePairedSurface(socket);
         const paneId = Number(message.payload?.paneId ?? 0);
-        const pane = this.panes.get(paneId);
+        const pane = targetSurface.panes.get(paneId);
         assert.ok(pane);
         pane.contentId = null;
         pane.contentType = null;
@@ -559,8 +698,9 @@ class FakeSurfAceWsServer {
         return;
       }
       case "pane.split": {
+        const targetSurface = this.requirePairedSurface(socket);
         const paneId = Number(message.payload?.paneId ?? 0);
-        const sourcePane = this.panes.get(paneId);
+        const sourcePane = targetSurface.panes.get(paneId);
         assert.ok(sourcePane);
         if (this.dropNextSplitRequest) {
           this.dropNextSplitRequest = false;
@@ -581,7 +721,7 @@ class FakeSurfAceWsServer {
           paneId,
         });
         for (const [index, newPaneId] of newPaneIds.entries()) {
-          this.panes.set(newPaneId, {
+          targetSurface.panes.set(newPaneId, {
             contentId: null,
             contentType: null,
             drawings: [],
@@ -596,9 +736,9 @@ class FakeSurfAceWsServer {
         socket.send(
           JSON.stringify(
             this.response(message.id, "pane.split", {
-              panes: [...this.panes.keys()].map((currentPaneId) => ({
+              panes: [...targetSurface.panes.keys()].map((currentPaneId) => ({
                 paneId: currentPaneId,
-                paneLabel: this.panes.get(currentPaneId)?.paneLabel ?? currentPaneId,
+                paneLabel: targetSurface.panes.get(currentPaneId)?.paneLabel ?? currentPaneId,
               })),
             }),
           ),
@@ -606,9 +746,10 @@ class FakeSurfAceWsServer {
         return;
       }
       case "pane.close": {
+        const targetSurface = this.requirePairedSurface(socket);
         const paneId = Number(message.payload?.paneId ?? 0);
-        assert.ok(this.panes.has(paneId));
-        if (this.panes.size === 1) {
+        assert.ok(targetSurface.panes.has(paneId));
+        if (targetSurface.panes.size === 1) {
           socket.send(
             JSON.stringify({
               error: {
@@ -625,7 +766,7 @@ class FakeSurfAceWsServer {
           );
           return;
         }
-        this.panes.delete(paneId);
+        targetSurface.panes.delete(paneId);
         this.closePaneRequests.push({ paneId });
         socket.send(
           JSON.stringify(
@@ -638,8 +779,9 @@ class FakeSurfAceWsServer {
         return;
       }
       case "annotations.remove": {
+        const targetSurface = this.requirePairedSurface(socket);
         const paneId = Number(message.payload?.paneId ?? 0);
-        const pane = this.panes.get(paneId);
+        const pane = targetSurface.panes.get(paneId);
         assert.ok(pane);
         const strokeIds = Array.isArray(message.payload?.strokeIds)
           ? message.payload.strokeIds.map((value) => String(value))
@@ -673,8 +815,15 @@ class FakeSurfAceWsServer {
           ),
         );
         return;
-      case "ownership.relinquish":
-        this.pairedSocket = null;
+      case "ownership.relinquish": {
+        const pairedSurfaceId = this.socketSurfaceIds.get(socket);
+        if (pairedSurfaceId) {
+          this.pairedSocketsBySurfaceId.delete(pairedSurfaceId);
+          this.socketSurfaceIds.delete(socket);
+          if (pairedSurfaceId === this.surfaceId) {
+            this.pairedSocket = null;
+          }
+        }
         socket.send(
           JSON.stringify(
             this.response(message.id, "ownership.relinquish", {
@@ -684,6 +833,7 @@ class FakeSurfAceWsServer {
         );
         socket.close(1000, "relinquished");
         return;
+      }
       default:
         throw new Error(`Unhandled op in test server: ${message.op}`);
     }
@@ -1047,6 +1197,110 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await runtime.stop();
       await serverB.close();
       await serverA.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("surfaces.list binds and pairs every surface exposed by one endpoint", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_surface-a" });
+    server.addSurface({ initialRemotePaneId: 42, name: "Surface B", surfaceId: "sf_surface-b" });
+    server.addSurface({ initialRemotePaneId: 43, name: "Surface C", surfaceId: "sf_surface-c" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-multi-surface-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtime.start();
+      await waitFor(() =>
+        server.pairedSocketFor("sf_surface-a") !== null &&
+        server.pairedSocketFor("sf_surface-b") !== null &&
+        server.pairedSocketFor("sf_surface-c") !== null,
+      );
+
+      const screens = await runtime.listScreens();
+      assert.deepEqual(
+        screens.map((screen) => ({
+          fingerprint: screen.fingerprint,
+          panes: screen.panes.map((pane) => pane.paneId),
+          windowLabel: screen.windowLabel,
+        })),
+        [
+          { fingerprint: "sf_surface-a", panes: [1], windowLabel: "a" },
+          { fingerprint: "sf_surface-b", panes: [2], windowLabel: "b" },
+          { fingerprint: "sf_surface-c", panes: [3], windowLabel: "c" },
+        ],
+      );
+
+      const requestsBySurface = new Map(
+        server.pairRequestSurfaceIds.map((surfaceId, index) => [surfaceId, server.pairRequests[index]]),
+      );
+      assert.deepEqual([...requestsBySurface.keys()].sort(), [
+        "sf_surface-a",
+        "sf_surface-b",
+        "sf_surface-c",
+      ]);
+      assert.equal(requestsBySurface.get("sf_surface-a")?.windowLabel, "a");
+      assert.equal(requestsBySurface.get("sf_surface-b")?.windowLabel, "b");
+      assert.equal(requestsBySurface.get("sf_surface-c")?.windowLabel, "c");
+      assert.deepEqual(
+        [...requestsBySurface.values()].map((request) => request?.initialPaneId).sort(),
+        [1, 2, 3],
+      );
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("surface appeared and removed events add and drop live surfaces on one endpoint", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_surface-a" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-surface-events-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtime.start();
+      await waitFor(() => server.pairedSocket !== null);
+
+      server.sendSurfaceAppeared({
+        initialRemotePaneId: 42,
+        name: "Surface B",
+        surfaceId: "sf_surface-b",
+      });
+
+      await waitFor(async () => {
+        const screens = await runtime.listScreens();
+        return (
+          server.pairedSocketFor("sf_surface-b") !== null &&
+          screens.some((screen) => screen.fingerprint === "sf_surface-b")
+        );
+      });
+
+      assert.deepEqual(
+        (await runtime.listScreens()).map((screen) => screen.fingerprint),
+        ["sf_surface-a", "sf_surface-b"],
+      );
+
+      server.sendSurfaceRemoved({ surfaceId: "sf_surface-b" });
+
+      await waitFor(async () => {
+        const screens = await runtime.listScreens();
+        return (
+          server.pairedSocketFor("sf_surface-b") === null &&
+          !screens.some((screen) => screen.fingerprint === "sf_surface-b")
+        );
+      });
+
+      assert.deepEqual(
+        (await runtime.listScreens()).map((screen) => screen.fingerprint),
+        ["sf_surface-a"],
+      );
+    } finally {
+      await runtime.stop();
+      await server.close();
       await fs.rm(stateDir, { force: true, recursive: true });
     }
   });
