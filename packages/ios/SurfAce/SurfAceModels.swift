@@ -299,9 +299,83 @@ struct SurfAcePaneEntry {
     }
 }
 
-enum SurfAceLayoutDirection: String {
+enum SurfAceLayoutDirection: String, Codable {
     case horizontal
     case vertical
+}
+
+enum SurfAcePersistedPaneLayoutNode: Codable {
+    case empty
+    case leaf(Int)
+    case split(direction: SurfAceLayoutDirection, children: [SurfAcePersistedPaneLayoutNode])
+
+    private enum CodingKeys: String, CodingKey {
+        case children
+        case direction
+        case kind
+        case paneId
+    }
+
+    private enum Kind: String, Codable {
+        case empty
+        case leaf
+        case split
+    }
+
+    init(from runtimeNode: SurfAcePaneLayoutNode) {
+        switch runtimeNode {
+        case .empty:
+            self = .empty
+        case .leaf(let paneId):
+            self = .leaf(paneId)
+        case .split(let direction, let children):
+            self = .split(
+                direction: direction,
+                children: children.map(SurfAcePersistedPaneLayoutNode.init(from:))
+            )
+        }
+    }
+
+    var runtimeNode: SurfAcePaneLayoutNode {
+        switch self {
+        case .empty:
+            return .empty
+        case .leaf(let paneId):
+            return .leaf(paneId)
+        case .split(let direction, let children):
+            return .split(direction: direction, children: children.map(\.runtimeNode))
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .empty:
+            self = .empty
+        case .leaf:
+            self = .leaf(try container.decode(Int.self, forKey: .paneId))
+        case .split:
+            self = .split(
+                direction: try container.decode(SurfAceLayoutDirection.self, forKey: .direction),
+                children: try container.decode([SurfAcePersistedPaneLayoutNode].self, forKey: .children)
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .empty:
+            try container.encode(Kind.empty, forKey: .kind)
+        case .leaf(let paneId):
+            try container.encode(Kind.leaf, forKey: .kind)
+            try container.encode(paneId, forKey: .paneId)
+        case .split(let direction, let children):
+            try container.encode(Kind.split, forKey: .kind)
+            try container.encode(direction, forKey: .direction)
+            try container.encode(children, forKey: .children)
+        }
+    }
 }
 
 indirect enum SurfAcePaneLayoutNode {
@@ -376,6 +450,55 @@ indirect enum SurfAcePaneLayoutNode {
             }
             return .split(direction: direction, children: remaining)
         }
+    }
+}
+
+struct SurfAcePersistedPaneTopology: Codable {
+    var paneId: Int
+    var paneLabel: Int
+    var name: String?
+
+    @MainActor
+    init(pane: SurfAcePaneModel) {
+        self.paneId = pane.paneId
+        self.paneLabel = pane.paneLabel
+        self.name = pane.name
+    }
+
+    @MainActor
+    func makePane() -> SurfAcePaneModel {
+        SurfAcePaneModel(paneId: paneId, paneLabel: paneLabel, name: name)
+    }
+}
+
+struct SurfAcePersistedSurfaceTopology: Codable {
+    var windowLabel: String
+    var name: String
+    var paneLayout: SurfAcePersistedPaneLayoutNode
+    var panes: [SurfAcePersistedPaneTopology]
+
+    @MainActor
+    init(surface: SurfAceSurfaceModel) {
+        self.windowLabel = surface.windowLabel
+        self.name = surface.name
+        self.paneLayout = SurfAcePersistedPaneLayoutNode(from: surface.paneLayout)
+        self.panes = surface.panes.map(SurfAcePersistedPaneTopology.init(pane:))
+    }
+
+    @MainActor
+    func apply(to surface: SurfAceSurfaceModel) {
+        let restoredPanes = Dictionary(
+            uniqueKeysWithValues: panes.map { pane in
+                let restoredPane = pane.makePane()
+                return (restoredPane.paneId, restoredPane)
+            }
+        )
+        guard !restoredPanes.isEmpty else { return }
+        surface.windowLabel = windowLabel
+        surface.name = name
+        surface.panesById = restoredPanes
+        surface.paneLayout = paneLayout.runtimeNode
+        surface.providerTopologyInitialized = true
     }
 }
 

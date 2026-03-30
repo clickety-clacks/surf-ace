@@ -13,6 +13,7 @@
 		4A276F1C4C06E696FCA8D872 /* SurfAceBonjourPublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 856099927C9D1E8B57CB1A1D /* SurfAceBonjourPublisherTests.swift */; };
 		5964DDDD0A9B7A881AECDA0C /* SurfAceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C230CE2F392C57A940FD796E /* SurfAceModels.swift */; };
 		6661F25504963451BE3CE25C /* SurfAceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */; };
+		72B46388216FEB0A75BE1771 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B686887B1553129CAEF435A0 /* SurfAceSurfaceTopologyPersistenceTests.swift */; };
 		7440C200D139A9CDEB4071DA /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
 		78FE925CC623EE70BD36510C /* SurfAceSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */; };
 		AB13C11EA76DDA755EEEED0A /* SurfAceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */; };
@@ -41,6 +42,7 @@
 		71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceANSI.swift; sourceTree = "<group>"; };
 		7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisher.swift; sourceTree = "<group>"; };
 		AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServer.swift; sourceTree = "<group>"; };
+		B686887B1553129CAEF435A0 /* SurfAceSurfaceTopologyPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceSurfaceTopologyPersistenceTests.swift; sourceTree = "<group>"; };
 		C230CE2F392C57A940FD796E /* SurfAceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceModels.swift; sourceTree = "<group>"; };
 		DA0B8CE0B10CC8BE7F94EC21 /* SurfAce.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SurfAce.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E1026649686E370A8442CA40 /* SurfAceTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SurfAceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -80,6 +82,7 @@
 				856099927C9D1E8B57CB1A1D /* SurfAceBonjourPublisherTests.swift */,
 				176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */,
 				2F01C4F32B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift */,
+				B686887B1553129CAEF435A0 /* SurfAceSurfaceTopologyPersistenceTests.swift */,
 			);
 			path = SurfAceTests;
 			sourceTree = "<group>";
@@ -189,6 +192,7 @@
 				4A276F1C4C06E696FCA8D872 /* SurfAceBonjourPublisherTests.swift in Sources */,
 				B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */,
 				2F01C4F42B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift in Sources */,
+				72B46388216FEB0A75BE1771 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

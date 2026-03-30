@@ -195,6 +195,8 @@ final class SurfAceRuntime {
     @ObservationIgnored private let bonjourPublisher = SurfAceBonjourPublisher()
     @ObservationIgnored private let identityStore = SurfAceIdentityStore()
     @ObservationIgnored private let mappingStoreKey = "SurfAce.SurfaceIdentityMapping"
+    @ObservationIgnored private let surfaceTopologyStoreKey = "SurfAce.SurfaceTopologyMapping"
+    @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
@@ -207,6 +209,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var surfaceNeedsResumedEvent: Set<String> = []
     @ObservationIgnored private var terminatedConnectionUUIDs: Set<String> = []
     @ObservationIgnored private var identityMapping = SurfAceIdentityMapping()
+    @ObservationIgnored private var persistedSurfaceTopologies: [String: SurfAcePersistedSurfaceTopology] = [:]
     @ObservationIgnored private var heartbeatWatchdogTask: Task<Void, Never>?
 
     private let maxMessageBytes = 12 * 1024 * 1024
@@ -238,7 +241,8 @@ final class SurfAceRuntime {
         "event.pane_renamed",
     ]
 
-    init() {
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
         let hostName = ProcessInfo.processInfo.hostName
@@ -366,6 +370,9 @@ final class SurfAceRuntime {
             windowLabel: "",
             name: screenName
         )
+        if let persistedTopology = persistedSurfaceTopologies[surfaceId] {
+            persistedTopology.apply(to: surface)
+        }
         surfaceById[surfaceId] = surface
         surfaceIdBySceneKey[sceneKey] = surfaceId
         surfaces.append(surface)
@@ -1357,6 +1364,7 @@ final class SurfAceRuntime {
                 ]
             )
         }
+        persistSurfaceTopology(surfaceId: surfaceId)
 
         return [
             "v": 1,
@@ -1380,6 +1388,7 @@ final class SurfAceRuntime {
 
         let name = payload["name"] as? String
         pane.name = name?.isEmpty == true ? nil : name
+        persistSurfaceTopology(surfaceId: surfaceId)
         sendLifecycleEvent(
             surfaceId: surfaceId,
             op: "event.pane_renamed",
@@ -1419,6 +1428,7 @@ final class SurfAceRuntime {
         if let newLayout = surface.paneLayout.removingLeaf(paneId: paneId) {
             surface.paneLayout = newLayout
         }
+        persistSurfaceTopology(surfaceId: surfaceId)
 
         sendLifecycleEvent(
             surfaceId: surfaceId,
@@ -2246,6 +2256,7 @@ final class SurfAceRuntime {
         }
         surface.panesById[initialPaneId]?.paneLabel = initialPaneLabel
         surface.providerTopologyInitialized = true
+        persistSurfaceTopology(surfaceId: surface.surfaceId)
     }
 
     private func viewportPayload(for surface: SurfAceSurfaceModel) -> [String: Any] {
@@ -2443,7 +2454,7 @@ final class SurfAceRuntime {
     }
 
     private func loadIdentityMapping() {
-        guard let data = UserDefaults.standard.data(forKey: mappingStoreKey),
+        guard let data = userDefaults.data(forKey: mappingStoreKey),
               let mapping = try? JSONDecoder().decode(SurfAceIdentityMapping.self, from: data) else {
             identityMapping = SurfAceIdentityMapping()
             return
@@ -2453,7 +2464,27 @@ final class SurfAceRuntime {
 
     private func persistIdentityMapping() {
         guard let data = try? JSONEncoder().encode(identityMapping) else { return }
-        UserDefaults.standard.set(data, forKey: mappingStoreKey)
+        userDefaults.set(data, forKey: mappingStoreKey)
+    }
+
+    private func loadPersistedSurfaceTopologies() {
+        guard let data = userDefaults.data(forKey: surfaceTopologyStoreKey),
+              let mapping = try? JSONDecoder().decode([String: SurfAcePersistedSurfaceTopology].self, from: data) else {
+            persistedSurfaceTopologies = [:]
+            return
+        }
+        persistedSurfaceTopologies = mapping
+    }
+
+    func persistSurfaceTopology(surfaceId: String) {
+        guard let surface = surfaceById[surfaceId] else { return }
+        persistedSurfaceTopologies[surfaceId] = SurfAcePersistedSurfaceTopology(surface: surface)
+        persistSurfaceTopologies()
+    }
+
+    private func persistSurfaceTopologies() {
+        guard let data = try? JSONEncoder().encode(persistedSurfaceTopologies) else { return }
+        userDefaults.set(data, forKey: surfaceTopologyStoreKey)
     }
 
     private func normalizedWindowLabel(from value: Any?) -> String? {
