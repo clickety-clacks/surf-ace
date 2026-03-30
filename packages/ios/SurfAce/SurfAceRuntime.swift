@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Observation
+import Network
 import UIKit
 
 private func surfAceServerRuntimeLog(_ message: String) {
@@ -213,7 +214,6 @@ final class SurfAceRuntime {
 
         do {
             let port = try await server.start(
-                port: fixedServerPort,
                 webSocketPath: webSocketPath,
                 httpHandler: { [weak self] request in
                     guard let self else { return HTTPServerResponse(statusCode: 500) }
@@ -227,14 +227,18 @@ final class SurfAceRuntime {
                     await self.handleWebSocket(socket)
                 }
             )
+            guard port == fixedServerPort else {
+                throw SurfAceHTTPServerError.boundPortMismatch(requested: fixedServerPort, actual: port)
+            }
             serverPort = Int(port)
             isStarted = true
             surfAceServerRuntimeLog("runtime start succeeded port=\(serverPort) screenName=\(screenName) fingerprint=\(fingerprint)")
             startHeartbeatWatchdog()
             publishBonjour()
         } catch {
-            surfAceServerRuntimeLog("runtime start failed port=\(fixedServerPort) error=\(error.localizedDescription)")
-            endpointError = "Server failed on port \(fixedServerPort): \(error.localizedDescription)"
+            let details = startupFailureMessage(for: error)
+            surfAceServerRuntimeLog("runtime start failed port=\(fixedServerPort) error=\(details)")
+            endpointError = details
         }
     }
 
@@ -2356,6 +2360,13 @@ final class SurfAceRuntime {
 
     private func timestampNow() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func startupFailureMessage(for error: Error) -> String {
+        if case let NWError.posix(code) = error, code == .EADDRINUSE {
+            return "Server failed on fixed port \(fixedServerPort): port is already in use; aborting startup without fallback"
+        }
+        return "Server failed on fixed port \(fixedServerPort): \(error.localizedDescription)"
     }
 }
 

@@ -12,21 +12,11 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
-	<key>CFBundleDisplayName</key>
-	<string>Surf Ace</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>UIApplicationSupportsMultipleScenes</key>
-	<true/>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_surf-ace._tcp</string>
-	</array>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Surf Ace uses your local network to advertise and accept provider connections.</string>
 </dict>
 </plist>
