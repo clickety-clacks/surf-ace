@@ -10,7 +10,9 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
     var onPublishFailure: (@Sendable (String) -> Void)?
 
     func publish(name: String, port: Int, txtRecord: [String: String]) {
-        surfAceBonjourLog("publish requested name=\(name) port=\(port) txtKeys=\(txtRecord.keys.sorted())")
+        surfAceBonjourLog(
+            "publish requested name=\(name) port=\(port) txtKeys=\(txtRecord.keys.sorted())"
+        )
         stop()
         triggerLocalNetworkPermissionPrompt()
         let service = NetService(
@@ -47,6 +49,9 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
         let errorDomain = errorDict[NetService.errorDomain]?.intValue ?? 0
         let details = "domain=\(errorDomain) code=\(errorCode)"
         surfAceBonjourLog("publish failed name=\(sender.name) \(details)")
+        if service === sender {
+            service = nil
+        }
         let callback = onPublishFailure
         DispatchQueue.main.async {
             callback?(details)

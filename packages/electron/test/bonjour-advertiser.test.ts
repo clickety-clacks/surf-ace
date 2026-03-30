@@ -19,6 +19,8 @@ class FakeBonjour {
   findCalls = 0;
   unpublishCalls = 0;
   destroyed = false;
+  findError: Error | null = null;
+  publishError: Error | null = null;
 
   constructor(discoveredNames: string[][] = []) {
     this.discoveredNames = discoveredNames;
@@ -28,6 +30,9 @@ class FakeBonjour {
     _options: { protocol: "tcp"; type: "surf-ace" },
     listener?: (service: { name: string }) => void,
   ) {
+    if (this.findError) {
+      throw this.findError;
+    }
     const browser = new EventEmitter() as EventEmitter & { stop(): void };
     const names = this.discoveredNames[this.findCalls] ?? [];
     this.findCalls += 1;
@@ -53,6 +58,9 @@ class FakeBonjour {
     void options.protocol;
     void options.txt;
     void options.type;
+    if (this.publishError) {
+      throw this.publishError;
+    }
     this.publishNames.push(options.name);
     const service = new FakeService();
     this.services.push(service);
@@ -120,4 +128,70 @@ test("bonjour advertiser keeps incrementing the suffix across repeated conflicts
   ]);
   assert.equal(bonjour.unpublishCalls, 1);
   await advertiser.stop();
+});
+
+test("bonjour advertiser disables mDNS when publish throws EADDRNOTAVAIL", async () => {
+  const bonjour = new FakeBonjour();
+  const publishError = new Error("send EADDRNOTAVAIL 224.0.0.251:5353") as Error & { code?: string };
+  publishError.code = "EADDRNOTAVAIL";
+  bonjour.publishError = publishError;
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+
+  try {
+    const advertiser = new BonjourAdvertiser({
+      bonjour,
+      name: "TARS Surf Ace",
+      port: 18791,
+      txtProvider: () => ({ pk: "sf_test" }),
+    });
+
+    advertiser.start();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 850);
+    });
+
+    assert.equal(bonjour.publishNames.length, 0);
+    assert.equal(bonjour.destroyed, true);
+    assert.match(warnings.join("\n"), /disabling mDNS discovery for interface default/);
+    await advertiser.stop();
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("bonjour advertiser disables mDNS when discovery throws ENETUNREACH", async () => {
+  const bonjour = new FakeBonjour();
+  const findError = new Error("send ENETUNREACH 224.0.0.251:5353") as Error & { code?: string };
+  findError.code = "ENETUNREACH";
+  bonjour.findError = findError;
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+
+  try {
+    const advertiser = new BonjourAdvertiser({
+      bonjour,
+      name: "TARS Surf Ace",
+      port: 18791,
+      txtProvider: () => ({ pk: "sf_test" }),
+    });
+
+    advertiser.start();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+
+    assert.equal(bonjour.publishNames.length, 0);
+    assert.equal(bonjour.destroyed, true);
+    assert.match(warnings.join("\n"), /falling back to IP discovery/);
+    await advertiser.stop();
+  } finally {
+    console.warn = originalWarn;
+  }
 });
