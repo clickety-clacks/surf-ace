@@ -849,6 +849,10 @@ function windowLabelForIndex(index: number): string {
   return label;
 }
 
+function paneLabelStorageKey(surfaceId: string, remotePaneId: PaneId): string {
+  return `${surfaceId}::${Number(remotePaneId)}`;
+}
+
 export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly deliverSettledAnnotationTurn?: (
     turn: SurfAceAnnotationIntentTurn,
@@ -1203,7 +1207,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const additionalPaneCount = input.count - 1;
     const newPaneIds = Array.from({ length: additionalPaneCount }, () => {
       const paneId = this.allocatePaneId();
-      const paneLabel = this.ensurePaneLabel(paneId);
+      const paneLabel = this.ensurePaneLabel(surface, null);
       const created = createPane(paneId, paneLabel, paneId, surface.viewport);
       surface.panes.set(created.paneId, created);
       reservedPanes.push(created);
@@ -1997,10 +2001,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private ensurePane(surface: ManagedSurface, remotePaneId: PaneId): ManagedPane {
     const existing = this.findPaneByRemoteId(surface, remotePaneId);
     if (existing) {
+      existing.paneLabel = this.ensurePaneLabel(surface, existing, remotePaneId);
       return existing;
     }
     const paneId = this.allocatePaneId();
-    const paneLabel = this.ensurePaneLabel(paneId, remotePaneId);
+    const paneLabel = this.ensurePaneLabel(surface, null, remotePaneId);
     const created = createPane(paneId, paneLabel, remotePaneId, surface.viewport);
     surface.panes.set(created.paneId, created);
     return created;
@@ -2009,18 +2014,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private ensureInitialPairPane(surface: ManagedSurface): PaneId {
     const existingFirstPane = this.firstPane(surface);
     if (existingFirstPane && existingFirstPane.remotePaneId > 0) {
+      existingFirstPane.paneLabel = this.ensurePaneLabel(
+        surface,
+        existingFirstPane,
+        existingFirstPane.remotePaneId,
+      );
       return existingFirstPane.remotePaneId;
     }
 
     if (existingFirstPane) {
       existingFirstPane.remotePaneId = existingFirstPane.paneId;
-      existingFirstPane.paneLabel = this.ensurePaneLabel(existingFirstPane.paneId);
+      existingFirstPane.paneLabel = this.ensurePaneLabel(surface, existingFirstPane);
       return existingFirstPane.remotePaneId;
     }
 
     if (surface.panes.size === 0) {
       const initialPaneId = this.allocatePaneId();
-      const initialPaneLabel = this.ensurePaneLabel(initialPaneId);
+      const initialPaneLabel = this.ensurePaneLabel(surface, null);
       surface.panes = new Map<number, ManagedPane>([
         [initialPaneId, createPane(initialPaneId, initialPaneLabel, initialPaneId, surface.viewport)],
       ]);
@@ -2079,6 +2089,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     bootstrapPane.remotePaneId = remotePaneId;
+    bootstrapPane.paneLabel = this.ensurePaneLabel(surface, bootstrapPane, remotePaneId);
     return bootstrapPane;
   }
 
@@ -2099,6 +2110,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     existingPane.remotePaneId = remotePaneId;
+    existingPane.paneLabel = this.ensurePaneLabel(surface, existingPane, remotePaneId);
     return existingPane;
   }
 
@@ -2186,28 +2198,70 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return paneLabel;
   }
 
-  private ensurePaneLabel(paneId: PaneId, remotePaneId?: PaneId): number {
-    const key = String(paneId);
-    const existing = this.persistentState.paneLabelsByPaneId[key];
-    if (typeof existing === "number" && existing > 0) {
-      return existing;
+  private ensurePaneLabel(
+    surface: ManagedSurface,
+    pane: ManagedPane | null,
+    remotePaneId?: PaneId,
+  ): number {
+    if (remotePaneId && remotePaneId > 0) {
+      const key = paneLabelStorageKey(surface.surfaceId, remotePaneId);
+      const existing = this.persistentState.paneLabelsByPaneId[key];
+      if (typeof existing === "number" && existing > 0) {
+        return existing;
+      }
+
+      const paneLabel =
+        pane?.paneLabel && pane.paneLabel > 0
+          ? pane.paneLabel
+          : Number(remotePaneId);
+      if (paneLabel >= this.persistentState.nextPaneLabel) {
+        this.persistentState.nextPaneLabel = paneLabel + 1;
+      }
+      this.persistentState.paneLabelsByPaneId[key] = paneLabel;
+      this.runBackgroundTask(
+        `persist pane label for ${surface.surfaceId}/${remotePaneId}`,
+        async () => {
+          await this.persistState();
+        },
+      );
+      return paneLabel;
     }
 
-    const paneLabel =
-      remotePaneId && remotePaneId > 0
-        ? Number(remotePaneId)
-        : this.allocatePaneLabel();
-    if (paneLabel >= this.persistentState.nextPaneLabel) {
-      this.persistentState.nextPaneLabel = paneLabel + 1;
+    if (pane?.paneLabel && pane.paneLabel > 0) {
+      return pane.paneLabel;
     }
-    this.persistentState.paneLabelsByPaneId[key] = paneLabel;
+
+    return this.allocatePaneLabel();
+  }
+
+  private reconcilePaneLabelsBySurfaceId(previousSurfaceId: string, nextSurfaceId: string): void {
+    if (previousSurfaceId === nextSurfaceId) {
+      return;
+    }
+
+    let changed = false;
+    const remapped = { ...this.persistentState.paneLabelsByPaneId };
+    const previousPrefix = `${previousSurfaceId}::`;
+    for (const [key, paneLabel] of Object.entries(this.persistentState.paneLabelsByPaneId)) {
+      if (!key.startsWith(previousPrefix)) {
+        continue;
+      }
+      remapped[`${nextSurfaceId}::${key.slice(previousPrefix.length)}`] = paneLabel;
+      delete remapped[key];
+      changed = true;
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    this.persistentState.paneLabelsByPaneId = remapped;
     this.runBackgroundTask(
-      `persist pane label for ${paneId}`,
+      `persist pane label remap ${previousSurfaceId} -> ${nextSurfaceId}`,
       async () => {
         await this.persistState();
       },
     );
-    return paneLabel;
   }
 
   private async loadState(): Promise<void> {
@@ -2669,6 +2723,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         matchedRemoteSurfaceId,
         surface.windowLabel,
       );
+      this.reconcilePaneLabelsBySurfaceId(oldSurfaceId, matchedRemoteSurfaceId);
       this.surfaces.set(matchedRemoteSurfaceId, surface);
       this.runBackgroundTask(
         `persist remapped surface id ${surface.endpointId}`,

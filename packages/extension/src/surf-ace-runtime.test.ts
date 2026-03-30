@@ -2494,6 +2494,47 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("stable surfaceId plus remotePaneId preserves paneLabel across reconnect bootstrap", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, {
+      initialRemotePaneId: 41,
+      surfaceId: "sf_surface-a",
+    });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-pane-label-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtimeA = createSurfAceRuntime({ discovery, stateDir });
+    const runtimeB = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtimeA.start();
+      await waitFor(() => server.pairedSocket !== null);
+
+      const beforeRestart = (await runtimeA.listScreens())[0];
+      assert.deepEqual(
+        beforeRestart?.panes.map((pane) => ({ paneId: pane.paneId, paneLabel: pane.paneLabel })),
+        [{ paneId: 1, paneLabel: 1 }],
+      );
+
+      await runtimeA.stop();
+      await waitFor(() => server.activeSocketCount === 0);
+
+      await runtimeB.start();
+      await waitFor(() => server.pairRequests.length >= 2);
+      await waitFor(() => server.pairedSocket !== null);
+
+      const afterRestart = (await runtimeB.listScreens())[0];
+      assert.ok(afterRestart);
+      assert.equal(afterRestart.panes.length, 1);
+      assert.equal(afterRestart.panes[0]?.paneId, 2);
+      assert.equal(afterRestart.panes[0]?.paneLabel, 1);
+    } finally {
+      await runtimeB.stop();
+      await runtimeA.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("single invalid_resume clears the stale session and retries as a fresh owner pair", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
