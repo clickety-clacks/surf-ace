@@ -611,7 +611,7 @@ final class SurfAceRuntime {
     }
 
     private func handleWillEnterForeground() {
-        refreshBonjourTXT()
+        publishBonjour()
         for surfaceId in surfaceNeedsResumedEvent {
             refreshConnectionState(surfaceId: surfaceId)
         }

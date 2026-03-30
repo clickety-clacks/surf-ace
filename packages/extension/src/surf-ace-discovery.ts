@@ -333,9 +333,6 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
     }
     this.browser?.update();
     const refreshedEndpoints = await this.queryCurrentEndpoints();
-    if (refreshedEndpoints.length === 0) {
-      return;
-    }
     this.reconcileSnapshot(refreshedEndpoints);
   }
 
@@ -417,7 +414,12 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
 
     for (const [id, existing] of this.snapshot) {
       const refreshed = endpointsByInstance.get(existing.instanceName);
-      if (refreshed && refreshed.endpointId !== id) {
+      if (!refreshed) {
+        this.snapshot.delete(id);
+        changed = true;
+        continue;
+      }
+      if (refreshed.endpointId !== id) {
         this.snapshot.delete(id);
         changed = true;
       }
@@ -547,6 +549,7 @@ export function createBonjourSurfAceDiscoveryService(params?: {
 }
 
 export const __test = {
+  BonjourSurfAceDiscoveryService,
   decodeDnsSdEscapes,
   parseDnsSdBrowseOutput,
   parseDnsSdLookupOutput,

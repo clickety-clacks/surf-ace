@@ -1,6 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { SurfAceDiscoveryEndpoint } from "./surf-ace-discovery.js";
 import { __test } from "./surf-ace-discovery.js";
+
+function endpoint(params?: Partial<SurfAceDiscoveryEndpoint>): SurfAceDiscoveryEndpoint {
+  return {
+    busy: false,
+    capabilitiesBitmask: 31,
+    endpointId: "emanator.local:19001/ws",
+    fingerprintPrefix: "e305802b",
+    host: "emanator.local",
+    instanceName: "Emanator Surf Ace",
+    lastSeenAt: 1234,
+    name: "Emanator",
+    port: 19001,
+    protocolVersion: 1,
+    viewport: {
+      height: 1024,
+      scale: 2,
+      width: 768,
+    },
+    wsPath: "/ws",
+    ...params,
+  };
+}
 
 test("parseDnsSdBrowseOutput decodes instance names", () => {
   const output = `Browsing for _surf-ace._tcp.local.
@@ -46,4 +69,50 @@ DATE: ---Sat 21 Mar 2026---
     },
     wsPath: "/ws",
   });
+});
+
+test("refreshNow clears stale endpoints when a full refresh returns no advertisements", async () => {
+  const discovery = new __test.BonjourSurfAceDiscoveryService({
+    logger: {},
+    now: () => 1234,
+  }) as any;
+  const notifications: SurfAceDiscoveryEndpoint[][] = [];
+  discovery.subscribe((endpoints: SurfAceDiscoveryEndpoint[]) => {
+    notifications.push(endpoints);
+  });
+  discovery.started = true;
+  discovery.browser = { update() {} };
+  discovery.snapshot.set("emanator.local:19001/ws", endpoint());
+  discovery.queryCurrentEndpoints = async () => [];
+
+  await discovery.refreshNow();
+
+  assert.deepEqual(discovery.getSnapshot(), []);
+  assert.deepEqual(notifications, [[]]);
+});
+
+test("refreshNow removes endpoints missing from the refreshed snapshot", async () => {
+  const discovery = new __test.BonjourSurfAceDiscoveryService({
+    logger: {},
+    now: () => 1234,
+  }) as any;
+  const retained = endpoint({ endpointId: "emanator.local:19001/ws", instanceName: "Emanator Surf Ace" });
+  const stale = endpoint({
+    endpointId: "emanator.local:29001/ws",
+    fingerprintPrefix: "deadbeef",
+    host: "emanator.local",
+    instanceName: "Old Emanator Surf Ace",
+    lastSeenAt: 1200,
+    name: "Old Emanator",
+    port: 29001,
+  });
+  discovery.started = true;
+  discovery.browser = { update() {} };
+  discovery.snapshot.set(retained.endpointId, retained);
+  discovery.snapshot.set(stale.endpointId, stale);
+  discovery.queryCurrentEndpoints = async () => [endpoint({ lastSeenAt: 5678 })];
+
+  await discovery.refreshNow();
+
+  assert.deepEqual(discovery.getSnapshot(), [retained]);
 });

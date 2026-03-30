@@ -6,33 +6,88 @@ private func surfAceBonjourLog(_ message: String) {
 }
 
 final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
+    private struct Publication {
+        let name: String
+        let port: Int
+        let txtRecord: [String: String]
+    }
+
     private var service: NetService?
+    private var desiredPublication: Publication?
+    private let permissionPromptTrigger: () -> Void
+    private let serviceFactory: (String, Int) -> NetService
     var onPublishFailure: (@Sendable (String) -> Void)?
+
+    override init() {
+        self.permissionPromptTrigger = {
+            SurfAceBonjourPublisher.triggerLocalNetworkPermissionPrompt()
+        }
+        self.serviceFactory = { name, port in
+            NetService(
+                domain: "local.",
+                type: "_surf-ace._tcp.",
+                name: name,
+                port: Int32(port)
+            )
+        }
+        super.init()
+    }
+
+    init(
+        serviceFactory: @escaping (String, Int) -> NetService,
+        permissionPromptTrigger: @escaping () -> Void
+    ) {
+        self.serviceFactory = serviceFactory
+        self.permissionPromptTrigger = permissionPromptTrigger
+        super.init()
+    }
 
     func publish(name: String, port: Int, txtRecord: [String: String]) {
         surfAceBonjourLog(
             "publish requested name=\(name) port=\(port) txtKeys=\(txtRecord.keys.sorted())"
         )
-        stop()
-        triggerLocalNetworkPermissionPrompt()
-        let service = NetService(
-            domain: "local.",
-            type: "_surf-ace._tcp.",
-            name: name,
-            port: Int32(port)
-        )
-        service.delegate = self
-        service.setTXTRecord(NetService.data(fromTXTRecord: encodeTXTRecord(txtRecord)))
-        service.publish(options: .noAutoRename)
-        self.service = service
+        desiredPublication = Publication(name: name, port: port, txtRecord: txtRecord)
+        publishDesiredPublication(replacingExistingService: true)
     }
 
     func updateTXTRecord(_ txtRecord: [String: String]) {
+        if let publication = desiredPublication {
+            desiredPublication = Publication(
+                name: publication.name,
+                port: publication.port,
+                txtRecord: txtRecord
+            )
+        }
         surfAceBonjourLog("update TXT name=\(service?.name ?? "nil") txtKeys=\(txtRecord.keys.sorted())")
+        if service == nil {
+            publishDesiredPublication(replacingExistingService: false)
+            return
+        }
         service?.setTXTRecord(NetService.data(fromTXTRecord: encodeTXTRecord(txtRecord)))
     }
 
     func stop() {
+        desiredPublication = nil
+        stopService()
+    }
+
+    private func publishDesiredPublication(replacingExistingService: Bool) {
+        guard let publication = desiredPublication else { return }
+        if replacingExistingService {
+            stopService()
+        } else if service != nil {
+            return
+        }
+
+        permissionPromptTrigger()
+        let service = serviceFactory(publication.name, publication.port)
+        service.delegate = self
+        service.setTXTRecord(NetService.data(fromTXTRecord: encodeTXTRecord(publication.txtRecord)))
+        service.publish(options: .noAutoRename)
+        self.service = service
+    }
+
+    private func stopService() {
         surfAceBonjourLog("stop requested name=\(service?.name ?? "nil")")
         service?.stop()
         service = nil
@@ -64,9 +119,12 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
 
     func netServiceDidStop(_ sender: NetService) {
         surfAceBonjourLog("service stopped name=\(sender.name)")
+        if service === sender {
+            service = nil
+        }
     }
 
-    private func triggerLocalNetworkPermissionPrompt() {
+    private static func triggerLocalNetworkPermissionPrompt() {
         surfAceBonjourLog("permission trigger start")
         let parameters = NWParameters()
         parameters.includePeerToPeer = true
