@@ -25,6 +25,18 @@ function endpoint(params?: Partial<SurfAceDiscoveryEndpoint>): SurfAceDiscoveryE
   };
 }
 
+test("discoveryDiagnostic formats concise structured fields", () => {
+  assert.equal(
+    __test.discoveryDiagnostic("reconcile", {
+      adopted_count: 1,
+      endpoint_id: "eezo.local:19001/ws",
+      note: "name changed",
+      skipped: undefined,
+    }),
+    '[surf-ace:discovery] event=reconcile adopted_count=1 endpoint_id=eezo.local:19001/ws note="name changed"',
+  );
+});
+
 test("parseDnsSdBrowseOutput decodes instance names", () => {
   const output = `Browsing for _surf-ace._tcp.local.
 DATE: ---Sat 21 Mar 2026---

@@ -5,7 +5,7 @@ import WebSocket from "ws";
 
 import type { PairRequest, Request, Response } from "../../protocol/src/index.js";
 import { SurfaceCore } from "../src/surface-core.js";
-import { SurfaceWsServer } from "../src/ws-server.js";
+import { SurfaceWsServer, __test } from "../src/ws-server.js";
 
 let nextPort = 24301;
 
@@ -294,6 +294,17 @@ test("ws server keeps ownership lock after owner socket closes", async () => {
     assert.equal(listed.payload.surfaces[0]?.paired, true);
     await closeSocket(probe);
   });
+});
+
+test("ws server diagnostics format concise structured fields", () => {
+  assert.equal(
+    __test.serverDiagnostic("pair_request_begin", {
+      provider_id: "pv_alpha",
+      surface_id: "sf_main",
+      takeover: false,
+    }),
+    "[surf-ace:server] event=pair_request_begin provider_id=pv_alpha surface_id=sf_main takeover=false",
+  );
 });
 
 test("ws server allows the lock owner to resume after disconnect", async () => {

@@ -418,6 +418,23 @@ type PersistedScreenSnapshotFile = {
   version: 1;
 };
 
+type RuntimeDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
+
+function formatRuntimeDiagnosticValue(value: string | number | boolean): string {
+  const text = String(value);
+  return /^[A-Za-z0-9_./:@%-]+$/.test(text) ? text : JSON.stringify(text);
+}
+
+function runtimeDiagnostic(event: string, fields: RuntimeDiagnosticFields = {}): string {
+  const suffix = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${formatRuntimeDiagnosticValue(value as string | number | boolean)}`)
+    .join(" ");
+  return suffix.length > 0
+    ? `[surf-ace:runtime] event=${event} ${suffix}`
+    : `[surf-ace:runtime] event=${event}`;
+}
+
 const DEFAULT_DRAWING_FLUSH_CONFIG: DrawingFlushConfig = {
   idleWindowMs: 8_000,
   maxIntervalMs: 30_000,
@@ -2651,14 +2668,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     // Spec §6.1: connect → pair.request directly (surfaces.list is optional and not required
     // for single-window endpoints; Electron returns errors on the pre-flight WS connection).
     this.logger.info?.(
-      `[surf-ace:runtime] refreshEndpointTopology for ${endpoint.name}@${endpoint.endpointId} (fp=${endpoint.fingerprintPrefix || "none"})`,
+      runtimeDiagnostic("endpoint_reconcile_begin", {
+        busy: endpoint.busy,
+        endpoint_id: endpoint.endpointId,
+        fingerprint: endpoint.fingerprintPrefix || "none",
+        host: endpoint.host,
+        port: endpoint.port,
+        surface_name: endpoint.name,
+      }),
     );
     const existing = this.reusableSurface(
       [...this.surfaces.values()].find((s) => s.endpointId === endpoint.endpointId),
     );
 
     if (existing) {
-      this.logger.info?.(`[surf-ace:runtime] refreshEndpointTopology → reuse existing by endpointId: ${existing.surfaceId}`);
+      this.logger.info?.(
+        runtimeDiagnostic("endpoint_adopt", {
+          action: "reuse_by_endpoint",
+          endpoint_id: endpoint.endpointId,
+          surface_id: existing.surfaceId,
+        }),
+      );
       this.assignEndpoint(existing, endpoint);
       this.ensureSurfaceWorker(existing);
       return;
@@ -2671,14 +2701,28 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
 
     if (existingByFingerprint) {
-      this.logger.info?.(`[surf-ace:runtime] refreshEndpointTopology → reuse existing by fingerprint: ${existingByFingerprint.surfaceId}`);
+      this.logger.info?.(
+        runtimeDiagnostic("endpoint_adopt", {
+          action: "reuse_by_fingerprint",
+          endpoint_id: endpoint.endpointId,
+          fingerprint: endpoint.fingerprintPrefix || "none",
+          surface_id: existingByFingerprint.surfaceId,
+        }),
+      );
       this.assignEndpoint(existingByFingerprint, endpoint);
       this.ensureSurfaceWorker(existingByFingerprint);
       return;
     }
 
     const surfaceId = makeProvisionalSurfaceId(endpoint.endpointId);
-    this.logger.info?.(`[surf-ace:runtime] refreshEndpointTopology → NEW surface ${surfaceId} for ${endpoint.name}`);
+    this.logger.info?.(
+      runtimeDiagnostic("endpoint_adopt", {
+        action: "create_surface",
+        endpoint_id: endpoint.endpointId,
+        surface_id: surfaceId,
+        surface_name: endpoint.name,
+      }),
+    );
     const surface = createManagedSurface(
       surfaceId,
       endpoint,
@@ -2716,6 +2760,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!endpointChanged) {
       return;
     }
+    this.logger.info?.(
+      runtimeDiagnostic("endpoint_rebind", {
+        fingerprint: endpoint.fingerprintPrefix || "none",
+        from_endpoint_id: previousEndpointId,
+        surface_id: surface.surfaceId,
+        to_endpoint_id: endpoint.endpointId,
+      }),
+    );
 
     surface.reconnectAttempt = 0;
     surface.unreachableFailures = 0;
@@ -2781,6 +2833,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (preservedSurface) {
         this.preserveSurfaceStateUntilPairResponse(surface, preservedSurface);
       }
+      this.logger.info?.(
+        runtimeDiagnostic("surface_adopt_remote_id", {
+          endpoint_id: surface.endpointId,
+          from_surface_id: oldSurfaceId,
+          panes: preservedSurface?.panes.size ?? surface.panes.size,
+          to_surface_id: matchedRemoteSurfaceId,
+        }),
+      );
       surface.surfaceId = matchedRemoteSurfaceId;
       surface.windowLabel = this.reconcileWindowLabel(
         oldSurfaceId,
@@ -3039,7 +3099,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               this.stopHeartbeat(surface);
               if (!surface.stopRequested && (code !== 1000 || reason !== "provider_shutdown")) {
                 this.logger.warn?.(
-                  `[surf-ace:runtime] socket closed for ${surface.surfaceId}: code=${code} reason=${reason || "<none>"}`,
+                  runtimeDiagnostic("socket_closed", {
+                    code,
+                    reason: reason || "<none>",
+                    surface_id: surface.surfaceId,
+                  }),
                 );
               }
               if (!surface.autoRetryEnabled) {
@@ -3059,22 +3123,49 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 this.handleWireEvent(surface, event);
               } catch (error) {
                 this.logger.warn?.(
-                  `[surf-ace:runtime] event handler error for ${surface.surfaceId}: ${String(error)}`,
+                  runtimeDiagnostic("event_handler_error", {
+                    error: String(error),
+                    surface_id: surface.surfaceId,
+                  }),
                 );
               }
             },
           });
 
           await this.assignSurfaceClient(surface, client);
-          this.logger.info?.(`[surf-ace:runtime] worker connecting to ${buildWsUrl(surface.endpoint)} for ${surface.surfaceId}`);
+          this.logger.info?.(
+            runtimeDiagnostic("reconnect_attempt", {
+              attempt: surface.reconnectAttempt + 1,
+              endpoint_id: surface.endpointId,
+              surface_id: surface.surfaceId,
+              url: buildWsUrl(surface.endpoint),
+            }),
+          );
           await client.connect(REQUEST_TIMEOUT_MS);
-          this.logger.info?.(`[surf-ace:runtime] worker WS open for ${surface.surfaceId}, discovering surfaceId`);
+          this.logger.info?.(
+            runtimeDiagnostic("socket_open", {
+              endpoint_id: surface.endpointId,
+              surface_id: surface.surfaceId,
+            }),
+          );
           await this.discoverSurfaceId(surface);
-          this.logger.info?.(`[surf-ace:runtime] worker pairing ${surface.surfaceId}`);
+          this.logger.info?.(
+            runtimeDiagnostic("pair_request_begin", {
+              resume: Boolean(this.shouldAttemptResume(surface)),
+              surface_id: surface.surfaceId,
+            }),
+          );
           const pairResponse = await this.requestPair(surface);
           this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId));
           surface.connectionState = "connected";
-          this.logger.info?.(`[surf-ace:runtime] worker CONNECTED ${surface.surfaceId} session=${pairResponse.payload.sessionId} panes=${pairResponse.payload.state.panes.length}`);
+          this.logger.info?.(
+            runtimeDiagnostic("pair_response_ok", {
+              panes: pairResponse.payload.state.panes.length,
+              resumed: pairResponse.payload.resumed,
+              session_id: pairResponse.payload.sessionId,
+              surface_id: surface.surfaceId,
+            }),
+          );
           surface.unreachableFailures = 0;
           this.applyPairState(surface, pairResponse);
           this.startHeartbeat(surface);
@@ -3094,7 +3185,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           ) {
             if (surface.sessionId !== null) {
               this.logger.warn?.(
-                `[surf-ace:runtime] clearing stale sessionId for ${surface.surfaceId} after ownership lock / resume mismatch`,
+                runtimeDiagnostic("resume_state_cleared", {
+                  reason: "ownership_lock_or_resume_mismatch",
+                  surface_id: surface.surfaceId,
+                }),
               );
               surface.sessionId = null;
               surface.hasPairedInGatewaySession = false;
@@ -3108,7 +3202,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 : "connecting";
           }
           this.logger.warn?.(
-            `[surf-ace:runtime] worker error for ${surface.surfaceId}: ${String(error)}`,
+            runtimeDiagnostic("reconnect_error", {
+              error: String(error),
+              failures: surface.unreachableFailures,
+              surface_id: surface.surfaceId,
+            }),
           );
         } finally {
           this.stopHeartbeat(surface);

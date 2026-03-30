@@ -94,6 +94,23 @@ const DEFAULT_LIMITS = {
   maxVisibleTextBytes: 4096,
 };
 
+type ServerDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
+
+function formatServerDiagnosticValue(value: string | number | boolean): string {
+  const text = String(value);
+  return /^[A-Za-z0-9_./:@%-]+$/.test(text) ? text : JSON.stringify(text);
+}
+
+function serverDiagnostic(event: string, fields: ServerDiagnosticFields = {}): string {
+  const suffix = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${formatServerDiagnosticValue(value)}`)
+    .join(" ");
+  return suffix.length > 0
+    ? `[surf-ace:server] event=${event} ${suffix}`
+    : `[surf-ace:server] event=${event}`;
+}
+
 export class SurfaceWsServer {
   private readonly core: SurfaceCore;
   private readonly endpointName: string;
@@ -135,6 +152,12 @@ export class SurfaceWsServer {
 
     this.httpServer.on("upgrade", (request, socket, head) => {
       if (request.url !== this.wsPath) {
+        console.warn(
+          serverDiagnostic("socket_reject", {
+            path: request.url ?? "<none>",
+            reason: "bad_path",
+          }),
+        );
         socket.destroy();
         return;
       }
@@ -143,12 +166,24 @@ export class SurfaceWsServer {
       });
     });
 
-    this.wss.on("connection", (socket) => {
+    this.wss.on("connection", (socket, request) => {
       this.socketMeta.set(socket, { cache: new Map(), pairedSurfaceId: null });
+      console.info(
+        serverDiagnostic("socket_open", {
+          path: request.url ?? this.wsPath,
+        }),
+      );
       socket.on("message", (data) => {
         void this.handleMessage(socket, data.toString("utf8")).catch(() => {});
       });
-      socket.on("close", () => {
+      socket.on("close", (code, reasonBuffer) => {
+        const reason = reasonBuffer.toString() || "<none>";
+        console.info(
+          serverDiagnostic("socket_close", {
+            code,
+            reason,
+          }),
+        );
         this.handleSocketClosed(socket);
       });
     });
@@ -159,14 +194,34 @@ export class SurfaceWsServer {
   }
 
   async start(): Promise<void> {
+    console.info(
+      serverDiagnostic("bind_start", {
+        host: "0.0.0.0",
+        port: this.port,
+        ws_path: this.wsPath,
+      }),
+    );
     await new Promise<void>((resolve, reject) => {
       this.httpServer.listen(this.port, "0.0.0.0", () => resolve());
       this.httpServer.once("error", reject);
     });
     this.ignoreInitialSurfaceEvents = false;
+    console.info(
+      serverDiagnostic("bind_ok", {
+        endpoint_name: this.endpointName,
+        host: this.hostName,
+        port: this.port,
+        ws_path: this.wsPath,
+      }),
+    );
   }
 
   async stop(): Promise<void> {
+    console.info(
+      serverDiagnostic("stop_begin", {
+        active_sessions: [...this.transports.values()].filter((transport) => Boolean(transport.active)).length,
+      }),
+    );
     for (const transport of this.transports.values()) {
       clearTransport(transport);
       if (transport.active) {
@@ -188,6 +243,7 @@ export class SurfaceWsServer {
         });
       });
     });
+    console.info(serverDiagnostic("stop_ok"));
   }
 
   advertisedTxt(fingerprintPrefix: string): Record<string, string> {
@@ -467,6 +523,7 @@ export class SurfaceWsServer {
     try {
       request = JSON.parse(raw) as Request;
     } catch {
+      console.warn(serverDiagnostic("socket_protocol_violation", { reason: "invalid_json" }));
       socket.close(4410, "protocol_violation");
       return;
     }
@@ -483,6 +540,13 @@ export class SurfaceWsServer {
     const cached = cache.get(request.id);
     if (cached) {
       if (cached.payloadHash !== payloadHash) {
+        console.warn(
+          serverDiagnostic("request_reject", {
+            op: request.op,
+            reason: "request_id_reuse_mismatch",
+            request_id: request.id,
+          }),
+        );
         await this.reply(socket, errorResponse(request.op, request.id, "invalid_request_id_reuse", "Request id was reused with different payload"));
         return;
       }
@@ -495,6 +559,12 @@ export class SurfaceWsServer {
       response = await this.dispatchRequest(socket, request);
     } catch (error) {
       if (error instanceof SurfaceCoreError) {
+        console.warn(
+          serverDiagnostic("request_error", {
+            code: error.code,
+            op: request.op,
+          }),
+        );
         response = errorResponse(
           request.op,
           request.id,
@@ -503,6 +573,12 @@ export class SurfaceWsServer {
           error.details,
         );
       } else {
+        console.warn(
+          serverDiagnostic("request_error", {
+            code: "internal_error",
+            op: request.op,
+          }),
+        );
         response = errorResponse(request.op, request.id, "internal_error", "Unhandled surface error");
       }
     }
@@ -639,29 +715,71 @@ export class SurfaceWsServer {
     const requestedProfile = request.payload.eventProfile ?? "minimum_deep";
     const drawingFlushConfig = request.payload.drawingFlushConfig ?? DEFAULT_DRAWING_FLUSH_CONFIG;
     const resumeSessionId = request.payload.resume?.sessionId ?? null;
+    console.info(
+      serverDiagnostic("pair_request_begin", {
+        provider_id: providerId,
+        resume_session_id: resumeSessionId ?? "nil",
+        surface_id: surfaceId,
+        takeover: request.payload.takeover ?? false,
+      }),
+    );
 
     let resumed = false;
     let sessionId: string;
 
     if (!lock) {
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+      console.info(
+        serverDiagnostic("pair_request_new_session", {
+          provider_id: providerId,
+          surface_id: surfaceId,
+        }),
+      );
     } else if (lock.providerId === providerId) {
       if (resumeSessionId !== lock.sessionId) {
+        console.warn(
+          serverDiagnostic("pair_request_invalid_resume", {
+            expected_session_id: lock.sessionId,
+            provider_id: providerId,
+            received_session_id: resumeSessionId ?? "nil",
+            surface_id: surfaceId,
+          }),
+        );
         throw new SurfaceCoreError("invalid_resume", "Resume session did not match active ownership lock");
       }
       resumed = true;
       sessionId = lock.sessionId;
+      console.info(
+        serverDiagnostic("pair_request_resumed", {
+          provider_id: providerId,
+          session_id: sessionId,
+          surface_id: surfaceId,
+        }),
+      );
       if (existing && existing.socket !== socket) {
         this.detachActiveSession(surfaceId, "superseded");
       }
     } else {
       if (!request.payload.takeover) {
+        console.warn(
+          serverDiagnostic("pair_request_busy", {
+            lock_provider_id: lock.providerId,
+            requested_provider_id: providerId,
+            surface_id: surfaceId,
+          }),
+        );
         throw new SurfaceCoreError("busy", "Surface ownership lock is held by another provider");
       }
       if (existing && existing.socket !== socket) {
         this.detachActiveSession(surfaceId, "superseded");
       }
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+      console.info(
+        serverDiagnostic("pair_request_takeover", {
+          provider_id: providerId,
+          surface_id: surfaceId,
+        }),
+      );
     }
 
     const session: ActiveSession = {
@@ -726,6 +844,15 @@ export class SurfaceWsServer {
       type: "response",
       v: 1,
     };
+
+    console.info(
+      serverDiagnostic("pair_response_ok", {
+        pane_count: response.payload.state.panes.length,
+        resumed,
+        session_id: sessionId,
+        surface_id: surfaceId,
+      }),
+    );
 
     return response;
   }
@@ -983,6 +1110,13 @@ export class SurfaceWsServer {
     const session = transport.active;
     clearPaneTimers(session.paneFlushTimers);
     transport.active = null;
+    console.info(
+      serverDiagnostic("session_detached", {
+        provider_id: session.providerId,
+        session_id: session.sessionId,
+        surface_id: surfaceId,
+      }),
+    );
     this.core.setConnectionBar(surfaceId, "connecting");
     this.onBusyChanged?.();
   }
@@ -999,6 +1133,14 @@ export class SurfaceWsServer {
     if (meta) {
       meta.pairedSurfaceId = null;
     }
+    console.info(
+      serverDiagnostic("session_detach_request", {
+        provider_id: active.providerId,
+        reason,
+        session_id: active.sessionId,
+        surface_id: surfaceId,
+      }),
+    );
     active.socket.close(1000, reason);
   }
 
@@ -1209,6 +1351,10 @@ export class SurfaceWsServer {
     }
   }
 }
+
+export const __test = {
+  serverDiagnostic,
+};
 
 function errorResponse(
   op: Request["op"],

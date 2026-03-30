@@ -37,6 +37,23 @@ type BonjourBinding = {
   service: Service | null;
 };
 
+type BonjourDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
+
+function formatBonjourDiagnosticValue(value: string | number | boolean): string {
+  const text = String(value);
+  return /^[A-Za-z0-9_./:@%-]+$/.test(text) ? text : JSON.stringify(text);
+}
+
+function bonjourDiagnostic(event: string, fields: BonjourDiagnosticFields = {}): string {
+  const suffix = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${formatBonjourDiagnosticValue(value)}`)
+    .join(" ");
+  return suffix.length > 0
+    ? `[surf-ace:bonjour] event=${event} ${suffix}`
+    : `[surf-ace:bonjour] event=${event}`;
+}
+
 function isIpv4Family(family: string | number): boolean {
   return family === 4 || family === "IPv4";
 }
@@ -91,6 +108,13 @@ export class BonjourAdvertiser {
 
   start(): void {
     this.started = true;
+    console.info(
+      bonjourDiagnostic("publish_start", {
+        base_name: this.baseName,
+        binding_count: this.activeBonjourBindings().length,
+        port: this.port,
+      }),
+    );
     if (this.services.length > 0 || this.publishing) {
       return;
     }
@@ -101,12 +125,24 @@ export class BonjourAdvertiser {
     if (!this.started) {
       return;
     }
+    console.info(
+      bonjourDiagnostic("publish_refresh", {
+        current_name: this.serviceName,
+        isolated: Boolean(this.isolatedPublisher),
+      }),
+    );
     void this.restart();
   }
 
   async stop(): Promise<void> {
     this.destroyed = true;
     this.started = false;
+    console.info(
+      bonjourDiagnostic("publish_stop", {
+        isolated: Boolean(this.isolatedPublisher),
+        published_count: this.services.length,
+      }),
+    );
     this.clearVisibilityTimer();
     this.stopIsolatedPublisher();
     await Promise.all(this.bonjourBindings.map((binding) => this.shutdownBonjourBinding(binding)));
@@ -145,6 +181,13 @@ export class BonjourAdvertiser {
       void this.publishWithIsolatedPublisher(name);
       return;
     }
+    console.info(
+      bonjourDiagnostic("publish_attempt", {
+        binding_count: this.activeBonjourBindings().length,
+        name,
+        port: this.port,
+      }),
+    );
     const services: Service[] = [];
     for (const binding of this.activeBonjourBindings()) {
       let service: Service;
@@ -169,6 +212,12 @@ export class BonjourAdvertiser {
     }
     this.serviceName = name;
     this.services = services;
+    console.info(
+      bonjourDiagnostic("publish_issued", {
+        binding_count: services.length,
+        name,
+      }),
+    );
     this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_DELAY_MS);
   }
 
@@ -202,7 +251,12 @@ export class BonjourAdvertiser {
     }
     if (!activeNames.has(publishedName)) {
       this.visibilityFailures += 1;
-      console.warn(`[surf-ace] bonjour publish not visible for "${publishedName}"; retrying`);
+      console.warn(
+        bonjourDiagnostic("publish_not_visible", {
+          failure_count: this.visibilityFailures,
+          name: publishedName,
+        }),
+      );
       if (
         !this.isolatedPublisher &&
         this.visibilityFailures >= BonjourAdvertiser.VISIBILITY_FAILURES_BEFORE_ISOLATION
@@ -214,6 +268,12 @@ export class BonjourAdvertiser {
       return;
     }
     this.visibilityFailures = 0;
+    console.info(
+      bonjourDiagnostic("publish_visible", {
+        discovered_count: activeNames.size,
+        name: publishedName,
+      }),
+    );
     this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
   }
 
@@ -229,7 +289,12 @@ export class BonjourAdvertiser {
     this.republishAttempts += 1;
     this.serviceName = `${this.baseName} (${this.republishAttempts + 1})`;
     try {
-      console.warn(`[surf-ace] bonjour name conflict; retrying as "${this.serviceName}"`);
+      console.warn(
+        bonjourDiagnostic("publish_republish", {
+          name: this.serviceName,
+          reason: "name_conflict",
+        }),
+      );
       await this.restart();
     } finally {
       this.restarting = false;
@@ -250,7 +315,13 @@ export class BonjourAdvertiser {
     if (candidate !== preferredName) {
       this.republishAttempts = suffix - 1;
       this.serviceName = candidate;
-      console.warn(`[surf-ace] bonjour name conflict; retrying as "${candidate}"`);
+      console.warn(
+        bonjourDiagnostic("publish_republish", {
+          candidate,
+          preferred_name: preferredName,
+          reason: "name_conflict",
+        }),
+      );
     }
     return candidate;
   }
@@ -340,7 +411,13 @@ export class BonjourAdvertiser {
         return;
       }
       if (!this.isNameConflict(error)) {
-        console.warn("[surf-ace] bonjour publish failed:", error.message);
+        console.warn(
+          bonjourDiagnostic("publish_failed", {
+            error: error.message,
+            interface: binding.interfaceAddress ?? "default",
+            name: this.serviceName,
+          }),
+        );
         return;
       }
       void this.republishWithFallbackName();
@@ -354,7 +431,11 @@ export class BonjourAdvertiser {
     const code = error instanceof Error ? ((error as BonjourError).code ?? error.message) : String(error);
     const interfaceLabel = binding.interfaceAddress ?? "default";
     console.warn(
-      `[surf-ace] bonjour multicast unavailable (${code}); disabling mDNS discovery for interface ${interfaceLabel} and falling back to IP discovery`,
+      bonjourDiagnostic("binding_disabled", {
+        error: code,
+        interface: interfaceLabel,
+        reason: "multicast_unavailable",
+      }),
     );
     binding.disabled = true;
     this.clearVisibilityTimer();
@@ -367,6 +448,12 @@ export class BonjourAdvertiser {
   }
 
   private async unpublishBonjourBinding(binding: BonjourBinding): Promise<void> {
+    console.info(
+      bonjourDiagnostic("publish_unpublish", {
+        interface: binding.interfaceAddress ?? "default",
+        name: binding.service?.name ?? this.serviceName,
+      }),
+    );
     await new Promise<void>((resolve) => {
       binding.client.unpublishAll(() => resolve());
     });
@@ -386,7 +473,12 @@ export class BonjourAdvertiser {
     if (this.destroyed) {
       return;
     }
-    console.warn("[surf-ace] switching bonjour publishing to dns-sd");
+    console.warn(
+      bonjourDiagnostic("publish_isolated_switch", {
+        failures: this.visibilityFailures,
+        name: this.serviceName,
+      }),
+    );
     await Promise.all(this.activeBonjourBindings().map((binding) => this.unpublishBonjourBinding(binding)));
     this.services = [];
     await this.publishWithIsolatedPublisher(this.serviceName);
@@ -397,6 +489,13 @@ export class BonjourAdvertiser {
     this.serviceName = name;
     const txt = this.txtProvider();
     const txtArgs = Object.entries(txt).map(([k, v]) => `${k}=${v}`);
+    console.info(
+      bonjourDiagnostic("publish_attempt", {
+        isolated: true,
+        name,
+        port: this.port,
+      }),
+    );
     const child = spawn(
       "dns-sd",
       ["-R", name, "_surf-ace._tcp", "local.", String(this.port), ...txtArgs],
@@ -404,7 +503,12 @@ export class BonjourAdvertiser {
     );
     child.on("exit", (code) => {
       if (this.isolatedPublisher === child) {
-        console.warn(`[surf-ace] dns-sd publisher exited (code=${code})`);
+        console.warn(
+          bonjourDiagnostic("publish_isolated_exit", {
+            code: code ?? "null",
+            name: this.serviceName,
+          }),
+        );
         this.isolatedPublisher = null;
       }
     });
@@ -418,6 +522,15 @@ export class BonjourAdvertiser {
     if (!child || child.killed) {
       return;
     }
+    console.info(
+      bonjourDiagnostic("publish_isolated_stop", {
+        name: this.serviceName,
+      }),
+    );
     child.kill();
   }
 }
+
+export const __test = {
+  bonjourDiagnostic,
+};

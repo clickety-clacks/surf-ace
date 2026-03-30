@@ -37,6 +37,27 @@ export interface SurfAceDiscoveryService {
   subscribe(listener: (endpoints: SurfAceDiscoveryEndpoint[]) => void): () => void;
 }
 
+type DiagnosticFields = Record<string, boolean | number | string | null | undefined>;
+
+function formatDiagnosticValue(value: string | number | boolean): string {
+  const text = String(value);
+  return /^[A-Za-z0-9_./:@%-]+$/.test(text) ? text : JSON.stringify(text);
+}
+
+function formatDiagnosticFields(fields: DiagnosticFields): string {
+  return Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${key}=${formatDiagnosticValue(value as string | number | boolean)}`)
+    .join(" ");
+}
+
+function discoveryDiagnostic(event: string, fields: DiagnosticFields = {}): string {
+  const suffix = formatDiagnosticFields(fields);
+  return suffix.length > 0
+    ? `[surf-ace:discovery] event=${event} ${suffix}`
+    : `[surf-ace:discovery] event=${event}`;
+}
+
 function parseIntSafe(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
@@ -300,6 +321,12 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       return;
     }
     this.started = true;
+    this.logger.info?.(
+      discoveryDiagnostic("start", {
+        interval_ms: this.intervalMs,
+        timeout_ms: this.timeoutMs,
+      }),
+    );
 
     this.bonjour = new Bonjour();
     this.browser = this.bonjour.find({ type: SURF_ACE_SERVICE_TYPE, protocol: "tcp" });
@@ -325,14 +352,29 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
     this.bonjour?.destroy();
     this.browser = null;
     this.bonjour = null;
+    this.logger.info?.(
+      discoveryDiagnostic("stop", {
+        snapshot_count: this.snapshot.size,
+      }),
+    );
   }
 
   async refreshNow(): Promise<void> {
     if (!this.started) {
       return;
     }
+    this.logger.debug?.(
+      discoveryDiagnostic("refresh_begin", {
+        snapshot_count: this.snapshot.size,
+      }),
+    );
     this.browser?.update();
     const refreshedEndpoints = await this.queryCurrentEndpoints();
+    this.logger.debug?.(
+      discoveryDiagnostic("refresh_complete", {
+        resolved_count: refreshedEndpoints.length,
+      }),
+    );
     this.reconcileSnapshot(refreshedEndpoints);
   }
 
@@ -345,22 +387,42 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
 
   private attachBrowserHandlers(browser: Browser): void {
     browser.on("up", (service: Service) => {
+      this.logger.info?.(
+        discoveryDiagnostic("service_up", {
+          instance: service.name,
+          port: service.port,
+        }),
+      );
       this.upsertService(service);
     });
 
     browser.on("txt-update", (service: Service) => {
+      this.logger.debug?.(
+        discoveryDiagnostic("service_txt_update", {
+          instance: service.name,
+          port: service.port,
+        }),
+      );
       this.upsertService(service);
     });
 
     browser.on("down", (service: Service) => {
       let changed = false;
+      let removedCount = 0;
       for (const [id, ep] of this.snapshot) {
         if (ep.instanceName === service.name) {
           this.snapshot.delete(id);
           changed = true;
+          removedCount += 1;
         }
       }
       if (changed) {
+        this.logger.info?.(
+          discoveryDiagnostic("service_down", {
+            instance: service.name,
+            removed_count: removedCount,
+          }),
+        );
         this.notify();
       }
     });
@@ -393,6 +455,18 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       if (!existing || !sameEndpoint(existing, endpoint)) {
         this.snapshot.set(endpoint.endpointId, endpoint);
         changed = true;
+        this.logger.info?.(
+          discoveryDiagnostic(existing ? "service_update" : "service_add", {
+            adopted: existing?.endpointId !== endpoint.endpointId,
+            busy: endpoint.busy,
+            endpoint_id: endpoint.endpointId,
+            fingerprint: endpoint.fingerprintPrefix || "none",
+            host: endpoint.host,
+            instance: endpoint.instanceName,
+            port: endpoint.port,
+            surface_name: endpoint.name,
+          }),
+        );
       }
 
       if (changed) {
@@ -407,6 +481,8 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
 
   private reconcileSnapshot(endpoints: SurfAceDiscoveryEndpoint[]): void {
     let changed = false;
+    let updated = 0;
+    let adopted = 0;
     const endpointsByInstance = new Map<string, SurfAceDiscoveryEndpoint>();
     for (const endpoint of endpoints) {
       endpointsByInstance.set(endpoint.instanceName, endpoint);
@@ -422,6 +498,7 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       if (refreshed.endpointId !== id) {
         this.snapshot.delete(id);
         changed = true;
+        adopted += 1;
       }
     }
 
@@ -430,10 +507,19 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       if (!existing || !sameEndpoint(existing, endpoint)) {
         this.snapshot.set(endpoint.endpointId, endpoint);
         changed = true;
+        updated += 1;
       }
     }
 
     if (changed) {
+      this.logger.info?.(
+        discoveryDiagnostic("reconcile", {
+          adopted_count: adopted,
+          resolved_count: endpoints.length,
+          snapshot_count: this.snapshot.size,
+          updated_count: updated,
+        }),
+      );
       this.notify();
     }
   }
@@ -462,6 +548,12 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
     const endpoints = [...services.values()]
       .map((service) => serviceToEndpoint(service, this.now))
       .filter((endpoint): endpoint is SurfAceDiscoveryEndpoint => endpoint !== null);
+    this.logger.debug?.(
+      discoveryDiagnostic("bonjour_resolve", {
+        service_count: services.size,
+        resolved_count: endpoints.length,
+      }),
+    );
 
     if (process.platform !== "darwin") {
       return endpoints;
@@ -505,13 +597,17 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       const resolved = endpoints.filter((endpoint): endpoint is SurfAceDiscoveryEndpoint => endpoint !== null);
       if (resolved.length > 0) {
         this.logger.info?.(
-          `[surf-ace:discovery] dns-sd resolved ${resolved.length} surf ace endpoint(s)`,
+          discoveryDiagnostic("dns_sd_resolve", {
+            resolved_count: resolved.length,
+          }),
         );
       }
       return resolved;
     } catch (error) {
       this.logger.warn?.(
-        `[surf-ace:discovery] dns-sd supplement failed: ${error instanceof Error ? error.message : String(error)}`,
+        discoveryDiagnostic("dns_sd_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        }),
       );
       return [];
     }
@@ -550,7 +646,9 @@ export function createBonjourSurfAceDiscoveryService(params?: {
 
 export const __test = {
   BonjourSurfAceDiscoveryService,
+  discoveryDiagnostic,
   decodeDnsSdEscapes,
+  formatDiagnosticFields,
   parseDnsSdBrowseOutput,
   parseDnsSdLookupOutput,
 };

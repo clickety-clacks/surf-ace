@@ -4,7 +4,7 @@ import test from "node:test";
 
 import type { Service } from "bonjour-service";
 
-import { BonjourAdvertiser } from "../src/bonjour-advertiser.js";
+import { BonjourAdvertiser, __test } from "../src/bonjour-advertiser.js";
 
 class FakeService extends EventEmitter {
   triggerError(message: string): void {
@@ -99,6 +99,17 @@ test("bonjour advertiser republishes with a suffixed name after a name conflict"
   await advertiser.stop();
 });
 
+test("bonjour advertiser diagnostics format concise structured fields", () => {
+  assert.equal(
+    __test.bonjourDiagnostic("publish_attempt", {
+      name: "TARS Surf Ace",
+      port: 19001,
+      txt_keys: "busy,name,pk",
+    }),
+    '[surf-ace:bonjour] event=publish_attempt name="TARS Surf Ace" port=19001 txt_keys="busy,name,pk"',
+  );
+});
+
 test("bonjour advertiser keeps incrementing the suffix across repeated conflicts", async () => {
   const bonjour = new FakeBonjour([
     ["TARS Surf Ace"],
@@ -156,7 +167,7 @@ test("bonjour advertiser disables mDNS when publish throws EADDRNOTAVAIL", async
 
     assert.equal(bonjour.publishNames.length, 0);
     assert.equal(bonjour.destroyed, true);
-    assert.match(warnings.join("\n"), /disabling mDNS discovery for interface default/);
+    assert.match(warnings.join("\n"), /\[surf-ace:bonjour\] event=binding_disabled .*interface=default .*reason=multicast_unavailable/);
     await advertiser.stop();
   } finally {
     console.warn = originalWarn;
@@ -189,7 +200,7 @@ test("bonjour advertiser disables mDNS when discovery throws ENETUNREACH", async
 
     assert.equal(bonjour.publishNames.length, 0);
     assert.equal(bonjour.destroyed, true);
-    assert.match(warnings.join("\n"), /falling back to IP discovery/);
+    assert.match(warnings.join("\n"), /\[surf-ace:bonjour\] event=binding_disabled .*interface=default .*reason=multicast_unavailable/);
     await advertiser.stop();
   } finally {
     console.warn = originalWarn;

@@ -1,6 +1,29 @@
 import Foundation
 import Network
 
+private func surfAceBonjourDiagnosticValue(_ value: CustomStringConvertible) -> String {
+    let text = String(describing: value)
+    return text.range(of: #"^[A-Za-z0-9_./:@%-]+$"#, options: .regularExpression) != nil
+        ? text
+        : "\"\(text.replacingOccurrences(of: "\"", with: "\\\""))\""
+}
+
+private func surfAceBonjourDiagnosticFields(_ fields: [(String, CustomStringConvertible?)]) -> String {
+    fields.compactMap { key, value in
+        guard let value else { return nil }
+        let text = String(describing: value)
+        guard !text.isEmpty else { return nil }
+        return "\(key)=\(surfAceBonjourDiagnosticValue(value))"
+    }.joined(separator: " ")
+}
+
+private func surfAceBonjourDiagnostic(_ event: String, _ fields: [(String, CustomStringConvertible?)] = []) -> String {
+    let suffix = surfAceBonjourDiagnosticFields(fields)
+    return suffix.isEmpty
+        ? "event=\(event)"
+        : "event=\(event) \(suffix)"
+}
+
 private func surfAceBonjourLog(_ message: String) {
     print("[SurfAce-Bonjour] \(message)")
 }
@@ -44,7 +67,10 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
 
     func publish(name: String, port: Int, txtRecord: [String: String]) {
         surfAceBonjourLog(
-            "publish requested name=\(name) port=\(port) txtKeys=\(txtRecord.keys.sorted())"
+            surfAceBonjourDiagnostic(
+                "publish_attempt",
+                [("name", name), ("port", port), ("txt_keys", txtRecord.keys.sorted().joined(separator: ","))]
+            )
         )
         desiredPublication = Publication(name: name, port: port, txtRecord: txtRecord)
         publishDesiredPublication(replacingExistingService: true)
@@ -58,7 +84,12 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
                 txtRecord: txtRecord
             )
         }
-        surfAceBonjourLog("update TXT name=\(service?.name ?? "nil") txtKeys=\(txtRecord.keys.sorted())")
+        surfAceBonjourLog(
+            surfAceBonjourDiagnostic(
+                "publish_txt_update",
+                [("name", service?.name ?? "nil"), ("txt_keys", txtRecord.keys.sorted().joined(separator: ","))]
+            )
+        )
         if service == nil {
             publishDesiredPublication(replacingExistingService: false)
             return
@@ -88,7 +119,12 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
     }
 
     private func stopService() {
-        surfAceBonjourLog("stop requested name=\(service?.name ?? "nil")")
+        surfAceBonjourLog(
+            surfAceBonjourDiagnostic(
+                "publish_stop",
+                [("name", service?.name ?? "nil")]
+            )
+        )
         service?.stop()
         service = nil
     }
@@ -103,7 +139,12 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
         let errorCode = errorDict[NetService.errorCode]?.intValue ?? -1
         let errorDomain = errorDict[NetService.errorDomain]?.intValue ?? 0
         let details = "domain=\(errorDomain) code=\(errorCode)"
-        surfAceBonjourLog("publish failed name=\(sender.name) \(details)")
+        surfAceBonjourLog(
+            surfAceBonjourDiagnostic(
+                "publish_failed",
+                [("domain", errorDomain), ("error_code", errorCode), ("name", sender.name)]
+            )
+        )
         if service === sender {
             service = nil
         }
@@ -114,18 +155,28 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
     }
 
     func netServiceDidPublish(_ sender: NetService) {
-        surfAceBonjourLog("publish succeeded name=\(sender.name) type=\(sender.type) domain=\(sender.domain)")
+        surfAceBonjourLog(
+            surfAceBonjourDiagnostic(
+                "publish_ok",
+                [("domain", sender.domain), ("name", sender.name), ("type", sender.type)]
+            )
+        )
     }
 
     func netServiceDidStop(_ sender: NetService) {
-        surfAceBonjourLog("service stopped name=\(sender.name)")
+        surfAceBonjourLog(
+            surfAceBonjourDiagnostic(
+                "publish_stopped",
+                [("name", sender.name)]
+            )
+        )
         if service === sender {
             service = nil
         }
     }
 
-    private static func triggerLocalNetworkPermissionPrompt() {
-        surfAceBonjourLog("permission trigger start")
+    private func triggerLocalNetworkPermissionPrompt() {
+        surfAceBonjourLog(surfAceBonjourDiagnostic("permission_probe_start"))
         let parameters = NWParameters()
         parameters.includePeerToPeer = true
         let browser = NWBrowser(
@@ -135,23 +186,33 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
         browser.stateUpdateHandler = { [browser] state in
             switch state {
             case .setup:
-                surfAceBonjourLog("permission trigger setup")
+                surfAceBonjourLog(surfAceBonjourDiagnostic("permission_probe_setup"))
             case .ready:
-                surfAceBonjourLog("permission trigger ready")
+                surfAceBonjourLog(surfAceBonjourDiagnostic("permission_probe_ready"))
                 browser.stateUpdateHandler = nil
                 browser.browseResultsChangedHandler = nil
                 browser.cancel()
             case .waiting(let error):
-                surfAceBonjourLog("permission trigger waiting error=\(error.localizedDescription)")
+                surfAceBonjourLog(
+                    surfAceBonjourDiagnostic(
+                        "permission_probe_waiting",
+                        [("error", error.localizedDescription)]
+                    )
+                )
             case .failed(let error):
-                surfAceBonjourLog("permission trigger failed error=\(error.localizedDescription)")
+                surfAceBonjourLog(
+                    surfAceBonjourDiagnostic(
+                        "permission_probe_failed",
+                        [("error", error.localizedDescription)]
+                    )
+                )
                 browser.stateUpdateHandler = nil
                 browser.browseResultsChangedHandler = nil
                 browser.cancel()
             case .cancelled:
-                surfAceBonjourLog("permission trigger cancelled")
+                surfAceBonjourLog(surfAceBonjourDiagnostic("permission_probe_cancelled"))
             @unknown default:
-                surfAceBonjourLog("permission trigger unknown state")
+                surfAceBonjourLog(surfAceBonjourDiagnostic("permission_probe_unknown"))
                 browser.stateUpdateHandler = nil
                 browser.browseResultsChangedHandler = nil
                 browser.cancel()
