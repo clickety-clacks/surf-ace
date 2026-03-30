@@ -14,6 +14,12 @@
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_surf-ace._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Surf Ace announces itself on your local network so CLU can discover and render content.</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>

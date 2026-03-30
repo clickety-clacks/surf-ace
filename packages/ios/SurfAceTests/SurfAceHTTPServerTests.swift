@@ -67,6 +67,18 @@ final class SurfAceHTTPServerTests: XCTestCase {
         await secondServer.stop()
     }
 
+    func testInfoPlistDeclaresLocalNetworkPrivacyUsage() throws {
+        let info = try loadAppInfoPlist()
+        let usageDescription = try XCTUnwrap(info["NSLocalNetworkUsageDescription"] as? String)
+        XCTAssertFalse(usageDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    func testInfoPlistDeclaresSurfAceBonjourServiceType() throws {
+        let info = try loadAppInfoPlist()
+        let services = try XCTUnwrap(info["NSBonjourServices"] as? [String])
+        XCTAssertEqual(services, ["_surf-ace._tcp"])
+    }
+
     private func nextAvailablePort() throws -> UInt16 {
         for candidate in UInt16(29_001)...UInt16(29_100) {
             let descriptor = socket(AF_INET, SOCK_STREAM, 0)
@@ -96,5 +108,15 @@ final class SurfAceHTTPServerTests: XCTestCase {
         }
 
         throw XCTSkip("No free TCP port available in test range")
+    }
+
+    private func loadAppInfoPlist() throws -> [String: Any] {
+        let plistURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SurfAce/Info.plist")
+        let data = try Data(contentsOf: plistURL)
+        let plist = try PropertyListSerialization.propertyList(from: data, format: nil)
+        return try XCTUnwrap(plist as? [String: Any])
     }
 }
