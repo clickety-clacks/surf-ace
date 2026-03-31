@@ -29,6 +29,7 @@ enum SurfAceEventProfile: String {
             return [
                 "event.drawing_flush",
                 "event.annotation_committed",
+                "event.history_navigated",
                 "event.tap",
                 "event.selection",
                 "event.page",
@@ -39,6 +40,7 @@ enum SurfAceEventProfile: String {
             return [
                 "event.drawing_flush",
                 "event.annotation_committed",
+                "event.history_navigated",
                 "event.tap",
                 "event.selection",
                 "event.page",

@@ -227,6 +227,7 @@ final class SurfAceRuntime {
     private let eventTypes = [
         "event.drawing_flush",
         "event.annotation_committed",
+        "event.history_navigated",
         "event.tap",
         "event.scroll",
         "event.selection",
@@ -502,6 +503,18 @@ final class SurfAceRuntime {
         pane.bridge?.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry, restoreViewport: nil)
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         pane.lastNavigationURL = pane.currentEntry.url
+        if eventIsEnabled(surfaceId: surfaceId, eventName: "event.history_navigated") {
+            sendEvent(
+                surfaceId: surfaceId,
+                op: "event.history_navigated",
+                payload: [
+                    "paneId": paneId,
+                    "contentId": jsonValue(pane.currentEntry.contentId),
+                    "revision": pane.currentEntry.revision,
+                    "direction": direction == .back ? "back" : "forward",
+                ]
+            )
+        }
         noteInteraction(surfaceId: surfaceId)
     }
 
@@ -922,6 +935,16 @@ final class SurfAceRuntime {
                 sender: sender,
                 connectionUUID: connectionUUID
             )
+        case "topology.apply":
+            return SurfAceProcessedRequestResult(
+                responseObject: handleTopologyApply(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
+        case "content.apply":
+            return SurfAceProcessedRequestResult(
+                responseObject: await handleContentApply(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "panes.list":
             return SurfAceProcessedRequestResult(
                 responseObject: handlePanesList(id: id, connectionUUID: connectionUUID),
@@ -1318,6 +1341,200 @@ final class SurfAceRuntime {
                 },
             ],
         ]
+    }
+
+    private func handleTopologyApply(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
+              let topologyRevision = payload["topologyRevision"] as? Int,
+              let windowLabel = payload["windowLabel"] as? String,
+              let panesPayload = payload["panes"] as? [[String: Any]],
+              let layoutPayload = payload["layout"] as? [String: Any] else {
+            return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply payload")
+        }
+
+        var panesById: [Int: SurfAcePaneModel] = [:]
+        for panePayload in panesPayload {
+            guard let paneId = panePayload["paneId"] as? Int,
+                  let paneLabel = panePayload["paneLabel"] as? Int else {
+                return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply panes")
+            }
+            let pane = surface.panesById[paneId] ?? SurfAcePaneModel(paneId: paneId, paneLabel: paneLabel)
+            pane.paneLabel = paneLabel
+            pane.name = (panePayload["name"] as? String)?.isEmpty == true ? nil : panePayload["name"] as? String
+            panesById[paneId] = pane
+        }
+
+        guard let layout = parseTopologyLayoutNode(layoutPayload, panesById: panesById) else {
+            return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply layout")
+        }
+
+        surface.windowLabel = windowLabel
+        surface.name = "\(screenName) \(windowLabel.uppercased())"
+        surface.panesById = panesById
+        surface.paneLayout = layout
+        surface.providerTopologyInitialized = topologyRevision > 0
+        persistSurfaceTopology(surfaceId: surfaceId)
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "topology.apply",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "topologyRevision": topologyRevision,
+                "panes": layout.paneIDs.compactMap { paneId -> [String: Any]? in
+                    guard let pane = panesById[paneId] else { return nil }
+                    return [
+                        "paneId": pane.paneId,
+                        "paneLabel": pane.paneLabel,
+                        "name": jsonValue(pane.name),
+                    ]
+                },
+            ],
+        ]
+    }
+
+    private func handleContentApply(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let paneId = payload["paneId"] as? Int,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              let revision = payload["revision"] as? Int else {
+            return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "paneId and revision are required")
+        }
+
+        if let clear = payload["clear"] as? Bool, clear {
+            guard revision >= pane.currentEntry.revision else {
+                return staleRevisionResponse(op: "content.apply", id: id, expectedRevision: pane.currentEntry.revision)
+            }
+            guard !pane.annotationMode else {
+                pane.toast = "Finish annotation (Done) to navigate"
+                return makeErrorResponse(op: "content.apply", id: id, code: "invalid_operation", message: "annotation mode is active")
+            }
+            if revision == pane.currentEntry.revision, pane.currentEntry.contentId == nil {
+                var response = mutationAck(id: id, op: "content.apply", paneId: paneId, entry: pane.currentEntry)
+                if var payloadObject = response["payload"] as? [String: Any],
+                   let topologyRevision = payload["topologyRevision"] as? Int {
+                    payloadObject["topologyRevision"] = topologyRevision
+                    response["payload"] = payloadObject
+                }
+                return response
+            }
+            if pane.currentEntry.contentId != nil {
+                pane.backStack.append(pane.currentEntry)
+                if pane.backStack.count > 20 {
+                    pane.backStack.removeFirst(pane.backStack.count - 20)
+                }
+            }
+            pane.forwardStack.removeAll()
+            pane.currentEntry = .empty(revision: revision)
+            pane.pendingFlushStrokes.removeAll()
+            pane.firstPendingStrokeAt = nil
+            pane.lastPendingStrokeAt = nil
+            pane.lastSelection = nil
+            pane.lastNavigationURL = nil
+            pane.lastPage = nil
+            pane.pendingSnapshotHintReason = nil
+            pane.bridge?.render(entry: nil, restoreViewport: nil)
+            restorePaneDrawing(surfaceId: surfaceId, pane: pane)
+            var response = mutationAck(id: id, op: "content.apply", paneId: paneId, entry: pane.currentEntry)
+            if var payloadObject = response["payload"] as? [String: Any],
+               let topologyRevision = payload["topologyRevision"] as? Int {
+                payloadObject["topologyRevision"] = topologyRevision
+                response["payload"] = payloadObject
+            }
+            return response
+        }
+
+        guard let contentId = payload["contentId"] as? String else {
+            return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "contentId is required")
+        }
+        guard revision >= pane.currentEntry.revision else {
+            return staleRevisionResponse(op: "content.apply", id: id, expectedRevision: pane.currentEntry.revision)
+        }
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return makeErrorResponse(op: "content.apply", id: id, code: "invalid_operation", message: "annotation mode is active")
+        }
+        if revision == pane.currentEntry.revision, pane.currentEntry.contentId == contentId {
+            var response = mutationAck(id: id, op: "content.apply", paneId: paneId, entry: pane.currentEntry)
+            if var payloadObject = response["payload"] as? [String: Any],
+               let topologyRevision = payload["topologyRevision"] as? Int {
+                payloadObject["topologyRevision"] = topologyRevision
+                response["payload"] = payloadObject
+            }
+            return response
+        }
+        guard payloadByteCount(payload) <= maxFrameBytes else {
+            return makeErrorResponse(op: "content.apply", id: id, code: "content_too_large", message: "content exceeds maxFrameBytes")
+        }
+
+        let frame: SurfAceFrame
+        do {
+            frame = try SurfAceFrame.from(contentId: contentId, revision: revision, jsonObject: payload)
+        } catch SurfAceFrameParseError.unsupportedType {
+            return makeErrorResponse(op: "content.apply", id: id, code: "unsupported_content_type", message: "unsupported contentType")
+        } catch SurfAceFrameParseError.invalidContentID {
+            return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "contentId must match ct_<8hex>")
+        } catch SurfAceFrameParseError.missingField(let field) {
+            return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "missing \(field)")
+        } catch {
+            return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "invalid content.apply payload")
+        }
+
+        if frame.contentType == .canvas {
+            return makeErrorResponse(op: "content.apply", id: id, code: "unsupported_content_type", message: "unsupported contentType")
+        }
+
+        guard let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"]) else {
+            return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "historyOwnerToken is required")
+        }
+        let shouldRestoreViewport = shouldPreserveHTMLViewportAcrossContentSet(
+            currentEntry: pane.currentEntry,
+            incomingFrame: frame,
+            historyOwnerToken: historyOwnerToken
+        )
+        let restoreViewport: SurfAceViewport?
+        if shouldRestoreViewport,
+           let snapshot = await pane.bridge?.fetchSnapshot(includeImage: false) {
+            pane.lastViewport = snapshot.viewport
+            pane.lastVisibleText = snapshot.visibleText
+            pane.lastSelection = snapshot.selection ?? pane.lastSelection
+            restoreViewport = snapshot.viewport
+        } else if shouldRestoreViewport {
+            restoreViewport = pane.lastViewport
+        } else {
+            restoreViewport = nil
+        }
+        let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
+
+        pane.pendingFlushStrokes.removeAll()
+        pane.firstPendingStrokeAt = nil
+        pane.lastPendingStrokeAt = nil
+        pane.lastSelection = nil
+        pane.lastNavigationURL = nil
+        pane.lastPage = nil
+        pane.pendingSnapshotHintReason = frame.contentType == .html ? "after_render" : nil
+        pane.bridge?.render(entry: pane.currentEntry, restoreViewport: restoreViewport)
+        restorePaneDrawing(surfaceId: surfaceId, pane: pane)
+        if frame.contentType != .html {
+            sendSnapshotHint(surfaceId: surfaceId, reason: "after_render")
+        }
+
+        var response = mutationAck(
+            id: id,
+            op: "content.apply",
+            paneId: paneId,
+            entry: pane.currentEntry,
+            historyInfo: historyInfo
+        )
+        if var payloadObject = response["payload"] as? [String: Any],
+           let topologyRevision = payload["topologyRevision"] as? Int {
+            payloadObject["topologyRevision"] = topologyRevision
+            response["payload"] = payloadObject
+        }
+        return response
     }
 
     private func handlePaneSplit(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
@@ -2257,6 +2474,37 @@ final class SurfAceRuntime {
         surface.panesById[initialPaneId]?.paneLabel = initialPaneLabel
         surface.providerTopologyInitialized = true
         persistSurfaceTopology(surfaceId: surface.surfaceId)
+    }
+
+    private func parseTopologyLayoutNode(
+        _ payload: [String: Any],
+        panesById: [Int: SurfAcePaneModel]
+    ) -> SurfAcePaneLayoutNode? {
+        guard let type = payload["type"] as? String else {
+            return nil
+        }
+
+        switch type {
+        case "pane":
+            guard let paneId = payload["paneId"] as? Int,
+                  panesById[paneId] != nil else {
+                return nil
+            }
+            return .leaf(paneId)
+        case "split":
+            guard let directionRaw = payload["direction"] as? String,
+                  let direction = SurfAceLayoutDirection(rawValue: directionRaw),
+                  let childrenPayload = payload["children"] as? [[String: Any]] else {
+                return nil
+            }
+            let children = childrenPayload.compactMap { parseTopologyLayoutNode($0, panesById: panesById) }
+            guard children.count == childrenPayload.count else {
+                return nil
+            }
+            return .split(direction: direction, children: children)
+        default:
+            return nil
+        }
     }
 
     private func viewportPayload(for surface: SurfAceSurfaceModel) -> [String: Any] {

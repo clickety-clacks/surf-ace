@@ -4,6 +4,8 @@ import { parseHTML } from "linkedom";
 
 import type {
   AnnotationCommittedEvent,
+  ContentApplyRequest,
+  ContentApplyResponse,
   ContentAppendRequest,
   ContentClearRequest,
   ContentPatchRequest,
@@ -12,6 +14,7 @@ import type {
   DrawingFlushConfig,
   DrawingFlushEvent,
   EpochMs,
+  HistoryNavigatedEvent,
   MutationAckResponse,
   PaneCloseResponse,
   PaneCreatedEvent,
@@ -28,6 +31,8 @@ import type {
   StrokeId,
   SurfaceId,
   SurfaceViewport,
+  TopologyApplyRequest,
+  TopologyApplyResponse,
 } from "../../protocol/src/index.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
@@ -89,6 +94,7 @@ type SurfaceState = {
   panes: Map<number, PaneState>;
   providerName: string | null;
   surfaceId: string;
+  topologyRevision: number;
   viewport: SurfaceViewport;
   windowLabel: string;
 };
@@ -137,6 +143,7 @@ export type CoreEvent =
   | { paneId: number; surfaceId: string; type: "pane-removed" }
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
+  | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
   | { paneId: number; surfaceId: string; type: "drawing-dirty" };
 
 export class SurfaceCoreError extends Error {
@@ -362,6 +369,14 @@ export class SurfaceCore {
     pane.toast = null;
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
+    this.emit({
+      contentId: currentEntry(pane).contentId,
+      direction,
+      paneId,
+      revision: currentEntry(pane).revision,
+      surfaceId,
+      type: "history-navigated",
+    });
   }
 
   panesList(surfaceId: string): PanesListResponse["payload"] {
@@ -427,6 +442,150 @@ export class SurfaceCore {
     if (didChange) {
       this.emit({ surfaceId, type: "surface-changed" });
     }
+  }
+
+  topologyApply(
+    surfaceId: string,
+    payload: TopologyApplyRequest["payload"],
+  ): TopologyApplyResponse["payload"] {
+    const surface = this.getSurface(surfaceId);
+    const paneStateById = new Map<number, TopologyApplyRequest["payload"]["panes"][number]>();
+    for (const pane of payload.panes) {
+      paneStateById.set(Number(pane.paneId), pane);
+    }
+
+    const layout = topologyLayoutToSurfaceLayout(payload.layout, paneStateById);
+    const activePaneIds = flattenLayout(layout);
+    const existingPanes = new Map(surface.panes);
+    const nextPanes = new Map<number, PaneState>();
+    const orderedPanes: number[] = [];
+
+    for (const paneId of activePaneIds) {
+      const summary = paneStateById.get(paneId)!;
+      const existingPane = existingPanes.get(paneId);
+      const pane = existingPane ?? createPaneState(paneId, summary.paneLabel, this.now());
+      pane.paneLabel = summary.paneLabel;
+      pane.name = summary.name;
+      nextPanes.set(paneId, pane);
+      orderedPanes.push(paneId);
+    }
+
+    surface.layout = layout;
+    surface.paneOrder = orderedPanes;
+    surface.panes = nextPanes;
+    surface.topologyRevision = Number(payload.topologyRevision);
+    surface.windowLabel = payload.windowLabel;
+    this.emit({ surfaceId, type: "surface-changed" });
+
+    return {
+      panes: orderedPanes.map((paneId) => {
+        const pane = nextPanes.get(paneId)!;
+        return {
+          name: pane.name,
+          paneId: pane.paneId as PaneId,
+          paneLabel: pane.paneLabel,
+        };
+      }),
+      topologyRevision: payload.topologyRevision,
+    };
+  }
+
+  contentApply(
+    surfaceId: string,
+    payload: ContentApplyRequest["payload"],
+  ): ContentApplyResponse["payload"] {
+    const surface = this.getSurface(surfaceId);
+    if (payload.topologyRevision !== undefined) {
+      surface.topologyRevision = Number(payload.topologyRevision);
+    }
+    if ("clear" in payload && payload.clear) {
+      const pane = this.expectPane(surfaceId, payload.paneId);
+      const current = currentEntry(pane);
+      if (pane.annotating) {
+        pane.toast = "Finish annotation (Done) to navigate";
+        this.emit({ surfaceId, type: "surface-changed" });
+        throw new SurfaceCoreError("invalid_operation", "Cannot clear content while annotating");
+      }
+      if (current.revision > payload.revision) {
+        throw new SurfaceCoreError("stale_revision", `Expected revision >= ${current.revision}`, {
+          expectedRevision: current.revision,
+        });
+      }
+      if (current.revision === payload.revision && current.contentId === null) {
+        return {
+          ...currentMutationAck(pane),
+          topologyRevision: payload.topologyRevision,
+        };
+      }
+      if (pane.historyIndex < pane.history.length - 1) {
+        pane.history = pane.history.slice(0, pane.historyIndex + 1);
+      }
+      pane.history.push({
+        annotations: [],
+        content: null,
+        contentId: null,
+        contentType: null,
+        ownerToken: null,
+        revision: payload.revision,
+      });
+      pane.historyIndex = pane.history.length - 1;
+      trimHistory(pane);
+      pane.toast = null;
+      pane.latestContentEventAt = this.now();
+      clearDirtyState(pane);
+      this.emit({ surfaceId, type: "surface-changed" });
+      return {
+        ...currentMutationAck(pane),
+        topologyRevision: payload.topologyRevision,
+      };
+    }
+
+    const pane = this.expectPane(surfaceId, payload.paneId);
+    const current = currentEntry(pane);
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      throw new SurfaceCoreError("invalid_operation", "Cannot replace content while annotating");
+    }
+    if (current.revision > payload.revision) {
+      throw new SurfaceCoreError("stale_revision", `Expected revision >= ${current.revision}`, {
+        expectedRevision: current.revision,
+      });
+    }
+    if (current.revision === payload.revision && current.contentId === payload.contentId) {
+      return {
+        ...currentMutationAck(pane),
+        topologyRevision: payload.topologyRevision,
+      };
+    }
+
+    if (pane.historyIndex < pane.history.length - 1) {
+      pane.history = pane.history.slice(0, pane.historyIndex + 1);
+    }
+    const nextEntry: HistoryEntry = {
+      annotations: [],
+      content: cloneContent(payload.content),
+      contentId: payload.contentId,
+      contentType: payload.contentType,
+      display: payload.display ? { ...payload.display } : undefined,
+      ownerToken: payload.historyOwnerToken,
+      revision: payload.revision,
+    };
+    if (shouldReplaceVisibleEntry(pane, payload.historyOwnerToken)) {
+      pane.history[pane.historyIndex] = nextEntry;
+    } else {
+      pane.history.push(nextEntry);
+      pane.historyIndex = pane.history.length - 1;
+    }
+    trimHistory(pane);
+    pane.toast = null;
+    pane.latestContentEventAt = this.now();
+    clearDirtyState(pane);
+    this.emit({ surfaceId, type: "surface-changed" });
+    return {
+      ...currentMutationAck(pane),
+      topologyRevision: payload.topologyRevision,
+    };
   }
 
   paneSplit(
@@ -923,6 +1082,7 @@ export class SurfaceCore {
       contentTypes: [...SUPPORTED_CONTENT_TYPES],
       eventTypes: [
         "event.drawing_flush",
+        "event.history_navigated",
         "event.tap",
         "event.selection",
         "event.page",
@@ -949,6 +1109,7 @@ export class SurfaceCore {
       panes: new Map([[BOOTSTRAP_PANE_ID, bootstrapPane]]),
       providerName: null,
       surfaceId,
+      topologyRevision: 0,
       viewport: cloneViewport(viewport),
       windowLabel: "",
     };
@@ -1142,6 +1303,28 @@ function flattenLayout(node: LayoutNode): number[] {
     return [node.paneId];
   }
   return node.children.flatMap(flattenLayout);
+}
+
+function topologyLayoutToSurfaceLayout(
+  node: TopologyApplyRequest["payload"]["layout"],
+  paneStateById: Map<number, TopologyApplyRequest["payload"]["panes"][number]>,
+): LayoutNode {
+  if (node.type === "pane") {
+    const paneId = Number(node.paneId);
+    if (!paneStateById.has(paneId)) {
+      throw new SurfaceCoreError("invalid_payload", `topology.apply missing pane summary for ${paneId}`);
+    }
+    return {
+      paneId,
+      type: "pane",
+    };
+  }
+
+  return {
+    children: node.children.map((child) => topologyLayoutToSurfaceLayout(child, paneStateById)),
+    direction: node.direction,
+    type: "split",
+  };
 }
 
 function splitLayoutNode(

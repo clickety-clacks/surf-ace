@@ -202,6 +202,51 @@ function contentClearRequest(paneId: number, revision: number): Request {
   };
 }
 
+function topologyApplyRequest(): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "topology.apply",
+    payload: {
+      layout: {
+        children: [
+          { paneId: 1 as never, type: "pane" },
+          { paneId: 2 as never, type: "pane" },
+        ],
+        direction: "horizontal",
+        type: "split",
+      },
+      panes: [
+        { name: "Left", paneId: 1 as never, paneLabel: 41 },
+        { name: "Right", paneId: 2 as never, paneLabel: 42 },
+      ],
+      topologyRevision: 7 as never,
+      windowLabel: "b",
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
+function contentApplyRequest(paneId: number, revision: number): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "content.apply",
+    payload: {
+      content: { markdown: "# Applied" },
+      contentId: "ct_applied" as never,
+      contentType: "markdown",
+      historyOwnerToken: "hot_apply",
+      paneId: paneId as never,
+      revision: revision as never,
+      topologyRevision: 7 as never,
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 function paneSplitRequest(
   paneId: number,
   options: {
@@ -599,6 +644,45 @@ test("ws server emits annotation_committed after the final drawing flush when an
     assert.equal(events[0]?.payload.paneId, 1);
     assert.equal(events[1]?.payload.paneId, 1);
     assert.equal(events[1]?.payload.contentId, "ct_snapshot");
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server accepts topology.apply and content.apply over the paired surface session", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const topology = await request(owner, topologyApplyRequest());
+    assert.equal(topology.ok, true);
+    assert.equal(topology.op, "topology.apply");
+    assert.equal(topology.payload.topologyRevision, 7);
+    assert.deepEqual(topology.payload.panes, [
+      { name: "Left", paneId: 1, paneLabel: 41 },
+      { name: "Right", paneId: 2, paneLabel: 42 },
+    ]);
+
+    const content = await request(owner, contentApplyRequest(1, 1));
+    assert.equal(content.ok, true);
+    assert.equal(content.op, "content.apply");
+    assert.equal(content.payload.currentContentId, "ct_applied");
+    assert.equal(content.payload.topologyRevision, 7);
+
+    const panes = await request(owner, {
+      id: `rq_${Math.random().toString(16).slice(2)}` as never,
+      op: "panes.list",
+      payload: {},
+      sentAt: Date.now() as never,
+      type: "request",
+      v: 1,
+    });
+    assert.equal(panes.ok, true);
+    assert.deepEqual(panes.payload.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.name]), [
+      [1, 41, "Left"],
+      [2, 42, "Right"],
+    ]);
 
     await closeSocket(owner);
   });

@@ -249,6 +249,118 @@ test("surface core assigns pane history and split topology", () => {
   assert.equal(firstPane.canGoForward, true);
 });
 
+test("surface core topology.apply reuses existing pane content and replaces provisional layout", () => {
+  const core = new SurfaceCore({
+    now: () => 1000,
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const initialPaneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Preserved" },
+    contentId: "ct_preserved" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_session_a",
+    paneId: initialPaneId as never,
+    revision: 1 as never,
+  });
+
+  const applied = core.topologyApply(surface.surfaceId, {
+    layout: {
+      children: [
+        { paneId: 7 as never, type: "pane" },
+        { paneId: 9 as never, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    },
+    panes: [
+      { name: "Left", paneId: 7 as never, paneLabel: 41 },
+      { name: "Right", paneId: 9 as never, paneLabel: 42 },
+    ],
+    topologyRevision: 3 as never,
+    windowLabel: "b",
+  });
+
+  assert.equal(applied.topologyRevision, 3);
+  assert.deepEqual(applied.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.name]), [
+    [7, 41, "Left"],
+    [9, 42, "Right"],
+  ]);
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(windowState.windowLabel, "b");
+  assert.deepEqual(windowState.layout, {
+    children: [
+      { paneId: 7, type: "pane" },
+      { paneId: 9, type: "pane" },
+    ],
+    direction: "horizontal",
+    type: "split",
+  });
+  assert.equal(windowState.panes.find((pane) => pane.paneId === 7)?.content.contentId, "ct_preserved");
+  assert.equal(windowState.panes.find((pane) => pane.paneId === 7)?.label, "41");
+  assert.equal(windowState.panes.find((pane) => pane.paneId === 9)?.label, "42");
+});
+
+test("surface core emits history navigation after back/forward", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const events: Array<{
+    contentId: string | null;
+    direction: string;
+    paneId: number;
+    revision: number;
+    surfaceId: string;
+    type: string;
+  }> = [];
+  core.subscribe((event) => {
+    if (event.type === "history-navigated") {
+      events.push(event);
+    }
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 5);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# First" },
+    contentId: "ct_first" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_a",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Second" },
+    contentId: "ct_second" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_b",
+    paneId: paneId as never,
+    revision: 2 as never,
+  });
+
+  core.navigateHistory(surface.surfaceId, paneId, "back");
+
+  assert.deepEqual(events, [
+    {
+      contentId: "ct_first",
+      direction: "back",
+      paneId,
+      revision: 1,
+      surfaceId: surface.surfaceId,
+      type: "history-navigated",
+    },
+  ]);
+});
+
 test("surface core reports pane-scoped viewport data in panes.list", () => {
   const core = new SurfaceCore({
     persistentState: {

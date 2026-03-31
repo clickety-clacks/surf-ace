@@ -5,6 +5,7 @@ import { WebSocket, WebSocketServer } from "ws";
 
 import type {
   AnnotationsRemoveRequest,
+  ContentApplyRequest,
   ContentAppendRequest,
   ContentClearRequest,
   ContentPatchRequest,
@@ -13,6 +14,7 @@ import type {
   Event,
   EventProfile,
   HeartbeatPingRequest,
+  HistoryNavigatedEvent,
   RelinquishRequest,
   PaneCloseRequest,
   PaneRenameRequest,
@@ -26,6 +28,7 @@ import type {
   SnapshotHintEvent,
   SurfaceViewport,
   SurfacesListRequest,
+  TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
 import { SurfaceCore, SurfaceCoreError, type CoreEvent } from "./surface-core.js";
@@ -468,6 +471,9 @@ export class SurfaceWsServer {
       case "drawing-dirty":
         this.schedulePaneFlush(event.surfaceId, event.paneId);
         return;
+      case "history-navigated":
+        await this.maybeSendHistoryNavigated(event);
+        return;
       case "pane-created":
         await this.broadcastLifecycleEvent({
           eventId: makeEventId(),
@@ -641,6 +647,10 @@ export class SurfaceWsServer {
         return await this.handlePairRequest(socket, request);
       case "ownership.relinquish":
         return this.handleRelinquish(socket, request);
+      case "topology.apply":
+        return this.handleTopologyApply(socket, request);
+      case "content.apply":
+        return await this.handleContentApply(socket, request);
       case "panes.list":
         return this.handlePanesList(socket, request);
       case "pane.split":
@@ -890,6 +900,50 @@ export class SurfaceWsServer {
       ok: true,
       op: "panes.list",
       payload: this.core.panesList(surfaceId),
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private handleTopologyApply(socket: WebSocket, request: TopologyApplyRequest): Response {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    return {
+      id: request.id,
+      ok: true,
+      op: "topology.apply",
+      payload: this.core.topologyApply(surfaceId, request.payload),
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private async handleContentApply(socket: WebSocket, request: ContentApplyRequest): Promise<Response> {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    if ("clear" in request.payload) {
+      return {
+        id: request.id,
+        ok: true,
+        op: "content.apply",
+        payload: this.core.contentApply(surfaceId, request.payload),
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+    const contentBytes = Buffer.byteLength(JSON.stringify(request.payload.content), "utf8");
+    if (contentBytes > DEFAULT_LIMITS.maxFrameBytes) {
+      throw new SurfaceCoreError("content_too_large", "Content exceeded max frame size");
+    }
+    if (!request.payload.historyOwnerToken) {
+      throw new SurfaceCoreError("invalid_payload", "content.apply requires historyOwnerToken");
+    }
+    return {
+      id: request.id,
+      ok: true,
+      op: "content.apply",
+      payload: this.core.contentApply(surfaceId, request.payload),
       sentAt: Date.now(),
       type: "response",
       v: 1,
@@ -1350,6 +1404,27 @@ export class SurfaceWsServer {
       throw error;
     }
   }
+
+  private async maybeSendHistoryNavigated(event: Extract<CoreEvent, { type: "history-navigated" }>): Promise<void> {
+    const session = this.activeSession(event.surfaceId);
+    if (!session || !isEventEnabled(session.eventProfile, "event.history_navigated")) {
+      return;
+    }
+    const payload: HistoryNavigatedEvent["payload"] = {
+      contentId: event.contentId as HistoryNavigatedEvent["payload"]["contentId"],
+      direction: event.direction,
+      paneId: event.paneId as HistoryNavigatedEvent["payload"]["paneId"],
+      revision: event.revision as HistoryNavigatedEvent["payload"]["revision"],
+    };
+    await this.sendEvent(session.socket, {
+      eventId: makeEventId(),
+      op: "event.history_navigated",
+      payload,
+      sentAt: Date.now(),
+      type: "event",
+      v: 1,
+    });
+  }
 }
 
 export const __test = {
@@ -1396,6 +1471,7 @@ function activeEventsForProfile(profile: EventProfile) {
     return [
       "event.annotation_committed",
       "event.drawing_flush",
+      "event.history_navigated",
       "event.tap",
       "event.scroll",
       "event.selection",
@@ -1407,6 +1483,7 @@ function activeEventsForProfile(profile: EventProfile) {
   return [
     "event.annotation_committed",
     "event.drawing_flush",
+    "event.history_navigated",
     "event.tap",
     "event.selection",
     "event.page",
@@ -1420,6 +1497,7 @@ function isEventEnabled(profile: EventProfile, eventName: Event["op"]): boolean 
     eventName === "event.surface_appeared" ||
     eventName === "event.surface_removed" ||
     eventName === "event.surface_resumed" ||
+    eventName === "event.history_navigated" ||
     eventName === "event.pane_created" ||
     eventName === "event.pane_removed" ||
     eventName === "event.pane_renamed"

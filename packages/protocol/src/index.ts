@@ -134,6 +134,8 @@ export type PairResume = {
   sessionId: SessionId;
 };
 
+export type TopologyRevision = Brand<number, "TopologyRevision">;
+
 export type DrawingFlushConfig = {
   idleWindowMs: number;
   maxIntervalMs: number;
@@ -308,6 +310,45 @@ export type HeartbeatPingRequest = RequestBase<"heartbeat.ping"> & {
 
 export type PanesListRequest = RequestBase<"panes.list">;
 
+export type TopologyLayoutNode =
+  | {
+      type: "pane";
+      paneId: PaneId;
+    }
+  | {
+      type: "split";
+      direction: "horizontal" | "vertical";
+      children: TopologyLayoutNode[];
+    };
+
+export type TopologyPaneState = {
+  paneId: PaneId;
+  paneLabel: number;
+  name: string | null;
+};
+
+export type TopologyApplyRequest = RequestBase<"topology.apply"> & {
+  payload: {
+    topologyRevision: TopologyRevision;
+    windowLabel: string;
+    layout: TopologyLayoutNode;
+    panes: TopologyPaneState[];
+  };
+};
+
+export type ContentApplyRequest = RequestBase<"content.apply"> & {
+  payload:
+    | (ContentSetPayload & {
+        topologyRevision?: TopologyRevision;
+      })
+    | {
+        clear: true;
+        paneId: PaneId;
+        revision: Revision;
+        topologyRevision?: TopologyRevision;
+      };
+};
+
 export type PaneSplitRequest = RequestBase<"pane.split"> & {
   payload: {
     paneId: PaneId;
@@ -359,6 +400,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
       profile: EventProfile;
       activeEvents: Array<
         | "event.drawing_flush"
+        | "event.history_navigated"
         | "event.tap"
         | "event.scroll"
         | "event.selection"
@@ -463,6 +505,23 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
   };
 };
 
+export type TopologyApplyResponse = ResponseBase<"topology.apply"> & {
+  payload: {
+    topologyRevision: TopologyRevision;
+    panes: Array<{
+      paneId: PaneId;
+      paneLabel: number;
+      name: string | null;
+    }>;
+  };
+};
+
+export type ContentApplyResponse = ResponseBase<"content.apply"> & {
+  payload: MutationAckResponse["payload"] & {
+    topologyRevision?: TopologyRevision;
+  };
+};
+
 export type PaneSplitResponse = ResponseBase<"pane.split"> & {
   payload: {
     panes: Array<{
@@ -493,6 +552,8 @@ export type ErrorResponse = {
     | "surfaces.list"
     | "pair.request"
     | "ownership.relinquish"
+    | "topology.apply"
+    | "content.apply"
     | "content.set"
     | "content.append"
     | "content.patch"
@@ -607,6 +668,15 @@ export type NavigationEvent = EventBase<"event.navigation"> & {
   };
 };
 
+export type HistoryNavigatedEvent = EventBase<"event.history_navigated"> & {
+  payload: {
+    paneId: PaneId;
+    contentId: ContentId | null;
+    revision: Revision;
+    direction: "back" | "forward";
+  };
+};
+
 export type SurfaceAppearedEvent = EventBase<"event.surface_appeared"> & {
   payload: {
     surfaceId: SurfaceId;
@@ -662,6 +732,8 @@ export type Request =
   | SurfacesListRequest
   | PairRequest
   | RelinquishRequest
+  | TopologyApplyRequest
+  | ContentApplyRequest
   | ContentSetRequest
   | ContentAppendRequest
   | ContentPatchRequest
@@ -678,6 +750,8 @@ export type Response =
   | SurfacesListResponse
   | PairResponse
   | RelinquishResponse
+  | TopologyApplyResponse
+  | ContentApplyResponse
   | MutationAckResponse
   | AnnotationsRemoveResponse
   | SnapshotResponse
@@ -696,6 +770,7 @@ export type Event =
   | SelectionEvent
   | PageEvent
   | NavigationEvent
+  | HistoryNavigatedEvent
   | SurfaceAppearedEvent
   | SurfaceRemovedEvent
   | SurfaceResumedEvent

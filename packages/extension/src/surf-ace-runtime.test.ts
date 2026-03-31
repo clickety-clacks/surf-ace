@@ -84,6 +84,13 @@ class FakeSurfAceWsServer {
     paneId: number;
     revision: number;
   }> = [];
+  readonly topologyApplyRequests: Array<{
+    layout: unknown;
+    paneIds: number[];
+    paneLabels: number[];
+    topologyRevision: number;
+    windowLabel: string;
+  }> = [];
   initialRemotePaneId: number;
   readonly pairAttemptDetails: Array<{
     providerId: string | null;
@@ -380,6 +387,32 @@ class FakeSurfAceWsServer {
     return sentAt;
   }
 
+  sendHistoryNavigated(
+    paneId: number,
+    options: {
+      contentId: string | null;
+      direction: "back" | "forward";
+      fromSurfaceId?: string;
+      revision: number;
+    },
+  ): void {
+    this.pairedSocketFor(options.fromSurfaceId ?? this.surfaceId)?.send(
+      JSON.stringify({
+        eventId: `ev_${this.nextEventId++}`,
+        op: "event.history_navigated",
+        payload: {
+          contentId: options.contentId,
+          direction: options.direction,
+          paneId,
+          revision: options.revision,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      }),
+    );
+  }
+
   sendSnapshotHint(reason: "after_reconnect" | "after_render" | "backpressure_drop"): void {
     this.pairedSocket?.send(
       JSON.stringify({
@@ -534,6 +567,7 @@ class FakeSurfAceWsServer {
                 eventTypes: [
                   "event.annotation_committed",
                   "event.drawing_flush",
+                  "event.history_navigated",
                   "event.tap",
                   "event.selection",
                   "event.page",
@@ -545,6 +579,7 @@ class FakeSurfAceWsServer {
                 activeEvents: [
                   "event.annotation_committed",
                   "event.drawing_flush",
+                  "event.history_navigated",
                   "event.tap",
                   "event.selection",
                   "event.page",
@@ -583,6 +618,105 @@ class FakeSurfAceWsServer {
           ),
         );
         return;
+      case "topology.apply": {
+        const targetSurface = this.requirePairedSurface(socket);
+        const panes = Array.isArray(message.payload?.panes)
+          ? message.payload.panes.map((paneState) => ({
+              name:
+                typeof (paneState as { name?: unknown }).name === "string"
+                  ? String((paneState as { name: string }).name)
+                  : null,
+              paneId: Number((paneState as { paneId?: unknown }).paneId ?? 0),
+              paneLabel: Number((paneState as { paneLabel?: unknown }).paneLabel ?? 0),
+            }))
+          : [];
+        this.topologyApplyRequests.push({
+          layout: structuredClone(message.payload?.layout ?? null),
+          paneIds: panes.map((pane) => pane.paneId),
+          paneLabels: panes.map((pane) => pane.paneLabel),
+          topologyRevision: Number(message.payload?.topologyRevision ?? 0),
+          windowLabel: String(message.payload?.windowLabel ?? ""),
+        });
+        const previousPanes = new Map(targetSurface.panes);
+        targetSurface.panes.clear();
+        for (const paneState of panes) {
+          const previousPane = previousPanes.get(paneState.paneId);
+          targetSurface.panes.set(paneState.paneId, {
+            contentId: previousPane?.contentId ?? null,
+            contentType: previousPane?.contentType ?? null,
+            drawings: previousPane?.drawings ? [...previousPane.drawings] : [],
+            name: paneState.name,
+            paneLabel: paneState.paneLabel,
+            revision: previousPane?.revision ?? 0,
+            viewport: previousPane?.viewport ?? { ...targetSurface.viewport },
+          });
+        }
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "topology.apply", {
+              panes: panes.map((pane) => ({
+                name: pane.name,
+                paneId: pane.paneId,
+                paneLabel: pane.paneLabel,
+              })),
+              topologyRevision: Number(message.payload?.topologyRevision ?? 0),
+            }),
+          ),
+        );
+        return;
+      }
+      case "content.apply": {
+        const targetSurface = this.requirePairedSurface(socket);
+        const paneId = Number(message.payload?.paneId ?? 0);
+        const pane = targetSurface.panes.get(paneId);
+        assert.ok(pane);
+        if (message.payload && "clear" in message.payload) {
+          pane.contentId = null;
+          pane.contentType = null;
+          pane.drawings = [];
+          pane.revision = Number(message.payload.revision ?? pane.revision);
+          this.clearRequests.push({
+            paneId,
+            revision: pane.revision,
+          });
+          socket.send(
+            JSON.stringify(
+              this.response(message.id, "content.apply", {
+                contentId: null,
+                currentContentId: null,
+                currentRevision: pane.revision,
+                paneId,
+                topologyRevision: message.payload.topologyRevision,
+              }),
+            ),
+          );
+          return;
+        }
+        pane.contentId = String(message.payload?.contentId);
+        pane.contentType = String(message.payload?.contentType);
+        pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
+        pane.drawings = [];
+        this.contentSetRequests.push({
+          contentId: pane.contentId,
+          contentType: pane.contentType,
+          historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
+          paneId,
+          revision: pane.revision,
+        });
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "content.apply", {
+              contentId: pane.contentId,
+              contentType: pane.contentType,
+              currentContentId: pane.contentId,
+              currentRevision: pane.revision,
+              paneId,
+              topologyRevision: message.payload?.topologyRevision,
+            }),
+          ),
+        );
+        return;
+      }
       case "panes.list": {
         const targetSurface = this.requirePairedSurface(socket);
         socket.send(
@@ -1610,13 +1744,22 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
 
       const splitPaneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
-      assert.deepEqual(server.splitRequests, [
+      assert.deepEqual(server.splitRequests, []);
+      assert.deepEqual(server.topologyApplyRequests.slice(0, 1), [
         {
-          count: 3,
-          direction: "horizontal",
-          newPaneIds: [42, 43],
-          newPaneLabels: [2, 3],
-          paneId: server.initialRemotePaneId,
+          layout: {
+            children: [
+              { paneId: server.initialRemotePaneId, type: "pane" },
+              { paneId: 42, type: "pane" },
+              { paneId: 43, type: "pane" },
+            ],
+            direction: "horizontal",
+            type: "split",
+          },
+          paneIds: [server.initialRemotePaneId, 42, 43],
+          paneLabels: [1, 2, 3],
+          topologyRevision: 1,
+          windowLabel: "a",
         },
       ]);
 
@@ -1628,10 +1771,144 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         paneId: splitPaneIds[1]!,
       });
       assert.deepEqual(close, { ok: true, paneId: splitPaneIds[1], paneLabel: 2 });
-      assert.deepEqual(server.closePaneRequests, [{ paneId: 2 }]);
+      assert.deepEqual(server.closePaneRequests, []);
+      assert.deepEqual(server.topologyApplyRequests.at(-1), {
+        layout: {
+          children: [
+            { paneId: server.initialRemotePaneId, type: "pane" },
+            { paneId: 43, type: "pane" },
+          ],
+          direction: "horizontal",
+          type: "split",
+        },
+        paneIds: [server.initialRemotePaneId, 43],
+        paneLabels: [1, 3],
+        topologyRevision: 2,
+        windowLabel: "a",
+      });
 
       const afterCloseScreens = await runtime.listScreens();
       assertPaneLabelsWithOpaqueIds(afterCloseScreens[0]?.panes ?? [], [1, 3]);
+    });
+  });
+
+  await t.test("extension-owned topology is re-applied after reconnect instead of importing collapsed surface panes", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 3,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const splitPaneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
+
+      const firstPush = await runtime.push(
+        {
+          content: "<p>one</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: splitPaneIds[0]!,
+        },
+        { sessionKey: "agent:test:topology-a" },
+      );
+      const secondPush = await runtime.push(
+        {
+          content: "<p>two</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: splitPaneIds[1]!,
+        },
+        { sessionKey: "agent:test:topology-b" },
+      );
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      server.panes.clear();
+      server.panes.set(server.initialRemotePaneId, {
+        contentId: null,
+        contentType: null,
+        drawings: [],
+        name: null,
+        paneLabel: 1,
+        revision: 0,
+        viewport: { height: 768, scale: 2, width: 1024 },
+      });
+
+      const initialTopologyApplyCount = server.topologyApplyRequests.length;
+      const initialContentApplyCount = server.contentSetRequests.length;
+      await surface.client.close(1000, "test_authoritative_topology_reconnect");
+
+      await waitFor(() => server.pairRequests.length >= 2, 12_000);
+      await waitFor(() => server.topologyApplyRequests.length > initialTopologyApplyCount, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      const lastTopologyApply = server.topologyApplyRequests.at(-1);
+      assert.deepEqual(lastTopologyApply?.paneLabels, [1, 2, 3]);
+      assert.deepEqual(lastTopologyApply?.paneIds, [server.initialRemotePaneId, 42, 43]);
+
+      await waitFor(() => server.contentSetRequests.length >= initialContentApplyCount + 2, 12_000);
+      const repushedContentIds = server.contentSetRequests.slice(-2).map((request) => request.contentId);
+      assert.deepEqual(repushedContentIds.sort(), [firstPush.contentId, secondPush.contentId].sort());
+
+      const screens = await runtime.listScreens();
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 2, 3]);
+      assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, firstPush.contentId);
+      assert.equal(screens[0]?.panes[1]?.activeContent?.contentId, secondPush.contentId);
+    });
+  });
+
+  await t.test("history navigation updates provider-owned visible content for reconnect repush", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const first = await runtime.push(
+        {
+          content: "<p>first</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:history-a" },
+      );
+      const second = await runtime.push(
+        {
+          content: "<p>second</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:history-b" },
+      );
+
+      server.sendHistoryNavigated(server.initialRemotePaneId, {
+        contentId: first.contentId,
+        direction: "back",
+        revision: 1,
+      });
+
+      await waitFor(async () => (await runtime.listScreens())[0]?.panes[0]?.historySummary.visibleContentId === first.contentId);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      await surface.client.close(1000, "test_history_repush_reconnect");
+
+      await waitFor(() => server.pairRequests.length >= 2, 12_000);
+      await waitFor(() => server.contentSetRequests.length > initialContentApplyCount, 12_000);
+
+      const repushed = server.contentSetRequests.at(-1);
+      assert.equal(repushed?.contentId, first.contentId);
+      assert.notEqual(repushed?.contentId, second.contentId);
+
+      const screens = await runtime.listScreens();
+      assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, first.contentId);
+      assert.equal(screens[0]?.panes[0]?.historySummary.visibleContentId, first.contentId);
     });
   });
 
