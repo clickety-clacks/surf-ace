@@ -736,6 +736,10 @@ export class SurfaceWsServer {
 
     let resumed = false;
     let sessionId: string;
+    const existingOpenElsewhere =
+      existing !== null &&
+      existing.socket !== socket &&
+      existing.socket.readyState === WebSocket.OPEN;
 
     if (!lock) {
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
@@ -746,7 +750,30 @@ export class SurfaceWsServer {
         }),
       );
     } else if (lock.providerId === providerId) {
-      if (resumeSessionId !== lock.sessionId) {
+      if (existingOpenElsewhere) {
+        console.warn(
+          serverDiagnostic("pair_request_duplicate_active", {
+            provider_id: providerId,
+            session_id: lock.sessionId,
+            surface_id: surfaceId,
+          }),
+        );
+        throw new SurfaceCoreError("busy", "Provider already holds an active socket for this surface");
+      }
+      if (!resumeSessionId) {
+        resumed = true;
+        sessionId = lock.sessionId;
+        console.info(
+          serverDiagnostic("pair_request_implicit_resume", {
+            provider_id: providerId,
+            session_id: sessionId,
+            surface_id: surfaceId,
+          }),
+        );
+        if (existing && existing.socket !== socket) {
+          this.detachActiveSession(surfaceId, "superseded");
+        }
+      } else if (resumeSessionId !== lock.sessionId) {
         console.warn(
           serverDiagnostic("pair_request_invalid_resume", {
             expected_session_id: lock.sessionId,
@@ -756,18 +783,19 @@ export class SurfaceWsServer {
           }),
         );
         throw new SurfaceCoreError("invalid_resume", "Resume session did not match active ownership lock");
-      }
-      resumed = true;
-      sessionId = lock.sessionId;
-      console.info(
-        serverDiagnostic("pair_request_resumed", {
-          provider_id: providerId,
-          session_id: sessionId,
-          surface_id: surfaceId,
-        }),
-      );
-      if (existing && existing.socket !== socket) {
-        this.detachActiveSession(surfaceId, "superseded");
+      } else {
+        resumed = true;
+        sessionId = lock.sessionId;
+        console.info(
+          serverDiagnostic("pair_request_resumed", {
+            provider_id: providerId,
+            session_id: sessionId,
+            surface_id: surfaceId,
+          }),
+        );
+        if (existing && existing.socket !== socket) {
+          this.detachActiveSession(surfaceId, "superseded");
+        }
       }
     } else {
       if (!request.payload.takeover) {

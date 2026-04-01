@@ -2926,6 +2926,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const screen = (await runtime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
       assert.ok(screen);
       assertPaneLabelsWithOpaqueIds(screen.panes, [1, 2, 3]);
+      assert.equal(preservedSurface.stopRequested, true);
+      assert.equal(preservedSurface.autoRetryEnabled, false);
+      await waitFor(() => preservedSurface.client === null, 5_000);
     });
   });
 

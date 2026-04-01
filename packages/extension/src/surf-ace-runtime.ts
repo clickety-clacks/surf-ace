@@ -2376,6 +2376,34 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     remappedSurface.topologyRevision = preservedSurface.topologyRevision;
   }
 
+  private quiesceSupersededSurface(
+    supersededSurface: ManagedSurface,
+    replacementSurfaceId: SurfaceId,
+  ): void {
+    supersededSurface.stopRequested = true;
+    supersededSurface.autoRetryEnabled = false;
+    supersededSurface.connectionState = "connecting";
+    this.stopHeartbeat(supersededSurface);
+    this.wakeSurfaceRetry(supersededSurface);
+    if (!supersededSurface.client) {
+      return;
+    }
+    this.runBackgroundTask(
+      `close superseded surface ${supersededSurface.surfaceId} -> ${replacementSurfaceId}`,
+      async () => {
+        const client = supersededSurface.client;
+        if (!client) {
+          return;
+        }
+        await this.closeSurfaceClient(
+          supersededSurface,
+          client,
+          clampCloseReason("provider_shutdown"),
+        );
+      },
+    );
+  }
+
   private orderedPanes(surface: ManagedSurface): ManagedPane[] {
     const ordered: ManagedPane[] = [];
     const seen = new Set<PaneId>();
@@ -3136,16 +3164,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   }
 
-  private async discoverSurfaceId(surface: ManagedSurface): Promise<void> {
+  private async discoverSurfaceId(surface: ManagedSurface): Promise<ManagedSurface[]> {
     const client = surface.client;
     if (!client) {
-      return;
+      return [];
     }
 
     let response: Response;
     try {
       if (!client.isOpen()) {
-        return;
+        return [];
       }
       response = await client.request(
         this.requestEnvelope("surfaces.list"),
@@ -3155,16 +3183,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.logger.warn?.(
         `[surf-ace:runtime] surfaces.list failed for ${surface.endpointId}, using cached surfaceId`,
       );
-      return;
+      return [];
     }
 
     if (isErrorResponse(response)) {
-      return;
+      return [];
     }
 
     const remoteSurfaces = (response as SurfacesListResponse).payload.surfaces;
     if (remoteSurfaces.length === 0) {
-      return;
+      return [];
     }
 
     const matchedRemoteSurface =
@@ -3180,6 +3208,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
       if (preservedSurface) {
         this.preserveSurfaceStateUntilPairResponse(surface, preservedSurface);
+        this.quiesceSupersededSurface(preservedSurface, matchedRemoteSurfaceId);
       }
       this.logger.info?.(
         runtimeDiagnostic("surface_adopt_remote_id", {
@@ -3211,6 +3240,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.name = matchedRemoteSurface.name;
     surface.viewport = cloneViewport(matchedRemoteSurface.viewport);
 
+    const siblingsToStart: ManagedSurface[] = [];
     for (const remoteSurface of remoteSurfaces) {
       const remoteSurfaceId = asSurfaceId(remoteSurface.surfaceId);
       if (remoteSurfaceId === surface.surfaceId) {
@@ -3235,8 +3265,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       discoveredSurface.viewport = cloneViewport(remoteSurface.viewport);
       discoveredSurface.stopRequested = false;
       this.surfaces.set(remoteSurfaceId, discoveredSurface);
-      this.ensureSurfaceWorker(discoveredSurface);
+      siblingsToStart.push(discoveredSurface);
     }
+    return siblingsToStart;
   }
 
   private async requestPair(surface: ManagedSurface): Promise<PairResponse> {
@@ -3496,7 +3527,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               surface_id: surface.surfaceId,
             }),
           );
-          await this.discoverSurfaceId(surface);
+          const siblingSurfaces = await this.discoverSurfaceId(surface);
           this.logger.info?.(
             runtimeDiagnostic("pair_request_begin", {
               resume: Boolean(this.shouldAttemptResume(surface)),
@@ -3505,7 +3536,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           );
           const pairResponse = await this.requestPair(surface);
           this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId));
-          surface.connectionState = "connected";
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
               panes: pairResponse.payload.state.panes.length,
@@ -3520,6 +3550,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           await this.repushSurfaceContent(surface);
           this.startHeartbeat(surface);
           await this.syncSurfaceSnapshots(surface, true);
+          surface.connectionState = "connected";
+          for (const siblingSurface of siblingSurfaces) {
+            this.ensureSurfaceWorker(siblingSurface);
+          }
           await client.waitForClose();
           this.noteConnectionEnded(surface);
         } catch (error) {

@@ -403,6 +403,62 @@ test("ws server rejects owner reconnect with an invalid resume token", async () 
   });
 });
 
+test("ws server implicitly resumes same-provider reconnects without a resume token after disconnect", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+    const replacement = await connect(url);
+    const resumed = await request(
+      replacement,
+      pairRequest(surfaceId, "pv_alpha"),
+    );
+
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.op, "pair.request");
+    assert.equal(resumed.payload.resumed, true);
+    assert.equal(resumed.payload.sessionId, first.payload.sessionId);
+
+    await closeSocket(replacement);
+  });
+});
+
+test("ws server rejects duplicate same-provider pair requests while the active socket is still open", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+
+    const duplicate = await connect(url);
+    const rejected = await request(duplicate, pairRequest(surfaceId, "pv_alpha"));
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.op, "pair.request");
+    assert.equal(rejected.error.code, "busy");
+    assert.equal(owner.readyState, WebSocket.OPEN);
+
+    const panes = await request(owner, {
+      id: `rq_${Math.random().toString(16).slice(2)}` as never,
+      op: "panes.list",
+      payload: {},
+      sentAt: Date.now() as never,
+      type: "request",
+      v: 1,
+    });
+    assert.equal(panes.ok, true);
+    assert.equal(panes.op, "panes.list");
+
+    await closeSocket(duplicate);
+    await closeSocket(owner);
+  });
+});
+
 test("ws server rejects foreign providers without takeover while locked", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const owner = await connect(url);
