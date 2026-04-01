@@ -2994,7 +2994,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("busy after a cold-start reconnect retries with takeover", async () => {
+  await t.test("busy after a cold-start reconnect backs off without takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -3003,20 +3003,20 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.hasPairedInGatewaySession = false;
       surface.sessionId = null;
 
-      // Return busy once, then succeed when the cold-start retry escalates to takeover.
+      // Return busy once, then allow the next non-takeover retry to succeed.
       server.busyWithoutTakeoverResponsesRemaining = 1;
       await surface.client.close(1000, "test_cold_start_busy_backoff");
 
-      // Wait for reconnect: first attempt gets busy, second retries with takeover and succeeds.
+      // Wait for reconnect: first attempt gets busy, the next retry stays non-takeover and succeeds.
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
-      assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
-        [false, true],
+      assert.ok(
+        server.pairAttemptDetails.slice(1, 3).every((attempt) => attempt.takeover === false),
+        "cold-start busy recovery must not escalate to takeover",
       );
       assert.ok(
-        warnings.some((warning) => warning.includes("busy on cold-start connect") && warning.includes("retrying with takeover")),
+        warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
       );
     });
   });

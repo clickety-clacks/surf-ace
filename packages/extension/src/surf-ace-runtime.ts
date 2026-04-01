@@ -3447,11 +3447,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     ) {
       return response;
     }
-
-    this.logger.warn?.(
-      `[surf-ace:runtime] busy on cold-start connect for ${surface.surfaceId}; retrying with takeover`,
-    );
-    return sendPairRequest(true, null);
+    void sendPairRequest;
+    return response;
   }
 
   private requestEnvelope<TOp extends Request["op"]>(
