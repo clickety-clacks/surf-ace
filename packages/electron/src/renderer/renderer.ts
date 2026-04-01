@@ -269,10 +269,20 @@ function currentVisiblePdfPage(view: PaneView): HTMLElement | null {
   return bestPage;
 }
 
+function currentHtmlVisibleText(view: PaneView): string | null {
+  const frame = view.contentEl.querySelector<HTMLIFrameElement>(".content-html-frame");
+  const text = frame?.contentDocument?.body?.innerText?.trim();
+  return text ? text.slice(0, 4096) : null;
+}
+
 function currentVisibleText(view: PaneView): string {
   const currentPdfPage = currentVisiblePdfPage(view);
   if (currentPdfPage) {
     return (currentPdfPage.dataset.pageText ?? "").slice(0, 4096);
+  }
+  const currentHtmlText = currentHtmlVisibleText(view);
+  if (currentHtmlText) {
+    return currentHtmlText;
   }
   return (view.contentEl.textContent ?? "").slice(0, 4096);
 }
@@ -852,6 +862,18 @@ function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement)
   };
 }
 
+function scheduleHtmlSnapshotRefresh(view: PaneView, renderToken: number): void {
+  const delays = [0, 50, 200, 500];
+  for (const delay of delays) {
+    window.setTimeout(() => {
+      if (renderToken !== view.currentRenderToken) {
+        return;
+      }
+      reportPaneSnapshot(view);
+    }, delay);
+  }
+}
+
 function stopIdleAnimation(view: PaneView): void {
   view.idleAnimationStop?.();
   view.idleAnimationStop = null;
@@ -1054,7 +1076,29 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     wireHtmlFrame(view, pane.paneId, frame);
     view.contentEl.appendChild(frame);
     sizeWebViewToPane(view, frame);
-    frame.srcdoc = injectHtmlFrameBridge(finalHtml);
+    frame.addEventListener(
+      "load",
+      () => {
+        window.setTimeout(() => {
+          reportPaneSnapshot(view);
+        }, 0);
+      },
+      { once: true },
+    );
+    const assignSrcdoc = () => {
+      if (renderToken !== view.currentRenderToken) {
+        return;
+      }
+      frame.srcdoc = injectHtmlFrameBridge(finalHtml);
+      scheduleHtmlSnapshotRefresh(view, renderToken);
+    };
+    if (view.rootEl.isConnected) {
+      assignSrcdoc();
+    } else {
+      window.requestAnimationFrame(() => {
+        assignSrcdoc();
+      });
+    }
     return;
   }
 

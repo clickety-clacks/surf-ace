@@ -124,6 +124,33 @@ test("surface core ignores snapshot updates for stale pane ids", () => {
   assert.ok(warnings.some((warning) => warning.includes("unknown pane 819")));
 });
 
+test("surface core falls back to authoritative html text when renderer snapshot is still placeholder", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<html><body><h1>pane two</h1><p>ready</p></body></html>" },
+    contentId: "ct_html" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    visibleText: "Surface readyWaiting for content.",
+  });
+
+  const snapshot = core.captureSnapshot(surface.surfaceId, paneId);
+  assert.equal(snapshot.visibleText, "pane two\nready");
+});
+
 test("surface core treats stale pane access as best-effort instead of crashing", () => {
   const warnings: string[] = [];
   const core = new SurfaceCore({

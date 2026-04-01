@@ -870,7 +870,7 @@ export class SurfaceCore {
       revision: current.revision as Revision,
       selection: pane.snapshot.selection,
       viewport: structuredClone(pane.snapshot.viewport),
-      visibleText: pane.snapshot.visibleText,
+      visibleText: snapshotVisibleText(pane, current),
     };
   }
 
@@ -1285,6 +1285,28 @@ function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {
 
 function cloneContent(content: ContentPayload | null): ContentPayload | null {
   return content ? structuredClone(content) : null;
+}
+
+function htmlVisibleText(content: HtmlContent): string | null {
+  const { document } = parseHTML(content.html);
+  const text = (document.body?.innerText ?? document.body?.textContent ?? "").trim();
+  return text ? text.slice(0, 4096) : null;
+}
+
+function snapshotVisibleText(pane: PaneState, entry: HistoryEntry): string {
+  const snapshotText = pane.snapshot.visibleText;
+  if (
+    entry.contentType !== "html" ||
+    entry.content === null ||
+    typeof entry.content !== "object" ||
+    !("html" in entry.content)
+  ) {
+    return snapshotText;
+  }
+  if (snapshotText && snapshotText !== "Surface readyWaiting for content.") {
+    return snapshotText;
+  }
+  return htmlVisibleText(entry.content as HtmlContent) ?? snapshotText;
 }
 
 function currentMutationAck(pane: PaneState): MutationAckResponse["payload"] {
