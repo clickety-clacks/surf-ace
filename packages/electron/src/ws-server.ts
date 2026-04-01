@@ -760,20 +760,7 @@ export class SurfaceWsServer {
         );
         throw new SurfaceCoreError("busy", "Provider already holds an active socket for this surface");
       }
-      if (!resumeSessionId) {
-        resumed = true;
-        sessionId = lock.sessionId;
-        console.info(
-          serverDiagnostic("pair_request_implicit_resume", {
-            provider_id: providerId,
-            session_id: sessionId,
-            surface_id: surfaceId,
-          }),
-        );
-        if (existing && existing.socket !== socket) {
-          this.detachActiveSession(surfaceId, "superseded");
-        }
-      } else if (resumeSessionId !== lock.sessionId) {
+      if (resumeSessionId !== lock.sessionId) {
         console.warn(
           serverDiagnostic("pair_request_invalid_resume", {
             expected_session_id: lock.sessionId,

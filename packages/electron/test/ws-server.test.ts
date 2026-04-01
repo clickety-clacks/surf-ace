@@ -403,7 +403,7 @@ test("ws server rejects owner reconnect with an invalid resume token", async () 
   });
 });
 
-test("ws server implicitly resumes same-provider reconnects without a resume token after disconnect", async () => {
+test("ws server rejects same-provider reconnects without a resume token after disconnect", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const owner = await connect(url);
     const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
@@ -420,10 +420,9 @@ test("ws server implicitly resumes same-provider reconnects without a resume tok
       pairRequest(surfaceId, "pv_alpha"),
     );
 
-    assert.equal(resumed.ok, true);
+    assert.equal(resumed.ok, false);
     assert.equal(resumed.op, "pair.request");
-    assert.equal(resumed.payload.resumed, true);
-    assert.equal(resumed.payload.sessionId, first.payload.sessionId);
+    assert.equal(resumed.error.code, "invalid_resume");
 
     await closeSocket(replacement);
   });
