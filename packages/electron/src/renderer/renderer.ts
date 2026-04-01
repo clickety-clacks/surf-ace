@@ -1051,10 +1051,10 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
       : `<!doctype html><html><head>${
           html.baseUrl ? `<base href="${html.baseUrl}">` : ""
         }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${html.html}</body></html>`;
-    frame.srcdoc = injectHtmlFrameBridge(finalHtml);
+    wireHtmlFrame(view, pane.paneId, frame);
     view.contentEl.appendChild(frame);
     sizeWebViewToPane(view, frame);
-    wireHtmlFrame(view, pane.paneId, frame);
+    frame.srcdoc = injectHtmlFrameBridge(finalHtml);
     return;
   }
 

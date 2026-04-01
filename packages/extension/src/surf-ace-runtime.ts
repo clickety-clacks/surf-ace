@@ -1467,8 +1467,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       v: 1,
     };
 
+    const previousVisibleText = pane.snapshot?.visibleText?.trim() ?? "";
     const response = await this.sendRequest(surface, request);
-    return this.applyMutationResponse(surface, pane, response, request, sessionKey) as SurfAcePushResult;
+    const result = this.applyMutationResponse(surface, pane, response, request, sessionKey) as SurfAcePushResult;
+    if (input.contentType === "html") {
+      await this.syncPaneSnapshot(surface, pane, {
+        waitForVisibleText: true,
+        waitForVisibleTextChangeFrom: previousVisibleText,
+      });
+    }
+    return result;
   }
 
   private emit(event: SurfAceLocalEvent): void {
@@ -3803,34 +3811,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     surface.snapshotSyncInFlight = true;
     try {
-      const panes = this.orderedPanes(surface);
+      const panes = this.layoutPanes(surface);
       for (const pane of panes) {
-        let response: Response;
-        try {
-          response = await this.sendRequest(
-            surface,
-            this.requestEnvelope("snapshot.get", {
-              includeDrawings: true,
-              includeImage: true,
-              includeVisibleText: true,
-              paneId: pane.remotePaneId,
-            }),
-          );
-        } catch (error) {
-          if (error instanceof SurfAceToolError && error.code === "not_connected") {
-            return;
-          }
-          throw error;
-        }
-
-        if (isErrorResponse(response)) {
-          throw new SurfAceToolError(
-            mutationErrorCode(response.error.code),
-            response.error.message,
-          );
-        }
-
-        this.applySnapshot(surface, pane, response as SnapshotResponse);
+        await this.syncPaneSnapshot(surface, pane);
       }
     } catch (error) {
       if (surface.client?.isOpen()) {
@@ -3849,6 +3832,64 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private canSendRequests(surface: ManagedSurface): boolean {
     return Boolean(surface.client?.isOpen());
+  }
+
+  private layoutPanes(surface: ManagedSurface): ManagedPane[] {
+    const panes: ManagedPane[] = [];
+    for (const paneId of flattenManagedLayout(surface.layout)) {
+      const pane = surface.panes.get(paneId);
+      if (pane) {
+        panes.push(pane);
+      }
+    }
+    return panes;
+  }
+
+  private async syncPaneSnapshot(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    options: { waitForVisibleText?: boolean; waitForVisibleTextChangeFrom?: string } = {},
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      let response: Response;
+      try {
+        response = await this.sendRequest(
+          surface,
+          this.requestEnvelope("snapshot.get", {
+            includeDrawings: true,
+            includeImage: true,
+            includeVisibleText: true,
+            paneId: pane.remotePaneId,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof SurfAceToolError && error.code === "not_connected") {
+          return;
+        }
+        throw error;
+      }
+
+      if (isErrorResponse(response)) {
+        throw new SurfAceToolError(
+          mutationErrorCode(response.error.code),
+          response.error.message,
+        );
+      }
+
+      this.applySnapshot(surface, pane, response as SnapshotResponse);
+      const visibleText = pane.snapshot?.visibleText?.trim() ?? "";
+      const changedFromPrevious =
+        options.waitForVisibleTextChangeFrom === undefined ||
+        visibleText !== options.waitForVisibleTextChangeFrom;
+      if (
+        !options.waitForVisibleText ||
+        pane.contentType !== "html" ||
+        (visibleText.length > 0 && changedFromPrevious)
+      ) {
+        return;
+      }
+      await sleep(75);
+    }
   }
 
   private markPairConnected(surface: ManagedSurface, sessionId: SessionId): void {
