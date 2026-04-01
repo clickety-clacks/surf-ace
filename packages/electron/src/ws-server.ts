@@ -73,6 +73,7 @@ type SocketMeta = {
 };
 
 export type SurfaceWsServerOptions = {
+  bindAddress?: string;
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
   core: SurfaceCore;
   endpointName: string;
@@ -115,6 +116,7 @@ function serverDiagnostic(event: string, fields: ServerDiagnosticFields = {}): s
 }
 
 export class SurfaceWsServer {
+  private readonly bindAddress: string;
   private readonly core: SurfaceCore;
   private readonly endpointName: string;
   private readonly hostName: string;
@@ -132,6 +134,7 @@ export class SurfaceWsServer {
   private ignoreInitialSurfaceEvents = true;
 
   constructor(options: SurfaceWsServerOptions) {
+    this.bindAddress = options.bindAddress ?? "0.0.0.0";
     this.capturePaneImage = options.capturePaneImage;
     this.core = options.core;
     this.endpointName = options.endpointName;
@@ -199,20 +202,21 @@ export class SurfaceWsServer {
   async start(): Promise<void> {
     console.info(
       serverDiagnostic("bind_start", {
-        host: "0.0.0.0",
+        host: this.bindAddress,
         port: this.port,
         ws_path: this.wsPath,
       }),
     );
     await new Promise<void>((resolve, reject) => {
-      this.httpServer.listen(this.port, "0.0.0.0", () => resolve());
+      this.httpServer.listen(this.port, this.bindAddress, () => resolve());
       this.httpServer.once("error", reject);
     });
     this.ignoreInitialSurfaceEvents = false;
     console.info(
       serverDiagnostic("bind_ok", {
         endpoint_name: this.endpointName,
-        host: this.hostName,
+        host: this.bindAddress,
+        host_name: this.hostName,
         port: this.port,
         ws_path: this.wsPath,
       }),

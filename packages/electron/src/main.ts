@@ -17,6 +17,12 @@ import { SurfaceWsServer } from "./ws-server.js";
 const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const STATE_FILE_NAME = "surface-core-state.json";
+const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
+
+function advertisingDisabled(): boolean {
+  const value = process.env.SURF_ACE_DISABLE_ADVERTISING?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
 
 function gpuDisableRequested(): boolean {
   const value = process.env.SURF_ACE_DISABLE_GPU?.trim().toLowerCase();
@@ -432,6 +438,7 @@ async function boot(): Promise<void> {
   const primarySurface = core.ensurePrimarySurface(endpointName(), displayViewport());
 
   server = new SurfaceWsServer({
+    bindAddress: BIND_ADDRESS,
     capturePaneImage,
     core,
     endpointName: endpointName(),
@@ -452,12 +459,14 @@ async function boot(): Promise<void> {
   installIpc();
   await server.start();
 
-  advertiser = new BonjourAdvertiser({
-    name: `${endpointName()} (${shortHostName()})`,
-    port: WS_PORT,
-    txtProvider: () => server.advertisedTxt(identityFingerprint),
-  });
-  advertiser.start();
+  if (!advertisingDisabled()) {
+    advertiser = new BonjourAdvertiser({
+      name: `${endpointName()} (${shortHostName()})`,
+      port: WS_PORT,
+      txtProvider: () => server.advertisedTxt(identityFingerprint),
+    });
+    advertiser.start();
+  }
 
   await createWindowForSurface(primarySurface.surfaceId);
 }
