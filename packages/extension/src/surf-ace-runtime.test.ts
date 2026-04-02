@@ -2932,6 +2932,69 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("pair.response canonicalization collapses duplicate provisional surfaces onto the canonical surface id", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 3,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
+
+      const internalRuntime = runtime as any;
+      const canonicalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(canonicalSurface);
+
+      const bootstrapPane = structuredClone(canonicalSurface.panes.get(firstPaneId));
+      assert.ok(bootstrapPane);
+
+      const provisionalSurface = {
+        ...canonicalSurface,
+        client: {
+          close: async () => {},
+          isOpen: () => true,
+          request: async () => {
+            throw new Error("not used in canonicalization test");
+          },
+        },
+        connectedAt: null,
+        endpoint: {
+          ...canonicalSurface.endpoint,
+          endpointId: "endpoint-duplicate-hostname",
+          fingerprintPrefix: "",
+        },
+        endpointId: "endpoint-duplicate-hostname",
+        fingerprintPrefix: "",
+        hasPairedInGatewaySession: false,
+        panes: new Map([[bootstrapPane.paneId, bootstrapPane]]),
+        recentEventIds: [...canonicalSurface.recentEventIds],
+        recentEventIdsSet: new Set(canonicalSurface.recentEventIdsSet),
+        retryDelayResolver: null,
+        sessionId: null,
+        snapshotBufferedEvents: [...canonicalSurface.snapshotBufferedEvents],
+        stopRequested: false,
+        surfaceId: "sf_disc_duplicate_hostname" as any,
+        workPromise: null,
+      };
+
+      internalRuntime.surfaces.set(provisionalSurface.surfaceId, provisionalSurface);
+      internalRuntime.adoptCanonicalSurfaceId(provisionalSurface, server.surfaceId, "pair.response");
+
+      assert.equal(internalRuntime.surfaces.has("sf_disc_duplicate_hostname"), false);
+      assert.equal(internalRuntime.surfaces.get(server.surfaceId), provisionalSurface);
+      const screens = await runtime.listScreens();
+      assert.equal(screens.filter((entry) => entry.fingerprint === server.surfaceId).length, 1);
+      const screen = screens.find((entry) => entry.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      assertPaneLabelsWithOpaqueIds(screen.panes, [1, 2, 3]);
+      assert.equal(canonicalSurface.stopRequested, true);
+      assert.equal(canonicalSurface.autoRetryEnabled, false);
+      await waitFor(() => canonicalSurface.client === null, 5_000);
+    });
+  });
+
   await t.test("stable surfaceId plus remotePaneId preserves paneLabel across reconnect bootstrap", async () => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port, {

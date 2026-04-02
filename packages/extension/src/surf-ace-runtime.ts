@@ -2409,6 +2409,52 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           clampCloseReason("provider_shutdown"),
         );
       },
+      );
+  }
+
+  private adoptCanonicalSurfaceId(
+    surface: ManagedSurface,
+    nextSurfaceId: SurfaceId,
+    source: "pair.response" | "surfaces.list",
+  ): void {
+    if (nextSurfaceId === surface.surfaceId) {
+      if (!surface.windowLabel) {
+        surface.windowLabel = this.ensureWindowLabel(nextSurfaceId);
+      }
+      return;
+    }
+
+    const oldSurfaceId = surface.surfaceId;
+    const preservedSurface = this.surfaces.get(nextSurfaceId);
+    if (this.surfaces.get(oldSurfaceId) === surface) {
+      this.surfaces.delete(oldSurfaceId);
+    }
+    if (preservedSurface && preservedSurface !== surface) {
+      this.preserveSurfaceStateUntilPairResponse(surface, preservedSurface);
+      this.quiesceSupersededSurface(preservedSurface, nextSurfaceId);
+    }
+    this.logger.info?.(
+      runtimeDiagnostic("surface_adopt_remote_id", {
+        endpoint_id: surface.endpointId,
+        from_surface_id: oldSurfaceId,
+        panes: preservedSurface?.panes.size ?? surface.panes.size,
+        source,
+        to_surface_id: nextSurfaceId,
+      }),
+    );
+    surface.surfaceId = nextSurfaceId;
+    surface.windowLabel = this.reconcileWindowLabel(
+      oldSurfaceId,
+      nextSurfaceId,
+      surface.windowLabel,
+    );
+    this.reconcilePaneLabelsBySurfaceId(oldSurfaceId, nextSurfaceId);
+    this.surfaces.set(nextSurfaceId, surface);
+    this.runBackgroundTask(
+      `persist remapped surface id ${surface.endpointId}`,
+      async () => {
+        await this.persistState();
+      },
     );
   }
 
@@ -3208,41 +3254,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       remoteSurfaces[0];
     const matchedRemoteSurfaceId = asSurfaceId(matchedRemoteSurface.surfaceId);
 
-    if (matchedRemoteSurfaceId !== surface.surfaceId) {
-      const oldSurfaceId = surface.surfaceId;
-      const preservedSurface = this.surfaces.get(matchedRemoteSurfaceId);
-      if (this.surfaces.get(oldSurfaceId) === surface) {
-        this.surfaces.delete(oldSurfaceId);
-      }
-      if (preservedSurface) {
-        this.preserveSurfaceStateUntilPairResponse(surface, preservedSurface);
-        this.quiesceSupersededSurface(preservedSurface, matchedRemoteSurfaceId);
-      }
-      this.logger.info?.(
-        runtimeDiagnostic("surface_adopt_remote_id", {
-          endpoint_id: surface.endpointId,
-          from_surface_id: oldSurfaceId,
-          panes: preservedSurface?.panes.size ?? surface.panes.size,
-          to_surface_id: matchedRemoteSurfaceId,
-        }),
-      );
-      surface.surfaceId = matchedRemoteSurfaceId;
-      surface.windowLabel = this.reconcileWindowLabel(
-        oldSurfaceId,
-        matchedRemoteSurfaceId,
-        surface.windowLabel,
-      );
-      this.reconcilePaneLabelsBySurfaceId(oldSurfaceId, matchedRemoteSurfaceId);
-      this.surfaces.set(matchedRemoteSurfaceId, surface);
-      this.runBackgroundTask(
-        `persist remapped surface id ${surface.endpointId}`,
-        async () => {
-          await this.persistState();
-        },
-      );
-    } else if (!surface.windowLabel) {
-      surface.windowLabel = this.ensureWindowLabel(matchedRemoteSurfaceId);
-    }
+    this.adoptCanonicalSurfaceId(surface, matchedRemoteSurfaceId, "surfaces.list");
 
     surface.lastSeenAt = this.now();
     surface.name = matchedRemoteSurface.name;
@@ -3540,6 +3552,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             }),
           );
           const pairResponse = await this.requestPair(surface);
+          this.adoptCanonicalSurfaceId(
+            surface,
+            asSurfaceId(pairResponse.payload.surfaceId),
+            "pair.response",
+          );
           this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId));
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
