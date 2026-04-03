@@ -301,13 +301,10 @@ final class SurfAceRuntime {
                     await self.handleWebSocket(socket)
                 }
             )
-            guard port == fixedServerPort else {
-                throw SurfAceHTTPServerError.boundPortMismatch(requested: fixedServerPort, actual: port)
-            }
             serverPort = Int(port)
             isStarted = true
             surfAceServerRuntimeLog(
-                "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("screen_name", screenName)]))"
+                "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", fixedServerPort), ("screen_name", screenName)]))"
             )
             startHeartbeatWatchdog()
             publishBonjour()
@@ -2781,7 +2778,7 @@ final class SurfAceRuntime {
 
     private func startupFailureMessage(for error: Error) -> String {
         if case let NWError.posix(code) = error, code == .EADDRINUSE {
-            return "Server failed on fixed port \(fixedServerPort): port is already in use; aborting startup without fallback"
+            return "Server failed after trying ports \(fixedServerPort)-\(fixedServerPort + SurfAceHTTPServer.fallbackPortOffsetLimit): port is already in use"
         }
         return "Server failed on fixed port \(fixedServerPort): \(error.localizedDescription)"
     }

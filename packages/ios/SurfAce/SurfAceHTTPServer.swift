@@ -334,6 +334,7 @@ actor SurfAceHTTPServer {
     typealias HTTPHandler = @Sendable (HTTPServerRequest) async -> HTTPServerResponse
     typealias WebSocketHandler = @Sendable (SurfAceWebSocket) async -> Void
     static let fixedPort: UInt16 = 19_001
+    static let fallbackPortOffsetLimit: UInt16 = 10
 
     private var listener: NWListener?
     private let listenerQueue = DispatchQueue(label: "co.clicketyclacks.SurfAce.HTTPServer")
@@ -346,12 +347,50 @@ actor SurfAceHTTPServer {
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
-        try await startForTesting(
-            port: Self.fixedPort,
+        try await startWithFallbackForTesting(
+            preferredPort: Self.fixedPort,
+            fallbackPortOffsetLimit: Self.fallbackPortOffsetLimit,
             webSocketPath: webSocketPath,
             httpHandler: httpHandler,
             webSocketHandler: webSocketHandler
         )
+    }
+
+    func startWithFallbackForTesting(
+        preferredPort: UInt16,
+        fallbackPortOffsetLimit: UInt16,
+        webSocketPath: String = "/ws",
+        httpHandler: @escaping HTTPHandler,
+        webSocketHandler: @escaping WebSocketHandler
+    ) async throws -> UInt16 {
+        let maxOffset = Int(fallbackPortOffsetLimit)
+        let candidatePorts = (0...maxOffset).compactMap { offset -> UInt16? in
+            UInt16(Int(preferredPort) + offset)
+        }
+        var lastError: Error?
+
+        for port in candidatePorts {
+            do {
+                let boundPort = try await startForTesting(
+                    port: port,
+                    webSocketPath: webSocketPath,
+                    httpHandler: httpHandler,
+                    webSocketHandler: webSocketHandler
+                )
+                if boundPort != preferredPort {
+                    surfAceServerLog("listener fallback requestedPort=\(preferredPort) actualPort=\(boundPort)")
+                }
+                return boundPort
+            } catch let nwError as NWError where nwError == .posix(.EADDRINUSE) {
+                lastError = nwError
+                continue
+            } catch {
+                lastError = error
+                throw error
+            }
+        }
+
+        throw lastError ?? SurfAceHTTPServerError.invalidRequestedPort(preferredPort)
     }
 
     func startForTesting(

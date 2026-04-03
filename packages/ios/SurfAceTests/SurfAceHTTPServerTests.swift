@@ -67,6 +67,30 @@ final class SurfAceHTTPServerTests: XCTestCase {
         await secondServer.stop()
     }
 
+    func testStartWithFallbackBindsNextAvailablePortWhenPreferredPortIsInUse() async throws {
+        let firstServer = SurfAceHTTPServer()
+        let secondServer = SurfAceHTTPServer()
+        let port = try nextAvailablePort()
+
+        _ = try await firstServer.startForTesting(
+            port: port,
+            httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
+            webSocketHandler: { _ in }
+        )
+
+        let boundPort = try await secondServer.startWithFallbackForTesting(
+            preferredPort: port,
+            fallbackPortOffsetLimit: 2,
+            httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
+            webSocketHandler: { _ in }
+        )
+
+        XCTAssertEqual(boundPort, port + 1)
+
+        await firstServer.stop()
+        await secondServer.stop()
+    }
+
     func testInfoPlistDeclaresLocalNetworkPrivacyUsage() throws {
         let info = try loadAppInfoPlist()
         let usageDescription = try XCTUnwrap(info["NSLocalNetworkUsageDescription"] as? String)
