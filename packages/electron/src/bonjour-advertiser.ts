@@ -58,18 +58,40 @@ function isIpv4Family(family: string | number): boolean {
   return family === 4 || family === "IPv4";
 }
 
-function bonjourInterfaceAddresses(): string[] {
-  const networks = os.networkInterfaces();
+function isLoopbackIpv4Address(address: string): boolean {
+  return address === "127.0.0.1" || address.startsWith("127.");
+}
+
+function bonjourBindingAddressesForPlatform(
+  platform: NodeJS.Platform,
+  networks: ReturnType<typeof os.networkInterfaces>,
+): string[] {
+  // On macOS, mDNSResponder already owns 5353 on each interface. Creating
+  // per-interface Bonjour clients causes live EADDRINUSE crashes in the main
+  // process, so use a single default client and rely on visibility fallback.
+  if (platform === "darwin") {
+    return [];
+  }
   const names = Object.keys(networks);
-  const addresses: string[] = [];
+  const addresses = new Set<string>();
   for (const name of names) {
     const entries = networks[name] ?? [];
-    const entry = entries.find((candidate) => isIpv4Family(candidate.family));
+    const entry = entries.find(
+      (candidate) => isIpv4Family(candidate.family) && !candidate.internal && !isLoopbackIpv4Address(candidate.address),
+    );
     if (entry?.address) {
-      addresses.push(entry.address);
+      addresses.add(entry.address);
     }
   }
-  return addresses;
+  return [...addresses];
+}
+
+function useIsolatedBonjourPublisherByDefault(platform: NodeJS.Platform): boolean {
+  return platform === "darwin";
+}
+
+function bonjourInterfaceAddresses(): string[] {
+  return bonjourBindingAddressesForPlatform(process.platform, os.networkInterfaces());
 }
 
 export class BonjourAdvertiser {
@@ -80,6 +102,7 @@ export class BonjourAdvertiser {
   private readonly bonjourBindings: BonjourBinding[];
   private readonly port: number;
   private readonly txtProvider: () => Record<string, string>;
+  private readonly useIsolatedPublisherByDefault: boolean;
   private destroyed = false;
   private isolatedPublisher: ChildProcess | null = null;
   private republishAttempts = 0;
@@ -104,6 +127,7 @@ export class BonjourAdvertiser {
     this.port = options.port;
     this.serviceName = options.name;
     this.txtProvider = options.txtProvider;
+    this.useIsolatedPublisherByDefault = !options.bonjour && useIsolatedBonjourPublisherByDefault(process.platform);
   }
 
   start(): void {
@@ -116,6 +140,10 @@ export class BonjourAdvertiser {
       }),
     );
     if (this.services.length > 0 || this.publishing) {
+      return;
+    }
+    if (this.useIsolatedPublisherByDefault) {
+      void this.publishWithIsolatedPublisher(this.serviceName);
       return;
     }
     void this.publishNextAvailableName(this.serviceName);
@@ -150,13 +178,16 @@ export class BonjourAdvertiser {
   }
 
   private async restart(): Promise<void> {
-    if (this.destroyed || this.activeBonjourBindings().length === 0) {
+    if (
+      this.destroyed
+      || (this.activeBonjourBindings().length === 0 && !this.isolatedPublisher && !this.useIsolatedPublisherByDefault)
+    ) {
       return;
     }
     this.clearVisibilityTimer();
     await Promise.all(this.activeBonjourBindings().map((binding) => this.unpublishBonjourBinding(binding)));
     this.services = [];
-    if (this.isolatedPublisher) {
+    if (this.isolatedPublisher || this.useIsolatedPublisherByDefault) {
       await this.publishWithIsolatedPublisher(this.serviceName);
       return;
     }
@@ -533,4 +564,6 @@ export class BonjourAdvertiser {
 
 export const __test = {
   bonjourDiagnostic,
+  bonjourBindingAddressesForPlatform,
+  useIsolatedBonjourPublisherByDefault,
 };

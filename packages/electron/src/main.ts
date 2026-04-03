@@ -16,6 +16,7 @@ import { SurfaceWsServer } from "./ws-server.js";
 
 const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
+const EXPLICIT_WS_PORT = process.env.SURF_ACE_PORT != null;
 const STATE_FILE_NAME = "surface-core-state.json";
 const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
 
@@ -48,6 +49,56 @@ let isQuitting = false;
 let server: SurfaceWsServer;
 let stateDir = "";
 let stateWrite = Promise.resolve();
+
+function isAddressInUse(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as NodeJS.ErrnoException).code === "EADDRINUSE";
+}
+
+function candidatePorts(preferredPort: number): number[] {
+  if (EXPLICIT_WS_PORT) {
+    return [preferredPort];
+  }
+  const ports = [preferredPort];
+  for (let offset = 1; offset <= 10; offset += 1) {
+    ports.push(preferredPort + offset);
+  }
+  return ports;
+}
+
+async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: number; server: SurfaceWsServer }> {
+  const ports = candidatePorts(WS_PORT);
+  let lastError: unknown;
+  for (const port of ports) {
+    const candidate = new SurfaceWsServer({
+      bindAddress: BIND_ADDRESS,
+      capturePaneImage,
+      core: coreValue,
+      endpointName: endpointName(),
+      hostName: shortHostName(),
+      onBusyChanged: () => advertiser?.refresh(),
+      port,
+      viewport: () => displayViewport(),
+    });
+    try {
+      await candidate.start();
+      if (port !== WS_PORT) {
+        console.warn(
+          `[surf-ace] WS port ${WS_PORT} unavailable; using ${port} for this Electron surface on ${shortHostName()}.`,
+        );
+      }
+      return { port, server: candidate };
+    } catch (error) {
+      lastError = error;
+      if (!isAddressInUse(error) || port === ports.at(-1)) {
+        throw error;
+      }
+    }
+  }
+  throw lastError;
+}
 
 app.on("child-process-gone", (_event, details) => {
   if (details.type !== "GPU") {
@@ -437,16 +488,8 @@ async function boot(): Promise<void> {
   core = new SurfaceCore({ persistentState });
   const primarySurface = core.ensurePrimarySurface(endpointName(), displayViewport());
 
-  server = new SurfaceWsServer({
-    bindAddress: BIND_ADDRESS,
-    capturePaneImage,
-    core,
-    endpointName: endpointName(),
-    hostName: shortHostName(),
-    onBusyChanged: () => advertiser?.refresh(),
-    port: WS_PORT,
-    viewport: () => displayViewport(),
-  });
+  const serverStart = await createAndStartServer(core);
+  server = serverStart.server;
 
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "surface-changed") {
@@ -457,12 +500,11 @@ async function boot(): Promise<void> {
 
   installMenu();
   installIpc();
-  await server.start();
 
   if (!advertisingDisabled()) {
     advertiser = new BonjourAdvertiser({
       name: `${endpointName()} (${shortHostName()})`,
-      port: WS_PORT,
+      port: serverStart.port,
       txtProvider: () => server.advertisedTxt(identityFingerprint),
     });
     advertiser.start();

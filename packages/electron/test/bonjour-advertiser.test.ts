@@ -110,6 +110,45 @@ test("bonjour advertiser diagnostics format concise structured fields", () => {
   );
 });
 
+test("bonjour advertiser uses the default binding on macOS", () => {
+  const addresses = __test.bonjourBindingAddressesForPlatform("darwin", {
+    en0: [
+      { address: "192.168.50.240", family: "IPv4", internal: false },
+      { address: "fe80::1", family: "IPv6", internal: false },
+    ] as never,
+    lo0: [
+      { address: "127.0.0.1", family: "IPv4", internal: true },
+    ] as never,
+    utun4: [
+      { address: "100.71.19.27", family: "IPv4", internal: false },
+    ] as never,
+  });
+
+  assert.deepEqual(addresses, []);
+});
+
+test("bonjour advertiser uses the isolated publisher on macOS", () => {
+  assert.equal(__test.useIsolatedBonjourPublisherByDefault("darwin"), true);
+  assert.equal(__test.useIsolatedBonjourPublisherByDefault("linux"), false);
+});
+
+test("bonjour advertiser ignores loopback/internal IPv4 bindings on non-macOS hosts", () => {
+  const addresses = __test.bonjourBindingAddressesForPlatform("linux", {
+    en0: [
+      { address: "192.168.50.240", family: "IPv4", internal: false },
+      { address: "fe80::1", family: "IPv6", internal: false },
+    ] as never,
+    lo0: [
+      { address: "127.0.0.1", family: "IPv4", internal: true },
+    ] as never,
+    utun4: [
+      { address: "100.71.19.27", family: "IPv4", internal: false },
+    ] as never,
+  });
+
+  assert.deepEqual(addresses, ["192.168.50.240", "100.71.19.27"]);
+});
+
 test("bonjour advertiser keeps incrementing the suffix across repeated conflicts", async () => {
   const bonjour = new FakeBonjour([
     ["TARS Surf Ace"],
