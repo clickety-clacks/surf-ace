@@ -2671,7 +2671,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("fingerprint identity reuses the surface but reconnects when endpoint ids churn", async () => {
+  await t.test("fingerprint identity reuses live paired surface without reconnecting on endpoint alias churn", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const replacementPort = nextPort++;
       const replacementServer = new FakeSurfAceWsServer(replacementPort);
@@ -2680,6 +2680,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const internalRuntime = runtime as any;
         const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
         assert.ok(originalSurface);
+        assert.ok(originalSurface.client?.isOpen());
+        const originalEndpointId = originalSurface.endpointId;
 
         internalRuntime.refreshEndpointTopology({
           ...discoveryEndpoint(replacementPort, originalSurface.fingerprintPrefix),
@@ -2687,11 +2689,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         });
 
         assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
-        assert.equal(originalSurface.endpointId, `endpoint-${replacementPort}`);
-
-        await waitFor(() => replacementServer.pairedSocket !== null, 3_000);
-        assert.equal(replacementServer.pairAttemptDetails.at(-1)?.resumeSessionId, "sa_test_session");
-        assert.equal(replacementServer.pairAttemptDetails.at(-1)?.takeover, false);
+        assert.equal(originalSurface.endpointId, originalEndpointId);
+        assert.equal(originalSurface.client?.isOpen(), true);
+        assert.equal(replacementServer.pairedSocket, null);
       } finally {
         await replacementServer.close();
       }

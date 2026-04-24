@@ -3228,6 +3228,28 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private assignEndpoint(surface: ManagedSurface, endpoint: SurfAceDiscoveryEndpoint): void {
     const previousEndpointId = surface.endpointId;
     const endpointChanged = previousEndpointId !== endpoint.endpointId;
+    const sameFingerprint =
+      Boolean(endpoint.fingerprintPrefix) &&
+      endpoint.fingerprintPrefix === surface.fingerprintPrefix;
+    if (
+      endpointChanged &&
+      sameFingerprint &&
+      surface.hasPairedInGatewaySession &&
+      surface.client?.isOpen()
+    ) {
+      surface.lastSeenAt = this.now();
+      surface.name = endpoint.name;
+      surface.viewport = cloneViewport(endpoint.viewport);
+      this.logger.info?.(
+        runtimeDiagnostic("endpoint_alias_observed", {
+          fingerprint: endpoint.fingerprintPrefix || "none",
+          observed_endpoint_id: endpoint.endpointId,
+          retained_endpoint_id: previousEndpointId,
+          surface_id: surface.surfaceId,
+        }),
+      );
+      return;
+    }
     surface.endpoint = endpoint;
     surface.endpointId = endpoint.endpointId;
     surface.fingerprintPrefix = endpoint.fingerprintPrefix;
