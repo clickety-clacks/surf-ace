@@ -41,6 +41,7 @@ type PaneContentValue =
   | HtmlContent
   | ImageContent
   | MarkdownContent
+  | { process: { command: string }; targetClass: "terminal" }
   | PdfContent
   | TerminalContent
   | VideoContent;
@@ -52,7 +53,7 @@ type RendererPaneState = {
   content: {
     content: PaneContentValue;
     contentId: string | null;
-    contentType: "canvas" | "html" | "image" | "markdown" | "pdf" | "terminal" | "video" | null;
+    contentType: "canvas" | "html" | "image" | "markdown" | "native_surface" | "pdf" | "terminal" | "video" | null;
     display?: { interactive?: boolean; scrollable?: boolean; title?: string };
     revision: number;
   };
@@ -1143,6 +1144,11 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
 
   if (pane.content.contentType === "canvas") {
     renderCenteredState(view, "Canvas");
+    return;
+  }
+
+  if (pane.content.contentType === "native_surface") {
+    renderCenteredState(view, "Native surface");
   }
 }
 

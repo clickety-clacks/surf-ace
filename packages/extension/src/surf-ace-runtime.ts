@@ -60,6 +60,7 @@ import type {
   Viewport,
   MutationAckResponse,
   PageEvent,
+  NativeSurfaceContent,
   TopologyApplyRequest,
 } from "../../protocol/src/index.js";
 import {
@@ -227,10 +228,12 @@ export type SurfAceAnnotateRemoveResult = {
   removedStrokeIds: string[];
 };
 
+export type SurfAcePushContentType = Exclude<ContentType, "native_surface">;
+
 export type SurfAcePushInput =
   {
     content: string;
-    contentType: ContentType;
+    contentType: SurfAcePushContentType;
     fingerprint: string;
     paneId: PaneId;
   };
@@ -455,6 +458,20 @@ function runtimeDiagnostic(event: string, fields: RuntimeDiagnosticFields = {}):
   return suffix.length > 0
     ? `[surf-ace:runtime] event=${event} ${suffix}`
     : `[surf-ace:runtime] event=${event}`;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNativeSurfaceContentValue(value: unknown): value is NativeSurfaceContent {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  const processSpec = value["process"];
+  return value["targetClass"] === "terminal" &&
+    isPlainObject(processSpec) &&
+    typeof processSpec["command"] === "string";
 }
 
 const DEFAULT_DRAWING_FLUSH_CONFIG: DrawingFlushConfig = {
@@ -955,8 +972,30 @@ function normalizeContent(
     }
     return content as ContentSetRequest["payload"]["content"];
   }
+  if (contentType === "native_surface") {
+    if (typeof content === "string") {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        throw new Error("native_surface content must be valid JSON");
+      }
+      if (!isNativeSurfaceContentValue(parsed as ContentSetRequest["payload"]["content"])) {
+        throw new Error("native_surface content must include targetClass=terminal and process.command");
+      }
+      return parsed as ContentSetRequest["payload"]["content"];
+    }
+    if (!isNativeSurfaceContentValue(content as ContentSetRequest["payload"]["content"])) {
+      throw new Error("native_surface content must include targetClass=terminal and process.command");
+    }
+    return content as ContentSetRequest["payload"]["content"];
+  }
   return content as ContentSetRequest["payload"]["content"];
 }
+
+export const __test = {
+  normalizeContent,
+};
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {

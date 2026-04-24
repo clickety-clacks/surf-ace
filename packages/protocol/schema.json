@@ -102,7 +102,7 @@
     },
     "ContentType": {
       "type": "string",
-      "enum": ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"]
+      "enum": ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "native_surface"]
     },
     "EventType": {
       "type": "string",
@@ -118,6 +118,7 @@
         "event.surface_removed",
         "event.surface_resumed",
         "event.snapshot_hint",
+        "event.native_surface_status",
         "event.pane_created",
         "event.pane_removed",
         "event.pane_renamed"
@@ -345,6 +346,37 @@
         }
       ]
     },
+    "NativeSurfaceTargetClass": {
+      "type": "string",
+      "enum": ["terminal"]
+    },
+    "NativeSurfaceProcessSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "cwd": { "type": "string", "minLength": 1 },
+        "env": {
+          "type": "object",
+          "propertyNames": { "type": "string", "minLength": 1 },
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "NativeSurfaceContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetClass", "process"],
+      "properties": {
+        "targetClass": { "$ref": "#/$defs/NativeSurfaceTargetClass" },
+        "process": { "$ref": "#/$defs/NativeSurfaceProcessSpec" }
+      }
+    },
 
     "SurfacesListRequest": {
       "type": "object",
@@ -522,6 +554,12 @@
                   "properties": {
                     "contentType": { "const": "canvas" },
                     "content": { "$ref": "#/$defs/CanvasContent" }
+                  }
+                },
+                {
+                  "properties": {
+                    "contentType": { "const": "native_surface" },
+                    "content": { "$ref": "#/$defs/NativeSurfaceContent" }
                   }
                 }
               ]
@@ -1320,6 +1358,63 @@
               "enum": ["after_render", "after_reconnect", "backpressure_drop"]
             }
           }
+        }
+      }
+    },
+    "NativeSurfaceStatusEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.native_surface_status" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["paneId", "contentId", "revision", "lifecycle"],
+              "properties": {
+                "paneId": { "$ref": "#/$defs/PaneId" },
+                "contentId": { "$ref": "#/$defs/ContentId" },
+                "revision": { "$ref": "#/$defs/Revision" },
+                "lifecycle": { "type": "string", "enum": ["launching", "attached"] }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["paneId", "contentId", "revision", "lifecycle", "errorCode", "errorMessage"],
+              "properties": {
+                "paneId": { "$ref": "#/$defs/PaneId" },
+                "contentId": { "$ref": "#/$defs/ContentId" },
+                "revision": { "$ref": "#/$defs/Revision" },
+                "lifecycle": { "const": "failed" },
+                "errorCode": { "type": "string" },
+                "errorMessage": { "type": "string" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["paneId", "contentId", "revision", "lifecycle", "exitCode"],
+              "properties": {
+                "paneId": { "$ref": "#/$defs/PaneId" },
+                "contentId": { "$ref": "#/$defs/ContentId" },
+                "revision": { "$ref": "#/$defs/Revision" },
+                "lifecycle": { "const": "exited" },
+                "exitCode": {
+                  "oneOf": [
+                    { "type": "integer" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          ]
         }
       }
     },

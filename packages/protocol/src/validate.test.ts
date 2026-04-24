@@ -175,6 +175,50 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   assert.deepEqual(errorResponse, { ok: true });
 });
 
+test("validateEnvelopeType accepts native surface content.set requests", () => {
+  const result = validateEnvelopeType("content.set", {
+    id: "req_native_content",
+    op: "content.set",
+    payload: {
+      content: {
+        process: {
+          args: ["--login"],
+          command: "zsh",
+        },
+        targetClass: "terminal",
+      },
+      contentId: "ct_native",
+      contentType: "native_surface",
+      historyOwnerToken: "hot_native",
+      paneId: 7,
+      revision: 1,
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+
+  assert.deepEqual(result, { ok: true });
+});
+
+test("validateEnvelopeType accepts native surface status events", () => {
+  const result = validateEnvelopeType("event.native_surface_status", {
+    eventId: "evt_native_status",
+    op: "event.native_surface_status",
+    payload: {
+      contentId: "ct_native",
+      lifecycle: "attached",
+      paneId: 7,
+      revision: 1,
+    },
+    sentAt: Date.now(),
+    type: "event",
+    v: 1,
+  });
+
+  assert.deepEqual(result, { ok: true });
+});
+
 test("validateEnvelopeType rejects op drift", () => {
   const opMismatch = validateEnvelopeType("pair.request", {
     id: "req_1",

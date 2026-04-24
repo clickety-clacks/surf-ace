@@ -15,6 +15,7 @@ import type {
   EventProfile,
   HeartbeatPingRequest,
   HistoryNavigatedEvent,
+  NativeSurfaceStatusEvent,
   RelinquishRequest,
   PaneCloseRequest,
   PaneRenameRequest,
@@ -478,6 +479,9 @@ export class SurfaceWsServer {
       case "history-navigated":
         await this.maybeSendHistoryNavigated(event);
         return;
+      case "native-surface-status":
+        await this.maybeSendNativeSurfaceStatus(event);
+        return;
       case "pane-created":
         await this.broadcastLifecycleEvent({
           eventId: makeEventId(),
@@ -640,6 +644,13 @@ export class SurfaceWsServer {
         type: "event",
         v: 1,
       });
+    }
+    if (
+      response.type === "response" &&
+      response.ok &&
+      response.op === "pair.request"
+    ) {
+      await this.sendCurrentNativeSurfaceStatuses(response.payload.surfaceId, socket);
     }
   }
 
@@ -1444,6 +1455,44 @@ export class SurfaceWsServer {
       v: 1,
     });
   }
+
+  private async maybeSendNativeSurfaceStatus(
+    event: Extract<CoreEvent, { type: "native-surface-status" }>,
+  ): Promise<void> {
+    const session = this.activeSession(event.surfaceId);
+    if (!session || !isEventEnabled(session.eventProfile, "event.native_surface_status")) {
+      return;
+    }
+    const { surfaceId: _surfaceId, type: _type, ...payload } = event;
+    await this.sendNativeSurfaceStatus(session.socket, payload as NativeSurfaceStatusEvent["payload"]);
+  }
+
+  private async sendCurrentNativeSurfaceStatuses(
+    surfaceId: string,
+    socket: WebSocket,
+  ): Promise<void> {
+    const session = this.activeSession(surfaceId);
+    if (!session || session.socket !== socket || !isEventEnabled(session.eventProfile, "event.native_surface_status")) {
+      return;
+    }
+    for (const payload of this.core.nativeSurfaceStatuses(surfaceId)) {
+      await this.sendNativeSurfaceStatus(socket, payload);
+    }
+  }
+
+  private async sendNativeSurfaceStatus(
+    socket: WebSocket,
+    payload: NativeSurfaceStatusEvent["payload"],
+  ): Promise<void> {
+    await this.sendEvent(socket, {
+      eventId: makeEventId(),
+      op: "event.native_surface_status",
+      payload,
+      sentAt: Date.now(),
+      type: "event",
+      v: 1,
+    });
+  }
 }
 
 export const __test = {
@@ -1517,6 +1566,7 @@ function isEventEnabled(profile: EventProfile, eventName: Event["op"]): boolean 
     eventName === "event.surface_removed" ||
     eventName === "event.surface_resumed" ||
     eventName === "event.history_navigated" ||
+    eventName === "event.native_surface_status" ||
     eventName === "event.pane_created" ||
     eventName === "event.pane_removed" ||
     eventName === "event.pane_renamed"
@@ -1567,6 +1617,7 @@ function contentBitmask(contentTypes: string[]): number {
     pdf: 1 << 2,
     terminal: 1 << 3,
     video: 1 << 5,
+    native_surface: 1 << 7,
   };
   return contentTypes.reduce((mask, type) => mask | (bits[type] ?? 0), 0);
 }

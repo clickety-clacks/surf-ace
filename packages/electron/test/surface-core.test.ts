@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
+import type { NativePaneHostBridge, NativePaneHostPlan } from "../src/native-pane-bridge.js";
 
 function applyProviderBootstrap(core: SurfaceCore, surfaceId: string, initialPaneId: number): number {
   core.applyProviderBootstrapTopology(surfaceId, {
@@ -222,6 +223,322 @@ test("surface core rejects video and canvas content types with unsupported_conte
 
   assert.equal(core.supportsContentType("video"), false);
   assert.equal(core.supportsContentType("canvas"), false);
+});
+
+test("surface core reports native surface failure when compositor bridge is unavailable", () => {
+  const core = new SurfaceCore({
+    compositorHostMode: {
+      enabled: false,
+      outputRotation: null,
+      waylandDisplay: null,
+    },
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const events: unknown[] = [];
+  core.subscribe((event) => {
+    if (event.type === "native-surface-status") {
+      events.push(event);
+    }
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 5);
+  core.contentSet(surface.surfaceId, {
+    content: {
+      process: { command: "zsh" },
+      targetClass: "terminal",
+    },
+    contentId: "ct_native" as never,
+    contentType: "native_surface",
+    historyOwnerToken: "hot_native",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  assert.equal(core.supportsContentType("native_surface"), true);
+  assert.deepEqual(core.nativeSurfaceStatuses(surface.surfaceId), [
+    {
+      contentId: "ct_native",
+      errorCode: "render_failed",
+      errorMessage: "Surf Ace compositor native-pane host API is unavailable",
+      lifecycle: "failed",
+      paneId,
+      revision: 1,
+    },
+  ]);
+  assert.equal(events.length, 1);
+});
+
+test("surface core sends Surf Ace pane geometry and process intent to native pane bridge in compositor mode", async () => {
+  const plans: NativePaneHostPlan[] = [];
+  const bridge: NativePaneHostBridge = {
+    available: true,
+    async host(plan) {
+      plans.push(plan);
+      return {
+        contentId: plan.contentId,
+        lifecycle: "attached",
+        paneId: plan.paneId,
+        revision: plan.revision,
+      };
+    },
+    async release() {},
+  };
+  const core = new SurfaceCore({
+    compositorHostMode: {
+      enabled: true,
+      outputRotation: "normal",
+      waylandDisplay: "surf-ace-0",
+    },
+    nativePaneHostBridge: bridge,
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    bounds: { height: 300, width: 500, x: 40, y: 60 },
+  });
+  core.contentSet(surface.surfaceId, {
+    content: {
+      process: {
+        args: ["--login"],
+        command: "zsh",
+      },
+      targetClass: "terminal",
+    },
+    contentId: "ct_native" as never,
+    contentType: "native_surface",
+    historyOwnerToken: "hot_native",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(plans.length, 1);
+  assert.deepEqual(plans[0], {
+    contentId: "ct_native",
+    geometry: { height: 300, width: 500, x: 40, y: 60 },
+    paneId,
+    process: {
+      args: ["--login"],
+      command: "zsh",
+    },
+    revision: 1,
+    surfaceId: surface.surfaceId,
+    targetClass: "terminal",
+  });
+  assert.deepEqual(core.nativeSurfaceStatuses(surface.surfaceId), [
+    {
+      contentId: "ct_native",
+      lifecycle: "attached",
+      paneId,
+      revision: 1,
+    },
+  ]);
+
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    bounds: { height: 320, width: 520, x: 50, y: 70 },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(plans.length, 2);
+  assert.deepEqual(plans[1]?.geometry, { height: 320, width: 520, x: 50, y: 70 });
+});
+
+test("surface core releases and rehosts native surfaces across history navigation", async () => {
+  const plans: NativePaneHostPlan[] = [];
+  const releases: unknown[] = [];
+  const bridge: NativePaneHostBridge = {
+    available: true,
+    async host(plan) {
+      plans.push(plan);
+      return {
+        contentId: plan.contentId,
+        lifecycle: "attached",
+        paneId: plan.paneId,
+        revision: plan.revision,
+      };
+    },
+    async release(plan) {
+      releases.push(plan);
+    },
+  };
+  const core = new SurfaceCore({
+    compositorHostMode: {
+      enabled: true,
+      outputRotation: null,
+      waylandDisplay: "surf-ace-0",
+    },
+    nativePaneHostBridge: bridge,
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.contentSet(surface.surfaceId, {
+    content: { process: { command: "zsh" }, targetClass: "terminal" },
+    contentId: "ct_native" as never,
+    contentType: "native_surface",
+    historyOwnerToken: "hot_native",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  core.contentSet(surface.surfaceId, {
+    content: { process: { args: ["--login"], command: "zsh" }, targetClass: "terminal" },
+    contentId: "ct_native_2" as never,
+    contentType: "native_surface",
+    historyOwnerToken: "hot_native_2",
+    paneId: paneId as never,
+    revision: 2 as never,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(plans.length, 2);
+  assert.equal(releases.length, 1);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>local</p>" },
+    contentId: "ct_html" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    revision: 3 as never,
+  });
+  core.navigateHistory(surface.surfaceId, paneId, "back");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  core.navigateHistory(surface.surfaceId, paneId, "forward");
+
+  assert.equal(plans.length, 3);
+  assert.equal(releases.length, 3);
+});
+
+test("surface core releases native surfaces when panes or surfaces are removed", async () => {
+  const releases: unknown[] = [];
+  const bridge: NativePaneHostBridge = {
+    available: true,
+    async host(plan) {
+      return {
+        contentId: plan.contentId,
+        lifecycle: "attached",
+        paneId: plan.paneId,
+        revision: plan.revision,
+      };
+    },
+    async release(plan) {
+      releases.push(plan);
+    },
+  };
+  const core = new SurfaceCore({
+    compositorHostMode: {
+      enabled: true,
+      outputRotation: null,
+      waylandDisplay: "surf-ace-0",
+    },
+    nativePaneHostBridge: bridge,
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [8],
+    newPaneLabels: [8],
+    paneId,
+  });
+  core.contentSet(surface.surfaceId, {
+    content: { process: { command: "zsh" }, targetClass: "terminal" },
+    contentId: "ct_native" as never,
+    contentType: "native_surface",
+    historyOwnerToken: "hot_native",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  core.paneClose(surface.surfaceId, paneId);
+  assert.equal(releases.length, 1);
+
+  const secondSurface = core.createAdditionalSurface("Surf Ace 2", { height: 600, scale: 2, width: 900 });
+  const secondPaneId = applyProviderBootstrap(core, secondSurface.surfaceId, 11);
+  core.contentSet(secondSurface.surfaceId, {
+    content: { process: { command: "zsh" }, targetClass: "terminal" },
+    contentId: "ct_native_2" as never,
+    contentType: "native_surface",
+    historyOwnerToken: "hot_native_2",
+    paneId: secondPaneId as never,
+    revision: 1 as never,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  core.removeSurface(secondSurface.surfaceId);
+  assert.equal(releases.length, 2);
+});
+
+test("surface core releases native surfaces removed by topology.apply", async () => {
+  const releases: unknown[] = [];
+  const bridge: NativePaneHostBridge = {
+    available: true,
+    async host(plan) {
+      return {
+        contentId: plan.contentId,
+        lifecycle: "attached",
+        paneId: plan.paneId,
+        revision: plan.revision,
+      };
+    },
+    async release(plan) {
+      releases.push(plan);
+    },
+  };
+  const core = new SurfaceCore({
+    compositorHostMode: {
+      enabled: true,
+      outputRotation: null,
+      waylandDisplay: "surf-ace-0",
+    },
+    nativePaneHostBridge: bridge,
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.contentSet(surface.surfaceId, {
+    content: { process: { command: "zsh" }, targetClass: "terminal" },
+    contentId: "ct_native" as never,
+    contentType: "native_surface",
+    historyOwnerToken: "hot_native",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  core.topologyApply(surface.surfaceId, {
+    layout: { paneId: 8 as never, type: "pane" },
+    panes: [{ name: "Replacement", paneId: 8 as never, paneLabel: 8 }],
+    topologyRevision: 2 as never,
+    windowLabel: "b",
+  });
+
+  assert.equal(releases.length, 1);
 });
 
 test("surface core assigns pane history and split topology", () => {

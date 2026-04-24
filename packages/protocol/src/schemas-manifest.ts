@@ -12,6 +12,7 @@ import {
   heartbeatPongResponseSchema,
   mutationAckResponseSchema,
   navigationEventSchema,
+  nativeSurfaceStatusEventSchema,
   pageEventSchema,
   pairRequestSchema,
   pairResponseSchema,
@@ -144,6 +145,9 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   },
   "event.snapshot_hint": {
     event: snapshotHintEventSchema,
+  },
+  "event.native_surface_status": {
+    event: nativeSurfaceStatusEventSchema,
   },
   "event.pane_created": {
     event: paneCreatedEventSchema,

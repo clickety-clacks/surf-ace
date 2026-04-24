@@ -40,6 +40,7 @@ type ProtocolSchemaDefName =
   | "SurfaceRemovedEvent"
   | "SurfaceResumedEvent"
   | "SnapshotHintEvent"
+  | "NativeSurfaceStatusEvent"
   | "PaneCreatedEvent"
   | "PaneRemovedEvent"
   | "PaneRenamedEvent";
@@ -95,6 +96,7 @@ export const surfaceAppearedEventSchema = getSchemaDef("SurfaceAppearedEvent");
 export const surfaceRemovedEventSchema = getSchemaDef("SurfaceRemovedEvent");
 export const surfaceResumedEventSchema = getSchemaDef("SurfaceResumedEvent");
 export const snapshotHintEventSchema = getSchemaDef("SnapshotHintEvent");
+export const nativeSurfaceStatusEventSchema = getSchemaDef("NativeSurfaceStatusEvent");
 export const paneCreatedEventSchema = getSchemaDef("PaneCreatedEvent");
 export const paneRemovedEventSchema = getSchemaDef("PaneRemovedEvent");
 export const paneRenamedEventSchema = getSchemaDef("PaneRenamedEvent");

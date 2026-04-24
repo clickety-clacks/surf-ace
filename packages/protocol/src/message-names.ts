@@ -44,6 +44,7 @@ export const EVENT_MESSAGES = [
   "event.surface_removed",
   "event.surface_resumed",
   "event.snapshot_hint",
+  "event.native_surface_status",
   "event.pane_created",
   "event.pane_removed",
   "event.pane_renamed",

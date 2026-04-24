@@ -22,7 +22,8 @@ export type ContentType =
   | "terminal"
   | "markdown"
   | "video"
-  | "canvas";
+  | "canvas"
+  | "native_surface";
 
 // `surf_ace_list` exposes provider-side connectivity with this enum in DESIGN.md.
 //
@@ -115,6 +116,20 @@ export type CanvasContent =
       grid?: boolean;
     };
 
+export type NativeSurfaceTargetClass = "terminal";
+
+export type NativeSurfaceProcessSpec = {
+  command: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+};
+
+export type NativeSurfaceContent = {
+  targetClass: NativeSurfaceTargetClass;
+  process: NativeSurfaceProcessSpec;
+};
+
 export type ContentValue =
   | HtmlContent
   | ImageContent
@@ -122,7 +137,8 @@ export type ContentValue =
   | TerminalContent
   | MarkdownContent
   | VideoContent
-  | CanvasContent;
+  | CanvasContent
+  | NativeSurfaceContent;
 
 export type ContentDisplay = {
   title?: string;
@@ -249,6 +265,15 @@ export type ContentSetPayload =
       revision: Revision;
       contentType: "canvas";
       content: CanvasContent;
+      display?: ContentDisplay;
+    }
+  | {
+      paneId: PaneId;
+      contentId: ContentId;
+      historyOwnerToken: string;
+      revision: Revision;
+      contentType: "native_surface";
+      content: NativeSurfaceContent;
       display?: ContentDisplay;
     };
 
@@ -703,6 +728,31 @@ export type SnapshotHintEvent = EventBase<"event.snapshot_hint"> & {
   };
 };
 
+export type NativeSurfaceStatusEvent = EventBase<"event.native_surface_status"> & {
+  payload:
+    | {
+        paneId: PaneId;
+        contentId: ContentId;
+        revision: Revision;
+        lifecycle: "launching" | "attached";
+      }
+    | {
+        paneId: PaneId;
+        contentId: ContentId;
+        revision: Revision;
+        lifecycle: "failed";
+        errorCode: ErrorResponse["error"]["code"];
+        errorMessage: string;
+      }
+    | {
+        paneId: PaneId;
+        contentId: ContentId;
+        revision: Revision;
+        lifecycle: "exited";
+        exitCode: number | null;
+      };
+};
+
 export type PaneCreatedEvent = EventBase<"event.pane_created"> & {
   payload: {
     surfaceId: SurfaceId;
@@ -775,6 +825,7 @@ export type Event =
   | SurfaceRemovedEvent
   | SurfaceResumedEvent
   | SnapshotHintEvent
+  | NativeSurfaceStatusEvent
   | PaneCreatedEvent
   | PaneRemovedEvent
   | PaneRenamedEvent;

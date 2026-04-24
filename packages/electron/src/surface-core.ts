@@ -16,6 +16,8 @@ import type {
   EpochMs,
   HistoryNavigatedEvent,
   MutationAckResponse,
+  NativeSurfaceContent,
+  NativeSurfaceStatusEvent,
   PaneCloseResponse,
   PaneCreatedEvent,
   PaneId,
@@ -34,6 +36,13 @@ import type {
   TopologyApplyRequest,
   TopologyApplyResponse,
 } from "../../protocol/src/index.js";
+import {
+  buildNativePaneHostPlan,
+  createUnavailableNativePaneHostBridge,
+  detectCompositorHostMode,
+  type CompositorHostModeState,
+  type NativePaneHostBridge,
+} from "./native-pane-bridge.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
 type ContentDisplay = ContentSetRequest["payload"]["display"];
@@ -68,6 +77,7 @@ type PaneState = {
   lastSuccessfulFlushAt: number | null;
   latestContentEventAt: number;
   name: string | null;
+  nativeSurfaceStatus: NativeSurfaceStatusEvent["payload"] | null;
   paneId: number;
   paneLabel: number;
   pendingAnnotationCommit: boolean;
@@ -144,6 +154,7 @@ export type CoreEvent =
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
   | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
+  | ({ surfaceId: string; type: "native-surface-status" } & NativeSurfaceStatusEvent["payload"])
   | { paneId: number; surfaceId: string; type: "drawing-dirty" };
 
 export class SurfaceCoreError extends Error {
@@ -180,21 +191,28 @@ const SUPPORTED_CONTENT_TYPES: ContentType[] = [
   "pdf",
   "terminal",
   "markdown",
+  "native_surface",
 ];
 
 export class SurfaceCore {
   private readonly surfaces = new Map<string, SurfaceState>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private readonly logger: { warn?: (message: string) => void };
+  private readonly nativePaneHostBridge: NativePaneHostBridge;
   private readonly now: () => number;
+  private readonly compositorHostMode: CompositorHostModeState;
   private persistentState: PersistentSurfaceState;
 
   constructor(options?: {
+    compositorHostMode?: CompositorHostModeState;
     logger?: { warn?: (message: string) => void };
+    nativePaneHostBridge?: NativePaneHostBridge;
     now?: () => number;
     persistentState?: PersistentSurfaceState;
   }) {
+    this.compositorHostMode = options?.compositorHostMode ?? detectCompositorHostMode();
     this.logger = options?.logger ?? console;
+    this.nativePaneHostBridge = options?.nativePaneHostBridge ?? createUnavailableNativePaneHostBridge();
     this.now = options?.now ?? (() => Date.now());
     this.persistentState = options?.persistentState ?? {
       primarySurfaceId: null,
@@ -240,9 +258,11 @@ export class SurfaceCore {
   }
 
   removeSurface(surfaceId: string): void {
-    if (!this.surfaces.has(surfaceId)) {
+    const surface = this.surfaces.get(surfaceId);
+    if (!surface) {
       return;
     }
+    this.releaseNativeSurfacesForPanes(surfaceId, surface.panes.values());
     this.surfaces.delete(surfaceId);
     this.emit({ surfaceId, type: "surface-removed" });
   }
@@ -368,6 +388,7 @@ export class SurfaceCore {
 
     pane.toast = null;
     clearDirtyState(pane);
+    this.syncNativeSurfaceHost(surfaceId, pane);
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({
       contentId: currentEntry(pane).contentId,
@@ -475,6 +496,11 @@ export class SurfaceCore {
     surface.panes = nextPanes;
     surface.topologyRevision = Number(payload.topologyRevision);
     surface.windowLabel = payload.windowLabel;
+    this.releaseNativeSurfacesForPanes(
+      surfaceId,
+      [...existingPanes].flatMap(([paneId, pane]) => (nextPanes.has(paneId) ? [] : [pane])),
+    );
+    this.syncNativeSurfaceHosts(surfaceId);
     this.emit({ surfaceId, type: "surface-changed" });
 
     return {
@@ -533,6 +559,7 @@ export class SurfaceCore {
       pane.toast = null;
       pane.latestContentEventAt = this.now();
       clearDirtyState(pane);
+      this.resetNativeSurfaceState(surfaceId, pane);
       this.emit({ surfaceId, type: "surface-changed" });
       return {
         ...currentMutationAck(pane),
@@ -581,6 +608,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
+    this.syncNativeSurfaceHost(surfaceId, pane);
     this.emit({ surfaceId, type: "surface-changed" });
     return {
       ...currentMutationAck(pane),
@@ -628,6 +656,7 @@ export class SurfaceCore {
     }
 
     this.emit({ surfaceId, type: "surface-changed" });
+    this.syncNativeSurfaceHosts(surfaceId);
     for (const paneId of newPaneIds) {
       this.emit({
         fromSplit: true,
@@ -666,6 +695,7 @@ export class SurfaceCore {
     }
     const closedFramesDiscarded = pane.deliveredClosedFrameCount;
 
+    this.resetNativeSurfaceState(surfaceId, pane);
     surface.panes.delete(paneId);
     surface.paneOrder = surface.paneOrder.filter((entry) => entry !== paneId);
     surface.layout = collapseLayout(removePaneFromLayout(surface.layout!, paneId));
@@ -718,6 +748,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
+    this.syncNativeSurfaceHost(surfaceId, pane);
     this.emit({ surfaceId, type: "surface-changed" });
 
     return currentMutationAck(pane);
@@ -749,6 +780,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
+    this.resetNativeSurfaceState(surfaceId, pane);
     this.emit({ surfaceId, type: "surface-changed" });
     return currentMutationAck(pane);
   }
@@ -858,6 +890,9 @@ export class SurfaceCore {
       viewport: snapshot.viewport ?? pane.snapshot.viewport,
       visibleText: snapshot.visibleText ?? pane.snapshot.visibleText,
     };
+    if (snapshot.bounds) {
+      this.syncNativeSurfaceHost(surfaceId, pane);
+    }
   }
 
   captureSnapshot(surfaceId: string, paneId: number): SnapshotResponse["payload"] {
@@ -1062,6 +1097,7 @@ export class SurfaceCore {
       return;
     }
     surface.viewport = cloneViewport(viewport);
+    this.syncNativeSurfaceHosts(surfaceId);
     this.emit({ surfaceId, type: "surface-changed" });
   }
 
@@ -1077,6 +1113,29 @@ export class SurfaceCore {
     return SUPPORTED_CONTENT_TYPES.includes(contentType);
   }
 
+  compositorHostState(): CompositorHostModeState {
+    return { ...this.compositorHostMode };
+  }
+
+  nativeSurfaceStatuses(surfaceId: string): NativeSurfaceStatusEvent["payload"][] {
+    const surface = this.getSurface(surfaceId);
+    return surface.paneOrder.flatMap((paneId) => {
+      const pane = surface.panes.get(paneId);
+      const entry = pane ? currentEntry(pane) : null;
+      if (
+        !pane ||
+        !entry ||
+        entry.contentType !== "native_surface" ||
+        pane.nativeSurfaceStatus === null ||
+        pane.nativeSurfaceStatus.contentId !== entry.contentId ||
+        pane.nativeSurfaceStatus.revision !== entry.revision
+      ) {
+        return [];
+      }
+      return [{ ...pane.nativeSurfaceStatus }];
+    });
+  }
+
   capabilities() {
     return {
       contentTypes: [...SUPPORTED_CONTENT_TYPES],
@@ -1088,6 +1147,7 @@ export class SurfaceCore {
         "event.page",
         "event.navigation",
         "event.snapshot_hint",
+        "event.native_surface_status",
         "event.scroll",
         "event.surface_appeared",
         "event.surface_removed",
@@ -1187,6 +1247,129 @@ export class SurfaceCore {
     return pane;
   }
 
+  private syncNativeSurfaceHost(surfaceId: string, pane: PaneState): void {
+    const entry = currentEntry(pane);
+    if (
+      entry.contentType !== "native_surface" ||
+      entry.contentId === null ||
+      !isNativeSurfaceContent(entry.content)
+    ) {
+      this.resetNativeSurfaceState(surfaceId, pane);
+      return;
+    }
+    if (
+      pane.nativeSurfaceStatus &&
+      (pane.nativeSurfaceStatus.contentId !== entry.contentId ||
+        pane.nativeSurfaceStatus.revision !== entry.revision)
+    ) {
+      this.resetNativeSurfaceState(surfaceId, pane);
+    }
+
+    const geometry = pane.snapshot.bounds ?? paneBoundsFromLayout(this.getSurface(surfaceId), pane.paneId);
+    const plan = buildNativePaneHostPlan({
+      content: entry.content,
+      contentId: entry.contentId,
+      geometry,
+      paneId: pane.paneId,
+      revision: entry.revision,
+      surfaceId,
+    });
+
+    if (!this.compositorHostMode.enabled || !this.nativePaneHostBridge.available) {
+      this.emitNativeSurfaceStatusIfCurrent(surfaceId, pane, {
+        contentId: entry.contentId,
+        errorCode: "render_failed",
+        errorMessage: "Surf Ace compositor native-pane host API is unavailable",
+        lifecycle: "failed",
+        paneId: pane.paneId as NativeSurfaceStatusEvent["payload"]["paneId"],
+        revision: entry.revision as NativeSurfaceStatusEvent["payload"]["revision"],
+      });
+      return;
+    }
+
+    this.setNativeSurfaceStatusIfCurrent(pane, {
+      contentId: entry.contentId,
+      lifecycle: "launching",
+      paneId: pane.paneId as NativeSurfaceStatusEvent["payload"]["paneId"],
+      revision: entry.revision as NativeSurfaceStatusEvent["payload"]["revision"],
+    });
+
+    void this.nativePaneHostBridge.host(plan).then((status) => {
+      if (status) {
+        this.emitNativeSurfaceStatusIfCurrent(surfaceId, pane, status);
+      }
+    }).catch((error: unknown) => {
+      this.emitNativeSurfaceStatusIfCurrent(surfaceId, pane, {
+        contentId: entry.contentId!,
+        errorCode: "render_failed",
+        errorMessage: error instanceof Error ? error.message : "Native pane host request failed",
+        lifecycle: "failed",
+        paneId: pane.paneId as NativeSurfaceStatusEvent["payload"]["paneId"],
+        revision: entry.revision as NativeSurfaceStatusEvent["payload"]["revision"],
+      });
+    });
+  }
+
+  private syncNativeSurfaceHosts(surfaceId: string): void {
+    const surface = this.getSurface(surfaceId);
+    for (const paneId of surface.paneOrder) {
+      const pane = surface.panes.get(paneId);
+      if (pane) {
+        this.syncNativeSurfaceHost(surfaceId, pane);
+      }
+    }
+  }
+
+  private releaseNativeSurfacesForPanes(surfaceId: string, panes: Iterable<PaneState>): void {
+    for (const pane of panes) {
+      this.resetNativeSurfaceState(surfaceId, pane);
+    }
+  }
+
+  private resetNativeSurfaceState(surfaceId: string, pane: PaneState): void {
+    const status = pane.nativeSurfaceStatus;
+    pane.nativeSurfaceStatus = null;
+    if (status) {
+      void this.nativePaneHostBridge.release({
+        contentId: status.contentId,
+        paneId: status.paneId,
+        revision: status.revision,
+        surfaceId: surfaceId as SurfaceId,
+      }).catch(() => {});
+    }
+  }
+
+  private setNativeSurfaceStatusIfCurrent(
+    pane: PaneState,
+    event: NativeSurfaceStatusEvent["payload"],
+  ): boolean {
+    const entry = currentEntry(pane);
+    if (
+      entry.contentType !== "native_surface" ||
+      entry.contentId !== event.contentId ||
+      entry.revision !== event.revision
+    ) {
+      return false;
+    }
+    pane.nativeSurfaceStatus = { ...event };
+    return true;
+  }
+
+  private emitNativeSurfaceStatusIfCurrent(
+    surfaceId: string,
+    pane: PaneState,
+    event: NativeSurfaceStatusEvent["payload"],
+  ): void {
+    if (!this.setNativeSurfaceStatusIfCurrent(pane, event)) {
+      return;
+    }
+    this.emit({
+      ...event,
+      surfaceId,
+      type: "native-surface-status",
+    });
+  }
+
   private emit(event: CoreEvent): void {
     for (const listener of this.listeners) {
       listener(event);
@@ -1222,6 +1405,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     lastSuccessfulFlushAt: now,
     latestContentEventAt: now,
     name: null,
+    nativeSurfaceStatus: null,
     paneId,
     paneLabel,
     pendingAnnotationCommit: false,
@@ -1285,6 +1469,20 @@ function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {
 
 function cloneContent(content: ContentPayload | null): ContentPayload | null {
   return content ? structuredClone(content) : null;
+}
+
+function isNativeSurfaceContent(content: ContentPayload | null): content is NativeSurfaceContent {
+  return Boolean(
+    content &&
+      typeof content === "object" &&
+      "targetClass" in content &&
+      content.targetClass === "terminal" &&
+      "process" in content &&
+      content.process &&
+      typeof content.process === "object" &&
+      "command" in content.process &&
+      typeof content.process.command === "string",
+  );
 }
 
 function htmlVisibleText(content: HtmlContent): string | null {
@@ -1460,6 +1658,51 @@ function layoutPaneViewports(
 
   visit(node, viewport);
   return byPaneId;
+}
+
+function paneBoundsFromLayout(
+  surface: SurfaceState,
+  targetPaneId: number,
+): { height: number; width: number; x: number; y: number } {
+  const root = {
+    height: surface.viewport.height,
+    width: surface.viewport.width,
+    x: 0,
+    y: 0,
+  };
+  return findPaneBounds(surface.layout!, targetPaneId, root) ?? root;
+}
+
+function findPaneBounds(
+  node: LayoutNode,
+  targetPaneId: number,
+  bounds: { height: number; width: number; x: number; y: number },
+): { height: number; width: number; x: number; y: number } | null {
+  if (node.type === "pane") {
+    return node.paneId === targetPaneId ? { ...bounds } : null;
+  }
+
+  const childCount = node.children.length || 1;
+  for (const [index, child] of node.children.entries()) {
+    const childBounds = node.direction === "horizontal"
+      ? {
+          height: bounds.height,
+          width: bounds.width / childCount,
+          x: bounds.x + (bounds.width / childCount) * index,
+          y: bounds.y,
+        }
+      : {
+          height: bounds.height / childCount,
+          width: bounds.width,
+          x: bounds.x,
+          y: bounds.y + (bounds.height / childCount) * index,
+        };
+    const match = findPaneBounds(child, targetPaneId, childBounds);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
 }
 
 function patchHtml(

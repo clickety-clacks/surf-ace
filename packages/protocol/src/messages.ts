@@ -5,6 +5,7 @@ export type {
   ErrorResponse,
   Event,
   NavigationEvent,
+  NativeSurfaceStatusEvent,
   PairRequest,
   PairResponse,
   RelinquishRequest,
