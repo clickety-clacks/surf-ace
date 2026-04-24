@@ -38,10 +38,11 @@ import type {
 } from "../../protocol/src/index.js";
 import {
   buildNativePaneHostPlan,
-  createUnavailableNativePaneHostBridge,
+  createCompositorNativePaneHostBridge,
   detectCompositorHostMode,
   type CompositorHostModeState,
   type NativePaneHostBridge,
+  type NativePaneHostPlan,
 } from "./native-pane-bridge.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
@@ -212,7 +213,9 @@ export class SurfaceCore {
   }) {
     this.compositorHostMode = options?.compositorHostMode ?? detectCompositorHostMode();
     this.logger = options?.logger ?? console;
-    this.nativePaneHostBridge = options?.nativePaneHostBridge ?? createUnavailableNativePaneHostBridge();
+    this.nativePaneHostBridge =
+      options?.nativePaneHostBridge ??
+      createCompositorNativePaneHostBridge({ hostMode: this.compositorHostMode });
     this.now = options?.now ?? (() => Date.now());
     this.persistentState = options?.persistentState ?? {
       primarySurfaceId: null,
@@ -1257,12 +1260,18 @@ export class SurfaceCore {
       this.resetNativeSurfaceState(surfaceId, pane);
       return;
     }
+    const hadCurrentNativeHost =
+      pane.nativeSurfaceStatus !== null &&
+      pane.nativeSurfaceStatus.contentId === entry.contentId &&
+      pane.nativeSurfaceStatus.revision === entry.revision &&
+      (pane.nativeSurfaceStatus.lifecycle === "launching" ||
+        pane.nativeSurfaceStatus.lifecycle === "attached");
     if (
       pane.nativeSurfaceStatus &&
       (pane.nativeSurfaceStatus.contentId !== entry.contentId ||
         pane.nativeSurfaceStatus.revision !== entry.revision)
     ) {
-      this.resetNativeSurfaceState(surfaceId, pane);
+      pane.nativeSurfaceStatus = null;
     }
 
     const geometry = pane.snapshot.bounds ?? paneBoundsFromLayout(this.getSurface(surfaceId), pane.paneId);
@@ -1287,14 +1296,10 @@ export class SurfaceCore {
       return;
     }
 
-    this.setNativeSurfaceStatusIfCurrent(pane, {
-      contentId: entry.contentId,
-      lifecycle: "launching",
-      paneId: pane.paneId as NativeSurfaceStatusEvent["payload"]["paneId"],
-      revision: entry.revision as NativeSurfaceStatusEvent["payload"]["revision"],
-    });
-
-    void this.nativePaneHostBridge.host(plan).then((status) => {
+    const bridgeRequest = hadCurrentNativeHost
+      ? this.nativePaneHostBridge.update(plan)
+      : this.hostNativeSurfacePane(pane, plan);
+    void bridgeRequest.then((status) => {
       if (status) {
         this.emitNativeSurfaceStatusIfCurrent(surfaceId, pane, status);
       }
@@ -1318,6 +1323,16 @@ export class SurfaceCore {
         this.syncNativeSurfaceHost(surfaceId, pane);
       }
     }
+  }
+
+  private hostNativeSurfacePane(pane: PaneState, plan: NativePaneHostPlan): Promise<NativeSurfaceStatusEvent["payload"] | null> {
+    this.setNativeSurfaceStatusIfCurrent(pane, {
+      contentId: plan.contentId,
+      lifecycle: "launching",
+      paneId: pane.paneId as NativeSurfaceStatusEvent["payload"]["paneId"],
+      revision: plan.revision,
+    });
+    return this.nativePaneHostBridge.host(plan);
   }
 
   private releaseNativeSurfacesForPanes(surfaceId: string, panes: Iterable<PaneState>): void {
