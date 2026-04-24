@@ -115,6 +115,8 @@ class FakeSurfAceWsServer {
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
   invalidResumeWithoutTakeoverResponsesRemaining = 0;
+  lockedProviderId: string | null = null;
+  lockedSessionId: string | null = null;
   lockUntilNewProviderIdCode: "busy" | "invalid_resume" | null = null;
   lockUntilNewProviderIdProviderId: string | null = null;
   maxConcurrentSocketCount = 0;
@@ -553,6 +555,40 @@ class FakeSurfAceWsServer {
           );
           return;
         }
+        let pairResponseResumed = false;
+        let pairResponseSessionId = "sa_test_session";
+        if (this.lockedProviderId && this.lockedSessionId) {
+          const attemptedProviderId = this.pairAttemptDetails.at(-1)?.providerId;
+          const attemptedResumeSessionId = this.pairAttemptDetails.at(-1)?.resumeSessionId;
+          if (attemptedProviderId !== this.lockedProviderId) {
+            socket.send(
+              JSON.stringify(
+                this.errorResponse(
+                  message.id,
+                  "pair.request",
+                  "busy",
+                  "Surface is already paired",
+                ),
+              ),
+            );
+            return;
+          }
+          if (attemptedResumeSessionId !== this.lockedSessionId) {
+            socket.send(
+              JSON.stringify(
+                this.errorResponse(
+                  message.id,
+                  "pair.request",
+                  "invalid_resume",
+                  this.resumePairMismatchMessage,
+                ),
+              ),
+            );
+            return;
+          }
+          pairResponseResumed = true;
+          pairResponseSessionId = this.lockedSessionId;
+        }
         const requestedSurface = this.requireSurface(String(message.payload?.surfaceId ?? this.surfaceId));
         this.pairedSocketsBySurfaceId.set(requestedSurface.surfaceId, socket);
         this.socketSurfaceIds.set(socket, requestedSurface.surfaceId);
@@ -600,8 +636,8 @@ class FakeSurfAceWsServer {
                 maxVisibleTextBytes: 4096,
                 resumeGraceMs: 20_000,
               },
-              resumed: false,
-              sessionId: "sa_test_session",
+              resumed: pairResponseResumed,
+              sessionId: pairResponseSessionId,
               state: {
                 panes: [...requestedSurface.panes.entries()].map(([paneId, pane]) => ({
                   contentType: pane.contentType,
@@ -1305,6 +1341,40 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         ["activeContent", "historySummary", "name", "paneId", "paneLabel"].sort(),
       );
     });
+  });
+
+  await t.test("endpoint identity changes discard stale transport lineage before reconnect", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port);
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-endpoint-churn-"));
+    const initialEndpoint = discoveryEndpoint(port);
+    const discovery = new StaticDiscoveryService([initialEndpoint]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtime.start();
+      await waitFor(() => server.pairedSocket !== null);
+      assert.equal(server.pairAttemptDetails.length, 1);
+
+      discovery.setEndpoints([
+        {
+          ...initialEndpoint,
+          endpointId: `${initialEndpoint.endpointId}-after-churn`,
+          lastSeenAt: Date.now(),
+        },
+      ]);
+      await discovery.refreshNow();
+
+      await waitFor(() => server.pairAttemptDetails.length >= 2);
+      const reconnectAttempt = server.pairAttemptDetails.at(-1);
+      assert.ok(reconnectAttempt);
+      assert.equal(reconnectAttempt.resumeSessionId, "sa_test_session");
+      assert.equal(reconnectAttempt.takeover, false);
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
   });
 
   await t.test("previously unseen remote panes seed paneLabel from remotePaneId once during migration", async () => {
@@ -2477,7 +2547,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("repeated busy reconnect failures rotate provider identity and recover automatically", async () => {
+  await t.test("repeated busy reconnect failures preserve provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -2495,26 +2565,21 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       internalRuntime.wakeSurfaceRetry(surface);
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       internalRuntime.wakeSurfaceRetry(surface);
-      await waitFor(() => server.pairAttemptDetails.length >= 5, 12_000);
-      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
 
       const reconnectAttempts = server.pairAttemptDetails.slice(1);
       assert.deepEqual(
         reconnectAttempts.slice(0, 3).map((attempt) => attempt.providerId),
         [initialProviderId, initialProviderId, initialProviderId],
       );
-      assert.notEqual(reconnectAttempts[3]?.providerId, initialProviderId);
       assert.ok(reconnectAttempts.every((attempt) => attempt.takeover === false));
       assert.ok(
-        warnings.some((warning) => warning.includes("rotating provider identity")),
-      );
-      assert.ok(
-        warnings.some((warning) => warning.includes("rotated provider identity")),
+        warnings.some((warning) => warning.includes("preserving ownership identity")),
       );
     });
   });
 
-  await t.test("repeated invalid_resume reconnect failures rotate provider identity and recover automatically", async () => {
+  await t.test("repeated invalid_resume reconnect failures preserve provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -2532,21 +2597,16 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       internalRuntime.wakeSurfaceRetry(surface);
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       internalRuntime.wakeSurfaceRetry(surface);
-      await waitFor(() => server.pairAttemptDetails.length >= 5, 12_000);
-      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
 
       const reconnectAttempts = server.pairAttemptDetails.slice(1);
       assert.deepEqual(
         reconnectAttempts.slice(0, 3).map((attempt) => attempt.providerId),
         [initialProviderId, initialProviderId, initialProviderId],
       );
-      assert.notEqual(reconnectAttempts[3]?.providerId, initialProviderId);
       assert.ok(reconnectAttempts.every((attempt) => attempt.takeover === false));
       assert.ok(
-        warnings.some((warning) => warning.includes("rotating provider identity")),
-      );
-      assert.ok(
-        warnings.some((warning) => warning.includes("rotated provider identity")),
+        warnings.some((warning) => warning.includes("preserving ownership identity")),
       );
     });
   });
@@ -2611,7 +2671,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("fingerprint identity reuses the existing worker when endpoint ids churn", async () => {
+  await t.test("fingerprint identity reuses the surface but reconnects when endpoint ids churn", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const replacementPort = nextPort++;
       const replacementServer = new FakeSurfAceWsServer(replacementPort);
@@ -2629,12 +2689,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
         assert.equal(originalSurface.endpointId, `endpoint-${replacementPort}`);
 
-        await new Promise((resolve) => {
-          setTimeout(resolve, 100);
-        });
-
-        assert.equal(replacementServer.pairedSocket, null);
-        assert.equal(server.pairAttemptDetails.length, 1);
+        await waitFor(() => replacementServer.pairedSocket !== null, 3_000);
+        assert.equal(replacementServer.pairAttemptDetails.at(-1)?.resumeSessionId, "sa_test_session");
+        assert.equal(replacementServer.pairAttemptDetails.at(-1)?.takeover, false);
       } finally {
         await replacementServer.close();
       }
@@ -3034,6 +3091,173 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("provider restart resumes still-running surface with persisted ownership identity", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_restart_owner" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-restart-owner-"));
+    const providerId = "pv_restart_owner";
+    const sessionId = "sa_restart_session";
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+    server.lockedProviderId = providerId;
+    server.lockedSessionId = sessionId;
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 2,
+            nextRemotePaneId: 2,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId,
+            version: 1,
+            windowLabels: {
+              [server.surfaceId]: "a",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify(
+          {
+            screens: [
+              {
+                _debug: {
+                  autoRetryEnabled: true,
+                  endpointId: "endpoint-before-provider-restart",
+                  hasPairedInGatewaySession: true,
+                  reconnectAttempt: 0,
+                  sessionId,
+                  unreachableFailures: 0,
+                  wsOpen: true,
+                },
+                connectionState: "connected",
+                fingerprint: server.surfaceId,
+                lastSeenAt: Date.now(),
+                name: "Restart Owner",
+                panes: [],
+                pendingEvents: 0,
+                viewport: {
+                  height: 768,
+                  scale: 2,
+                  width: 1024,
+                },
+                windowLabel: "a",
+              },
+            ],
+            updatedAt: Date.now(),
+            version: 1,
+          },
+          null,
+          2,
+        ),
+      );
+
+      await runtime.start();
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.equal(server.pairAttemptDetails.length, 1);
+      assert.equal(server.pairAttemptDetails[0]?.providerId, providerId);
+      assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
+      assert.equal(server.pairAttemptDetails[0]?.takeover, false);
+      assert.equal(server.pairedSocket !== null, true);
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("provider restart keeps persisted ownership through transient busy", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_restart_busy" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-restart-busy-"));
+    const providerId = "pv_restart_busy";
+    const sessionId = "sa_restart_busy_session";
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+    server.lockedProviderId = providerId;
+    server.lockedSessionId = sessionId;
+    server.busyWithoutTakeoverResponsesRemaining = 1;
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 2,
+            nextRemotePaneId: 2,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId,
+            version: 1,
+            windowLabels: {
+              [server.surfaceId]: "a",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify(
+          {
+            screens: [
+              {
+                _debug: {
+                  autoRetryEnabled: true,
+                  endpointId: "endpoint-before-provider-restart",
+                  hasPairedInGatewaySession: true,
+                  reconnectAttempt: 0,
+                  sessionId,
+                  unreachableFailures: 0,
+                  wsOpen: true,
+                },
+                connectionState: "connected",
+                fingerprint: server.surfaceId,
+                lastSeenAt: Date.now(),
+                name: "Restart Busy",
+                panes: [],
+                pendingEvents: 0,
+                viewport: {
+                  height: 768,
+                  scale: 2,
+                  width: 1024,
+                },
+                windowLabel: "a",
+              },
+            ],
+            updatedAt: Date.now(),
+            version: 1,
+          },
+          null,
+          2,
+        ),
+      );
+
+      await runtime.start();
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.equal(server.pairAttemptDetails[0]?.providerId, providerId);
+      assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
+      assert.equal(server.pairAttemptDetails[0]?.takeover, false);
+      assert.equal(server.pairAttemptDetails[1]?.providerId, providerId);
+      assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, sessionId);
+      assert.equal(server.pairAttemptDetails[1]?.takeover, false);
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("single invalid_resume clears the stale session and retries as a fresh owner pair", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
@@ -3046,14 +3270,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       server.rejectNextResumePairWithSessionMismatch = true;
       await surface.client.close(1000, "test_resume_restart");
 
-      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
-      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
 
       assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, "sa_test_session");
       assert.equal(server.pairAttemptDetails[1]?.takeover, false);
-      assert.equal(server.pairAttemptDetails[2]?.resumeSessionId, null);
-      assert.equal(server.pairAttemptDetails[2]?.takeover, false);
       assert.equal(surface.sessionId, "sa_test_session");
+      assert.equal(surface.hasPairedInGatewaySession, true);
     });
   });
 

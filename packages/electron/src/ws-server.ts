@@ -43,6 +43,7 @@ type ActiveSession = {
   drawingFlushConfig: DrawingFlushConfig;
   eventProfile: EventProfile;
   paneFlushTimers: Map<number, PaneFlushTimers>;
+  pairConfirmed: boolean;
   providerId: string;
   requestCache: Map<string, SocketCacheEntry>;
   sessionId: string;
@@ -81,7 +82,6 @@ export type SurfaceWsServerOptions = {
   onBusyChanged?: () => void;
   port: number;
   protocolVersion?: number;
-  resumeGraceMs?: number;
   viewport: () => SurfaceViewport;
   wsPath?: string;
 };
@@ -676,7 +676,7 @@ export class SurfaceWsServer {
       case "snapshot.get":
         return await this.handleSnapshotGet(socket, request);
       case "heartbeat.ping":
-        return this.handleHeartbeat(request);
+        return this.handleHeartbeat(socket, request);
     }
   }
 
@@ -816,6 +816,7 @@ export class SurfaceWsServer {
       drawingFlushConfig,
       eventProfile: requestedProfile,
       paneFlushTimers: new Map(),
+      pairConfirmed: false,
       providerId,
       requestCache: new Map(),
       sessionId,
@@ -840,11 +841,8 @@ export class SurfaceWsServer {
         windowLabel: request.payload.windowLabel,
       });
     }
-    this.core.setProviderName(
-      surfaceId,
-      request.payload.providerName,
-    );
-    this.core.setConnectionBar(surfaceId, "connected");
+    this.core.setConnectionBar(surfaceId, "connecting");
+    this.core.setProviderName(surfaceId, request.payload.providerName);
     this.onBusyChanged?.();
 
     const response: Response = {
@@ -1135,7 +1133,16 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleHeartbeat(request: HeartbeatPingRequest): Response {
+  private handleHeartbeat(socket: WebSocket, request: HeartbeatPingRequest): Response {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    const transport = this.transport(surfaceId);
+    if (transport.active?.socket !== socket) {
+      throw new SurfaceCoreError("not_paired", "Operation requires active pair.request first");
+    }
+    if (!transport.active.pairConfirmed) {
+      transport.active.pairConfirmed = true;
+      this.core.setConnectionBar(surfaceId, "connected");
+    }
     return {
       id: request.id,
       ok: true,

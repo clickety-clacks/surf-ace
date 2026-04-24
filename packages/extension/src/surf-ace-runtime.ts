@@ -1039,6 +1039,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private leaseHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private ownsRuntimeLease = false;
   private screenSnapshotWrite: Promise<void> = Promise.resolve();
+  private restartSnapshots = new Map<string, SurfAceScreenSummary>();
 
   constructor(options: SurfAceRuntimeOptions = {}) {
     this.deliverSettledAnnotationTurn = options.deliverSettledAnnotationTurn;
@@ -1074,6 +1075,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.started = true;
         return;
       }
+      await this.loadRestartSnapshots();
       // Clear stale workPromises left over from a previous lifecycle (e.g.
       // stop() was called but start() fires before its await-all resolves).
       // Surfaces with a stale workPromise would cause ensureSurfaceWorker to
@@ -2421,6 +2423,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (!surface.windowLabel) {
         surface.windowLabel = this.ensureWindowLabel(nextSurfaceId);
       }
+      this.restoreRestartOwnership(surface);
       return;
     }
 
@@ -2450,6 +2453,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
     this.reconcilePaneLabelsBySurfaceId(oldSurfaceId, nextSurfaceId);
     this.surfaces.set(nextSurfaceId, surface);
+    this.restoreRestartOwnership(surface);
     this.runBackgroundTask(
       `persist remapped surface id ${surface.endpointId}`,
       async () => {
@@ -2883,6 +2887,46 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
+  private async loadRestartSnapshots(): Promise<void> {
+    this.restartSnapshots = new Map(
+      (await this.loadPersistedScreenSnapshot())
+        .filter((screen) =>
+          screen._debug?.hasPairedInGatewaySession === true &&
+          typeof screen._debug.sessionId === "string" &&
+          screen._debug.sessionId.length > 0
+        )
+        .map((screen) => [screen.fingerprint, screen]),
+    );
+  }
+
+  private restoreRestartOwnership(surface: ManagedSurface): void {
+    if (surface.hasPairedInGatewaySession || surface.sessionId) {
+      return;
+    }
+    const snapshot = this.restartSnapshots.get(surface.surfaceId);
+    const sessionId = snapshot?._debug?.sessionId;
+    if (
+      !snapshot ||
+      snapshot._debug?.hasPairedInGatewaySession !== true ||
+      typeof sessionId !== "string" ||
+      sessionId.length === 0
+    ) {
+      return;
+    }
+    surface.hasPairedInGatewaySession = true;
+    surface.sessionId = asSessionId(sessionId);
+    if (!surface.windowLabel && snapshot.windowLabel) {
+      surface.windowLabel = snapshot.windowLabel;
+    }
+    this.restartSnapshots.delete(surface.surfaceId);
+    this.logger.info?.(
+      runtimeDiagnostic("restart_ownership_restored", {
+        session_id: sessionId,
+        surface_id: surface.surfaceId,
+      }),
+    );
+  }
+
   private queuePersistScreenSnapshot(reason: string): void {
     if (!this.ownsRuntimeLease) {
       return;
@@ -3201,19 +3245,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     surface.reconnectAttempt = 0;
     surface.unreachableFailures = 0;
-    if (surface.connectionState !== "connected") {
-      surface.connectionState = "connecting";
-    }
-    if (surface.connectionState !== "connected") {
-      this.runBackgroundTask(
-        `refresh surface client after endpoint change ${surface.surfaceId}`,
-        async () => {
-          if (surface.client) {
-            await this.closeSurfaceClient(surface, surface.client, clampCloseReason("provider_shutdown"));
-          }
-        },
-      );
-    }
+    surface.connectionState = "connecting";
+    this.runBackgroundTask(
+      `refresh surface client after endpoint change ${surface.surfaceId}`,
+      async () => {
+        if (surface.client) {
+          await this.closeSurfaceClient(surface, surface.client, clampCloseReason("provider_shutdown"));
+        }
+      },
+    );
     this.wakeSurfaceRetry(surface);
 
   }
@@ -3364,11 +3404,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         sendPairRequest,
       );
       if (isResumeSessionMismatch(response)) {
-        this.logger.warn?.(
-          `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; retrying fresh owner pair`,
-        );
-        surface.sessionId = null;
-        response = await sendPairRequest(false, null);
+        if (!surface.hasPairedInGatewaySession) {
+          this.logger.warn?.(
+            `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; retrying fresh owner pair`,
+          );
+          surface.sessionId = null;
+          response = await sendPairRequest(false, null);
+        }
       }
     }
 
@@ -3393,11 +3435,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (isErrorResponse(response)) {
       if (isOwnershipLockResponse(response)) {
         const ownershipLockCode = response.error.code === "busy" ? "busy" : "invalid_resume";
-        const shouldRotateIdentity = this.noteOwnershipLockFailure(surface, ownershipLockCode);
-        if (shouldRotateIdentity) {
-          await this.rotateProviderIdentityForOwnershipLock(surface, ownershipLockCode);
-          response = await sendPairRequest(false, null);
-        }
+        this.noteOwnershipLockFailure(surface, ownershipLockCode);
       } else {
         surface.consecutiveOwnershipLockFailures = 0;
       }
@@ -3589,7 +3627,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             error instanceof SurfAceToolError &&
             (error.code === "busy" || error.message.toLowerCase().includes("ownership lock") || error.message.toLowerCase().includes("resume"))
           ) {
-            if (surface.sessionId !== null) {
+            if (surface.sessionId !== null && !surface.hasPairedInGatewaySession) {
               this.logger.warn?.(
                 runtimeDiagnostic("resume_state_cleared", {
                   reason: "ownership_lock_or_resume_mismatch",
@@ -3940,37 +3978,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private noteOwnershipLockFailure(
     surface: ManagedSurface,
     code: "busy" | "invalid_resume",
-  ): boolean {
+  ): void {
     surface.consecutiveOwnershipLockFailures += 1;
     if (
       surface.consecutiveOwnershipLockFailures <
       MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES
     ) {
-      return false;
+      return;
     }
     this.logger.warn?.(
-      `[surf-ace:runtime] ${code} persisted for ${surface.surfaceId} with provider ${this.persistentState.providerId}; rotating provider identity`,
+      `[surf-ace:runtime] ${code} persisted for ${surface.surfaceId} with provider ${this.persistentState.providerId}; preserving ownership identity`,
     );
-    return true;
   }
 
   private clearSurfaceResumeState(surface: ManagedSurface): void {
     surface.sessionId = null;
     surface.hasPairedInGatewaySession = false;
     surface.consecutiveResumeFailures = 0;
-  }
-
-  private async rotateProviderIdentityForOwnershipLock(
-    surface: ManagedSurface,
-    code: "busy" | "invalid_resume",
-  ): Promise<void> {
-    this.persistentState.providerId = `pv_${randomUUID().replaceAll("-", "")}`;
-    surface.consecutiveOwnershipLockFailures = 0;
-    this.clearSurfaceResumeState(surface);
-    await this.persistState();
-    this.logger.warn?.(
-      `[surf-ace:runtime] rotated provider identity after repeated ${code} for ${surface.surfaceId}`,
-    );
   }
 
   private shouldAttemptResume(surface: ManagedSurface): boolean {

@@ -288,6 +288,19 @@ function snapshotGetRequest(paneId: number): Request {
   };
 }
 
+function heartbeatRequest(): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "heartbeat.ping",
+    payload: {
+      nonce: `hb_${Math.random().toString(16).slice(2)}`,
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 async function withServer(
   run: (ctx: { core: SurfaceCore; surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
 ): Promise<void> {
@@ -534,11 +547,31 @@ test("ws server exposes providerName while connected and clears it on relinquish
     const owner = await connect(url);
     const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", { providerName: "CLU / Surf Ace" }));
     assert.equal(paired.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
     assert.equal(core.getRendererWindowState(surfaceId).providerName, "CLU / Surf Ace");
+
+    const heartbeat = await request(owner, heartbeatRequest());
+    assert.equal(heartbeat.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     const relinquished = await request(owner, relinquishRequest());
     assert.equal(relinquished.ok, true);
     assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server does not show green until provider heartbeat confirms readiness", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+
+    const heartbeat = await request(owner, heartbeatRequest());
+    assert.equal(heartbeat.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     await closeSocket(owner);
   });
