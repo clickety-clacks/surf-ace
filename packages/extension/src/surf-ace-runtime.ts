@@ -470,6 +470,7 @@ const MAX_READ_FRAME_IMAGE_BYTES = 4 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const LEASE_HEARTBEAT_INTERVAL_MS = 30_000;
 const LEASE_STALE_THRESHOLD_MS = 90_000;
+const RESTART_SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60_000;
 const RECONNECT_BACKOFF_BASE_MS = 2_000;
 const RECONNECT_BACKOFF_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -2876,7 +2877,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return [];
       }
       const ageMs = this.now() - (parsed.updatedAt ?? 0);
-      if (ageMs > LEASE_STALE_THRESHOLD_MS) {
+      if (ageMs > RESTART_SNAPSHOT_MAX_AGE_MS) {
         return [];
       }
       return parsed.screens.map((screen) => ({

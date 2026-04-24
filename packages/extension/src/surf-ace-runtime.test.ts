@@ -3154,7 +3154,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
                 windowLabel: "a",
               },
             ],
-            updatedAt: Date.now(),
+            updatedAt: Date.now() - 10 * 60_000,
             version: 1,
           },
           null,
