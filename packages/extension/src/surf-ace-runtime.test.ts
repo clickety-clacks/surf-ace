@@ -1311,6 +1311,52 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("passive processes forward pane mutations to the active runtime owner", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port);
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-lease-"));
+    const discoveryA = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const discoveryB = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtimeA = createSurfAceRuntime({ discovery: discoveryA, stateDir });
+    const runtimeB = createSurfAceRuntime({ discovery: discoveryB, stateDir });
+
+    try {
+      await runtimeA.start();
+      await waitFor(() => server.pairedSocket !== null);
+      await runtimeB.start();
+      await waitFor(async () => (await runtimeB.listScreens()).length === 1);
+
+      const screen = (await runtimeB.listScreens())[0];
+      const pane = screen?.panes[0];
+      assert.ok(screen);
+      assert.ok(pane);
+
+      const pushed = await runtimeB.push({
+        content: "# passive owner bridge",
+        contentType: "markdown",
+        fingerprint: screen.fingerprint,
+        paneId: pane.paneId,
+      });
+      const read = await runtimeB.read({
+        fingerprint: screen.fingerprint,
+        paneId: pane.paneId,
+      });
+
+      assert.equal(pushed.fingerprint, server.surfaceId);
+      assert.equal(pushed.paneId, pane.paneId);
+      assert.equal(read.fingerprint, server.surfaceId);
+      assert.equal(read.paneId, pane.paneId);
+      assert.equal(server.contentSetRequests.length, 1);
+      assert.equal(server.contentSetRequests[0]?.paneId, server.initialRemotePaneId);
+      assert.equal(server.pairRequests.length, 1);
+    } finally {
+      await runtimeB.stop();
+      await runtimeA.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("listScreens exposes only the CLU surface fields and local pane identities", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const screens = await runtime.listScreens();
@@ -2364,6 +2410,181 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       } finally {
         process.off("unhandledRejection", handleUnhandled);
       }
+    });
+  });
+
+  await t.test("surface resume sync skips restored panes without bound remote ids", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push(
+        {
+          content: "# unbound restore",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:resume-unbound" },
+      );
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(firstPaneId);
+      assert.ok(pane);
+      pane.remotePaneId = undefined;
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      const initialSnapshotCount = server.snapshotRequests.length;
+      internalRuntime.handleSurfaceResumedEvent(surface, {
+        eventId: "ev_test_resume_unbound",
+        op: "event.surface_resumed",
+        payload: {
+          surfaceId: server.surfaceId,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      });
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 100);
+      });
+
+      assert.equal(server.contentSetRequests.length, initialContentApplyCount);
+      assert.equal(server.snapshotRequests.length, initialSnapshotCount);
+      assert.equal(
+        warnings.some((warning) => warning.includes("paneId is required")),
+        false,
+      );
+    });
+  });
+
+  await t.test("surface resume replays provider-owned content before snapshot sync", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const pushed = await runtime.push(
+        {
+          content: "# restart continuity",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:resume-continuity" },
+      );
+
+      const remotePane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(remotePane);
+      remotePane.contentId = null;
+      remotePane.contentType = null;
+      remotePane.revision = 0;
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+
+      internalRuntime.handleSurfaceResumedEvent(surface, {
+        eventId: "ev_test_resume_content",
+        op: "event.surface_resumed",
+        payload: {
+          surfaceId: server.surfaceId,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      });
+
+      await waitFor(() => server.contentSetRequests.length > initialContentApplyCount, 12_000);
+
+      const replayed = server.contentSetRequests.at(-1);
+      assert.equal(replayed?.contentId, pushed.contentId);
+      assert.equal(replayed?.contentType, "markdown");
+
+      const screens = await runtime.listScreens();
+      assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, pushed.contentId);
+      assert.equal(screens[0]?.panes[0]?.activeContent?.revision, pushed.revision);
+    });
+  });
+
+  await t.test("persisted restart snapshot carries provider-owned content for replay", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const pushed = await runtime.push(
+        {
+          content: "# persisted restart continuity",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:restart-persist" },
+      );
+
+      const internalRuntime = runtime as any;
+      await internalRuntime.persistScreenSnapshot();
+      const snapshotPath = path.join(internalRuntime.stateDir, "surf-ace-runtime-screens.json");
+      const snapshot = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+        contentContinuity?: Record<string, Array<{
+          contentId: string;
+          contentType: string;
+          contentValue: string;
+          paneLabel: number;
+          revision: number;
+          sessionKey: string | null;
+        }>>;
+      };
+      const continuityEntry = snapshot.contentContinuity?.[server.surfaceId]?.[0];
+      assert.equal(continuityEntry?.contentId, pushed.contentId);
+      assert.equal(continuityEntry?.contentType, "markdown");
+      assert.equal(continuityEntry?.contentValue, "# persisted restart continuity");
+      assert.equal(continuityEntry?.paneLabel, 1);
+      assert.equal(continuityEntry?.revision, pushed.revision);
+      assert.equal(continuityEntry?.sessionKey, "agent:test:restart-persist");
+    });
+  });
+
+  await t.test("restart content snapshot restores pane content before replay", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const pushed = await runtime.push(
+        {
+          content: "# restored restart continuity",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:restart-restore" },
+      );
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = internalRuntime.firstPane(surface);
+      assert.ok(pane);
+
+      internalRuntime.clearVisiblePaneContent(pane, 0);
+      internalRuntime.restartContentBySurface = new Map([
+        [
+          server.surfaceId,
+          [
+            {
+              contentId: pushed.contentId,
+              contentType: "markdown",
+              contentValue: "# restored restart continuity",
+              historyOwnerToken: "hot_test",
+              paneLabel: pane.paneLabel,
+              revision: pushed.revision,
+              sessionKey: "agent:test:restart-restore",
+            },
+          ],
+        ],
+      ]);
+
+      internalRuntime.restoreRestartContent(surface);
+
+      const screens = await runtime.listScreens();
+      assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, pushed.contentId);
+      assert.equal(screens[0]?.panes[0]?.activeContent?.revision, pushed.revision);
     });
   });
 

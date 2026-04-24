@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -434,7 +436,18 @@ type RuntimeStateFile = {
   windowLabels: Record<string, string>;
 };
 
+type PersistedRestartContentEntry = {
+  contentId: string;
+  contentType: ContentType;
+  contentValue: ContentSetRequest["payload"]["content"];
+  historyOwnerToken: string | null;
+  paneLabel: number;
+  revision: number;
+  sessionKey: string | null;
+};
+
 type PersistedScreenSnapshotFile = {
+  contentContinuity?: Record<string, PersistedRestartContentEntry[]>;
   screens: SurfAceScreenSummary[];
   updatedAt: number;
   version: 1;
@@ -484,6 +497,8 @@ const MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES = 3;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
 const SCREEN_SNAPSHOT_FILE_NAME = "surf-ace-runtime-screens.json";
 const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
+const OWNER_CONTROL_PATH = "/surf-ace-runtime-owner";
+const OWNER_CONTROL_MAX_BODY_BYTES = 1024 * 1024;
 
 export class SurfAceToolError extends Error {
   constructor(
@@ -508,6 +523,36 @@ export class SurfAceToolError extends Error {
   }
 }
 
+type OwnerControlCommand =
+  | {
+      context?: { sessionKey?: string };
+      input: SurfAcePushInput;
+      op: "push";
+    }
+  | {
+      input: { fingerprint: string; paneId: PaneId };
+      op: "clear" | "closePane" | "read" | "snapshot";
+    }
+  | {
+      input: SurfAceSplitInput;
+      op: "split";
+    }
+  | {
+      input: { fingerprint: string };
+      op: "relinquish";
+    }
+  | {
+      input: SurfAceAnnotateRemoveInput;
+      op: "annotateRemove";
+    };
+
+type RuntimeLeaseFile = {
+  controlPort?: number;
+  lastActiveAt?: number;
+  pid?: number;
+  startedAt?: number;
+};
+
 function asEpochMs(value: number): EpochMs {
   return value as EpochMs;
 }
@@ -518,6 +563,11 @@ function asPaneId(value: string): PaneId {
 
 function asRemotePaneId(value: number): RemotePaneId {
   return value as RemotePaneId;
+}
+
+function isBoundRemotePaneId(value: RemotePaneId | null | undefined): value is RemotePaneId {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue > 0;
 }
 
 function asRevision(value: number): Revision {
@@ -1039,7 +1089,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private runtimeLease: FileHandle | null = null;
   private leaseHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private ownsRuntimeLease = false;
+  private ownerControlPort: number | null = null;
+  private ownerControlServer: Server | null = null;
   private screenSnapshotWrite: Promise<void> = Promise.resolve();
+  private restartContentBySurface = new Map<string, PersistedRestartContentEntry[]>();
   private restartSnapshots = new Map<string, SurfAceScreenSummary>();
 
   constructor(options: SurfAceRuntimeOptions = {}) {
@@ -1068,6 +1121,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       await ensureDirectory(this.stateDir);
       await this.loadState();
       this.ownsRuntimeLease = await this.acquireRuntimeLease();
+      if (this.ownsRuntimeLease) {
+        await this.startOwnerControlServer();
+        await this.refreshRuntimeLease();
+      }
       this.logger.info?.(`[surf-ace:runtime] start() — lease acquired: ${this.ownsRuntimeLease}`);
       if (!this.ownsRuntimeLease) {
         this.logger.info?.(
@@ -1163,30 +1220,49 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     context?: { sessionKey?: string },
   ): Promise<SurfAcePushResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAcePushResult>({
+        context,
+        input,
+        op: "push",
+      });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.contentSet(surface, input, context?.sessionKey);
   }
 
   async clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceClearResult>({ input, op: "clear" });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.contentClear(surface, input);
   }
 
   async split(input: SurfAceSplitInput): Promise<SurfAceSplitResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceSplitResult>({ input, op: "split" });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.paneSplit(surface, input);
   }
 
   async closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceClosePaneResult>({ input, op: "closePane" });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.paneClose(surface, input);
   }
 
   async relinquish(input: { fingerprint: string }): Promise<SurfAceRelinquishResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceRelinquishResult>({ input, op: "relinquish" });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     const response = await this.sendRequest(
       surface,
@@ -1212,6 +1288,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   async read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceReadResult>({ input, op: "read" });
+    }
     const pane = this.requirePane(input.fingerprint, input.paneId);
     const returnedFrames: SurfAceFrame[] = [];
     let returnedImageBytes = 0;
@@ -1277,6 +1356,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   async snapshot(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceSnapshotResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceSnapshotResult>({ input, op: "snapshot" });
+    }
     const pane = this.requirePane(input.fingerprint, input.paneId);
     return {
       fingerprint: input.fingerprint,
@@ -1290,6 +1372,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     input: SurfAceAnnotateRemoveInput,
   ): Promise<SurfAceAnnotateRemoveResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceAnnotateRemoveResult>({
+        input,
+        op: "annotateRemove",
+      });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     const pane = this.requirePane(input.fingerprint, input.paneId);
 
@@ -1943,6 +2031,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.runBackgroundTask(
       `surface resumed sync for ${surface.surfaceId}`,
       async () => {
+        await this.repushSurfaceContent(surface);
         await this.syncSurfaceSnapshots(surface);
       },
     );
@@ -2622,6 +2711,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async repushSurfaceContent(surface: ManagedSurface): Promise<void> {
     for (const pane of this.orderedPanes(surface)) {
+      if (!isBoundRemotePaneId(pane.remotePaneId)) {
+        continue;
+      }
       if (!pane.activeContentId || !pane.contentType || pane.contentValue === null) {
         if (pane.currentRevision <= asRevision(0)) {
           continue;
@@ -2869,32 +2961,41 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async loadPersistedScreenSnapshot(): Promise<SurfAceScreenSummary[]> {
+    return (await this.loadPersistedScreenSnapshotFile())?.screens ?? [];
+  }
+
+  private async loadPersistedScreenSnapshotFile(): Promise<PersistedScreenSnapshotFile | null> {
     const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
     try {
       const raw = await fs.readFile(snapshotPath, "utf8");
       const parsed = JSON.parse(raw) as PersistedScreenSnapshotFile;
       if (parsed.version !== 1 || !Array.isArray(parsed.screens)) {
-        return [];
+        return null;
       }
       const ageMs = this.now() - (parsed.updatedAt ?? 0);
       if (ageMs > RESTART_SNAPSHOT_MAX_AGE_MS) {
-        return [];
+        return null;
       }
-      return parsed.screens.map((screen) => ({
-        ...screen,
-        panes: screen.panes.map((pane) => ({
-          ...pane,
-          paneId: migratePersistedPaneId(screen.fingerprint, pane.paneId, pane.paneLabel),
+      return {
+        ...parsed,
+        screens: parsed.screens.map((screen) => ({
+          ...screen,
+          panes: screen.panes.map((pane) => ({
+            ...pane,
+            paneId: migratePersistedPaneId(screen.fingerprint, pane.paneId, pane.paneLabel),
+          })),
         })),
-      }));
+      };
     } catch {
-      return [];
+      return null;
     }
   }
 
   private async loadRestartSnapshots(): Promise<void> {
+    const snapshotFile = await this.loadPersistedScreenSnapshotFile();
+    const screens = snapshotFile?.screens ?? [];
     this.restartSnapshots = new Map(
-      (await this.loadPersistedScreenSnapshot())
+      screens
         .filter((screen) =>
           screen._debug?.hasPairedInGatewaySession === true &&
           typeof screen._debug.sessionId === "string" &&
@@ -2902,6 +3003,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         )
         .map((screen) => [screen.fingerprint, screen]),
     );
+    this.restartContentBySurface = new Map(Object.entries(snapshotFile?.contentContinuity ?? {}));
   }
 
   private restoreRestartOwnership(surface: ManagedSurface): void {
@@ -2932,6 +3034,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
   }
 
+  private restoreRestartContent(surface: ManagedSurface): void {
+    const entries = this.restartContentBySurface.get(surface.surfaceId);
+    if (!entries || entries.length === 0) {
+      return;
+    }
+
+    const panes = this.orderedPanes(surface);
+    for (const entry of entries) {
+      const pane =
+        panes.find((candidate) => candidate.paneLabel === entry.paneLabel) ??
+        (panes.length === 1 && entries.length === 1 ? panes[0] : null);
+      if (!pane) {
+        continue;
+      }
+      this.applyVisibleEntry(pane, {
+        contentId: entry.contentId as ContentId,
+        contentType: entry.contentType,
+        contentValue: structuredClone(entry.contentValue),
+        historyOwnerToken: entry.historyOwnerToken,
+        revision: entry.revision as Revision,
+        sessionKey: entry.sessionKey,
+      });
+    }
+    this.restartContentBySurface.delete(surface.surfaceId);
+  }
+
   private queuePersistScreenSnapshot(reason: string): void {
     if (!this.ownsRuntimeLease) {
       return;
@@ -2950,6 +3078,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
     const payload: PersistedScreenSnapshotFile = {
+      contentContinuity: this.buildContentContinuitySnapshot(),
       screens: this.buildScreenSummaries(),
       updatedAt: this.now(),
       version: 1,
@@ -2962,8 +3091,193 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.screenSnapshotWrite;
   }
 
+  private buildContentContinuitySnapshot(): Record<string, PersistedRestartContentEntry[]> {
+    const contentContinuity: Record<string, PersistedRestartContentEntry[]> = {};
+    for (const surface of this.surfaces.values()) {
+      const entries = this.orderedPanes(surface)
+        .map((pane): PersistedRestartContentEntry | null => {
+          const entry = this.visibleHistoryEntry(pane);
+          if (!entry) {
+            return null;
+          }
+          return {
+            contentId: entry.contentId,
+            contentType: entry.contentType,
+            contentValue: structuredClone(entry.contentValue),
+            historyOwnerToken: entry.historyOwnerToken,
+            paneLabel: pane.paneLabel,
+            revision: entry.revision,
+            sessionKey: entry.sessionKey,
+          };
+        })
+        .filter((entry): entry is PersistedRestartContentEntry => entry !== null);
+      if (entries.length > 0) {
+        contentContinuity[surface.surfaceId] = entries;
+      }
+    }
+    return contentContinuity;
+  }
+
   private providerId(): ProviderId {
     return makeProviderId(this.persistentState.providerId);
+  }
+
+  private async forwardToRuntimeOwner<TResult>(command: OwnerControlCommand): Promise<TResult> {
+    const lease = await this.readRuntimeLease();
+    const controlPort = lease.controlPort;
+    if (typeof controlPort !== "number" || controlPort <= 0) {
+      throw new SurfAceToolError(
+        "internal_error",
+        "Surf Ace runtime owner is active but does not expose a tool control endpoint.",
+      );
+    }
+
+    let response: globalThis.Response;
+    try {
+      response = await fetch(`http://127.0.0.1:${controlPort}${OWNER_CONTROL_PATH}`, {
+        body: JSON.stringify(command),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+    } catch (error) {
+      throw new SurfAceToolError(
+        "internal_error",
+        `Surf Ace runtime owner control request failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const payload = await response.json().catch(() => null) as
+      | { error?: { code?: SurfAceToolError["code"]; message?: string }; ok?: boolean; result?: TResult }
+      | null;
+    if (!response.ok || payload?.ok !== true) {
+      const code = payload?.error?.code ?? "internal_error";
+      const message = payload?.error?.message ?? "Surf Ace runtime owner control request failed.";
+      throw new SurfAceToolError(code, message);
+    }
+    return payload.result as TResult;
+  }
+
+  private async startOwnerControlServer(): Promise<void> {
+    if (this.ownerControlServer) {
+      return;
+    }
+
+    const server = createServer((request, response) => {
+      void this.handleOwnerControlRequest(request, response);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(0, "127.0.0.1");
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      server.close();
+      throw new SurfAceToolError("internal_error", "Surf Ace runtime owner control endpoint failed to bind.");
+    }
+    server.unref();
+    this.ownerControlServer = server;
+    this.ownerControlPort = address.port;
+  }
+
+  private async stopOwnerControlServer(): Promise<void> {
+    const server = this.ownerControlServer;
+    this.ownerControlServer = null;
+    this.ownerControlPort = null;
+    if (!server) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  }
+
+  private async handleOwnerControlRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    if (request.method !== "POST" || request.url !== OWNER_CONTROL_PATH) {
+      this.writeOwnerControlResponse(response, 404, {
+        error: { code: "invalid_operation", message: "Unknown Surf Ace runtime owner control route." },
+        ok: false,
+      });
+      return;
+    }
+
+    try {
+      const command = await this.readOwnerControlCommand(request);
+      const result = await this.executeOwnerControlCommand(command);
+      this.writeOwnerControlResponse(response, 200, { ok: true, result });
+    } catch (error) {
+      const code = error instanceof SurfAceToolError ? error.code : "internal_error";
+      const message = error instanceof Error ? error.message : String(error);
+      this.writeOwnerControlResponse(response, 500, {
+        error: { code, message },
+        ok: false,
+      });
+    }
+  }
+
+  private async readOwnerControlCommand(request: IncomingMessage): Promise<OwnerControlCommand> {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > OWNER_CONTROL_MAX_BODY_BYTES) {
+        throw new SurfAceToolError("content_too_large", "Surf Ace runtime owner control request is too large.");
+      }
+      chunks.push(buffer);
+    }
+    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as OwnerControlCommand;
+    return parsed;
+  }
+
+  private async executeOwnerControlCommand(command: OwnerControlCommand): Promise<unknown> {
+    switch (command.op) {
+      case "annotateRemove":
+        return await this.annotateRemove(command.input);
+      case "clear":
+        return await this.clear(command.input);
+      case "closePane":
+        return await this.closePane(command.input);
+      case "push":
+        return await this.push(command.input, command.context);
+      case "read":
+        return await this.read(command.input);
+      case "relinquish":
+        return await this.relinquish(command.input);
+      case "snapshot":
+        return await this.snapshot(command.input);
+      case "split":
+        return await this.split(command.input);
+    }
+  }
+
+  private writeOwnerControlResponse(
+    response: ServerResponse,
+    statusCode: number,
+    payload: Record<string, unknown>,
+  ): void {
+    response.writeHead(statusCode, { "content-type": "application/json" });
+    response.end(JSON.stringify(payload));
+  }
+
+  private async readRuntimeLease(): Promise<RuntimeLeaseFile> {
+    const leasePath = path.join(this.stateDir, RUNTIME_LEASE_FILE_NAME);
+    try {
+      return JSON.parse(await fs.readFile(leasePath, "utf8")) as RuntimeLeaseFile;
+    } catch {
+      return {};
+    }
   }
 
   private async acquireRuntimeLease(): Promise<boolean> {
@@ -2992,6 +3306,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private async writeLeaseContent(handle: FileHandle): Promise<void> {
     const content = JSON.stringify(
       {
+        controlPort: this.ownerControlPort,
         pid: process.pid,
         startedAt: this.now(),
         lastActiveAt: this.now(),
@@ -3001,6 +3316,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
     await handle.truncate(0);
     await handle.write(content, 0, "utf8");
+  }
+
+  private async refreshRuntimeLease(): Promise<void> {
+    const handle = this.runtimeLease;
+    if (!handle) {
+      return;
+    }
+    await this.writeLeaseContent(handle);
   }
 
   private startLeaseHeartbeat(): void {
@@ -3041,7 +3364,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     let ownerPid: number | null = null;
     let lastActiveAt: number | null = null;
     try {
-      const parsed = JSON.parse(contents) as { pid?: number; lastActiveAt?: number };
+      const parsed = JSON.parse(contents) as RuntimeLeaseFile;
       ownerPid = typeof parsed.pid === "number" ? parsed.pid : null;
       lastActiveAt = typeof parsed.lastActiveAt === "number" ? parsed.lastActiveAt : null;
     } catch {
@@ -3086,6 +3409,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async releaseRuntimeLease(): Promise<void> {
     this.stopLeaseHeartbeat();
+    await this.stopOwnerControlServer();
     const lease = this.runtimeLease;
     this.runtimeLease = null;
     this.ownsRuntimeLease = false;
@@ -3633,6 +3957,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           );
           surface.unreachableFailures = 0;
           this.applyPairState(surface, pairResponse);
+          this.restoreRestartContent(surface);
           await this.pushTopology(surface);
           await this.repushSurfaceContent(surface);
           this.startHeartbeat(surface);
@@ -3893,6 +4218,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     try {
       const panes = this.layoutPanes(surface);
       for (const pane of panes) {
+        if (!isBoundRemotePaneId(pane.remotePaneId)) {
+          continue;
+        }
         await this.syncPaneSnapshot(surface, pane);
       }
     } catch (error) {
