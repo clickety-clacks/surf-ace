@@ -2384,6 +2384,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       ? structuredClone(preservedSurface.layout)
       : null;
     remappedSurface.topologyRevision = preservedSurface.topologyRevision;
+    remappedSurface.hasPairedInGatewaySession = preservedSurface.hasPairedInGatewaySession;
+    remappedSurface.sessionId = preservedSurface.sessionId;
+    remappedSurface.consecutiveResumeFailures = preservedSurface.consecutiveResumeFailures;
+    remappedSurface.consecutiveOwnershipLockFailures = preservedSurface.consecutiveOwnershipLockFailures;
   }
 
   private quiesceSupersededSurface(
