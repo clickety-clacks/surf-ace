@@ -3638,6 +3638,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           this.startHeartbeat(surface);
           await this.syncSurfaceSnapshots(surface, true);
           surface.connectionState = "connected";
+          this.queuePersistScreenSnapshot("connection ready");
           for (const siblingSurface of siblingSurfaces) {
             this.ensureSurfaceWorker(siblingSurface);
           }
