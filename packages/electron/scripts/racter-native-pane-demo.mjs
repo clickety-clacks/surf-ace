@@ -4,6 +4,66 @@ import net from "node:net";
 
 import WebSocket from "ws";
 
+class SurfAceClient {
+  constructor(socket) {
+    this.next = 1;
+    this.pending = new Map();
+    this.nativeStatuses = [];
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString("utf8"));
+      if (message.type === "response" && this.pending.has(message.id)) {
+        const { reject, resolve, timer } = this.pending.get(message.id);
+        clearTimeout(timer);
+        this.pending.delete(message.id);
+        if (message.ok) {
+          resolve(message);
+        } else {
+          reject(new Error(`${message.op} failed: ${message.error?.code ?? "unknown"} ${message.error?.message ?? ""}`.trim()));
+        }
+        return;
+      }
+      if (message.op === "event.native_surface_status") {
+        this.nativeStatuses.push(message.payload);
+      }
+    });
+    this.socket = socket;
+  }
+
+  request(op, payload) {
+    const id = `rq_e2e_${this.next++}`;
+    const message = {
+      id,
+      op,
+      payload,
+      sentAt: Date.now(),
+      type: "request",
+      v: 1,
+    };
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${op} timed out`));
+      }, 10000);
+      this.pending.set(id, { reject, resolve, timer });
+      this.socket.send(JSON.stringify(message));
+    });
+  }
+
+  async waitForNativeStatus({ contentId, paneId, timeoutMs }) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const status = [...this.nativeStatuses]
+        .reverse()
+        .find((entry) => entry.contentId === contentId && Number(entry.paneId) === paneId);
+      if (status && status.lifecycle !== "launching") {
+        return status;
+      }
+      await sleep(100);
+    }
+    return this.nativeStatuses.find((entry) => entry.contentId === contentId && Number(entry.paneId) === paneId) ?? null;
+  }
+}
+
 const args = parseArgs(process.argv.slice(2));
 const port = Number(args.port ?? process.env.SURF_ACE_PORT ?? 19001);
 const host = String(args.host ?? "127.0.0.1");
@@ -107,66 +167,6 @@ try {
   }, null, 2));
 } finally {
   socket.close(1000, "racter_e2e_done");
-}
-
-class SurfAceClient {
-  constructor(socket) {
-    this.next = 1;
-    this.pending = new Map();
-    this.nativeStatuses = [];
-    socket.on("message", (data) => {
-      const message = JSON.parse(data.toString("utf8"));
-      if (message.type === "response" && this.pending.has(message.id)) {
-        const { reject, resolve, timer } = this.pending.get(message.id);
-        clearTimeout(timer);
-        this.pending.delete(message.id);
-        if (message.ok) {
-          resolve(message);
-        } else {
-          reject(new Error(`${message.op} failed: ${message.error?.code ?? "unknown"} ${message.error?.message ?? ""}`.trim()));
-        }
-        return;
-      }
-      if (message.op === "event.native_surface_status") {
-        this.nativeStatuses.push(message.payload);
-      }
-    });
-    this.socket = socket;
-  }
-
-  request(op, payload) {
-    const id = `rq_e2e_${this.next++}`;
-    const message = {
-      id,
-      op,
-      payload,
-      sentAt: Date.now(),
-      type: "request",
-      v: 1,
-    };
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`${op} timed out`));
-      }, 10000);
-      this.pending.set(id, { reject, resolve, timer });
-      this.socket.send(JSON.stringify(message));
-    });
-  }
-
-  async waitForNativeStatus({ contentId, paneId, timeoutMs }) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const status = [...this.nativeStatuses]
-        .reverse()
-        .find((entry) => entry.contentId === contentId && Number(entry.paneId) === paneId);
-      if (status && status.lifecycle !== "launching") {
-        return status;
-      }
-      await sleep(100);
-    }
-    return this.nativeStatuses.find((entry) => entry.contentId === contentId && Number(entry.paneId) === paneId) ?? null;
-  }
 }
 
 function connectWebSocket(targetUrl) {
