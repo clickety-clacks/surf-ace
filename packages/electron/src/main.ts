@@ -19,6 +19,7 @@ const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const EXPLICIT_WS_PORT = process.env.SURF_ACE_PORT != null;
 const STATE_FILE_NAME = "surface-core-state.json";
 const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
+const WAYLAND_APP_ID = process.env.SURF_ACE_WAYLAND_APP_ID?.trim();
 
 function advertisingDisabled(): boolean {
   const value = process.env.SURF_ACE_DISABLE_ADVERTISING?.trim().toLowerCase();
@@ -34,6 +35,10 @@ function gpuDisableRequested(): boolean {
 // reproduce the original GPU-process crash path.
 if (gpuDisableRequested()) {
   app.commandLine.appendSwitch("disable-gpu");
+}
+
+if (WAYLAND_APP_ID) {
+  app.commandLine.appendSwitch("class", WAYLAND_APP_ID);
 }
 
 const windows = new Map<string, BrowserWindow>();
