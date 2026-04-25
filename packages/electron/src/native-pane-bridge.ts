@@ -105,6 +105,9 @@ type CompositorNativePaneRequest = {
 
 type CompositorControlRequest =
   | {
+      type: "get_status";
+    }
+  | {
       panes: CompositorNativePaneRequest[];
       type: "native_pane.host";
     }
@@ -170,9 +173,13 @@ export class UnixSocketCompositorControlTransport implements CompositorControlTr
 
 export function createCompositorNativePaneHostBridge(options?: {
   hostMode?: CompositorHostModeState;
+  pollAttempts?: number;
+  pollIntervalMs?: number;
   transport?: CompositorControlTransport;
 }): NativePaneHostBridge {
   const hostMode = options?.hostMode ?? detectCompositorHostMode();
+  const pollAttempts = options?.pollAttempts ?? 20;
+  const pollIntervalMs = options?.pollIntervalMs ?? 250;
   const transport = options?.transport ?? (
     hostMode.controlSocketPath
       ? new UnixSocketCompositorControlTransport(hostMode.controlSocketPath)
@@ -186,12 +193,16 @@ export function createCompositorNativePaneHostBridge(options?: {
     available: true,
     async host(plan) {
       const response = await assertCompositorOk(transport.send(buildNativePaneHostRequest(plan)));
-      return nativeStatusFromCompositorStatus(plan, response.status) ?? {
+      const initialStatus = nativeStatusFromCompositorStatus(plan, response.status) ?? {
         contentId: plan.contentId,
         lifecycle: "launching",
         paneId: plan.paneId,
         revision: plan.revision,
       };
+      if (initialStatus.lifecycle !== "launching") {
+        return initialStatus;
+      }
+      return await pollNativePaneHostStatus(transport, plan, initialStatus, pollAttempts, pollIntervalMs);
     },
     async update(plan) {
       const response = await assertCompositorOk(transport.send(buildNativePaneUpdateRequest(plan)));
@@ -206,6 +217,10 @@ export function createCompositorNativePaneHostBridge(options?: {
       );
     },
   };
+}
+
+export function buildCompositorGetStatusRequest(): CompositorControlRequest {
+  return { type: "get_status" };
 }
 
 export function createUnavailableNativePaneHostBridge(): NativePaneHostBridge {
@@ -294,6 +309,35 @@ async function assertCompositorOk(
     throw new Error(response.error ?? "Compositor native pane control request failed");
   }
   return response;
+}
+
+async function pollNativePaneHostStatus(
+  transport: CompositorControlTransport,
+  plan: NativePaneHostPlan,
+  initialStatus: NativePaneStatusPayload,
+  attempts: number,
+  intervalMs: number,
+): Promise<NativePaneStatusPayload> {
+  let latest = initialStatus;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await delay(intervalMs);
+    const response = await assertCompositorOk(transport.send(buildCompositorGetStatusRequest()));
+    const next = nativeStatusFromCompositorStatus(plan, response.status);
+    if (!next) {
+      continue;
+    }
+    latest = next;
+    if (next.lifecycle !== "launching") {
+      return next;
+    }
+  }
+  return latest;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function sendCompositorControlRequest(

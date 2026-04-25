@@ -6,6 +6,7 @@
   "main": "dist/main.cjs",
   "scripts": {
     "build": "node ./scripts/build.mjs",
+    "demo:racter-native-pane": "node ./scripts/racter-native-pane-demo.mjs",
     "launchd:install": "pnpm run build && node ./scripts/install-launch-agent.mjs",
     "launchd:uninstall": "node ./scripts/install-launch-agent.mjs --uninstall",
     "package": "pnpm run build && electron-builder --mac dir --arm64",

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  buildCompositorGetStatusRequest,
   buildNativePaneHostPlan,
   buildNativePaneHostRequest,
   buildNativePaneUpdateRequest,
@@ -121,6 +122,10 @@ test("compositor bridge serializes native pane host and update requests", () => 
     serializeCompositorControlRequest(buildNativePaneUpdateRequest(plan)),
     '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"height":300,"width":401,"x":10,"y":21},"id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.update"}\n',
   );
+  assert.equal(
+    serializeCompositorControlRequest(buildCompositorGetStatusRequest()),
+    '{"type":"get_status"}\n',
+  );
 });
 
 test("compositor bridge sends host and maps nativeHost lifecycle status", async () => {
@@ -155,6 +160,7 @@ test("compositor bridge sends host and maps nativeHost lifecycle status", async 
       outputRotation: null,
       waylandDisplay: "wayland-77",
     },
+    pollAttempts: 0,
     transport,
   });
   const plan = buildNativePaneHostPlan({
@@ -191,6 +197,71 @@ test("compositor bridge sends host and maps nativeHost lifecycle status", async 
   assert.deepEqual(status, {
     contentId: "ct_native",
     lifecycle: "launching",
+    paneId: 7,
+    revision: 3,
+  });
+});
+
+test("compositor bridge polls get_status after host until nativeHost attaches", async () => {
+  const requests: unknown[] = [];
+  const transport: CompositorControlTransport = {
+    async send(request) {
+      requests.push(request);
+      return {
+        ok: true,
+        status: {
+          panes: [
+            {
+              id: "sf_panel:7",
+              nativeHost: {
+                bindingId: "sf_panel:7:ct_native",
+                contentId: "ct_native",
+                lifecycle: requests.length < 3
+                  ? { pid: 42, state: "launching" }
+                  : { pid: 42, state: "attached" },
+                paneId: "sf_panel:7",
+                process: { command: "top" },
+                revision: 3,
+              },
+            },
+          ],
+        },
+      };
+    },
+  };
+  const bridge = createCompositorNativePaneHostBridge({
+    hostMode: {
+      controlSocketPath: "/tmp/surf-ace-compositor.sock",
+      enabled: true,
+      outputRotation: null,
+      waylandDisplay: "wayland-77",
+    },
+    pollAttempts: 3,
+    pollIntervalMs: 0,
+    transport,
+  });
+  const plan = buildNativePaneHostPlan({
+    content: {
+      process: { command: "top" },
+      targetClass: "terminal",
+    },
+    contentId: "ct_native",
+    geometry: { height: 300, width: 400, x: 10, y: 20 },
+    paneId: 7,
+    revision: 3,
+    surfaceId: "sf_panel",
+  });
+
+  const status = await bridge.host(plan);
+
+  assert.deepEqual(requests.map((request) => (request as { type: string }).type), [
+    "native_pane.host",
+    "get_status",
+    "get_status",
+  ]);
+  assert.deepEqual(status, {
+    contentId: "ct_native",
+    lifecycle: "attached",
     paneId: 7,
     revision: 3,
   });
