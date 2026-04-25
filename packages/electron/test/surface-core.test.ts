@@ -276,7 +276,7 @@ test("surface core reports native surface failure when compositor bridge is unav
   assert.equal(events.length, 1);
 });
 
-test("surface core sends Surf Ace pane geometry and process intent to native pane bridge in compositor mode", async () => {
+test("surface core sends layout geometry and process intent to native pane bridge in compositor mode", async () => {
   const plans: NativePaneHostPlan[] = [];
   const updates: NativePaneHostPlan[] = [];
   const bridge: NativePaneHostBridge = {
@@ -335,7 +335,7 @@ test("surface core sends Surf Ace pane geometry and process intent to native pan
   assert.equal(updates.length, 0);
   assert.deepEqual(plans[0], {
     contentId: "ct_native",
-    geometry: { height: 300, width: 500, x: 40, y: 60 },
+    geometry: { height: 800, width: 1200, x: 0, y: 0 },
     paneId,
     process: {
       args: ["--login"],
@@ -361,7 +361,7 @@ test("surface core sends Surf Ace pane geometry and process intent to native pan
 
   assert.equal(plans.length, 1);
   assert.equal(updates.length, 1);
-  assert.deepEqual(updates[0]?.geometry, { height: 320, width: 520, x: 50, y: 70 });
+  assert.deepEqual(updates[0]?.geometry, { height: 800, width: 1200, x: 0, y: 0 });
   assert.deepEqual(core.nativeSurfaceStatuses(surface.surfaceId), [
     {
       contentId: "ct_native",
@@ -518,7 +518,7 @@ test("surface core rehosts failed native panes instead of sending update-only sy
 
   assert.equal(plans.length, 2);
   assert.equal(updates.length, 0);
-  assert.deepEqual(plans[1]?.geometry, { height: 320, width: 520, x: 50, y: 70 });
+  assert.deepEqual(plans[1]?.geometry, { height: 800, width: 1200, x: 0, y: 0 });
 });
 
 test("surface core ignores stale native status after pane content changes", async () => {
