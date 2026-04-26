@@ -4,111 +4,6 @@ import net from "node:net";
 
 import WebSocket from "ws";
 
-const args = parseArgs(process.argv.slice(2));
-const port = Number(args.port ?? process.env.SURF_ACE_PORT ?? 19001);
-const host = String(args.host ?? "127.0.0.1");
-const wsPath = String(args.path ?? "/ws");
-const url = String(args.url ?? `ws://${host}:${port}${wsPath}`);
-const compositorSocket = String(
-  args.compositorSocket ?? process.env.SURF_ACE_COMPOSITOR_SOCKET ?? "/tmp/surf-ace-compositor.sock",
-);
-const providerId = String(args.providerId ?? "pv_racter_e2e");
-const providerName = String(args.providerName ?? "Surf Ace RACTER E2E");
-const windowLabel = String(args.windowLabel ?? "RACTER E2E");
-const htmlPaneId = Number(args.htmlPaneId ?? 1);
-const nativePaneId = Number(args.nativePaneId ?? 2);
-const nativeProcess = resolveNativeProcess(args);
-
-const socket = await connectWebSocket(url);
-const client = new SurfAceClient(socket);
-
-try {
-  const surfaces = await client.request("surfaces.list", {});
-  const surface = surfaces.payload.surfaces.find((entry) => !entry.paired) ?? surfaces.payload.surfaces[0];
-  if (!surface) {
-    throw new Error("No Surf Ace surface is available");
-  }
-
-  const pair = await client.request("pair.request", {
-    connectionId: `conn_${randomId()}`,
-    eventProfile: "minimum_deep",
-    initialPaneId: htmlPaneId,
-    initialPaneLabel: htmlPaneId,
-    protocolVersion: 1,
-    providerId,
-    providerName,
-    surfaceId: surface.surfaceId,
-    takeover: true,
-    windowLabel,
-  });
-
-  await client.request("content.set", {
-    content: {
-      html: [
-        "<main>",
-        "<h1>Surf Ace RACTER E2E</h1>",
-        "<p>This pane is normal Surf Ace-rendered HTML.</p>",
-        "</main>",
-      ].join(""),
-    },
-    contentId: "ct_e2ehtml",
-    contentType: "html",
-    historyOwnerToken: "hot_e2e_html",
-    paneId: htmlPaneId,
-    revision: 1,
-  });
-
-  const split = await client.request("pane.split", {
-    count: 2,
-    direction: "horizontal",
-    newPaneIds: [nativePaneId],
-    newPaneLabels: [nativePaneId],
-    paneId: htmlPaneId,
-  });
-
-  await client.request("content.set", {
-    content: {
-      process: {
-        args: nativeProcess.args,
-        command: nativeProcess.command,
-      },
-      targetClass: "terminal",
-    },
-    contentId: "ct_e2etop",
-    contentType: "native_surface",
-    historyOwnerToken: "hot_e2e_top",
-    paneId: nativePaneId,
-    revision: 1,
-  });
-
-  const nativeStatus = await client.waitForNativeStatus({
-    contentId: "ct_e2etop",
-    paneId: nativePaneId,
-    timeoutMs: Number(args.nativeStatusTimeoutMs ?? 8000),
-  });
-  const panes = await client.request("panes.list", {});
-  const compositorStatus = await getCompositorStatus(compositorSocket).catch((error) => ({
-    error: error instanceof Error ? error.message : String(error),
-  }));
-
-  console.log(JSON.stringify({
-    compositorSocket,
-    compositorStatus: summarizeCompositorStatus(compositorStatus, pair.payload.surfaceId, nativePaneId),
-    nativeStatus,
-    panes: panes.payload.panes.map((pane) => ({
-      activeContentId: pane.activeContentId,
-      contentType: pane.contentType,
-      paneId: pane.paneId,
-      viewport: pane.viewport,
-    })),
-    split: split.payload,
-    surfaceId: pair.payload.surfaceId,
-    url,
-  }, null, 2));
-} finally {
-  socket.close(1000, "racter_e2e_done");
-}
-
 class SurfAceClient {
   constructor(socket) {
     this.next = 1;
@@ -167,6 +62,146 @@ class SurfAceClient {
     }
     return this.nativeStatuses.find((entry) => entry.contentId === contentId && Number(entry.paneId) === paneId) ?? null;
   }
+}
+
+const args = parseArgs(process.argv.slice(2));
+const port = Number(args.port ?? process.env.SURF_ACE_PORT ?? 19001);
+const host = String(args.host ?? "127.0.0.1");
+const wsPath = String(args.path ?? "/ws");
+const url = String(args.url ?? `ws://${host}:${port}${wsPath}`);
+const compositorSocket = String(
+  args.compositorSocket ?? process.env.SURF_ACE_COMPOSITOR_SOCKET ?? "/tmp/surf-ace-compositor.sock",
+);
+const providerId = String(args.providerId ?? "pv_racter_e2e");
+const providerName = String(args.providerName ?? "Surf Ace RACTER E2E");
+const windowLabel = String(args.windowLabel ?? "RACTER E2E");
+const htmlPaneId = Number(args.htmlPaneId ?? 1);
+const nativePaneId = Number(args.nativePaneId ?? 2);
+const secondNativePaneId = Number(args.secondNativePaneId ?? 3);
+const nativeProcess = resolveNativeProcess(args, {
+  appId: "surf-ace-pane-btop",
+  commandName: "btop",
+  fallbackName: "top",
+});
+const secondNativeProcess = resolveNativeProcess(args, {
+  appId: "surf-ace-pane-top",
+  commandName: "top",
+  commandOverride: args.secondCommand,
+  commandArgsOverride: args.secondCommandArgs,
+});
+
+const socket = await connectWebSocket(url);
+const client = new SurfAceClient(socket);
+
+try {
+  const surfaces = await client.request("surfaces.list", {});
+  const surface = surfaces.payload.surfaces.find((entry) => !entry.paired) ?? surfaces.payload.surfaces[0];
+  if (!surface) {
+    throw new Error("No Surf Ace surface is available");
+  }
+
+  const pair = await client.request("pair.request", {
+    connectionId: `conn_${randomId()}`,
+    eventProfile: "minimum_deep",
+    initialPaneId: htmlPaneId,
+    initialPaneLabel: htmlPaneId,
+    protocolVersion: 1,
+    providerId,
+    providerName,
+    surfaceId: surface.surfaceId,
+    takeover: true,
+    windowLabel,
+  });
+
+  await client.request("content.set", {
+    content: {
+      html: [
+        "<main style=\"min-height:100%;padding:48px;background:#f6f7fb;color:#172033;font-family:Arial,sans-serif\">",
+        "<h1 style=\"font-size:64px;margin:0 0 24px\">Surf Ace Visual E2E</h1>",
+        "<p style=\"font-size:28px;line-height:1.4\">This left pane is normal Surf Ace-rendered HTML.</p>",
+        "<p style=\"font-size:24px;color:#325b9a\">The center and right panes are native Wayland terminal surfaces hosted by the compositor.</p>",
+        "</main>",
+      ].join(""),
+    },
+    contentId: "ct_e2ehtml",
+    contentType: "html",
+    historyOwnerToken: "hot_e2e_html",
+    paneId: htmlPaneId,
+    revision: 1,
+  });
+
+  const split = await client.request("pane.split", {
+    count: 3,
+    direction: "horizontal",
+    newPaneIds: [nativePaneId, secondNativePaneId],
+    newPaneLabels: [nativePaneId, secondNativePaneId],
+    paneId: htmlPaneId,
+  });
+
+  await client.request("content.set", {
+    content: {
+      process: {
+        args: nativeProcess.args,
+        command: nativeProcess.command,
+      },
+      targetClass: "terminal",
+    },
+    contentId: "ct_e2etop",
+    contentType: "native_surface",
+    historyOwnerToken: "hot_e2e_top",
+    paneId: nativePaneId,
+    revision: 1,
+  });
+  await client.request("content.set", {
+    content: {
+      process: {
+        args: secondNativeProcess.args,
+        command: secondNativeProcess.command,
+      },
+      targetClass: "terminal",
+    },
+    contentId: "ct_e2etop2",
+    contentType: "native_surface",
+    historyOwnerToken: "hot_e2e_top2",
+    paneId: secondNativePaneId,
+    revision: 1,
+  });
+
+  const nativeStatus = await client.waitForNativeStatus({
+    contentId: "ct_e2etop",
+    paneId: nativePaneId,
+    timeoutMs: Number(args.nativeStatusTimeoutMs ?? 8000),
+  });
+  const secondNativeStatus = await client.waitForNativeStatus({
+    contentId: "ct_e2etop2",
+    paneId: secondNativePaneId,
+    timeoutMs: Number(args.nativeStatusTimeoutMs ?? 8000),
+  });
+  const panes = await client.request("panes.list", {});
+  const compositorStatus = await getCompositorStatus(compositorSocket).catch((error) => ({
+    error: error instanceof Error ? error.message : String(error),
+  }));
+
+  console.log(JSON.stringify({
+    compositorSocket,
+    compositorStatus: [
+      summarizeCompositorStatus(compositorStatus, pair.payload.surfaceId, nativePaneId),
+      summarizeCompositorStatus(compositorStatus, pair.payload.surfaceId, secondNativePaneId),
+    ],
+    nativeStatus,
+    secondNativeStatus,
+    panes: panes.payload.panes.map((pane) => ({
+      activeContentId: pane.activeContentId,
+      contentType: pane.contentType,
+      paneId: pane.paneId,
+      viewport: pane.viewport,
+    })),
+    split: split.payload,
+    surfaceId: pair.payload.surfaceId,
+    url,
+  }, null, 2));
+} finally {
+  socket.close(1000, "racter_e2e_done");
 }
 
 function connectWebSocket(targetUrl) {
@@ -238,31 +273,39 @@ function parseArgs(argv) {
   return parsed;
 }
 
-function resolveNativeProcess(parsedArgs) {
+function resolveNativeProcess(parsedArgs, options = {}) {
   if (parsedArgs.command) {
     return {
       args: parsedArgs.commandArgs ? String(parsedArgs.commandArgs).split(" ") : [],
       command: String(parsedArgs.command),
     };
   }
+  if (options.commandOverride) {
+    return {
+      args: options.commandArgsOverride ? String(options.commandArgsOverride).split(" ") : [],
+      command: String(options.commandOverride),
+    };
+  }
 
-  const top = String(parsedArgs.topCommand ?? "top");
-  const appId = "surf-ace-pane-top";
+  const commandName = commandExists(options.commandName ?? "top")
+    ? String(options.commandName ?? "top")
+    : String(options.fallbackName ?? "top");
+  const appId = String(options.appId ?? "surf-ace-pane-top");
   for (const terminal of ["foot", "ghostty", "kitty", "wezterm", "alacritty"]) {
     if (!commandExists(terminal)) {
       continue;
     }
     switch (terminal) {
       case "foot":
-        return { args: ["--app-id", appId, top], command: terminal };
+        return { args: ["--app-id", appId, commandName], command: terminal };
       case "ghostty":
-        return { args: [`--class=${appId}`, "-e", top], command: terminal };
+        return { args: [`--class=${appId}`, "-e", commandName], command: terminal };
       case "kitty":
-        return { args: ["--class", appId, top], command: terminal };
+        return { args: ["--class", appId, commandName], command: terminal };
       case "wezterm":
-        return { args: ["start", "--class", appId, "--", top], command: terminal };
+        return { args: ["start", "--class", appId, "--", commandName], command: terminal };
       case "alacritty":
-        return { args: ["--class", `${appId},${appId}`, "-e", top], command: terminal };
+        return { args: ["--class", `${appId},${appId}`, "-e", commandName], command: terminal };
       default:
         break;
     }

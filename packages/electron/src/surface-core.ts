@@ -1276,7 +1276,7 @@ export class SurfaceCore {
       pane.nativeSurfaceStatus = null;
     }
 
-    const geometry = pane.snapshot.bounds ?? paneBoundsFromLayout(this.getSurface(surfaceId), pane.paneId);
+    const geometry = paneBoundsFromLayout(this.getSurface(surfaceId), pane.paneId);
     const plan = buildNativePaneHostPlan({
       content: entry.content,
       contentId: entry.contentId,
