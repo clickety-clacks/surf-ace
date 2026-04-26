@@ -15,6 +15,18 @@ type Viewport = {
   zoomLevel: number;
 };
 
+type OverlayCapture = "pointer_axis" | "pointer_button" | "pointer_hover";
+
+type OverlayRegionReport = {
+  captures: OverlayCapture[];
+  kind: "annotation_control" | "history_back" | "history_forward" | "other" | "pane_badge" | "pane_handle";
+  paneId: string;
+  paneInstanceId: string;
+  rect: { height: number; width: number; x: number; y: number };
+  regionId: string;
+  zIndex?: number;
+};
+
 type StrokePoint = {
   pressure?: number;
   timestamp: number;
@@ -76,6 +88,7 @@ type RendererWindowState = {
   panes: RendererPaneState[];
   providerName: string | null;
   surfaceId: string;
+  topologyRevision: number;
   viewport: { height: number; scale: number; width: number };
   windowLabel: string;
 };
@@ -134,7 +147,11 @@ const paneViews = new Map<number, PaneView>();
 let bootstrap: Bootstrap | null = null;
 let latestState: RendererWindowState | null = null;
 let labelsHideTimer: number | null = null;
+let overlayRevision = 0;
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
+let overlayRegionsFrame: number | null = null;
+
+const OVERLAY_CAPTURES: OverlayCapture[] = ["pointer_hover", "pointer_button", "pointer_axis"];
 
 function escapeHtml(input: string): string {
   return input
@@ -222,6 +239,114 @@ function reportPaneSnapshot(view: PaneView): void {
     selection,
     viewport,
     visibleText,
+  });
+}
+
+function visibleElementRect(element: Element): OverlayRegionReport["rect"] | null {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  return {
+    height: rect.height,
+    width: rect.width,
+    x: rect.x,
+    y: rect.y,
+  };
+}
+
+function overlayRegionForElement(
+  pane: RendererPaneState,
+  element: Element,
+  idSuffix: string,
+  kind: OverlayRegionReport["kind"],
+  zIndex: number,
+): OverlayRegionReport | null {
+  const rect = visibleElementRect(element);
+  if (!rect) {
+    return null;
+  }
+  return {
+    captures: OVERLAY_CAPTURES,
+    kind,
+    paneId: `${latestState?.surfaceId ?? "surface"}:${pane.paneId}`,
+    paneInstanceId: `${latestState?.surfaceId ?? "surface"}:${pane.paneId}:${pane.content.contentId ?? "none"}`,
+    rect,
+    regionId: `surf-ace-pane-${pane.paneId}-${idSuffix}`,
+    zIndex,
+  };
+}
+
+function buttonOverlayMetadata(
+  button: HTMLButtonElement,
+  index: number,
+): { kind: OverlayRegionReport["kind"]; suffix: string } {
+  const roleClass = [...button.classList].find((className) => className !== "control-button" && className !== "active");
+  switch (roleClass) {
+    case "pane-label-chip":
+      return { kind: "pane_badge", suffix: `control-pane-label-${index}` };
+    case "back":
+      return { kind: "history_back", suffix: `control-back-${index}` };
+    case "forward":
+      return { kind: "history_forward", suffix: `control-forward-${index}` };
+    case "annotate":
+    case "done":
+      return { kind: "annotation_control", suffix: `control-${roleClass}-${index}` };
+    default:
+      return { kind: "other", suffix: `control-${roleClass ?? "button"}-${index}` };
+  }
+}
+
+function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "visibility"): void {
+  overlayRevision += 1;
+  if (!latestState) {
+    window.surfAce.reportOverlayRegions({
+      coordinateSpace: "surface_logical",
+      regions: [],
+      revision: overlayRevision,
+      topologyEpoch: "0",
+      updateReason,
+    });
+    return;
+  }
+
+  const regions: OverlayRegionReport[] = [];
+  for (const pane of latestState.panes) {
+    if (pane.content.contentType !== "native_surface") {
+      continue;
+    }
+    const view = paneViews.get(pane.paneId);
+    if (!view) {
+      continue;
+    }
+    const clusterRegion = overlayRegionForElement(pane, view.controlsEl, "control-cluster", "pane_handle", 10);
+    if (clusterRegion) {
+      regions.push(clusterRegion);
+    }
+    view.controlsEl.querySelectorAll<HTMLButtonElement>(".control-button").forEach((button, index) => {
+      const metadata = buttonOverlayMetadata(button, index);
+      const buttonRegion = overlayRegionForElement(pane, button, metadata.suffix, metadata.kind, 20);
+      if (buttonRegion) {
+        regions.push(buttonRegion);
+      }
+    });
+  }
+  window.surfAce.reportOverlayRegions({
+    coordinateSpace: "surface_logical",
+    regions,
+    revision: overlayRevision,
+    topologyEpoch: String(latestState.topologyRevision),
+    updateReason,
+  });
+}
+
+function scheduleCompositorOverlayRegionReport(updateReason: "layout" | "resize" | "visibility"): void {
+  if (overlayRegionsFrame !== null) {
+    window.cancelAnimationFrame(overlayRegionsFrame);
+  }
+  overlayRegionsFrame = window.requestAnimationFrame(() => {
+    overlayRegionsFrame = null;
+    reportCompositorOverlayRegions(updateReason);
   });
 }
 
@@ -1219,6 +1344,7 @@ function renderWindow(state: RendererWindowState): void {
   }
   wrapper.append(windowTitlePill, layoutRoot);
   appRoot.replaceChildren(wrapper);
+  scheduleCompositorOverlayRegionReport("layout");
 }
 
 async function init(): Promise<void> {
@@ -1242,6 +1368,7 @@ async function init(): Promise<void> {
         reportPaneSnapshot(view);
       }
     }
+    scheduleCompositorOverlayRegionReport("resize");
   });
 
   window.addEventListener("pointermove", scheduleLabelsHide, { passive: true });

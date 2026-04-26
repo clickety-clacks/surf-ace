@@ -29,11 +29,43 @@ export type NativePaneHostPlan = {
 
 export type NativePaneStatusPayload = NativeSurfaceStatusEvent["payload"];
 
+export type CompositorOverlayCapture = "pointer_axis" | "pointer_button" | "pointer_hover";
+
+export type CompositorOverlayKind =
+  | "annotation_control"
+  | "history_back"
+  | "history_forward"
+  | "other"
+  | "pane_badge"
+  | "pane_handle";
+
+export type CompositorOverlayRegion = {
+  captures: CompositorOverlayCapture[];
+  kind: CompositorOverlayKind;
+  paneId: PaneId | number | string;
+  paneInstanceId: string;
+  rect: NativePaneGeometry;
+  regionId: string;
+  zIndex?: number;
+};
+
 export interface NativePaneHostBridge {
   readonly available: boolean;
   host(plan: NativePaneHostPlan): Promise<NativePaneStatusPayload | null>;
   update(plan: NativePaneHostPlan): Promise<NativePaneStatusPayload | null>;
   release(plan: Pick<NativePaneHostPlan, "contentId" | "paneId" | "revision" | "surfaceId">): Promise<void>;
+}
+
+export interface CompositorOverlayRegionBridge {
+  readonly available: boolean;
+  clear(surfaceId: SurfaceId | string): Promise<void>;
+  set(snapshot: {
+    regions: CompositorOverlayRegion[];
+    revision: number;
+    surfaceId: SurfaceId | string;
+    topologyEpoch: string;
+    updateReason?: "animation" | "clear" | "drag" | "initial" | "layout" | "native_attach" | "native_detach" | "resize" | "visibility";
+  }): Promise<void>;
 }
 
 export type CompositorHostModeState = {
@@ -103,9 +135,37 @@ type CompositorNativePaneRequest = {
   target: "terminal";
 };
 
+type CompositorOverlayRegionRequest = {
+  captures: CompositorOverlayCapture[];
+  kind: CompositorOverlayKind;
+  paneId: string;
+  paneInstanceId: string;
+  rect: { height: number; width: number; x: number; y: number };
+  regionId: string;
+  zIndex?: number;
+};
+
 type CompositorControlRequest =
   | {
       type: "get_status";
+    }
+  | {
+      type: "overlay_regions.status";
+    }
+  | {
+      surfaceId: string;
+      type: "overlay_regions.clear";
+      windowId?: string;
+    }
+  | {
+      coordinateSpace: "surface_logical";
+      regions: CompositorOverlayRegionRequest[];
+      revision: number;
+      surfaceId: string;
+      topologyEpoch: string;
+      type: "overlay_regions.set";
+      updateReason?: "animation" | "clear" | "drag" | "initial" | "layout" | "native_attach" | "native_detach" | "resize" | "visibility";
+      windowId?: string;
     }
   | {
       panes: CompositorNativePaneRequest[];
@@ -127,7 +187,15 @@ type CompositorControlResponse = {
 };
 
 type CompositorStatusSnapshot = {
+  overlay?: CompositorOverlayStatus;
+  overlay_regions?: CompositorOverlayStatus;
   panes?: CompositorPaneStatus[];
+};
+
+type CompositorOverlayStatus = {
+  activeRevision?: number | null;
+  windowId?: string | null;
+  topologyEpoch?: string | null;
 };
 
 type CompositorPaneStatus = {
@@ -219,8 +287,69 @@ export function createCompositorNativePaneHostBridge(options?: {
   };
 }
 
+export function createCompositorOverlayRegionBridge(options?: {
+  hostMode?: CompositorHostModeState;
+  transport?: CompositorControlTransport;
+}): CompositorOverlayRegionBridge {
+  const hostMode = options?.hostMode ?? detectCompositorHostMode();
+  const transport = options?.transport ?? (
+    hostMode.controlSocketPath
+      ? new UnixSocketCompositorControlTransport(hostMode.controlSocketPath)
+      : null
+  );
+  if (!hostMode.enabled || !transport) {
+    return createUnavailableCompositorOverlayRegionBridge();
+  }
+
+  return {
+    available: true,
+    async clear(surfaceId) {
+      const statusResponse = await assertCompositorOk(transport.send(buildCompositorOverlayStatusRequest()));
+      const overlayStatus = overlayStatusFromCompositorStatus(statusResponse.status);
+      await assertCompositorOk(
+        transport.send({
+          surfaceId: String(surfaceId),
+          type: "overlay_regions.clear",
+          ...(overlayStatus.windowId ? { windowId: overlayStatus.windowId } : {}),
+        }),
+      );
+    },
+    async set(snapshot) {
+      const statusResponse = await assertCompositorOk(transport.send(buildCompositorOverlayStatusRequest()));
+      const overlayStatus = overlayStatusFromCompositorStatus(statusResponse.status);
+      await assertCompositorOk(
+        transport.send(
+          buildOverlayRegionsSetRequest(
+            snapshot.surfaceId,
+            Math.max(snapshot.revision, (overlayStatus.activeRevision ?? 0) + 1),
+            overlayStatus.topologyEpoch ?? snapshot.topologyEpoch,
+            snapshot.regions,
+            snapshot.updateReason,
+            overlayStatus.windowId,
+          ),
+        ),
+      );
+    },
+  };
+}
+
+export function overlayStatusFromCompositorStatus(
+  status: CompositorStatusSnapshot | undefined,
+): { activeRevision: number | null; topologyEpoch: string | null; windowId: string | null } {
+  const overlay = status?.overlay_regions ?? status?.overlay;
+  return {
+    activeRevision: typeof overlay?.activeRevision === "number" ? overlay.activeRevision : null,
+    topologyEpoch: typeof overlay?.topologyEpoch === "string" ? overlay.topologyEpoch : null,
+    windowId: typeof overlay?.windowId === "string" ? overlay.windowId : null,
+  };
+}
+
 export function buildCompositorGetStatusRequest(): CompositorControlRequest {
   return { type: "get_status" };
+}
+
+export function buildCompositorOverlayStatusRequest(): CompositorControlRequest {
+  return { type: "overlay_regions.status" };
 }
 
 export function createUnavailableNativePaneHostBridge(): NativePaneHostBridge {
@@ -236,6 +365,14 @@ export function createUnavailableNativePaneHostBridge(): NativePaneHostBridge {
   };
 }
 
+export function createUnavailableCompositorOverlayRegionBridge(): CompositorOverlayRegionBridge {
+  return {
+    available: false,
+    async clear() {},
+    async set() {},
+  };
+}
+
 export function buildNativePaneHostRequest(plan: NativePaneHostPlan): CompositorControlRequest {
   return {
     panes: [buildCompositorNativePane(plan)],
@@ -247,6 +384,39 @@ export function buildNativePaneUpdateRequest(plan: NativePaneHostPlan): Composit
   return {
     panes: [buildCompositorNativePane(plan)],
     type: "native_pane.update",
+  };
+}
+
+export function buildOverlayRegionsSetRequest(
+  surfaceId: SurfaceId | string,
+  revision: number,
+  topologyEpoch: string,
+  regions: CompositorOverlayRegion[],
+  updateReason?: "animation" | "clear" | "drag" | "initial" | "layout" | "native_attach" | "native_detach" | "resize" | "visibility",
+  windowId?: string | null,
+): CompositorControlRequest {
+  return {
+    coordinateSpace: "surface_logical",
+    regions: regions.map((region) => ({
+      captures: [...region.captures],
+      kind: region.kind,
+      paneId: String(region.paneId),
+      paneInstanceId: region.paneInstanceId,
+      rect: {
+        x: Math.round(region.rect.x),
+        y: Math.round(region.rect.y),
+        width: Math.max(1, Math.round(region.rect.width)),
+        height: Math.max(1, Math.round(region.rect.height)),
+      },
+      regionId: region.regionId,
+      ...(region.zIndex !== undefined ? { zIndex: region.zIndex } : {}),
+    })),
+    revision,
+    surfaceId: String(surfaceId),
+    topologyEpoch,
+    type: "overlay_regions.set",
+    ...(updateReason ? { updateReason } : {}),
+    ...(windowId ? { windowId } : {}),
   };
 }
 

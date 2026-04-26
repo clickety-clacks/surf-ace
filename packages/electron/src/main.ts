@@ -12,6 +12,11 @@ import {
   type PersistentSurfaceState,
   type RendererWindowState,
 } from "./surface-core.js";
+import {
+  createCompositorOverlayRegionBridge,
+  type CompositorOverlayRegion,
+  type CompositorOverlayRegionBridge,
+} from "./native-pane-bridge.js";
 import { SurfaceWsServer } from "./ws-server.js";
 
 const DEFAULT_WS_PORT = 19001;
@@ -51,6 +56,7 @@ let core: SurfaceCore;
 let distDir = "";
 let identityFingerprint = "";
 let isQuitting = false;
+let overlayRegionBridge: CompositorOverlayRegionBridge;
 let server: SurfaceWsServer;
 let stateDir = "";
 let stateWrite = Promise.resolve();
@@ -303,6 +309,9 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     lastExplicitPaneIds.delete(surfaceId);
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
+    void overlayRegionBridge.clear(surfaceId).catch((error) => {
+      console.warn(`[surf-ace] compositor overlay region clear failed: ${error}`);
+    });
     if (!isQuitting) {
       void server.broadcastSurfaceRemoved(surfaceId);
       server.disconnectSurface(surfaceId, "provider_shutdown");
@@ -403,6 +412,25 @@ function installIpc(): void {
     });
   });
 
+  ipcMain.on("surface:overlay-regions", (event, payload) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || !payload || typeof payload !== "object") {
+      return;
+    }
+    const regions = Array.isArray(payload.regions)
+      ? payload.regions
+      : [];
+    void overlayRegionBridge.set({
+      regions: regions as CompositorOverlayRegion[],
+      revision: Number(payload.revision ?? 0),
+      surfaceId,
+      topologyEpoch: String(payload.topologyEpoch ?? "0"),
+      updateReason: typeof payload.updateReason === "string" ? payload.updateReason as never : undefined,
+    }).catch((error) => {
+      console.warn(`[surf-ace] compositor overlay region update failed: ${error}`);
+    });
+  });
+
   ipcMain.on("surface:clear-toast", (event, payload) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) {
@@ -491,6 +519,9 @@ async function boot(): Promise<void> {
   identityFingerprint = identity.fingerprintPrefix;
 
   core = new SurfaceCore({ persistentState });
+  overlayRegionBridge = createCompositorOverlayRegionBridge({
+    hostMode: core.compositorHostState(),
+  });
   const primarySurface = core.ensurePrimarySurface(endpointName(), displayViewport());
 
   const serverStart = await createAndStartServer(core);
@@ -539,6 +570,9 @@ if (!singleInstanceLock) {
 
   app.on("before-quit", async () => {
     isQuitting = true;
+    await Promise.allSettled(
+      [...windows.keys()].map((surfaceId) => overlayRegionBridge.clear(surfaceId)),
+    );
     advertiser?.refresh();
     await advertiser?.stop();
     await server.stop();

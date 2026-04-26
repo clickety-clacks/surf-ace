@@ -10,10 +10,15 @@ import {
   buildNativePaneHostPlan,
   buildNativePaneHostRequest,
   buildNativePaneUpdateRequest,
+  buildCompositorOverlayStatusRequest,
+  buildOverlayRegionsSetRequest,
+  createCompositorOverlayRegionBridge,
   createCompositorNativePaneHostBridge,
+  createUnavailableCompositorOverlayRegionBridge,
   createUnavailableNativePaneHostBridge,
   detectCompositorHostMode,
   nativeStatusFromCompositorStatus,
+  overlayStatusFromCompositorStatus,
   serializeCompositorControlRequest,
   UnixSocketCompositorControlTransport,
   type CompositorControlTransport,
@@ -97,6 +102,18 @@ test("unavailable native pane bridge no-ops safely", async () => {
   await assert.doesNotReject(() => bridge.release({} as never));
 });
 
+test("unavailable compositor overlay region bridge no-ops safely", async () => {
+  const bridge = createUnavailableCompositorOverlayRegionBridge();
+  assert.equal(bridge.available, false);
+  await assert.doesNotReject(() => bridge.set({
+    regions: [],
+    revision: 1,
+    surfaceId: "sf_panel",
+    topologyEpoch: "0",
+  }));
+  await assert.doesNotReject(() => bridge.clear("sf_panel"));
+});
+
 test("compositor bridge serializes native pane host and update requests", () => {
   const plan = buildNativePaneHostPlan({
     content: {
@@ -125,6 +142,193 @@ test("compositor bridge serializes native pane host and update requests", () => 
   assert.equal(
     serializeCompositorControlRequest(buildCompositorGetStatusRequest()),
     '{"type":"get_status"}\n',
+  );
+  assert.equal(
+    serializeCompositorControlRequest(buildCompositorOverlayStatusRequest()),
+    '{"type":"overlay_regions.status"}\n',
+  );
+});
+
+test("compositor bridge serializes overlay region updates with Surf Ace pane identity", () => {
+  assert.equal(
+    serializeCompositorControlRequest(
+      buildOverlayRegionsSetRequest("sf_panel", 4, "9", [
+        {
+          captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+          kind: "pane_handle",
+          paneId: "sf_panel:7",
+          paneInstanceId: "sf_panel:7:ct_native",
+          rect: { height: 40.3, width: 120.6, x: 10.4, y: 20.5 },
+          regionId: "surf-ace-pane-7-control-cluster",
+          zIndex: 10,
+        },
+      ], "layout"),
+    ),
+    '{"coordinateSpace":"surface_logical","regions":[{"captures":["pointer_hover","pointer_button","pointer_axis"],"kind":"pane_handle","paneId":"sf_panel:7","paneInstanceId":"sf_panel:7:ct_native","rect":{"x":10,"y":21,"width":121,"height":40},"regionId":"surf-ace-pane-7-control-cluster","zIndex":10}],"revision":4,"surfaceId":"sf_panel","topologyEpoch":"9","type":"overlay_regions.set","updateReason":"layout"}\n',
+  );
+});
+
+test("compositor overlay region bridge sends multi-pane toolbar regions", async () => {
+  const requests: unknown[] = [];
+  const bridge = createCompositorOverlayRegionBridge({
+    hostMode: {
+      controlSocketPath: "/tmp/surf-ace-compositor.sock",
+      enabled: true,
+      outputRotation: null,
+      waylandDisplay: "wayland-77",
+    },
+    transport: {
+      async send(request) {
+        requests.push(request);
+        return {
+          ok: true,
+          status: {
+            overlay_regions: {
+              activeRevision: 12,
+              topologyEpoch: "topology-11",
+              windowId: "fd",
+            },
+            panes: [],
+          },
+        };
+      },
+    },
+  });
+
+  await bridge.set({
+    regions: [
+      {
+        captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+        kind: "pane_handle",
+        paneId: "sf_panel:7",
+        paneInstanceId: "sf_panel:7:ct_left",
+        rect: { x: 10, y: 10, width: 120, height: 40 },
+        regionId: "surf-ace-pane-7-control-cluster",
+        zIndex: 10,
+      },
+      {
+        captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+        kind: "pane_handle",
+        paneId: "sf_panel:8",
+        paneInstanceId: "sf_panel:8:ct_right",
+        rect: { x: 410, y: 10, width: 120, height: 40 },
+        regionId: "surf-ace-pane-8-control-cluster",
+        zIndex: 10,
+      },
+    ],
+    revision: 12,
+    surfaceId: "sf_panel",
+    topologyEpoch: "11",
+    updateReason: "resize",
+  });
+
+  assert.equal(bridge.available, true);
+  assert.deepEqual(requests, [
+    {
+      type: "overlay_regions.status",
+    },
+    {
+      coordinateSpace: "surface_logical",
+      regions: [
+        {
+            captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+            kind: "pane_handle",
+            paneId: "sf_panel:7",
+            paneInstanceId: "sf_panel:7:ct_left",
+          rect: { x: 10, y: 10, width: 120, height: 40 },
+          regionId: "surf-ace-pane-7-control-cluster",
+          zIndex: 10,
+        },
+        {
+            captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+            kind: "pane_handle",
+            paneId: "sf_panel:8",
+            paneInstanceId: "sf_panel:8:ct_right",
+          rect: { x: 410, y: 10, width: 120, height: 40 },
+          regionId: "surf-ace-pane-8-control-cluster",
+          zIndex: 10,
+        },
+      ],
+      revision: 13,
+      surfaceId: "sf_panel",
+      topologyEpoch: "topology-11",
+      type: "overlay_regions.set",
+      updateReason: "resize",
+      windowId: "fd",
+    },
+  ]);
+});
+
+test("compositor overlay region bridge clears surface window regions", async () => {
+  const requests: unknown[] = [];
+  const bridge = createCompositorOverlayRegionBridge({
+    hostMode: {
+      controlSocketPath: "/tmp/surf-ace-compositor.sock",
+      enabled: true,
+      outputRotation: null,
+      waylandDisplay: "wayland-77",
+    },
+    transport: {
+      async send(request) {
+        requests.push(request);
+        return {
+          ok: true,
+          status: {
+            overlay: {
+              activeRevision: 4,
+              topologyEpoch: "topology-7",
+              windowId: "fd",
+            },
+            panes: [],
+          },
+        };
+      },
+    },
+  });
+
+  await bridge.clear("sf_panel");
+
+  assert.deepEqual(requests, [
+    {
+      type: "overlay_regions.status",
+    },
+    {
+      surfaceId: "sf_panel",
+      type: "overlay_regions.clear",
+      windowId: "fd",
+    },
+  ]);
+});
+
+test("overlayStatusFromCompositorStatus accepts current status field names", () => {
+  assert.deepEqual(
+    overlayStatusFromCompositorStatus({
+      overlay_regions: {
+        activeRevision: 2,
+        topologyEpoch: "topology-7",
+        windowId: "fd",
+      },
+      panes: [],
+    }),
+    {
+      activeRevision: 2,
+      topologyEpoch: "topology-7",
+      windowId: "fd",
+    },
+  );
+  assert.deepEqual(
+    overlayStatusFromCompositorStatus({
+      overlay: {
+        activeRevision: 3,
+        topologyEpoch: "topology-8",
+      },
+      panes: [],
+    }),
+    {
+      activeRevision: 3,
+      topologyEpoch: "topology-8",
+      windowId: null,
+    },
   );
 });
 

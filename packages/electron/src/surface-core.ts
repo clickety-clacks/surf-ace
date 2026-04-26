@@ -142,6 +142,7 @@ export type RendererWindowState = {
   panes: RendererPaneState[];
   providerName: string | null;
   surfaceId: string;
+  topologyRevision: number;
   viewport: SurfaceViewport;
   windowLabel: string;
 };
@@ -336,6 +337,7 @@ export class SurfaceCore {
       }),
       providerName: surface.providerName,
       surfaceId: surface.surfaceId,
+      topologyRevision: surface.topologyRevision,
       viewport: cloneViewport(surface.viewport),
       windowLabel: surface.windowLabel,
     };
