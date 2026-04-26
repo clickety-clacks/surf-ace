@@ -65,6 +65,7 @@ import type {
   TopologyApplyResponse,
   Viewport,
   MutationAckResponse,
+  NativePaneMaterialization,
   RestorePolicy,
   PageEvent,
   TopologyApplyRequest,
@@ -910,6 +911,74 @@ function collapseManagedLayout(node: ManagedLayoutNode | null): ManagedLayoutNod
     ...node,
     children: node.children.map((child) => collapseManagedLayout(child)),
   };
+}
+
+function integerPaneRect(rect: Rect): Rect {
+  return {
+    height: Math.max(0, Math.round(rect.height)),
+    width: Math.max(0, Math.round(rect.width)),
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+  };
+}
+
+function collectManagedPaneRects(node: ManagedLayoutNode, rect: Rect, result: Map<PaneId, Rect>): void {
+  if (node.type === "pane") {
+    result.set(node.paneId, integerPaneRect(rect));
+    return;
+  }
+
+  if (node.children.length === 0) {
+    return;
+  }
+
+  if (node.direction === "horizontal") {
+    node.children.forEach((child, index) => {
+      const childStart = Math.round(rect.x + (rect.width * index) / node.children.length);
+      const childEnd = Math.round(rect.x + (rect.width * (index + 1)) / node.children.length);
+      collectManagedPaneRects(
+        child,
+        {
+          height: rect.height,
+          width: Math.max(0, childEnd - childStart),
+          x: childStart,
+          y: rect.y,
+        },
+        result,
+      );
+    });
+    return;
+  }
+
+  node.children.forEach((child, index) => {
+    const childStart = Math.round(rect.y + (rect.height * index) / node.children.length);
+    const childEnd = Math.round(rect.y + (rect.height * (index + 1)) / node.children.length);
+    collectManagedPaneRects(
+      child,
+      {
+        height: Math.max(0, childEnd - childStart),
+        width: rect.width,
+        x: rect.x,
+        y: childStart,
+      },
+      result,
+    );
+  });
+}
+
+function managedPaneRects(surface: ManagedSurface): Map<PaneId, Rect> {
+  const result = new Map<PaneId, Rect>();
+  collectManagedPaneRects(
+    collapseManagedLayout(surface.layout),
+    {
+      height: surface.viewport.height,
+      width: surface.viewport.width,
+      x: 0,
+      y: 0,
+    },
+    result,
+  );
+  return result;
 }
 
 function remoteLayoutToTopologyLayout(
@@ -3494,6 +3563,67 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return null;
   }
 
+  private nativePaneMaterializationForTarget(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    target: PaneTargetRecord,
+  ): NativePaneMaterialization | undefined {
+    if (!isProcessBackedTargetKind(target.targetKind)) {
+      return undefined;
+    }
+
+    const geometry = managedPaneRects(surface).get(pane.paneId) ?? {
+      height: surface.viewport.height,
+      width: surface.viewport.width,
+      x: 0,
+      y: 0,
+    };
+    const revision = asRevision(target.targetEpoch);
+    const paneEntry: NativePaneMaterialization["panes"][number] = {
+      binding_id: `${pane.paneId}:${target.targetId}`,
+      content_id: target.targetId,
+      geometry,
+      id: pane.paneId,
+      revision,
+    };
+
+    if (target.targetKind === "terminal_app" && isPlainRecord(target.targetPayload)) {
+      const { args, command, cwd, env } = target.targetPayload;
+      if (typeof command === "string" && isStringArray(args)) {
+        paneEntry.target = "terminal";
+        paneEntry.process = {
+          args: [...args],
+          command,
+          ...(typeof cwd === "string" ? { cwd } : {}),
+          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
+        };
+      }
+    }
+
+    return {
+      op: "native_pane.host",
+      overlaySet: {
+        coordinateSpace: "surface_logical",
+        regions: [
+          {
+            captures: [],
+            kind: "native_pane",
+            paneId: pane.paneId,
+            paneInstanceId: pane.paneLineageId,
+            rect: geometry,
+            regionId: `${pane.paneId}:${target.targetId}`,
+            zIndex: Math.max(0, flattenManagedLayout(surface.layout).indexOf(pane.paneId)),
+          },
+        ],
+        revision,
+        surfaceId: surface.surfaceId,
+        topologyEpoch: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
+        windowId: surface.windowLabel,
+      },
+      panes: [paneEntry],
+    };
+  }
+
   private async materializeTargetRecord(
     surface: ManagedSurface,
     pane: ManagedPane,
@@ -3580,6 +3710,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         requestId,
         restoreReason,
         surfaceId: surface.surfaceId,
+        materialization: this.nativePaneMaterializationForTarget(surface, pane, target),
         targetEpoch: target.targetEpoch,
         targetHeader: structuredClone(target.targetHeader),
         targetId: target.targetId,
