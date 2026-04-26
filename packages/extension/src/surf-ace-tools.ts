@@ -62,18 +62,18 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_list",
     },
     {
-      description: "Push content to a Surf Ace pane, replacing whatever is currently visible.",
+      description: "Push content or a live browser URL target to a Surf Ace pane, replacing whatever is currently visible.",
       execute: async (args: SurfAcePushInput, context?: SurfAceToolContext) =>
         await runtime.push(args, { sessionKey: context?.sessionKey }),
       inputSchema: {
         additionalProperties: false,
         properties: {
           content: {
-            description: "Required content payload string, encoded per content type as defined in the spec.",
+            description: "Required content payload string. For browser_url this is the live URL to navigate; it is not static HTML.",
             type: "string",
           },
           contentType: {
-            enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"],
+            enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "browser_url"],
             type: "string",
           },
           diagnostic: {
