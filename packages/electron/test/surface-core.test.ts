@@ -161,11 +161,12 @@ test("surface core materializes browser_url targets as live URL content", () => 
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
     ownershipSessionId: "sa_test",
-    paneLineageId: "pane:7",
+    paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
     surfaceId: surface.surfaceId as never,
@@ -187,6 +188,11 @@ test("surface core materializes browser_url targets as live URL content", () => 
   const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
   assert.equal(pane.content.contentType, "browser_url");
   assert.deepEqual(pane.content.content, { url: "https://google.com/" });
+  const snapshot = core.captureSnapshot(surface.surfaceId, 7);
+  assert.equal(snapshot.contentId, null);
+  assert.equal(snapshot.contentType, null);
+  assert.equal(snapshot.currentTarget?.targetId, "tg_google");
+  assert.equal(snapshot.currentTarget?.targetKind, "browser_url");
 });
 
 test("surface core rejects browser_url target when live browser capability is not requested", () => {
@@ -199,11 +205,12 @@ test("surface core rejects browser_url target when live browser capability is no
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
     ownershipSessionId: "sa_test",
-    paneLineageId: "pane:7",
+    paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
     surfaceId: surface.surfaceId as never,
@@ -223,6 +230,43 @@ test("surface core rejects browser_url target when live browser capability is no
 
   assert.equal(result.status, "rejected");
   assert.equal(result.errorCode, "capability_missing");
+});
+
+test("surface core rejects browser_url targets for non-web schemes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+
+  const result = core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId,
+    requestId: "tr_test",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "file:///etc/passwd",
+    },
+    targetId: "tg_file",
+    targetKind: "browser_url",
+    targetPayload: { url: "file:///etc/passwd" },
+  });
+
+  assert.equal(result.status, "rejected");
+  assert.equal(result.errorCode, "unsafe_payload");
 });
 
 test("surface core treats stale pane access as best-effort instead of crashing", () => {

@@ -72,16 +72,8 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
             description: "Required content payload string, encoded per content type as defined in the spec. For browser_url, this is the absolute URL to navigate.",
             type: "string",
           },
-          allowedSnapshotFallback: {
-            description: "browser_url only: whether an explicit web_snapshot fallback is allowed when live navigation is unavailable.",
-            type: "boolean",
-          },
           contentType: {
             enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "browser_url"],
-            type: "string",
-          },
-          fallbackSnapshotTargetId: {
-            description: "browser_url only: target id for an explicitly allowed web_snapshot fallback.",
             type: "string",
           },
           fingerprint: fingerprintParam,

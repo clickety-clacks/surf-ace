@@ -58,7 +58,15 @@ import type {
   TapEvent,
   TargetApplyRequest,
   TargetApplyResponse,
+  TargetRegisterRequest,
+  TargetRegisteredResponse,
+  TargetRegisterRejectedResponse,
+  TargetHeader,
+  PaneTargetState,
+  RestorePolicy,
   TargetCapability,
+  TargetErrorCode,
+  TargetKind,
   TopologyApplyResponse,
   Viewport,
   MutationAckResponse,
@@ -93,10 +101,11 @@ export type SurfAcePaneSummary = {
   activeContent:
     | {
         contentId: string;
-        contentType: PushContentType;
+        contentType: ContentType;
         revision: number;
       }
     | null;
+  currentTarget?: PaneTargetState | null;
   historySummary: SurfAceHistorySummary;
 };
 
@@ -207,7 +216,8 @@ export type SurfAceSnapshotResult = {
   paneLabel: number;
   snapshot: {
     contentId: string | null;
-    contentType: PushContentType | null;
+    contentType: ContentType | null;
+    currentTarget?: PaneTargetState | null;
     drawings?: Stroke[];
     image?: string;
     revision: number;
@@ -244,11 +254,13 @@ export type SurfAcePushInput =
   };
 
 export type SurfAcePushResult = {
-  contentId: string;
+  contentId: string | null;
   fingerprint: string;
   paneId: PaneId;
   paneLabel: number;
   revision: number;
+  targetId?: string;
+  targetKind?: TargetKind;
 };
 
 export type SurfAceClearResult = {
@@ -369,17 +381,38 @@ type ManagedLayoutNode =
 
 type ManagedHistoryEntry = {
   contentId: ContentId;
-  contentType: PushContentType;
-  contentValue: ContentSetRequest["payload"]["content"] | BrowserUrlPayload;
+  contentType: ContentType;
+  contentValue: ContentSetRequest["payload"]["content"];
   historyOwnerToken: string | null;
   revision: Revision;
   sessionKey: string | null;
 };
 
+type PaneTargetRecord = {
+  targetId: string;
+  surfaceId: SurfaceId;
+  surfaceInstanceId: string | null;
+  paneLineageId: string;
+  paneIdAtApply: string;
+  paneLabelAtApply: number | string | null;
+  targetEpoch: number;
+  targetKind: TargetKind;
+  targetHeader: TargetHeader;
+  targetPayload: unknown;
+  restorePolicy: RestorePolicy;
+  ownerProviderId: string;
+  ownershipSessionId: string;
+  ownershipEpoch: number;
+  appliedAt: string;
+  currentState: "current" | "superseded" | "tombstoned";
+  supersededByTargetId?: string;
+  lastApplyEvidence?: TargetApplyResponse["payload"];
+};
+
 type ManagedPane = {
   activeContentId: ContentId | null;
-  contentType: PushContentType | null;
-  contentValue: ContentSetRequest["payload"]["content"] | BrowserUrlPayload | null;
+  contentType: ContentType | null;
+  contentValue: ContentSetRequest["payload"]["content"] | null;
   currentRevision: Revision;
   historyEntries: ManagedHistoryEntry[];
   historySummary: SurfAceHistorySummary;
@@ -387,10 +420,12 @@ type ManagedPane = {
   name: string | null;
   ownerSessionKey: string | null;
   paneId: PaneId;
+  paneLineageId: string | null;
   paneLabel: number;
   pendingOwnerSessionKey: string | null;
   remotePaneId: RemotePaneId;
   snapshot: CachedSnapshot | null;
+  targetRecord: PaneTargetRecord | null;
   viewport: SurfaceViewport;
   buffer: MutablePaneBuffer;
 };
@@ -421,6 +456,7 @@ type ManagedSurface = {
   reconnectAttempt: number;
   retryDelayResolver: (() => void) | null;
   sessionId: SessionId | null;
+  ownershipEpoch: number | null;
   snapshotBufferedEvents: Event[];
   snapshotSyncInFlight: boolean;
   stopRequested: boolean;
@@ -437,6 +473,8 @@ type RuntimeStateFile = {
   nextRemotePaneId: number;
   nextPaneLabel: number;
   nextWindowLabelIndex: number;
+  targetRegistrationAcks?: Record<string, { targetEpoch: number; targetId: string }>;
+  paneTargetRecords?: Record<string, PaneTargetRecord>;
   paneLabelsByPaneId: Record<string, number>;
   providerId: string;
   version: 1;
@@ -576,7 +614,10 @@ function makeTargetRequestId(): string {
 }
 
 function paneLineageId(pane: ManagedPane): string {
-  return `pane:${pane.remotePaneId}`;
+  if (!pane.paneLineageId) {
+    throw new SurfAceToolError("pane_lineage_missing", "Surf Ace surface did not report a paneLineageId for this pane.");
+  }
+  return pane.paneLineageId;
 }
 
 function makeFrameId(): string {
@@ -663,10 +704,12 @@ function createPane(
     name: null,
     ownerSessionKey: null,
     paneId,
+    paneLineageId: null,
     paneLabel,
     pendingOwnerSessionKey: null,
     remotePaneId,
     snapshot: null,
+    targetRecord: null,
     viewport: cloneViewport(viewport),
   };
 }
@@ -705,6 +748,7 @@ function createManagedSurface(
     reconnectAttempt: 0,
     retryDelayResolver: null,
     sessionId: null,
+    ownershipEpoch: null,
     snapshotBufferedEvents: [],
     snapshotSyncInFlight: false,
     stopRequested: false,
@@ -1032,6 +1076,38 @@ function paneLabelStorageKey(surfaceId: string, remotePaneId: RemotePaneId): str
   return `${surfaceId}::${Number(remotePaneId)}`;
 }
 
+function paneTargetRecordStorageKey(surfaceId: SurfaceId, targetId: string): string {
+  return `${surfaceId}::${targetId}`;
+}
+
+function targetRegistrationStorageKey(surfaceId: SurfaceId, idempotencyKey: string): string {
+  return `${surfaceId}::${idempotencyKey}`;
+}
+
+function paneTargetState(record: PaneTargetRecord | null): PaneTargetState | null {
+  if (!record) {
+    return null;
+  }
+  return {
+    currentState: record.currentState,
+    lastApplyEvidence: record.lastApplyEvidence,
+    paneLineageId: record.paneLineageId,
+    restorePolicy: record.restorePolicy,
+    targetEpoch: record.targetEpoch,
+    targetId: record.targetId,
+    targetKind: record.targetKind,
+  };
+}
+
+function parseSafeBrowserUrl(value: string): URL | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 function migratePersistedPaneId(fingerprint: string, legacyPaneId: unknown, paneLabel: number): PaneId {
   if (typeof legacyPaneId === "string") {
     return asPaneId(legacyPaneId);
@@ -1060,6 +1136,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     nextRemotePaneId: 1,
     nextPaneLabel: 1,
     nextWindowLabelIndex: 0,
+    targetRegistrationAcks: {},
+    paneTargetRecords: {},
     paneLabelsByPaneId: {},
     providerId: "",
     version: 1,
@@ -1448,12 +1526,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const currentLayout = collapseManagedLayout(surface.layout);
     const nextLayout = collapseManagedLayout(removePaneFromManagedLayout(currentLayout, pane.paneId));
     surface.layout = nextLayout;
+    this.tombstoneCurrentTargetRecord(pane);
     surface.panes.delete(pane.paneId);
 
     try {
       await this.pushTopology(surface, { increment: true });
     } catch (error) {
       surface.panes.set(pane.paneId, pane);
+      if (pane.targetRecord?.currentState === "tombstoned") {
+        pane.targetRecord.currentState = "current";
+        this.persistTargetRecord(pane.targetRecord);
+      }
       surface.layout = currentLayout;
       throw error;
     }
@@ -1530,39 +1613,65 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
-    let url: URL;
-    try {
-      url = new URL(input.content);
-    } catch {
-      throw new SurfAceToolError("unsafe_payload", "browser_url content must be an absolute URL.");
+    if (input.allowedSnapshotFallback || input.fallbackSnapshotTargetId) {
+      throw new SurfAceToolError(
+        "unsupported_target_kind",
+        "browser_url snapshot fallback is not implemented; request web_snapshot explicitly instead.",
+      );
+    }
+    const url = parseSafeBrowserUrl(input.content);
+    if (!url) {
+      throw new SurfAceToolError("unsafe_payload", "browser_url content must be an http or https URL.");
     }
 
     const targetId = makeTargetId();
-    const targetEpoch = (pane.currentRevision as number) + 1;
+    const targetEpoch = (pane.targetRecord?.targetEpoch ?? 0) + 1;
     const payload: BrowserUrlPayload = {
-      ...(input.allowedSnapshotFallback === undefined ? {} : { allowedSnapshotFallback: input.allowedSnapshotFallback }),
-      ...(input.fallbackSnapshotTargetId === undefined ? {} : { fallbackSnapshotTargetId: input.fallbackSnapshotTargetId }),
       url: url.toString(),
+    };
+    const targetHeader: TargetHeader = {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: url.toString(),
+    };
+    const lineageId = paneLineageId(pane);
+    const ownershipEpoch = surface.ownershipEpoch;
+    if (!surface.sessionId || ownershipEpoch === null) {
+      throw new SurfAceToolError("not_connected", "Surf Ace surface is not paired with an ownership epoch.");
+    }
+    const record: PaneTargetRecord = {
+      appliedAt: new Date(this.now()).toISOString(),
+      currentState: "current",
+      ownerProviderId: this.providerId(),
+      ownershipEpoch,
+      ownershipSessionId: surface.sessionId,
+      paneIdAtApply: String(pane.remotePaneId),
+      paneLabelAtApply: pane.paneLabel,
+      paneLineageId: lineageId,
+      restorePolicy: "confirm",
+      surfaceId: surface.surfaceId,
+      surfaceInstanceId: null,
+      targetEpoch,
+      targetHeader,
+      targetId,
+      targetKind: "browser_url",
+      targetPayload: payload,
     };
     const request: TargetApplyRequest = {
       id: makeBrandedRequestId(),
       op: "target.apply",
       payload: {
-        ownershipEpoch: 0,
-        ownershipSessionId: surface.sessionId ?? "",
-        paneLineageId: paneLineageId(pane),
+        ownershipEpoch,
+        ownershipSessionId: surface.sessionId,
+        paneLineageId: lineageId,
         requestId: makeTargetRequestId(),
         restoreReason: "initial_apply",
         surfaceId: surface.surfaceId,
         targetEpoch,
-        targetHeader: {
-          payloadSchemaVersion: 1,
-          replaySemantics: "navigate",
-          requiredCapabilities: ["target.browser_url.v1"],
-          safeToLogFields: ["url", "allowedSnapshotFallback", "fallbackSnapshotTargetId"],
-          safetyClass: "network",
-          summary: url.toString(),
-        },
+        targetHeader,
         targetId,
         targetKind: "browser_url",
         targetPayload: payload,
@@ -1573,12 +1682,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     };
 
     pane.pendingOwnerSessionKey = sessionKey ?? null;
+    this.setCurrentTargetRecord(pane, record);
     const response = await this.sendRequest(surface, request);
     if (isErrorResponse(response)) {
       pane.pendingOwnerSessionKey = null;
+      record.lastApplyEvidence = {
+        appliedAt: new Date(this.now()).toISOString(),
+        errorCode: mutationErrorCode(response.error.code) as TargetErrorCode,
+        message: response.error.message,
+        paneLineageId: lineageId,
+        requestId: request.payload.requestId,
+        status: "failed",
+        targetEpoch,
+        targetId,
+      };
+      this.persistTargetRecord(record);
       throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
     }
     const result = (response as TargetApplyResponse).payload;
+    record.lastApplyEvidence = result;
+    this.persistTargetRecord(record);
     if (result.status !== "applied") {
       pane.pendingOwnerSessionKey = null;
       throw new SurfAceToolError(
@@ -1587,38 +1710,38 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
-    const contentId = targetId as ContentId;
     const previousVisibleEntry = this.visibleHistoryEntry(pane);
     if (previousVisibleEntry) {
       this.storeHiddenHistoryEntry(pane, previousVisibleEntry);
     }
     this.removeHiddenHistoryEntryForSession(pane, sessionKey ?? null);
-    pane.activeContentId = contentId;
-    pane.contentType = "browser_url";
-    pane.contentValue = payload;
-    pane.currentRevision = targetEpoch as Revision;
+    pane.activeContentId = null;
+    pane.contentType = null;
+    pane.contentValue = null;
     pane.historyOwnerToken = null;
     pane.ownerSessionKey = pane.pendingOwnerSessionKey ?? sessionKey ?? null;
-    pane.historySummary.visibleContentId = contentId;
+    pane.historySummary.visibleContentId = null;
     pane.pendingOwnerSessionKey = null;
     pane.buffer.currentUrl = url.toString();
     pane.snapshot = pane.snapshot
       ? {
           ...pane.snapshot,
-          contentId,
-          contentType: "browser_url",
+          contentId: null,
+          contentType: null,
           drawings: [],
-          revision: targetEpoch as Revision,
+          revision: pane.currentRevision,
         }
       : null;
     this.queuePersistScreenSnapshot("target.apply browser_url");
 
     return {
-      contentId,
+      contentId: null,
       fingerprint: surface.surfaceId,
       paneId: pane.paneId,
       paneLabel: pane.paneLabel,
-      revision: targetEpoch,
+      revision: pane.currentRevision,
+      targetId,
+      targetKind: "browser_url",
     };
   }
 
@@ -2179,6 +2302,155 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.queuePersistScreenSnapshot(`wire event ${event.op}`);
   }
 
+  private handleWireRequest(surface: ManagedSurface, request: Request): Response {
+    if (request.op !== "target.register") {
+      return {
+        error: {
+          code: "invalid_operation",
+          message: `Surface-originated ${request.op} is not accepted by this provider`,
+        },
+        id: request.id,
+        ok: false,
+        op: request.op,
+        sentAt: asEpochMs(this.now()),
+        type: "response",
+        v: 1,
+      } as Response;
+    }
+    return this.handleTargetRegister(surface, request);
+  }
+
+  private handleTargetRegister(
+    surface: ManagedSurface,
+    request: TargetRegisterRequest,
+  ): TargetRegisteredResponse | TargetRegisterRejectedResponse {
+    const reject = (errorCode: TargetErrorCode, message: string): TargetRegisterRejectedResponse => ({
+      id: request.id,
+      ok: true,
+      op: "target.register.rejected",
+      payload: {
+        errorCode,
+        idempotencyKey: request.payload.idempotencyKey,
+        message,
+        status: "rejected",
+      },
+      sentAt: asEpochMs(this.now()),
+      type: "response",
+      v: 1,
+    });
+
+    if (request.payload.surfaceId !== surface.surfaceId) {
+      return reject("registration_failed", "target.register surfaceId does not match this provider surface");
+    }
+    if (!surface.sessionId || request.payload.ownershipSessionId !== surface.sessionId) {
+      return reject("ownership_session_mismatch", "target.register ownershipSessionId does not match active ownership");
+    }
+    if (surface.ownershipEpoch === null || request.payload.ownershipEpoch !== surface.ownershipEpoch) {
+      return reject("registration_late_old_epoch", "target.register ownershipEpoch does not match active ownership");
+    }
+    const duplicate = this.persistentState.targetRegistrationAcks?.[
+      targetRegistrationStorageKey(surface.surfaceId, request.payload.idempotencyKey)
+    ];
+    if (duplicate) {
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.registered",
+        payload: {
+          idempotencyKey: request.payload.idempotencyKey,
+          status: "registered",
+          targetEpoch: duplicate.targetEpoch,
+          targetId: duplicate.targetId,
+        },
+        sentAt: asEpochMs(this.now()),
+        type: "response",
+        v: 1,
+      };
+    }
+    const pane = [...surface.panes.values()].find((candidate) => candidate.paneLineageId === request.payload.paneLineageId);
+    if (!pane) {
+      return reject("pane_lineage_missing", "target.register pane lineage is unknown");
+    }
+    const currentEpoch = pane.targetRecord?.currentState === "current" ? pane.targetRecord.targetEpoch : null;
+    if (request.payload.expectedPreviousTargetEpoch !== currentEpoch) {
+      return reject("target_epoch_stale", "target.register expectedPreviousTargetEpoch does not match current target epoch");
+    }
+    if (!request.payload.targetHeader.requiredCapabilities.every((capability) => surface.targetCapabilities.includes(capability))) {
+      return reject("capability_missing", "surface lacks required target capability");
+    }
+    if (request.payload.targetKind === "browser_url") {
+      const targetPayload = request.payload.targetPayload as Partial<BrowserUrlPayload>;
+      const payloadKeys = Object.keys(targetPayload);
+      if (
+        request.payload.targetHeader.safetyClass !== "network" ||
+        request.payload.targetHeader.replaySemantics !== "navigate" ||
+        !request.payload.targetHeader.requiredCapabilities.includes("target.browser_url.v1") ||
+        typeof targetPayload.url !== "string" ||
+        !parseSafeBrowserUrl(targetPayload.url) ||
+        payloadKeys.some((key) => key !== "url")
+      ) {
+        return reject("unsafe_payload", "browser_url target.register requires network safety, target.browser_url.v1, navigate semantics, only a url payload field, and an http or https url");
+      }
+    }
+
+    const targetId = makeTargetId();
+    const targetEpoch = (currentEpoch ?? 0) + 1;
+    const record: PaneTargetRecord = {
+      appliedAt: request.payload.launchedAt,
+      currentState: "current",
+      lastApplyEvidence: {
+        appliedAt: request.payload.launchedAt,
+        materializedState: {
+          registrationState: request.payload.registrationState,
+        },
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.id,
+        status: "applied",
+        targetEpoch,
+        targetId,
+      },
+      ownerProviderId: this.providerId(),
+      ownershipEpoch: request.payload.ownershipEpoch,
+      ownershipSessionId: request.payload.ownershipSessionId,
+      paneIdAtApply: String(pane.remotePaneId),
+      paneLabelAtApply: pane.paneLabel,
+      paneLineageId: request.payload.paneLineageId,
+      restorePolicy: request.payload.targetHeader.safetyClass === "passive" ? "auto" : "confirm",
+      surfaceId: surface.surfaceId,
+      surfaceInstanceId: request.payload.surfaceInstanceId,
+      targetEpoch,
+      targetHeader: structuredClone(request.payload.targetHeader),
+      targetId,
+      targetKind: request.payload.targetKind,
+      targetPayload: structuredClone(request.payload.targetPayload),
+    };
+    this.setCurrentTargetRecord(pane, record);
+    this.persistentState.targetRegistrationAcks ??= {};
+    this.persistentState.targetRegistrationAcks[
+      targetRegistrationStorageKey(surface.surfaceId, request.payload.idempotencyKey)
+    ] = { targetEpoch, targetId };
+    this.runBackgroundTask(
+      `persist target registration ${request.payload.idempotencyKey}`,
+      async () => {
+        await this.persistState();
+      },
+    );
+    return {
+      id: request.id,
+      ok: true,
+      op: "target.registered",
+      payload: {
+        idempotencyKey: request.payload.idempotencyKey,
+        status: "registered",
+        targetEpoch,
+        targetId,
+      },
+      sentAt: asEpochMs(this.now()),
+      type: "response",
+      v: 1,
+    };
+  }
+
   private ingestDrawingFlush(surface: ManagedSurface, event: DrawingFlushEvent): void {
     this.logger.info?.(
       `[surf-ace:runtime] ingestDrawingFlush for ${surface.surfaceId} pane=${event.payload.paneId} strokes=${event.payload.strokes?.length ?? "MISSING"}`,
@@ -2654,6 +2926,40 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.historyEntries = pane.historyEntries.filter((entry) => !sameHistorySessionKey(entry.sessionKey, sessionKey));
   }
 
+  private setCurrentTargetRecord(
+    pane: ManagedPane,
+    record: PaneTargetRecord,
+  ): void {
+    if (pane.targetRecord && pane.targetRecord.targetId !== record.targetId) {
+      pane.targetRecord.currentState = "superseded";
+      pane.targetRecord.supersededByTargetId = record.targetId;
+      this.persistTargetRecord(pane.targetRecord);
+    }
+    pane.targetRecord = record;
+    this.persistTargetRecord(record);
+    this.queuePersistScreenSnapshot("target record current");
+  }
+
+  private persistTargetRecord(record: PaneTargetRecord): void {
+    this.persistentState.paneTargetRecords ??= {};
+    this.persistentState.paneTargetRecords[paneTargetRecordStorageKey(record.surfaceId, record.targetId)] = structuredClone(record);
+    this.runBackgroundTask(
+      `persist target record ${record.targetId}`,
+      async () => {
+        await this.persistState();
+      },
+    );
+  }
+
+  private tombstoneCurrentTargetRecord(pane: ManagedPane): void {
+    if (!pane.targetRecord) {
+      return;
+    }
+    pane.targetRecord.currentState = "tombstoned";
+    this.persistTargetRecord(pane.targetRecord);
+    pane.targetRecord = null;
+  }
+
   private takeHiddenHistoryEntryByContentId(
     pane: ManagedPane,
     contentId: ContentId,
@@ -2749,13 +3055,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         continue;
       }
       pane.name = paneState.name;
+      pane.paneLineageId = paneState.paneLineageId;
       pane.paneLabel = paneState.paneLabel;
+      pane.targetRecord = this.loadCurrentTargetRecord(surface, pane.paneLineageId) ?? pane.targetRecord;
     }
     this.queuePersistScreenSnapshot("topology apply");
   }
 
   private async repushSurfaceContent(surface: ManagedSurface): Promise<void> {
     for (const pane of this.orderedPanes(surface)) {
+      if (pane.targetRecord?.currentState === "current") {
+        const replayed = await this.maybeReplayTargetRecord(surface, pane, pane.targetRecord);
+        if (!replayed) {
+          continue;
+        }
+      }
       if (!pane.activeContentId || !pane.contentType || pane.contentValue === null) {
         if (pane.currentRevision <= asRevision(0)) {
           continue;
@@ -2775,49 +3089,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         };
         const clearResponse = await this.sendRequest(surface, clearRequest);
         this.applyMutationResponse(surface, pane, clearResponse, clearRequest);
-        continue;
-      }
-
-      if (pane.contentType === "browser_url") {
-        const targetPayload = structuredClone(pane.contentValue) as BrowserUrlPayload;
-        const targetRequest: TargetApplyRequest = {
-          id: makeBrandedRequestId(),
-          op: "target.apply",
-          payload: {
-            ownershipEpoch: 0,
-            ownershipSessionId: surface.sessionId ?? "",
-            paneLineageId: paneLineageId(pane),
-            requestId: makeTargetRequestId(),
-            restoreReason: "resume_restore",
-            surfaceId: surface.surfaceId,
-            targetEpoch: pane.currentRevision as number,
-            targetHeader: {
-              payloadSchemaVersion: 1,
-              replaySemantics: "navigate",
-              requiredCapabilities: ["target.browser_url.v1"],
-              safeToLogFields: ["url", "allowedSnapshotFallback", "fallbackSnapshotTargetId"],
-              safetyClass: "network",
-              summary: targetPayload.url,
-            },
-            targetId: pane.activeContentId,
-            targetKind: "browser_url",
-            targetPayload,
-          },
-          sentAt: asEpochMs(this.now()),
-          type: "request",
-          v: 1,
-        };
-        const targetResponse = await this.sendRequest(surface, targetRequest);
-        if (isErrorResponse(targetResponse)) {
-          throw new SurfAceToolError(mutationErrorCode(targetResponse.error.code), targetResponse.error.message);
-        }
-        const targetResult = (targetResponse as TargetApplyResponse).payload;
-        if (targetResult.status !== "applied") {
-          throw new SurfAceToolError(
-            mutationErrorCode(targetResult.errorCode ?? "materialization_failed"),
-            targetResult.message ?? "browser_url target was not restored",
-          );
-        }
         continue;
       }
 
@@ -2842,6 +3113,87 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const contentResponse = await this.sendRequest(surface, contentRequest);
       this.applyMutationResponse(surface, pane, contentResponse, contentRequest, pane.ownerSessionKey ?? undefined);
     }
+  }
+
+  private async maybeReplayTargetRecord(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    record: PaneTargetRecord,
+  ): Promise<boolean> {
+    const blocked = (errorCode: TargetErrorCode, message: string): false => {
+      record.lastApplyEvidence = {
+        appliedAt: new Date(this.now()).toISOString(),
+        errorCode,
+        message,
+        paneLineageId: record.paneLineageId,
+        requestId: makeTargetRequestId(),
+        status: "rejected",
+        targetEpoch: record.targetEpoch,
+        targetId: record.targetId,
+      };
+      this.persistTargetRecord(record);
+      return false;
+    };
+
+    if (record.surfaceId !== surface.surfaceId) {
+      return blocked("restore_blocked_stale_target", "target surfaceId does not match paired surface");
+    }
+    if (!pane.paneLineageId || pane.paneLineageId !== record.paneLineageId) {
+      return blocked("pane_lineage_missing", "target pane lineage is not present on the paired surface");
+    }
+    if (record.currentState !== "current" || pane.targetRecord?.targetId !== record.targetId) {
+      return blocked("target_superseded", "target record is no longer current");
+    }
+    if (record.restorePolicy === "confirm") {
+      return blocked("restore_requires_confirmation", "browser_url restore requires operator confirmation");
+    }
+    if (record.restorePolicy === "manual" || record.restorePolicy === "never") {
+      return blocked("policy_denied", `restorePolicy ${record.restorePolicy} blocks automatic replay`);
+    }
+    if (!record.targetHeader.requiredCapabilities.every((capability) => surface.targetCapabilities.includes(capability))) {
+      return blocked("capability_missing", "surface lacks required target capability");
+    }
+    const browserUrlPayload = record.targetKind === "browser_url" ? record.targetPayload as BrowserUrlPayload : null;
+    if (browserUrlPayload && !parseSafeBrowserUrl(browserUrlPayload.url)) {
+      return blocked("unsafe_payload", "browser_url targetPayload.url must be http or https");
+    }
+    if (!surface.sessionId || surface.ownershipEpoch === null || record.ownershipEpoch !== surface.ownershipEpoch) {
+      return blocked("ownership_epoch_mismatch", "target ownership epoch does not match active ownership");
+    }
+
+    const targetRequest: TargetApplyRequest = {
+      id: makeBrandedRequestId(),
+      op: "target.apply",
+      payload: {
+        ownershipEpoch: surface.ownershipEpoch,
+        ownershipSessionId: surface.sessionId,
+        paneLineageId: record.paneLineageId,
+        requestId: makeTargetRequestId(),
+        restoreReason: "resume_restore",
+        surfaceId: surface.surfaceId,
+        targetEpoch: record.targetEpoch,
+        targetHeader: record.targetHeader,
+        targetId: record.targetId,
+        targetKind: record.targetKind,
+        targetPayload: structuredClone(record.targetPayload),
+      },
+      sentAt: asEpochMs(this.now()),
+      type: "request",
+      v: 1,
+    };
+    const targetResponse = await this.sendRequest(surface, targetRequest);
+    if (isErrorResponse(targetResponse)) {
+      return blocked(mutationErrorCode(targetResponse.error.code) as TargetErrorCode, targetResponse.error.message);
+    }
+    const targetResult = (targetResponse as TargetApplyResponse).payload;
+    record.lastApplyEvidence = targetResult;
+    this.persistTargetRecord(record);
+    if (targetResult.status !== "applied") {
+      return false;
+    }
+    pane.buffer.currentUrl = browserUrlPayload?.url ?? null;
+    this.queuePersistScreenSnapshot("target restore");
+    return true;
   }
 
   private allocatePaneId(): PaneId {
@@ -2962,6 +3314,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           nextRemotePaneId: parsed.nextRemotePaneId ?? (parsed as { nextPaneId?: number }).nextPaneId ?? 1,
           nextPaneLabel: parsed.nextPaneLabel ?? 1,
           nextWindowLabelIndex: parsed.nextWindowLabelIndex,
+          targetRegistrationAcks: parsed.targetRegistrationAcks ?? {},
+          paneTargetRecords: parsed.paneTargetRecords ?? {},
           paneLabelsByPaneId: parsed.paneLabelsByPaneId ?? {},
           providerId: parsed.providerId,
           version: 1,
@@ -3015,6 +3369,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 revision: pane.currentRevision,
               }
             : null,
+          currentTarget: paneTargetState(pane.targetRecord),
           historySummary: structuredClone(pane.historySummary),
           name: pane.name,
           paneId: pane.paneId,
@@ -3712,6 +4067,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 );
               }
             },
+            onRequest: async (request) => this.handleWireRequest(surface, request),
           });
 
           await this.assignSurfaceClient(surface, client);
@@ -3743,7 +4099,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             asSurfaceId(pairResponse.payload.surfaceId),
             "pair.response",
           );
-          this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId));
+          this.markPairConnected(
+            surface,
+            asSessionId(pairResponse.payload.sessionId),
+            pairResponse.payload.ownershipEpoch,
+          );
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
               panes: pairResponse.payload.state.panes.length,
@@ -4092,13 +4452,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private markPairConnected(surface: ManagedSurface, sessionId: SessionId): void {
+  private markPairConnected(surface: ManagedSurface, sessionId: SessionId, ownershipEpoch: number): void {
     surface.consecutiveResumeFailures = 0;
     surface.consecutiveOwnershipLockFailures = 0;
     surface.connectedAt = this.now();
     surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
     surface.sessionId = sessionId;
+    surface.ownershipEpoch = ownershipEpoch;
     this.queuePersistScreenSnapshot("pair connected");
   }
 
@@ -4187,9 +4548,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.recoverSolePaneForTopologySync(surface, paneState.paneId, response.payload.state.panes.length);
       if (pane) {
         pane.viewport = cloneViewport(surface.viewport);
+        pane.paneLineageId = paneState.paneLineageId;
+        pane.targetRecord = this.loadCurrentTargetRecord(surface, pane.paneLineageId);
       }
     }
+    for (const paneState of response.payload.state.panes) {
+      const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+      if (!pane) {
+        continue;
+      }
+      pane.paneLineageId = paneState.paneLineageId;
+      pane.targetRecord = this.loadCurrentTargetRecord(surface, pane.paneLineageId);
+    }
     this.queuePersistScreenSnapshot("apply pair state");
+  }
+
+  private loadCurrentTargetRecord(surface: ManagedSurface, paneLineageId: string | null): PaneTargetRecord | null {
+    if (!paneLineageId) {
+      return null;
+    }
+    const record = Object.values(this.persistentState.paneTargetRecords ?? {})
+      .find((candidate) =>
+        candidate.surfaceId === surface.surfaceId &&
+        candidate.paneLineageId === paneLineageId &&
+        candidate.currentState === "current"
+      ) ?? null;
+    return record && record.currentState === "current" ? structuredClone(record) : null;
   }
 
   private applySnapshot(
@@ -4206,6 +4590,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       cachedAt: this.now(),
       contentId: payload.contentId,
       contentType: payload.contentType,
+      currentTarget: payload.currentTarget,
       drawings: payload.drawings ? structuredClone(payload.drawings) : undefined,
       image: payload.image,
       revision: payload.revision,
@@ -4337,8 +4722,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     if (isClearRequest) {
+      this.tombstoneCurrentTargetRecord(pane);
       this.clearVisiblePaneContent(pane, payload.currentRevision);
     } else {
+      this.tombstoneCurrentTargetRecord(pane);
       if (contentChanged) {
         this.storeHiddenHistoryEntry(pane, previousVisibleEntry);
       }

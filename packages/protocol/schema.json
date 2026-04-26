@@ -8,6 +8,7 @@
     { "$ref": "#/$defs/PairRequest" },
     { "$ref": "#/$defs/RelinquishRequest" },
     { "$ref": "#/$defs/TargetApplyRequest" },
+    { "$ref": "#/$defs/TargetRegisterRequest" },
     { "$ref": "#/$defs/ContentSetRequest" },
     { "$ref": "#/$defs/ContentAppendRequest" },
     { "$ref": "#/$defs/ContentPatchRequest" },
@@ -20,6 +21,8 @@
     { "$ref": "#/$defs/PairResponse" },
     { "$ref": "#/$defs/RelinquishResponse" },
     { "$ref": "#/$defs/TargetApplyResponse" },
+    { "$ref": "#/$defs/TargetRegisteredResponse" },
+    { "$ref": "#/$defs/TargetRegisterRejectedResponse" },
     { "$ref": "#/$defs/MutationAckResponse" },
     { "$ref": "#/$defs/AnnotationsRemoveResponse" },
     { "$ref": "#/$defs/SnapshotResponse" },
@@ -108,11 +111,11 @@
     },
     "TargetKind": {
       "type": "string",
-      "enum": ["browser_url"]
+      "enum": ["html", "markdown", "image", "browser_url", "web_snapshot", "terminal_app", "native_app", "compositor_app"]
     },
     "TargetCapability": {
       "type": "string",
-      "enum": ["target.browser_url.v1"]
+      "enum": ["target.html.v1", "target.markdown.v1", "target.image.v1", "target.web_snapshot.v1", "target.browser_url.v1", "target.terminal_app.v1", "target.native_app.v1", "target.compositor_app.v1"]
     },
     "EventType": {
       "type": "string",
@@ -515,6 +518,20 @@
         }
       }
     },
+    "PaneTargetState": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["targetId", "targetKind", "paneLineageId", "targetEpoch", "restorePolicy", "currentState"],
+      "properties": {
+        "targetId": { "type": "string", "minLength": 1 },
+        "targetKind": { "$ref": "#/$defs/TargetKind" },
+        "paneLineageId": { "type": "string", "minLength": 1 },
+        "targetEpoch": { "type": "integer", "minimum": 0 },
+        "restorePolicy": { "type": "string", "enum": ["auto", "confirm", "manual", "never"] },
+        "currentState": { "type": "string", "enum": ["current", "superseded", "tombstoned"] },
+        "lastApplyEvidence": { "type": "object" }
+      }
+    },
     "TargetApplyRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -541,6 +558,85 @@
             "targetHeader": { "$ref": "#/$defs/TargetHeader" },
             "targetPayload": {},
             "restoreReason": { "type": "string", "enum": ["initial_apply", "resume_restore", "manual_restore", "confirmed_restore"] }
+          }
+        }
+      }
+    },
+    "TargetRegisteredResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "target.registered" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["idempotencyKey", "targetId", "targetEpoch", "status"],
+          "properties": {
+            "idempotencyKey": { "type": "string" },
+            "targetId": { "type": "string" },
+            "targetEpoch": { "type": "integer", "minimum": 0 },
+            "status": { "const": "registered" }
+          }
+        }
+      }
+    },
+    "TargetRegisterRejectedResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "target.register.rejected" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["idempotencyKey", "status", "errorCode", "message"],
+          "properties": {
+            "idempotencyKey": { "type": "string" },
+            "status": { "const": "rejected" },
+            "errorCode": { "$ref": "#/$defs/TargetErrorCode" },
+            "message": { "type": "string" }
+          }
+        }
+      }
+    },
+    "TargetRegisterRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "target.register" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["idempotencyKey", "surfaceId", "surfaceInstanceId", "ownershipSessionId", "ownershipEpoch", "paneLineageId", "expectedPreviousTargetEpoch", "targetKind", "targetHeader", "targetPayload", "launchedAt", "registrationState"],
+          "properties": {
+            "idempotencyKey": { "type": "string", "minLength": 1 },
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "surfaceInstanceId": { "type": ["string", "null"] },
+            "ownershipSessionId": { "type": "string" },
+            "ownershipEpoch": { "type": "integer", "minimum": 0 },
+            "paneLineageId": { "type": "string", "minLength": 1 },
+            "expectedPreviousTargetEpoch": { "type": ["integer", "null"], "minimum": 0 },
+            "targetKind": { "$ref": "#/$defs/TargetKind" },
+            "targetHeader": { "$ref": "#/$defs/TargetHeader" },
+            "targetPayload": {},
+            "launchedAt": { "type": "string" },
+            "registrationState": { "type": "string", "enum": ["before_attach", "attached"] }
           }
         }
       }
@@ -822,6 +918,7 @@
           "additionalProperties": false,
           "required": [
             "sessionId",
+            "ownershipEpoch",
             "resumed",
             "surfaceId",
             "surfaceName",
@@ -833,6 +930,7 @@
           ],
           "properties": {
             "sessionId": { "$ref": "#/$defs/SessionId" },
+            "ownershipEpoch": { "type": "integer", "minimum": 0 },
             "resumed": { "type": "boolean" },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "surfaceName": { "type": "string" },
@@ -913,9 +1011,10 @@
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["paneId", "paneLabel", "currentContentId", "currentRevision", "contentType"],
+                    "required": ["paneId", "paneLineageId", "paneLabel", "currentContentId", "currentRevision", "contentType"],
                     "properties": {
                       "paneId": { "$ref": "#/$defs/PaneId" },
+                      "paneLineageId": { "type": "string", "minLength": 1 },
                       "paneLabel": { "type": "integer", "minimum": 1 },
                       "currentContentId": {
                         "oneOf": [{ "$ref": "#/$defs/ContentId" }, { "type": "null" }]
@@ -923,6 +1022,9 @@
                       "currentRevision": { "$ref": "#/$defs/Revision" },
                       "contentType": {
                         "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+                      },
+                      "currentTarget": {
+                        "oneOf": [{ "$ref": "#/$defs/PaneTargetState" }, { "type": "null" }]
                       }
                     }
                   }
@@ -961,7 +1063,7 @@
       "properties": {
         "v": { "const": 1 },
         "type": { "const": "response" },
-        "op": { "const": "target.apply" },
+        "op": { "const": "target.apply.result" },
         "id": { "$ref": "#/$defs/RequestId" },
         "ok": { "const": true },
         "sentAt": { "$ref": "#/$defs/EpochMs" },
@@ -1081,6 +1183,9 @@
             "revision": { "$ref": "#/$defs/Revision" },
             "contentType": {
               "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+            },
+            "currentTarget": {
+              "oneOf": [{ "$ref": "#/$defs/PaneTargetState" }, { "type": "null" }]
             },
             "viewport": { "$ref": "#/$defs/Viewport" },
             "visibleText": { "type": "string" },
@@ -1494,9 +1599,10 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["paneId", "paneLabel", "name", "activeContentId", "contentType", "viewport"],
+                "required": ["paneId", "paneLineageId", "paneLabel", "name", "activeContentId", "contentType", "viewport"],
                 "properties": {
                   "paneId": { "$ref": "#/$defs/PaneId" },
+                  "paneLineageId": { "type": "string", "minLength": 1 },
                   "paneLabel": { "type": "integer", "minimum": 1 },
                   "name": {
                     "oneOf": [
@@ -1510,6 +1616,9 @@
                   },
                   "contentType": {
                     "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
+                  },
+                  "currentTarget": {
+                    "oneOf": [{ "$ref": "#/$defs/PaneTargetState" }, { "type": "null" }]
                   },
                   "viewport": { "$ref": "#/$defs/SurfaceViewport" }
                 }

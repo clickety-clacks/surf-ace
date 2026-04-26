@@ -8,6 +8,7 @@ import type {
   ContentApplyResponse,
   ContentAppendRequest,
   ContentClearRequest,
+  ContentId,
   ContentPatchRequest,
   ContentSetRequest,
   ContentType,
@@ -33,6 +34,7 @@ import type {
   SurfaceViewport,
   TargetApplyRequest,
   TargetApplyResponse,
+  PaneTargetState,
   TopologyApplyRequest,
   TopologyApplyResponse,
 } from "../../protocol/src/index.js";
@@ -51,6 +53,7 @@ type HistoryEntry = {
   display?: ContentDisplay;
   ownerToken: string | null;
   revision: number;
+  targetState?: PaneTargetState | null;
 };
 
 type PaneSnapshot = {
@@ -74,6 +77,7 @@ type PaneState = {
   latestContentEventAt: number;
   name: string | null;
   paneId: number;
+  paneLineageId: string;
   paneLabel: number;
   pendingAnnotationCommit: boolean;
   snapshot: PaneSnapshot;
@@ -395,10 +399,12 @@ export class SurfaceCore {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
         return {
-          activeContentId: current.contentId,
-          contentType: current.contentType,
+          activeContentId: protocolContentId(current),
+          contentType: protocolContentType(current),
+          currentTarget: current.targetState ?? null,
           name: pane.name,
           paneId: pane.paneId as PaneId,
+          paneLineageId: pane.paneLineageId,
           paneLabel: pane.paneLabel,
           viewport: paneViewports.get(paneId) ?? structuredClone(pane.snapshot.viewport),
         };
@@ -413,10 +419,12 @@ export class SurfaceCore {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
         return {
-          contentType: current.contentType,
-          currentContentId: current.contentId,
+          contentType: protocolContentType(current),
+          currentContentId: protocolContentId(current),
+          currentTarget: current.targetState ?? null,
           currentRevision: current.revision as Revision,
           paneId: pane.paneId as PaneId,
+          paneLineageId: pane.paneLineageId,
           paneLabel: pane.paneLabel,
         };
       }),
@@ -491,6 +499,7 @@ export class SurfaceCore {
         return {
           name: pane.name,
           paneId: pane.paneId as PaneId,
+          paneLineageId: pane.paneLineageId,
           paneLabel: pane.paneLabel,
         };
       }),
@@ -619,11 +628,9 @@ export class SurfaceCore {
     if (typeof targetPayload.url !== "string" || targetPayload.url.trim() === "") {
       return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url is required");
     }
-    let url: URL;
-    try {
-      url = new URL(targetPayload.url);
-    } catch {
-      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url must be an absolute URL");
+    const url = parseSafeBrowserUrl(targetPayload.url);
+    if (!url) {
+      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url must be http or https");
     }
     const pane = paneForLineage(surface, payload.paneLineageId);
     if (!pane) {
@@ -649,6 +656,14 @@ export class SurfaceCore {
       contentType: "browser_url",
       ownerToken: null,
       revision: payload.targetEpoch,
+      targetState: {
+        currentState: "current",
+        paneLineageId: payload.paneLineageId,
+        restorePolicy: payload.restoreReason === "initial_apply" ? "confirm" : "auto",
+        targetEpoch: payload.targetEpoch,
+        targetId: payload.targetId,
+        targetKind: "browser_url",
+      },
     });
     pane.historyIndex = pane.history.length - 1;
     trimHistory(pane);
@@ -656,7 +671,8 @@ export class SurfaceCore {
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
-    return targetApplyResult(payload, "applied", undefined, undefined, {
+    return targetApplyResult(payload, "applied", undefined, "browser_url navigation started; success is reported asynchronously by surface diagnostics", {
+      navigationStatus: "started_unverified",
       replaySemantics: "navigate",
       url: url.toString(),
     });
@@ -938,8 +954,9 @@ export class SurfaceCore {
     const pane = this.expectPane(surfaceId, paneId);
     const current = currentEntry(pane);
     return {
-      contentId: current.contentId,
-      contentType: current.contentType,
+      contentId: protocolContentId(current),
+      contentType: protocolContentType(current),
+      currentTarget: current.targetState ?? null,
       paneId: pane.paneId as PaneId,
       revision: current.revision as Revision,
       selection: pane.snapshot.selection,
@@ -1290,6 +1307,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
         contentType: null,
         ownerToken: null,
         revision: 0,
+        targetState: null,
       },
     ],
     historyIndex: 0,
@@ -1298,6 +1316,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     latestContentEventAt: now,
     name: null,
     paneId,
+    paneLineageId: makePaneLineageId(),
     paneLabel,
     pendingAnnotationCommit: false,
     snapshot: {
@@ -1319,16 +1338,29 @@ function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
 }
 
-function paneLineageId(paneId: number): string {
-  return `pane:${paneId}`;
+function makePaneLineageId(): string {
+  return `pl_${randomBytes(8).toString("hex")}`;
 }
 
 function paneForLineage(surface: SurfaceState, lineageId: string): PaneState | null {
-  const match = /^pane:(\d+)$/.exec(lineageId);
-  if (!match) {
+  return [...surface.panes.values()].find((pane) => pane.paneLineageId === lineageId) ?? null;
+}
+
+function protocolContentId(entry: HistoryEntry): ContentId | null {
+  return entry.contentType === "browser_url" ? null : entry.contentId as ContentId | null;
+}
+
+function protocolContentType(entry: HistoryEntry): ContentType | null {
+  return entry.contentType === "browser_url" ? null : entry.contentType as ContentType | null;
+}
+
+function parseSafeBrowserUrl(value: string): URL | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
     return null;
   }
-  return surface.panes.get(Number(match[1])) ?? null;
 }
 
 function targetApplyResult(

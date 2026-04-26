@@ -41,6 +41,9 @@ import {
   tapEventSchema,
   targetApplyRequestSchema,
   targetApplyResponseSchema,
+  targetRegisterRejectedResponseSchema,
+  targetRegisteredResponseSchema,
+  targetRegisterRequestSchema,
 } from "./schemas.js";
 
 export const SURF_ACE_PROTOCOL_SCHEMAS = {
@@ -62,6 +65,12 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "target.apply": {
     request: targetApplyRequestSchema,
     response: targetApplyResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "target.register": {
+    request: targetRegisterRequestSchema,
+    response: targetRegisteredResponseSchema,
+    rejectedResponse: targetRegisterRejectedResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "content.set": {

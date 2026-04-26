@@ -132,6 +132,7 @@ private struct SurfAceSessionState {
     let sender: SurfAceOutboundSender
     let eventProfile: SurfAceEventProfile
     let drawingFlushConfig: SurfAceDrawingFlushConfig
+    let ownershipEpoch: Int
     let pairedAt: Date
     var pairConfirmed: Bool
 }
@@ -139,6 +140,7 @@ private struct SurfAceSessionState {
 private struct SurfAceOwnershipLockState {
     let sessionId: String
     let providerId: String
+    let ownershipEpoch: Int
 }
 
 final class SurfAceSceneDisconnectObserver {
@@ -942,6 +944,24 @@ final class SurfAceRuntime {
                 responseObject: handleTargetApply(id: id, payload: payload, connectionUUID: connectionUUID),
                 postSendPairCommit: nil
             )
+        case "target.register":
+            return SurfAceProcessedRequestResult(
+                responseObject: [
+                    "v": 1,
+                    "type": "response",
+                    "op": "target.register.rejected",
+                    "id": id,
+                    "ok": true,
+                    "sentAt": timestampNow(),
+                    "payload": [
+                        "idempotencyKey": payload["idempotencyKey"] as? String ?? "",
+                        "status": "rejected",
+                        "errorCode": "registration_failed",
+                        "message": "target.register is provider-bound and is not accepted by the surface runtime",
+                    ],
+                ],
+                postSendPairCommit: nil
+            )
         case "content.apply":
             return SurfAceProcessedRequestResult(
                 responseObject: await handleContentApply(id: id, payload: payload, connectionUUID: connectionUUID),
@@ -1145,6 +1165,7 @@ final class SurfAceRuntime {
         let ownershipLock = ownershipLocksBySurfaceId[surfaceId]
         let resumed: Bool
         let sessionId: String
+        let ownershipEpoch: Int
 
         if let ownershipLock {
             if takeover {
@@ -1153,6 +1174,7 @@ final class SurfAceRuntime {
                 )
                 resumed = false
                 sessionId = randomHex(prefix: "sa", byteCount: 12)
+                ownershipEpoch = ownershipLock.ownershipEpoch + 1
                 if let activeSession, activeSession.connectionUUID != connectionUUID {
                     Task {
                         await activeSession.socket.close(code: 1000, reason: "superseded")
@@ -1177,6 +1199,7 @@ final class SurfAceRuntime {
                 }
                 resumed = true
                 sessionId = ownershipLock.sessionId
+                ownershipEpoch = ownershipLock.ownershipEpoch
                 surfAceGatewayLog(
                     "event=pair_request_resumed \(surfAceDiagnosticFields([("provider_id", providerId), ("session_id", sessionId), ("surface_id", surfaceId)]))"
                 )
@@ -1204,6 +1227,7 @@ final class SurfAceRuntime {
         } else {
             resumed = false
             sessionId = randomHex(prefix: "sa", byteCount: 12)
+            ownershipEpoch = 1
             surfAceGatewayLog(
                 "event=pair_request_new_session \(surfAceDiagnosticFields([("provider_id", providerId), ("session_id", sessionId), ("surface_id", surfaceId)]))"
             )
@@ -1218,6 +1242,7 @@ final class SurfAceRuntime {
             sender: sender,
             eventProfile: eventProfile,
             drawingFlushConfig: drawingFlushConfig,
+            ownershipEpoch: ownershipEpoch,
             pairedAt: Date(),
             pairConfirmed: false
         )
@@ -1234,6 +1259,7 @@ final class SurfAceRuntime {
             "sentAt": timestampNow(),
             "payload": [
                 "sessionId": sessionId,
+                "ownershipEpoch": ownershipEpoch,
                 "resumed": resumed,
                 "surfaceId": surface.surfaceId,
                 "surfaceName": surface.name,
@@ -1263,10 +1289,12 @@ final class SurfAceRuntime {
                     "panes": surface.panes.map { pane in
                         [
                             "paneId": pane.paneId,
+                            "paneLineageId": pane.paneLineageId,
                             "paneLabel": pane.paneLabel,
                             "currentContentId": jsonValue(pane.currentEntry.contentId),
                             "currentRevision": pane.currentEntry.revision,
                             "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
+                            "currentTarget": jsonValue(targetStatePayload(pane.currentTarget)),
                         ]
                     },
                 ],
@@ -1305,7 +1333,8 @@ final class SurfAceRuntime {
         surface.providerName = plan.providerName
         ownershipLocksBySurfaceId[plan.surfaceId] = SurfAceOwnershipLockState(
             sessionId: plan.session.sessionId,
-            providerId: plan.session.providerId
+            providerId: plan.session.providerId,
+            ownershipEpoch: plan.session.ownershipEpoch
         )
         lastHeartbeatAtBySurfaceId[plan.surfaceId] = Date()
         ownershipLockOrphanedAt.removeValue(forKey: plan.surfaceId)
@@ -1335,10 +1364,12 @@ final class SurfAceRuntime {
                 "panes": surface.panes.map { pane in
                     [
                         "paneId": pane.paneId,
+                        "paneLineageId": pane.paneLineageId,
                         "paneLabel": pane.paneLabel,
                         "name": jsonValue(pane.name),
                         "activeContentId": jsonValue(pane.currentEntry.contentId),
                         "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
+                        "currentTarget": jsonValue(targetStatePayload(pane.currentTarget)),
                         "viewport": paneViewportPayload(surfaceId: surfaceId, paneId: pane.paneId),
                     ]
                 },
@@ -1391,6 +1422,7 @@ final class SurfAceRuntime {
                     guard let pane = panesById[paneId] else { return nil }
                     return [
                         "paneId": pane.paneId,
+                        "paneLineageId": pane.paneLineageId,
                         "paneLabel": pane.paneLabel,
                         "name": jsonValue(pane.name),
                     ]
@@ -1431,6 +1463,7 @@ final class SurfAceRuntime {
                 }
             }
             pane.forwardStack.removeAll()
+            pane.currentTarget = nil
             pane.currentEntry = .empty(revision: revision)
             pane.pendingFlushStrokes.removeAll()
             pane.firstPendingStrokeAt = nil
@@ -1511,6 +1544,7 @@ final class SurfAceRuntime {
             restoreViewport = nil
         }
         let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
+        pane.currentTarget = nil
 
         pane.pendingFlushStrokes.removeAll()
         pane.firstPendingStrokeAt = nil
@@ -1565,7 +1599,7 @@ final class SurfAceRuntime {
             return [
                 "v": 1,
                 "type": "response",
-                "op": "target.apply",
+                "op": "target.apply.result",
                 "id": id,
                 "ok": true,
                 "sentAt": timestampNow(),
@@ -1583,6 +1617,9 @@ final class SurfAceRuntime {
         if activeSessions[surfaceId]?.sessionId != payload["ownershipSessionId"] as? String {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "ownership_session_mismatch", message: "target.apply ownershipSessionId does not match the active session")
         }
+        if activeSessions[surfaceId]?.ownershipEpoch != payload["ownershipEpoch"] as? Int {
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "ownership_epoch_mismatch", message: "target.apply ownershipEpoch does not match the active session")
+        }
         guard payload["targetKind"] as? String == "browser_url" else {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsupported_target_kind", message: "unsupported target kind")
         }
@@ -1592,8 +1629,7 @@ final class SurfAceRuntime {
               header["replaySemantics"] as? String == "navigate" else {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsafe_payload", message: "browser_url requires target.browser_url.v1 and navigate semantics")
         }
-        guard let paneId = paneIdFromLineage(paneLineageId),
-              let pane = pane(surfaceId: surfaceId, paneId: paneId) else {
+        guard let pane = paneByLineage(surfaceId: surfaceId, paneLineageId: paneLineageId) else {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "pane_lineage_missing", message: "pane lineage is unknown")
         }
         guard !pane.annotationMode else {
@@ -1602,8 +1638,8 @@ final class SurfAceRuntime {
         }
         guard let targetPayload = payload["targetPayload"] as? [String: Any],
               let url = targetPayload["url"] as? String,
-              URL(string: url) != nil else {
-            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsafe_payload", message: "browser_url targetPayload.url is required")
+              safeBrowserURL(url) != nil else {
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsafe_payload", message: "browser_url targetPayload.url must be http or https")
         }
 
         if pane.currentEntry.contentId != nil {
@@ -1626,18 +1662,30 @@ final class SurfAceRuntime {
         pane.lastSelection = nil
         pane.lastNavigationURL = url
         pane.lastPage = nil
+        pane.currentTarget = SurfAcePaneTargetState(
+            targetId: targetId,
+            targetKind: "browser_url",
+            paneLineageId: paneLineageId,
+            targetEpoch: targetEpoch,
+            restorePolicy: payload["restoreReason"] as? String == "initial_apply" ? "confirm" : "auto",
+            currentState: "current",
+            lastApplyEvidence: nil
+        )
         pane.pendingSnapshotHintReason = "after_render"
         pane.bridge?.render(entry: pane.currentEntry, restoreViewport: nil)
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
 
-        return result(
+        let response = result(
             requestId: requestId,
             targetId: targetId,
             paneLineageId: paneLineageId,
             targetEpoch: targetEpoch,
             status: "applied",
-            materializedState: ["url": url, "replaySemantics": "navigate"]
+            message: "browser_url navigation started; success is reported asynchronously by surface diagnostics",
+            materializedState: ["url": url, "replaySemantics": "navigate", "navigationStatus": "started_unverified"]
         )
+        pane.currentTarget?.lastApplyEvidence = response["payload"] as? [String: Any]
+        return response
     }
 
     private func handlePaneSplit(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
@@ -1694,7 +1742,7 @@ final class SurfAceRuntime {
             "ok": true,
             "sentAt": timestampNow(),
             "payload": [
-                "panes": surface.panes.map { ["paneId": $0.paneId, "paneLabel": $0.paneLabel] },
+                "panes": surface.panes.map { ["paneId": $0.paneId, "paneLineageId": $0.paneLineageId, "paneLabel": $0.paneLabel] },
             ],
         ]
     }
@@ -1831,6 +1879,7 @@ final class SurfAceRuntime {
             restoreViewport = nil
         }
         let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
+        pane.currentTarget = nil
 
         pane.pendingFlushStrokes.removeAll()
         pane.firstPendingStrokeAt = nil
@@ -1960,6 +2009,7 @@ final class SurfAceRuntime {
             }
         }
         pane.forwardStack.removeAll()
+        pane.currentTarget = nil
         pane.currentEntry = .empty(revision: revision)
         pane.drawingRestoreWarningVisible = false
         pane.pendingFlushStrokes.removeAll()
@@ -2038,6 +2088,7 @@ final class SurfAceRuntime {
             "contentId": jsonValue(pane.currentEntry.contentId),
             "revision": pane.currentEntry.revision,
             "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
+            "currentTarget": jsonValue(targetStatePayload(pane.currentTarget)),
             "viewport": jsonObject(fromEncodable: pane.lastViewport) ?? NSNull(),
             "selection": jsonObject(fromEncodable: pane.lastSelection) ?? NSNull(),
         ]
@@ -2769,6 +2820,31 @@ final class SurfAceRuntime {
         value ?? NSNull()
     }
 
+    private func targetStatePayload(_ target: SurfAcePaneTargetState?) -> [String: Any]? {
+        guard let target else { return nil }
+        var payload: [String: Any] = [
+            "targetId": target.targetId,
+            "targetKind": target.targetKind,
+            "paneLineageId": target.paneLineageId,
+            "targetEpoch": target.targetEpoch,
+            "restorePolicy": target.restorePolicy,
+            "currentState": target.currentState,
+        ]
+        if let lastApplyEvidence = target.lastApplyEvidence {
+            payload["lastApplyEvidence"] = lastApplyEvidence
+        }
+        return payload
+    }
+
+    private func safeBrowserURL(_ value: String) -> URL? {
+        guard let url = URL(string: value),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return nil
+        }
+        return url
+    }
+
     private func encodeJSON(_ object: [String: Any]) -> String? {
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
@@ -2886,9 +2962,8 @@ final class SurfAceRuntime {
         ISO8601DateFormatter().string(from: Date())
     }
 
-    private func paneIdFromLineage(_ paneLineageId: String) -> Int? {
-        guard paneLineageId.hasPrefix("pane:") else { return nil }
-        return Int(paneLineageId.dropFirst("pane:".count))
+    private func paneByLineage(surfaceId: String, paneLineageId: String) -> SurfAcePaneModel? {
+        surfaceById[surfaceId]?.panes.first { $0.paneLineageId == paneLineageId }
     }
 
     private func startupFailureMessage(for error: Error) -> String {

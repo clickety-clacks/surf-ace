@@ -15,6 +15,7 @@ type TestPane = {
   contentType: string | null;
   drawings: string[];
   name: string | null;
+  paneLineageId: string;
   paneLabel: number;
   revision: number;
   viewport: {
@@ -151,6 +152,7 @@ class FakeSurfAceWsServer {
           contentType: null,
           drawings: [],
           name: null,
+          paneLineageId: `pl_${this.initialRemotePaneId}`,
           paneLabel: this.initialRemotePaneId,
           revision: 0,
           viewport: {
@@ -241,6 +243,7 @@ class FakeSurfAceWsServer {
             contentType: null,
             drawings: [],
             name: null,
+            paneLineageId: `pl_${initialRemotePaneId}`,
             paneLabel: initialRemotePaneId,
             revision: 0,
             viewport: { ...viewport },
@@ -609,6 +612,7 @@ class FakeSurfAceWsServer {
                 resumeGraceMs: 20_000,
               },
               resumed: false,
+              ownershipEpoch: 1,
               sessionId: "sa_test_session",
               state: {
                 panes: [...requestedSurface.panes.entries()].map(([paneId, pane]) => ({
@@ -616,6 +620,7 @@ class FakeSurfAceWsServer {
                   currentContentId: pane.contentId,
                   currentRevision: pane.revision,
                   paneId,
+                  paneLineageId: pane.paneLineageId,
                   paneLabel: pane.paneLabel,
                 })),
               },
@@ -651,10 +656,11 @@ class FakeSurfAceWsServer {
           const previousPane = previousPanes.get(paneState.paneId);
           targetSurface.panes.set(paneState.paneId, {
             contentId: previousPane?.contentId ?? null,
-            contentType: previousPane?.contentType ?? null,
-            drawings: previousPane?.drawings ? [...previousPane.drawings] : [],
-            name: paneState.name,
-            paneLabel: paneState.paneLabel,
+              contentType: previousPane?.contentType ?? null,
+              drawings: previousPane?.drawings ? [...previousPane.drawings] : [],
+              name: paneState.name,
+              paneLineageId: previousPane?.paneLineageId ?? `pl_${paneState.paneId}`,
+              paneLabel: paneState.paneLabel,
             revision: previousPane?.revision ?? 0,
             viewport: previousPane?.viewport ?? { ...targetSurface.viewport },
           });
@@ -665,6 +671,7 @@ class FakeSurfAceWsServer {
               panes: panes.map((pane) => ({
                 name: pane.name,
                 paneId: pane.paneId,
+                paneLineageId: targetSurface.panes.get(pane.paneId)?.paneLineageId ?? `pl_${pane.paneId}`,
                 paneLabel: pane.paneLabel,
               })),
               topologyRevision: Number(message.payload?.topologyRevision ?? 0),
@@ -681,11 +688,10 @@ class FakeSurfAceWsServer {
           requiredCapabilities?: unknown;
         };
         const paneLineageId = String(message.payload?.paneLineageId ?? "");
-        const paneId = Number(/^pane:(\d+)$/.exec(paneLineageId)?.[1] ?? 0);
-        const pane = targetSurface.panes.get(paneId);
+        const pane = [...targetSurface.panes.values()].find((candidate) => candidate.paneLineageId === paneLineageId);
         assert.ok(pane);
-        pane.contentId = String(message.payload?.targetId);
-        pane.contentType = String(message.payload?.targetKind);
+        pane.contentId = null;
+        pane.contentType = null;
         pane.revision = Number(message.payload?.targetEpoch ?? pane.revision + 1);
         pane.drawings = [];
         this.targetApplyRequests.push({
@@ -699,7 +705,7 @@ class FakeSurfAceWsServer {
         });
         socket.send(
           JSON.stringify(
-            this.response(message.id, "target.apply", {
+            this.response(message.id, "target.apply.result", {
               appliedAt: new Date().toISOString(),
               materializedState: {
                 replaySemantics: "navigate",
@@ -709,7 +715,7 @@ class FakeSurfAceWsServer {
               requestId: String(message.payload?.requestId),
               status: "applied",
               targetEpoch: pane.revision,
-              targetId: pane.contentId,
+              targetId: String(message.payload?.targetId),
             }),
           ),
         );
@@ -910,6 +916,7 @@ class FakeSurfAceWsServer {
             contentType: null,
             drawings: [],
             name: null,
+            paneLineageId: `pl_${newPaneId}`,
             paneLabel: newPaneLabels[index] ?? newPaneId,
             revision: 0,
             viewport: {
@@ -922,6 +929,7 @@ class FakeSurfAceWsServer {
             this.response(message.id, "pane.split", {
               panes: [...targetSurface.panes.keys()].map((currentPaneId) => ({
                 paneId: currentPaneId,
+                paneLineageId: targetSurface.panes.get(currentPaneId)?.paneLineageId ?? `pl_${currentPaneId}`,
                 paneLabel: targetSurface.panes.get(currentPaneId)?.paneLabel ?? currentPaneId,
               })),
             }),
@@ -1368,6 +1376,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentType: null,
         drawings: [],
         name: null,
+        paneLineageId: "pl_77",
         paneLabel: 77,
         revision: 0,
         viewport: {
@@ -1394,6 +1403,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentType: null,
         drawings: [],
         name: null,
+        paneLineageId: "pl_2",
         paneLabel: 2,
         revision: 0,
         viewport: {
@@ -1743,12 +1753,51 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.contentSetRequests.length, 0);
       assert.equal(server.targetApplyRequests.length, 1);
       assert.deepEqual(server.targetApplyRequests[0], {
-        paneLineageId: `pane:${server.initialRemotePaneId}`,
+        paneLineageId: `pl_${server.initialRemotePaneId}`,
         replaySemantics: "navigate",
         requiredCapabilities: ["target.browser_url.v1"],
         targetKind: "browser_url",
         url: "https://google.com/",
       });
+    });
+  });
+
+  await t.test("provider rejects browser_url pushes for non-web schemes", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await assert.rejects(
+        runtime.push(
+          {
+            content: "file:///etc/passwd",
+            contentType: "browser_url",
+            fingerprint: server.surfaceId,
+            paneId: firstPaneId,
+          },
+          { sessionKey: "agent:test:url" },
+        ),
+        /http or https URL/,
+      );
+      assert.equal(server.targetApplyRequests.length, 0);
+    });
+  });
+
+  await t.test("provider rejects browser_url snapshot fallback knobs until web_snapshot fallback exists", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await assert.rejects(
+        runtime.push(
+          {
+            allowedSnapshotFallback: true,
+            content: "https://google.com",
+            contentType: "browser_url",
+            fingerprint: server.surfaceId,
+            paneId: firstPaneId,
+          },
+          { sessionKey: "agent:test:url" },
+        ),
+        /snapshot fallback is not implemented/,
+      );
+      assert.equal(server.targetApplyRequests.length, 0);
     });
   });
 
@@ -1909,6 +1958,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentType: null,
         drawings: [],
         name: null,
+        paneLineageId: `pl_${server.initialRemotePaneId}`,
         paneLabel: 1,
         revision: 0,
         viewport: { height: 768, scale: 2, width: 1024 },
@@ -2901,6 +2951,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentType: null,
         drawings: [],
         name: null,
+        paneLineageId: "pl_900",
         paneLabel: 900,
         revision: 0,
         viewport: {

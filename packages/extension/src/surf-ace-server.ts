@@ -1,5 +1,6 @@
 import WebSocket, { type RawData } from "ws";
 import type { Event, Request, Response } from "../../protocol/src/index.js";
+import { validateEnvelopeType } from "../../protocol/src/validate.js";
 
 type PendingRequest = {
   reject: (error: Error) => void;
@@ -11,6 +12,7 @@ export class SurfAceWireClient {
   private readonly url: string;
   private readonly onClose?: (code: number, reason: string) => void;
   private readonly onEvent?: (event: Event) => void;
+  private readonly onRequest?: (request: Request) => Promise<Response> | Response;
 
   private closePromise: Promise<void> | null = null;
   private closeResolver: (() => void) | null = null;
@@ -22,11 +24,13 @@ export class SurfAceWireClient {
     options?: {
       onClose?: (code: number, reason: string) => void;
       onEvent?: (event: Event) => void;
+      onRequest?: (request: Request) => Promise<Response> | Response;
     },
   ) {
     this.url = url;
     this.onClose = options?.onClose;
     this.onEvent = options?.onEvent;
+    this.onRequest = options?.onRequest;
   }
 
   async connect(timeoutMs: number): Promise<void> {
@@ -155,9 +159,9 @@ export class SurfAceWireClient {
   }
 
   private handleMessage(data: RawData): void {
-    let parsed: Event | Response;
+    let parsed: Event | Request | Response;
     try {
-      parsed = JSON.parse(toText(data)) as Event | Response;
+      parsed = JSON.parse(toText(data)) as Event | Request | Response;
     } catch (error) {
       console.warn(
         `[surf-ace:wire] failed to parse incoming message: ${String(error)}`,
@@ -173,6 +177,42 @@ export class SurfAceWireClient {
           `[surf-ace:wire] unhandled error in onEvent callback (op=${parsed.op}): ${String(error)}`,
         );
       }
+      return;
+    }
+
+    if (parsed.type === "request") {
+      if (parsed.op === "target.register") {
+        const validation = validateEnvelopeType("target.register", parsed);
+        if (!validation.ok) {
+          const ws = this.ws;
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(targetRegisterRejected(parsed, validation.reason)));
+          }
+          return;
+        }
+      }
+      void Promise.resolve()
+        .then(async () => await this.onRequest?.(parsed))
+        .then((response) => {
+          if (!response) {
+            return;
+          }
+          const ws = this.ws;
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(response));
+          }
+        })
+        .catch((error) => {
+          console.warn(
+            `[surf-ace:wire] unhandled error in onRequest callback (op=${parsed.op}): ${String(error)}`,
+          );
+          if (parsed.op === "target.register") {
+            const ws = this.ws;
+            if (ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(targetRegisterRejected(parsed, asError(error).message)));
+            }
+          }
+        });
       return;
     }
 
@@ -193,6 +233,27 @@ export class SurfAceWireClient {
       this.pending.delete(id);
     }
   }
+}
+
+function targetRegisterRejected(message: Request, reason: string): Response {
+  const rawMessage = message as Record<string, unknown>;
+  const payload = typeof rawMessage.payload === "object" && rawMessage.payload !== null
+    ? rawMessage.payload as Record<string, unknown>
+    : {};
+  return {
+    id: typeof message.id === "string" && message.id.length > 0 ? message.id : "target_register_invalid",
+    ok: true,
+    op: "target.register.rejected",
+    payload: {
+      errorCode: "registration_failed",
+      idempotencyKey: typeof payload.idempotencyKey === "string" ? payload.idempotencyKey : "unknown",
+      message: `invalid target.register request: ${reason}`,
+      status: "rejected",
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  } as Response;
 }
 
 function asError(error: unknown): Error {

@@ -11,6 +11,9 @@ type ProtocolSchemaDefName =
   | "RelinquishResponse"
   | "TargetApplyRequest"
   | "TargetApplyResponse"
+  | "TargetRegisterRequest"
+  | "TargetRegisteredResponse"
+  | "TargetRegisterRejectedResponse"
   | "ContentSetRequest"
   | "ContentAppendRequest"
   | "ContentPatchRequest"
@@ -66,6 +69,9 @@ export const relinquishRequestSchema = getSchemaDef("RelinquishRequest");
 export const relinquishResponseSchema = getSchemaDef("RelinquishResponse");
 export const targetApplyRequestSchema = getSchemaDef("TargetApplyRequest");
 export const targetApplyResponseSchema = getSchemaDef("TargetApplyResponse");
+export const targetRegisterRequestSchema = getSchemaDef("TargetRegisterRequest");
+export const targetRegisteredResponseSchema = getSchemaDef("TargetRegisteredResponse");
+export const targetRegisterRejectedResponseSchema = getSchemaDef("TargetRegisterRejectedResponse");
 export const contentSetRequestSchema = getSchemaDef("ContentSetRequest");
 export const contentAppendRequestSchema = getSchemaDef("ContentAppendRequest");
 export const contentPatchRequestSchema = getSchemaDef("ContentPatchRequest");

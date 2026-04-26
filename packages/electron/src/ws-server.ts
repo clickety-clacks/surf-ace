@@ -43,6 +43,7 @@ type ActiveSession = {
   connectionId: string;
   drawingFlushConfig: DrawingFlushConfig;
   eventProfile: EventProfile;
+  ownershipEpoch: number;
   paneFlushTimers: Map<number, PaneFlushTimers>;
   providerId: string;
   requestCache: Map<string, SocketCacheEntry>;
@@ -53,6 +54,7 @@ type ActiveSession = {
 type OwnershipLock = {
   drawingFlushConfig: DrawingFlushConfig;
   eventProfile: EventProfile;
+  ownershipEpoch: number;
   providerId: string;
   sessionId: string;
 };
@@ -656,6 +658,8 @@ export class SurfaceWsServer {
         return this.handleTopologyApply(socket, request);
       case "target.apply":
         return this.handleTargetApply(socket, request);
+      case "target.register":
+        return this.handleTargetRegister(request);
       case "content.apply":
         return await this.handleContentApply(socket, request);
       case "panes.list":
@@ -743,6 +747,7 @@ export class SurfaceWsServer {
 
     let resumed = false;
     let sessionId: string;
+    let ownershipEpoch: number;
     const existingOpenElsewhere =
       existing !== null &&
       existing.socket !== socket &&
@@ -750,6 +755,7 @@ export class SurfaceWsServer {
 
     if (!lock) {
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+      ownershipEpoch = 1;
       console.info(
         serverDiagnostic("pair_request_new_session", {
           provider_id: providerId,
@@ -780,6 +786,7 @@ export class SurfaceWsServer {
       } else {
         resumed = true;
         sessionId = lock.sessionId;
+        ownershipEpoch = lock.ownershipEpoch;
         console.info(
           serverDiagnostic("pair_request_resumed", {
             provider_id: providerId,
@@ -806,6 +813,7 @@ export class SurfaceWsServer {
         this.detachActiveSession(surfaceId, "superseded");
       }
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+      ownershipEpoch = lock.ownershipEpoch + 1;
       console.info(
         serverDiagnostic("pair_request_takeover", {
           provider_id: providerId,
@@ -818,6 +826,7 @@ export class SurfaceWsServer {
       connectionId: request.payload.connectionId,
       drawingFlushConfig,
       eventProfile: requestedProfile,
+      ownershipEpoch,
       paneFlushTimers: new Map(),
       providerId,
       requestCache: new Map(),
@@ -828,6 +837,7 @@ export class SurfaceWsServer {
     transport.lock = {
       drawingFlushConfig,
       eventProfile: requestedProfile,
+      ownershipEpoch,
       providerId,
       sessionId,
     };
@@ -865,6 +875,7 @@ export class SurfaceWsServer {
           ...DEFAULT_LIMITS,
           resumeGraceMs: 20_000,
         },
+        ownershipEpoch,
         resumed,
         sessionId: sessionId as PairRequest["payload"]["resume"]["sessionId"],
         state: this.core.pairState(surfaceId),
@@ -948,7 +959,7 @@ export class SurfaceWsServer {
       return {
         id: request.id,
         ok: true,
-        op: "target.apply",
+        op: "target.apply.result",
         payload: {
           appliedAt: new Date().toISOString(),
           errorCode: "ownership_session_mismatch",
@@ -964,11 +975,48 @@ export class SurfaceWsServer {
         v: 1,
       };
     }
+    if (session && request.payload.ownershipEpoch !== session.ownershipEpoch) {
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply.result",
+        payload: {
+          appliedAt: new Date().toISOString(),
+          errorCode: "ownership_epoch_mismatch",
+          message: "target.apply ownershipEpoch does not match the active session",
+          paneLineageId: request.payload.paneLineageId,
+          requestId: request.payload.requestId,
+          status: "rejected",
+          targetEpoch: request.payload.targetEpoch,
+          targetId: request.payload.targetId,
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
     return {
       id: request.id,
       ok: true,
-      op: "target.apply",
+      op: "target.apply.result",
       payload: this.core.targetApply(surfaceId, request.payload),
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private handleTargetRegister(request: Extract<Request, { op: "target.register" }>): Response {
+    return {
+      id: request.id,
+      ok: true,
+      op: "target.register.rejected",
+      payload: {
+        errorCode: "registration_failed",
+        idempotencyKey: request.payload.idempotencyKey,
+        message: "target.register is provider-bound and is not accepted by the surface server",
+        status: "rejected",
+      },
       sentAt: Date.now(),
       type: "response",
       v: 1,

@@ -714,9 +714,14 @@ test("ws server accepts topology.apply and content.apply over the paired surface
     assert.equal(topology.ok, true);
     assert.equal(topology.op, "topology.apply");
     assert.equal(topology.payload.topologyRevision, 7);
-    assert.deepEqual(topology.payload.panes, [
-      { name: "Left", paneId: 1, paneLabel: 41 },
-      { name: "Right", paneId: 2, paneLabel: 42 },
+    assert.deepEqual(topology.payload.panes.map((pane) => ({
+      name: pane.name,
+      paneId: pane.paneId,
+      paneLabel: pane.paneLabel,
+      hasLineage: pane.paneLineageId.startsWith("pl_"),
+    })), [
+      { name: "Left", paneId: 1, paneLabel: 41, hasLineage: true },
+      { name: "Right", paneId: 2, paneLabel: 42, hasLineage: true },
     ]);
 
     const content = await request(owner, contentApplyRequest(1, 1));

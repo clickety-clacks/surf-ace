@@ -24,9 +24,25 @@ export type ContentType =
   | "video"
   | "canvas";
 
-export type TargetKind = "browser_url";
+export type TargetKind =
+  | "html"
+  | "markdown"
+  | "image"
+  | "browser_url"
+  | "web_snapshot"
+  | "terminal_app"
+  | "native_app"
+  | "compositor_app";
 
-export type TargetCapability = "target.browser_url.v1";
+export type TargetCapability =
+  | "target.html.v1"
+  | "target.markdown.v1"
+  | "target.image.v1"
+  | "target.web_snapshot.v1"
+  | "target.browser_url.v1"
+  | "target.terminal_app.v1"
+  | "target.native_app.v1"
+  | "target.compositor_app.v1";
 
 export type TargetHeader = {
   summary: string;
@@ -41,6 +57,30 @@ export type BrowserUrlTargetPayloadV1 = {
   url: string;
   allowedSnapshotFallback?: boolean;
   fallbackSnapshotTargetId?: string;
+};
+
+export type RestorePolicy = "auto" | "confirm" | "manual" | "never";
+
+export type ApplyEvidence = {
+  requestId: string;
+  targetId: string;
+  paneLineageId: string;
+  targetEpoch: number;
+  status: "applied" | "rejected" | "failed";
+  errorCode?: TargetErrorCode;
+  message?: string;
+  materializedState?: Record<string, unknown>;
+  appliedAt: string;
+};
+
+export type PaneTargetState = {
+  targetId: string;
+  targetKind: TargetKind;
+  paneLineageId: string;
+  targetEpoch: number;
+  restorePolicy: RestorePolicy;
+  currentState: "current" | "superseded" | "tombstoned";
+  lastApplyEvidence?: ApplyEvidence;
 };
 
 export type TargetErrorCode =
@@ -404,6 +444,23 @@ export type TargetApplyRequest = RequestBase<"target.apply"> & {
   };
 };
 
+export type TargetRegisterRequest = RequestBase<"target.register"> & {
+  payload: {
+    idempotencyKey: string;
+    surfaceId: SurfaceId;
+    surfaceInstanceId: string | null;
+    ownershipSessionId: string;
+    ownershipEpoch: number;
+    paneLineageId: string;
+    expectedPreviousTargetEpoch: number | null;
+    targetKind: TargetKind;
+    targetHeader: TargetHeader;
+    targetPayload: unknown;
+    launchedAt: string;
+    registrationState: "before_attach" | "attached";
+  };
+};
+
 export type PaneSplitRequest = RequestBase<"pane.split"> & {
   payload: {
     paneId: PaneId;
@@ -443,6 +500,7 @@ export type SurfacesListResponse = ResponseBase<"surfaces.list"> & {
 export type PairResponse = ResponseBase<"pair.request"> & {
   payload: {
     sessionId: SessionId;
+    ownershipEpoch: number;
     resumed: boolean;
     surfaceId: SurfaceId;
     surfaceName: string;
@@ -477,10 +535,12 @@ export type PairResponse = ResponseBase<"pair.request"> & {
     state: {
       panes: Array<{
         paneId: PaneId;
+        paneLineageId: string;
         paneLabel: number;
         currentContentId: ContentId | null;
         currentRevision: Revision;
         contentType: ContentType | null;
+        currentTarget?: PaneTargetState | null;
       }>;
     };
   };
@@ -534,6 +594,7 @@ export type SnapshotResponse = ResponseBase<"snapshot.get"> & {
     contentId: ContentId | null;
     revision: Revision;
     contentType: ContentType | null;
+    currentTarget?: PaneTargetState | null;
     viewport: Viewport;
     visibleText?: string;
     selection: Selection;
@@ -552,10 +613,12 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
   payload: {
     panes: Array<{
       paneId: PaneId;
+      paneLineageId: string;
       paneLabel: number;
       name: string | null;
       activeContentId: ContentId | null;
       contentType: ContentType | null;
+      currentTarget?: PaneTargetState | null;
       viewport: SurfaceViewport;
     }>;
   };
@@ -566,6 +629,7 @@ export type TopologyApplyResponse = ResponseBase<"topology.apply"> & {
     topologyRevision: TopologyRevision;
     panes: Array<{
       paneId: PaneId;
+      paneLineageId: string;
       paneLabel: number;
       name: string | null;
     }>;
@@ -578,17 +642,25 @@ export type ContentApplyResponse = ResponseBase<"content.apply"> & {
   };
 };
 
-export type TargetApplyResponse = ResponseBase<"target.apply"> & {
+export type TargetApplyResponse = ResponseBase<"target.apply.result"> & {
+  payload: ApplyEvidence;
+};
+
+export type TargetRegisteredResponse = ResponseBase<"target.registered"> & {
   payload: {
-    requestId: string;
+    idempotencyKey: string;
     targetId: string;
-    paneLineageId: string;
     targetEpoch: number;
-    status: "applied" | "rejected" | "failed";
-    errorCode?: TargetErrorCode;
-    message?: string;
-    materializedState?: Record<string, unknown>;
-    appliedAt: string;
+    status: "registered";
+  };
+};
+
+export type TargetRegisterRejectedResponse = ResponseBase<"target.register.rejected"> & {
+  payload: {
+    idempotencyKey: string;
+    status: "rejected";
+    errorCode: TargetErrorCode;
+    message: string;
   };
 };
 
@@ -624,6 +696,7 @@ export type ErrorResponse = {
     | "ownership.relinquish"
     | "topology.apply"
     | "target.apply"
+    | "target.register"
     | "content.apply"
     | "content.set"
     | "content.append"
@@ -806,6 +879,7 @@ export type Request =
   | RelinquishRequest
   | TopologyApplyRequest
   | TargetApplyRequest
+  | TargetRegisterRequest
   | ContentApplyRequest
   | ContentSetRequest
   | ContentAppendRequest
@@ -825,6 +899,8 @@ export type Response =
   | RelinquishResponse
   | TopologyApplyResponse
   | TargetApplyResponse
+  | TargetRegisteredResponse
+  | TargetRegisterRejectedResponse
   | ContentApplyResponse
   | MutationAckResponse
   | AnnotationsRemoveResponse

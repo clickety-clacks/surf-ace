@@ -17,7 +17,6 @@ enum SurfAceContentType: String, Codable {
     case markdown
     case video
     case canvas
-    case browserUrl = "browser_url"
 }
 
 enum SurfAceEventProfile: String {
@@ -178,8 +177,6 @@ struct SurfAceFrame: Equatable {
             } else {
                 throw SurfAceFrameParseError.missingField("content")
             }
-        case .browserUrl:
-            throw SurfAceFrameParseError.unsupportedType
         }
 
         let display = jsonObject["display"] as? [String: Any]
@@ -312,10 +309,10 @@ struct SurfAcePaneEntry {
         fallbackSnapshotTargetId: String? = nil
     ) -> SurfAcePaneEntry {
         SurfAcePaneEntry(
-            contentId: targetId,
+            contentId: nil,
             revision: targetEpoch,
             historyOwnerToken: nil,
-            contentType: .browserUrl,
+            contentType: nil,
             payload: .browserURL(
                 url: url,
                 allowedSnapshotFallback: allowedSnapshotFallback,
@@ -328,6 +325,25 @@ struct SurfAcePaneEntry {
             drawingData: Data(),
             strokesById: [:]
         )
+    }
+}
+
+struct SurfAcePaneTargetState: Equatable {
+    var targetId: String
+    var targetKind: String
+    var paneLineageId: String
+    var targetEpoch: Int
+    var restorePolicy: String
+    var currentState: String
+    var lastApplyEvidence: [String: Any]?
+
+    static func == (lhs: SurfAcePaneTargetState, rhs: SurfAcePaneTargetState) -> Bool {
+        lhs.targetId == rhs.targetId &&
+        lhs.targetKind == rhs.targetKind &&
+        lhs.paneLineageId == rhs.paneLineageId &&
+        lhs.targetEpoch == rhs.targetEpoch &&
+        lhs.restorePolicy == rhs.restorePolicy &&
+        lhs.currentState == rhs.currentState
     }
 }
 
@@ -487,19 +503,21 @@ indirect enum SurfAcePaneLayoutNode {
 
 struct SurfAcePersistedPaneTopology: Codable {
     var paneId: Int
+    var paneLineageId: String
     var paneLabel: Int
     var name: String?
 
     @MainActor
     init(pane: SurfAcePaneModel) {
         self.paneId = pane.paneId
+        self.paneLineageId = pane.paneLineageId
         self.paneLabel = pane.paneLabel
         self.name = pane.name
     }
 
     @MainActor
     func makePane() -> SurfAcePaneModel {
-        SurfAcePaneModel(paneId: paneId, paneLabel: paneLabel, name: name)
+        SurfAcePaneModel(paneId: paneId, paneLineageId: paneLineageId, paneLabel: paneLabel, name: name)
     }
 }
 
@@ -550,6 +568,7 @@ protocol SurfAcePaneBridging: AnyObject {
 @Observable
 final class SurfAcePaneModel {
     var paneId: Int
+    var paneLineageId: String
     var paneLabel: Int
     var name: String?
     var backStack: [SurfAcePaneEntry]
@@ -578,11 +597,13 @@ final class SurfAcePaneModel {
     var lastPendingStrokeAt: Int64?
     var lastSuccessfulFlushAt: Date?
     var pendingAnnotationCommit = false
+    var currentTarget: SurfAcePaneTargetState?
     @ObservationIgnored var pendingFlushTask: Task<Void, Never>?
     @ObservationIgnored weak var bridge: (any SurfAcePaneBridging)?
 
-    init(paneId: Int, paneLabel: Int? = nil, name: String? = nil) {
+    init(paneId: Int, paneLineageId: String = "pl_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())", paneLabel: Int? = nil, name: String? = nil) {
         self.paneId = paneId
+        self.paneLineageId = paneLineageId
         self.paneLabel = paneLabel ?? paneId
         self.name = name
         self.backStack = []

@@ -149,9 +149,9 @@ final class SurfAceViewportPreservationTests: XCTestCase {
             fallbackSnapshotTargetId: "tg_snapshot"
         )
 
-        XCTAssertEqual(entry.contentId, "tg_google")
+        XCTAssertNil(entry.contentId)
         XCTAssertEqual(entry.revision, 1)
-        XCTAssertEqual(entry.contentType, .browserUrl)
+        XCTAssertNil(entry.contentType)
         XCTAssertEqual(
             entry.payload,
             .browserURL(
