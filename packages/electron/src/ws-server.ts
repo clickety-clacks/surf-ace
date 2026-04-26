@@ -28,6 +28,8 @@ import type {
   SnapshotHintEvent,
   SurfaceViewport,
   SurfacesListRequest,
+  TargetApplyRequest,
+  TargetApplyResponse,
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
@@ -655,6 +657,8 @@ export class SurfaceWsServer {
         return this.handleTopologyApply(socket, request);
       case "content.apply":
         return await this.handleContentApply(socket, request);
+      case "target.apply":
+        return await this.handleTargetApply(socket, request);
       case "panes.list":
         return this.handlePanesList(socket, request);
       case "pane.split":
@@ -963,6 +967,29 @@ export class SurfaceWsServer {
       ok: true,
       op: "content.apply",
       payload: this.core.contentApply(surfaceId, request.payload),
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private async handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Promise<Response> {
+    this.requirePairedSurfaceId(socket);
+    const payload: TargetApplyResponse["payload"] = {
+      appliedAt: new Date().toISOString(),
+      errorCode: "unsupported_target_kind",
+      message: `Unsupported target kind: ${request.payload.targetKind}`,
+      paneLineageId: request.payload.paneLineageId,
+      requestId: request.payload.requestId,
+      status: "rejected",
+      targetEpoch: request.payload.targetEpoch,
+      targetId: request.payload.targetId,
+    };
+    return {
+      id: request.id,
+      ok: true,
+      op: "target.apply",
+      payload,
       sentAt: Date.now(),
       type: "response",
       v: 1,

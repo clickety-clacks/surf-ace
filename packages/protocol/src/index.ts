@@ -24,6 +24,54 @@ export type ContentType =
   | "video"
   | "canvas";
 
+export type TargetKind =
+  | "html"
+  | "markdown"
+  | "image"
+  | "browser_url"
+  | "web_snapshot"
+  | "terminal_app"
+  | "native_app"
+  | "compositor_app"
+  | "video";
+
+export type TargetHeader = {
+  summary: string;
+  requiredCapabilities: string[];
+  safetyClass: "passive" | "network" | "process" | "privileged";
+  replaySemantics: "bytes" | "navigate" | "launch_equivalent" | "attach";
+  payloadSchemaVersion: number;
+  safeToLogFields: string[];
+};
+
+export type RestorePolicy = "auto" | "confirm" | "manual" | "never";
+
+export type TargetErrorCode =
+  | "capability_missing"
+  | "policy_denied"
+  | "approval_required"
+  | "unsafe_payload"
+  | "ownership_epoch_mismatch"
+  | "ownership_session_mismatch"
+  | "pane_lineage_missing"
+  | "pane_lineage_ambiguous"
+  | "target_epoch_stale"
+  | "target_superseded"
+  | "registration_late_old_epoch"
+  | "registration_duplicate"
+  | "registration_failed"
+  | "materialization_failed"
+  | "unsupported_target_kind"
+  | "restore_blocked_stale_target"
+  | "restore_unregistered_local_target"
+  | "restore_requires_confirmation";
+
+export type TargetApplyReason =
+  | "initial_apply"
+  | "resume_restore"
+  | "manual_restore"
+  | "confirmed_restore";
+
 // `surf_ace_list` exposes provider-side connectivity with this enum in DESIGN.md.
 //
 // KNOWN BUG (iOS client): The connection status indicator (green bar) on
@@ -349,6 +397,22 @@ export type ContentApplyRequest = RequestBase<"content.apply"> & {
       };
 };
 
+export type TargetApplyRequest = RequestBase<"target.apply"> & {
+  payload: {
+    requestId: string;
+    targetId: string;
+    surfaceId: SurfaceId;
+    ownershipSessionId: string;
+    ownershipEpoch: number;
+    paneLineageId: string;
+    targetEpoch: number;
+    targetKind: TargetKind;
+    targetHeader: TargetHeader;
+    targetPayload: unknown;
+    restoreReason: TargetApplyReason;
+  };
+};
+
 export type PaneSplitRequest = RequestBase<"pane.split"> & {
   payload: {
     paneId: PaneId;
@@ -395,6 +459,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
     capabilities: {
       contentTypes: ContentType[];
       eventTypes: Event["op"][];
+      targetCapabilities?: string[];
     };
     eventConfig: {
       profile: EventProfile;
@@ -422,6 +487,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
       panes: Array<{
         paneId: PaneId;
         paneLabel: number;
+        paneLineageId?: string;
         currentContentId: ContentId | null;
         currentRevision: Revision;
         contentType: ContentType | null;
@@ -512,6 +578,7 @@ export type TopologyApplyResponse = ResponseBase<"topology.apply"> & {
       paneId: PaneId;
       paneLabel: number;
       name: string | null;
+      paneLineageId?: string;
     }>;
   };
 };
@@ -519,6 +586,20 @@ export type TopologyApplyResponse = ResponseBase<"topology.apply"> & {
 export type ContentApplyResponse = ResponseBase<"content.apply"> & {
   payload: MutationAckResponse["payload"] & {
     topologyRevision?: TopologyRevision;
+  };
+};
+
+export type TargetApplyResponse = ResponseBase<"target.apply"> & {
+  payload: {
+    requestId: string;
+    targetId: string;
+    paneLineageId: string;
+    targetEpoch: number;
+    status: "applied" | "rejected" | "failed";
+    errorCode?: TargetErrorCode;
+    message?: string;
+    materializedState?: Record<string, unknown>;
+    appliedAt: string;
   };
 };
 
@@ -554,6 +635,7 @@ export type ErrorResponse = {
     | "ownership.relinquish"
     | "topology.apply"
     | "content.apply"
+    | "target.apply"
     | "content.set"
     | "content.append"
     | "content.patch"
@@ -580,6 +662,7 @@ export type ErrorResponse = {
       | "unsupported_protocol_version"
       | "unsupported_content_type"
       | "unsupported_operation_for_content_type"
+      | TargetErrorCode
       | "stale_revision"
       | "stale_content"
       | "content_too_large"
@@ -734,6 +817,7 @@ export type Request =
   | RelinquishRequest
   | TopologyApplyRequest
   | ContentApplyRequest
+  | TargetApplyRequest
   | ContentSetRequest
   | ContentAppendRequest
   | ContentPatchRequest
@@ -752,6 +836,7 @@ export type Response =
   | RelinquishResponse
   | TopologyApplyResponse
   | ContentApplyResponse
+  | TargetApplyResponse
   | MutationAckResponse
   | AnnotationsRemoveResponse
   | SnapshotResponse

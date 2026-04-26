@@ -76,6 +76,16 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
             enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"],
             type: "string",
           },
+          diagnostic: {
+            additionalProperties: false,
+            properties: {
+              derivedFromTargetId: { type: "string" },
+              kind: { enum: ["placeholder", "status", "error"], type: "string" },
+              summary: { type: "string" },
+            },
+            required: ["kind", "summary"],
+            type: "object",
+          },
           fingerprint: fingerprintParam,
           paneId: paneIdParam,
         },

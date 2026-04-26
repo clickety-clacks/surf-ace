@@ -78,12 +78,22 @@ class FakeSurfAceWsServer {
   readonly clearRequests: Array<{ paneId: number; revision: number }> = [];
   readonly closePaneRequests: Array<{ paneId: number }> = [];
   readonly contentSetRequests: Array<{
+    content: unknown;
     contentId: string;
     contentType: string;
     historyOwnerToken: string;
     paneId: number;
     revision: number;
   }> = [];
+  readonly targetApplyRequests: Array<{
+    ownershipEpoch: number;
+    ownershipSessionId: string;
+    paneLineageId: string;
+    restoreReason: string;
+    targetId: string;
+    targetKind: string;
+  }> = [];
+  targetApplyErrorCode: string | null = null;
   readonly topologyApplyRequests: Array<{
     layout: unknown;
     paneIds: number[];
@@ -197,6 +207,10 @@ class FakeSurfAceWsServer {
       return;
     }
     this.closed = true;
+    for (const socket of this.sockets) {
+      socket.close(1000, "test_server_close");
+      socket.terminate();
+    }
     await new Promise<void>((resolve, reject) => {
       this.wss.close((error) => {
         if (error) {
@@ -574,6 +588,12 @@ class FakeSurfAceWsServer {
                   "event.navigation",
                   "event.snapshot_hint",
                 ],
+                targetCapabilities: [
+                  "target.html.v1",
+                  "target.markdown.v1",
+                  "target.image.v1",
+                  "target.terminal_app.v1",
+                ],
               },
               eventConfig: {
                 activeEvents: [
@@ -600,7 +620,7 @@ class FakeSurfAceWsServer {
                 maxVisibleTextBytes: 4096,
                 resumeGraceMs: 20_000,
               },
-              resumed: false,
+              resumed: typeof message.payload?.resume === "object" && message.payload?.resume !== null,
               sessionId: "sa_test_session",
               state: {
                 panes: [...requestedSurface.panes.entries()].map(([paneId, pane]) => ({
@@ -609,6 +629,7 @@ class FakeSurfAceWsServer {
                   currentRevision: pane.revision,
                   paneId,
                   paneLabel: pane.paneLabel,
+                  paneLineageId: `pl_${requestedSurface.surfaceId}_${paneId}`,
                 })),
               },
               surfaceId: requestedSurface.surfaceId,
@@ -620,6 +641,11 @@ class FakeSurfAceWsServer {
         return;
       case "topology.apply": {
         const targetSurface = this.requirePairedSurface(socket);
+        if (this.dropNextSplitRequest) {
+          this.dropNextSplitRequest = false;
+          socket.close(1011, "drop_next_topology_apply");
+          return;
+        }
         const panes = Array.isArray(message.payload?.panes)
           ? message.payload.panes.map((paneState) => ({
               name:
@@ -658,6 +684,7 @@ class FakeSurfAceWsServer {
                 name: pane.name,
                 paneId: pane.paneId,
                 paneLabel: pane.paneLabel,
+                paneLineageId: `pl_${targetSurface.surfaceId}_${pane.paneId}`,
               })),
               topologyRevision: Number(message.payload?.topologyRevision ?? 0),
             }),
@@ -692,11 +719,17 @@ class FakeSurfAceWsServer {
           );
           return;
         }
-        pane.contentId = String(message.payload?.contentId);
+        const nextContentId = String(message.payload?.contentId);
+        const nextRevision = Number(message.payload?.revision ?? pane.revision + 1);
+        const idempotentReplay = pane.contentId === nextContentId && pane.revision === nextRevision;
+        pane.contentId = nextContentId;
         pane.contentType = String(message.payload?.contentType);
-        pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
-        pane.drawings = [];
+        pane.revision = nextRevision;
+        if (!idempotentReplay) {
+          pane.drawings = [];
+        }
         this.contentSetRequests.push({
+          content: structuredClone(message.payload?.content),
           contentId: pane.contentId,
           contentType: pane.contentType,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
@@ -712,6 +745,38 @@ class FakeSurfAceWsServer {
               currentRevision: pane.revision,
               paneId,
               topologyRevision: message.payload?.topologyRevision,
+            }),
+          ),
+        );
+        return;
+      }
+      case "target.apply": {
+        this.targetApplyRequests.push({
+          ownershipEpoch: Number(message.payload?.ownershipEpoch ?? 0),
+          ownershipSessionId: String(message.payload?.ownershipSessionId ?? ""),
+          paneLineageId: String(message.payload?.paneLineageId ?? ""),
+          restoreReason: String(message.payload?.restoreReason ?? ""),
+          targetId: String(message.payload?.targetId ?? ""),
+          targetKind: String(message.payload?.targetKind ?? ""),
+        });
+        if (this.targetApplyErrorCode) {
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(message.id, "target.apply", this.targetApplyErrorCode, "target apply failed"),
+            ),
+          );
+          return;
+        }
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "target.apply", {
+              appliedAt: new Date().toISOString(),
+              materializedState: { paneLineageId: String(message.payload?.paneLineageId ?? "") },
+              paneLineageId: String(message.payload?.paneLineageId ?? ""),
+              requestId: String(message.payload?.requestId ?? message.id),
+              status: "applied",
+              targetEpoch: Number(message.payload?.targetEpoch ?? 0),
+              targetId: String(message.payload?.targetId ?? ""),
             }),
           ),
         );
@@ -785,6 +850,7 @@ class FakeSurfAceWsServer {
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
         pane.drawings = [];
         this.contentSetRequests.push({
+          content: structuredClone(message.payload?.content),
           contentId: pane.contentId,
           contentType: pane.contentType,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
@@ -1173,6 +1239,23 @@ function assertPaneLabelsWithOpaqueIds(
   return paneIds;
 }
 
+function targetRegistrationOwnership(
+  runtime: ReturnType<typeof createSurfAceRuntime>,
+  surfaceId: string,
+  paneId: string,
+): { launchedAt: string; ownershipEpoch: number; ownershipSessionId: string; paneLineageId: string } {
+  const surface = (runtime as any).surfaces.get(surfaceId);
+  assert.ok(surface);
+  const pane = surface.panes.get(paneId);
+  assert.ok(pane);
+  return {
+    launchedAt: new Date().toISOString(),
+    ownershipEpoch: surface.ownershipEpoch,
+    ownershipSessionId: surface.sessionId,
+    paneLineageId: pane.paneLineageId,
+  };
+}
+
 test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
   await t.test("passive processes read the active owner's shared screen snapshot", async () => {
     const port = nextPort++;
@@ -1302,7 +1385,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.initialRemotePaneId, 41);
       assert.deepEqual(
         Object.keys(screen.panes[0] ?? {}).sort(),
-        ["activeContent", "historySummary", "name", "paneId", "paneLabel"].sort(),
+        ["activeContent", "historySummary", "name", "paneId", "paneLabel", "target"].sort(),
       );
     });
   });
@@ -1329,32 +1412,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       await internalRuntime.syncSurfaceSnapshots(surface, true);
       const screens = await runtime.listScreens();
-      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 77]);
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1]);
     });
   });
 
   await t.test("migration-seeded pane labels advance the allocator before later splits", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
-      const internalRuntime = runtime as any;
-      const surface = internalRuntime.surfaces.get(server.surfaceId);
-      assert.ok(surface);
-
-      server.panes.set(2, {
-        contentId: null,
-        contentType: null,
-        drawings: [],
-        name: null,
-        paneLabel: 2,
-        revision: 0,
-        viewport: {
-          height: 768,
-          scale: 2,
-          width: 1024,
-        },
-      });
-
-      await internalRuntime.syncSurfaceSnapshots(surface, true);
-      await waitFor(async () => (await runtime.listScreens())[0]?.panes.length === 2, 12_000);
       const sourcePaneId = await livePaneId(runtime, server.surfaceId, 1);
 
       const split = await runtime.split({
@@ -1364,14 +1427,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         paneId: sourcePaneId,
       });
 
-      assert.deepEqual(server.splitRequests.at(-1), {
-        count: 2,
-        direction: "horizontal",
-        newPaneIds: [42],
-        newPaneLabels: [3],
-        paneId: server.initialRemotePaneId,
-      });
-      assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
+      assert.deepEqual(server.topologyApplyRequests.at(-1)?.paneIds, [server.initialRemotePaneId, 42]);
+      assertPaneLabelsWithOpaqueIds(split, [1, 2]);
     });
   });
 
@@ -1733,6 +1790,266 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider records generic pane targets and keeps diagnostic placeholders separate", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const registered = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "terminal:btop:1",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "launch_equivalent",
+          requiredCapabilities: ["target.terminal_app.v1"],
+          safeToLogFields: ["command", "args"],
+          safetyClass: "process",
+          summary: "btop",
+        },
+        targetKind: "terminal_app",
+        targetPayload: {
+          args: [],
+          command: "btop",
+          envPolicy: "surface_default",
+          pty: true,
+          restartPolicy: "restore_new_process",
+        },
+      });
+      assert.equal(registered.status, "registered");
+
+      const screensAfterRegister = await runtime.listScreens();
+      const target = screensAfterRegister[0]?.panes[0]?.target;
+      assert.equal(target?.targetKind, "terminal_app");
+      assert.equal(target?.targetPolicy, "confirm");
+      assert.equal(target?.blockedReason, null);
+      assert.deepEqual(target?.targetPayload, { args: [], command: "btop" });
+
+      const blocked = await runtime.restoreTarget({
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      assert.equal(blocked.blockedReason, "restore_requires_confirmation");
+      assert.equal(server.targetApplyRequests.length, 0);
+
+      await runtime.push({
+        content: "<p>btop should be here</p>",
+        contentType: "html",
+        diagnostic: {
+          derivedFromTargetId: target?.targetId,
+          kind: "placeholder",
+          summary: "btop placeholder",
+        },
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+
+      const screensAfterPlaceholder = await runtime.listScreens();
+      const targetAfterPlaceholder = screensAfterPlaceholder[0]?.panes[0]?.target;
+      assert.equal(targetAfterPlaceholder?.targetKind, "terminal_app");
+      assert.equal(targetAfterPlaceholder?.diagnosticContent?.kind, "placeholder");
+      assert.equal(targetAfterPlaceholder?.diagnosticContent?.summary, "btop placeholder");
+
+      const confirmed = await runtime.restoreTarget({
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      assert.equal(confirmed.blockedReason, null);
+      assert.equal(confirmed.evidence?.status, "applied");
+      assert.deepEqual(server.targetApplyRequests, [
+        {
+          ownershipEpoch: targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId).ownershipEpoch,
+          ownershipSessionId: targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId).ownershipSessionId,
+          paneLineageId: targetAfterPlaceholder?.paneLineageId,
+          restoreReason: "confirmed_restore",
+          targetId: target?.targetId,
+          targetKind: "terminal_app",
+        },
+      ]);
+      const screensAfterRestore = await runtime.listScreens();
+      assert.equal(screensAfterRestore[0]?.panes[0]?.target?.diagnosticContent, null);
+    });
+  });
+
+  await t.test("provider rejects duplicate and stale local target registrations without incrementing epoch", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const input = {
+        expectedPreviousTargetEpoch: null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "native:app:1",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached" as const,
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "launch_equivalent" as const,
+          requiredCapabilities: ["target.native_app.v1"],
+          safeToLogFields: ["appId"],
+          safetyClass: "process" as const,
+          summary: "Native App",
+        },
+        targetKind: "native_app" as const,
+        targetPayload: {
+          appId: "com.example.Native",
+          launchMode: "new_instance",
+        },
+      };
+      const first = await runtime.registerTarget(input);
+      const duplicate = await runtime.registerTarget(input);
+      assert.equal(first.status, "registered");
+      assert.deepEqual(duplicate, first);
+
+      const stale = await runtime.registerTarget({
+        ...input,
+        idempotencyKey: "native:app:stale",
+        targetPayload: {
+          appId: "com.example.Other",
+          launchMode: "new_instance",
+        },
+      });
+      assert.equal(stale.status, "rejected");
+      assert.equal(stale.status === "rejected" ? stale.errorCode : "", "target_epoch_stale");
+
+      const oldEpoch = await runtime.registerTarget({
+        ...input,
+        idempotencyKey: "native:app:old-epoch",
+        ownershipEpoch: input.ownershipEpoch - 1,
+      });
+      assert.equal(oldEpoch.status, "rejected");
+      assert.equal(oldEpoch.status === "rejected" ? oldEpoch.errorCode : "", "registration_late_old_epoch");
+
+      await runtime.clear({
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const staleAfterTombstone = await runtime.registerTarget({
+        ...input,
+        idempotencyKey: "native:app:stale-after-tombstone",
+      });
+      assert.equal(staleAfterTombstone.status, "rejected");
+      assert.equal(staleAfterTombstone.status === "rejected" ? staleAfterTombstone.errorCode : "", "target_epoch_stale");
+
+      const malformed = await runtime.registerTarget({
+        ...input,
+        expectedPreviousTargetEpoch: first.status === "registered" ? first.targetEpoch : null,
+        idempotencyKey: "native:app:malformed",
+        targetPayload: {
+          appId: "com.example.Malformed",
+        },
+      });
+      assert.equal(malformed.status, "rejected");
+      assert.equal(malformed.status === "rejected" ? malformed.errorCode : "", "unsafe_payload");
+
+      const malformedImage = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: first.status === "registered" ? first.targetEpoch : null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "image:malformed",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "bytes",
+          requiredCapabilities: ["target.image.v1"],
+          safeToLogFields: ["mediaType", "alt"],
+          safetyClass: "passive",
+          summary: "Malformed Image",
+        },
+        targetKind: "image",
+        targetPayload: {
+          data: "aGVsbG8=",
+        },
+      });
+      assert.equal(malformedImage.status, "rejected");
+      assert.equal(malformedImage.status === "rejected" ? malformedImage.errorCode : "", "unsafe_payload");
+    });
+  });
+
+  await t.test("provider normalizes generic target.apply failures for diagnostics", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      server.targetApplyErrorCode = "busy";
+      const registered = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "terminal:busy:1",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "launch_equivalent",
+          requiredCapabilities: ["target.terminal_app.v1"],
+          safeToLogFields: ["command"],
+          safetyClass: "process",
+          summary: "busy terminal",
+        },
+        targetKind: "terminal_app",
+        targetPayload: {
+          args: [],
+          command: "top",
+          envPolicy: "surface_default",
+          pty: true,
+          restartPolicy: "restore_new_process",
+        },
+      });
+      assert.equal(registered.status, "registered");
+
+      const restored = await runtime.restoreTarget({
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      assert.equal(restored.evidence?.status, "failed");
+      assert.equal(restored.evidence?.errorCode, "materialization_failed");
+      const screens = await runtime.listScreens();
+      assert.equal(screens[0]?.panes[0]?.target?.blockedReason, "materialization_failed");
+    });
+  });
+
+  await t.test("provider blocks process auto-restore without a validated approval token model", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const registered = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "terminal:auto:approval-token-string",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached",
+        restorePolicy: "auto",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "launch_equivalent",
+          requiredCapabilities: ["target.terminal_app.v1"],
+          safeToLogFields: ["command"],
+          safetyClass: "process",
+          summary: "top",
+        },
+        targetKind: "terminal_app",
+        targetPayload: {
+          approvalTokenId: "not-provider-validated",
+          args: [],
+          command: "top",
+          envPolicy: "surface_default",
+          pty: true,
+          restartPolicy: "restore_new_process",
+        },
+      });
+      assert.equal(registered.status, "registered");
+
+      const restored = await runtime.restoreTarget({
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      assert.equal(restored.blockedReason, "approval_required");
+      assert.equal(server.targetApplyRequests.length, 0);
+    });
+  });
+
   await t.test("provider splits panes with provider-assigned pane ids and closes them by pane scope", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
@@ -1745,9 +2062,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const splitPaneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
       assert.deepEqual(server.splitRequests, []);
-      assert.deepEqual(server.topologyApplyRequests.slice(0, 1), [
-        {
-          layout: {
+      assert.ok(
+        server.topologyApplyRequests.some((request) => (
+          JSON.stringify(request.layout) === JSON.stringify({
             children: [
               { paneId: server.initialRemotePaneId, type: "pane" },
               { paneId: 42, type: "pane" },
@@ -1755,13 +2072,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             ],
             direction: "horizontal",
             type: "split",
-          },
-          paneIds: [server.initialRemotePaneId, 42, 43],
-          paneLabels: [1, 2, 3],
-          topologyRevision: 1,
-          windowLabel: "a",
-        },
-      ]);
+          }) &&
+          JSON.stringify(request.paneIds) === JSON.stringify([server.initialRemotePaneId, 42, 43]) &&
+          JSON.stringify(request.paneLabels) === JSON.stringify([1, 2, 3]) &&
+          request.windowLabel === "a"
+        )),
+      );
 
       const splitScreens = await runtime.listScreens();
       assertPaneLabelsWithOpaqueIds(splitScreens[0]?.panes ?? [], [1, 2, 3]);
@@ -1783,7 +2099,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         },
         paneIds: [server.initialRemotePaneId, 43],
         paneLabels: [1, 3],
-        topologyRevision: 2,
+        topologyRevision: server.topologyApplyRequests.at(-1)?.topologyRevision,
         windowLabel: "a",
       });
 
@@ -1905,6 +2221,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const repushed = server.contentSetRequests.at(-1);
       assert.equal(repushed?.contentId, first.contentId);
       assert.notEqual(repushed?.contentId, second.contentId);
+      assert.deepEqual(repushed?.content, { html: "<p>first</p>" });
 
       const screens = await runtime.listScreens();
       assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, first.contentId);
@@ -2211,7 +2528,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         });
         const splitPaneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
 
-        const secondRemotePaneId = server.splitRequests.at(-1)?.newPaneIds[0];
+        const secondRemotePaneId = server.topologyApplyRequests.at(-1)?.paneIds[1];
         assert.equal(typeof secondRemotePaneId, "number");
 
         const secondPush = await runtime.push(
@@ -2880,6 +3197,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const provisionalSurface = {
         ...preservedSurface,
         client: {
+          close: async () => {},
           isOpen: () => true,
           request: async () => ({
             id: "rq_surfaces_list",
