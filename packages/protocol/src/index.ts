@@ -72,6 +72,44 @@ export type TargetApplyReason =
   | "manual_restore"
   | "confirmed_restore";
 
+export type NativePaneMaterializationPane = {
+  id: string;
+  content_id?: string;
+  binding_id?: string;
+  revision: Revision;
+  geometry: Rect;
+  target?: "terminal";
+  process?: {
+    command: string;
+    args: string[];
+    cwd?: string;
+    env?: Record<string, string>;
+  };
+};
+
+export type NativePaneOverlaySet = {
+  surfaceId: SurfaceId;
+  windowId: string;
+  revision: Revision;
+  topologyEpoch: TopologyRevision;
+  coordinateSpace: "surface_logical";
+  regions: Array<{
+    regionId: string;
+    paneId: string;
+    paneInstanceId: string;
+    kind: "native_pane";
+    rect: Rect;
+    zIndex: number;
+    captures: string[];
+  }>;
+};
+
+export type NativePaneMaterialization = {
+  op: "native_pane.host" | "native_pane.update";
+  panes: NativePaneMaterializationPane[];
+  overlaySet?: NativePaneOverlaySet;
+};
+
 // `surf_ace_list` exposes provider-side connectivity with this enum in DESIGN.md.
 //
 // KNOWN BUG (iOS client): The connection status indicator (green bar) on
@@ -409,6 +447,7 @@ export type TargetApplyRequest = RequestBase<"target.apply"> & {
     targetKind: TargetKind;
     targetHeader: TargetHeader;
     targetPayload: unknown;
+    materialization?: NativePaneMaterialization;
     restoreReason: TargetApplyReason;
   };
 };

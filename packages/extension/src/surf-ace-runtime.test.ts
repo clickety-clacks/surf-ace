@@ -86,6 +86,7 @@ class FakeSurfAceWsServer {
     revision: number;
   }> = [];
   readonly targetApplyRequests: Array<{
+    materialization: unknown;
     ownershipEpoch: number;
     ownershipSessionId: string;
     paneLineageId: string;
@@ -122,6 +123,14 @@ class FakeSurfAceWsServer {
   snapshotImage = "aGVsbG8=";
   snapshotRequests: Array<{ includeImage: boolean; includeVisibleText: boolean; paneId: number }> = [];
   snapshotScrollOffset = { x: 0, y: 0 };
+  targetCapabilities = [
+    "target.html.v1",
+    "target.markdown.v1",
+    "target.image.v1",
+    "target.terminal_app.v1",
+    "target.native_app.v1",
+    "target.compositor_app.v1",
+  ];
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
   invalidResumeWithoutTakeoverResponsesRemaining = 0;
@@ -630,12 +639,7 @@ class FakeSurfAceWsServer {
                   "event.navigation",
                   "event.snapshot_hint",
                 ],
-                targetCapabilities: [
-                  "target.html.v1",
-                  "target.markdown.v1",
-                  "target.image.v1",
-                  "target.terminal_app.v1",
-                ],
+                targetCapabilities: [...this.targetCapabilities],
               },
               eventConfig: {
                 activeEvents: [
@@ -793,6 +797,7 @@ class FakeSurfAceWsServer {
       }
       case "target.apply": {
         this.targetApplyRequests.push({
+          materialization: structuredClone(message.payload?.materialization),
           ownershipEpoch: Number(message.payload?.ownershipEpoch ?? 0),
           ownershipSessionId: String(message.payload?.ownershipSessionId ?? ""),
           paneLineageId: String(message.payload?.paneLineageId ?? ""),
@@ -2062,7 +2067,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         targetPayload: {
           args: [],
           command: "btop",
-          envPolicy: "surface_default",
+          cwd: "/tmp",
+          env: { TERM: "xterm-256color" },
+          envPolicy: "explicit_allowlist",
           pty: true,
           restartPolicy: "restore_new_process",
         },
@@ -2110,6 +2117,43 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(confirmed.evidence?.status, "applied");
       assert.deepEqual(server.targetApplyRequests, [
         {
+          materialization: {
+            op: "native_pane.host",
+            overlaySet: {
+              coordinateSpace: "surface_logical",
+              regions: [
+                {
+                  captures: [],
+                  kind: "native_pane",
+                  paneId: firstPaneId,
+                  paneInstanceId: targetAfterPlaceholder?.paneLineageId,
+                  rect: { height: 768, width: 1024, x: 0, y: 0 },
+                  regionId: `${firstPaneId}:${target?.targetId}`,
+                  zIndex: 0,
+                },
+              ],
+              revision: registered.targetEpoch,
+              surfaceId: server.surfaceId,
+              topologyEpoch: 1,
+              windowId: "a",
+            },
+            panes: [
+              {
+                binding_id: `${firstPaneId}:${target?.targetId}`,
+                content_id: target?.targetId,
+                geometry: { height: 768, width: 1024, x: 0, y: 0 },
+                id: firstPaneId,
+                process: {
+                  args: [],
+                  command: "btop",
+                  cwd: "/tmp",
+                  env: { TERM: "xterm-256color" },
+                },
+                revision: registered.targetEpoch,
+                target: "terminal",
+              },
+            ],
+          },
           ownershipEpoch: targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId).ownershipEpoch,
           ownershipSessionId: targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId).ownershipSessionId,
           paneLineageId: targetAfterPlaceholder?.paneLineageId,
@@ -2120,6 +2164,159 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       ]);
       const screensAfterRestore = await runtime.listScreens();
       assert.equal(screensAfterRestore[0]?.panes[0]?.target?.diagnosticContent, null);
+    });
+  });
+
+  await t.test("provider sends current split pane geometry in native pane materialization", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const [, secondPane] = split;
+      assert.ok(secondPane);
+      const registered = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "terminal:btop:split-pane",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, secondPane.paneId),
+        paneId: secondPane.paneId,
+        registrationState: "attached",
+        restorePolicy: "manual",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "launch_equivalent",
+          requiredCapabilities: ["target.terminal_app.v1"],
+          safeToLogFields: ["command", "args"],
+          safetyClass: "process",
+          summary: "btop split",
+        },
+        targetKind: "terminal_app",
+        targetPayload: {
+          args: ["--utf-force"],
+          command: "btop",
+          envPolicy: "surface_default",
+          pty: true,
+          restartPolicy: "restore_new_process",
+        },
+      });
+      assert.equal(registered.status, "registered");
+
+      const restored = await runtime.restoreTarget({
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: secondPane.paneId,
+      });
+      assert.equal(restored.blockedReason, null);
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const [applyRequest] = server.targetApplyRequests;
+      assert.ok(applyRequest);
+      assert.deepEqual(applyRequest.materialization, {
+        op: "native_pane.host",
+        overlaySet: {
+          coordinateSpace: "surface_logical",
+          regions: [
+            {
+              captures: [],
+              kind: "native_pane",
+              paneId: secondPane.paneId,
+              paneInstanceId: applyRequest.paneLineageId,
+              rect: { height: 768, width: 512, x: 512, y: 0 },
+              regionId: `${secondPane.paneId}:${registered.targetId}`,
+              zIndex: 1,
+            },
+          ],
+          revision: registered.targetEpoch,
+          surfaceId: server.surfaceId,
+          topologyEpoch: 2,
+          windowId: "a",
+        },
+        panes: [
+          {
+            binding_id: `${secondPane.paneId}:${registered.targetId}`,
+            content_id: registered.targetId,
+            geometry: { height: 768, width: 512, x: 512, y: 0 },
+            id: secondPane.paneId,
+            process: { args: ["--utf-force"], command: "btop" },
+            revision: registered.targetEpoch,
+            target: "terminal",
+          },
+        ],
+      });
+    });
+  });
+
+  await t.test("provider includes pane geometry for native app target materialization", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const registered = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "native:demo:geometry",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached",
+        restorePolicy: "manual",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "launch_equivalent",
+          requiredCapabilities: ["target.native_app.v1"],
+          safeToLogFields: ["appId"],
+          safetyClass: "process",
+          summary: "Native Demo",
+        },
+        targetKind: "native_app",
+        targetPayload: {
+          appId: "com.example.NativeDemo",
+          launchMode: "new_instance",
+        },
+      });
+      assert.equal(registered.status, "registered");
+
+      const restored = await runtime.restoreTarget({
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      assert.equal(restored.blockedReason, null);
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const [applyRequest] = server.targetApplyRequests;
+      assert.ok(applyRequest);
+      assert.deepEqual(applyRequest.materialization, {
+        op: "native_pane.host",
+        overlaySet: {
+          coordinateSpace: "surface_logical",
+          regions: [
+            {
+              captures: [],
+              kind: "native_pane",
+              paneId: firstPaneId,
+              paneInstanceId: applyRequest.paneLineageId,
+              rect: { height: 768, width: 1024, x: 0, y: 0 },
+              regionId: `${firstPaneId}:${registered.targetId}`,
+              zIndex: 0,
+            },
+          ],
+          revision: registered.targetEpoch,
+          surfaceId: server.surfaceId,
+          topologyEpoch: 1,
+          windowId: "a",
+        },
+        panes: [
+          {
+            binding_id: `${firstPaneId}:${registered.targetId}`,
+            content_id: registered.targetId,
+            geometry: { height: 768, width: 1024, x: 0, y: 0 },
+            id: firstPaneId,
+            revision: registered.targetEpoch,
+          },
+        ],
+      });
     });
   });
 

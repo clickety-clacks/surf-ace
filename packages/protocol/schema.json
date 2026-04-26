@@ -98,6 +98,10 @@
       "type": "integer",
       "minimum": 0
     },
+    "TopologyRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
     "EpochMs": {
       "type": "integer",
       "minimum": 0
@@ -254,6 +258,82 @@
         "y": { "type": "number" },
         "width": { "type": "number", "minimum": 0 },
         "height": { "type": "number", "minimum": 0 }
+      }
+    },
+    "NativePaneMaterializationPane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "geometry"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "content_id": { "type": "string", "minLength": 1 },
+        "binding_id": { "type": "string", "minLength": 1 },
+        "revision": { "$ref": "#/$defs/Revision" },
+        "geometry": { "$ref": "#/$defs/Rect" },
+        "target": { "const": "terminal" },
+        "process": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command", "args"],
+          "properties": {
+            "command": { "type": "string" },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "cwd": { "type": "string" },
+            "env": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "NativePaneOverlaySet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surfaceId", "windowId", "revision", "topologyEpoch", "coordinateSpace", "regions"],
+      "properties": {
+        "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+        "windowId": { "type": "string" },
+        "revision": { "$ref": "#/$defs/Revision" },
+        "topologyEpoch": { "$ref": "#/$defs/TopologyRevision" },
+        "coordinateSpace": { "const": "surface_logical" },
+        "regions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["regionId", "paneId", "paneInstanceId", "kind", "rect", "zIndex", "captures"],
+            "properties": {
+              "regionId": { "type": "string", "minLength": 1 },
+              "paneId": { "type": "string", "minLength": 1 },
+              "paneInstanceId": { "type": "string", "minLength": 1 },
+              "kind": { "const": "native_pane" },
+              "rect": { "$ref": "#/$defs/Rect" },
+              "zIndex": { "type": "integer", "minimum": 0 },
+              "captures": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "NativePaneMaterialization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "panes"],
+      "properties": {
+        "op": { "type": "string", "enum": ["native_pane.host", "native_pane.update"] },
+        "panes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/NativePaneMaterializationPane" }
+        },
+        "overlaySet": { "$ref": "#/$defs/NativePaneOverlaySet" }
       }
     },
     "Viewport": {
@@ -985,6 +1065,7 @@
             "targetKind": { "$ref": "#/$defs/TargetKind" },
             "targetHeader": { "$ref": "#/$defs/TargetHeader" },
             "targetPayload": {},
+            "materialization": { "$ref": "#/$defs/NativePaneMaterialization" },
             "restoreReason": { "$ref": "#/$defs/TargetApplyReason" }
           }
         }
