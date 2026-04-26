@@ -1,5 +1,6 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import net from "node:net";
 
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -28,6 +29,7 @@ import type {
   SnapshotHintEvent,
   SurfaceViewport,
   SurfacesListRequest,
+  NativePaneMaterialization,
   TargetApplyRequest,
   TargetApplyResponse,
   TopologyApplyRequest,
@@ -81,12 +83,23 @@ export type SurfaceWsServerOptions = {
   core: SurfaceCore;
   endpointName: string;
   hostName: string;
+  compositorSocketPath?: string | null;
   onBusyChanged?: () => void;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
   wsPath?: string;
 };
+
+type CompositorControlRequest =
+  | {
+    type: NativePaneMaterialization["op"];
+    panes: NativePaneMaterialization["panes"];
+  }
+  | (NonNullable<NativePaneMaterialization["overlaySet"]> & {
+    type: "overlay_regions.set";
+    updateReason: "initial" | "update";
+  });
 
 const DEFAULT_DRAWING_FLUSH_CONFIG: DrawingFlushConfig = {
   idleWindowMs: 8_000,
@@ -117,8 +130,109 @@ function serverDiagnostic(event: string, fields: ServerDiagnosticFields = {}): s
     : `[surf-ace:server] event=${event}`;
 }
 
+function requestForCompositor(materialization: NativePaneMaterialization): CompositorControlRequest {
+  return {
+    panes: materialization.panes,
+    type: materialization.op,
+  };
+}
+
+function overlayRequestForCompositor(
+  materialization: NativePaneMaterialization,
+): CompositorControlRequest | null {
+  if (!materialization.overlaySet) {
+    return null;
+  }
+  return {
+    ...materialization.overlaySet,
+    type: "overlay_regions.set",
+    updateReason: materialization.op === "native_pane.host" ? "initial" : "update",
+  };
+}
+
+function compositorFailureMessage(response: Record<string, unknown>): string | null {
+  if (response.ok !== false) {
+    return null;
+  }
+  const message = response.message;
+  if (typeof message === "string" && message.length > 0) {
+    return message;
+  }
+  const error = response.error;
+  if (error && typeof error === "object") {
+    const errorRecord = error as Record<string, unknown>;
+    if (typeof errorRecord.message === "string" && errorRecord.message.length > 0) {
+      return errorRecord.message;
+    }
+    if (typeof errorRecord.code === "string" && errorRecord.code.length > 0) {
+      return errorRecord.code;
+    }
+  }
+  return "compositor rejected materialization";
+}
+
+async function sendCompositorControl(socketPath: string, request: CompositorControlRequest): Promise<Record<string, unknown>> {
+  return await new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let buffer = "";
+    let settled = false;
+    const settle = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      callback();
+    };
+    socket.setEncoding("utf8");
+    socket.setTimeout(10_000);
+    socket.on("connect", () => {
+      socket.write(`${JSON.stringify(request)}\n`);
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const line = buffer.slice(0, newlineIndex);
+      settle(() => {
+        try {
+          resolve(JSON.parse(line) as Record<string, unknown>);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    socket.on("timeout", () => {
+      settle(() => reject(new Error("compositor control request timed out")));
+    });
+    socket.on("error", (error) => {
+      settle(() => reject(error));
+    });
+    socket.on("end", () => {
+      if (settled) {
+        return;
+      }
+      const line = buffer.trim();
+      settle(() => {
+        if (line.length === 0) {
+          reject(new Error("compositor control closed without a response"));
+          return;
+        }
+        try {
+          resolve(JSON.parse(line) as Record<string, unknown>);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  });
+}
+
 export class SurfaceWsServer {
   private readonly bindAddress: string;
+  private readonly compositorSocketPath: string | null;
   private readonly core: SurfaceCore;
   private readonly endpointName: string;
   private readonly hostName: string;
@@ -138,6 +252,9 @@ export class SurfaceWsServer {
   constructor(options: SurfaceWsServerOptions) {
     this.bindAddress = options.bindAddress ?? "0.0.0.0";
     this.capturePaneImage = options.capturePaneImage;
+    this.compositorSocketPath = options.compositorSocketPath === undefined
+      ? (process.env.SURF_ACE_COMPOSITOR_SOCKET ?? null)
+      : options.compositorSocketPath;
     this.core = options.core;
     this.endpointName = options.endpointName;
     this.hostName = options.hostName;
@@ -854,7 +971,7 @@ export class SurfaceWsServer {
       ok: true,
       op: "pair.request",
       payload: {
-        capabilities: this.core.capabilities(),
+        capabilities: this.capabilities(),
         eventConfig: {
           activeEvents: activeEventsForProfile(requestedProfile),
           drawingFlushConfig,
@@ -972,11 +1089,146 @@ export class SurfaceWsServer {
   }
 
   private async handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Promise<Response> {
-    this.requirePairedSurfaceId(socket);
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    const appliedAt = new Date().toISOString();
+    const active = this.transport(surfaceId).active;
+    if (request.payload.surfaceId !== surfaceId) {
+      return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply surfaceId does not match paired surface");
+    }
+    if (!active || active.socket !== socket || request.payload.ownershipSessionId !== active.sessionId) {
+      return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply ownership session does not match active session");
+    }
+    const paneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
+    if (!paneLineages.has(request.payload.paneLineageId)) {
+      return this.targetApplyFailureResponse(request, appliedAt, "pane_lineage_missing", "target.apply pane lineage is not present on this surface");
+    }
+
+    const materialization = request.payload.materialization;
+    if (!materialization) {
+      const payload: TargetApplyResponse["payload"] = {
+        appliedAt,
+        errorCode: "unsupported_target_kind",
+        message: `Unsupported target kind: ${request.payload.targetKind}`,
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.payload.requestId,
+        status: "rejected",
+        targetEpoch: request.payload.targetEpoch,
+        targetId: request.payload.targetId,
+      };
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+    if (!this.compositorSocketPath) {
+      const payload: TargetApplyResponse["payload"] = {
+        appliedAt,
+        errorCode: "materialization_failed",
+        message: "SURF_ACE_COMPOSITOR_SOCKET is not configured",
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.payload.requestId,
+        status: "failed",
+        targetEpoch: request.payload.targetEpoch,
+        targetId: request.payload.targetId,
+      };
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+
+    const hostRequest = requestForCompositor(materialization);
+    let hostResponse: Record<string, unknown> | null = null;
+    let overlayRequest: CompositorControlRequest | null = null;
+    let overlayResponse: Record<string, unknown> | null = null;
+    try {
+      hostResponse = await sendCompositorControl(this.compositorSocketPath, hostRequest);
+      const hostFailure = compositorFailureMessage(hostResponse);
+      if (hostFailure) {
+        throw new Error(hostFailure);
+      }
+      overlayRequest = overlayRequestForCompositor(materialization);
+      overlayResponse = overlayRequest
+        ? await sendCompositorControl(this.compositorSocketPath, overlayRequest)
+        : null;
+      if (overlayResponse) {
+        const overlayFailure = compositorFailureMessage(overlayResponse);
+        if (overlayFailure) {
+          throw new Error(overlayFailure);
+        }
+      }
+      const payload: TargetApplyResponse["payload"] = {
+        appliedAt,
+        materializedState: {
+          hostRequest,
+          hostResponse,
+          overlayRequest,
+          overlayResponse,
+        },
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.payload.requestId,
+        status: "applied",
+        targetEpoch: request.payload.targetEpoch,
+        targetId: request.payload.targetId,
+      };
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    } catch (error) {
+      const payload: TargetApplyResponse["payload"] = {
+        appliedAt,
+        errorCode: "materialization_failed",
+        materializedState: {
+          hostRequest,
+          hostResponse,
+          overlayRequest,
+          overlayResponse,
+        },
+        message: error instanceof Error ? error.message : String(error),
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.payload.requestId,
+        status: "failed",
+        targetEpoch: request.payload.targetEpoch,
+        targetId: request.payload.targetId,
+      };
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+  }
+
+  private targetApplyFailureResponse(
+    request: TargetApplyRequest,
+    appliedAt: string,
+    errorCode: TargetApplyResponse["payload"]["errorCode"],
+    message: string,
+  ): Response {
     const payload: TargetApplyResponse["payload"] = {
-      appliedAt: new Date().toISOString(),
-      errorCode: "unsupported_target_kind",
-      message: `Unsupported target kind: ${request.payload.targetKind}`,
+      appliedAt,
+      errorCode,
+      message,
       paneLineageId: request.payload.paneLineageId,
       requestId: request.payload.requestId,
       status: "rejected",
@@ -1197,6 +1449,16 @@ export class SurfaceWsServer {
     const created: SurfaceTransportState = { active: null, lock: null };
     this.transports.set(surfaceId, created);
     return created;
+  }
+
+  private capabilities() {
+    const capabilities = this.core.capabilities();
+    return {
+      ...capabilities,
+      targetCapabilities: this.compositorSocketPath
+        ? ["target.terminal_app.v1"]
+        : capabilities.targetCapabilities,
+    };
   }
 
   private activeSession(surfaceId: string): ActiveSession | null {
