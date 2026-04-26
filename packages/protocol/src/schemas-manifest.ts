@@ -17,6 +17,8 @@ import {
   pairResponseSchema,
   relinquishRequestSchema,
   relinquishResponseSchema,
+  targetApplyRequestSchema,
+  targetApplyResponseSchema,
   paneCloseRequestSchema,
   paneCloseResponseSchema,
   paneCreatedEventSchema,
@@ -55,6 +57,11 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "ownership.relinquish": {
     request: relinquishRequestSchema,
     response: relinquishResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "target.apply": {
+    request: targetApplyRequestSchema,
+    response: targetApplyResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "content.set": {

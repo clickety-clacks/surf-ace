@@ -70,6 +70,7 @@ type PaneState = {
   name: string | null;
   paneId: number;
   paneLabel: number;
+  paneLineageId: string;
   pendingAnnotationCommit: boolean;
   snapshot: PaneSnapshot;
   toast: string | null;
@@ -410,6 +411,7 @@ export class SurfaceCore {
           currentRevision: current.revision as Revision,
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
         };
       }),
     };
@@ -484,6 +486,7 @@ export class SurfaceCore {
           name: pane.name,
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
         };
       }),
       topologyRevision: payload.topologyRevision,
@@ -1096,6 +1099,7 @@ export class SurfaceCore {
         "event.pane_removed",
         "event.pane_renamed",
       ],
+      targetCapabilities: [],
     };
   }
 
@@ -1224,6 +1228,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     name: null,
     paneId,
     paneLabel,
+    paneLineageId: `pl_${randomUUID().replaceAll("-", "")}`,
     pendingAnnotationCommit: false,
     snapshot: {
       bounds: null,
