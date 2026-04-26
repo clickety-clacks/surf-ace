@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import WebSocket from "ws";
@@ -247,6 +251,56 @@ function contentApplyRequest(paneId: number, revision: number): Request {
   };
 }
 
+function targetApplyRequest(
+  overrides: Partial<{
+    ownershipSessionId: string;
+    paneLineageId: string;
+    surfaceId: string;
+  }> = {},
+): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "target.apply",
+    payload: {
+      materialization: {
+        op: "native_pane.host",
+        panes: [
+          {
+            binding_id: "118:ct_top",
+            content_id: "ct_top",
+            geometry: { height: 384, width: 512, x: 512, y: 0 },
+            id: "118",
+            process: { args: ["top"], command: "foot" },
+            revision: 9 as never,
+            target: "terminal",
+          },
+        ],
+      },
+      ownershipEpoch: 1,
+      ownershipSessionId: overrides.ownershipSessionId ?? "sa_test",
+      paneLineageId: overrides.paneLineageId ?? "pl_118",
+      restoreReason: "resume_restore",
+      requestId: "restore_top_118",
+      surfaceId: (overrides.surfaceId ?? "sf_test") as never,
+      targetEpoch: 3,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.terminal_app.v1"],
+        safeToLogFields: [],
+        safetyClass: "process",
+        summary: "top",
+      },
+      targetId: "target_top_118",
+      targetKind: "terminal_app",
+      targetPayload: { command: "top" },
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 function paneSplitRequest(
   paneId: number,
   options: {
@@ -290,6 +344,7 @@ function snapshotGetRequest(paneId: number): Request {
 
 async function withServer(
   run: (ctx: { core: SurfaceCore; surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
+  options: { compositorSocketPath?: string | null } = {},
 ): Promise<void> {
   const core = new SurfaceCore({
     persistentState: {
@@ -304,6 +359,7 @@ async function withServer(
     core,
     endpointName: "Surf Ace",
     hostName: "localhost",
+    compositorSocketPath: options.compositorSocketPath ?? null,
     port,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
@@ -557,6 +613,153 @@ test("ws server rejects pair requests without providerName", async () => {
       socket.once("close", () => resolve());
     });
   });
+});
+
+test("ws server advertises terminal targets when compositor bridge is configured", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+
+    assert.equal(paired.ok, true);
+    assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.terminal_app.v1"]);
+
+    await closeSocket(socket);
+  }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
+});
+
+test("ws server forwards target.apply native pane host materialization to compositor", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const line = buffer.slice(0, newlineIndex);
+      const message = JSON.parse(line) as Record<string, unknown>;
+      received.push(message);
+      socket.write(`${JSON.stringify({ ok: true, status: { panes: [{ id: "118" }] } })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const applied = await request(socket, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(applied.ok, true);
+      assert.equal(applied.op, "target.apply");
+      assert.equal(applied.payload.status, "applied");
+      assert.deepEqual(received, [
+        {
+          panes: [
+            {
+              binding_id: "118:ct_top",
+              content_id: "ct_top",
+              geometry: { height: 384, width: 512, x: 512, y: 0 },
+              id: "118",
+              process: { args: ["top"], command: "foot" },
+              revision: 9,
+              target: "terminal",
+            },
+          ],
+          type: "native_pane.host",
+        },
+      ]);
+      assert.deepEqual(applied.payload.materializedState?.hostRequest, received[0]);
+      assert.deepEqual(applied.payload.materializedState?.hostResponse, {
+        ok: true,
+        status: { panes: [{ id: "118" }] },
+      });
+
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server rejects stale target.apply lineage before compositor materialization", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const rejected = await request(socket, targetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: "pl_stale",
+      surfaceId: paired.payload.surfaceId,
+    }));
+
+    assert.equal(rejected.ok, true);
+    assert.equal(rejected.op, "target.apply");
+    assert.equal(rejected.payload.status, "rejected");
+    assert.equal(rejected.payload.errorCode, "pane_lineage_missing");
+
+    await closeSocket(socket);
+  }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
+});
+
+test("ws server reports compositor target.apply rejection as materialization failure", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) {
+        return;
+      }
+      socket.write(`${JSON.stringify({ error: { message: "invalid pane 118" }, ok: false })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const failed = await request(socket, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(failed.ok, true);
+      assert.equal(failed.op, "target.apply");
+      assert.equal(failed.payload.status, "failed");
+      assert.equal(failed.payload.errorCode, "materialization_failed");
+      assert.equal(failed.payload.message, "invalid pane 118");
+
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
 });
 
 test("ws server ignores reply races when the requester closes before the response", async () => {
