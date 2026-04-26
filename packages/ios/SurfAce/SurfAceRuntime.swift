@@ -937,6 +937,11 @@ final class SurfAceRuntime {
                 responseObject: handleTopologyApply(id: id, payload: payload, connectionUUID: connectionUUID),
                 postSendPairCommit: nil
             )
+        case "target.apply":
+            return SurfAceProcessedRequestResult(
+                responseObject: handleTargetApply(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "content.apply":
             return SurfAceProcessedRequestResult(
                 responseObject: await handleContentApply(id: id, payload: payload, connectionUUID: connectionUUID),
@@ -1236,6 +1241,7 @@ final class SurfAceRuntime {
                 "capabilities": [
                     "contentTypes": supportedContentTypes.map(\.rawValue),
                     "eventTypes": eventTypes,
+                    "targetCapabilities": ["target.browser_url.v1"],
                 ],
                 "eventConfig": [
                     "profile": eventProfile.rawValue,
@@ -1532,6 +1538,106 @@ final class SurfAceRuntime {
             response["payload"] = payloadObject
         }
         return response
+    }
+
+    private func handleTargetApply(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        func result(
+            requestId: String,
+            targetId: String,
+            paneLineageId: String,
+            targetEpoch: Int,
+            status: String,
+            errorCode: String? = nil,
+            message: String? = nil,
+            materializedState: [String: Any]? = nil
+        ) -> [String: Any] {
+            var resultPayload: [String: Any] = [
+                "requestId": requestId,
+                "targetId": targetId,
+                "paneLineageId": paneLineageId,
+                "targetEpoch": targetEpoch,
+                "status": status,
+                "appliedAt": isoTimestampNow(),
+            ]
+            if let errorCode { resultPayload["errorCode"] = errorCode }
+            if let message { resultPayload["message"] = message }
+            if let materializedState { resultPayload["materializedState"] = materializedState }
+            return [
+                "v": 1,
+                "type": "response",
+                "op": "target.apply",
+                "id": id,
+                "ok": true,
+                "sentAt": timestampNow(),
+                "payload": resultPayload,
+            ]
+        }
+
+        let requestId = payload["requestId"] as? String ?? ""
+        let targetId = payload["targetId"] as? String ?? ""
+        let paneLineageId = payload["paneLineageId"] as? String ?? ""
+        let targetEpoch = payload["targetEpoch"] as? Int ?? 0
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID) else {
+            return makeErrorResponse(op: "target.apply", id: id, code: "not_paired", message: "pair.request required")
+        }
+        if activeSessions[surfaceId]?.sessionId != payload["ownershipSessionId"] as? String {
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "ownership_session_mismatch", message: "target.apply ownershipSessionId does not match the active session")
+        }
+        guard payload["targetKind"] as? String == "browser_url" else {
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsupported_target_kind", message: "unsupported target kind")
+        }
+        guard let header = payload["targetHeader"] as? [String: Any],
+              let requiredCapabilities = header["requiredCapabilities"] as? [String],
+              requiredCapabilities.contains("target.browser_url.v1"),
+              header["replaySemantics"] as? String == "navigate" else {
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsafe_payload", message: "browser_url requires target.browser_url.v1 and navigate semantics")
+        }
+        guard let paneId = paneIdFromLineage(paneLineageId),
+              let pane = pane(surfaceId: surfaceId, paneId: paneId) else {
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "pane_lineage_missing", message: "pane lineage is unknown")
+        }
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "policy_denied", message: "annotation mode is active")
+        }
+        guard let targetPayload = payload["targetPayload"] as? [String: Any],
+              let url = targetPayload["url"] as? String,
+              URL(string: url) != nil else {
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsafe_payload", message: "browser_url targetPayload.url is required")
+        }
+
+        if pane.currentEntry.contentId != nil {
+            pane.backStack.append(pane.currentEntry)
+            if pane.backStack.count > 20 {
+                pane.backStack.removeFirst(pane.backStack.count - 20)
+            }
+        }
+        pane.forwardStack.removeAll()
+        pane.currentEntry = .browserURL(
+            targetId: targetId,
+            targetEpoch: targetEpoch,
+            url: url,
+            allowedSnapshotFallback: targetPayload["allowedSnapshotFallback"] as? Bool,
+            fallbackSnapshotTargetId: targetPayload["fallbackSnapshotTargetId"] as? String
+        )
+        pane.pendingFlushStrokes.removeAll()
+        pane.firstPendingStrokeAt = nil
+        pane.lastPendingStrokeAt = nil
+        pane.lastSelection = nil
+        pane.lastNavigationURL = url
+        pane.lastPage = nil
+        pane.pendingSnapshotHintReason = "after_render"
+        pane.bridge?.render(entry: pane.currentEntry, restoreViewport: nil)
+        restorePaneDrawing(surfaceId: surfaceId, pane: pane)
+
+        return result(
+            requestId: requestId,
+            targetId: targetId,
+            paneLineageId: paneLineageId,
+            targetEpoch: targetEpoch,
+            status: "applied",
+            materializedState: ["url": url, "replaySemantics": "navigate"]
+        )
     }
 
     private func handlePaneSplit(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
@@ -2774,6 +2880,15 @@ final class SurfAceRuntime {
 
     private func timestampNow() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func isoTimestampNow() -> String {
+        ISO8601DateFormatter().string(from: Date())
+    }
+
+    private func paneIdFromLineage(_ paneLineageId: String) -> Int? {
+        guard paneLineageId.hasPrefix("pane:") else { return nil }
+        return Int(paneLineageId.dropFirst("pane:".count))
     }
 
     private func startupFailureMessage(for error: Error) -> String {

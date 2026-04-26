@@ -151,6 +151,80 @@ test("surface core falls back to authoritative html text when renderer snapshot 
   assert.equal(snapshot.visibleText, "pane two\nready");
 });
 
+test("surface core materializes browser_url targets as live URL content", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  const result = core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId: "pane:7",
+    requestId: "tr_test",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://google.com/",
+    },
+    targetId: "tg_google",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://google.com/" },
+  });
+
+  assert.equal(result.status, "applied");
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(pane.content.contentType, "browser_url");
+  assert.deepEqual(pane.content.content, { url: "https://google.com/" });
+});
+
+test("surface core rejects browser_url target when live browser capability is not requested", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  const result = core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId: "pane:7",
+    requestId: "tr_test",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "bytes",
+      requiredCapabilities: ["target.html.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://google.com/",
+    },
+    targetId: "tg_google",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://google.com/" },
+  });
+
+  assert.equal(result.status, "rejected");
+  assert.equal(result.errorCode, "capability_missing");
+});
+
 test("surface core treats stale pane access as best-effort instead of crashing", () => {
   const warnings: string[] = [];
   const core = new SurfaceCore({

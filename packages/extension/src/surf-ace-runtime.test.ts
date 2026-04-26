@@ -91,6 +91,13 @@ class FakeSurfAceWsServer {
     topologyRevision: number;
     windowLabel: string;
   }> = [];
+  readonly targetApplyRequests: Array<{
+    paneLineageId: string;
+    replaySemantics: string | null;
+    requiredCapabilities: string[];
+    targetKind: string;
+    url: string | null;
+  }> = [];
   initialRemotePaneId: number;
   readonly pairAttemptDetails: Array<{
     providerId: string | null;
@@ -574,6 +581,7 @@ class FakeSurfAceWsServer {
                   "event.navigation",
                   "event.snapshot_hint",
                 ],
+                targetCapabilities: ["target.browser_url.v1"],
               },
               eventConfig: {
                 activeEvents: [
@@ -660,6 +668,48 @@ class FakeSurfAceWsServer {
                 paneLabel: pane.paneLabel,
               })),
               topologyRevision: Number(message.payload?.topologyRevision ?? 0),
+            }),
+          ),
+        );
+        return;
+      }
+      case "target.apply": {
+        const targetSurface = this.requirePairedSurface(socket);
+        const targetPayload = (message.payload?.targetPayload ?? {}) as { url?: unknown };
+        const targetHeader = (message.payload?.targetHeader ?? {}) as {
+          replaySemantics?: unknown;
+          requiredCapabilities?: unknown;
+        };
+        const paneLineageId = String(message.payload?.paneLineageId ?? "");
+        const paneId = Number(/^pane:(\d+)$/.exec(paneLineageId)?.[1] ?? 0);
+        const pane = targetSurface.panes.get(paneId);
+        assert.ok(pane);
+        pane.contentId = String(message.payload?.targetId);
+        pane.contentType = String(message.payload?.targetKind);
+        pane.revision = Number(message.payload?.targetEpoch ?? pane.revision + 1);
+        pane.drawings = [];
+        this.targetApplyRequests.push({
+          paneLineageId,
+          replaySemantics: typeof targetHeader.replaySemantics === "string" ? targetHeader.replaySemantics : null,
+          requiredCapabilities: Array.isArray(targetHeader.requiredCapabilities)
+            ? targetHeader.requiredCapabilities.map(String)
+            : [],
+          targetKind: String(message.payload?.targetKind ?? ""),
+          url: typeof targetPayload.url === "string" ? targetPayload.url : null,
+        });
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "target.apply", {
+              appliedAt: new Date().toISOString(),
+              materializedState: {
+                replaySemantics: "navigate",
+                url: targetPayload.url,
+              },
+              paneLineageId,
+              requestId: String(message.payload?.requestId),
+              status: "applied",
+              targetEpoch: pane.revision,
+              targetId: pane.contentId,
             }),
           ),
         );
@@ -1673,6 +1723,32 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       } finally {
         unsubscribe();
       }
+    });
+  });
+
+  await t.test("provider routes browser_url pushes through target.apply instead of content.apply HTML", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const pushed = await runtime.push(
+        {
+          content: "https://google.com",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:url" },
+      );
+
+      assert.equal(pushed.paneId, firstPaneId);
+      assert.equal(server.contentSetRequests.length, 0);
+      assert.equal(server.targetApplyRequests.length, 1);
+      assert.deepEqual(server.targetApplyRequests[0], {
+        paneLineageId: `pane:${server.initialRemotePaneId}`,
+        replaySemantics: "navigate",
+        requiredCapabilities: ["target.browser_url.v1"],
+        targetKind: "browser_url",
+        url: "https://google.com/",
+      });
     });
   });
 

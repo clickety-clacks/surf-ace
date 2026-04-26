@@ -35,8 +35,10 @@ type TerminalContent = { lines: string[]; scrollback: number };
 type MarkdownContent = { markdown: string };
 type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
+type BrowserUrlContent = { url: string; allowedSnapshotFallback?: boolean; fallbackSnapshotTargetId?: string };
 type PaneContentValue =
   | null
+  | BrowserUrlContent
   | CanvasContent
   | HtmlContent
   | ImageContent
@@ -52,7 +54,7 @@ type RendererPaneState = {
   content: {
     content: PaneContentValue;
     contentId: string | null;
-    contentType: "canvas" | "html" | "image" | "markdown" | "pdf" | "terminal" | "video" | null;
+    contentType: "browser_url" | "canvas" | "html" | "image" | "markdown" | "pdf" | "terminal" | "video" | null;
     display?: { interactive?: boolean; scrollable?: boolean; title?: string };
     revision: number;
   };
@@ -1099,6 +1101,27 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
         assignSrcdoc();
       });
     }
+    return;
+  }
+
+  if (pane.content.contentType === "browser_url") {
+    const browserUrl = pane.content.content as BrowserUrlContent;
+    const frame = document.createElement("iframe");
+    frame.className = "content-html-frame content-browser-url-frame";
+    frame.setAttribute("sandbox", "allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts");
+    wireHtmlFrame(view, pane.paneId, frame);
+    view.contentEl.appendChild(frame);
+    sizeWebViewToPane(view, frame);
+    frame.addEventListener(
+      "load",
+      () => {
+        window.setTimeout(() => {
+          reportPaneSnapshot(view);
+        }, 0);
+      },
+      { once: true },
+    );
+    frame.src = browserUrl.url;
     return;
   }
 

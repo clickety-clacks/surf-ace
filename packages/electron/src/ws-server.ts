@@ -28,6 +28,7 @@ import type {
   SnapshotHintEvent,
   SurfaceViewport,
   SurfacesListRequest,
+  TargetApplyRequest,
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
@@ -653,6 +654,8 @@ export class SurfaceWsServer {
         return this.handleRelinquish(socket, request);
       case "topology.apply":
         return this.handleTopologyApply(socket, request);
+      case "target.apply":
+        return this.handleTargetApply(socket, request);
       case "content.apply":
         return await this.handleContentApply(socket, request);
       case "panes.list":
@@ -932,6 +935,40 @@ export class SurfaceWsServer {
       ok: true,
       op: "topology.apply",
       payload: this.core.topologyApply(surfaceId, request.payload),
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Response {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    const session = this.activeSession(surfaceId);
+    if (session && request.payload.ownershipSessionId !== session.sessionId) {
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply",
+        payload: {
+          appliedAt: new Date().toISOString(),
+          errorCode: "ownership_session_mismatch",
+          message: "target.apply ownershipSessionId does not match the active session",
+          paneLineageId: request.payload.paneLineageId,
+          requestId: request.payload.requestId,
+          status: "rejected",
+          targetEpoch: request.payload.targetEpoch,
+          targetId: request.payload.targetId,
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+    return {
+      id: request.id,
+      ok: true,
+      op: "target.apply",
+      payload: this.core.targetApply(surfaceId, request.payload),
       sentAt: Date.now(),
       type: "response",
       v: 1,

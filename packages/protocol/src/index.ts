@@ -24,6 +24,45 @@ export type ContentType =
   | "video"
   | "canvas";
 
+export type TargetKind = "browser_url";
+
+export type TargetCapability = "target.browser_url.v1";
+
+export type TargetHeader = {
+  summary: string;
+  requiredCapabilities: TargetCapability[];
+  safetyClass: "passive" | "network" | "process" | "privileged";
+  replaySemantics: "bytes" | "navigate" | "launch_equivalent" | "attach";
+  payloadSchemaVersion: number;
+  safeToLogFields: string[];
+};
+
+export type BrowserUrlTargetPayloadV1 = {
+  url: string;
+  allowedSnapshotFallback?: boolean;
+  fallbackSnapshotTargetId?: string;
+};
+
+export type TargetErrorCode =
+  | "capability_missing"
+  | "policy_denied"
+  | "approval_required"
+  | "unsafe_payload"
+  | "ownership_epoch_mismatch"
+  | "ownership_session_mismatch"
+  | "pane_lineage_missing"
+  | "pane_lineage_ambiguous"
+  | "target_epoch_stale"
+  | "target_superseded"
+  | "registration_late_old_epoch"
+  | "registration_duplicate"
+  | "registration_failed"
+  | "materialization_failed"
+  | "unsupported_target_kind"
+  | "restore_blocked_stale_target"
+  | "restore_unregistered_local_target"
+  | "restore_requires_confirmation";
+
 // `surf_ace_list` exposes provider-side connectivity with this enum in DESIGN.md.
 //
 // KNOWN BUG (iOS client): The connection status indicator (green bar) on
@@ -349,6 +388,22 @@ export type ContentApplyRequest = RequestBase<"content.apply"> & {
       };
 };
 
+export type TargetApplyRequest = RequestBase<"target.apply"> & {
+  payload: {
+    requestId: string;
+    targetId: string;
+    surfaceId: SurfaceId;
+    ownershipSessionId: string;
+    ownershipEpoch: number;
+    paneLineageId: string;
+    targetEpoch: number;
+    targetKind: TargetKind;
+    targetHeader: TargetHeader;
+    targetPayload: unknown;
+    restoreReason: "initial_apply" | "resume_restore" | "manual_restore" | "confirmed_restore";
+  };
+};
+
 export type PaneSplitRequest = RequestBase<"pane.split"> & {
   payload: {
     paneId: PaneId;
@@ -395,6 +450,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
     capabilities: {
       contentTypes: ContentType[];
       eventTypes: Event["op"][];
+      targetCapabilities?: TargetCapability[];
     };
     eventConfig: {
       profile: EventProfile;
@@ -522,6 +578,20 @@ export type ContentApplyResponse = ResponseBase<"content.apply"> & {
   };
 };
 
+export type TargetApplyResponse = ResponseBase<"target.apply"> & {
+  payload: {
+    requestId: string;
+    targetId: string;
+    paneLineageId: string;
+    targetEpoch: number;
+    status: "applied" | "rejected" | "failed";
+    errorCode?: TargetErrorCode;
+    message?: string;
+    materializedState?: Record<string, unknown>;
+    appliedAt: string;
+  };
+};
+
 export type PaneSplitResponse = ResponseBase<"pane.split"> & {
   payload: {
     panes: Array<{
@@ -553,6 +623,7 @@ export type ErrorResponse = {
     | "pair.request"
     | "ownership.relinquish"
     | "topology.apply"
+    | "target.apply"
     | "content.apply"
     | "content.set"
     | "content.append"
@@ -584,6 +655,7 @@ export type ErrorResponse = {
       | "stale_content"
       | "content_too_large"
       | "render_failed"
+      | TargetErrorCode
       | "rate_limited"
       | "internal_error";
     message: string;
@@ -733,6 +805,7 @@ export type Request =
   | PairRequest
   | RelinquishRequest
   | TopologyApplyRequest
+  | TargetApplyRequest
   | ContentApplyRequest
   | ContentSetRequest
   | ContentAppendRequest
@@ -751,6 +824,7 @@ export type Response =
   | PairResponse
   | RelinquishResponse
   | TopologyApplyResponse
+  | TargetApplyResponse
   | ContentApplyResponse
   | MutationAckResponse
   | AnnotationsRemoveResponse

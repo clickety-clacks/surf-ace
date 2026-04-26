@@ -9,6 +9,8 @@ type ProtocolSchemaDefName =
   | "PairResponse"
   | "RelinquishRequest"
   | "RelinquishResponse"
+  | "TargetApplyRequest"
+  | "TargetApplyResponse"
   | "ContentSetRequest"
   | "ContentAppendRequest"
   | "ContentPatchRequest"
@@ -62,6 +64,8 @@ export const pairRequestSchema = getSchemaDef("PairRequest");
 export const pairResponseSchema = getSchemaDef("PairResponse");
 export const relinquishRequestSchema = getSchemaDef("RelinquishRequest");
 export const relinquishResponseSchema = getSchemaDef("RelinquishResponse");
+export const targetApplyRequestSchema = getSchemaDef("TargetApplyRequest");
+export const targetApplyResponseSchema = getSchemaDef("TargetApplyResponse");
 export const contentSetRequestSchema = getSchemaDef("ContentSetRequest");
 export const contentAppendRequestSchema = getSchemaDef("ContentAppendRequest");
 export const contentPatchRequestSchema = getSchemaDef("ContentPatchRequest");

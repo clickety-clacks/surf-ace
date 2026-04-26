@@ -39,6 +39,8 @@ import {
   surfacesListRequestSchema,
   surfacesListResponseSchema,
   tapEventSchema,
+  targetApplyRequestSchema,
+  targetApplyResponseSchema,
 } from "./schemas.js";
 
 export const SURF_ACE_PROTOCOL_SCHEMAS = {
@@ -55,6 +57,11 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "ownership.relinquish": {
     request: relinquishRequestSchema,
     response: relinquishResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "target.apply": {
+    request: targetApplyRequestSchema,
+    response: targetApplyResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "content.set": {

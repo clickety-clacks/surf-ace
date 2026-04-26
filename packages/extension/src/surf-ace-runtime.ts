@@ -56,6 +56,9 @@ import type {
   SurfacesListResponse,
   SurfaceViewport,
   TapEvent,
+  TargetApplyRequest,
+  TargetApplyResponse,
+  TargetCapability,
   TopologyApplyResponse,
   Viewport,
   MutationAckResponse,
@@ -73,6 +76,9 @@ import { SurfAceWireClient } from "./surf-ace-server.js";
 export type SurfAceConnectionState = "connected" | "connecting" | "unreachable";
 type Brand<T, TName extends string> = T & { readonly __brand: TName };
 export type PaneId = Brand<string, "PaneId">;
+type BrowserUrlContentType = "browser_url";
+type PushContentType = ContentType | BrowserUrlContentType;
+type BrowserUrlPayload = { url: string; allowedSnapshotFallback?: boolean; fallbackSnapshotTargetId?: string };
 
 export type SurfAceHistorySummary = {
   backCount: number;
@@ -87,7 +93,7 @@ export type SurfAcePaneSummary = {
   activeContent:
     | {
         contentId: string;
-        contentType: ContentType;
+        contentType: PushContentType;
         revision: number;
       }
     | null;
@@ -201,7 +207,7 @@ export type SurfAceSnapshotResult = {
   paneLabel: number;
   snapshot: {
     contentId: string | null;
-    contentType: ContentType | null;
+    contentType: PushContentType | null;
     drawings?: Stroke[];
     image?: string;
     revision: number;
@@ -230,8 +236,10 @@ export type SurfAceAnnotateRemoveResult = {
 export type SurfAcePushInput =
   {
     content: string;
-    contentType: ContentType;
+    contentType: PushContentType;
     fingerprint: string;
+    allowedSnapshotFallback?: boolean;
+    fallbackSnapshotTargetId?: string;
     paneId: PaneId;
   };
 
@@ -361,8 +369,8 @@ type ManagedLayoutNode =
 
 type ManagedHistoryEntry = {
   contentId: ContentId;
-  contentType: ContentType;
-  contentValue: ContentSetRequest["payload"]["content"];
+  contentType: PushContentType;
+  contentValue: ContentSetRequest["payload"]["content"] | BrowserUrlPayload;
   historyOwnerToken: string | null;
   revision: Revision;
   sessionKey: string | null;
@@ -370,8 +378,8 @@ type ManagedHistoryEntry = {
 
 type ManagedPane = {
   activeContentId: ContentId | null;
-  contentType: ContentType | null;
-  contentValue: ContentSetRequest["payload"]["content"] | null;
+  contentType: PushContentType | null;
+  contentValue: ContentSetRequest["payload"]["content"] | BrowserUrlPayload | null;
   currentRevision: Revision;
   historyEntries: ManagedHistoryEntry[];
   historySummary: SurfAceHistorySummary;
@@ -418,6 +426,7 @@ type ManagedSurface = {
   stopRequested: boolean;
   surfaceId: SurfaceId;
   topologyRevision: number;
+  targetCapabilities: TargetCapability[];
   unreachableFailures: number;
   viewport: SurfaceViewport;
   windowLabel: string;
@@ -496,9 +505,15 @@ export class SurfAceToolError extends Error {
       | "unsupported_content_type"
       | "render_failed"
       | "busy"
+      | "capability_missing"
       | "invalid_operation"
+      | "materialization_failed"
+      | "pane_lineage_missing"
+      | "policy_denied"
       | "rate_limited"
       | "stale_revision"
+      | "unsafe_payload"
+      | "unsupported_target_kind"
       | "unsupported_operation_for_content_type",
     message: string,
   ) {
@@ -550,6 +565,18 @@ function makeProvisionalSurfaceId(endpointId: string): SurfaceId {
 
 function makeContentId(): ContentId {
   return `ct_${randomBytes(4).toString("hex")}` as ContentId;
+}
+
+function makeTargetId(): string {
+  return `tg_${randomBytes(8).toString("hex")}`;
+}
+
+function makeTargetRequestId(): string {
+  return `tr_${randomBytes(8).toString("hex")}`;
+}
+
+function paneLineageId(pane: ManagedPane): string {
+  return `pane:${pane.remotePaneId}`;
 }
 
 function makeFrameId(): string {
@@ -682,6 +709,7 @@ function createManagedSurface(
     snapshotSyncInFlight: false,
     stopRequested: false,
     surfaceId,
+    targetCapabilities: [],
     topologyRevision: 0,
     unreachableFailures: 0,
     viewport: cloneViewport(viewport),
@@ -885,6 +913,12 @@ function mutationErrorCode(
     case "stale_revision":
     case "unsupported_content_type":
     case "unsupported_operation_for_content_type":
+    case "capability_missing":
+    case "materialization_failed":
+    case "pane_lineage_missing":
+    case "policy_denied":
+    case "unsafe_payload":
+    case "unsupported_target_kind":
       return code;
     default:
       return "internal_error";
@@ -1161,7 +1195,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   ): Promise<SurfAcePushResult> {
     await this.start();
     const surface = this.requireConnectedSurface(input.fingerprint);
-    return await this.contentSet(surface, input, context?.sessionKey);
+    if (input.contentType === "browser_url") {
+      return await this.browserUrlTargetApply(surface, { ...input, contentType: "browser_url" }, context?.sessionKey);
+    }
+    return await this.contentSet(surface, { ...input, contentType: input.contentType as ContentType }, context?.sessionKey);
   }
 
   async clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult> {
@@ -1431,7 +1468,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async contentSet(
     surface: ManagedSurface,
-    input: SurfAcePushInput,
+    input: SurfAcePushInput & { contentType: ContentType },
     sessionKey?: string,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
@@ -1477,6 +1514,112 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       });
     }
     return result;
+  }
+
+  private async browserUrlTargetApply(
+    surface: ManagedSurface,
+    input: SurfAcePushInput & { contentType: BrowserUrlContentType },
+    sessionKey?: string,
+  ): Promise<SurfAcePushResult> {
+    const pane = this.requirePane(surface.surfaceId, input.paneId);
+    this.finalizeLiveFrame(surface, pane);
+    if (!surface.targetCapabilities.includes("target.browser_url.v1")) {
+      throw new SurfAceToolError(
+        "capability_missing",
+        "Surf Ace surface does not advertise target.browser_url.v1; refusing to fake a URL as HTML.",
+      );
+    }
+
+    let url: URL;
+    try {
+      url = new URL(input.content);
+    } catch {
+      throw new SurfAceToolError("unsafe_payload", "browser_url content must be an absolute URL.");
+    }
+
+    const targetId = makeTargetId();
+    const targetEpoch = (pane.currentRevision as number) + 1;
+    const payload: BrowserUrlPayload = {
+      ...(input.allowedSnapshotFallback === undefined ? {} : { allowedSnapshotFallback: input.allowedSnapshotFallback }),
+      ...(input.fallbackSnapshotTargetId === undefined ? {} : { fallbackSnapshotTargetId: input.fallbackSnapshotTargetId }),
+      url: url.toString(),
+    };
+    const request: TargetApplyRequest = {
+      id: makeBrandedRequestId(),
+      op: "target.apply",
+      payload: {
+        ownershipEpoch: 0,
+        ownershipSessionId: surface.sessionId ?? "",
+        paneLineageId: paneLineageId(pane),
+        requestId: makeTargetRequestId(),
+        restoreReason: "initial_apply",
+        surfaceId: surface.surfaceId,
+        targetEpoch,
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "navigate",
+          requiredCapabilities: ["target.browser_url.v1"],
+          safeToLogFields: ["url", "allowedSnapshotFallback", "fallbackSnapshotTargetId"],
+          safetyClass: "network",
+          summary: url.toString(),
+        },
+        targetId,
+        targetKind: "browser_url",
+        targetPayload: payload,
+      },
+      sentAt: asEpochMs(this.now()),
+      type: "request",
+      v: 1,
+    };
+
+    pane.pendingOwnerSessionKey = sessionKey ?? null;
+    const response = await this.sendRequest(surface, request);
+    if (isErrorResponse(response)) {
+      pane.pendingOwnerSessionKey = null;
+      throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
+    }
+    const result = (response as TargetApplyResponse).payload;
+    if (result.status !== "applied") {
+      pane.pendingOwnerSessionKey = null;
+      throw new SurfAceToolError(
+        mutationErrorCode(result.errorCode ?? "materialization_failed"),
+        result.message ?? "browser_url target was not applied",
+      );
+    }
+
+    const contentId = targetId as ContentId;
+    const previousVisibleEntry = this.visibleHistoryEntry(pane);
+    if (previousVisibleEntry) {
+      this.storeHiddenHistoryEntry(pane, previousVisibleEntry);
+    }
+    this.removeHiddenHistoryEntryForSession(pane, sessionKey ?? null);
+    pane.activeContentId = contentId;
+    pane.contentType = "browser_url";
+    pane.contentValue = payload;
+    pane.currentRevision = targetEpoch as Revision;
+    pane.historyOwnerToken = null;
+    pane.ownerSessionKey = pane.pendingOwnerSessionKey ?? sessionKey ?? null;
+    pane.historySummary.visibleContentId = contentId;
+    pane.pendingOwnerSessionKey = null;
+    pane.buffer.currentUrl = url.toString();
+    pane.snapshot = pane.snapshot
+      ? {
+          ...pane.snapshot,
+          contentId,
+          contentType: "browser_url",
+          drawings: [],
+          revision: targetEpoch as Revision,
+        }
+      : null;
+    this.queuePersistScreenSnapshot("target.apply browser_url");
+
+    return {
+      contentId,
+      fingerprint: surface.surfaceId,
+      paneId: pane.paneId,
+      paneLabel: pane.paneLabel,
+      revision: targetEpoch,
+    };
   }
 
   private emit(event: SurfAceLocalEvent): void {
@@ -2632,6 +2775,49 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         };
         const clearResponse = await this.sendRequest(surface, clearRequest);
         this.applyMutationResponse(surface, pane, clearResponse, clearRequest);
+        continue;
+      }
+
+      if (pane.contentType === "browser_url") {
+        const targetPayload = structuredClone(pane.contentValue) as BrowserUrlPayload;
+        const targetRequest: TargetApplyRequest = {
+          id: makeBrandedRequestId(),
+          op: "target.apply",
+          payload: {
+            ownershipEpoch: 0,
+            ownershipSessionId: surface.sessionId ?? "",
+            paneLineageId: paneLineageId(pane),
+            requestId: makeTargetRequestId(),
+            restoreReason: "resume_restore",
+            surfaceId: surface.surfaceId,
+            targetEpoch: pane.currentRevision as number,
+            targetHeader: {
+              payloadSchemaVersion: 1,
+              replaySemantics: "navigate",
+              requiredCapabilities: ["target.browser_url.v1"],
+              safeToLogFields: ["url", "allowedSnapshotFallback", "fallbackSnapshotTargetId"],
+              safetyClass: "network",
+              summary: targetPayload.url,
+            },
+            targetId: pane.activeContentId,
+            targetKind: "browser_url",
+            targetPayload,
+          },
+          sentAt: asEpochMs(this.now()),
+          type: "request",
+          v: 1,
+        };
+        const targetResponse = await this.sendRequest(surface, targetRequest);
+        if (isErrorResponse(targetResponse)) {
+          throw new SurfAceToolError(mutationErrorCode(targetResponse.error.code), targetResponse.error.message);
+        }
+        const targetResult = (targetResponse as TargetApplyResponse).payload;
+        if (targetResult.status !== "applied") {
+          throw new SurfAceToolError(
+            mutationErrorCode(targetResult.errorCode ?? "materialization_failed"),
+            targetResult.message ?? "browser_url target was not restored",
+          );
+        }
         continue;
       }
 
@@ -3992,6 +4178,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private applyPairState(surface: ManagedSurface, response: PairResponse): void {
     surface.name = response.payload.surfaceName;
+    surface.targetCapabilities = response.payload.capabilities.targetCapabilities ?? [];
     surface.viewport = cloneViewport(response.payload.viewport);
     if (response.payload.state.panes.length === 1 && surface.panes.size === 1) {
       const paneState = response.payload.state.panes[0]!;

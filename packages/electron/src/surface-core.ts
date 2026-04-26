@@ -31,18 +31,23 @@ import type {
   StrokeId,
   SurfaceId,
   SurfaceViewport,
+  TargetApplyRequest,
+  TargetApplyResponse,
   TopologyApplyRequest,
   TopologyApplyResponse,
 } from "../../protocol/src/index.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
 type ContentDisplay = ContentSetRequest["payload"]["display"];
+type BrowserUrlPayload = { url: string; allowedSnapshotFallback?: boolean; fallbackSnapshotTargetId?: string };
+type RenderableContentType = ContentType | "browser_url";
+type RenderablePayload = ContentPayload | BrowserUrlPayload;
 
 type HistoryEntry = {
   annotations: Stroke[];
-  content: ContentPayload | null;
+  content: RenderablePayload | null;
   contentId: string | null;
-  contentType: ContentType | null;
+  contentType: RenderableContentType | null;
   display?: ContentDisplay;
   ownerToken: string | null;
   revision: number;
@@ -109,9 +114,9 @@ export type RendererPaneState = {
   canGoBack: boolean;
   canGoForward: boolean;
   content: {
-    content: ContentPayload | null;
+    content: RenderablePayload | null;
     contentId: string | null;
-    contentType: ContentType | null;
+    contentType: RenderableContentType | null;
     display?: ContentDisplay;
     revision: number;
   };
@@ -181,6 +186,9 @@ const SUPPORTED_CONTENT_TYPES: ContentType[] = [
   "terminal",
   "markdown",
 ];
+const SUPPORTED_TARGET_CAPABILITIES = [
+  "target.browser_url.v1",
+] as const;
 
 export class SurfaceCore {
   private readonly surfaces = new Map<string, SurfaceState>();
@@ -586,6 +594,72 @@ export class SurfaceCore {
       ...currentMutationAck(pane),
       topologyRevision: payload.topologyRevision,
     };
+  }
+
+  targetApply(
+    surfaceId: string,
+    payload: TargetApplyRequest["payload"],
+  ): TargetApplyResponse["payload"] {
+    const surface = this.getSurface(surfaceId);
+    if (payload.surfaceId !== surface.surfaceId) {
+      return targetApplyResult(payload, "rejected", "materialization_failed", "target surfaceId does not match this surface");
+    }
+    if (!payload.targetHeader.requiredCapabilities.every((capability) =>
+      (SUPPORTED_TARGET_CAPABILITIES as readonly string[]).includes(capability)
+    )) {
+      return targetApplyResult(payload, "rejected", "capability_missing", "required target capability is not advertised");
+    }
+    if (payload.targetKind !== "browser_url") {
+      return targetApplyResult(payload, "rejected", "unsupported_target_kind", "unsupported target kind");
+    }
+    if (payload.targetHeader.replaySemantics !== "navigate") {
+      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url requires navigate replay semantics");
+    }
+    const targetPayload = payload.targetPayload as Partial<BrowserUrlPayload>;
+    if (typeof targetPayload.url !== "string" || targetPayload.url.trim() === "") {
+      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url is required");
+    }
+    let url: URL;
+    try {
+      url = new URL(targetPayload.url);
+    } catch {
+      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url must be an absolute URL");
+    }
+    const pane = paneForLineage(surface, payload.paneLineageId);
+    if (!pane) {
+      return targetApplyResult(payload, "rejected", "pane_lineage_missing", "pane lineage is unknown");
+    }
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      return targetApplyResult(payload, "rejected", "policy_denied", "annotation mode is active");
+    }
+
+    if (pane.historyIndex < pane.history.length - 1) {
+      pane.history = pane.history.slice(0, pane.historyIndex + 1);
+    }
+    pane.history.push({
+      annotations: [],
+      content: {
+        ...(targetPayload.allowedSnapshotFallback === undefined ? {} : { allowedSnapshotFallback: targetPayload.allowedSnapshotFallback }),
+        ...(targetPayload.fallbackSnapshotTargetId === undefined ? {} : { fallbackSnapshotTargetId: targetPayload.fallbackSnapshotTargetId }),
+        url: url.toString(),
+      },
+      contentId: payload.targetId,
+      contentType: "browser_url",
+      ownerToken: null,
+      revision: payload.targetEpoch,
+    });
+    pane.historyIndex = pane.history.length - 1;
+    trimHistory(pane);
+    pane.toast = null;
+    pane.latestContentEventAt = this.now();
+    clearDirtyState(pane);
+    this.emit({ surfaceId, type: "surface-changed" });
+    return targetApplyResult(payload, "applied", undefined, undefined, {
+      replaySemantics: "navigate",
+      url: url.toString(),
+    });
   }
 
   paneSplit(
@@ -1096,6 +1170,7 @@ export class SurfaceCore {
         "event.pane_removed",
         "event.pane_renamed",
       ],
+      targetCapabilities: [...SUPPORTED_TARGET_CAPABILITIES],
     };
   }
 
@@ -1242,6 +1317,38 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
 
 function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
+}
+
+function paneLineageId(paneId: number): string {
+  return `pane:${paneId}`;
+}
+
+function paneForLineage(surface: SurfaceState, lineageId: string): PaneState | null {
+  const match = /^pane:(\d+)$/.exec(lineageId);
+  if (!match) {
+    return null;
+  }
+  return surface.panes.get(Number(match[1])) ?? null;
+}
+
+function targetApplyResult(
+  payload: TargetApplyRequest["payload"],
+  status: TargetApplyResponse["payload"]["status"],
+  errorCode?: TargetApplyResponse["payload"]["errorCode"],
+  message?: string,
+  materializedState?: Record<string, unknown>,
+): TargetApplyResponse["payload"] {
+  return {
+    appliedAt: new Date().toISOString(),
+    errorCode,
+    materializedState,
+    message,
+    paneLineageId: payload.paneLineageId,
+    requestId: payload.requestId,
+    status,
+    targetEpoch: payload.targetEpoch,
+    targetId: payload.targetId,
+  };
 }
 
 function shouldReplaceVisibleEntry(pane: PaneState, ownerToken: string): boolean {

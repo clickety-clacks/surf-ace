@@ -669,6 +669,18 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 html = placeholderHTML(title: "Canvas", detail: "No preview is available for this pane.")
                 baseURL = nil
                 showWebView()
+            case .browserURL(let url, _, _):
+                finishPendingHTMLRender()
+                guard let requestURL = URL(string: url) else {
+                    html = placeholderHTML(title: "Browser URL", detail: "Invalid URL.")
+                    baseURL = nil
+                    showWebView()
+                    break
+                }
+                showWebView()
+                webView.load(URLRequest(url: requestURL))
+                applyCurrentInteractionState()
+                return
             case nil:
                 finishPendingHTMLRender()
                 html = standbyHTML()
@@ -737,6 +749,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             lastSelection = nil
         case .terminal(let lines, _):
             lastVisibleText = lines.suffix(200).map(SurfAceANSI.strip).joined(separator: "\n")
+        case .browserURL(let url, _, _):
+            lastVisibleText = url
+            lastSelection = nil
         case .some(.video), .some(.canvas):
             lastVisibleText = ""
             lastSelection = nil

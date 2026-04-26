@@ -82,10 +82,14 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.ok(pushTool);
   assert.deepEqual(
     Object.keys(pushTool.inputSchema.properties as Record<string, unknown>).sort(),
-    ["content", "contentType", "fingerprint", "paneId"].sort(),
+    ["allowedSnapshotFallback", "content", "contentType", "fallbackSnapshotTargetId", "fingerprint", "paneId"].sort(),
   );
   assert.deepEqual(pushTool.inputSchema.required, ["fingerprint", "paneId", "contentType", "content"]);
   assert.equal(pushTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(
+    ((pushTool.inputSchema.properties as Record<string, any>).contentType as Record<string, unknown>).enum,
+    ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "browser_url"],
+  );
 
   const splitTool = tools.find((tool) => tool.name === "surf_ace_split");
   assert.ok(splitTool);

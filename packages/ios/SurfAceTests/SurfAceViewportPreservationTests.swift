@@ -139,4 +139,45 @@ final class SurfAceViewportPreservationTests: XCTestCase {
             )
         )
     }
+
+    func testBrowserURLPaneEntryIsDistinctFromStaticHTML() {
+        let entry = SurfAcePaneEntry.browserURL(
+            targetId: "tg_google",
+            targetEpoch: 1,
+            url: "https://google.com/",
+            allowedSnapshotFallback: true,
+            fallbackSnapshotTargetId: "tg_snapshot"
+        )
+
+        XCTAssertEqual(entry.contentId, "tg_google")
+        XCTAssertEqual(entry.revision, 1)
+        XCTAssertEqual(entry.contentType, .browserUrl)
+        XCTAssertEqual(
+            entry.payload,
+            .browserURL(
+                url: "https://google.com/",
+                allowedSnapshotFallback: true,
+                fallbackSnapshotTargetId: "tg_snapshot"
+            )
+        )
+        XCTAssertEqual(entry.url, "https://google.com/")
+    }
+
+    func testContentApplyParserRejectsBrowserURLAsStaticContent() {
+        XCTAssertThrowsError(
+            try SurfAceFrame.from(
+                contentId: "ct_cafefeed",
+                revision: 1,
+                jsonObject: [
+                    "contentType": "browser_url",
+                    "content": ["url": "https://google.com/"],
+                ]
+            )
+        ) { error in
+            guard case SurfAceFrameParseError.unsupportedType = error else {
+                XCTFail("Unexpected error: \(error)")
+                return
+            }
+        }
+    }
 }

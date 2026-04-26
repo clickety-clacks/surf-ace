@@ -17,6 +17,7 @@ enum SurfAceContentType: String, Codable {
     case markdown
     case video
     case canvas
+    case browserUrl = "browser_url"
 }
 
 enum SurfAceEventProfile: String {
@@ -96,6 +97,7 @@ enum SurfAceFramePayload: Equatable {
     case markdown(markdown: String)
     case video(url: String)
     case canvas(color: String?, grid: Bool)
+    case browserURL(url: String, allowedSnapshotFallback: Bool?, fallbackSnapshotTargetId: String?)
 }
 
 struct SurfAceFrame: Equatable {
@@ -176,6 +178,8 @@ struct SurfAceFrame: Equatable {
             } else {
                 throw SurfAceFrameParseError.missingField("content")
             }
+        case .browserUrl:
+            throw SurfAceFrameParseError.unsupportedType
         }
 
         let display = jsonObject["display"] as? [String: Any]
@@ -295,6 +299,32 @@ struct SurfAcePaneEntry {
             scrollable: frame.scrollable,
             interactive: frame.interactive,
             url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+    }
+
+    static func browserURL(
+        targetId: String,
+        targetEpoch: Int,
+        url: String,
+        allowedSnapshotFallback: Bool? = nil,
+        fallbackSnapshotTargetId: String? = nil
+    ) -> SurfAcePaneEntry {
+        SurfAcePaneEntry(
+            contentId: targetId,
+            revision: targetEpoch,
+            historyOwnerToken: nil,
+            contentType: .browserUrl,
+            payload: .browserURL(
+                url: url,
+                allowedSnapshotFallback: allowedSnapshotFallback,
+                fallbackSnapshotTargetId: fallbackSnapshotTargetId
+            ),
+            title: nil,
+            scrollable: true,
+            interactive: true,
+            url: url,
             drawingData: Data(),
             strokesById: [:]
         )

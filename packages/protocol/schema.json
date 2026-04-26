@@ -7,6 +7,7 @@
     { "$ref": "#/$defs/SurfacesListRequest" },
     { "$ref": "#/$defs/PairRequest" },
     { "$ref": "#/$defs/RelinquishRequest" },
+    { "$ref": "#/$defs/TargetApplyRequest" },
     { "$ref": "#/$defs/ContentSetRequest" },
     { "$ref": "#/$defs/ContentAppendRequest" },
     { "$ref": "#/$defs/ContentPatchRequest" },
@@ -18,6 +19,7 @@
     { "$ref": "#/$defs/SurfacesListResponse" },
     { "$ref": "#/$defs/PairResponse" },
     { "$ref": "#/$defs/RelinquishResponse" },
+    { "$ref": "#/$defs/TargetApplyResponse" },
     { "$ref": "#/$defs/MutationAckResponse" },
     { "$ref": "#/$defs/AnnotationsRemoveResponse" },
     { "$ref": "#/$defs/SnapshotResponse" },
@@ -103,6 +105,14 @@
     "ContentType": {
       "type": "string",
       "enum": ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"]
+    },
+    "TargetKind": {
+      "type": "string",
+      "enum": ["browser_url"]
+    },
+    "TargetCapability": {
+      "type": "string",
+      "enum": ["target.browser_url.v1"]
     },
     "EventType": {
       "type": "string",
@@ -274,6 +284,24 @@
             "stale_content",
             "content_too_large",
             "render_failed",
+            "capability_missing",
+            "policy_denied",
+            "approval_required",
+            "unsafe_payload",
+            "ownership_epoch_mismatch",
+            "ownership_session_mismatch",
+            "pane_lineage_missing",
+            "pane_lineage_ambiguous",
+            "target_epoch_stale",
+            "target_superseded",
+            "registration_late_old_epoch",
+            "registration_duplicate",
+            "registration_failed",
+            "materialization_failed",
+            "unsupported_target_kind",
+            "restore_blocked_stale_target",
+            "restore_unregistered_local_target",
+            "restore_requires_confirmation",
             "rate_limited",
             "internal_error"
           ]
@@ -281,6 +309,29 @@
         "message": { "type": "string", "minLength": 1 },
         "details": { "type": "object" }
       }
+    },
+    "TargetErrorCode": {
+      "type": "string",
+      "enum": [
+        "capability_missing",
+        "policy_denied",
+        "approval_required",
+        "unsafe_payload",
+        "ownership_epoch_mismatch",
+        "ownership_session_mismatch",
+        "pane_lineage_missing",
+        "pane_lineage_ambiguous",
+        "target_epoch_stale",
+        "target_superseded",
+        "registration_late_old_epoch",
+        "registration_duplicate",
+        "registration_failed",
+        "materialization_failed",
+        "unsupported_target_kind",
+        "restore_blocked_stale_target",
+        "restore_unregistered_local_target",
+        "restore_requires_confirmation"
+      ]
     },
     "HtmlContent": {
       "type": "object",
@@ -441,6 +492,57 @@
         "op": { "const": "ownership.relinquish" },
         "id": { "$ref": "#/$defs/RequestId" },
         "sentAt": { "$ref": "#/$defs/EpochMs" }
+      }
+    },
+    "TargetHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "requiredCapabilities", "safetyClass", "replaySemantics", "payloadSchemaVersion", "safeToLogFields"],
+      "properties": {
+        "summary": { "type": "string" },
+        "requiredCapabilities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TargetCapability" },
+          "uniqueItems": true
+        },
+        "safetyClass": { "type": "string", "enum": ["passive", "network", "process", "privileged"] },
+        "replaySemantics": { "type": "string", "enum": ["bytes", "navigate", "launch_equivalent", "attach"] },
+        "payloadSchemaVersion": { "type": "integer", "minimum": 1 },
+        "safeToLogFields": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "TargetApplyRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "target.apply" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requestId", "targetId", "surfaceId", "ownershipSessionId", "ownershipEpoch", "paneLineageId", "targetEpoch", "targetKind", "targetHeader", "targetPayload", "restoreReason"],
+          "properties": {
+            "requestId": { "type": "string", "minLength": 1 },
+            "targetId": { "type": "string", "minLength": 1 },
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "ownershipSessionId": { "type": "string" },
+            "ownershipEpoch": { "type": "integer", "minimum": 0 },
+            "paneLineageId": { "type": "string", "minLength": 1 },
+            "targetEpoch": { "type": "integer", "minimum": 0 },
+            "targetKind": { "$ref": "#/$defs/TargetKind" },
+            "targetHeader": { "$ref": "#/$defs/TargetHeader" },
+            "targetPayload": {},
+            "restoreReason": { "type": "string", "enum": ["initial_apply", "resume_restore", "manual_restore", "confirmed_restore"] }
+          }
+        }
       }
     },
     "ContentSetRequest": {
@@ -758,6 +860,11 @@
                   "type": "array",
                   "items": { "$ref": "#/$defs/EventType" },
                   "uniqueItems": true
+                },
+                "targetCapabilities": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/TargetCapability" },
+                  "uniqueItems": true
                 }
               }
             },
@@ -843,6 +950,35 @@
           "required": ["relinquished"],
           "properties": {
             "relinquished": { "const": true }
+          }
+        }
+      }
+    },
+    "TargetApplyResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "target.apply" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requestId", "targetId", "paneLineageId", "targetEpoch", "status", "appliedAt"],
+          "properties": {
+            "requestId": { "type": "string" },
+            "targetId": { "type": "string" },
+            "paneLineageId": { "type": "string" },
+            "targetEpoch": { "type": "integer", "minimum": 0 },
+            "status": { "type": "string", "enum": ["applied", "rejected", "failed"] },
+            "errorCode": { "$ref": "#/$defs/TargetErrorCode" },
+            "message": { "type": "string" },
+            "materializedState": { "type": "object" },
+            "appliedAt": { "type": "string" }
           }
         }
       }
@@ -996,6 +1132,7 @@
             "surfaces.list",
             "pair.request",
             "ownership.relinquish",
+            "target.apply",
             "content.set",
             "content.append",
             "content.patch",
