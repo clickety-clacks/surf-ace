@@ -91,8 +91,10 @@ class FakeSurfAceWsServer {
     ownershipSessionId: string;
     paneLineageId: string;
     restoreReason: string;
+    targetHeader: unknown;
     targetId: string;
     targetKind: string;
+    targetPayload: unknown;
   }> = [];
   targetApplyErrorCode: string | null = null;
   readonly topologyApplyRequests: Array<{
@@ -761,8 +763,10 @@ class FakeSurfAceWsServer {
           ownershipSessionId: String(message.payload?.ownershipSessionId ?? ""),
           paneLineageId: String(message.payload?.paneLineageId ?? ""),
           restoreReason: String(message.payload?.restoreReason ?? ""),
+          targetHeader: structuredClone(message.payload?.targetHeader),
           targetId: String(message.payload?.targetId ?? ""),
           targetKind: String(message.payload?.targetKind ?? ""),
+          targetPayload: structuredClone(message.payload?.targetPayload),
         });
         if (this.targetApplyErrorCode) {
           socket.send(
@@ -1124,6 +1128,7 @@ async function withRuntimeHarness(
         },
       ) => Promise<void>)
     | {
+        configureServer?: (server: FakeSurfAceWsServer) => void;
         now?: () => number;
         providerName?: string;
         run: (ctx: {
@@ -1138,10 +1143,11 @@ async function withRuntimeHarness(
 ): Promise<void> {
   const options =
     typeof optionsOrRun === "function"
-      ? { run: optionsOrRun, now: undefined, providerName: undefined }
+      ? { configureServer: undefined, run: optionsOrRun, now: undefined, providerName: undefined }
       : optionsOrRun;
   const port = nextPort++;
   const server = new FakeSurfAceWsServer(port);
+  options.configureServer?.(server);
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-"));
   const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
   const warnings: string[] = [];
@@ -1908,12 +1914,94 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           ownershipSessionId: targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId).ownershipSessionId,
           paneLineageId: targetAfterPlaceholder?.paneLineageId,
           restoreReason: "confirmed_restore",
+          targetHeader: {
+            payloadSchemaVersion: 1,
+            replaySemantics: "launch_equivalent",
+            requiredCapabilities: ["target.terminal_app.v1"],
+            safeToLogFields: ["command", "args"],
+            safetyClass: "process",
+            summary: "btop",
+          },
           targetId: target?.targetId,
           targetKind: "terminal_app",
+          targetPayload: {
+            args: [],
+            command: "btop",
+            cwd: "/tmp",
+            env: { TERM: "xterm-256color" },
+            envPolicy: "explicit_allowlist",
+            pty: true,
+            restartPolicy: "restore_new_process",
+          },
         },
       ]);
       const screensAfterRestore = await runtime.listScreens();
       assert.equal(screensAfterRestore[0]?.panes[0]?.target?.diagnosticContent, null);
+    });
+  });
+
+  await t.test("surf_ace_push browser_url creates a live URL target instead of static HTML", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        const pushed = await runtime.push({
+          content: "https://google.com",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(pushed.contentId, null);
+        assert.equal(pushed.targetKind, "browser_url");
+        assert.equal(pushed.targetApplyEvidence?.status, "applied");
+        assert.equal(server.contentSetRequests.length, 0);
+        assert.equal(server.targetApplyRequests.length, 1);
+        const [applyRequest] = server.targetApplyRequests;
+        assert.ok(applyRequest);
+        assert.equal(applyRequest.materialization, undefined);
+        assert.equal(applyRequest.restoreReason, "initial_apply");
+        assert.equal(applyRequest.targetKind, "browser_url");
+        assert.deepEqual(applyRequest.targetHeader, {
+          payloadSchemaVersion: 1,
+          replaySemantics: "navigate",
+          requiredCapabilities: ["target.browser_url.v1"],
+          safeToLogFields: ["url"],
+          safetyClass: "network",
+          summary: "https://google.com",
+        });
+        assert.deepEqual(applyRequest.targetPayload, { url: "https://google.com" });
+
+        const screens = await runtime.listScreens();
+        const target = screens[0]?.panes[0]?.target;
+        assert.equal(target?.targetKind, "browser_url");
+        assert.equal(target?.targetPolicy, "confirm");
+        assert.deepEqual(target?.targetPayload, { url: "https://google.com" });
+      },
+    });
+  });
+
+  await t.test("surf_ace_push browser_url blocks when the surface lacks live browser capability", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+      await assert.rejects(
+        async () => await runtime.push({
+          content: "https://google.com",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        }),
+        /target\.browser_url\.v1/,
+      );
+      assert.equal(server.contentSetRequests.length, 0);
+      assert.equal(server.targetApplyRequests.length, 0);
     });
   });
 

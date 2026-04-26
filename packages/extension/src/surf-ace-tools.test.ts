@@ -86,6 +86,10 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(pushTool.inputSchema.required, ["fingerprint", "paneId", "contentType", "content"]);
   assert.equal(pushTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(
+    (pushTool.inputSchema.properties as { contentType: { enum: string[] } }).contentType.enum,
+    ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "browser_url"],
+  );
 
   const splitTool = tools.find((tool) => tool.name === "surf_ace_split");
   assert.ok(splitTool);

@@ -236,25 +236,33 @@ export type SurfAceAnnotateRemoveResult = {
   removedStrokeIds: string[];
 };
 
-export type SurfAcePushInput =
-  {
-    content: string;
-    contentType: ContentType;
-    diagnostic?: {
-      derivedFromTargetId?: string;
-      kind: "placeholder" | "status" | "error";
-      summary: string;
-    };
-    fingerprint: string;
-    paneId: PaneId;
+export type SurfAcePushContentType = ContentType | "browser_url";
+
+export type SurfAcePushInput = {
+  content: string;
+  contentType: SurfAcePushContentType;
+  diagnostic?: {
+    derivedFromTargetId?: string;
+    kind: "placeholder" | "status" | "error";
+    summary: string;
   };
+  fingerprint: string;
+  paneId: PaneId;
+};
+
+type SurfAceContentPushInput = SurfAcePushInput & { contentType: ContentType };
+type SurfAceBrowserUrlPushInput = SurfAcePushInput & { contentType: "browser_url" };
 
 export type SurfAcePushResult = {
-  contentId: string;
+  blockedReason?: TargetErrorCode | null;
+  contentId: string | null;
   fingerprint: string;
   paneId: PaneId;
   paneLabel: number;
   revision: number;
+  targetApplyEvidence?: ApplyEvidence;
+  targetId?: string;
+  targetKind?: TargetKind;
 };
 
 export type SurfAceClearResult = {
@@ -1182,6 +1190,14 @@ function normalizeContent(
   return content as ContentSetRequest["payload"]["content"];
 }
 
+function isBrowserUrlPushInput(input: SurfAcePushInput): input is SurfAceBrowserUrlPushInput {
+  return input.contentType === "browser_url";
+}
+
+function isContentPushInput(input: SurfAcePushInput): input is SurfAceContentPushInput {
+  return input.contentType !== "browser_url";
+}
+
 function defaultRestorePolicyForTarget(
   targetKind: TargetKind,
   targetHeader: TargetHeader,
@@ -1673,7 +1689,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   ): Promise<SurfAcePushResult> {
     await this.start();
     const surface = this.requireConnectedSurface(input.fingerprint);
-    return await this.contentSet(surface, input, context?.sessionKey);
+    if (isBrowserUrlPushInput(input)) {
+      return await this.browserUrlTargetSet(surface, input);
+    }
+    if (isContentPushInput(input)) {
+      return await this.contentSet(surface, input, context?.sessionKey);
+    }
+    throw new SurfAceToolError("unsupported_content_type", `Unsupported content type: ${String(input.contentType)}`);
   }
 
   async clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult> {
@@ -2072,7 +2094,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async contentSet(
     surface: ManagedSurface,
-    input: SurfAcePushInput,
+    input: SurfAceContentPushInput,
     sessionKey?: string,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
@@ -2120,6 +2142,49 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       });
     }
     return result;
+  }
+
+  private async browserUrlTargetSet(
+    surface: ManagedSurface,
+    input: SurfAceBrowserUrlPushInput,
+  ): Promise<SurfAcePushResult> {
+    const pane = this.requirePane(surface.surfaceId, input.paneId);
+    this.finalizeLiveFrame(surface, pane);
+    const requiredCapability = requiredCapabilityForTargetKind("browser_url");
+    if (!surface.targetCapabilities.has(requiredCapability)) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Surface ${surface.surfaceId} does not advertise ${requiredCapability}`,
+      );
+    }
+
+    const targetHeader: TargetHeader = {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: [requiredCapability],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: input.content,
+    };
+    const target = await this.createPaneTargetRecord(surface, pane, {
+      targetHeader,
+      targetKind: "browser_url",
+      targetPayload: { url: input.content },
+    });
+    pane.diagnosticContent = null;
+
+    const evidence = await this.materializeTargetRecord(surface, pane, target, "initial_apply");
+    return {
+      blockedReason: evidence.status === "applied" ? null : evidence.errorCode ?? "materialization_failed",
+      contentId: null,
+      fingerprint: surface.surfaceId,
+      paneId: pane.paneId,
+      paneLabel: pane.paneLabel,
+      revision: pane.currentRevision,
+      targetApplyEvidence: evidence,
+      targetId: target.targetId,
+      targetKind: target.targetKind,
+    };
   }
 
   private emit(event: SurfAceLocalEvent): void {
