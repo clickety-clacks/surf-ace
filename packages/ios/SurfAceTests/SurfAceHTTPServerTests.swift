@@ -103,10 +103,10 @@ final class SurfAceHTTPServerTests: XCTestCase {
         XCTAssertEqual(services, ["_surf-ace._tcp"])
     }
 
-    func testInfoPlistDoesNotEnableMultipleSceneSupport() throws {
+    func testInfoPlistDeclaresMultipleSceneSupport() throws {
         let info = try loadAppInfoPlist()
-        let sceneManifest = info["UIApplicationSceneManifest"] as? [String: Any]
-        XCTAssertNotEqual(sceneManifest?["UIApplicationSupportsMultipleScenes"] as? Bool, true)
+        let sceneManifest = try XCTUnwrap(info["UIApplicationSceneManifest"] as? [String: Any])
+        XCTAssertEqual(sceneManifest["UIApplicationSupportsMultipleScenes"] as? Bool, true)
     }
 
     private func nextAvailablePort() throws -> UInt16 {

@@ -356,16 +356,6 @@ final class SurfAceRuntime {
             }
             return existing
         }
-        if !UIApplication.shared.supportsMultipleScenes,
-           let primarySurface = surfaces.first {
-            surfAceLifecycleLog(
-                "event=scene_connect_rejected_multiple_scenes \(surfAceDiagnosticFields([("scene_key", sceneKey), ("primary_surface_id", primarySurface.surfaceId)]))"
-            )
-            if let scene {
-                requestDuplicateSceneDestruction(scene: scene, sceneKey: sceneKey)
-            }
-            return primarySurface
-        }
         if let scene {
             ensureSceneDisconnectObservation(sceneKey: sceneKey, scene: scene)
         }
@@ -442,16 +432,6 @@ final class SurfAceRuntime {
         }
         ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
         refreshBonjourTXT()
-    }
-
-    private func requestDuplicateSceneDestruction(scene: UIScene, sceneKey: String) {
-        UIApplication.shared.requestSceneSessionDestruction(scene.session, options: nil) { error in
-            Task { @MainActor in
-                surfAceLifecycleLog(
-                    "event=scene_destruction_failed \(surfAceDiagnosticFields([("scene_key", sceneKey), ("error", error.localizedDescription)]))"
-                )
-            }
-        }
     }
 
     private func ensureSceneDisconnectObservation(sceneKey: String, scene: UIScene) {
