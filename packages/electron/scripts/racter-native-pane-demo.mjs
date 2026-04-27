@@ -320,11 +320,9 @@ function resolvePaneGeometries(statusResponse, parsedArgs) {
     parsedArgs.logicalHeight ?? parsedArgs["logical-height"] ?? status.logical_surface_height ?? 3840,
   );
   const paneWidth = logicalWidth / 2;
-  const bottomControlGutter = Number(parsedArgs.bottomControlGutter ?? parsedArgs["bottom-control-gutter"] ?? 112);
-  const nativePaneHeight = Math.max(1, logicalHeight - bottomControlGutter);
   return {
-    btop: { height: nativePaneHeight, width: paneWidth, x: 0, y: 0 },
-    top: { height: nativePaneHeight, width: logicalWidth - paneWidth, x: paneWidth, y: 0 },
+    btop: { height: logicalHeight, width: paneWidth, x: 0, y: 0 },
+    top: { height: logicalHeight, width: logicalWidth - paneWidth, x: paneWidth, y: 0 },
   };
 }
 
