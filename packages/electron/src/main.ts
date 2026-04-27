@@ -37,7 +37,6 @@ if (gpuDisableRequested()) {
 }
 
 const windows = new Map<string, BrowserWindow>();
-const lastExplicitPaneIds = new Map<string, number>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const readyWindows = new Set<string>();
 const singleInstanceLock = app.requestSingleInstanceLock();
@@ -188,10 +187,6 @@ function broadcastSurfaceState(surfaceId: string): void {
     return;
   }
   const state = core.getRendererWindowState(surfaceId);
-  const activePaneId = lastExplicitPaneIds.get(surfaceId);
-  if (activePaneId && !state.panes.some((pane) => pane.paneId === activePaneId)) {
-    lastExplicitPaneIds.delete(surfaceId);
-  }
   const windowLabel = core.surfaceWindowLabel(surfaceId);
   window.setTitle(windowLabel ? `${endpointName()} · ${windowLabel}` : endpointName());
   if (!readyWindows.has(surfaceId)) {
@@ -221,7 +216,7 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
       return;
     }
     const state = core.getRendererWindowState(surfaceId);
-    const activePaneId = lastExplicitPaneIds.get(surfaceId);
+    const activePaneId = core.activeKeyboardPaneId(surfaceId);
     if (!activePaneId || !state.panes.some((pane) => pane.paneId === activePaneId)) {
       return;
     }
@@ -295,7 +290,6 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   });
   window.on("closed", () => {
     windows.delete(surfaceId);
-    lastExplicitPaneIds.delete(surfaceId);
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
     if (!isQuitting) {
@@ -418,7 +412,7 @@ function installIpc(): void {
 
     const paneId = Number(payload.paneId ?? 0);
     if (paneId > 0) {
-      lastExplicitPaneIds.set(surfaceId, paneId);
+      core.setActiveKeyboardPane(surfaceId, paneId);
     }
     switch (payload.type) {
       case "focus-pane":

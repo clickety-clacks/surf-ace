@@ -87,6 +87,7 @@ type LayoutNode =
     };
 
 type SurfaceState = {
+  activeKeyboardPaneId: number | null;
   connectionBar: "connected" | "connecting" | "disconnected";
   layout: LayoutNode | null;
   name: string;
@@ -105,6 +106,7 @@ export type PersistentSurfaceState = {
 };
 
 export type RendererPaneState = {
+  activeKeyboardPane: boolean;
   annotationBorderVisible: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -284,6 +286,7 @@ export class SurfaceCore {
 
   getRendererWindowState(surfaceId: string): RendererWindowState {
     const surface = this.getSurface(surfaceId);
+    this.ensureActiveKeyboardPane(surface);
     return {
       connectionBar: surface.connectionBar,
       layout: surface.layout ? structuredClone(surface.layout) : null,
@@ -292,6 +295,7 @@ export class SurfaceCore {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
         return {
+          activeKeyboardPane: surface.activeKeyboardPaneId === paneId,
           annotationBorderVisible: pane.annotating,
           canGoBack: pane.historyIndex > 0,
           canGoForward: pane.historyIndex < pane.history.length - 1,
@@ -316,6 +320,21 @@ export class SurfaceCore {
       viewport: cloneViewport(surface.viewport),
       windowLabel: surface.windowLabel,
     };
+  }
+
+  activeKeyboardPaneId(surfaceId: string): number | null {
+    const surface = this.getSurface(surfaceId);
+    this.ensureActiveKeyboardPane(surface);
+    return surface.activeKeyboardPaneId;
+  }
+
+  setActiveKeyboardPane(surfaceId: string, paneId: number): void {
+    const surface = this.getSurface(surfaceId);
+    if (!surface.panes.has(paneId) || surface.activeKeyboardPaneId === paneId) {
+      return;
+    }
+    surface.activeKeyboardPaneId = paneId;
+    this.emit({ surfaceId, type: "surface-changed" });
   }
 
   clearToast(surfaceId: string, paneId: number): void {
@@ -475,6 +494,7 @@ export class SurfaceCore {
     surface.panes = nextPanes;
     surface.topologyRevision = Number(payload.topologyRevision);
     surface.windowLabel = payload.windowLabel;
+    this.ensureActiveKeyboardPane(surface);
     this.emit({ surfaceId, type: "surface-changed" });
 
     return {
@@ -615,6 +635,7 @@ export class SurfaceCore {
       surface.panes.set(pane.paneId, pane);
       surface.paneOrder.push(pane.paneId);
     }
+    surface.activeKeyboardPaneId = sourcePane.paneId;
     surface.layout = splitLayoutNode(surface.layout!, sourcePane.paneId, payload.direction, [
       sourcePane.paneId,
       ...newPaneIds,
@@ -669,6 +690,7 @@ export class SurfaceCore {
     surface.panes.delete(paneId);
     surface.paneOrder = surface.paneOrder.filter((entry) => entry !== paneId);
     surface.layout = collapseLayout(removePaneFromLayout(surface.layout!, paneId));
+    this.ensureActiveKeyboardPane(surface);
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({ paneId, surfaceId, type: "pane-removed" });
     return {
@@ -1102,6 +1124,7 @@ export class SurfaceCore {
   private createSurface(surfaceId: string, name: string, viewport: SurfaceViewport): SurfaceState {
     const bootstrapPane = createPaneState(BOOTSTRAP_PANE_ID, 0, this.now());
     const surface: SurfaceState = {
+      activeKeyboardPaneId: BOOTSTRAP_PANE_ID,
       connectionBar: "disconnected",
       layout: { paneId: BOOTSTRAP_PANE_ID, type: "pane" },
       name,
@@ -1161,6 +1184,7 @@ export class SurfaceCore {
     surface.panes.set(initialPaneId, replacementPane);
     surface.paneOrder = [initialPaneId];
     surface.layout = { paneId: initialPaneId, type: "pane" };
+    surface.activeKeyboardPaneId = initialPaneId;
     return true;
   }
 
@@ -1191,6 +1215,13 @@ export class SurfaceCore {
     for (const listener of this.listeners) {
       listener(event);
     }
+  }
+
+  private ensureActiveKeyboardPane(surface: SurfaceState): void {
+    if (surface.activeKeyboardPaneId !== null && surface.panes.has(surface.activeKeyboardPaneId)) {
+      return;
+    }
+    surface.activeKeyboardPaneId = surface.paneOrder[0] ?? null;
   }
 }
 

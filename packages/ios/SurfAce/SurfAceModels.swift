@@ -579,6 +579,7 @@ final class SurfAceSurfaceModel {
     var providerName: String?
     var paneLayout: SurfAcePaneLayoutNode
     var panesById: [Int: SurfAcePaneModel]
+    var activeKeyboardPaneId: Int?
     var providerTopologyInitialized = false
     var connectionBarState: SurfAceConnectionBarState = .disconnected
     var labelsVisible = true
@@ -595,6 +596,7 @@ final class SurfAceSurfaceModel {
         let initialPane = SurfAcePaneModel(paneId: 1, paneLabel: 1)
         self.panesById = [initialPane.paneId: initialPane]
         self.paneLayout = .leaf(initialPane.paneId)
+        self.activeKeyboardPaneId = initialPane.paneId
     }
 
     var panes: [SurfAcePaneModel] { paneLayout.paneIDs.compactMap { panesById[$0] } }
