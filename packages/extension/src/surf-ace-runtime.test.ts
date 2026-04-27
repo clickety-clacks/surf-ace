@@ -1484,6 +1484,105 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("surfaces.list does not remap an established missing surface to the first sibling", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      server.addSurface({ initialRemotePaneId: 42, name: "Surface B", surfaceId: "sf_surface-b" });
+
+      const internalRuntime = runtime as any;
+      const preservedSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(preservedSurface);
+      const staleSurface = {
+        ...preservedSurface,
+        client: {
+          isOpen: () => true,
+          request: async () => ({
+            id: "rq_surfaces_list",
+            ok: true,
+            op: "surfaces.list",
+            payload: {
+              surfaces: [
+                {
+                  name: "Surface A",
+                  paired: true,
+                  surfaceId: server.surfaceId,
+                  viewport: preservedSurface.viewport,
+                },
+                {
+                  name: "Surface B",
+                  paired: false,
+                  surfaceId: "sf_surface-b",
+                  viewport: preservedSurface.viewport,
+                },
+              ],
+            },
+            sentAt: Date.now(),
+            type: "response",
+            v: 1,
+          }),
+        },
+        connectedAt: null,
+        hasPairedInGatewaySession: false,
+        panes: new Map(),
+        recentEventIds: [],
+        recentEventIdsSet: new Set(),
+        retryDelayResolver: null,
+        sessionId: null,
+        snapshotBufferedEvents: [],
+        stopRequested: false,
+        surfaceId: "sf_stale-window" as any,
+        workPromise: null,
+      };
+      internalRuntime.surfaces.set(staleSurface.surfaceId, staleSurface);
+
+      await internalRuntime.discoverSurfaceId(staleSurface);
+
+      assert.equal(staleSurface.surfaceId, "sf_stale-window");
+      assert.equal(internalRuntime.surfaces.get("sf_stale-window"), staleSurface);
+      assert.equal(internalRuntime.surfaces.get(server.surfaceId), preservedSurface);
+      assert.ok(internalRuntime.surfaces.get("sf_surface-b"));
+    });
+  });
+
+  await t.test("endpoint reconciliation updates every known surface on a multi-window endpoint", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_surface-a" });
+    server.addSurface({ initialRemotePaneId: 42, name: "Surface B", surfaceId: "sf_surface-b" });
+    server.addSurface({ initialRemotePaneId: 43, name: "Surface C", surfaceId: "sf_surface-c" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-multi-reconcile-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port, "aaaabbbb")]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtime.start();
+      await waitFor(() =>
+        server.pairedSocketFor("sf_surface-a") !== null &&
+        server.pairedSocketFor("sf_surface-b") !== null &&
+        server.pairedSocketFor("sf_surface-c") !== null,
+      );
+
+      const internalRuntime = runtime as any;
+      const replacementEndpoint = {
+        ...discoveryEndpoint(nextPort++, "aaaabbbb"),
+        endpointId: "endpoint-replacement",
+      };
+      internalRuntime.refreshEndpointTopology(replacementEndpoint);
+
+      for (const surfaceId of ["sf_surface-a", "sf_surface-b", "sf_surface-c"]) {
+        const surface = internalRuntime.surfaces.get(surfaceId);
+        assert.ok(surface);
+        assert.equal(surface.endpointId, "endpoint-replacement");
+      }
+      assert.deepEqual(
+        [...internalRuntime.surfaces.keys()].filter((surfaceId) => surfaceId.startsWith("sf_surface-")).sort(),
+        ["sf_surface-a", "sf_surface-b", "sf_surface-c"],
+      );
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("surface appeared and removed events add and drop live surfaces on one endpoint", async () => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_surface-a" });
