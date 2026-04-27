@@ -3833,7 +3833,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         ],
         revision,
         surfaceId: surface.surfaceId,
-        topologyEpoch: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
+        topologyEpoch: this.nextTopologyRevision(surface, true) as TopologyApplyRequest["payload"]["topologyRevision"],
         windowId: surface.windowLabel,
       },
       panes: [paneEntry],
