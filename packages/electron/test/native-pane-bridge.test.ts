@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   buildCompositorGetStatusRequest,
+  buildCompositorLogicalPaneGeometry,
   buildNativePaneHostPlan,
   buildNativePaneHostRequest,
   buildNativePaneUpdateRequest,
@@ -84,7 +85,7 @@ test("buildNativePaneHostPlan keeps Surf Ace pane identity and geometry with pro
       targetClass: "terminal",
     },
     contentId: "ct_native",
-    geometry: { height: 300, width: 400, x: 10, y: 20 },
+    geometry: { coordinateSpace: "compositor_logical", height: 300, width: 400, x: 10, y: 20 },
     paneId: 7,
     revision: 3,
     surfaceId: "sf_panel",
@@ -92,7 +93,7 @@ test("buildNativePaneHostPlan keeps Surf Ace pane identity and geometry with pro
 
   assert.deepEqual(plan, {
     contentId: "ct_native",
-    geometry: { height: 300, width: 400, x: 10, y: 20 },
+    geometry: { coordinateSpace: "compositor_logical", height: 300, width: 400, x: 10, y: 20 },
     paneId: 7,
     process: {
       args: ["--login"],
@@ -104,6 +105,52 @@ test("buildNativePaneHostPlan keeps Surf Ace pane identity and geometry with pro
     surfaceId: "sf_panel",
     targetClass: "terminal",
   });
+});
+
+test("compositor logical geometry adapter rejects physical-shaped Racter payloads", () => {
+  assert.deepEqual(
+    buildCompositorLogicalPaneGeometry(
+      { height: 3840, width: 2160, x: 0, y: 0 },
+      { height: 3840, width: 2160 },
+    ),
+    { coordinateSpace: "compositor_logical", height: 3840, width: 2160, x: 0, y: 0 },
+  );
+  assert.throws(
+    () => buildCompositorLogicalPaneGeometry(
+      { height: 2160, width: 3840, x: 0, y: 0 },
+      { height: 3840, width: 2160 },
+    ),
+    /outside compositor logical surface bounds/,
+  );
+});
+
+test("compositor logical geometry adapter tolerates fractional split roundoff", () => {
+  assert.deepEqual(
+    buildCompositorLogicalPaneGeometry(
+      { height: 100, width: 1001 / 6, x: (1001 / 6) * 5, y: 0 },
+      { height: 100, width: 1001 },
+    ),
+    { coordinateSpace: "compositor_logical", height: 100, width: 1001 / 6, x: (1001 / 6) * 5, y: 0 },
+  );
+});
+
+test("buildNativePaneHostPlan rejects geometry without compositor logical provenance", () => {
+  assert.throws(
+    () => buildNativePaneHostPlan({
+      content: {
+        process: {
+          command: "top",
+        },
+        targetClass: "terminal",
+      },
+      contentId: "ct_native",
+      geometry: { height: 300, width: 400, x: 10, y: 20 } as never,
+      paneId: 7,
+      revision: 3,
+      surfaceId: "sf_panel",
+    }),
+    /must use compositor_logical/,
+  );
 });
 
 test("unavailable native pane bridge no-ops safely", async () => {
@@ -137,7 +184,7 @@ test("compositor bridge serializes native pane host and update requests", () => 
       targetClass: "terminal",
     },
     contentId: "ct_native",
-    geometry: { height: 300.2, width: 400.7, x: 10.4, y: 20.6 },
+    geometry: { coordinateSpace: "compositor_logical", height: 300.2, width: 400.7, x: 10.4, y: 20.6 },
     paneId: 7,
     revision: 3,
     surfaceId: "sf_panel",
@@ -145,11 +192,11 @@ test("compositor bridge serializes native pane host and update requests", () => 
 
   assert.equal(
     serializeCompositorControlRequest(buildNativePaneHostRequest(plan)),
-    '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"height":300,"width":401,"x":10,"y":21},"id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.host"}\n',
+    '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"height":300,"width":401,"x":10,"y":21},"geometry_coordinate_space":"compositor_logical","id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.host"}\n',
   );
   assert.equal(
     serializeCompositorControlRequest(buildNativePaneUpdateRequest(plan)),
-    '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"height":300,"width":401,"x":10,"y":21},"id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.update"}\n',
+    '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"height":300,"width":401,"x":10,"y":21},"geometry_coordinate_space":"compositor_logical","id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.update"}\n',
   );
   assert.equal(
     serializeCompositorControlRequest(buildCompositorGetStatusRequest()),
@@ -176,7 +223,7 @@ test("compositor bridge serializes overlay region updates with Surf Ace pane ide
         },
       ], "layout"),
     ),
-    '{"coordinateSpace":"surface_logical","regions":[{"captures":["pointer_hover","pointer_button","pointer_axis"],"kind":"pane_handle","paneId":"sf_panel:7","paneInstanceId":"sf_panel:7:ct_native","rect":{"x":10,"y":21,"width":121,"height":40},"regionId":"surf-ace-pane-7-control-cluster","zIndex":10}],"revision":4,"surfaceId":"sf_panel","topologyEpoch":"9","type":"overlay_regions.set","updateReason":"layout"}\n',
+    '{"coordinateSpace":"compositor_logical","regions":[{"captures":["pointer_hover","pointer_button","pointer_axis"],"kind":"pane_handle","paneId":"sf_panel:7","paneInstanceId":"sf_panel:7:ct_native","rect":{"x":10,"y":21,"width":121,"height":40},"regionId":"surf-ace-pane-7-control-cluster","zIndex":10}],"revision":4,"surfaceId":"sf_panel","topologyEpoch":"9","type":"overlay_regions.set","updateReason":"layout"}\n',
   );
 });
 
@@ -240,7 +287,7 @@ test("compositor overlay region bridge sends multi-pane toolbar regions", async 
       type: "overlay_regions.status",
     },
     {
-      coordinateSpace: "surface_logical",
+      coordinateSpace: "compositor_logical",
       regions: [
         {
             captures: ["pointer_hover", "pointer_button", "pointer_axis"],
@@ -385,7 +432,7 @@ test("compositor bridge sends host and maps nativeHost lifecycle status", async 
       targetClass: "terminal",
     },
     contentId: "ct_native",
-    geometry: { height: 300, width: 400, x: 10, y: 20 },
+    geometry: { coordinateSpace: "compositor_logical", height: 300, width: 400, x: 10, y: 20 },
     paneId: 7,
     revision: 3,
     surfaceId: "sf_panel",
@@ -398,9 +445,10 @@ test("compositor bridge sends host and maps nativeHost lifecycle status", async 
     {
       panes: [
         {
-          geometry: { height: 300, width: 400, x: 10, y: 20 },
           binding_id: "sf_panel:7:ct_native",
           content_id: "ct_native",
+          geometry: { height: 300, width: 400, x: 10, y: 20 },
+          geometry_coordinate_space: "compositor_logical",
           id: "sf_panel:7",
           process: { args: [], command: "zsh" },
           revision: 3,
@@ -462,7 +510,7 @@ test("compositor bridge polls get_status after host until nativeHost attaches", 
       targetClass: "terminal",
     },
     contentId: "ct_native",
-    geometry: { height: 300, width: 400, x: 10, y: 20 },
+    geometry: { coordinateSpace: "compositor_logical", height: 300, width: 400, x: 10, y: 20 },
     paneId: 7,
     revision: 3,
     surfaceId: "sf_panel",
@@ -523,7 +571,7 @@ test("compositor bridge sends update without launch intent", async () => {
       targetClass: "terminal",
     },
     contentId: "ct_native",
-    geometry: { height: 320, width: 420, x: 11, y: 22 },
+    geometry: { coordinateSpace: "compositor_logical", height: 320, width: 420, x: 11, y: 22 },
     paneId: 7,
     revision: 4,
     surfaceId: "sf_panel",
@@ -538,6 +586,7 @@ test("compositor bridge sends update without launch intent", async () => {
           binding_id: "sf_panel:7:ct_native",
           content_id: "ct_native",
           geometry: { height: 320, width: 420, x: 11, y: 22 },
+          geometry_coordinate_space: "compositor_logical",
           id: "sf_panel:7",
           process: { args: [], command: "zsh" },
           revision: 4,
@@ -622,7 +671,7 @@ test("nativeStatusFromCompositorStatus maps failed attached and exited states", 
       targetClass: "terminal",
     },
     contentId: "ct_native",
-    geometry: { height: 300, width: 400, x: 10, y: 20 },
+    geometry: { coordinateSpace: "compositor_logical", height: 300, width: 400, x: 10, y: 20 },
     paneId: 7,
     revision: 3,
     surfaceId: "sf_panel",
@@ -706,7 +755,7 @@ test("nativeStatusFromCompositorStatus rejects stale nativeHost status", () => {
       targetClass: "terminal",
     },
     contentId: "ct_native",
-    geometry: { height: 300, width: 400, x: 10, y: 20 },
+    geometry: { coordinateSpace: "compositor_logical", height: 300, width: 400, x: 10, y: 20 },
     paneId: 7,
     revision: 3,
     surfaceId: "sf_panel",

@@ -9,12 +9,19 @@ import type {
 import { connect } from "node:net";
 
 const DEFAULT_COMPOSITOR_CONTROL_SOCKET = "/tmp/surf-ace-compositor.sock";
+const COMPOSITOR_LOGICAL_GEOMETRY_EPSILON = 0.000001;
 
-export type NativePaneGeometry = {
+export type CompositorLogicalCoordinateSpace = "compositor_logical";
+
+export type NativePaneRect = {
   height: number;
   width: number;
   x: number;
   y: number;
+};
+
+export type NativePaneGeometry = NativePaneRect & {
+  coordinateSpace: CompositorLogicalCoordinateSpace;
 };
 
 export type NativePaneHostPlan = {
@@ -44,7 +51,7 @@ export type CompositorOverlayRegion = {
   kind: CompositorOverlayKind;
   paneId: PaneId | number | string;
   paneInstanceId: string;
-  rect: NativePaneGeometry;
+  rect: NativePaneRect;
   regionId: string;
   zIndex?: number;
 };
@@ -107,6 +114,9 @@ export function buildNativePaneHostPlan(input: {
   revision: number;
   surfaceId: string;
 }): NativePaneHostPlan {
+  if (input.geometry.coordinateSpace !== "compositor_logical") {
+    throw new Error("Native pane geometry must use compositor_logical coordinate space");
+  }
   return {
     contentId: input.contentId as ContentId,
     geometry: { ...input.geometry },
@@ -118,12 +128,33 @@ export function buildNativePaneHostPlan(input: {
   };
 }
 
+export function buildCompositorLogicalPaneGeometry(
+  rect: NativePaneRect,
+  logicalSurface: Pick<NativePaneRect, "height" | "width">,
+): NativePaneGeometry {
+  if (
+    rect.x < 0 ||
+    rect.y < 0 ||
+    rect.width <= 0 ||
+    rect.height <= 0 ||
+    rect.x + rect.width > logicalSurface.width + COMPOSITOR_LOGICAL_GEOMETRY_EPSILON ||
+    rect.y + rect.height > logicalSurface.height + COMPOSITOR_LOGICAL_GEOMETRY_EPSILON
+  ) {
+    throw new Error("Native pane geometry is outside compositor logical surface bounds");
+  }
+  return {
+    ...rect,
+    coordinateSpace: "compositor_logical",
+  };
+}
+
 type CompositorPaneId = string;
 
 type CompositorNativePaneRequest = {
   binding_id: string;
   content_id: string;
   geometry: { height: number; width: number; x: number; y: number };
+  geometry_coordinate_space: CompositorLogicalCoordinateSpace;
   id: string;
   process: {
     args: string[];
@@ -158,7 +189,7 @@ type CompositorControlRequest =
       windowId?: string;
     }
   | {
-      coordinateSpace: "surface_logical";
+      coordinateSpace: CompositorLogicalCoordinateSpace;
       regions: CompositorOverlayRegionRequest[];
       revision: number;
       surfaceId: string;
@@ -396,7 +427,7 @@ export function buildOverlayRegionsSetRequest(
   windowId?: string | null,
 ): CompositorControlRequest {
   return {
-    coordinateSpace: "surface_logical",
+    coordinateSpace: "compositor_logical",
     regions: regions.map((region) => ({
       captures: [...region.captures],
       kind: region.kind,
@@ -561,6 +592,7 @@ function buildCompositorNativePane(plan: NativePaneHostPlan): CompositorNativePa
       x: Math.round(plan.geometry.x),
       y: Math.round(plan.geometry.y),
     },
+    geometry_coordinate_space: plan.geometry.coordinateSpace,
     id: compositorPaneId(plan),
     process: buildCompositorProcess(plan),
     revision: Number(plan.revision),

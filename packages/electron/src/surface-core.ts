@@ -37,10 +37,12 @@ import type {
   TopologyApplyResponse,
 } from "../../protocol/src/index.js";
 import {
+  buildCompositorLogicalPaneGeometry,
   buildNativePaneHostPlan,
   createCompositorNativePaneHostBridge,
   detectCompositorHostMode,
   type CompositorHostModeState,
+  type NativePaneGeometry,
   type NativePaneHostBridge,
   type NativePaneHostPlan,
 } from "./native-pane-bridge.js";
@@ -1276,7 +1278,7 @@ export class SurfaceCore {
       pane.nativeSurfaceStatus = null;
     }
 
-    const geometry = paneBoundsFromLayout(this.getSurface(surfaceId), pane.paneId);
+    const geometry = getCompositorLogicalPaneGeometry(this.getSurface(surfaceId), pane.paneId);
     const plan = buildNativePaneHostPlan({
       content: entry.content,
       contentId: entry.contentId,
@@ -1677,17 +1679,18 @@ function layoutPaneViewports(
   return byPaneId;
 }
 
-function paneBoundsFromLayout(
+function getCompositorLogicalPaneGeometry(
   surface: SurfaceState,
   targetPaneId: number,
-): { height: number; width: number; x: number; y: number } {
+): NativePaneGeometry {
   const root = {
     height: surface.viewport.height,
     width: surface.viewport.width,
     x: 0,
     y: 0,
   };
-  return findPaneBounds(surface.layout!, targetPaneId, root) ?? root;
+  const bounds = findPaneBounds(surface.layout!, targetPaneId, root) ?? root;
+  return buildCompositorLogicalPaneGeometry(bounds, surface.viewport);
 }
 
 function findPaneBounds(

@@ -353,7 +353,7 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
   overlayRevision += 1;
   if (!latestState) {
     window.surfAce.reportOverlayRegions({
-      coordinateSpace: "surface_logical",
+      coordinateSpace: "compositor_logical",
       regions: [],
       revision: overlayRevision,
       topologyEpoch: "0",
@@ -374,7 +374,7 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
     regions.push(...collectMarkedOverlayRegions(pane, view));
   }
   window.surfAce.reportOverlayRegions({
-    coordinateSpace: "surface_logical",
+    coordinateSpace: "compositor_logical",
     regions,
     revision: overlayRevision,
     topologyEpoch: String(latestState.topologyRevision),

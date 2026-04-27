@@ -335,7 +335,7 @@ test("surface core sends layout geometry and process intent to native pane bridg
   assert.equal(updates.length, 0);
   assert.deepEqual(plans[0], {
     contentId: "ct_native",
-    geometry: { height: 800, width: 1200, x: 0, y: 0 },
+    geometry: { coordinateSpace: "compositor_logical", height: 800, width: 1200, x: 0, y: 0 },
     paneId,
     process: {
       args: ["--login"],
@@ -361,7 +361,7 @@ test("surface core sends layout geometry and process intent to native pane bridg
 
   assert.equal(plans.length, 1);
   assert.equal(updates.length, 1);
-  assert.deepEqual(updates[0]?.geometry, { height: 800, width: 1200, x: 0, y: 0 });
+  assert.deepEqual(updates[0]?.geometry, { coordinateSpace: "compositor_logical", height: 800, width: 1200, x: 0, y: 0 });
   assert.deepEqual(core.nativeSurfaceStatuses(surface.surfaceId), [
     {
       contentId: "ct_native",
@@ -422,7 +422,7 @@ test("surface core sends compositor logical geometry for rotated Racter output",
 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.deepEqual(plans[0]?.geometry, { height: 3840, width: 2160, x: 0, y: 0 });
+  assert.deepEqual(plans[0]?.geometry, { coordinateSpace: "compositor_logical", height: 3840, width: 2160, x: 0, y: 0 });
 });
 
 test("surface core keeps split HTML rendered locally while native pane goes through compositor bridge", async () => {
@@ -504,7 +504,7 @@ test("surface core keeps split HTML rendered locally while native pane goes thro
   assert.deepEqual(plans, [
     {
       contentId: "ct_top",
-      geometry: { height: 800, width: 600, x: 600, y: 0 },
+      geometry: { coordinateSpace: "compositor_logical", height: 800, width: 600, x: 600, y: 0 },
       paneId: rightPaneId,
       process: {
         args: ["-o", "cpu"],
@@ -571,7 +571,7 @@ test("surface core rehosts failed native panes instead of sending update-only sy
 
   assert.equal(plans.length, 2);
   assert.equal(updates.length, 0);
-  assert.deepEqual(plans[1]?.geometry, { height: 800, width: 1200, x: 0, y: 0 });
+  assert.deepEqual(plans[1]?.geometry, { coordinateSpace: "compositor_logical", height: 800, width: 1200, x: 0, y: 0 });
 });
 
 test("surface core ignores stale native status after pane content changes", async () => {
@@ -711,13 +711,13 @@ test("surface core supports simultaneous native hosts in separate Surf Ace panes
       {
         args: ["8"],
         contentId: "ct_top_8",
-        geometry: { height: 800, width: 400, x: 400, y: 0 },
+        geometry: { coordinateSpace: "compositor_logical", height: 800, width: 400, x: 400, y: 0 },
         paneId: 8,
       },
       {
         args: ["9"],
         contentId: "ct_top_9",
-        geometry: { height: 800, width: 400, x: 800, y: 0 },
+        geometry: { coordinateSpace: "compositor_logical", height: 800, width: 400, x: 800, y: 0 },
         paneId: 9,
       },
     ],
