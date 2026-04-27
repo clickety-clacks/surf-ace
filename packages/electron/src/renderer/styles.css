@@ -230,6 +230,7 @@ body {
   font-family: var(--ui-font-family);
   font-weight: 100;
   letter-spacing: 0.15em;
+  line-height: 1;
   text-transform: uppercase;
 }
 
@@ -437,6 +438,7 @@ body {
   font-size: 14px;
   font-weight: var(--ui-font-weight);
   letter-spacing: 0.1em;
+  line-height: 1;
   text-transform: uppercase;
   cursor: pointer;
 }

@@ -2,6 +2,38 @@ import net from "node:net";
 
 import type { NativePaneMaterialization } from "../../protocol/src/index.js";
 
+export type CompositorOverlayCapture = "pointer_axis" | "pointer_button" | "pointer_hover";
+
+export type CompositorOverlayKind =
+  | "annotation_control"
+  | "history_back"
+  | "history_forward"
+  | "other"
+  | "pane_badge"
+  | "pane_handle";
+
+export type CompositorOverlayRegion = {
+  captures: CompositorOverlayCapture[];
+  kind: CompositorOverlayKind;
+  paneId: number | string;
+  paneInstanceId: string;
+  rect: { height: number; width: number; x: number; y: number };
+  regionId: string;
+  zIndex?: number;
+};
+
+export type CompositorOverlayUpdateReason =
+  | "animation"
+  | "clear"
+  | "drag"
+  | "initial"
+  | "layout"
+  | "native_attach"
+  | "native_detach"
+  | "resize"
+  | "update"
+  | "visibility";
+
 export type CompositorControlRequest =
   | {
     panes: NativePaneMaterialization["panes"];
@@ -13,7 +45,22 @@ export type CompositorControlRequest =
   | (NonNullable<NativePaneMaterialization["overlaySet"]> & {
     type: "overlay_regions.set";
     updateReason: "initial" | "update";
-  });
+  })
+  | {
+    coordinateSpace: "surface_logical";
+    regions: CompositorOverlayRegion[];
+    revision: number;
+    surfaceId: string;
+    topologyEpoch: string;
+    type: "overlay_regions.set";
+    updateReason: CompositorOverlayUpdateReason;
+    windowId?: string;
+  }
+  | {
+    surfaceId: string;
+    type: "overlay_regions.clear";
+    windowId?: string;
+  };
 
 export type CompositorControlResponse = Record<string, unknown>;
 
@@ -47,6 +94,45 @@ export function overlayRequestForCompositor(
     ...materialization.overlaySet,
     type: "overlay_regions.set",
     updateReason: materialization.op === "native_pane.host" ? "initial" : "update",
+  };
+}
+
+export function overlayRegionsSetRequestForCompositor(snapshot: {
+  regions: CompositorOverlayRegion[];
+  revision: number;
+  surfaceId: string;
+  topologyEpoch: number | string;
+  updateReason?: CompositorOverlayUpdateReason;
+  windowId?: string | null;
+}): CompositorControlRequest {
+  return {
+    coordinateSpace: "surface_logical",
+    regions: snapshot.regions.map((region) => ({
+      ...region,
+      rect: {
+        height: Number(region.rect.height),
+        width: Number(region.rect.width),
+        x: Number(region.rect.x),
+        y: Number(region.rect.y),
+      },
+    })),
+    revision: Number(snapshot.revision),
+    surfaceId: snapshot.surfaceId,
+    topologyEpoch: String(snapshot.topologyEpoch),
+    type: "overlay_regions.set",
+    updateReason: snapshot.updateReason ?? "layout",
+    ...(snapshot.windowId ? { windowId: snapshot.windowId } : {}),
+  };
+}
+
+export function overlayRegionsClearRequestForCompositor(
+  surfaceId: string,
+  windowId?: string | null,
+): CompositorControlRequest {
+  return {
+    surfaceId,
+    type: "overlay_regions.clear",
+    ...(windowId ? { windowId } : {}),
   };
 }
 

@@ -8,6 +8,8 @@ import test from "node:test";
 import type { NativePaneMaterialization } from "../../protocol/src/index.js";
 import {
   compositorFailureMessage,
+  overlayRegionsClearRequestForCompositor,
+  overlayRegionsSetRequestForCompositor,
   overlayRequestForCompositor,
   requestForCompositor,
   resolveCompositorControlSocketPath,
@@ -79,6 +81,60 @@ test("native pane bridge serializes host and overlay requests from protocol mate
   });
   assert.equal(overlayRequestForCompositor(materialization({ op: "native_pane.update" }))?.updateReason, "update");
   assert.equal(overlayRequestForCompositor(materialization({ overlaySet: undefined })), null);
+});
+
+test("native pane bridge serializes renderer overlay region updates without coordinate rounding", () => {
+  const request = overlayRegionsSetRequestForCompositor({
+    regions: [
+      {
+        captures: ["pointer_hover"],
+        kind: "pane_badge",
+        paneId: "sf_test:118",
+        paneInstanceId: "sf_test:118:target_top",
+        rect: { height: 29.75, width: 102.5, x: 48.25, y: 18.5 },
+        regionId: "surf-ace-pane-118-pane-indicator-0",
+        zIndex: 15,
+      },
+    ],
+    revision: 7,
+    surfaceId: "sf_test",
+    topologyEpoch: 4,
+    updateReason: "layout",
+    windowId: "window-a",
+  });
+
+  assert.deepEqual(request, {
+    coordinateSpace: "surface_logical",
+    regions: [
+      {
+        captures: ["pointer_hover"],
+        kind: "pane_badge",
+        paneId: "sf_test:118",
+        paneInstanceId: "sf_test:118:target_top",
+        rect: { height: 29.75, width: 102.5, x: 48.25, y: 18.5 },
+        regionId: "surf-ace-pane-118-pane-indicator-0",
+        zIndex: 15,
+      },
+    ],
+    revision: 7,
+    surfaceId: "sf_test",
+    topologyEpoch: "4",
+    type: "overlay_regions.set",
+    updateReason: "layout",
+    windowId: "window-a",
+  });
+});
+
+test("native pane bridge serializes overlay region clears", () => {
+  assert.deepEqual(overlayRegionsClearRequestForCompositor("sf_test", "window-a"), {
+    surfaceId: "sf_test",
+    type: "overlay_regions.clear",
+    windowId: "window-a",
+  });
+  assert.deepEqual(overlayRegionsClearRequestForCompositor("sf_test"), {
+    surfaceId: "sf_test",
+    type: "overlay_regions.clear",
+  });
 });
 
 test("native pane bridge rejects untyped native pane geometry before compositor I/O", () => {

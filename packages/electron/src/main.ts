@@ -8,6 +8,14 @@ import type { Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import {
+  type CompositorControlRequest,
+  type CompositorOverlayRegion,
+  overlayRegionsClearRequestForCompositor,
+  overlayRegionsSetRequestForCompositor,
+  resolveCompositorControlSocketPath,
+  sendCompositorControl,
+} from "./native-pane-bridge.js";
+import {
   SurfaceCore,
   type PersistentSurfaceState,
   type RendererWindowState,
@@ -196,6 +204,14 @@ function broadcastSurfaceState(surfaceId: string): void {
   window.webContents.send("surface:state", state);
 }
 
+async function sendCompositorOverlayRequest(request: CompositorControlRequest): Promise<void> {
+  const socketPath = resolveCompositorControlSocketPath();
+  if (!socketPath) {
+    return;
+  }
+  await sendCompositorControl(socketPath, request);
+}
+
 function focusExistingWindow(): void {
   for (const window of windows.values()) {
     if (window.isDestroyed()) {
@@ -292,6 +308,9 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     windows.delete(surfaceId);
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
+    void sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId)).catch((error) => {
+      console.warn(`[surf-ace] compositor overlay region clear failed: ${error}`);
+    });
     if (!isQuitting) {
       void server.broadcastSurfaceRemoved(surfaceId);
       server.disconnectSurface(surfaceId, "provider_shutdown");
@@ -389,6 +408,24 @@ function installIpc(): void {
       page: Number(payload.page),
       pageText: payload.pageText ? String(payload.pageText) : undefined,
       totalPages: Number(payload.totalPages),
+    });
+  });
+
+  ipcMain.on("surface:overlay-regions", (event, payload) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || !payload || typeof payload !== "object") {
+      return;
+    }
+    const regions = Array.isArray(payload.regions) ? payload.regions : [];
+    void sendCompositorOverlayRequest(overlayRegionsSetRequestForCompositor({
+      regions: regions as CompositorOverlayRegion[],
+      revision: Number(payload.revision ?? 0),
+      surfaceId,
+      topologyEpoch: payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch),
+      updateReason: typeof payload.updateReason === "string" ? payload.updateReason as never : undefined,
+      windowId: surfaceId,
+    })).catch((error) => {
+      console.warn(`[surf-ace] compositor overlay region update failed: ${error}`);
     });
   });
 
@@ -528,6 +565,10 @@ if (!singleInstanceLock) {
 
   app.on("before-quit", async () => {
     isQuitting = true;
+    await Promise.allSettled(
+      [...windows.keys()].map((surfaceId) =>
+        sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId))),
+    );
     advertiser?.refresh();
     await advertiser?.stop();
     await server.stop();
