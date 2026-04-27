@@ -38,7 +38,7 @@ struct SurfAceRootView: View {
                     }
                 },
                 onNewWindowShortcut: {
-                    SurfAceSceneActivation.openNewWindow()
+                    SurfAceSceneActivation.openNewWindow(source: "scene_probe")
                 }
             )
         }
@@ -453,12 +453,19 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SurfAceSurfaceHostView {
         let view = SurfAceSurfaceHostView()
+        view.onNewWindowShortcut = {
+            SurfAceSceneActivation.openNewWindow(source: "pane_host")
+        }
         context.coordinator.attach(hostView: view)
         runtime.attachPaneBridge(surfaceId: surfaceId, paneId: paneId, bridge: context.coordinator)
         return view
     }
 
-    func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {}
+    func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {
+        uiView.onNewWindowShortcut = {
+            SurfAceSceneActivation.openNewWindow(source: "pane_host")
+        }
+    }
 
     static func dismantleUIView(_ uiView: SurfAceSurfaceHostView, coordinator: Coordinator) {
         coordinator.detach()
@@ -631,19 +638,6 @@ private struct SurfAceSceneProbeRepresentable: UIViewControllerRepresentable {
 }
 
 @MainActor
-private enum SurfAceSceneActivation {
-    static func openNewWindow() {
-        UIApplication.shared.requestSceneSessionActivation(
-            nil,
-            userActivity: nil,
-            options: nil
-        ) { error in
-            print("[surf-ace:ios:lifecycle] event=new_window_shortcut_failed error=\"\(error.localizedDescription)\"")
-        }
-    }
-}
-
-@MainActor
 private final class SurfAceWeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var target: WKScriptMessageHandler?
 
@@ -659,6 +653,7 @@ private final class SurfAceWeakScriptMessageHandler: NSObject, WKScriptMessageHa
 @MainActor
 final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     var onInteractionBegan: (() -> Void)?
+    var onNewWindowShortcut: (@MainActor () -> Void)?
     var onSelectionChanged: ((String, CGRect?) -> Void)?
     var onScrollSettled: ((SurfAceViewport, String) -> Void)?
     var onTapEvent: ((String, SurfAcePoint, String) -> Void)?
@@ -677,6 +672,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private let tapMessageName = "surfAceTap"
     private let navigationMessageName = "surfAceNavigation"
     private let focusMessageName = "surfAceFocus"
+    private let shortcutMessageName = "surfAceShortcut"
 
     private let webView: WKWebView
     private let pdfView = PDFView()
@@ -716,6 +712,31 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override var canBecomeFirstResponder: Bool {
+        true
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            UIKeyCommand(
+                title: "New Window",
+                image: nil,
+                action: #selector(handleNewWindowCommand),
+                input: "n",
+                modifierFlags: .command,
+                propertyList: nil
+            ),
+        ]
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            becomeFirstResponder()
+            print("[surf-ace:ios:shortcut] event=pane_host_registered first_responder=\(isFirstResponder) at=\(ISO8601DateFormatter().string(from: Date()))")
+        }
     }
 
     deinit {
@@ -951,6 +972,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             onNavigationEvent?(url, sentAt)
         case focusMessageName:
             break
+        case shortcutMessageName:
+            guard (body["shortcut"] as? String) == "new_window" else { return }
+            handleNewWindowShortcut(source: "web_content")
         default:
             break
         }
@@ -1015,6 +1039,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         controller.add(SurfAceWeakScriptMessageHandler(target: self), name: tapMessageName)
         controller.add(SurfAceWeakScriptMessageHandler(target: self), name: navigationMessageName)
         controller.add(SurfAceWeakScriptMessageHandler(target: self), name: focusMessageName)
+        controller.add(SurfAceWeakScriptMessageHandler(target: self), name: shortcutMessageName)
     }
 
     private func setupInteractionTracking() {
@@ -1029,7 +1054,17 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private func handlePaneTapGesture(_ recognizer: UITapGestureRecognizer) {
         if recognizer.state == .ended {
             onInteractionBegan?()
+            becomeFirstResponder()
         }
+    }
+
+    @objc private func handleNewWindowCommand() {
+        handleNewWindowShortcut(source: "pane_host_key_command")
+    }
+
+    private func handleNewWindowShortcut(source: String) {
+        print("[surf-ace:ios:shortcut] event=new_window_received source=\(source) first_responder=\(isFirstResponder) at=\(ISO8601DateFormatter().string(from: Date()))")
+        onNewWindowShortcut?()
     }
 
     private func setupPDFTracking() {
@@ -1848,7 +1883,20 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             }
           }
 
+          function postShortcut(shortcut) {
+            if (window.webkit?.messageHandlers?.surfAceShortcut) {
+              window.webkit.messageHandlers.surfAceShortcut.postMessage({ shortcut: shortcut });
+            }
+          }
+
           document.addEventListener('pointerdown', postFocus, { capture: true, passive: true });
+          document.addEventListener('keydown', function(event) {
+            if (!event || !event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return;
+            if (String(event.key || '').toLowerCase() !== 'n') return;
+            event.preventDefault();
+            event.stopPropagation();
+            postShortcut('new_window');
+          }, { capture: true });
           document.addEventListener('selectionchange', postSelectionIfAvailable);
           document.addEventListener('click', function(event) {
             const anchor = event && event.target && event.target.closest ? event.target.closest('a[href]') : null;
