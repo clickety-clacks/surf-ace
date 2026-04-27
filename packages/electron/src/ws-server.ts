@@ -92,6 +92,7 @@ export type SurfaceWsServerOptions = {
   endpointName: string;
   hostName: string;
   compositorSocketPath?: string | null;
+  getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   onBusyChanged?: () => void;
   onNativeMaterialized?: (surfaceId: string) => void;
   port: number;
@@ -135,6 +136,7 @@ export class SurfaceWsServer {
   private readonly core: SurfaceCore;
   private readonly endpointName: string;
   private readonly hostName: string;
+  private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   private readonly onBusyChanged?: () => void;
   private readonly onNativeMaterialized?: (surfaceId: string) => void;
   private readonly port: number;
@@ -157,6 +159,7 @@ export class SurfaceWsServer {
       : options.compositorSocketPath;
     this.core = options.core;
     this.endpointName = options.endpointName;
+    this.getOverlayDiagnostics = options.getOverlayDiagnostics;
     this.hostName = options.hostName;
     this.onBusyChanged = options.onBusyChanged;
     this.onNativeMaterialized = options.onNativeMaterialized;
@@ -664,6 +667,9 @@ export class SurfaceWsServer {
   }
 
   private async dispatchRequest(socket: WebSocket, request: Request): Promise<Response> {
+    if ((request as { op: string }).op === "diagnostics.overlay_regions") {
+      return this.handleOverlayDiagnostics(socket, request);
+    }
     switch (request.op) {
       case "surfaces.list":
         return this.handleSurfacesList(request);
@@ -700,6 +706,22 @@ export class SurfaceWsServer {
       case "heartbeat.ping":
         return this.handleHeartbeat(socket, request);
     }
+  }
+
+  private handleOverlayDiagnostics(socket: WebSocket, request: Request): Response {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    return {
+      id: request.id,
+      ok: true,
+      op: "diagnostics.overlay_regions",
+      payload: {
+        diagnostics: this.getOverlayDiagnostics?.(surfaceId) ?? null,
+        surfaceId,
+      },
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    } as unknown as Response;
   }
 
   private handleSurfacesList(request: SurfacesListRequest): Response {

@@ -356,9 +356,24 @@ function heartbeatRequest(): Request {
   };
 }
 
+function overlayDiagnosticsRequest(): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "diagnostics.overlay_regions" as never,
+    payload: {},
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 async function withServer(
   run: (ctx: { core: SurfaceCore; surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
-  options: { compositorSocketPath?: string | null; onNativeMaterialized?: (surfaceId: string) => void } = {},
+  options: {
+    compositorSocketPath?: string | null;
+    getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
+    onNativeMaterialized?: (surfaceId: string) => void;
+  } = {},
 ): Promise<void> {
   const core = new SurfaceCore({
     persistentState: {
@@ -372,6 +387,7 @@ async function withServer(
     capturePaneImage: async () => null,
     core,
     endpointName: "Surf Ace",
+    getOverlayDiagnostics: options.getOverlayDiagnostics,
     hostName: "localhost",
     compositorSocketPath: options.compositorSocketPath ?? null,
     onNativeMaterialized: options.onNativeMaterialized,
@@ -660,6 +676,26 @@ test("ws server advertises terminal targets when compositor bridge is configured
 
     await closeSocket(socket);
   }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
+});
+
+test("ws server exposes renderer overlay forwarding diagnostics to the paired owner", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const diagnostics = await request(socket, overlayDiagnosticsRequest());
+    assert.equal(diagnostics.ok, true);
+    assert.equal(diagnostics.op, "diagnostics.overlay_regions");
+    assert.deepEqual((diagnostics as never as { payload: unknown }).payload, {
+      diagnostics: { forwardStatus: "ok", regionCount: 6 },
+      surfaceId,
+    });
+
+    await closeSocket(socket);
+  }, {
+    getOverlayDiagnostics: (surfaceId) => ({ forwardStatus: "ok", regionCount: surfaceId ? 6 : 0 }),
+  });
 });
 
 test("ws server forwards target.apply native pane host materialization to compositor", async () => {

@@ -155,6 +155,7 @@ try {
   }), 15000);
 
   await waitForRendererOverlayRegions({
+    client,
     minRegionCount: Number(args.minOverlayRegionCount ?? args["min-overlay-region-count"] ?? 1),
     socketPath: compositorSocket,
     timeoutMs: Number(args.overlayWaitMs ?? args["overlay-wait-ms"] ?? 5000),
@@ -235,18 +236,34 @@ function targetApplyPayload(options) {
   };
 }
 
-async function waitForRendererOverlayRegions({ minRegionCount, socketPath, timeoutMs }) {
+async function waitForRendererOverlayRegions({ client, minRegionCount, socketPath, timeoutMs }) {
   const deadline = Date.now() + timeoutMs;
   let lastStatus = null;
+  let lastDiagnostics = null;
   while (Date.now() < deadline) {
     lastStatus = await getCompositorStatus(socketPath);
+    lastDiagnostics = await overlayDiagnostics(client);
     const regionCount = overlayRegionCount(lastStatus);
     if (regionCount >= minRegionCount) {
       return;
     }
     await sleep(100);
   }
-  throw new Error(`Timed out waiting for renderer overlay regions >= ${minRegionCount}; last count=${overlayRegionCount(lastStatus)}`);
+  throw new Error([
+    `Timed out waiting for renderer overlay regions >= ${minRegionCount}; last compositor count=${overlayRegionCount(lastStatus)}`,
+    `overlay diagnostics=${JSON.stringify(lastDiagnostics)}`,
+  ].join("; "));
+}
+
+async function overlayDiagnostics(client) {
+  try {
+    const response = await client.request("diagnostics.overlay_regions", {}, 5000);
+    return response.payload;
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function overlayRegionCount(response) {

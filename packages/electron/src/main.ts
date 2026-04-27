@@ -9,6 +9,7 @@ import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import {
   type CompositorControlRequest,
+  type CompositorControlResponse,
   type CompositorOverlayRegion,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
@@ -47,6 +48,7 @@ if (gpuDisableRequested()) {
 const windows = new Map<string, BrowserWindow>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const readyWindows = new Set<string>();
+const overlayDiagnostics = new Map<string, Record<string, unknown>>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
@@ -86,6 +88,7 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
       endpointName: endpointName(),
       hostName: shortHostName(),
       onBusyChanged: () => advertiser?.refresh(),
+      getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       onNativeMaterialized: (surfaceId) => broadcastSurfaceState(surfaceId),
       port,
       viewport: () => displayViewport(),
@@ -211,6 +214,43 @@ async function sendCompositorOverlayRequest(request: CompositorControlRequest): 
     return;
   }
   await sendCompositorControl(socketPath, request);
+}
+
+async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<string, unknown>): Promise<void> {
+  const regions = Array.isArray(payload.regions) ? payload.regions : [];
+  const socketPath = resolveCompositorControlSocketPath();
+  const diagnostic: Record<string, unknown> = {
+    compositorSocketConfigured: Boolean(socketPath),
+    lastRendererReportAt: new Date().toISOString(),
+    regionCount: regions.length,
+    revision: Number(payload.revision ?? 0),
+    topologyEpoch: payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch),
+    updateReason: typeof payload.updateReason === "string" ? payload.updateReason : null,
+  };
+  overlayDiagnostics.set(surfaceId, diagnostic);
+  if (!socketPath) {
+    diagnostic.forwardStatus = "skipped_no_socket";
+    return;
+  }
+  const request = overlayRegionsSetRequestForCompositor({
+    regions: regions as CompositorOverlayRegion[],
+    revision: Number(payload.revision ?? 0),
+    surfaceId,
+    topologyEpoch: payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch),
+    updateReason: typeof payload.updateReason === "string" ? payload.updateReason as never : undefined,
+    windowId: surfaceId,
+  });
+  diagnostic.forwardRequest = request;
+  try {
+    const response: CompositorControlResponse = await sendCompositorControl(socketPath, request);
+    diagnostic.forwardedAt = new Date().toISOString();
+    diagnostic.forwardResponse = response;
+    diagnostic.forwardStatus = "ok";
+  } catch (error) {
+    diagnostic.forwardError = error instanceof Error ? error.message : String(error);
+    diagnostic.forwardStatus = "error";
+    throw error;
+  }
 }
 
 function focusExistingWindow(): void {
@@ -417,15 +457,7 @@ function installIpc(): void {
     if (!surfaceId || !payload || typeof payload !== "object") {
       return;
     }
-    const regions = Array.isArray(payload.regions) ? payload.regions : [];
-    void sendCompositorOverlayRequest(overlayRegionsSetRequestForCompositor({
-      regions: regions as CompositorOverlayRegion[],
-      revision: Number(payload.revision ?? 0),
-      surfaceId,
-      topologyEpoch: payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch),
-      updateReason: typeof payload.updateReason === "string" ? payload.updateReason as never : undefined,
-      windowId: surfaceId,
-    })).catch((error) => {
+    void forwardRendererOverlayRegions(surfaceId, payload as Record<string, unknown>).catch((error) => {
       console.warn(`[surf-ace] compositor overlay region update failed: ${error}`);
     });
   });
