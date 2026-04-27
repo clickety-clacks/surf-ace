@@ -24,6 +24,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             3: SurfAcePaneModel(paneId: 3, paneLabel: 3, name: "Three"),
         ]
         firstSurface.paneLayout = .split(direction: .horizontal, children: [.leaf(1), .leaf(2), .leaf(3)])
+        firstSurface.activeKeyboardPaneId = 2
         firstSurface.providerTopologyInitialized = true
         firstRuntime.persistSurfaceTopology(surfaceId: firstSurface.surfaceId)
 
@@ -34,6 +35,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(restoredSurface.windowLabel, "a")
         XCTAssertEqual(restoredSurface.name, "Surf Ace A")
         XCTAssertEqual(restoredSurface.paneLayout.paneIDs, [1, 2, 3])
+        XCTAssertEqual(restoredSurface.activeKeyboardPaneId, 1)
         XCTAssertEqual(restoredSurface.panes.map(\.paneLabel), [1, 2, 3])
         XCTAssertEqual(restoredSurface.panes.map(\.name), ["One", "Two", "Three"])
         XCTAssertTrue(restoredSurface.providerTopologyInitialized)

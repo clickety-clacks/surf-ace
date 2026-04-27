@@ -46,6 +46,7 @@ type PaneContentValue =
   | VideoContent;
 
 type RendererPaneState = {
+  activeKeyboardPane: boolean;
   annotationBorderVisible: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -700,6 +701,7 @@ function htmlFrameBridgeScript(): string {
   });
 
   document.addEventListener("pointerdown", (event) => {
+    emit({ type: "focus" });
     if (navigationTarget(event.target)) {
       return;
     }
@@ -843,6 +845,8 @@ function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement)
         position: payload.position,
         type: "tap",
       });
+    } else if (payload.type === "focus") {
+      rememberPaneContext(paneId);
     } else if (payload.type === "navigation") {
       sendNavigationIntent(view, paneId, String(payload.url ?? ""));
     } else if (payload.type === "ready") {
@@ -1147,6 +1151,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
 }
 
 function updatePane(view: PaneView, pane: RendererPaneState): void {
+  view.rootEl.classList.toggle("keyboard-active", pane.activeKeyboardPane);
   view.rootEl.classList.toggle("annotating", pane.annotationBorderVisible);
   view.rootEl.classList.toggle("flush-in-flight", pane.flushInFlight);
   view.annotationCanvas.classList.toggle("enabled", pane.annotationBorderVisible);

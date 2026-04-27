@@ -169,10 +169,19 @@ private struct SurfAcePaneView: View {
             .overlay {
                 SurfAceAnnotationBorder(active: pane.annotationMode, pulsing: pane.isDrawingFlushSending)
             }
+            .overlay {
+                SurfAceKeyboardActiveBorder(active: surface.activeKeyboardPaneId == pane.paneId)
+            }
             .onChange(of: proxy.size) { _, newSize in
                 pane.lastMeasuredSize = newSize
             }
         }
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
+            }
+        )
         .clipped()
     }
 }
@@ -185,6 +194,7 @@ private struct SurfAcePaneControls: View {
     var body: some View {
         HStack(spacing: 12) {
             Button(pane.labelText) {
+                runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
                 runtime.toggleLabelsVisibility(surfaceId: surface.surfaceId)
             }
             .buttonStyle(SurfAceGlassButtonStyle())
@@ -304,6 +314,22 @@ private struct SurfAceAnnotationBorder: View {
                     animatePulse = false
                 }
             }
+    }
+}
+
+private struct SurfAceKeyboardActiveBorder: View {
+    let active: Bool
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 0, style: .continuous)
+            .strokeBorder(Color.white.opacity(active ? 0.98 : 0), lineWidth: 3)
+            .overlay {
+                RoundedRectangle(cornerRadius: 0, style: .continuous)
+                    .strokeBorder(Color(red: 0.49, green: 0.68, blue: 1.0).opacity(active ? 0.55 : 0), lineWidth: 7)
+            }
+            .shadow(color: Color(red: 0.49, green: 0.68, blue: 1.0).opacity(active ? 0.46 : 0), radius: 14)
+            .allowsHitTesting(false)
+            .animation(.easeOut(duration: 0.12), value: active)
     }
 }
 
@@ -431,7 +457,7 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             self.hostView = hostView
             hostView.onInteractionBegan = { [weak self] in
                 guard let self else { return }
-                self.runtime.noteInteraction(surfaceId: self.surfaceId)
+                self.runtime.activateKeyboardPane(surfaceId: self.surfaceId, paneId: self.paneId)
             }
             hostView.onSelectionChanged = { [weak self] text, rect in
                 guard let self else { return }
@@ -581,6 +607,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private let scrollMessageName = "surfAceScroll"
     private let tapMessageName = "surfAceTap"
     private let navigationMessageName = "surfAceNavigation"
+    private let focusMessageName = "surfAceFocus"
 
     private let webView: WKWebView
     private let pdfView = PDFView()
@@ -614,6 +641,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         setupViewHierarchy()
         setupScripts()
         setupPDFTracking()
+        setupInteractionTracking()
         render(entry: nil, restoreViewport: nil)
     }
 
@@ -852,6 +880,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             guard let url = body["url"] as? String, !url.isEmpty else { return }
             let sentAt = parseInt64(body["sentAt"]) ?? Int64(Date().timeIntervalSince1970 * 1000)
             onNavigationEvent?(url, sentAt)
+        case focusMessageName:
+            break
         default:
             break
         }
@@ -915,6 +945,22 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         controller.add(SurfAceWeakScriptMessageHandler(target: self), name: scrollMessageName)
         controller.add(SurfAceWeakScriptMessageHandler(target: self), name: tapMessageName)
         controller.add(SurfAceWeakScriptMessageHandler(target: self), name: navigationMessageName)
+        controller.add(SurfAceWeakScriptMessageHandler(target: self), name: focusMessageName)
+    }
+
+    private func setupInteractionTracking() {
+        let recognizer = UITapGestureRecognizer(target: self, action: #selector(handlePaneTapGesture(_:)))
+        recognizer.cancelsTouchesInView = false
+        recognizer.delaysTouchesBegan = false
+        recognizer.delaysTouchesEnded = false
+        addGestureRecognizer(recognizer)
+    }
+
+    @objc
+    private func handlePaneTapGesture(_ recognizer: UITapGestureRecognizer) {
+        if recognizer.state == .ended {
+            onInteractionBegan?()
+        }
     }
 
     private func setupPDFTracking() {
@@ -1727,6 +1773,13 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             }
           }
 
+          function postFocus() {
+            if (window.webkit?.messageHandlers?.surfAceFocus) {
+              window.webkit.messageHandlers.surfAceFocus.postMessage({});
+            }
+          }
+
+          document.addEventListener('pointerdown', postFocus, { capture: true, passive: true });
           document.addEventListener('selectionchange', postSelectionIfAvailable);
           document.addEventListener('click', function(event) {
             const anchor = event && event.target && event.target.closest ? event.target.closest('a[href]') : null;
