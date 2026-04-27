@@ -154,7 +154,11 @@ try {
     zIndex: 1,
   }), 15000);
 
-  await sleep(Number(args.overlayWaitMs ?? args["overlay-wait-ms"] ?? 1500));
+  await waitForRendererOverlayRegions({
+    minRegionCount: Number(args.minOverlayRegionCount ?? args["min-overlay-region-count"] ?? 1),
+    socketPath: compositorSocket,
+    timeoutMs: Number(args.overlayWaitMs ?? args["overlay-wait-ms"] ?? 5000),
+  });
 
   const finalStatus = await getCompositorStatus(compositorSocket);
   const panes = await client.request("panes.list", {});
@@ -184,42 +188,20 @@ try {
 
 function targetApplyPayload(options) {
   const paneId = Number(options.pane.paneId);
+  const compositorPaneId = String(paneId);
   const targetSummary = options.targetId.includes("btop") ? "btop" : "top";
   return {
     materialization: {
       op: "native_pane.host",
-      overlaySet: {
-        coordinateSpace: "surface_logical",
-        regions: [
-          {
-            captures: [],
-            kind: "native_pane",
-            paneId,
-            paneInstanceId: options.pane.paneLineageId,
-            rect: {
-              height: options.geometry.height,
-              width: options.geometry.width,
-              x: options.geometry.x,
-              y: options.geometry.y,
-            },
-            regionId: `${paneId}:${options.targetId}`,
-            zIndex: options.zIndex,
-          },
-        ],
-        revision: options.targetEpoch,
-        surfaceId: options.surfaceId,
-        topologyEpoch: options.topologyEpoch,
-        windowId: options.windowLabel,
-      },
       panes: [
         {
-          binding_id: `${paneId}:${options.targetId}`,
+          binding_id: `${compositorPaneId}:${options.targetId}`,
           content_id: options.targetId,
           geometry: {
             ...options.geometry,
             coordinateSpace: "compositor_logical",
           },
-          id: paneId,
+          id: compositorPaneId,
           process: {
             args: options.process.args,
             command: options.process.command,
@@ -251,6 +233,35 @@ function targetApplyPayload(options) {
       command: options.process.command,
     },
   };
+}
+
+async function waitForRendererOverlayRegions({ minRegionCount, socketPath, timeoutMs }) {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = null;
+  while (Date.now() < deadline) {
+    lastStatus = await getCompositorStatus(socketPath);
+    const regionCount = overlayRegionCount(lastStatus);
+    if (regionCount >= minRegionCount) {
+      return;
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for renderer overlay regions >= ${minRegionCount}; last count=${overlayRegionCount(lastStatus)}`);
+}
+
+function overlayRegionCount(response) {
+  const status = response?.status ?? response;
+  const overlayRegions = status?.overlay_regions ?? status?.overlayRegions;
+  if (typeof overlayRegions?.regionCount === "number") {
+    return overlayRegions.regionCount;
+  }
+  if (Array.isArray(overlayRegions?.regions)) {
+    return overlayRegions.regions.length;
+  }
+  if (typeof status?.overlay_region_count === "number") {
+    return status.overlay_region_count;
+  }
+  return 0;
 }
 
 function summarizeApply(response) {
