@@ -96,6 +96,9 @@ type CompositorControlRequest =
     type: NativePaneMaterialization["op"];
     panes: NativePaneMaterialization["panes"];
   }
+  | {
+    type: "get_status";
+  }
   | (NonNullable<NativePaneMaterialization["overlaySet"]> & {
     type: "overlay_regions.set";
     updateReason: "initial" | "update";
@@ -169,6 +172,65 @@ function compositorFailureMessage(response: Record<string, unknown>): string | n
     }
   }
   return "compositor rejected materialization";
+}
+
+function statusNumber(response: Record<string, unknown>, field: string): number | null {
+  const direct = response[field];
+  if (typeof direct === "number") {
+    return direct;
+  }
+  const status = response.status;
+  if (!status || typeof status !== "object") {
+    return null;
+  }
+  const nested = (status as Record<string, unknown>)[field];
+  return typeof nested === "number" ? nested : null;
+}
+
+function statusString(response: Record<string, unknown>, field: string): string | null {
+  const direct = response[field];
+  if (typeof direct === "string") {
+    return direct;
+  }
+  const status = response.status;
+  if (!status || typeof status !== "object") {
+    return null;
+  }
+  const nested = (status as Record<string, unknown>)[field];
+  return typeof nested === "string" ? nested : null;
+}
+
+function validateMaterializationAgainstCompositorStatus(
+  request: CompositorControlRequest,
+  status: Record<string, unknown>,
+): string | null {
+  if (!("panes" in request)) {
+    return null;
+  }
+  const coordinateSpace = statusString(status, "pane_geometry_coordinate_space");
+  if (coordinateSpace && coordinateSpace !== "compositor_logical") {
+    return `compositor pane geometry coordinate space is ${coordinateSpace}, expected compositor_logical`;
+  }
+  const logicalWidth = statusNumber(status, "logical_surface_width");
+  const logicalHeight = statusNumber(status, "logical_surface_height");
+  if (logicalWidth === null || logicalHeight === null) {
+    return null;
+  }
+  for (const pane of request.panes) {
+    const { geometry } = pane;
+    if (geometry.width <= 0 || geometry.height <= 0) {
+      return `native pane ${pane.id} has empty geometry`;
+    }
+    if (
+      geometry.x < 0 ||
+      geometry.y < 0 ||
+      geometry.x + geometry.width > logicalWidth ||
+      geometry.y + geometry.height > logicalHeight
+    ) {
+      return `native pane ${pane.id} geometry is outside compositor logical surface ${logicalWidth}x${logicalHeight}`;
+    }
+  }
+  return null;
 }
 
 async function sendCompositorControl(socketPath: string, request: CompositorControlRequest): Promise<Record<string, unknown>> {
@@ -1148,10 +1210,20 @@ export class SurfaceWsServer {
     }
 
     const hostRequest = requestForCompositor(materialization);
+    let preflightStatus: Record<string, unknown> | null = null;
     let hostResponse: Record<string, unknown> | null = null;
     let overlayRequest: CompositorControlRequest | null = null;
     let overlayResponse: Record<string, unknown> | null = null;
     try {
+      preflightStatus = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      const statusFailure = compositorFailureMessage(preflightStatus);
+      if (statusFailure) {
+        throw new Error(statusFailure);
+      }
+      const geometryFailure = validateMaterializationAgainstCompositorStatus(hostRequest, preflightStatus);
+      if (geometryFailure) {
+        throw new Error(geometryFailure);
+      }
       hostResponse = await sendCompositorControl(this.compositorSocketPath, hostRequest);
       const hostFailure = compositorFailureMessage(hostResponse);
       if (hostFailure) {
@@ -1174,6 +1246,7 @@ export class SurfaceWsServer {
           hostResponse,
           overlayRequest,
           overlayResponse,
+          preflightStatus,
         },
         paneLineageId: request.payload.paneLineageId,
         requestId: request.payload.requestId,
@@ -1199,6 +1272,7 @@ export class SurfaceWsServer {
           hostResponse,
           overlayRequest,
           overlayResponse,
+          preflightStatus,
         },
         message: error instanceof Error ? error.message : String(error),
         paneLineageId: request.payload.paneLineageId,
