@@ -193,7 +193,7 @@ private struct SurfAcePaneNumberIndicator: View {
     let paneHeight: CGFloat
 
     private var fontSize: CGFloat {
-        max(64, paneHeight * 0.2)
+        max(64, paneHeight / 6)
     }
 
     var body: some View {
