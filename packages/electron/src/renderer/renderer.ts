@@ -298,9 +298,53 @@ function unionRects(rects: OverlayRegionReport["rect"][]): OverlayRegionReport["
   };
 }
 
+function clampRectToRect(
+  rect: OverlayRegionReport["rect"],
+  bounds: OverlayRegionReport["rect"],
+): OverlayRegionReport["rect"] {
+  const x = Math.max(bounds.x, rect.x);
+  const y = Math.max(bounds.y, rect.y);
+  const right = Math.min(bounds.x + bounds.width, rect.x + rect.width);
+  const bottom = Math.min(bounds.y + bounds.height, rect.y + rect.height);
+  return {
+    height: Math.max(1, bottom - y),
+    width: Math.max(1, right - x),
+    x,
+    y,
+  };
+}
+
+function expandedAffordanceRect(
+  rect: OverlayRegionReport["rect"],
+  bounds: OverlayRegionReport["rect"],
+  options: { minHeight: number; minWidth: number; padX: number; padY: number },
+): OverlayRegionReport["rect"] {
+  const width = Math.min(bounds.width, Math.max(options.minWidth, rect.width + (options.padX * 2)));
+  const height = Math.min(bounds.height, Math.max(options.minHeight, rect.height + (options.padY * 2)));
+  return clampRectToRect({
+    height,
+    width,
+    x: rect.x + (rect.width / 2) - (width / 2),
+    y: rect.y + (rect.height / 2) - (height / 2),
+  }, bounds);
+}
+
 function visibleOverlayRect(element: HTMLElement, marker: string | undefined): OverlayRegionReport["rect"] | null {
-  if (marker === "pane-badge" || marker === "pane-indicator") {
-    return rangeRectForElementText(element) ?? elementRect(element);
+  if (marker === "pane-indicator") {
+    const bounds = elementRect(element);
+    const textRect = rangeRectForElementText(element);
+    if (bounds && textRect) {
+      return expandedAffordanceRect(textRect, bounds, { minHeight: 60, minWidth: 60, padX: 14, padY: 6 });
+    }
+    return bounds;
+  }
+  if (marker === "pane-badge") {
+    const bounds = elementRect(element);
+    const textRect = rangeRectForElementText(element);
+    if (bounds && textRect) {
+      return expandedAffordanceRect(textRect, bounds, { minHeight: 36, minWidth: 44, padX: 12, padY: 8 });
+    }
+    return bounds;
   }
   if (marker === "pane-handle") {
     const childRects = [...element.querySelectorAll<HTMLElement>(".control-button")]
