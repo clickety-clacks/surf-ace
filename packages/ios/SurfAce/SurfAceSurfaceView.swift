@@ -220,12 +220,6 @@ private struct SurfAcePaneControls: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Button(pane.labelText) {
-                runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
-                runtime.toggleLabelsVisibility(surfaceId: surface.surfaceId)
-            }
-            .buttonStyle(SurfAceGlassButtonStyle())
-
             if pane.drawingRestoreWarningVisible {
                 SurfAceWarningIndicator()
             }

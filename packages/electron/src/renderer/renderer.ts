@@ -160,15 +160,12 @@ let overlayRevision = 0;
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 
 const OVERLAY_CAPTURES: OverlayCapture[] = ["pointer_hover", "pointer_button", "pointer_axis"];
-const OVERLAY_HOVER_CAPTURE: OverlayCapture[] = ["pointer_hover"];
 const OVERLAY_MARKER_ATTRIBUTE = "data-surf-ace-overlay";
 type SurfAceOverlayKind =
   | "annotation-control"
   | "history-back"
   | "history-forward"
-  | "pane-badge"
-  | "pane-handle"
-  | "pane-indicator";
+  | "pane-handle";
 
 function escapeHtml(input: string): string {
   return input
@@ -284,24 +281,6 @@ function outsetRect(
   };
 }
 
-function rangeRectForElementText(element: HTMLElement): OverlayRegionReport["rect"] | null {
-  if (!element.textContent?.trim()) {
-    return null;
-  }
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  const rects = [...range.getClientRects()]
-    .filter((rect) => rect.width > 0 && rect.height > 0)
-    .map((rect) => ({
-      height: rect.height,
-      width: rect.width,
-      x: rect.x,
-      y: rect.y,
-    }));
-  range.detach();
-  return unionRects(rects);
-}
-
 function unionRects(rects: OverlayRegionReport["rect"][]): OverlayRegionReport["rect"] | null {
   if (rects.length === 0) {
     return null;
@@ -318,52 +297,10 @@ function unionRects(rects: OverlayRegionReport["rect"][]): OverlayRegionReport["
   };
 }
 
-function clampRectToRect(
-  rect: OverlayRegionReport["rect"],
-  bounds: OverlayRegionReport["rect"],
-): OverlayRegionReport["rect"] {
-  const x = Math.max(bounds.x, rect.x);
-  const y = Math.max(bounds.y, rect.y);
-  const right = Math.min(bounds.x + bounds.width, rect.x + rect.width);
-  const bottom = Math.min(bounds.y + bounds.height, rect.y + rect.height);
-  return {
-    height: Math.max(1, bottom - y),
-    width: Math.max(1, right - x),
-    x,
-    y,
-  };
-}
-
-function expandedAffordanceRect(
-  rect: OverlayRegionReport["rect"],
-  bounds: OverlayRegionReport["rect"],
-  options: { minHeight: number; minWidth: number; padX: number; padY: number },
-): OverlayRegionReport["rect"] {
-  const width = Math.min(bounds.width, Math.max(options.minWidth, rect.width + (options.padX * 2)));
-  const height = Math.min(bounds.height, Math.max(options.minHeight, rect.height + (options.padY * 2)));
-  return clampRectToRect({
-    height,
-    width,
-    x: rect.x + (rect.width / 2) - (width / 2),
-    y: rect.y + (rect.height / 2) - (height / 2),
-  }, bounds);
-}
-
 function visibleOverlayRect(element: HTMLElement, marker: string | undefined): OverlayRegionReport["rect"] | null {
   if (element.classList.contains("control-button")) {
     const rect = elementRect(element);
     return rect ? outsetRect(rect, 2) : null;
-  }
-  if (marker === "pane-indicator") {
-    return null;
-  }
-  if (marker === "pane-badge") {
-    const bounds = elementRect(element);
-    const textRect = rangeRectForElementText(element);
-    if (bounds && textRect) {
-      return expandedAffordanceRect(textRect, bounds, { minHeight: 36, minWidth: 44, padX: 12, padY: 8 });
-    }
-    return bounds;
   }
   if (marker === "pane-handle") {
     const childRects = [...element.querySelectorAll<HTMLElement>(".control-button")]
@@ -411,12 +348,8 @@ function overlayMetadataForMarker(
       return { captures: OVERLAY_CAPTURES, kind: "history_back", suffix: marker, zIndex: 20 };
     case "history-forward":
       return { captures: OVERLAY_CAPTURES, kind: "history_forward", suffix: marker, zIndex: 20 };
-    case "pane-badge":
-      return { captures: OVERLAY_CAPTURES, kind: "pane_badge", suffix: marker, zIndex: 20 };
     case "pane-handle":
       return { captures: OVERLAY_CAPTURES, kind: "pane_handle", suffix: marker, zIndex: 10 };
-    case "pane-indicator":
-      return { captures: OVERLAY_HOVER_CAPTURE, kind: "pane_badge", suffix: marker, zIndex: 15 };
     default:
       return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker || "overlay", zIndex: 10 };
   }
@@ -787,7 +720,6 @@ function ensurePaneView(paneId: number): PaneView {
   const labelEl = document.createElement("div");
   labelEl.className = "pane-label";
   labelEl.innerHTML = "<span></span>";
-  surfAceOverlay(labelEl.querySelector("span") as HTMLSpanElement, "pane-indicator");
   const canvas = document.createElement("canvas");
   canvas.className = "annotation-layer";
   const controlsEl = document.createElement("div");
@@ -846,12 +778,6 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  const paneLabel = surfAceOverlay(createButton(pane.label, "pane-label-chip"), "pane-badge");
-  paneLabel.addEventListener("click", () => {
-    rememberPaneContext(pane.paneId);
-    document.body.classList.remove("labels-hidden");
-  });
-
   const back = surfAceOverlay(createButton("◀", "back", !pane.canGoBack), "history-back");
   back.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
@@ -868,8 +794,6 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
   });
   annotate.classList.toggle("active", pane.showDone);
-
-  view.controlsEl.appendChild(paneLabel);
 
   if (!pane.showDone) {
     view.controlsEl.append(back, forward);

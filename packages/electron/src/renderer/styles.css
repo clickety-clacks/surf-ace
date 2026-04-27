@@ -493,15 +493,6 @@ body {
   border-color: rgba(160, 191, 255, 0.72);
 }
 
-.control-button.pane-label-chip {
-  min-width: 0;
-  padding: 0 14px;
-  border-color: rgba(164, 189, 235, 0.28);
-  background: rgba(10, 17, 31, 0.72);
-  color: rgba(243, 248, 255, 0.88);
-  opacity: 1;
-}
-
 .pane-toast {
   position: absolute;
   bottom: 78px;
