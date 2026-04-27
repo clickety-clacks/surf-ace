@@ -9,6 +9,7 @@
   --ok: #22c55e;
   --warn: #f59e0b;
   --destructive: #ef4444;
+  --bottom-control-gutter: 96px;
   --ui-font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
   --ui-font-weight: 200;
   --ui-letter-spacing: 0.12em;
@@ -175,6 +176,21 @@ body {
   transition: opacity 0.12s ease;
 }
 
+.pane-shell::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--bottom-control-gutter);
+  z-index: 21;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(8, 17, 31, 0), rgba(8, 17, 31, 0.86) 38%, rgba(8, 17, 31, 0.96)),
+    linear-gradient(90deg, rgba(124, 173, 255, 0.18), rgba(164, 189, 235, 0.08));
+  border-top: 1px solid rgba(164, 189, 235, 0.16);
+}
+
 .pane-shell.keyboard-active::after {
   opacity: 1;
 }
@@ -243,7 +259,7 @@ body {
 
 .pane-scroll {
   position: absolute;
-  inset: 0;
+  inset: 0 0 var(--bottom-control-gutter);
   overflow: auto;
 }
 
@@ -426,11 +442,11 @@ body {
   display: flex;
   gap: 6px;
   align-items: center;
-  padding: 7px 10px;
+  padding: 2px;
   border-radius: 999px;
-  background: rgba(13, 22, 41, 0.64);
-  border: 1px solid rgba(164, 189, 235, 0.32);
-  backdrop-filter: blur(14px);
+  background: transparent;
+  border: 0;
+  overflow: visible;
   z-index: 24;
 }
 
