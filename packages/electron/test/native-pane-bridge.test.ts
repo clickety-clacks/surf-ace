@@ -52,7 +52,7 @@ test("detectCompositorHostMode reads compositor host environment without requiri
     }),
     {
       controlSocketPath: "/tmp/surf-ace-compositor.sock",
-      enabled: false,
+      enabled: true,
       outputRotation: null,
       waylandDisplay: "wayland-77",
     },

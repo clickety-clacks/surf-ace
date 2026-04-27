@@ -87,6 +87,7 @@ export function detectCompositorHostMode(env: NodeJS.ProcessEnv = process.env): 
   return {
     controlSocketPath,
     enabled:
+      Boolean(env["SURF_ACE_COMPOSITOR_SOCKET"]) ||
       env["SURF_ACE_COMPOSITOR"] === "1" ||
       env["SURF_ACE_COMPOSITOR_MAIN_APP"] === "1" ||
       env["SURF_ACE_COMPOSITOR_HOST_MODE"] === "1",
