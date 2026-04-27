@@ -152,6 +152,15 @@ let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 let overlayRegionsFrame: number | null = null;
 
 const OVERLAY_CAPTURES: OverlayCapture[] = ["pointer_hover", "pointer_button", "pointer_axis"];
+const OVERLAY_HOVER_CAPTURE: OverlayCapture[] = ["pointer_hover"];
+const OVERLAY_MARKER_ATTRIBUTE = "data-surf-ace-overlay";
+type SurfAceOverlayKind =
+  | "annotation-control"
+  | "history-back"
+  | "history-forward"
+  | "pane-badge"
+  | "pane-handle"
+  | "pane-indicator";
 
 function escapeHtml(input: string): string {
   return input
@@ -261,13 +270,14 @@ function overlayRegionForElement(
   idSuffix: string,
   kind: OverlayRegionReport["kind"],
   zIndex: number,
+  captures: OverlayCapture[] = OVERLAY_CAPTURES,
 ): OverlayRegionReport | null {
   const rect = visibleElementRect(element);
   if (!rect) {
     return null;
   }
   return {
-    captures: OVERLAY_CAPTURES,
+    captures,
     kind,
     paneId: `${latestState?.surfaceId ?? "surface"}:${pane.paneId}`,
     paneInstanceId: `${latestState?.surfaceId ?? "surface"}:${pane.paneId}:${pane.content.contentId ?? "none"}`,
@@ -277,24 +287,66 @@ function overlayRegionForElement(
   };
 }
 
-function buttonOverlayMetadata(
-  button: HTMLButtonElement,
-  index: number,
-): { kind: OverlayRegionReport["kind"]; suffix: string } {
-  const roleClass = [...button.classList].find((className) => className !== "control-button" && className !== "active");
-  switch (roleClass) {
-    case "pane-label-chip":
-      return { kind: "pane_badge", suffix: `control-pane-label-${index}` };
-    case "back":
-      return { kind: "history_back", suffix: `control-back-${index}` };
-    case "forward":
-      return { kind: "history_forward", suffix: `control-forward-${index}` };
-    case "annotate":
-    case "done":
-      return { kind: "annotation_control", suffix: `control-${roleClass}-${index}` };
+function overlayMetadataForMarker(
+  marker: string | undefined,
+): { captures: OverlayCapture[]; kind: OverlayRegionReport["kind"]; suffix: string; zIndex: number } {
+  switch (marker) {
+    case "annotation-control":
+      return { captures: OVERLAY_CAPTURES, kind: "annotation_control", suffix: marker, zIndex: 20 };
+    case "history-back":
+      return { captures: OVERLAY_CAPTURES, kind: "history_back", suffix: marker, zIndex: 20 };
+    case "history-forward":
+      return { captures: OVERLAY_CAPTURES, kind: "history_forward", suffix: marker, zIndex: 20 };
+    case "pane-badge":
+      return { captures: OVERLAY_CAPTURES, kind: "pane_badge", suffix: marker, zIndex: 20 };
+    case "pane-handle":
+      return { captures: OVERLAY_CAPTURES, kind: "pane_handle", suffix: marker, zIndex: 10 };
+    case "pane-indicator":
+      return { captures: OVERLAY_HOVER_CAPTURE, kind: "pane_badge", suffix: marker, zIndex: 15 };
     default:
-      return { kind: "other", suffix: `control-${roleClass ?? "button"}-${index}` };
+      return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker || "overlay", zIndex: 10 };
   }
+}
+
+function surfAceOverlay<T extends HTMLElement>(element: T, kind: SurfAceOverlayKind): T {
+  element.setAttribute(OVERLAY_MARKER_ATTRIBUTE, kind);
+  return element;
+}
+
+function isMarkedOverlayVisible(element: HTMLElement, rootEl: HTMLElement): boolean {
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    if (current.hidden) {
+      return false;
+    }
+    const style = window.getComputedStyle(current);
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+      return false;
+    }
+    if (current === rootEl) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): OverlayRegionReport[] {
+  const markerSelector = `[${OVERLAY_MARKER_ATTRIBUTE}]`;
+  return [...view.rootEl.querySelectorAll<HTMLElement>(markerSelector)].flatMap((element, index) => {
+    if (!isMarkedOverlayVisible(element, view.rootEl)) {
+      return [];
+    }
+    const marker = element.getAttribute(OVERLAY_MARKER_ATTRIBUTE) ?? undefined;
+    const metadata = overlayMetadataForMarker(marker);
+    const region = overlayRegionForElement(
+      pane,
+      element,
+      `${metadata.suffix}-${index}`,
+      metadata.kind,
+      metadata.zIndex,
+      metadata.captures,
+    );
+    return region ? [region] : [];
+  });
 }
 
 function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "visibility"): void {
@@ -319,17 +371,7 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
     if (!view) {
       continue;
     }
-    const clusterRegion = overlayRegionForElement(pane, view.controlsEl, "control-cluster", "pane_handle", 10);
-    if (clusterRegion) {
-      regions.push(clusterRegion);
-    }
-    view.controlsEl.querySelectorAll<HTMLButtonElement>(".control-button").forEach((button, index) => {
-      const metadata = buttonOverlayMetadata(button, index);
-      const buttonRegion = overlayRegionForElement(pane, button, metadata.suffix, metadata.kind, 20);
-      if (buttonRegion) {
-        regions.push(buttonRegion);
-      }
-    });
+    regions.push(...collectMarkedOverlayRegions(pane, view));
   }
   window.surfAce.reportOverlayRegions({
     coordinateSpace: "surface_logical",
@@ -627,11 +669,13 @@ function ensurePaneView(paneId: number): PaneView {
   shieldEl.className = "annotation-shield";
   const labelEl = document.createElement("div");
   labelEl.className = "pane-label";
-  labelEl.innerHTML = "<span></span>";
+  const labelTextEl = surfAceOverlay(document.createElement("span"), "pane-indicator");
+  labelEl.appendChild(labelTextEl);
   const canvas = document.createElement("canvas");
   canvas.className = "annotation-layer";
   const controlsEl = document.createElement("div");
   controlsEl.className = "control-cluster";
+  surfAceOverlay(controlsEl, "pane-handle");
   const toastEl = document.createElement("div");
   toastEl.className = "pane-toast";
   toastEl.hidden = true;
@@ -685,23 +729,23 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  const paneLabel = createButton(pane.label, "pane-label-chip");
+  const paneLabel = surfAceOverlay(createButton(pane.label, "pane-label-chip"), "pane-badge");
   paneLabel.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     document.body.classList.remove("labels-hidden");
   });
 
-  const back = createButton("◀", "back", !pane.canGoBack);
+  const back = surfAceOverlay(createButton("◀", "back", !pane.canGoBack), "history-back");
   back.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ direction: "back", paneId: pane.paneId, type: "history" });
   });
-  const forward = createButton("▶", "forward", !pane.canGoForward);
+  const forward = surfAceOverlay(createButton("▶", "forward", !pane.canGoForward), "history-forward");
   forward.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ direction: "forward", paneId: pane.paneId, type: "history" });
   });
-  const annotate = createButton("👆", "annotate");
+  const annotate = surfAceOverlay(createButton("👆", "annotate"), "annotation-control");
   annotate.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
@@ -717,7 +761,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.appendChild(annotate);
 
   if (pane.showDone) {
-    const done = createButton("Done", "done");
+    const done = surfAceOverlay(createButton("Done", "done"), "annotation-control");
     done.addEventListener("click", () => {
       rememberPaneContext(pane.paneId);
       window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });

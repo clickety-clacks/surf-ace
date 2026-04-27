@@ -46,6 +46,18 @@ test("detectCompositorHostMode reads compositor host environment without requiri
   );
   assert.deepEqual(
     detectCompositorHostMode({
+      SURF_ACE_COMPOSITOR_SOCKET: "/tmp/surf-ace-compositor.sock",
+      WAYLAND_DISPLAY: "wayland-77",
+    }),
+    {
+      controlSocketPath: "/tmp/surf-ace-compositor.sock",
+      enabled: false,
+      outputRotation: null,
+      waylandDisplay: "wayland-77",
+    },
+  );
+  assert.deepEqual(
+    detectCompositorHostMode({
       SURF_ACE_COMPOSITOR_MAIN_APP: "1",
       SURF_ACE_COMPOSITOR_HOST_MODE: "1",
       SURF_ACE_COMPOSITOR_SOCKET: "/tmp/custom.sock",
