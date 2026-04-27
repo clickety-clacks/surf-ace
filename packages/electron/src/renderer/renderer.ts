@@ -264,6 +264,24 @@ function elementRect(element: Element): OverlayRegionReport["rect"] | null {
   };
 }
 
+function rangeRectForElementText(element: HTMLElement): OverlayRegionReport["rect"] | null {
+  if (!element.textContent?.trim()) {
+    return null;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  const rects = [...range.getClientRects()]
+    .filter((rect) => rect.width > 0 && rect.height > 0)
+    .map((rect) => ({
+      height: rect.height,
+      width: rect.width,
+      x: rect.x,
+      y: rect.y,
+    }));
+  range.detach();
+  return unionRects(rects);
+}
+
 function unionRects(rects: OverlayRegionReport["rect"][]): OverlayRegionReport["rect"] | null {
   if (rects.length === 0) {
     return null;
@@ -281,6 +299,9 @@ function unionRects(rects: OverlayRegionReport["rect"][]): OverlayRegionReport["
 }
 
 function visibleOverlayRect(element: HTMLElement, marker: string | undefined): OverlayRegionReport["rect"] | null {
+  if (marker === "pane-badge" || marker === "pane-indicator") {
+    return rangeRectForElementText(element) ?? elementRect(element);
+  }
   if (marker === "pane-handle") {
     const childRects = [...element.querySelectorAll<HTMLElement>(".control-button")]
       .filter((child) => isMarkedOverlayVisible(child, element))
