@@ -93,6 +93,7 @@ type RendererWindowState = {
 };
 
 type Bootstrap = {
+  overlayDebugBorders?: boolean;
   state: RendererWindowState;
   surfaceId: string;
 };
@@ -1501,6 +1502,7 @@ function renderWindow(state: RendererWindowState): void {
 
 async function init(): Promise<void> {
   bootstrap = (await window.surfAce.getBootstrap()) as Bootstrap;
+  document.body.classList.toggle("overlay-debug-borders", Boolean(bootstrap.overlayDebugBorders));
   latestState = bootstrap.state;
   renderWindow(bootstrap.state);
 

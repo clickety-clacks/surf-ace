@@ -471,6 +471,11 @@ body {
   cursor: pointer;
 }
 
+.overlay-debug-borders .control-button {
+  outline: 2px solid #ff00ff;
+  outline-offset: 2px;
+}
+
 .control-button:disabled {
   opacity: 0.4;
   cursor: default;
