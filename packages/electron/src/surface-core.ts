@@ -671,7 +671,7 @@ export class SurfaceCore {
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
-    return targetApplyResult(payload, "applied", undefined, "browser_url navigation started; success is reported asynchronously by surface diagnostics", {
+    return targetApplyResult(payload, "failed", "materialization_failed", "browser_url navigation started but has not been verified by the renderer", {
       navigationStatus: "started_unverified",
       replaySemantics: "navigate",
       url: url.toString(),

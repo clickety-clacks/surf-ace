@@ -180,4 +180,22 @@ final class SurfAceViewportPreservationTests: XCTestCase {
             }
         }
     }
+
+    func testBrowserURLStartedUnverifiedEvidenceIsNotApplied() {
+        let payload = SurfAceRuntime.browserURLStartedUnverifiedApplyResultPayload(
+            requestId: "tr_google",
+            targetId: "tg_google",
+            paneLineageId: "pl_1",
+            targetEpoch: 2,
+            url: "https://google.com/",
+            appliedAt: "2026-04-26T00:00:00Z"
+        )
+        let materializedState = payload["materializedState"] as? [String: Any]
+
+        XCTAssertEqual(payload["status"] as? String, "failed")
+        XCTAssertEqual(payload["errorCode"] as? String, "materialization_failed")
+        XCTAssertEqual(materializedState?["navigationStatus"] as? String, "started_unverified")
+        XCTAssertEqual(materializedState?["replaySemantics"] as? String, "navigate")
+        XCTAssertEqual(materializedState?["url"] as? String, "https://google.com/")
+    }
 }

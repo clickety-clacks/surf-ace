@@ -151,7 +151,7 @@ test("surface core falls back to authoritative html text when renderer snapshot 
   assert.equal(snapshot.visibleText, "pane two\nready");
 });
 
-test("surface core materializes browser_url targets as live URL content", () => {
+test("surface core starts browser_url targets without reporting unverified navigation as applied", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -184,7 +184,9 @@ test("surface core materializes browser_url targets as live URL content", () => 
     targetPayload: { url: "https://google.com/" },
   });
 
-  assert.equal(result.status, "applied");
+  assert.equal(result.status, "failed");
+  assert.equal(result.errorCode, "materialization_failed");
+  assert.equal(result.materializedState?.navigationStatus, "started_unverified");
   const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
   assert.equal(pane.content.contentType, "browser_url");
   assert.deepEqual(pane.content.content, { url: "https://google.com/" });

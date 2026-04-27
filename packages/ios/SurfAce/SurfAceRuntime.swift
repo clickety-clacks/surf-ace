@@ -1675,15 +1675,23 @@ final class SurfAceRuntime {
         pane.bridge?.render(entry: pane.currentEntry, restoreViewport: nil)
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
 
-        let response = result(
+        let resultPayload = Self.browserURLStartedUnverifiedApplyResultPayload(
             requestId: requestId,
             targetId: targetId,
             paneLineageId: paneLineageId,
             targetEpoch: targetEpoch,
-            status: "applied",
-            message: "browser_url navigation started; success is reported asynchronously by surface diagnostics",
-            materializedState: ["url": url, "replaySemantics": "navigate", "navigationStatus": "started_unverified"]
+            url: url,
+            appliedAt: isoTimestampNow()
         )
+        let response = [
+            "v": 1,
+            "type": "response",
+            "op": "target.apply.result",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": resultPayload,
+        ] as [String: Any]
         pane.currentTarget?.lastApplyEvidence = response["payload"] as? [String: Any]
         return response
     }
@@ -2834,6 +2842,27 @@ final class SurfAceRuntime {
             payload["lastApplyEvidence"] = lastApplyEvidence
         }
         return payload
+    }
+
+    static func browserURLStartedUnverifiedApplyResultPayload(
+        requestId: String,
+        targetId: String,
+        paneLineageId: String,
+        targetEpoch: Int,
+        url: String,
+        appliedAt: String
+    ) -> [String: Any] {
+        [
+            "requestId": requestId,
+            "targetId": targetId,
+            "paneLineageId": paneLineageId,
+            "targetEpoch": targetEpoch,
+            "status": "failed",
+            "errorCode": "materialization_failed",
+            "message": "browser_url navigation started but has not been verified by WKWebView",
+            "materializedState": ["url": url, "replaySemantics": "navigate", "navigationStatus": "started_unverified"],
+            "appliedAt": appliedAt,
+        ]
     }
 
     private func safeBrowserURL(_ value: String) -> URL? {
