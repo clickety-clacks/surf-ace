@@ -36,6 +36,9 @@ struct SurfAceRootView: View {
                         let surface = runtime.registerSurface(sceneKey: key, scene: scene)
                         surfaceId = surface.surfaceId
                     }
+                },
+                onNewWindowShortcut: {
+                    SurfAceSceneActivation.openNewWindow()
                 }
             )
         }
@@ -173,6 +176,8 @@ private struct SurfAcePaneView: View {
             }
             .overlay {
                 SurfAceKeyboardActiveBorder(active: surface.activeKeyboardPaneId == pane.paneId)
+                    .allowsHitTesting(false)
+                    .zIndex(10_000)
             }
             .onChange(of: proxy.size) { _, newSize in
                 pane.lastMeasuredSize = newSize
@@ -559,16 +564,42 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
 @MainActor
 final class SurfAceSceneProbeController: UIViewController {
     var onConnect: (@Sendable (String, UIScene) -> Void)?
+    var onNewWindowShortcut: (@MainActor @Sendable () -> Void)?
     private var connectedSceneKey: String?
+
+    override var canBecomeFirstResponder: Bool {
+        true
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            UIKeyCommand(
+                title: "New Window",
+                image: nil,
+                action: #selector(handleNewWindowCommand),
+                input: "n",
+                modifierFlags: .command,
+                propertyList: nil
+            ),
+        ]
+    }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         resolveSceneKeyIfNeeded()
+        becomeFirstResponder()
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         resolveSceneKeyIfNeeded()
+        if isViewLoaded, view.window != nil, !isFirstResponder {
+            becomeFirstResponder()
+        }
+    }
+
+    @objc private func handleNewWindowCommand() {
+        onNewWindowShortcut?()
     }
 
     private func resolveSceneKeyIfNeeded() {
@@ -584,15 +615,34 @@ final class SurfAceSceneProbeController: UIViewController {
 
 private struct SurfAceSceneProbeRepresentable: UIViewControllerRepresentable {
     let onConnect: @Sendable (String, UIScene) -> Void
+    let onNewWindowShortcut: @MainActor @Sendable () -> Void
 
     func makeUIViewController(context: Context) -> SurfAceSceneProbeController {
         let controller = SurfAceSceneProbeController()
-        controller.view.isHidden = true
+        controller.view.backgroundColor = .clear
+        controller.view.isUserInteractionEnabled = false
         controller.onConnect = onConnect
+        controller.onNewWindowShortcut = onNewWindowShortcut
         return controller
     }
 
-    func updateUIViewController(_ uiViewController: SurfAceSceneProbeController, context: Context) {}
+    func updateUIViewController(_ uiViewController: SurfAceSceneProbeController, context: Context) {
+        uiViewController.onConnect = onConnect
+        uiViewController.onNewWindowShortcut = onNewWindowShortcut
+    }
+}
+
+@MainActor
+private enum SurfAceSceneActivation {
+    static func openNewWindow() {
+        UIApplication.shared.requestSceneSessionActivation(
+            nil,
+            userActivity: nil,
+            options: nil
+        ) { error in
+            print("[surf-ace:ios:lifecycle] event=new_window_shortcut_failed error=\"\(error.localizedDescription)\"")
+        }
+    }
 }
 
 @MainActor
