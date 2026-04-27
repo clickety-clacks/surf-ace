@@ -77,7 +77,7 @@ export type NativePaneMaterializationPane = {
   content_id?: string;
   binding_id?: string;
   revision: Revision;
-  geometry: Rect;
+  geometry: NativePaneGeometry;
   target?: "terminal";
   process?: {
     command: string;
@@ -133,6 +133,10 @@ export type Rect = {
   y: number;
   width: number;
   height: number;
+};
+
+export type NativePaneGeometry = Rect & {
+  coordinateSpace: "compositor_logical";
 };
 
 export type Viewport = {

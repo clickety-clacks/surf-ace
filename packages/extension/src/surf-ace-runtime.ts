@@ -1045,6 +1045,23 @@ function managedPaneRects(surface: ManagedSurface): Map<PaneId, Rect> {
   return result;
 }
 
+function getCompositorLogicalPaneGeometry(
+  surface: ManagedSurface,
+  pane: ManagedPane,
+): NativePaneMaterialization["panes"][number]["geometry"] {
+  const geometry = managedPaneRects(surface).get(pane.paneId);
+  if (!geometry) {
+    throw new SurfAceToolError(
+      "internal_error",
+      `No compositor logical geometry for pane ${pane.paneId} on surface ${surface.surfaceId}`,
+    );
+  }
+  return {
+    ...geometry,
+    coordinateSpace: "compositor_logical",
+  };
+}
+
 function remoteLayoutToTopologyLayout(
   surface: ManagedSurface,
   node: ManagedLayoutNode,
@@ -3770,12 +3787,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return undefined;
     }
 
-    const geometry = managedPaneRects(surface).get(pane.paneId) ?? {
-      height: surface.viewport.height,
-      width: surface.viewport.width,
-      x: 0,
-      y: 0,
-    };
+    const geometry = getCompositorLogicalPaneGeometry(surface, pane);
     const revision = asRevision(target.targetEpoch);
     const paneEntry: NativePaneMaterialization["panes"][number] = {
       binding_id: `${pane.paneId}:${target.targetId}`,
@@ -3797,6 +3809,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         };
       }
     }
+    const overlayRect = {
+      height: geometry.height,
+      width: geometry.width,
+      x: geometry.x,
+      y: geometry.y,
+    };
 
     return {
       op: "native_pane.host",
@@ -3808,7 +3826,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             kind: "native_pane",
             paneId: pane.paneId,
             paneInstanceId: pane.paneLineageId,
-            rect: geometry,
+            rect: overlayRect,
             regionId: `${pane.paneId}:${target.targetId}`,
             zIndex: Math.max(0, flattenManagedLayout(surface.layout).indexOf(pane.paneId)),
           },

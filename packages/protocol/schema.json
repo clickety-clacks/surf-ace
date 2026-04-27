@@ -260,6 +260,18 @@
         "height": { "type": "number", "minimum": 0 }
       }
     },
+    "NativePaneGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height", "coordinateSpace"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "minimum": 0 },
+        "height": { "type": "number", "minimum": 0 },
+        "coordinateSpace": { "const": "compositor_logical" }
+      }
+    },
     "NativePaneMaterializationPane": {
       "type": "object",
       "additionalProperties": false,
@@ -269,7 +281,7 @@
         "content_id": { "type": "string", "minLength": 1 },
         "binding_id": { "type": "string", "minLength": 1 },
         "revision": { "$ref": "#/$defs/Revision" },
-        "geometry": { "$ref": "#/$defs/Rect" },
+        "geometry": { "$ref": "#/$defs/NativePaneGeometry" },
         "target": { "const": "terminal" },
         "process": {
           "type": "object",
