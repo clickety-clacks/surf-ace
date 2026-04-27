@@ -135,10 +135,12 @@ private struct SurfAcePaneView: View {
                 .background(Color.black.opacity(0.92))
 
                 if surface.labelsVisible {
-                    Text(pane.labelText)
-                        .font(.system(size: 48, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.22))
+                    SurfAcePaneNumberIndicator(label: pane.labelText, paneHeight: proxy.size.height)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding(.trailing, 18)
+                        .padding(.bottom, 104)
                         .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                         .transition(.opacity)
                 }
 
@@ -183,6 +185,31 @@ private struct SurfAcePaneView: View {
             }
         )
         .clipped()
+    }
+}
+
+private struct SurfAcePaneNumberIndicator: View {
+    let label: String
+    let paneHeight: CGFloat
+
+    private var fontSize: CGFloat {
+        max(64, paneHeight * 0.2)
+    }
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: fontSize, weight: .black, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.white.opacity(0.05))
+            .lineLimit(1)
+            .minimumScaleFactor(0.35)
+            .padding(.horizontal, fontSize * 0.12)
+            .frame(minWidth: fontSize * 0.78, minHeight: fontSize * 0.78)
+            .background(.black.opacity(0.05), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(.white.opacity(0.05), lineWidth: 1)
+            }
     }
 }
 
