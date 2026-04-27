@@ -212,9 +212,11 @@ body {
 
 .pane-label {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+  right: 16px;
+  bottom: 84px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-end;
   pointer-events: none;
   z-index: 25;
   transition: opacity 0.18s ease;
@@ -224,16 +226,19 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 12px 24px;
-  border-radius: 16px;
-  background: rgba(12, 22, 42, 0.54);
-  border: 1px solid rgba(162, 187, 238, 0.34);
+  min-width: 0.78em;
+  min-height: 0.78em;
+  padding: 0 0.12em;
+  border-radius: 999px;
+  background: rgba(13, 22, 41, 0.64);
+  border: 1px solid rgba(164, 189, 235, 0.32);
   backdrop-filter: blur(14px);
-  font-size: clamp(28px, 4vw, 44px);
+  color: rgba(238, 244, 255, 0.05);
+  font-size: 20vh;
   font-family: var(--ui-font-family);
-  font-weight: 100;
-  letter-spacing: 0.15em;
-  line-height: 1;
+  font-weight: 1000;
+  letter-spacing: 0;
+  line-height: 0.78;
   text-transform: uppercase;
 }
 

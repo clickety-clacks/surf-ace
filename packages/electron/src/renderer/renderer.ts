@@ -347,12 +347,7 @@ function visibleOverlayRect(element: HTMLElement, marker: string | undefined): O
     return rect ? outsetRect(rect, 2) : null;
   }
   if (marker === "pane-indicator") {
-    const bounds = elementRect(element);
-    const textRect = rangeRectForElementText(element);
-    if (bounds && textRect) {
-      return expandedAffordanceRect(textRect, bounds, { minHeight: 54, minWidth: 48, padX: 8, padY: 2 });
-    }
-    return bounds;
+    return elementRect(element);
   }
   if (marker === "pane-badge") {
     const bounds = elementRect(element);
