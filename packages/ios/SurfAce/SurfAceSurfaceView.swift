@@ -200,7 +200,7 @@ private struct SurfAcePaneNumberIndicator: View {
         Text(label)
             .font(.system(size: fontSize, weight: .black, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(.white.opacity(0.25))
+            .foregroundStyle(.white.opacity(0.20))
             .lineLimit(1)
             .minimumScaleFactor(0.35)
             .padding(.horizontal, fontSize * 0.12)
