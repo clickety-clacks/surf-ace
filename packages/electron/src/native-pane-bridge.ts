@@ -125,6 +125,15 @@ export function overlayRegionsSetRequestForCompositor(snapshot: {
   };
 }
 
+export function nativePaneInstanceIdsForCompositor(
+  materialization: NativePaneMaterialization,
+): Map<string, string> {
+  return new Map(materialization.panes.map((pane) => [
+    String(pane.id),
+    String(pane.binding_id ?? `${pane.id}:${pane.content_id ?? "none"}`),
+  ]));
+}
+
 export function overlayRegionsClearRequestForCompositor(
   surfaceId: string,
   windowId?: string | null,

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { app, BrowserWindow, Menu, ipcMain, screen, type WebContents } from "electron";
 
-import type { Stroke } from "../../protocol/src/index.js";
+import type { NativePaneMaterialization, Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import {
@@ -12,6 +12,7 @@ import {
   type CompositorControlResponse,
   type CompositorOverlayRegion,
   compositorFailureMessage,
+  nativePaneInstanceIdsForCompositor,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
   resolveCompositorControlSocketPath,
@@ -50,6 +51,7 @@ const windows = new Map<string, BrowserWindow>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const readyWindows = new Set<string>();
 const overlayDiagnostics = new Map<string, Record<string, unknown>>();
+const nativePaneInstances = new Map<string, Map<string, string>>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
@@ -90,7 +92,10 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
       hostName: shortHostName(),
       onBusyChanged: () => advertiser?.refresh(),
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
-      onNativeMaterialized: (surfaceId) => broadcastSurfaceState(surfaceId),
+      onNativeMaterialized: (surfaceId, materialization) => {
+        recordNativePaneInstances(surfaceId, materialization);
+        broadcastSurfaceState(surfaceId);
+      },
       port,
       viewport: () => displayViewport(),
     });
@@ -217,6 +222,22 @@ async function sendCompositorOverlayRequest(request: CompositorControlRequest): 
   await sendCompositorControl(socketPath, request);
 }
 
+function recordNativePaneInstances(surfaceId: string, materialization: NativePaneMaterialization): void {
+  const current = nativePaneInstances.get(surfaceId) ?? new Map<string, string>();
+  for (const [paneId, paneInstanceId] of nativePaneInstanceIdsForCompositor(materialization)) {
+    current.set(paneId, paneInstanceId);
+  }
+  nativePaneInstances.set(surfaceId, current);
+}
+
+function compositorOverlayRegions(surfaceId: string, regions: unknown[]): CompositorOverlayRegion[] {
+  const instances = nativePaneInstances.get(surfaceId);
+  return (regions as CompositorOverlayRegion[]).map((region) => {
+    const paneInstanceId = instances?.get(String(region.paneId));
+    return paneInstanceId ? { ...region, paneInstanceId } : region;
+  });
+}
+
 async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<string, unknown>): Promise<void> {
   const regions = Array.isArray(payload.regions) ? payload.regions : [];
   const socketPath = resolveCompositorControlSocketPath();
@@ -235,7 +256,7 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
     return;
   }
   const requestForEpoch = (topologyEpoch: string) => overlayRegionsSetRequestForCompositor({
-    regions: regions as CompositorOverlayRegion[],
+    regions: compositorOverlayRegions(surfaceId, regions),
     revision: Number(payload.revision ?? 0),
     surfaceId,
     topologyEpoch,

@@ -8,6 +8,7 @@ import test from "node:test";
 import type { NativePaneMaterialization } from "../../protocol/src/index.js";
 import {
   compositorFailureMessage,
+  nativePaneInstanceIdsForCompositor,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
   overlayRequestForCompositor,
@@ -123,6 +124,34 @@ test("native pane bridge serializes renderer overlay region updates without coor
     updateReason: "layout",
     windowId: "window-a",
   });
+});
+
+test("native pane bridge indexes live compositor pane instances from materialization bindings", () => {
+  assert.deepEqual(
+    [...nativePaneInstanceIdsForCompositor(materialization({
+      panes: [
+        {
+          binding_id: "1:target_btop",
+          content_id: "target_btop",
+          geometry: { coordinateSpace: "compositor_logical", height: 100, width: 100, x: 0, y: 0 },
+          id: "1",
+          revision: 1 as never,
+          target: "terminal",
+        },
+        {
+          content_id: "target_top",
+          geometry: { coordinateSpace: "compositor_logical", height: 100, width: 100, x: 100, y: 0 },
+          id: "2",
+          revision: 1 as never,
+          target: "terminal",
+        },
+      ],
+    })).entries()],
+    [
+      ["1", "1:target_btop"],
+      ["2", "2:target_top"],
+    ],
+  );
 });
 
 test("native pane bridge serializes overlay region clears", () => {

@@ -15,6 +15,7 @@ import type {
   EventProfile,
   HeartbeatPingRequest,
   HistoryNavigatedEvent,
+  NativePaneMaterialization,
   RelinquishRequest,
   PaneCloseRequest,
   PaneRenameRequest,
@@ -94,7 +95,7 @@ export type SurfaceWsServerOptions = {
   compositorSocketPath?: string | null;
   getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   onBusyChanged?: () => void;
-  onNativeMaterialized?: (surfaceId: string) => void;
+  onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -138,7 +139,7 @@ export class SurfaceWsServer {
   private readonly hostName: string;
   private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   private readonly onBusyChanged?: () => void;
-  private readonly onNativeMaterialized?: (surfaceId: string) => void;
+  private readonly onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   private readonly port: number;
   private readonly protocolVersion: number;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
@@ -1116,7 +1117,7 @@ export class SurfaceWsServer {
         targetEpoch: request.payload.targetEpoch,
         targetId: request.payload.targetId,
       };
-      this.onNativeMaterialized?.(surfaceId);
+      this.onNativeMaterialized?.(surfaceId, materialization);
       return {
         id: request.id,
         ok: true,
