@@ -20,11 +20,6 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Surf Ace announces itself on your local network so CLU can discover and render content.</string>
-	<key>UIApplicationSceneManifest</key>
-	<dict>
-		<key>UIApplicationSupportsMultipleScenes</key>
-		<true/>
-	</dict>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>

@@ -19,6 +19,10 @@ enum SurfAceSceneActivation {
                 ("supports_multiple_scenes", UIApplication.shared.supportsMultipleScenes ? "1" : "0")
             ]
         )
+        guard UIApplication.shared.supportsMultipleScenes else {
+            log(event: "new_window_unsupported", fields: [("source", source)])
+            return
+        }
 
         if let openWindow {
             log(event: "open_window_call", fields: [("source", source), ("window_id", SurfAceSceneID.mainWindow)])

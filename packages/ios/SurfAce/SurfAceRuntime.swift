@@ -199,6 +199,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var isStarted = false
+    @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
     @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
     @ObservationIgnored private var sceneDisconnectObserversBySceneKey: [String: SurfAceSceneDisconnectObserver] = [:]
@@ -277,7 +278,9 @@ final class SurfAceRuntime {
     }
 
     func start() async {
-        guard !isStarted else { return }
+        guard !isStarted, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
         observeLifecycle()
         surfAceLifecycleLog(
             "event=app_launch \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
@@ -346,12 +349,25 @@ final class SurfAceRuntime {
     }
 
     func registerSurface(sceneKey: String, scene: UIScene? = nil) -> SurfAceSurfaceModel {
-        if let scene {
-            ensureSceneDisconnectObservation(sceneKey: sceneKey, scene: scene)
-        }
         if let existingSurfaceId = surfaceIdBySceneKey[sceneKey],
            let existing = surfaceById[existingSurfaceId] {
+            if let scene {
+                ensureSceneDisconnectObservation(sceneKey: sceneKey, scene: scene)
+            }
             return existing
+        }
+        if !UIApplication.shared.supportsMultipleScenes,
+           let primarySurface = surfaces.first {
+            surfAceLifecycleLog(
+                "event=scene_connect_rejected_multiple_scenes \(surfAceDiagnosticFields([("scene_key", sceneKey), ("primary_surface_id", primarySurface.surfaceId)]))"
+            )
+            if let scene {
+                requestDuplicateSceneDestruction(scene: scene, sceneKey: sceneKey)
+            }
+            return primarySurface
+        }
+        if let scene {
+            ensureSceneDisconnectObservation(sceneKey: sceneKey, scene: scene)
         }
 
         let stored = identityMapping.surfacesBySceneKey[sceneKey]
@@ -426,6 +442,16 @@ final class SurfAceRuntime {
         }
         ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
         refreshBonjourTXT()
+    }
+
+    private func requestDuplicateSceneDestruction(scene: UIScene, sceneKey: String) {
+        UIApplication.shared.requestSceneSessionDestruction(scene.session, options: nil) { error in
+            Task { @MainActor in
+                surfAceLifecycleLog(
+                    "event=scene_destruction_failed \(surfAceDiagnosticFields([("scene_key", sceneKey), ("error", error.localizedDescription)]))"
+                )
+            }
+        }
     }
 
     private func ensureSceneDisconnectObservation(sceneKey: String, scene: UIScene) {
