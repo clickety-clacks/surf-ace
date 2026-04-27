@@ -221,6 +221,9 @@ body {
 }
 
 .pane-label span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 12px 24px;
   border-radius: 16px;
   background: rgba(12, 22, 42, 0.54);
@@ -428,8 +431,13 @@ body {
 }
 
 .control-button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 44px;
-  min-height: 44px;
+  height: 44px;
+  padding: 0;
   border-radius: 999px;
   border: 1px solid rgba(119, 154, 215, 0.42);
   background: rgba(40, 62, 108, 0.88);
