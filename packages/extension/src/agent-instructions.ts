@@ -16,3 +16,9 @@ export function buildSurfAceAgentInstructions(): string {
     "Use `surf_ace_annotations_remove` only for live overlay stroke removal on the currently visible pane content.",
   ].join("\n");
 }
+
+export function buildSurfAcePromptBuildHookResult() {
+  return {
+    prependSystemContext: buildSurfAceAgentInstructions(),
+  };
+}

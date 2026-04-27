@@ -3,10 +3,21 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import {
+  buildSurfAceAgentInstructions,
+  buildSurfAcePromptBuildHookResult,
+} from "./agent-instructions.js";
+import {
   deliverSettledAnnotationIntentTurn,
   type SurfAceAnnotationIntentTurn,
   __test,
 } from "./annotation-intent-delivery.js";
+
+test("Surf Ace prompt hook keeps static guidance out of per-turn user prompts", () => {
+  const hookResult = buildSurfAcePromptBuildHookResult();
+
+  assert.equal("prependContext" in hookResult, false);
+  assert.equal(hookResult.prependSystemContext, buildSurfAceAgentInstructions());
+});
 
 test("settled annotation delivery connects to the gateway and sends the image attachment via agent", async () => {
   const server = new WebSocketServer({ port: 0 });
