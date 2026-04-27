@@ -150,6 +150,7 @@ let labelsHideTimer: number | null = null;
 let overlayRevision = 0;
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 let overlayRegionsFrame: number | null = null;
+let overlayRegionsTimer: number | null = null;
 
 const OVERLAY_CAPTURES: OverlayCapture[] = ["pointer_hover", "pointer_button", "pointer_axis"];
 const OVERLAY_HOVER_CAPTURE: OverlayCapture[] = ["pointer_hover"];
@@ -363,15 +364,22 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
   }
 
   const regions: OverlayRegionReport[] = [];
+  const nativePaneIds: number[] = [];
   for (const pane of latestState.panes) {
     if (pane.content.contentType !== "native_surface") {
       continue;
     }
+    nativePaneIds.push(pane.paneId);
     const view = paneViews.get(pane.paneId);
     if (!view) {
       continue;
     }
     regions.push(...collectMarkedOverlayRegions(pane, view));
+  }
+  if (nativePaneIds.length > 0 && regions.length === 0) {
+    console.warn(
+      `[surf-ace] compositor overlay marker collection produced 0 regions for native panes ${nativePaneIds.join(",")}`,
+    );
   }
   window.surfAce.reportOverlayRegions({
     coordinateSpace: "surface_logical",
@@ -386,10 +394,17 @@ function scheduleCompositorOverlayRegionReport(updateReason: "layout" | "resize"
   if (overlayRegionsFrame !== null) {
     window.cancelAnimationFrame(overlayRegionsFrame);
   }
+  if (overlayRegionsTimer !== null) {
+    window.clearTimeout(overlayRegionsTimer);
+  }
   overlayRegionsFrame = window.requestAnimationFrame(() => {
     overlayRegionsFrame = null;
     reportCompositorOverlayRegions(updateReason);
   });
+  overlayRegionsTimer = window.setTimeout(() => {
+    overlayRegionsTimer = null;
+    reportCompositorOverlayRegions(updateReason);
+  }, 80);
 }
 
 function currentViewport(view: PaneView): Viewport {

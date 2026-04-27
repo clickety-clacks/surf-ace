@@ -350,17 +350,17 @@ export function createCompositorOverlayRegionBridge(options?: {
     async set(snapshot) {
       const statusResponse = await assertCompositorOk(transport.send(buildCompositorOverlayStatusRequest()));
       const overlayStatus = overlayStatusFromCompositorStatus(statusResponse.status);
+      const request = buildOverlayRegionsSetRequest(
+        snapshot.surfaceId,
+        Math.max(snapshot.revision, (overlayStatus.activeRevision ?? 0) + 1),
+        overlayStatus.topologyEpoch ?? snapshot.topologyEpoch,
+        snapshot.regions,
+        snapshot.updateReason,
+        overlayStatus.windowId,
+      );
+      console.warn(`[surf-ace] compositor overlay_regions.set ${JSON.stringify(request)}`);
       await assertCompositorOk(
-        transport.send(
-          buildOverlayRegionsSetRequest(
-            snapshot.surfaceId,
-            Math.max(snapshot.revision, (overlayStatus.activeRevision ?? 0) + 1),
-            overlayStatus.topologyEpoch ?? snapshot.topologyEpoch,
-            snapshot.regions,
-            snapshot.updateReason,
-            overlayStatus.windowId,
-          ),
-        ),
+        transport.send(request),
       );
     },
   };
