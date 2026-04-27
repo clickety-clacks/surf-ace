@@ -309,7 +309,7 @@ function overlayRegionForElement(
   return {
     captures,
     kind,
-    paneId: `${latestState.surfaceId}:${pane.paneId}`,
+    paneId: String(pane.paneId),
     paneInstanceId: `${latestState.surfaceId}:${pane.paneId}:${pane.content.contentId ?? "none"}`,
     rect,
     regionId: `surf-ace-pane-${pane.paneId}-${idSuffix}`,
