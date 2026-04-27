@@ -600,6 +600,10 @@ function makeProvisionalSurfaceId(endpointId: string): SurfaceId {
   return `sf_disc_${digest}` as SurfaceId;
 }
 
+function isProvisionalSurfaceId(surfaceId: SurfaceId): boolean {
+  return surfaceId.startsWith("sf_disc_");
+}
+
 function makeContentId(): ContentId {
   return `ct_${randomBytes(4).toString("hex")}` as ContentId;
 }
@@ -3508,10 +3512,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         surface_name: endpoint.name,
       }),
     );
-    const candidateByEndpoint = [...this.surfaces.values()].find(
-      (s) => s.endpointId === endpoint.endpointId,
+    const existingByEndpoint = this.reusableSurfacesMatching((surface) =>
+      surface.endpointId === endpoint.endpointId
     );
-    const existing = this.reusableSurface(candidateByEndpoint);
+
+    if (existingByEndpoint.length > 1) {
+      for (const surface of existingByEndpoint) {
+        this.assignEndpoint(surface, endpoint, { preserveLiveAlias: false });
+        this.ensureSurfaceWorker(surface);
+      }
+      return;
+    }
+
+    const existing = existingByEndpoint[0];
 
     if (existing) {
       this.logger.info?.(
@@ -3526,31 +3539,41 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    const candidateByFingerprint = endpoint.fingerprintPrefix
-      ? [...this.surfaces.values()].find((s) => s.fingerprintPrefix === endpoint.fingerprintPrefix)
-      : undefined;
-    const existingByFingerprint = this.reusableSurface(candidateByFingerprint);
+    const existingByFingerprint = endpoint.fingerprintPrefix
+      ? this.reusableSurfacesMatching((surface) => surface.fingerprintPrefix === endpoint.fingerprintPrefix)
+      : [];
 
-    if (existingByFingerprint) {
+    if (existingByFingerprint.length > 1) {
+      for (const surface of existingByFingerprint) {
+        this.assignEndpoint(surface, endpoint, { preserveLiveAlias: false });
+        this.ensureSurfaceWorker(surface);
+      }
+      return;
+    }
+
+    const existingFingerprintSurface = existingByFingerprint[0];
+
+    if (existingFingerprintSurface) {
       this.logger.info?.(
         runtimeDiagnostic("endpoint_adopt", {
           action: "reuse_by_fingerprint",
           endpoint_id: endpoint.endpointId,
           fingerprint: endpoint.fingerprintPrefix || "none",
-          surface_id: existingByFingerprint.surfaceId,
+          surface_id: existingFingerprintSurface.surfaceId,
         }),
       );
-      this.assignEndpoint(existingByFingerprint, endpoint);
-      this.ensureSurfaceWorker(existingByFingerprint);
+      this.assignEndpoint(existingFingerprintSurface, endpoint);
+      this.ensureSurfaceWorker(existingFingerprintSurface);
       return;
     }
 
-    const stoppedCandidate =
-      candidateByEndpoint?.stopRequested
-        ? candidateByEndpoint
-        : candidateByFingerprint?.stopRequested
-          ? candidateByFingerprint
-          : undefined;
+    const stoppedCandidate = [...this.surfaces.values()].find(
+      (surface) =>
+        surface.stopRequested &&
+        (surface.endpointId === endpoint.endpointId ||
+          (Boolean(endpoint.fingerprintPrefix) &&
+            surface.fingerprintPrefix === endpoint.fingerprintPrefix)),
+    );
     if (stoppedCandidate) {
       this.surfaces.delete(stoppedCandidate.surfaceId);
     }
@@ -3586,7 +3609,25 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return undefined;
   }
 
-  private assignEndpoint(surface: ManagedSurface, endpoint: SurfAceDiscoveryEndpoint): void {
+  private reusableSurfacesMatching(predicate: (surface: ManagedSurface) => boolean): ManagedSurface[] {
+    const surfaces: ManagedSurface[] = [];
+    for (const surface of [...this.surfaces.values()]) {
+      if (!predicate(surface)) {
+        continue;
+      }
+      const reusable = this.reusableSurface(surface);
+      if (reusable) {
+        surfaces.push(reusable);
+      }
+    }
+    return surfaces;
+  }
+
+  private assignEndpoint(
+    surface: ManagedSurface,
+    endpoint: SurfAceDiscoveryEndpoint,
+    options: { preserveLiveAlias?: boolean } = {},
+  ): void {
     const previousEndpointId = surface.endpointId;
     const endpointChanged = previousEndpointId !== endpoint.endpointId;
     const endpointUrlChanged = buildWsUrl(surface.endpoint) !== buildWsUrl(endpoint);
@@ -3597,6 +3638,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       endpointChanged &&
       endpointUrlChanged &&
       sameFingerprint &&
+      (options.preserveLiveAlias ?? true) &&
       surface.hasPairedInGatewaySession &&
       surface.client?.isOpen()
     ) {
@@ -3683,16 +3725,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return [];
     }
 
-    const matchedRemoteSurface =
-      remoteSurfaces.find((remoteSurface) => remoteSurface.surfaceId === surface.surfaceId) ??
-      remoteSurfaces[0];
-    const matchedRemoteSurfaceId = asSurfaceId(matchedRemoteSurface.surfaceId);
+    const matchedRemoteSurface = remoteSurfaces.find((remoteSurface) => remoteSurface.surfaceId === surface.surfaceId);
+    if (matchedRemoteSurface) {
+      const matchedRemoteSurfaceId = asSurfaceId(matchedRemoteSurface.surfaceId);
+      this.adoptCanonicalSurfaceId(surface, matchedRemoteSurfaceId, "surfaces.list");
 
-    this.adoptCanonicalSurfaceId(surface, matchedRemoteSurfaceId, "surfaces.list");
+      surface.lastSeenAt = this.now();
+      surface.name = matchedRemoteSurface.name;
+      surface.viewport = cloneViewport(matchedRemoteSurface.viewport);
+    } else if (isProvisionalSurfaceId(surface.surfaceId)) {
+      const canonicalRemoteSurface = remoteSurfaces[0]!;
+      const canonicalRemoteSurfaceId = asSurfaceId(canonicalRemoteSurface.surfaceId);
+      this.adoptCanonicalSurfaceId(surface, canonicalRemoteSurfaceId, "surfaces.list");
 
-    surface.lastSeenAt = this.now();
-    surface.name = matchedRemoteSurface.name;
-    surface.viewport = cloneViewport(matchedRemoteSurface.viewport);
+      surface.lastSeenAt = this.now();
+      surface.name = canonicalRemoteSurface.name;
+      surface.viewport = cloneViewport(canonicalRemoteSurface.viewport);
+    }
 
     const siblingsToStart: ManagedSurface[] = [];
     for (const remoteSurface of remoteSurfaces) {
