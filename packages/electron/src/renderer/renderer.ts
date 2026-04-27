@@ -347,7 +347,7 @@ function visibleOverlayRect(element: HTMLElement, marker: string | undefined): O
     return rect ? outsetRect(rect, 2) : null;
   }
   if (marker === "pane-indicator") {
-    return elementRect(element);
+    return null;
   }
   if (marker === "pane-badge") {
     const bounds = elementRect(element);
