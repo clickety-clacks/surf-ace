@@ -1,31 +1,18 @@
 import SwiftUI
-import UIKit
 
 private enum SurfAceSceneID {
     static let mainWindow = "surf-ace-main-window"
 }
 
 private struct SurfAceWindowCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
     var body: some Commands {
         CommandGroup(after: .newItem) {
             Button("New Window") {
-                SurfAceSceneActivation.openNewWindow(source: "swiftui_command")
+                openWindow(id: SurfAceSceneID.mainWindow)
             }
             .keyboardShortcut("n")
-        }
-    }
-}
-
-@MainActor
-enum SurfAceSceneActivation {
-    static func openNewWindow(source: String) {
-        print("[surf-ace:ios:shortcut] event=new_window_requested source=\(source) at=\(ISO8601DateFormatter().string(from: Date()))")
-        UIApplication.shared.requestSceneSessionActivation(
-            nil,
-            userActivity: nil,
-            options: nil
-        ) { error in
-            print("[surf-ace:ios:shortcut] event=new_window_failed source=\(source) error=\"\(error.localizedDescription)\" at=\(ISO8601DateFormatter().string(from: Date()))")
         }
     }
 }
