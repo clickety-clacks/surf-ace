@@ -217,13 +217,13 @@ test("compositor bridge serializes overlay region updates with Surf Ace pane ide
           kind: "pane_handle",
           paneId: "sf_panel:7",
           paneInstanceId: "sf_panel:7:ct_native",
-          rect: { coordinateSpace: "compositor_logical", height: 40.3, width: 120.6, x: 10.4, y: 20.5 },
+          rect: { height: 40.3, width: 120.6, x: 10.4, y: 20.5 },
           regionId: "surf-ace-pane-7-control-cluster",
           zIndex: 10,
         },
       ], "layout"),
     ),
-    '{"regions":[{"captures":["pointer_hover","pointer_button","pointer_axis"],"kind":"pane_handle","paneId":"sf_panel:7","paneInstanceId":"sf_panel:7:ct_native","rect":{"x":10,"y":21,"width":121,"height":40,"coordinateSpace":"compositor_logical"},"regionId":"surf-ace-pane-7-control-cluster","zIndex":10}],"revision":4,"surfaceId":"sf_panel","topologyEpoch":"9","type":"overlay_regions.set","updateReason":"layout"}\n',
+    '{"coordinateSpace":"surface_logical","regions":[{"captures":["pointer_hover","pointer_button","pointer_axis"],"kind":"pane_handle","paneId":"sf_panel:7","paneInstanceId":"sf_panel:7:ct_native","rect":{"x":10,"y":21,"width":121,"height":40},"regionId":"surf-ace-pane-7-control-cluster","zIndex":10}],"revision":4,"surfaceId":"sf_panel","topologyEpoch":"9","type":"overlay_regions.set","updateReason":"layout"}\n',
   );
 });
 
@@ -286,7 +286,7 @@ test("compositor overlay region bridge sends multi-pane toolbar regions", async 
         kind: "pane_handle",
         paneId: "sf_panel:7",
         paneInstanceId: "sf_panel:7:ct_left",
-        rect: { coordinateSpace: "compositor_logical", x: 10, y: 10, width: 120, height: 40 },
+        rect: { x: 10, y: 10, width: 120, height: 40 },
         regionId: "surf-ace-pane-7-control-cluster",
         zIndex: 10,
       },
@@ -295,7 +295,7 @@ test("compositor overlay region bridge sends multi-pane toolbar regions", async 
         kind: "pane_handle",
         paneId: "sf_panel:8",
         paneInstanceId: "sf_panel:8:ct_right",
-        rect: { coordinateSpace: "compositor_logical", x: 410, y: 10, width: 120, height: 40 },
+        rect: { x: 410, y: 10, width: 120, height: 40 },
         regionId: "surf-ace-pane-8-control-cluster",
         zIndex: 10,
       },
@@ -312,13 +312,14 @@ test("compositor overlay region bridge sends multi-pane toolbar regions", async 
       type: "overlay_regions.status",
     },
     {
+      coordinateSpace: "surface_logical",
       regions: [
         {
           captures: ["pointer_hover", "pointer_button", "pointer_axis"],
           kind: "pane_handle",
           paneId: "sf_panel:7",
           paneInstanceId: "sf_panel:7:ct_left",
-          rect: { x: 10, y: 10, width: 120, height: 40, coordinateSpace: "compositor_logical" },
+          rect: { x: 10, y: 10, width: 120, height: 40 },
           regionId: "surf-ace-pane-7-control-cluster",
           zIndex: 10,
         },
@@ -327,7 +328,7 @@ test("compositor overlay region bridge sends multi-pane toolbar regions", async 
           kind: "pane_handle",
           paneId: "sf_panel:8",
           paneInstanceId: "sf_panel:8:ct_right",
-          rect: { x: 410, y: 10, width: 120, height: 40, coordinateSpace: "compositor_logical" },
+          rect: { x: 410, y: 10, width: 120, height: 40 },
           regionId: "surf-ace-pane-8-control-cluster",
           zIndex: 10,
         },

@@ -24,6 +24,8 @@ export type NativePaneGeometry = NativePaneRect & {
   coordinateSpace: CompositorLogicalCoordinateSpace;
 };
 
+export type SurfaceLogicalCoordinateSpace = "surface_logical";
+
 export type NativePaneHostPlan = {
   contentId: ContentId;
   geometry: NativePaneGeometry;
@@ -51,7 +53,7 @@ export type CompositorOverlayRegion = {
   kind: CompositorOverlayKind;
   paneId: PaneId | number | string;
   paneInstanceId: string;
-  rect: NativePaneGeometry;
+  rect: NativePaneRect;
   regionId: string;
   zIndex?: number;
 };
@@ -171,7 +173,7 @@ type CompositorOverlayRegionRequest = {
   kind: CompositorOverlayKind;
   paneId: string;
   paneInstanceId: string;
-  rect: NativePaneGeometry;
+  rect: NativePaneRect;
   regionId: string;
   zIndex?: number;
 };
@@ -189,6 +191,7 @@ type CompositorControlRequest =
       windowId?: string;
     }
   | {
+      coordinateSpace: SurfaceLogicalCoordinateSpace;
       regions: CompositorOverlayRegionRequest[];
       revision: number;
       surfaceId: string;
@@ -426,6 +429,7 @@ export function buildOverlayRegionsSetRequest(
   windowId?: string | null,
 ): CompositorControlRequest {
   return {
+    coordinateSpace: "surface_logical",
     regions: regions.map((region) => ({
       captures: [...region.captures],
       kind: region.kind,
@@ -436,7 +440,6 @@ export function buildOverlayRegionsSetRequest(
         y: Math.round(region.rect.y),
         width: Math.max(1, Math.round(region.rect.width)),
         height: Math.max(1, Math.round(region.rect.height)),
-        coordinateSpace: "compositor_logical",
       },
       regionId: region.regionId,
       ...(region.zIndex !== undefined ? { zIndex: region.zIndex } : {}),
