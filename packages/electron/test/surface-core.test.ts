@@ -197,6 +197,94 @@ test("surface core starts browser_url targets without reporting unverified navig
   assert.equal(snapshot.currentTarget?.targetKind, "browser_url");
 });
 
+test("surface core records confirmed browser_url navigation success evidence", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId,
+    requestId: "tr_test",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://google.com/",
+    },
+    targetId: "tg_google",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://google.com/" },
+  });
+
+  const result = core.completeBrowserUrlNavigation(surface.surfaceId, 7, {
+    status: "applied",
+    targetId: "tg_google",
+    url: "https://google.com/",
+  });
+
+  assert.equal(result?.status, "applied");
+  assert.equal(result?.materializedState?.navigationStatus, "loaded");
+  assert.equal(core.captureSnapshot(surface.surfaceId, 7).currentTarget?.lastApplyEvidence?.status, "applied");
+});
+
+test("surface core records confirmed browser_url navigation failure evidence", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId,
+    requestId: "tr_test",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://blocked.invalid/",
+    },
+    targetId: "tg_blocked",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://blocked.invalid/" },
+  });
+
+  const result = core.completeBrowserUrlNavigation(surface.surfaceId, 7, {
+    errorMessage: "Blocked",
+    status: "failed",
+    targetId: "tg_blocked",
+    url: "https://blocked.invalid/",
+  });
+
+  assert.equal(result?.status, "failed");
+  assert.equal(result?.errorCode, "materialization_failed");
+  assert.equal(result?.materializedState?.navigationStatus, "failed");
+  assert.equal(core.captureSnapshot(surface.surfaceId, 7).currentTarget?.lastApplyEvidence?.status, "failed");
+});
+
 test("surface core rejects browser_url target when live browser capability is not requested", () => {
   const core = new SurfaceCore({
     persistentState: {

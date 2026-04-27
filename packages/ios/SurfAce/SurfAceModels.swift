@@ -555,6 +555,7 @@ struct SurfAcePersistedSurfaceTopology: Codable {
 @MainActor
 protocol SurfAcePaneBridging: AnyObject {
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?)
+    func renderBrowserURL(entry: SurfAcePaneEntry) async -> SurfAceBrowserNavigationResult
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool)
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool
     func captureDrawingData() -> Data
@@ -562,6 +563,12 @@ protocol SurfAcePaneBridging: AnyObject {
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult
     func removeDrawingStrokeIDs(_ strokeIDs: [String])
     func clearDrawings()
+}
+
+struct SurfAceBrowserNavigationResult {
+    var errorMessage: String?
+    var status: String
+    var url: String
 }
 
 @MainActor

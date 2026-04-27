@@ -29,6 +29,7 @@ import type {
   SurfaceViewport,
   SurfacesListRequest,
   TargetApplyRequest,
+  TargetApplyResponse,
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
@@ -70,6 +71,12 @@ type SurfaceTransportState = {
   lock: OwnershipLock | null;
 };
 
+type PendingBrowserUrlApply = {
+  payload: TargetApplyRequest["payload"];
+  resolve: (payload: TargetApplyResponse["payload"]) => void;
+  timeout: NodeJS.Timeout;
+};
+
 type SocketMeta = {
   cache: Map<string, SocketCacheEntry>;
   pairedSurfaceId: string | null;
@@ -100,6 +107,7 @@ const DEFAULT_LIMITS = {
   maxStrokePointsPerFlush: 8192,
   maxVisibleTextBytes: 4096,
 };
+const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
 
 type ServerDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
 
@@ -128,6 +136,7 @@ export class SurfaceWsServer {
   private readonly protocolVersion: number;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
+  private readonly pendingBrowserUrlApplies = new Map<string, PendingBrowserUrlApply>();
   readonly wsPath: string;
 
   private readonly httpServer: http.Server;
@@ -952,7 +961,7 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Response {
+  private async handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
     const session = this.activeSession(surfaceId);
     if (session && request.payload.ownershipSessionId !== session.sessionId) {
@@ -995,15 +1004,116 @@ export class SurfaceWsServer {
         v: 1,
       };
     }
+    const result = this.core.targetApply(surfaceId, request.payload);
+    const paneId = this.core.panesList(surfaceId).panes.find((pane) => pane.paneLineageId === request.payload.paneLineageId)?.paneId;
+    const shouldWaitForBrowserUrl =
+      request.payload.targetKind === "browser_url" &&
+      paneId !== undefined &&
+      result.status === "failed" &&
+      result.errorCode === "materialization_failed" &&
+      result.materializedState?.navigationStatus === "started_unverified";
     return {
       id: request.id,
       ok: true,
       op: "target.apply.result",
-      payload: this.core.targetApply(surfaceId, request.payload),
+      payload: shouldWaitForBrowserUrl
+        ? await this.waitForBrowserUrlNavigation(surfaceId, paneId, request.payload)
+        : result,
       sentAt: Date.now(),
       type: "response",
       v: 1,
     };
+  }
+
+  resolveBrowserUrlNavigation(
+    surfaceId: string,
+    paneId: number,
+    evidence: { errorMessage?: string; status: "applied" | "failed"; targetId: string; url: string },
+  ): void {
+    const key = browserUrlApplyKey(surfaceId, paneId);
+    const pending = this.pendingBrowserUrlApplies.get(key);
+    if (!pending) {
+      return;
+    }
+    if (pending.payload.targetId !== evidence.targetId) {
+      return;
+    }
+    this.pendingBrowserUrlApplies.delete(key);
+    clearTimeout(pending.timeout);
+    let payload = browserUrlApplyResult(
+      pending.payload,
+      evidence.status,
+      evidence.status === "failed" ? "materialization_failed" : undefined,
+      evidence.status === "applied" ? "browser_url navigation loaded" : evidence.errorMessage ?? "browser_url navigation failed",
+      {
+        navigationStatus: evidence.status === "applied" ? "loaded" : "failed",
+        replaySemantics: "navigate",
+        url: evidence.url,
+      },
+    );
+    const completed = this.core.completeBrowserUrlNavigation(surfaceId, paneId, evidence, payload);
+    if (!completed) {
+      payload = browserUrlApplyResult(
+        pending.payload,
+        "failed",
+        "materialization_failed",
+        "browser_url navigation was superseded before verification",
+        { navigationStatus: "failed", replaySemantics: "navigate", url: evidence.url },
+      );
+    }
+    pending.resolve(payload);
+  }
+
+  private async waitForBrowserUrlNavigation(
+    surfaceId: string,
+    paneId: number,
+    payload: TargetApplyRequest["payload"],
+  ): Promise<TargetApplyResponse["payload"]> {
+    return await new Promise((resolve) => {
+      const key = browserUrlApplyKey(surfaceId, paneId);
+      const previous = this.pendingBrowserUrlApplies.get(key);
+      if (previous) {
+        this.pendingBrowserUrlApplies.delete(key);
+        clearTimeout(previous.timeout);
+        const superseded = browserUrlApplyResult(
+          previous.payload,
+          "failed",
+          "materialization_failed",
+          "browser_url navigation superseded before verification",
+          { navigationStatus: "failed", replaySemantics: "navigate" },
+        );
+        this.core.completeBrowserUrlNavigation(surfaceId, paneId, {
+          errorMessage: "browser_url navigation superseded before verification",
+          status: "failed",
+          targetId: previous.payload.targetId,
+          url: String((previous.payload.targetPayload as { url?: unknown }).url ?? ""),
+        }, superseded);
+        previous.resolve(superseded);
+      }
+      const targetUrl = String((payload.targetPayload as { url?: unknown }).url ?? "");
+      const timeout = setTimeout(() => {
+        this.pendingBrowserUrlApplies.delete(key);
+        const timedOut = browserUrlApplyResult(
+          payload,
+          "failed",
+          "materialization_failed",
+          "browser_url navigation was not verified before timeout",
+          { navigationStatus: "started_unverified", replaySemantics: "navigate", url: targetUrl },
+        );
+        this.core.completeBrowserUrlNavigation(surfaceId, paneId, {
+          errorMessage: "browser_url navigation was not verified before timeout",
+          status: "failed",
+          targetId: payload.targetId,
+          url: targetUrl,
+        }, timedOut);
+        resolve(timedOut);
+      }, BROWSER_URL_NAVIGATION_TIMEOUT_MS);
+      this.pendingBrowserUrlApplies.set(key, {
+        payload,
+        resolve,
+        timeout,
+      });
+    });
   }
 
   private handleTargetRegister(request: Extract<Request, { op: "target.register" }>): Response {
@@ -1550,6 +1660,30 @@ function errorResponse(
     sentAt: Date.now(),
     type: "response",
     v: 1,
+  };
+}
+
+function browserUrlApplyKey(surfaceId: string, paneId: number): string {
+  return `${surfaceId}::${paneId}`;
+}
+
+function browserUrlApplyResult(
+  payload: TargetApplyRequest["payload"],
+  status: TargetApplyResponse["payload"]["status"],
+  errorCode: TargetApplyResponse["payload"]["errorCode"] | undefined,
+  message: string,
+  materializedState: Record<string, unknown>,
+): TargetApplyResponse["payload"] {
+  return {
+    appliedAt: new Date().toISOString(),
+    errorCode,
+    materializedState,
+    message,
+    paneLineageId: payload.paneLineageId,
+    requestId: payload.requestId,
+    status,
+    targetEpoch: payload.targetEpoch,
+    targetId: payload.targetId,
   };
 }
 

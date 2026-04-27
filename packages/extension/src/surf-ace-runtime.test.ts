@@ -120,6 +120,9 @@ class FakeSurfAceWsServer {
   snapshotImage = "aGVsbG8=";
   snapshotRequests: Array<{ includeImage: boolean; includeVisibleText: boolean; paneId: number }> = [];
   snapshotScrollOffset = { x: 0, y: 0 };
+  targetApplyErrorCode: string | null = null;
+  targetApplyNavigationStatus = "loaded";
+  targetApplyStatus: "applied" | "failed" = "applied";
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
   invalidResumeWithoutTakeoverResponsesRemaining = 0;
@@ -707,13 +710,15 @@ class FakeSurfAceWsServer {
           JSON.stringify(
             this.response(message.id, "target.apply.result", {
               appliedAt: new Date().toISOString(),
+              ...(this.targetApplyErrorCode ? { errorCode: this.targetApplyErrorCode } : {}),
               materializedState: {
+                navigationStatus: this.targetApplyNavigationStatus,
                 replaySemantics: "navigate",
                 url: targetPayload.url,
               },
               paneLineageId,
               requestId: String(message.payload?.requestId),
-              status: "applied",
+              status: this.targetApplyStatus,
               targetEpoch: pane.revision,
               targetId: String(message.payload?.targetId),
             }),
@@ -1759,6 +1764,34 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         targetKind: "browser_url",
         url: "https://google.com/",
       });
+    });
+  });
+
+  await t.test("provider keeps failed browser_url materialization as failed target evidence", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      server.targetApplyStatus = "failed";
+      server.targetApplyErrorCode = "materialization_failed";
+      server.targetApplyNavigationStatus = "failed";
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+      await assert.rejects(
+        runtime.push(
+          {
+            content: "https://blocked.invalid",
+            contentType: "browser_url",
+            fingerprint: server.surfaceId,
+            paneId: firstPaneId,
+          },
+          { sessionKey: "agent:test:url" },
+        ),
+        /browser_url target was not applied|materialization/i,
+      );
+
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      const pane = screen?.panes.find((candidate) => candidate.paneId === firstPaneId);
+      assert.equal(pane?.currentTarget?.targetKind, "browser_url");
+      assert.equal(pane?.currentTarget?.lastApplyEvidence?.status, "failed");
+      assert.equal(pane?.currentTarget?.lastApplyEvidence?.errorCode, "materialization_failed");
     });
   });
 

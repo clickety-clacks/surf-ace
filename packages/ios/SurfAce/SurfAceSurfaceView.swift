@@ -479,6 +479,13 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             hostView?.render(entry: entry, restoreViewport: restoreViewport)
         }
 
+        func renderBrowserURL(entry: SurfAcePaneEntry) async -> SurfAceBrowserNavigationResult {
+            guard let hostView else {
+                return SurfAceBrowserNavigationResult(errorMessage: "pane bridge is detached", status: "failed", url: entry.url ?? "")
+            }
+            return await hostView.renderBrowserURL(entry: entry)
+        }
+
         func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool) {
             hostView?.setInteraction(annotationMode: annotationMode, fingerDrawEnabled: fingerDrawEnabled)
         }
@@ -586,6 +593,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private let pdfView = PDFView()
     private let canvasView = PKCanvasView()
     private var currentEntry: SurfAcePaneEntry?
+    private var pendingBrowserNavigation: CheckedContinuation<SurfAceBrowserNavigationResult, Never>?
+    private var pendingBrowserNavigationLoad: WKNavigation?
+    private var pendingBrowserNavigationURL: String?
     private var annotationMode = false
     private var fingerDrawEnabled = false
     private var trackedStrokes: [TrackedStroke] = []
@@ -626,6 +636,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     }
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
+        finishPendingBrowserNavigation(
+            status: "failed",
+            errorMessage: "browser_url navigation was superseded",
+            url: pendingBrowserNavigationURL
+        )
         currentEntry = entry
         pendingViewportRestore = nil
         let html: String
@@ -696,6 +711,39 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
         webView.loadHTMLString(html, baseURL: baseURL)
         applyCurrentInteractionState()
+    }
+
+    func renderBrowserURL(entry: SurfAcePaneEntry) async -> SurfAceBrowserNavigationResult {
+        finishPendingBrowserNavigation(
+            status: "failed",
+            errorMessage: "browser_url navigation was superseded",
+            url: pendingBrowserNavigationURL
+        )
+        return await withCheckedContinuation { continuation in
+            currentEntry = entry
+            pendingViewportRestore = nil
+            pendingBrowserNavigation = continuation
+            pendingBrowserNavigationURL = entry.url
+            guard case .browserURL(let url, _, _) = entry.payload,
+                  let requestURL = URL(string: url) else {
+                finishPendingBrowserNavigation(status: "failed", errorMessage: "Invalid URL.", url: entry.url)
+                return
+            }
+            finishPendingHTMLRender()
+            showWebView()
+            let navigation = webView.load(URLRequest(url: requestURL))
+            pendingBrowserNavigationLoad = navigation
+            applyCurrentInteractionState()
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                self?.finishPendingBrowserNavigation(
+                    status: "failed",
+                    errorMessage: "browser_url navigation was not verified before timeout",
+                    navigation: navigation,
+                    url: self?.pendingBrowserNavigationURL
+                )
+            }
+        }
     }
 
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool) {
@@ -966,15 +1014,30 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             await self.restorePendingViewportIfNeeded()
             await self.publishCurrentWebViewportIfNeeded()
             self.finishPendingHTMLRender()
+            self.finishPendingBrowserNavigation(status: "applied", errorMessage: nil, navigation: navigation, url: self.pendingBrowserNavigationURL)
         }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         finishPendingHTMLRender()
+        finishPendingBrowserNavigation(status: "failed", errorMessage: error.localizedDescription, navigation: navigation, url: pendingBrowserNavigationURL)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         finishPendingHTMLRender()
+        finishPendingBrowserNavigation(status: "failed", errorMessage: error.localizedDescription, navigation: navigation, url: pendingBrowserNavigationURL)
+    }
+
+    private func finishPendingBrowserNavigation(status: String, errorMessage: String?, navigation: WKNavigation? = nil, url: String?) {
+        guard let continuation = pendingBrowserNavigation else { return }
+        if let navigation, pendingBrowserNavigationLoad !== navigation {
+            return
+        }
+        pendingBrowserNavigation = nil
+        pendingBrowserNavigationLoad = nil
+        let resolvedURL = url ?? pendingBrowserNavigationURL ?? ""
+        pendingBrowserNavigationURL = nil
+        continuation.resume(returning: SurfAceBrowserNavigationResult(errorMessage: errorMessage, status: status, url: resolvedURL))
     }
 
     private func showWebView() {

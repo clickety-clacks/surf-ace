@@ -941,7 +941,7 @@ final class SurfAceRuntime {
             )
         case "target.apply":
             return SurfAceProcessedRequestResult(
-                responseObject: handleTargetApply(id: id, payload: payload, connectionUUID: connectionUUID),
+                responseObject: await handleTargetApply(id: id, payload: payload, connectionUUID: connectionUUID),
                 postSendPairCommit: nil
             )
         case "target.register":
@@ -1574,7 +1574,7 @@ final class SurfAceRuntime {
         return response
     }
 
-    private func handleTargetApply(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+    private func handleTargetApply(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
         func result(
             requestId: String,
             targetId: String,
@@ -1672,15 +1672,18 @@ final class SurfAceRuntime {
             lastApplyEvidence: nil
         )
         pane.pendingSnapshotHintReason = "after_render"
-        pane.bridge?.render(entry: pane.currentEntry, restoreViewport: nil)
+        let navigationResult = await (pane.bridge?.renderBrowserURL(entry: pane.currentEntry) ??
+            SurfAceBrowserNavigationResult(errorMessage: "pane bridge is not attached", status: "failed", url: url))
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
 
-        let resultPayload = Self.browserURLStartedUnverifiedApplyResultPayload(
+        let resultPayload = Self.browserURLApplyResultPayload(
             requestId: requestId,
             targetId: targetId,
             paneLineageId: paneLineageId,
             targetEpoch: targetEpoch,
-            url: url,
+            url: navigationResult.url.isEmpty ? url : navigationResult.url,
+            status: navigationResult.status,
+            errorMessage: navigationResult.errorMessage,
             appliedAt: isoTimestampNow()
         )
         let response = [
@@ -2844,25 +2847,30 @@ final class SurfAceRuntime {
         return payload
     }
 
-    static func browserURLStartedUnverifiedApplyResultPayload(
+    static func browserURLApplyResultPayload(
         requestId: String,
         targetId: String,
         paneLineageId: String,
         targetEpoch: Int,
         url: String,
+        status: String,
+        errorMessage: String?,
         appliedAt: String
     ) -> [String: Any] {
-        [
+        var payload: [String: Any] = [
             "requestId": requestId,
             "targetId": targetId,
             "paneLineageId": paneLineageId,
             "targetEpoch": targetEpoch,
-            "status": "failed",
-            "errorCode": "materialization_failed",
-            "message": "browser_url navigation started but has not been verified by WKWebView",
-            "materializedState": ["url": url, "replaySemantics": "navigate", "navigationStatus": "started_unverified"],
+            "status": status,
+            "message": status == "applied" ? "browser_url navigation loaded" : errorMessage ?? "browser_url navigation failed",
+            "materializedState": ["url": url, "replaySemantics": "navigate", "navigationStatus": status == "applied" ? "loaded" : "failed"],
             "appliedAt": appliedAt,
         ]
+        if status != "applied" {
+            payload["errorCode"] = "materialization_failed"
+        }
+        return payload
     }
 
     private func safeBrowserURL(_ value: String) -> URL? {

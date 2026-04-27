@@ -36,6 +36,13 @@ type MarkdownContent = { markdown: string };
 type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
 type BrowserUrlContent = { url: string; allowedSnapshotFallback?: boolean; fallbackSnapshotTargetId?: string };
+type BrowserUrlWebViewElement = HTMLElement & { src: string };
+type BrowserUrlWebViewErrorEvent = Event & {
+  errorCode?: number;
+  errorDescription?: string;
+  isMainFrame?: boolean;
+  validatedURL?: string;
+};
 type PaneContentValue =
   | null
   | BrowserUrlContent
@@ -1106,22 +1113,49 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
 
   if (pane.content.contentType === "browser_url") {
     const browserUrl = pane.content.content as BrowserUrlContent;
-    const frame = document.createElement("iframe");
-    frame.className = "content-html-frame content-browser-url-frame";
-    frame.setAttribute("sandbox", "allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts");
-    wireHtmlFrame(view, pane.paneId, frame);
-    view.contentEl.appendChild(frame);
-    sizeWebViewToPane(view, frame);
-    frame.addEventListener(
-      "load",
+    const browserView = document.createElement("webview") as BrowserUrlWebViewElement;
+    browserView.className = "content-html-frame content-browser-url-frame";
+    browserView.setAttribute("allowpopups", "true");
+    view.contentEl.appendChild(browserView);
+    sizeWebViewToPane(view, browserView);
+    let reported = false;
+    const reportNavigation = (status: "applied" | "failed", errorMessage?: string) => {
+      if (reported || renderToken !== view.currentRenderToken) {
+        return;
+      }
+      reported = true;
+      window.surfAce.command({
+        ...(errorMessage ? { errorMessage } : {}),
+        paneId: pane.paneId,
+        status,
+        targetId: pane.content.contentId,
+        type: "browser-url-navigation",
+        url: browserUrl.url,
+      });
+    };
+    browserView.addEventListener(
+      "did-finish-load",
       () => {
+        reportNavigation("applied");
         window.setTimeout(() => {
           reportPaneSnapshot(view);
         }, 0);
       },
       { once: true },
     );
-    frame.src = browserUrl.url;
+    browserView.addEventListener(
+      "did-fail-load",
+      (event) => {
+        const failure = event as BrowserUrlWebViewErrorEvent;
+        if (failure.isMainFrame === false) {
+          return;
+        }
+        const description = failure.errorDescription ? `: ${failure.errorDescription}` : "";
+        reportNavigation("failed", `webview navigation failed${description}`);
+      },
+      { once: true },
+    );
+    browserView.src = browserUrl.url;
     return;
   }
 

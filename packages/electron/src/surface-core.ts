@@ -144,6 +144,13 @@ export type RendererWindowState = {
   windowLabel: string;
 };
 
+export type BrowserUrlNavigationEvidence = {
+  errorMessage?: string;
+  status: "applied" | "failed";
+  targetId: string;
+  url: string;
+};
+
 export type CoreEvent =
   | { surfaceId: string; type: "surface-changed" }
   | { surfaceId: string; type: "surface-created" }
@@ -676,6 +683,41 @@ export class SurfaceCore {
       replaySemantics: "navigate",
       url: url.toString(),
     });
+  }
+
+  completeBrowserUrlNavigation(
+    surfaceId: string,
+    paneId: number,
+    evidence: BrowserUrlNavigationEvidence,
+    applyResult?: TargetApplyResponse["payload"],
+  ): TargetApplyResponse["payload"] | null {
+    const pane = this.expectPane(surfaceId, paneId);
+    const entry = currentEntry(pane);
+    if (entry.contentType !== "browser_url" || entry.contentId !== evidence.targetId) {
+      return null;
+    }
+    const payload = applyResult ?? {
+      appliedAt: new Date().toISOString(),
+      errorCode: evidence.status === "failed" ? "materialization_failed" as const : undefined,
+      materializedState: {
+        navigationStatus: evidence.status === "applied" ? "loaded" : "failed",
+        replaySemantics: "navigate",
+        url: evidence.url,
+      },
+      message: evidence.status === "applied"
+        ? "browser_url navigation loaded"
+        : evidence.errorMessage ?? "browser_url navigation failed",
+      paneLineageId: pane.paneLineageId,
+      requestId: entry.targetState?.lastApplyEvidence?.requestId ?? "",
+      status: evidence.status,
+      targetEpoch: entry.revision,
+      targetId: evidence.targetId,
+    };
+    if (entry.targetState) {
+      entry.targetState.lastApplyEvidence = payload;
+      this.emit({ surfaceId, type: "surface-changed" });
+    }
+    return payload;
   }
 
   paneSplit(

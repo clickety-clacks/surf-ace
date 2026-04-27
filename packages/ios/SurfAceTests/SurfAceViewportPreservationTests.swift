@@ -181,21 +181,43 @@ final class SurfAceViewportPreservationTests: XCTestCase {
         }
     }
 
-    func testBrowserURLStartedUnverifiedEvidenceIsNotApplied() {
-        let payload = SurfAceRuntime.browserURLStartedUnverifiedApplyResultPayload(
+    func testBrowserURLNavigationSuccessEvidenceIsApplied() {
+        let payload = SurfAceRuntime.browserURLApplyResultPayload(
             requestId: "tr_google",
             targetId: "tg_google",
             paneLineageId: "pl_1",
             targetEpoch: 2,
             url: "https://google.com/",
+            status: "applied",
+            errorMessage: nil,
+            appliedAt: "2026-04-26T00:00:00Z"
+        )
+        let materializedState = payload["materializedState"] as? [String: Any]
+
+        XCTAssertEqual(payload["status"] as? String, "applied")
+        XCTAssertNil(payload["errorCode"])
+        XCTAssertEqual(materializedState?["navigationStatus"] as? String, "loaded")
+        XCTAssertEqual(materializedState?["replaySemantics"] as? String, "navigate")
+        XCTAssertEqual(materializedState?["url"] as? String, "https://google.com/")
+    }
+
+    func testBrowserURLNavigationFailureEvidenceIsNotApplied() {
+        let payload = SurfAceRuntime.browserURLApplyResultPayload(
+            requestId: "tr_google",
+            targetId: "tg_google",
+            paneLineageId: "pl_1",
+            targetEpoch: 2,
+            url: "https://blocked.invalid/",
+            status: "failed",
+            errorMessage: "Blocked",
             appliedAt: "2026-04-26T00:00:00Z"
         )
         let materializedState = payload["materializedState"] as? [String: Any]
 
         XCTAssertEqual(payload["status"] as? String, "failed")
         XCTAssertEqual(payload["errorCode"] as? String, "materialization_failed")
-        XCTAssertEqual(materializedState?["navigationStatus"] as? String, "started_unverified")
+        XCTAssertEqual(materializedState?["navigationStatus"] as? String, "failed")
         XCTAssertEqual(materializedState?["replaySemantics"] as? String, "navigate")
-        XCTAssertEqual(materializedState?["url"] as? String, "https://google.com/")
+        XCTAssertEqual(materializedState?["url"] as? String, "https://blocked.invalid/")
     }
 }
