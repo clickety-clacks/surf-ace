@@ -9,7 +9,6 @@
   --ok: #22c55e;
   --warn: #f59e0b;
   --destructive: #ef4444;
-  --bottom-control-gutter: 96px;
   --ui-font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
   --ui-font-weight: 200;
   --ui-letter-spacing: 0.12em;
@@ -173,21 +172,6 @@ body {
   transition: opacity 0.12s ease;
 }
 
-.pane-shell::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: var(--bottom-control-gutter);
-  z-index: 21;
-  pointer-events: none;
-  background:
-    linear-gradient(180deg, rgba(8, 17, 31, 0), rgba(8, 17, 31, 0.86) 38%, rgba(8, 17, 31, 0.96)),
-    linear-gradient(90deg, rgba(124, 173, 255, 0.18), rgba(164, 189, 235, 0.08));
-  border-top: 1px solid rgba(164, 189, 235, 0.16);
-}
-
 .pane-shell.keyboard-active::after {
   opacity: 1;
 }
@@ -226,7 +210,7 @@ body {
 .pane-label {
   position: absolute;
   right: 16px;
-  bottom: 112px;
+  bottom: 74px;
   display: flex;
   justify-content: flex-end;
   align-items: flex-end;
@@ -256,7 +240,7 @@ body {
 
 .pane-scroll {
   position: absolute;
-  inset: 0 0 var(--bottom-control-gutter);
+  inset: 0;
   overflow: auto;
 }
 
@@ -441,11 +425,16 @@ body {
   display: flex;
   gap: 6px;
   align-items: center;
-  padding: 2px;
+  padding: 6px;
   border-radius: 999px;
-  background: transparent;
-  border: 0;
+  background:
+    radial-gradient(ellipse at center, rgba(8, 17, 31, 0.92), rgba(8, 17, 31, 0.68) 56%, rgba(8, 17, 31, 0));
+  border: 1px solid rgba(164, 189, 235, 0.18);
+  box-shadow:
+    0 14px 42px rgba(0, 0, 0, 0.36),
+    0 0 0 1px rgba(8, 17, 31, 0.28);
   overflow: visible;
+  backdrop-filter: blur(14px);
   z-index: 24;
 }
 
