@@ -1483,8 +1483,31 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.initialRemotePaneId, 41);
       assert.deepEqual(
         Object.keys(screen.panes[0] ?? {}).sort(),
-        ["activeContent", "historySummary", "name", "paneId", "paneLabel", "target"].sort(),
+        ["activeContent", "historySummary", "name", "paneId", "paneLabel", "target", "viewport"].sort(),
       );
+      assert.deepEqual(screen.panes[0]?.viewport, { height: 768, scale: 2, width: 1024 });
+    });
+  });
+
+  await t.test("listScreens does not advertise connected for a stale closed transport", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await surface.client?.close(1000, "test_stale_closed_transport");
+      surface.connectionState = "connected";
+      surface.client = {
+        close: async () => {},
+        isOpen: () => false,
+        request: async () => {
+          throw new Error("stale transport should not receive requests");
+        },
+      };
+
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      assert.equal(screen.connectionState, "connecting");
+      assert.equal(screen._debug?.wsOpen, false);
     });
   });
 
@@ -2313,7 +2336,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
               kind: "native_pane",
               paneId: secondPane.paneId,
               paneInstanceId: applyRequest.paneLineageId,
-              rect: { height: 768, width: 512, x: 512, y: 0 },
+              rect: { height: 384, width: 1024, x: 0, y: 384 },
               regionId: `${secondPane.paneId}:${registered.targetId}`,
               zIndex: 1,
             },
@@ -2327,7 +2350,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           {
             binding_id: `${secondPane.paneId}:${registered.targetId}`,
             content_id: registered.targetId,
-            geometry: { coordinateSpace: "compositor_logical", height: 768, width: 512, x: 512, y: 0 },
+            geometry: { coordinateSpace: "compositor_logical", height: 384, width: 1024, x: 0, y: 384 },
             id: secondPane.paneId,
             process: { args: ["--utf-force"], command: "btop" },
             revision: registered.targetEpoch,
@@ -2699,6 +2722,14 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const splitScreens = await runtime.listScreens();
       assertPaneLabelsWithOpaqueIds(splitScreens[0]?.panes ?? [], [1, 2, 3]);
+      assert.deepEqual(
+        splitScreens[0]?.panes.map((pane) => pane.viewport),
+        [
+          { height: 256, scale: 2, width: 1024 },
+          { height: 256, scale: 2, width: 1024 },
+          { height: 256, scale: 2, width: 1024 },
+        ],
+      );
 
       const close = await runtime.closePane({
         fingerprint: server.surfaceId,
@@ -2723,6 +2754,41 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const afterCloseScreens = await runtime.listScreens();
       assertPaneLabelsWithOpaqueIds(afterCloseScreens[0]?.panes ?? [], [1, 3]);
+    });
+  });
+
+  await t.test("provider defaults omitted split direction from target pane geometry", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+      assert.deepEqual(server.topologyApplyRequests.at(-1), {
+        layout: {
+          children: [
+            { paneId: server.initialRemotePaneId, type: "pane" },
+            { paneId: 42, type: "pane" },
+          ],
+          direction: "vertical",
+          type: "split",
+        },
+        paneIds: [server.initialRemotePaneId, 42],
+        paneLabels: [1, 2],
+        topologyRevision: server.topologyApplyRequests.at(-1)?.topologyRevision,
+        windowLabel: "a",
+      });
+
+      const splitScreens = await runtime.listScreens();
+      assert.deepEqual(
+        splitScreens[0]?.panes.map((pane) => pane.viewport),
+        [
+          { height: 768, scale: 2, width: 512 },
+          { height: 768, scale: 2, width: 512 },
+        ],
+      );
     });
   });
 

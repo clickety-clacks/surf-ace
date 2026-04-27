@@ -145,11 +145,11 @@ body {
 }
 
 .layout-split.direction-horizontal {
-  flex-direction: row;
+  flex-direction: column;
 }
 
 .layout-split.direction-vertical {
-  flex-direction: column;
+  flex-direction: row;
 }
 
 .pane-shell {

@@ -290,8 +290,8 @@ test("surface core assigns pane history and split topology", () => {
   assert.deepEqual(split.panes.map((pane) => pane.paneId), [initialPaneId, 9]);
   const paneViewports = core.panesList(surface.surfaceId).panes.map((pane) => pane.viewport);
   assert.deepEqual(paneViewports, [
-    { height: 800, scale: 2, width: 600 },
-    { height: 800, scale: 2, width: 600 },
+    { height: 400, scale: 2, width: 1200 },
+    { height: 400, scale: 2, width: 1200 },
   ]);
 
   core.contentSet(surface.surfaceId, {
@@ -450,7 +450,7 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
   });
 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
-  assert.deepEqual(listedPane.viewport, { height: 800, scale: 2, width: 600 });
+  assert.deepEqual(listedPane.viewport, { height: 400, scale: 2, width: 1200 });
 });
 
 test("surface core updates terminal content in place", () => {

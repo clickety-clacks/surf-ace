@@ -1622,7 +1622,7 @@ function layoutPaneViewports(
     for (const child of current.children) {
       visit(
         child,
-        current.direction === "horizontal"
+        current.direction === "vertical"
           ? {
               height: currentViewport.height,
               scale: currentViewport.scale,

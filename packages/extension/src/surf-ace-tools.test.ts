@@ -97,7 +97,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     Object.keys(splitTool.inputSchema.properties as Record<string, unknown>).sort(),
     ["count", "direction", "fingerprint", "paneId"].sort(),
   );
-  assert.deepEqual(splitTool.inputSchema.required, ["fingerprint", "paneId", "count", "direction"]);
+  assert.deepEqual(splitTool.inputSchema.required, ["fingerprint", "paneId", "count"]);
   assert.equal(splitTool.inputSchema.additionalProperties, false);
 
   const closePaneTool = tools.find((tool) => tool.name === "surf_ace_close_pane");

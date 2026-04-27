@@ -104,6 +104,7 @@ export type SurfAcePaneSummary = {
     | null;
   historySummary: SurfAceHistorySummary;
   target: SurfAcePaneTargetDiagnostic | null;
+  viewport: SurfaceViewport;
 };
 
 export type SurfAceScreenSummary = {
@@ -369,7 +370,7 @@ export type SurfAceRelinquishResult = {
 
 export type SurfAceSplitInput = {
   count: number;
-  direction: "horizontal" | "vertical";
+  direction?: "horizontal" | "vertical";
   fingerprint: string;
   paneId: PaneId;
 };
@@ -996,7 +997,7 @@ function collectManagedPaneRects(node: ManagedLayoutNode, rect: Rect, result: Ma
     return;
   }
 
-  if (node.direction === "horizontal") {
+  if (node.direction === "vertical") {
     node.children.forEach((child, index) => {
       const childStart = Math.round(rect.x + (rect.width * index) / node.children.length);
       const childEnd = Math.round(rect.x + (rect.width * (index + 1)) / node.children.length);
@@ -2162,6 +2163,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     const currentLayout = collapseManagedLayout(surface.layout);
+    const direction = input.direction ?? this.defaultSplitDirection(surface, pane);
     const reservedPanes: ManagedPane[] = [];
     const additionalPaneCount = input.count - 1;
     for (let index = 0; index < additionalPaneCount; index += 1) {
@@ -2176,7 +2178,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.layout = splitManagedLayoutNode(
       currentLayout,
       pane.paneId,
-      input.direction,
+      direction,
       [pane.paneId, ...reservedPanes.map((reservedPane) => reservedPane.paneId)],
     );
 
@@ -2196,6 +2198,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         paneId: managedPane.paneId,
         paneLabel: managedPane.paneLabel,
       }));
+  }
+
+  private defaultSplitDirection(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+  ): "horizontal" | "vertical" {
+    const rect = managedPaneRects(surface).get(pane.paneId);
+    const viewport = rect ?? {
+      height: pane.viewport.height || surface.viewport.height,
+      width: pane.viewport.width || surface.viewport.width,
+    };
+    return viewport.width >= viewport.height ? "vertical" : "horizontal";
   }
 
   private async paneClose(
@@ -4168,26 +4182,37 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private buildScreenSummary(surface: ManagedSurface): SurfAceScreenSummary {
+    const paneRects = surface.layout ? managedPaneRects(surface) : new Map<PaneId, Rect>();
+    const connectionState =
+      surface.connectionState === "connected" && !(surface.client?.isOpen() ?? false)
+        ? surface.autoRetryEnabled ? "connecting" : "unreachable"
+        : surface.connectionState;
     return {
-      connectionState: surface.connectionState,
+      connectionState,
       fingerprint: surface.surfaceId,
       lastSeenAt: surface.lastSeenAt,
       name: surface.name,
       panes: this.orderedPanes(surface)
-        .map((pane) => ({
-          activeContent: pane.activeContentId && pane.contentType
-            ? {
-                contentId: pane.activeContentId,
-                contentType: pane.contentType,
-                revision: pane.currentRevision,
-              }
-            : null,
-          historySummary: structuredClone(pane.historySummary),
-          name: pane.name,
-          paneId: pane.paneId,
-          paneLabel: pane.paneLabel,
-          target: this.paneTargetDiagnostic(surface, pane),
-        })),
+        .map((pane) => {
+          const rect = paneRects.get(pane.paneId);
+          return {
+            activeContent: pane.activeContentId && pane.contentType
+              ? {
+                  contentId: pane.activeContentId,
+                  contentType: pane.contentType,
+                  revision: pane.currentRevision,
+                }
+              : null,
+            historySummary: structuredClone(pane.historySummary),
+            name: pane.name,
+            paneId: pane.paneId,
+            paneLabel: pane.paneLabel,
+            target: this.paneTargetDiagnostic(surface, pane),
+            viewport: rect
+              ? { height: rect.height, scale: surface.viewport.scale, width: rect.width }
+              : cloneViewport(pane.viewport),
+          };
+        }),
       pendingEvents: this.pendingEventCount(surface),
       viewport: cloneViewport(surface.viewport),
       windowLabel: surface.windowLabel,
