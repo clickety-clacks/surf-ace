@@ -372,6 +372,59 @@ test("surface core sends layout geometry and process intent to native pane bridg
   ]);
 });
 
+test("surface core sends compositor logical geometry for rotated Racter output", async () => {
+  const plans: NativePaneHostPlan[] = [];
+  const bridge: NativePaneHostBridge = {
+    available: true,
+    async host(plan) {
+      plans.push(plan);
+      return {
+        contentId: plan.contentId,
+        lifecycle: "attached",
+        paneId: plan.paneId,
+        revision: plan.revision,
+      };
+    },
+    async update() {
+      return null;
+    },
+    async release() {},
+  };
+  const core = new SurfaceCore({
+    compositorHostMode: {
+      enabled: true,
+      outputRotation: "deg90",
+      waylandDisplay: "wayland-77",
+    },
+    nativePaneHostBridge: bridge,
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 3840, scale: 1, width: 2160 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 118);
+  core.contentSet(surface.surfaceId, {
+    content: {
+      process: {
+        args: ["top"],
+        command: "foot",
+      },
+      targetClass: "terminal",
+    },
+    contentId: "ct_racter_top" as never,
+    contentType: "native_surface",
+    historyOwnerToken: "hot_racter_top",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(plans[0]?.geometry, { height: 3840, width: 2160, x: 0, y: 0 });
+});
+
 test("surface core keeps split HTML rendered locally while native pane goes through compositor bridge", async () => {
   const plans: NativePaneHostPlan[] = [];
   const bridge: NativePaneHostBridge = {
