@@ -5,6 +5,17 @@ enum SurfAceSceneID {
     static let mainWindow = "surf-ace-main-window"
 }
 
+extension Notification.Name {
+    static let surfAceCommandToast = Notification.Name("SurfAceCommandToast")
+}
+
+@MainActor
+enum SurfAceCommandToast {
+    static func show(_ message: String) {
+        NotificationCenter.default.post(name: .surfAceCommandToast, object: message)
+    }
+}
+
 @MainActor
 enum SurfAceSceneActivation {
     private static let formatter = ISO8601DateFormatter()
@@ -78,6 +89,7 @@ private struct SurfAceWindowCommands: Commands {
     var body: some Commands {
         CommandGroup(after: .newItem) {
             Button("New Window") {
+                SurfAceCommandToast.show("CMD-N received")
                 SurfAceSceneActivation.requestNewWindow(source: "swiftui_command", openWindow: openWindow)
             }
             .keyboardShortcut("n")

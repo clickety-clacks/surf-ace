@@ -11,6 +11,8 @@ struct SurfAceRootView: View {
     @Environment(\.displayScale) private var displayScale
     @State private var sceneKey: String?
     @State private var surfaceId: String?
+    @State private var commandToastText: String?
+    @State private var commandToastGeneration = 0
 
     var body: some View {
         ZStack {
@@ -26,8 +28,29 @@ struct SurfAceRootView: View {
                             .tint(.white)
                     }
             }
+
+            if let commandToastText {
+                SurfAceCommandToastView(text: commandToastText)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
         }
         .ignoresSafeArea()
+        .onReceive(NotificationCenter.default.publisher(for: .surfAceCommandToast)) { notification in
+            guard let message = notification.object as? String else { return }
+            commandToastGeneration += 1
+            let generation = commandToastGeneration
+            withAnimation(.easeOut(duration: 0.12)) {
+                commandToastText = message
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                guard commandToastGeneration == generation else { return }
+                withAnimation(.easeIn(duration: 0.18)) {
+                    commandToastText = nil
+                }
+            }
+        }
         .background {
             SurfAceSceneProbeRepresentable(
                 onConnect: { key, scene in
@@ -44,6 +67,27 @@ struct SurfAceRootView: View {
     private var surface: SurfAceSurfaceModel? {
         guard let surfaceId else { return nil }
         return runtime.surfaces.first { $0.surfaceId == surfaceId }
+    }
+}
+
+private struct SurfAceCommandToastView: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 54, weight: .black, design: .rounded))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.55)
+            .padding(.horizontal, 34)
+            .padding(.vertical, 22)
+            .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .strokeBorder(.white.opacity(0.22), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.44), radius: 18, y: 8)
+            .padding(.horizontal, 28)
     }
 }
 
