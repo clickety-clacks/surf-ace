@@ -135,7 +135,12 @@ function serverDiagnostic(event: string, fields: ServerDiagnosticFields = {}): s
 
 function requestForCompositor(materialization: NativePaneMaterialization): CompositorControlRequest {
   return {
-    panes: materialization.panes,
+    panes: materialization.panes.map((pane) => {
+      if (pane.geometry.coordinateSpace !== "compositor_logical") {
+        throw new Error(`native pane ${pane.id} geometry missing compositor_logical coordinate space`);
+      }
+      return pane;
+    }),
     type: materialization.op,
   };
 }
@@ -1211,12 +1216,13 @@ export class SurfaceWsServer {
       };
     }
 
-    const hostRequest = requestForCompositor(materialization);
+    let hostRequest: CompositorControlRequest | null = null;
     let preflightStatus: Record<string, unknown> | null = null;
     let hostResponse: Record<string, unknown> | null = null;
     let overlayRequest: CompositorControlRequest | null = null;
     let overlayResponse: Record<string, unknown> | null = null;
     try {
+      hostRequest = requestForCompositor(materialization);
       preflightStatus = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
       const statusFailure = compositorFailureMessage(preflightStatus);
       if (statusFailure) {

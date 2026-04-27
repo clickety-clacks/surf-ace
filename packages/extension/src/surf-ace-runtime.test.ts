@@ -1897,7 +1897,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
               {
                 binding_id: `${firstPaneId}:${target?.targetId}`,
                 content_id: target?.targetId,
-                geometry: { height: 768, width: 1024, x: 0, y: 0 },
+                geometry: { coordinateSpace: "compositor_logical", height: 768, width: 1024, x: 0, y: 0 },
                 id: firstPaneId,
                 process: {
                   args: [],
@@ -2077,7 +2077,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           {
             binding_id: `${secondPane.paneId}:${registered.targetId}`,
             content_id: registered.targetId,
-            geometry: { height: 768, width: 512, x: 512, y: 0 },
+            geometry: { coordinateSpace: "compositor_logical", height: 768, width: 512, x: 512, y: 0 },
             id: secondPane.paneId,
             process: { args: ["--utf-force"], command: "btop" },
             revision: registered.targetEpoch,
@@ -2159,7 +2159,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             {
               binding_id: `${firstPaneId}:${registered.targetId}`,
               content_id: registered.targetId,
-              geometry: { height: 3840, width: 2160, x: 0, y: 0 },
+              geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 2160, x: 0, y: 0 },
               id: firstPaneId,
               process: { args: [], command: "top" },
               revision: registered.targetEpoch,
@@ -2232,7 +2232,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           {
             binding_id: `${firstPaneId}:${registered.targetId}`,
             content_id: registered.targetId,
-            geometry: { height: 768, width: 1024, x: 0, y: 0 },
+            geometry: { coordinateSpace: "compositor_logical", height: 768, width: 1024, x: 0, y: 0 },
             id: firstPaneId,
             revision: registered.targetEpoch,
           },
