@@ -334,11 +334,14 @@ function visibleOverlayRect(element: HTMLElement, marker: string | undefined): O
     const bounds = elementRect(element);
     const textRect = rangeRectForElementText(element);
     if (bounds && textRect) {
-      return expandedAffordanceRect(textRect, bounds, { minHeight: 60, minWidth: 60, padX: 14, padY: 6 });
+      return expandedAffordanceRect(textRect, bounds, { minHeight: 54, minWidth: 48, padX: 8, padY: 2 });
     }
     return bounds;
   }
   if (marker === "pane-badge") {
+    if (element.classList.contains("control-button")) {
+      return elementRect(element);
+    }
     const bounds = elementRect(element);
     const textRect = rangeRectForElementText(element);
     if (bounds && textRect) {
