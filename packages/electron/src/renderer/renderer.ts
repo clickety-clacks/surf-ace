@@ -22,7 +22,7 @@ type OverlayRegionReport = {
   kind: "annotation_control" | "history_back" | "history_forward" | "other" | "pane_badge" | "pane_handle";
   paneId: string;
   paneInstanceId: string;
-  rect: { height: number; width: number; x: number; y: number };
+  rect: { coordinateSpace: "compositor_logical"; height: number; width: number; x: number; y: number };
   regionId: string;
   zIndex?: number;
 };
@@ -257,6 +257,7 @@ function visibleElementRect(element: Element): OverlayRegionReport["rect"] | nul
     return null;
   }
   return {
+    coordinateSpace: "compositor_logical",
     height: rect.height,
     width: rect.width,
     x: rect.x,
@@ -353,7 +354,6 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
   overlayRevision += 1;
   if (!latestState) {
     window.surfAce.reportOverlayRegions({
-      coordinateSpace: "compositor_logical",
       regions: [],
       revision: overlayRevision,
       topologyEpoch: "0",
@@ -374,7 +374,6 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
     regions.push(...collectMarkedOverlayRegions(pane, view));
   }
   window.surfAce.reportOverlayRegions({
-    coordinateSpace: "compositor_logical",
     regions,
     revision: overlayRevision,
     topologyEpoch: String(latestState.topologyRevision),

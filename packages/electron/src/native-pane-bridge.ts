@@ -51,7 +51,7 @@ export type CompositorOverlayRegion = {
   kind: CompositorOverlayKind;
   paneId: PaneId | number | string;
   paneInstanceId: string;
-  rect: NativePaneRect;
+  rect: NativePaneGeometry;
   regionId: string;
   zIndex?: number;
 };
@@ -153,8 +153,7 @@ type CompositorPaneId = string;
 type CompositorNativePaneRequest = {
   binding_id: string;
   content_id: string;
-  geometry: { height: number; width: number; x: number; y: number };
-  geometry_coordinate_space: CompositorLogicalCoordinateSpace;
+  geometry: NativePaneGeometry;
   id: string;
   process: {
     args: string[];
@@ -171,7 +170,7 @@ type CompositorOverlayRegionRequest = {
   kind: CompositorOverlayKind;
   paneId: string;
   paneInstanceId: string;
-  rect: { height: number; width: number; x: number; y: number };
+  rect: NativePaneGeometry;
   regionId: string;
   zIndex?: number;
 };
@@ -189,7 +188,6 @@ type CompositorControlRequest =
       windowId?: string;
     }
   | {
-      coordinateSpace: CompositorLogicalCoordinateSpace;
       regions: CompositorOverlayRegionRequest[];
       revision: number;
       surfaceId: string;
@@ -427,7 +425,6 @@ export function buildOverlayRegionsSetRequest(
   windowId?: string | null,
 ): CompositorControlRequest {
   return {
-    coordinateSpace: "compositor_logical",
     regions: regions.map((region) => ({
       captures: [...region.captures],
       kind: region.kind,
@@ -438,6 +435,7 @@ export function buildOverlayRegionsSetRequest(
         y: Math.round(region.rect.y),
         width: Math.max(1, Math.round(region.rect.width)),
         height: Math.max(1, Math.round(region.rect.height)),
+        coordinateSpace: "compositor_logical",
       },
       regionId: region.regionId,
       ...(region.zIndex !== undefined ? { zIndex: region.zIndex } : {}),
@@ -587,12 +585,12 @@ function buildCompositorNativePane(plan: NativePaneHostPlan): CompositorNativePa
     binding_id: nativePaneBindingId(plan),
     content_id: String(plan.contentId),
     geometry: {
-      height: Math.max(1, Math.round(plan.geometry.height)),
-      width: Math.max(1, Math.round(plan.geometry.width)),
       x: Math.round(plan.geometry.x),
       y: Math.round(plan.geometry.y),
+      width: Math.max(1, Math.round(plan.geometry.width)),
+      height: Math.max(1, Math.round(plan.geometry.height)),
+      coordinateSpace: plan.geometry.coordinateSpace,
     },
-    geometry_coordinate_space: plan.geometry.coordinateSpace,
     id: compositorPaneId(plan),
     process: buildCompositorProcess(plan),
     revision: Number(plan.revision),

@@ -192,11 +192,11 @@ test("compositor bridge serializes native pane host and update requests", () => 
 
   assert.equal(
     serializeCompositorControlRequest(buildNativePaneHostRequest(plan)),
-    '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"height":300,"width":401,"x":10,"y":21},"geometry_coordinate_space":"compositor_logical","id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.host"}\n',
+    '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"x":10,"y":21,"width":401,"height":300,"coordinateSpace":"compositor_logical"},"id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.host"}\n',
   );
   assert.equal(
     serializeCompositorControlRequest(buildNativePaneUpdateRequest(plan)),
-    '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"height":300,"width":401,"x":10,"y":21},"geometry_coordinate_space":"compositor_logical","id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.update"}\n',
+    '{"panes":[{"binding_id":"sf_panel:7:ct_native","content_id":"ct_native","geometry":{"x":10,"y":21,"width":401,"height":300,"coordinateSpace":"compositor_logical"},"id":"sf_panel:7","process":{"args":["-e","top"],"command":"ghostty","env":{"TERM":"xterm-256color"}},"revision":3,"target":"terminal"}],"type":"native_pane.update"}\n',
   );
   assert.equal(
     serializeCompositorControlRequest(buildCompositorGetStatusRequest()),
@@ -217,13 +217,38 @@ test("compositor bridge serializes overlay region updates with Surf Ace pane ide
           kind: "pane_handle",
           paneId: "sf_panel:7",
           paneInstanceId: "sf_panel:7:ct_native",
-          rect: { height: 40.3, width: 120.6, x: 10.4, y: 20.5 },
+          rect: { coordinateSpace: "compositor_logical", height: 40.3, width: 120.6, x: 10.4, y: 20.5 },
           regionId: "surf-ace-pane-7-control-cluster",
           zIndex: 10,
         },
       ], "layout"),
     ),
-    '{"coordinateSpace":"compositor_logical","regions":[{"captures":["pointer_hover","pointer_button","pointer_axis"],"kind":"pane_handle","paneId":"sf_panel:7","paneInstanceId":"sf_panel:7:ct_native","rect":{"x":10,"y":21,"width":121,"height":40},"regionId":"surf-ace-pane-7-control-cluster","zIndex":10}],"revision":4,"surfaceId":"sf_panel","topologyEpoch":"9","type":"overlay_regions.set","updateReason":"layout"}\n',
+    '{"regions":[{"captures":["pointer_hover","pointer_button","pointer_axis"],"kind":"pane_handle","paneId":"sf_panel:7","paneInstanceId":"sf_panel:7:ct_native","rect":{"x":10,"y":21,"width":121,"height":40,"coordinateSpace":"compositor_logical"},"regionId":"surf-ace-pane-7-control-cluster","zIndex":10}],"revision":4,"surfaceId":"sf_panel","topologyEpoch":"9","type":"overlay_regions.set","updateReason":"layout"}\n',
+  );
+});
+
+test("compositor bridge serializes Racter deg90 native host geometry as typed compositor logical geometry", () => {
+  const plan = buildNativePaneHostPlan({
+    content: {
+      process: {
+        args: ["top"],
+        command: "foot",
+      },
+      targetClass: "terminal",
+    },
+    contentId: "ct_racter_top",
+    geometry: buildCompositorLogicalPaneGeometry(
+      { height: 3840, width: 2160, x: 0, y: 0 },
+      { height: 3840, width: 2160 },
+    ),
+    paneId: 118,
+    revision: 1,
+    surfaceId: "sf_panel",
+  });
+
+  assert.equal(
+    serializeCompositorControlRequest(buildNativePaneHostRequest(plan)),
+    '{"panes":[{"binding_id":"sf_panel:118:ct_racter_top","content_id":"ct_racter_top","geometry":{"x":0,"y":0,"width":2160,"height":3840,"coordinateSpace":"compositor_logical"},"id":"sf_panel:118","process":{"args":["top"],"command":"foot"},"revision":1,"target":"terminal"}],"type":"native_pane.host"}\n',
   );
 });
 
@@ -261,7 +286,7 @@ test("compositor overlay region bridge sends multi-pane toolbar regions", async 
         kind: "pane_handle",
         paneId: "sf_panel:7",
         paneInstanceId: "sf_panel:7:ct_left",
-        rect: { x: 10, y: 10, width: 120, height: 40 },
+        rect: { coordinateSpace: "compositor_logical", x: 10, y: 10, width: 120, height: 40 },
         regionId: "surf-ace-pane-7-control-cluster",
         zIndex: 10,
       },
@@ -270,7 +295,7 @@ test("compositor overlay region bridge sends multi-pane toolbar regions", async 
         kind: "pane_handle",
         paneId: "sf_panel:8",
         paneInstanceId: "sf_panel:8:ct_right",
-        rect: { x: 410, y: 10, width: 120, height: 40 },
+        rect: { coordinateSpace: "compositor_logical", x: 410, y: 10, width: 120, height: 40 },
         regionId: "surf-ace-pane-8-control-cluster",
         zIndex: 10,
       },
@@ -287,23 +312,22 @@ test("compositor overlay region bridge sends multi-pane toolbar regions", async 
       type: "overlay_regions.status",
     },
     {
-      coordinateSpace: "compositor_logical",
       regions: [
         {
-            captures: ["pointer_hover", "pointer_button", "pointer_axis"],
-            kind: "pane_handle",
-            paneId: "sf_panel:7",
-            paneInstanceId: "sf_panel:7:ct_left",
-          rect: { x: 10, y: 10, width: 120, height: 40 },
+          captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+          kind: "pane_handle",
+          paneId: "sf_panel:7",
+          paneInstanceId: "sf_panel:7:ct_left",
+          rect: { x: 10, y: 10, width: 120, height: 40, coordinateSpace: "compositor_logical" },
           regionId: "surf-ace-pane-7-control-cluster",
           zIndex: 10,
         },
         {
-            captures: ["pointer_hover", "pointer_button", "pointer_axis"],
-            kind: "pane_handle",
-            paneId: "sf_panel:8",
-            paneInstanceId: "sf_panel:8:ct_right",
-          rect: { x: 410, y: 10, width: 120, height: 40 },
+          captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+          kind: "pane_handle",
+          paneId: "sf_panel:8",
+          paneInstanceId: "sf_panel:8:ct_right",
+          rect: { x: 410, y: 10, width: 120, height: 40, coordinateSpace: "compositor_logical" },
           regionId: "surf-ace-pane-8-control-cluster",
           zIndex: 10,
         },
@@ -447,8 +471,7 @@ test("compositor bridge sends host and maps nativeHost lifecycle status", async 
         {
           binding_id: "sf_panel:7:ct_native",
           content_id: "ct_native",
-          geometry: { height: 300, width: 400, x: 10, y: 20 },
-          geometry_coordinate_space: "compositor_logical",
+          geometry: { x: 10, y: 20, width: 400, height: 300, coordinateSpace: "compositor_logical" },
           id: "sf_panel:7",
           process: { args: [], command: "zsh" },
           revision: 3,
@@ -585,8 +608,7 @@ test("compositor bridge sends update without launch intent", async () => {
         {
           binding_id: "sf_panel:7:ct_native",
           content_id: "ct_native",
-          geometry: { height: 320, width: 420, x: 11, y: 22 },
-          geometry_coordinate_space: "compositor_logical",
+          geometry: { x: 11, y: 22, width: 420, height: 320, coordinateSpace: "compositor_logical" },
           id: "sf_panel:7",
           process: { args: [], command: "zsh" },
           revision: 4,
