@@ -93,6 +93,7 @@ export type SurfaceWsServerOptions = {
   hostName: string;
   compositorSocketPath?: string | null;
   onBusyChanged?: () => void;
+  onNativeMaterialized?: (surfaceId: string) => void;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -135,6 +136,7 @@ export class SurfaceWsServer {
   private readonly endpointName: string;
   private readonly hostName: string;
   private readonly onBusyChanged?: () => void;
+  private readonly onNativeMaterialized?: (surfaceId: string) => void;
   private readonly port: number;
   private readonly protocolVersion: number;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
@@ -157,6 +159,7 @@ export class SurfaceWsServer {
     this.endpointName = options.endpointName;
     this.hostName = options.hostName;
     this.onBusyChanged = options.onBusyChanged;
+    this.onNativeMaterialized = options.onNativeMaterialized;
     this.port = options.port;
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
@@ -1091,6 +1094,7 @@ export class SurfaceWsServer {
         targetEpoch: request.payload.targetEpoch,
         targetId: request.payload.targetId,
       };
+      this.onNativeMaterialized?.(surfaceId);
       return {
         id: request.id,
         ok: true,

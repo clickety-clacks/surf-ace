@@ -358,7 +358,7 @@ function heartbeatRequest(): Request {
 
 async function withServer(
   run: (ctx: { core: SurfaceCore; surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
-  options: { compositorSocketPath?: string | null } = {},
+  options: { compositorSocketPath?: string | null; onNativeMaterialized?: (surfaceId: string) => void } = {},
 ): Promise<void> {
   const core = new SurfaceCore({
     persistentState: {
@@ -374,6 +374,7 @@ async function withServer(
     endpointName: "Surf Ace",
     hostName: "localhost",
     compositorSocketPath: options.compositorSocketPath ?? null,
+    onNativeMaterialized: options.onNativeMaterialized,
     port,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
@@ -699,6 +700,7 @@ test("ws server forwards target.apply native pane host materialization to compos
     compositor.once("error", reject);
   });
   try {
+    const nativeMaterializedSurfaces: string[] = [];
     await withServer(async ({ surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
@@ -747,9 +749,13 @@ test("ws server forwards target.apply native pane host materialization to compos
         ok: true,
         status: { panes: [{ id: "118" }] },
       });
+      assert.deepEqual(nativeMaterializedSurfaces, [surfaceId]);
 
       await closeSocket(socket);
-    }, { compositorSocketPath: socketPath });
+    }, {
+      compositorSocketPath: socketPath,
+      onNativeMaterialized: (surfaceId) => nativeMaterializedSurfaces.push(surfaceId),
+    });
   } finally {
     await new Promise<void>((resolve) => compositor.close(() => resolve()));
     await rm(tempDir, { force: true, recursive: true });

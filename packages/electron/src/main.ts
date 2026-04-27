@@ -86,6 +86,7 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
       endpointName: endpointName(),
       hostName: shortHostName(),
       onBusyChanged: () => advertiser?.refresh(),
+      onNativeMaterialized: (surfaceId) => broadcastSurfaceState(surfaceId),
       port,
       viewport: () => displayViewport(),
     });
