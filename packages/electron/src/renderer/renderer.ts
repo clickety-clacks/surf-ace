@@ -264,6 +264,18 @@ function elementRect(element: Element): OverlayRegionReport["rect"] | null {
   };
 }
 
+function outsetRect(
+  rect: OverlayRegionReport["rect"],
+  amount: number,
+): OverlayRegionReport["rect"] {
+  return {
+    height: rect.height + (amount * 2),
+    width: rect.width + (amount * 2),
+    x: rect.x - amount,
+    y: rect.y - amount,
+  };
+}
+
 function rangeRectForElementText(element: HTMLElement): OverlayRegionReport["rect"] | null {
   if (!element.textContent?.trim()) {
     return null;
@@ -330,6 +342,10 @@ function expandedAffordanceRect(
 }
 
 function visibleOverlayRect(element: HTMLElement, marker: string | undefined): OverlayRegionReport["rect"] | null {
+  if (element.classList.contains("control-button")) {
+    const rect = elementRect(element);
+    return rect ? outsetRect(rect, 2) : null;
+  }
   if (marker === "pane-indicator") {
     const bounds = elementRect(element);
     const textRect = rangeRectForElementText(element);
@@ -339,9 +355,6 @@ function visibleOverlayRect(element: HTMLElement, marker: string | undefined): O
     return bounds;
   }
   if (marker === "pane-badge") {
-    if (element.classList.contains("control-button")) {
-      return elementRect(element);
-    }
     const bounds = elementRect(element);
     const textRect = rangeRectForElementText(element);
     if (bounds && textRect) {
@@ -354,7 +367,7 @@ function visibleOverlayRect(element: HTMLElement, marker: string | undefined): O
       .filter((child) => isMarkedOverlayVisible(child, element))
       .flatMap((child) => {
         const rect = elementRect(child);
-        return rect ? [rect] : [];
+        return rect ? [outsetRect(rect, 2)] : [];
       });
     return unionRects(childRects);
   }
