@@ -31,6 +31,7 @@ import type {
   NavigationEvent,
   PaneCreatedEvent,
   PaneId as RemotePaneId,
+  PanesListResponse,
   PaneRemovedEvent,
   PaneRenamedEvent,
   PairRequest,
@@ -439,7 +440,7 @@ type RuntimeStateFile = {
 type PersistedRestartContentEntry = {
   contentId: string;
   contentType: ContentType;
-  contentValue: ContentSetRequest["payload"]["content"];
+  contentValue: unknown;
   historyOwnerToken: string | null;
   paneLabel: number;
   revision: number;
@@ -1009,6 +1010,31 @@ function normalizeContent(
   return content as ContentSetRequest["payload"]["content"];
 }
 
+function denormalizeContent(
+  contentType: ContentType,
+  content: ContentSetRequest["payload"]["content"],
+): unknown {
+  if (
+    contentType === "markdown" &&
+    typeof content === "object" &&
+    content !== null &&
+    "markdown" in content &&
+    typeof (content as { markdown?: unknown }).markdown === "string"
+  ) {
+    return (content as { markdown: string }).markdown;
+  }
+  if (
+    contentType === "html" &&
+    typeof content === "object" &&
+    content !== null &&
+    "html" in content &&
+    typeof (content as { html?: unknown }).html === "string"
+  ) {
+    return (content as { html: string }).html;
+  }
+  return structuredClone(content);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -1184,7 +1210,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.stopRequested = true;
       this.stopHeartbeat(surface);
       this.wakeSurfaceRetry(surface);
-      if (surface.client) {
+      if (typeof surface.client?.close === "function") {
         await surface.client.close(1000, clampCloseReason("provider_shutdown"));
       }
       await surface.workPromise;
@@ -1481,10 +1507,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       throw error;
     }
     this.queuePersistScreenSnapshot("pane split");
-    return this.orderedPanes(surface).map((managedPane) => ({
-      paneId: managedPane.paneId,
-      paneLabel: managedPane.paneLabel,
-    }));
+    return this.orderedPanes(surface)
+      .sort((left, right) => left.paneLabel - right.paneLabel || left.paneId.localeCompare(right.paneId))
+      .map((managedPane) => ({
+        paneId: managedPane.paneId,
+        paneLabel: managedPane.paneLabel,
+      }));
   }
 
   private async paneClose(
@@ -3051,7 +3079,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.applyVisibleEntry(pane, {
         contentId: entry.contentId as ContentId,
         contentType: entry.contentType,
-        contentValue: structuredClone(entry.contentValue),
+        contentValue: normalizeContent(entry.contentType, entry.contentValue),
         historyOwnerToken: entry.historyOwnerToken,
         revision: entry.revision as Revision,
         sessionKey: entry.sessionKey,
@@ -3103,7 +3131,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           return {
             contentId: entry.contentId,
             contentType: entry.contentType,
-            contentValue: structuredClone(entry.contentValue),
+            contentValue: denormalizeContent(entry.contentType, entry.contentValue),
             historyOwnerToken: entry.historyOwnerToken,
             paneLabel: pane.paneLabel,
             revision: entry.revision,
@@ -3480,9 +3508,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         surface_name: endpoint.name,
       }),
     );
-    const existing = this.reusableSurface(
-      [...this.surfaces.values()].find((s) => s.endpointId === endpoint.endpointId),
+    const candidateByEndpoint = [...this.surfaces.values()].find(
+      (s) => s.endpointId === endpoint.endpointId,
     );
+    const existing = this.reusableSurface(candidateByEndpoint);
 
     if (existing) {
       this.logger.info?.(
@@ -3497,11 +3526,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    const existingByFingerprint = this.reusableSurface(
-      endpoint.fingerprintPrefix
-        ? [...this.surfaces.values()].find((s) => s.fingerprintPrefix === endpoint.fingerprintPrefix)
-        : undefined,
-    );
+    const candidateByFingerprint = endpoint.fingerprintPrefix
+      ? [...this.surfaces.values()].find((s) => s.fingerprintPrefix === endpoint.fingerprintPrefix)
+      : undefined;
+    const existingByFingerprint = this.reusableSurface(candidateByFingerprint);
 
     if (existingByFingerprint) {
       this.logger.info?.(
@@ -3517,7 +3545,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    const surfaceId = makeProvisionalSurfaceId(endpoint.endpointId);
+    const stoppedCandidate =
+      candidateByEndpoint?.stopRequested
+        ? candidateByEndpoint
+        : candidateByFingerprint?.stopRequested
+          ? candidateByFingerprint
+          : undefined;
+    if (stoppedCandidate) {
+      this.surfaces.delete(stoppedCandidate.surfaceId);
+    }
+    const surfaceId = stoppedCandidate?.surfaceId ?? makeProvisionalSurfaceId(endpoint.endpointId);
     this.logger.info?.(
       runtimeDiagnostic("endpoint_adopt", {
         action: "create_surface",
@@ -3546,18 +3583,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!surface.stopRequested) {
       return surface;
     }
-    this.surfaces.delete(surface.surfaceId);
     return undefined;
   }
 
   private assignEndpoint(surface: ManagedSurface, endpoint: SurfAceDiscoveryEndpoint): void {
     const previousEndpointId = surface.endpointId;
     const endpointChanged = previousEndpointId !== endpoint.endpointId;
+    const endpointUrlChanged = buildWsUrl(surface.endpoint) !== buildWsUrl(endpoint);
     const sameFingerprint =
       Boolean(endpoint.fingerprintPrefix) &&
       endpoint.fingerprintPrefix === surface.fingerprintPrefix;
     if (
       endpointChanged &&
+      endpointUrlChanged &&
       sameFingerprint &&
       surface.hasPairedInGatewaySession &&
       surface.client?.isOpen()
@@ -3574,6 +3612,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         }),
       );
       return;
+    }
+    if (endpointChanged && endpointUrlChanged) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] refreshed stale endpoint for ${surface.surfaceId}: ${previousEndpointId} -> ${endpoint.endpointId}`,
+      );
     }
     surface.endpoint = endpoint;
     surface.endpointId = endpoint.endpointId;
@@ -3956,9 +3999,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             }),
           );
           surface.unreachableFailures = 0;
-          this.applyPairState(surface, pairResponse);
+          const shouldRestoreProviderTopology =
+            surface.topologyRevision > 0 ||
+            surface.panes.size > pairResponse.payload.state.panes.length;
+          this.applyPairState(surface, pairResponse, {
+            pruneStalePanes: !shouldRestoreProviderTopology,
+          });
           this.restoreRestartContent(surface);
-          await this.pushTopology(surface);
+          if (shouldRestoreProviderTopology) {
+            await this.pushTopology(surface);
+          }
           await this.repushSurfaceContent(surface);
           this.startHeartbeat(surface);
           await this.syncSurfaceSnapshots(surface, true);
@@ -4216,6 +4266,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     surface.snapshotSyncInFlight = true;
     try {
+      await this.syncRemotePaneList(surface);
       const panes = this.layoutPanes(surface);
       for (const pane of panes) {
         if (!isBoundRemotePaneId(pane.remotePaneId)) {
@@ -4235,6 +4286,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       for (const event of buffered) {
         this.handleWireEvent(surface, event);
       }
+    }
+  }
+
+  private async syncRemotePaneList(surface: ManagedSurface): Promise<void> {
+    if (!this.canSendRequests(surface)) {
+      return;
+    }
+
+    let response: Response;
+    try {
+      response = await this.sendRequest(surface, this.requestEnvelope("panes.list"));
+    } catch (error) {
+      if (error instanceof SurfAceToolError && error.code === "not_connected") {
+        return;
+      }
+      throw error;
+    }
+    if (isErrorResponse(response)) {
+      return;
+    }
+
+    for (const paneState of (response as PanesListResponse).payload.panes) {
+      const pane = this.ensurePane(surface, paneState.paneId);
+      pane.name = paneState.name;
+      pane.paneLabel = this.ensurePaneLabel(surface, pane, paneState.paneId);
+      pane.viewport = cloneViewport(paneState.viewport);
     }
   }
 
@@ -4370,7 +4447,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       });
   }
 
-  private applyPairState(surface: ManagedSurface, response: PairResponse): void {
+  private applyPairState(
+    surface: ManagedSurface,
+    response: PairResponse,
+    options: { pruneStalePanes?: boolean } = {},
+  ): void {
     surface.name = response.payload.surfaceName;
     surface.viewport = cloneViewport(response.payload.viewport);
     if (response.payload.state.panes.length === 1 && surface.panes.size === 1) {
@@ -4380,6 +4461,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.recoverSolePaneForTopologySync(surface, paneState.paneId, response.payload.state.panes.length);
       if (pane) {
         pane.viewport = cloneViewport(surface.viewport);
+      }
+    }
+    const remotePaneIds = new Set(response.payload.state.panes.map((paneState) => paneState.paneId));
+    for (const paneState of response.payload.state.panes) {
+      const pane = this.ensurePane(surface, paneState.paneId);
+      pane.viewport = cloneViewport(surface.viewport);
+    }
+    if (options.pruneStalePanes ?? true) {
+      for (const pane of [...surface.panes.values()]) {
+        if (remotePaneIds.has(pane.remotePaneId)) {
+          continue;
+        }
+        surface.panes.delete(pane.paneId);
+        surface.layout = surface.layout ? removePaneFromManagedLayout(surface.layout, pane.paneId) : null;
+      }
+      if (!surface.layout) {
+        const firstPane = this.firstPane(surface);
+        surface.layout = firstPane ? { paneId: firstPane.paneId, type: "pane" } : null;
       }
     }
     this.queuePersistScreenSnapshot("apply pair state");

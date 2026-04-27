@@ -199,6 +199,9 @@ class FakeSurfAceWsServer {
       return;
     }
     this.closed = true;
+    for (const socket of this.sockets) {
+      socket.terminate();
+    }
     await new Promise<void>((resolve, reject) => {
       this.wss.close((error) => {
         if (error) {
@@ -664,8 +667,13 @@ class FakeSurfAceWsServer {
                   : null,
               paneId: Number((paneState as { paneId?: unknown }).paneId ?? 0),
               paneLabel: Number((paneState as { paneLabel?: unknown }).paneLabel ?? 0),
-            }))
+              }))
           : [];
+        if (this.dropNextSplitRequest) {
+          this.dropNextSplitRequest = false;
+          socket.close();
+          return;
+        }
         this.topologyApplyRequests.push({
           layout: structuredClone(message.payload?.layout ?? null),
           paneIds: panes.map((pane) => pane.paneId),
@@ -728,10 +736,13 @@ class FakeSurfAceWsServer {
           );
           return;
         }
+        const previousContentId = pane.contentId;
         pane.contentId = String(message.payload?.contentId);
         pane.contentType = String(message.payload?.contentType);
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
-        pane.drawings = [];
+        if (previousContentId !== pane.contentId) {
+          pane.drawings = [];
+        }
         this.contentSetRequests.push({
           contentId: pane.contentId,
           contentType: pane.contentType,
@@ -1480,13 +1491,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         paneId: sourcePaneId,
       });
 
-      assert.deepEqual(server.splitRequests.at(-1), {
-        count: 2,
-        direction: "horizontal",
-        newPaneIds: [42],
-        newPaneLabels: [3],
-        paneId: server.initialRemotePaneId,
-      });
+      const topologyApply = server.topologyApplyRequests.at(-1);
+      assert.deepEqual(
+        topologyApply?.paneIds
+          .map((paneId, index) => ({ paneId, paneLabel: topologyApply.paneLabels[index] }))
+          .sort((left, right) => left.paneLabel - right.paneLabel),
+        [
+          { paneId: server.initialRemotePaneId, paneLabel: 1 },
+          { paneId: 2, paneLabel: 2 },
+          { paneId: 42, paneLabel: 3 },
+        ],
+      );
       assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
     });
   });
@@ -2327,7 +2342,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         });
         const splitPaneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
 
-        const secondRemotePaneId = server.splitRequests.at(-1)?.newPaneIds[0];
+        const secondTopologyApply = server.topologyApplyRequests.at(-1);
+        const secondRemotePaneId =
+          secondTopologyApply?.paneIds[
+            secondTopologyApply.paneLabels.findIndex((paneLabel) => paneLabel === 2)
+          ];
         assert.equal(typeof secondRemotePaneId, "number");
 
         const secondPush = await runtime.push(
