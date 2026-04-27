@@ -172,7 +172,10 @@ private struct SurfAcePaneView: View {
                 }
             }
             .overlay {
-                SurfAceAnnotationBorder(active: pane.annotationMode, pulsing: pane.isDrawingFlushSending)
+                SurfAceAnnotationBorder(
+                    active: pane.annotationMode && surface.activeKeyboardPaneId != pane.paneId,
+                    pulsing: pane.isDrawingFlushSending
+                )
             }
             .overlay {
                 SurfAceKeyboardActiveBorder(active: surface.activeKeyboardPaneId == pane.paneId)
@@ -348,12 +351,7 @@ private struct SurfAceKeyboardActiveBorder: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 0, style: .continuous)
-            .strokeBorder(Color.white.opacity(active ? 0.98 : 0), lineWidth: 3)
-            .overlay {
-                RoundedRectangle(cornerRadius: 0, style: .continuous)
-                    .strokeBorder(Color(red: 0.49, green: 0.68, blue: 1.0).opacity(active ? 0.55 : 0), lineWidth: 7)
-            }
-            .shadow(color: Color(red: 0.49, green: 0.68, blue: 1.0).opacity(active ? 0.46 : 0), radius: 14)
+            .strokeBorder(Color.white.opacity(active ? 0.20 : 0), lineWidth: 10)
             .allowsHitTesting(false)
             .animation(.easeOut(duration: 0.12), value: active)
     }
