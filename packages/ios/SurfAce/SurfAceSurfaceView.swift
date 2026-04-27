@@ -222,9 +222,18 @@ private struct SurfAcePaneControls: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 12) {
+            Button {
+                SurfAceSceneActivation.requestNewWindow(source: "pane_controls_button", openWindow: openWindow)
+            } label: {
+                Image(systemName: "plus.rectangle.on.rectangle")
+            }
+            .buttonStyle(SurfAceGlassButtonStyle())
+            .accessibilityLabel("New Window")
+
             if pane.drawingRestoreWarningVisible {
                 SurfAceWarningIndicator()
             }
@@ -578,6 +587,13 @@ final class SurfAceSceneProbeController: UIViewController {
         }
         let sceneKey = scene.session.persistentIdentifier
         connectedSceneKey = sceneKey
+        SurfAceSceneActivation.log(
+            event: "scene_probe_connect",
+            fields: [
+                ("scene_key", sceneKey),
+                ("activation_state", "\(scene.activationState.rawValue)")
+            ]
+        )
         onConnect?(sceneKey, scene)
     }
 }
