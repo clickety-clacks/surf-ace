@@ -32,21 +32,12 @@ export type TargetKind =
   | "web_snapshot"
   | "terminal_app"
   | "native_app"
-  | "compositor_app";
-
-export type TargetCapability =
-  | "target.html.v1"
-  | "target.markdown.v1"
-  | "target.image.v1"
-  | "target.web_snapshot.v1"
-  | "target.browser_url.v1"
-  | "target.terminal_app.v1"
-  | "target.native_app.v1"
-  | "target.compositor_app.v1";
+  | "compositor_app"
+  | "video";
 
 export type TargetHeader = {
   summary: string;
-  requiredCapabilities: TargetCapability[];
+  requiredCapabilities: string[];
   safetyClass: "passive" | "network" | "process" | "privileged";
   replaySemantics: "bytes" | "navigate" | "launch_equivalent" | "attach";
   payloadSchemaVersion: number;
@@ -55,8 +46,6 @@ export type TargetHeader = {
 
 export type BrowserUrlTargetPayloadV1 = {
   url: string;
-  allowedSnapshotFallback?: boolean;
-  fallbackSnapshotTargetId?: string;
 };
 
 export type RestorePolicy = "auto" | "confirm" | "manual" | "never";
@@ -71,16 +60,6 @@ export type ApplyEvidence = {
   message?: string;
   materializedState?: Record<string, unknown>;
   appliedAt: string;
-};
-
-export type PaneTargetState = {
-  targetId: string;
-  targetKind: TargetKind;
-  paneLineageId: string;
-  targetEpoch: number;
-  restorePolicy: RestorePolicy;
-  currentState: "current" | "superseded" | "tombstoned";
-  lastApplyEvidence?: ApplyEvidence;
 };
 
 export type TargetErrorCode =
@@ -102,6 +81,50 @@ export type TargetErrorCode =
   | "restore_blocked_stale_target"
   | "restore_unregistered_local_target"
   | "restore_requires_confirmation";
+
+export type TargetApplyReason =
+  | "initial_apply"
+  | "resume_restore"
+  | "manual_restore"
+  | "confirmed_restore";
+
+export type NativePaneMaterializationPane = {
+  id: string;
+  content_id?: string;
+  binding_id?: string;
+  revision: Revision;
+  geometry: NativePaneGeometry;
+  target?: "terminal";
+  process?: {
+    command: string;
+    args: string[];
+    cwd?: string;
+    env?: Record<string, string>;
+  };
+};
+
+export type NativePaneOverlaySet = {
+  surfaceId: SurfaceId;
+  windowId: string;
+  revision: Revision;
+  topologyEpoch: TopologyRevision;
+  coordinateSpace: "surface_logical";
+  regions: Array<{
+    regionId: string;
+    paneId: string;
+    paneInstanceId: string;
+    kind: "native_pane";
+    rect: Rect;
+    zIndex: number;
+    captures: string[];
+  }>;
+};
+
+export type NativePaneMaterialization = {
+  op: "native_pane.host" | "native_pane.update";
+  panes: NativePaneMaterializationPane[];
+  overlaySet?: NativePaneOverlaySet;
+};
 
 // `surf_ace_list` exposes provider-side connectivity with this enum in DESIGN.md.
 //
@@ -126,6 +149,10 @@ export type Rect = {
   y: number;
   width: number;
   height: number;
+};
+
+export type NativePaneGeometry = Rect & {
+  coordinateSpace: "compositor_logical";
 };
 
 export type Viewport = {
@@ -440,7 +467,8 @@ export type TargetApplyRequest = RequestBase<"target.apply"> & {
     targetKind: TargetKind;
     targetHeader: TargetHeader;
     targetPayload: unknown;
-    restoreReason: "initial_apply" | "resume_restore" | "manual_restore" | "confirmed_restore";
+    materialization?: NativePaneMaterialization;
+    restoreReason: TargetApplyReason;
   };
 };
 
@@ -508,7 +536,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
     capabilities: {
       contentTypes: ContentType[];
       eventTypes: Event["op"][];
-      targetCapabilities?: TargetCapability[];
+      targetCapabilities?: string[];
     };
     eventConfig: {
       profile: EventProfile;
@@ -535,12 +563,11 @@ export type PairResponse = ResponseBase<"pair.request"> & {
     state: {
       panes: Array<{
         paneId: PaneId;
-        paneLineageId: string;
         paneLabel: number;
+        paneLineageId?: string;
         currentContentId: ContentId | null;
         currentRevision: Revision;
         contentType: ContentType | null;
-        currentTarget?: PaneTargetState | null;
       }>;
     };
   };
@@ -594,7 +621,6 @@ export type SnapshotResponse = ResponseBase<"snapshot.get"> & {
     contentId: ContentId | null;
     revision: Revision;
     contentType: ContentType | null;
-    currentTarget?: PaneTargetState | null;
     viewport: Viewport;
     visibleText?: string;
     selection: Selection;
@@ -613,12 +639,10 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
   payload: {
     panes: Array<{
       paneId: PaneId;
-      paneLineageId: string;
       paneLabel: number;
       name: string | null;
       activeContentId: ContentId | null;
       contentType: ContentType | null;
-      currentTarget?: PaneTargetState | null;
       viewport: SurfaceViewport;
     }>;
   };
@@ -629,9 +653,9 @@ export type TopologyApplyResponse = ResponseBase<"topology.apply"> & {
     topologyRevision: TopologyRevision;
     panes: Array<{
       paneId: PaneId;
-      paneLineageId: string;
       paneLabel: number;
       name: string | null;
+      paneLineageId?: string;
     }>;
   };
 };
@@ -695,9 +719,8 @@ export type ErrorResponse = {
     | "pair.request"
     | "ownership.relinquish"
     | "topology.apply"
-    | "target.apply"
-    | "target.register"
     | "content.apply"
+    | "target.apply"
     | "content.set"
     | "content.append"
     | "content.patch"
@@ -724,11 +747,11 @@ export type ErrorResponse = {
       | "unsupported_protocol_version"
       | "unsupported_content_type"
       | "unsupported_operation_for_content_type"
+      | TargetErrorCode
       | "stale_revision"
       | "stale_content"
       | "content_too_large"
       | "render_failed"
-      | TargetErrorCode
       | "rate_limited"
       | "internal_error";
     message: string;
@@ -878,9 +901,9 @@ export type Request =
   | PairRequest
   | RelinquishRequest
   | TopologyApplyRequest
+  | ContentApplyRequest
   | TargetApplyRequest
   | TargetRegisterRequest
-  | ContentApplyRequest
   | ContentSetRequest
   | ContentAppendRequest
   | ContentPatchRequest
@@ -898,10 +921,10 @@ export type Response =
   | PairResponse
   | RelinquishResponse
   | TopologyApplyResponse
+  | ContentApplyResponse
   | TargetApplyResponse
   | TargetRegisteredResponse
   | TargetRegisterRejectedResponse
-  | ContentApplyResponse
   | MutationAckResponse
   | AnnotationsRemoveResponse
   | SnapshotResponse

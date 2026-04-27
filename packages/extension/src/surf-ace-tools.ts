@@ -62,19 +62,29 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_list",
     },
     {
-      description: "Push content to a Surf Ace pane, replacing whatever is currently visible.",
+      description: "Push content or a live browser URL target to a Surf Ace pane, replacing whatever is currently visible.",
       execute: async (args: SurfAcePushInput, context?: SurfAceToolContext) =>
         await runtime.push(args, { sessionKey: context?.sessionKey }),
       inputSchema: {
         additionalProperties: false,
         properties: {
           content: {
-            description: "Required content payload string, encoded per content type as defined in the spec. For browser_url, this is the absolute URL to navigate.",
+            description: "Required content payload string. For browser_url this is the live URL to navigate; it is not static HTML.",
             type: "string",
           },
           contentType: {
             enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "browser_url"],
             type: "string",
+          },
+          diagnostic: {
+            additionalProperties: false,
+            properties: {
+              derivedFromTargetId: { type: "string" },
+              kind: { enum: ["placeholder", "status", "error"], type: "string" },
+              summary: { type: "string" },
+            },
+            required: ["kind", "summary"],
+            type: "object",
           },
           fingerprint: fingerprintParam,
           paneId: paneIdParam,
@@ -122,13 +132,14 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
             type: "integer",
           },
           direction: {
+            description: "Optional. vertical creates side-by-side panes; horizontal creates top/bottom panes. When omitted, Surf Ace chooses from the target pane geometry.",
             enum: ["horizontal", "vertical"],
             type: "string",
           },
           fingerprint: fingerprintParam,
           paneId: paneIdParam,
         },
-        required: ["fingerprint", "paneId", "count", "direction"],
+        required: ["fingerprint", "paneId", "count"],
         type: "object",
       },
       name: "surf_ace_split",

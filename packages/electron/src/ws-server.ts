@@ -15,6 +15,7 @@ import type {
   EventProfile,
   HeartbeatPingRequest,
   HistoryNavigatedEvent,
+  NativePaneMaterialization,
   RelinquishRequest,
   PaneCloseRequest,
   PaneRenameRequest,
@@ -33,6 +34,16 @@ import type {
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
+import {
+  compositorFailureMessage,
+  overlayRequestForCompositor,
+  requestForCompositor,
+  resolveCompositorControlSocketPath,
+  sendCompositorControl,
+  validateMaterializationAgainstCompositorStatus,
+  type CompositorControlRequest,
+  type CompositorControlResponse,
+} from "./native-pane-bridge.js";
 import { SurfaceCore, SurfaceCoreError, type CoreEvent } from "./surface-core.js";
 
 type SocketCacheEntry = {
@@ -44,8 +55,8 @@ type ActiveSession = {
   connectionId: string;
   drawingFlushConfig: DrawingFlushConfig;
   eventProfile: EventProfile;
-  ownershipEpoch: number;
   paneFlushTimers: Map<number, PaneFlushTimers>;
+  pairConfirmed: boolean;
   providerId: string;
   requestCache: Map<string, SocketCacheEntry>;
   sessionId: string;
@@ -55,7 +66,6 @@ type ActiveSession = {
 type OwnershipLock = {
   drawingFlushConfig: DrawingFlushConfig;
   eventProfile: EventProfile;
-  ownershipEpoch: number;
   providerId: string;
   sessionId: string;
 };
@@ -88,10 +98,12 @@ export type SurfaceWsServerOptions = {
   core: SurfaceCore;
   endpointName: string;
   hostName: string;
+  compositorSocketPath?: string | null;
+  getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   onBusyChanged?: () => void;
+  onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   port: number;
   protocolVersion?: number;
-  resumeGraceMs?: number;
   viewport: () => SurfaceViewport;
   wsPath?: string;
 };
@@ -128,10 +140,13 @@ function serverDiagnostic(event: string, fields: ServerDiagnosticFields = {}): s
 
 export class SurfaceWsServer {
   private readonly bindAddress: string;
+  private readonly compositorSocketPath: string | null;
   private readonly core: SurfaceCore;
   private readonly endpointName: string;
   private readonly hostName: string;
+  private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   private readonly onBusyChanged?: () => void;
+  private readonly onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   private readonly port: number;
   private readonly protocolVersion: number;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
@@ -148,10 +163,15 @@ export class SurfaceWsServer {
   constructor(options: SurfaceWsServerOptions) {
     this.bindAddress = options.bindAddress ?? "0.0.0.0";
     this.capturePaneImage = options.capturePaneImage;
+    this.compositorSocketPath = options.compositorSocketPath === undefined
+      ? resolveCompositorControlSocketPath()
+      : options.compositorSocketPath;
     this.core = options.core;
     this.endpointName = options.endpointName;
+    this.getOverlayDiagnostics = options.getOverlayDiagnostics;
     this.hostName = options.hostName;
     this.onBusyChanged = options.onBusyChanged;
+    this.onNativeMaterialized = options.onNativeMaterialized;
     this.port = options.port;
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
@@ -656,6 +676,9 @@ export class SurfaceWsServer {
   }
 
   private async dispatchRequest(socket: WebSocket, request: Request): Promise<Response> {
+    if ((request as { op: string }).op === "diagnostics.overlay_regions") {
+      return this.handleOverlayDiagnostics(socket, request);
+    }
     switch (request.op) {
       case "surfaces.list":
         return this.handleSurfacesList(request);
@@ -665,12 +688,10 @@ export class SurfaceWsServer {
         return this.handleRelinquish(socket, request);
       case "topology.apply":
         return this.handleTopologyApply(socket, request);
-      case "target.apply":
-        return this.handleTargetApply(socket, request);
-      case "target.register":
-        return this.handleTargetRegister(request);
       case "content.apply":
         return await this.handleContentApply(socket, request);
+      case "target.apply":
+        return await this.handleTargetApply(socket, request);
       case "panes.list":
         return this.handlePanesList(socket, request);
       case "pane.split":
@@ -692,8 +713,24 @@ export class SurfaceWsServer {
       case "snapshot.get":
         return await this.handleSnapshotGet(socket, request);
       case "heartbeat.ping":
-        return this.handleHeartbeat(request);
+        return this.handleHeartbeat(socket, request);
     }
+  }
+
+  private handleOverlayDiagnostics(socket: WebSocket, request: Request): Response {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    return {
+      id: request.id,
+      ok: true,
+      op: "diagnostics.overlay_regions",
+      payload: {
+        diagnostics: this.getOverlayDiagnostics?.(surfaceId) ?? null,
+        surfaceId,
+      },
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    } as unknown as Response;
   }
 
   private handleSurfacesList(request: SurfacesListRequest): Response {
@@ -756,7 +793,6 @@ export class SurfaceWsServer {
 
     let resumed = false;
     let sessionId: string;
-    let ownershipEpoch: number;
     const existingOpenElsewhere =
       existing !== null &&
       existing.socket !== socket &&
@@ -764,7 +800,6 @@ export class SurfaceWsServer {
 
     if (!lock) {
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-      ownershipEpoch = 1;
       console.info(
         serverDiagnostic("pair_request_new_session", {
           provider_id: providerId,
@@ -795,7 +830,6 @@ export class SurfaceWsServer {
       } else {
         resumed = true;
         sessionId = lock.sessionId;
-        ownershipEpoch = lock.ownershipEpoch;
         console.info(
           serverDiagnostic("pair_request_resumed", {
             provider_id: providerId,
@@ -822,7 +856,6 @@ export class SurfaceWsServer {
         this.detachActiveSession(surfaceId, "superseded");
       }
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-      ownershipEpoch = lock.ownershipEpoch + 1;
       console.info(
         serverDiagnostic("pair_request_takeover", {
           provider_id: providerId,
@@ -835,8 +868,8 @@ export class SurfaceWsServer {
       connectionId: request.payload.connectionId,
       drawingFlushConfig,
       eventProfile: requestedProfile,
-      ownershipEpoch,
       paneFlushTimers: new Map(),
+      pairConfirmed: false,
       providerId,
       requestCache: new Map(),
       sessionId,
@@ -846,7 +879,6 @@ export class SurfaceWsServer {
     transport.lock = {
       drawingFlushConfig,
       eventProfile: requestedProfile,
-      ownershipEpoch,
       providerId,
       sessionId,
     };
@@ -862,11 +894,8 @@ export class SurfaceWsServer {
         windowLabel: request.payload.windowLabel,
       });
     }
-    this.core.setProviderName(
-      surfaceId,
-      request.payload.providerName,
-    );
-    this.core.setConnectionBar(surfaceId, "connected");
+    this.core.setConnectionBar(surfaceId, "connecting");
+    this.core.setProviderName(surfaceId, request.payload.providerName);
     this.onBusyChanged?.();
 
     const response: Response = {
@@ -874,7 +903,7 @@ export class SurfaceWsServer {
       ok: true,
       op: "pair.request",
       payload: {
-        capabilities: this.core.capabilities(),
+        capabilities: this.capabilities(),
         eventConfig: {
           activeEvents: activeEventsForProfile(requestedProfile),
           drawingFlushConfig,
@@ -884,7 +913,6 @@ export class SurfaceWsServer {
           ...DEFAULT_LIMITS,
           resumeGraceMs: 20_000,
         },
-        ownershipEpoch,
         resumed,
         sessionId: sessionId as PairRequest["payload"]["resume"]["sessionId"],
         state: this.core.pairState(surfaceId),
@@ -961,68 +989,204 @@ export class SurfaceWsServer {
     };
   }
 
-  private async handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Promise<Response> {
+  private async handleContentApply(socket: WebSocket, request: ContentApplyRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const session = this.activeSession(surfaceId);
-    if (session && request.payload.ownershipSessionId !== session.sessionId) {
+    if ("clear" in request.payload) {
       return {
         id: request.id,
         ok: true,
-        op: "target.apply.result",
-        payload: {
-          appliedAt: new Date().toISOString(),
-          errorCode: "ownership_session_mismatch",
-          message: "target.apply ownershipSessionId does not match the active session",
-          paneLineageId: request.payload.paneLineageId,
-          requestId: request.payload.requestId,
-          status: "rejected",
-          targetEpoch: request.payload.targetEpoch,
-          targetId: request.payload.targetId,
-        },
+        op: "content.apply",
+        payload: this.core.contentApply(surfaceId, request.payload),
         sentAt: Date.now(),
         type: "response",
         v: 1,
       };
     }
-    if (session && request.payload.ownershipEpoch !== session.ownershipEpoch) {
-      return {
-        id: request.id,
-        ok: true,
-        op: "target.apply.result",
-        payload: {
-          appliedAt: new Date().toISOString(),
-          errorCode: "ownership_epoch_mismatch",
-          message: "target.apply ownershipEpoch does not match the active session",
-          paneLineageId: request.payload.paneLineageId,
-          requestId: request.payload.requestId,
-          status: "rejected",
-          targetEpoch: request.payload.targetEpoch,
-          targetId: request.payload.targetId,
-        },
-        sentAt: Date.now(),
-        type: "response",
-        v: 1,
-      };
+    const contentBytes = Buffer.byteLength(JSON.stringify(request.payload.content), "utf8");
+    if (contentBytes > DEFAULT_LIMITS.maxFrameBytes) {
+      throw new SurfaceCoreError("content_too_large", "Content exceeded max frame size");
     }
-    const result = this.core.targetApply(surfaceId, request.payload);
-    const paneId = this.core.panesList(surfaceId).panes.find((pane) => pane.paneLineageId === request.payload.paneLineageId)?.paneId;
-    const shouldWaitForBrowserUrl =
-      request.payload.targetKind === "browser_url" &&
-      paneId !== undefined &&
-      result.status === "failed" &&
-      result.errorCode === "materialization_failed" &&
-      result.materializedState?.navigationStatus === "started_unverified";
+    if (!request.payload.historyOwnerToken) {
+      throw new SurfaceCoreError("invalid_payload", "content.apply requires historyOwnerToken");
+    }
     return {
       id: request.id,
       ok: true,
-      op: "target.apply.result",
-      payload: shouldWaitForBrowserUrl
-        ? await this.waitForBrowserUrlNavigation(surfaceId, paneId, request.payload)
-        : result,
+      op: "content.apply",
+      payload: this.core.contentApply(surfaceId, request.payload),
       sentAt: Date.now(),
       type: "response",
       v: 1,
     };
+  }
+
+  private async handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Promise<Response> {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    const appliedAt = new Date().toISOString();
+    const active = this.transport(surfaceId).active;
+    if (request.payload.surfaceId !== surfaceId) {
+      return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply surfaceId does not match paired surface");
+    }
+    if (!active || active.socket !== socket || request.payload.ownershipSessionId !== active.sessionId) {
+      return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply ownership session does not match active session");
+    }
+    const paneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
+    if (!paneLineages.has(request.payload.paneLineageId)) {
+      return this.targetApplyFailureResponse(request, appliedAt, "pane_lineage_missing", "target.apply pane lineage is not present on this surface");
+    }
+
+    if (request.payload.targetKind === "browser_url") {
+      const result = this.core.targetApply(surfaceId, request.payload);
+      const paneId = this.core.pairState(surfaceId).panes.find((pane) =>
+        pane.paneLineageId === request.payload.paneLineageId
+      )?.paneId;
+      const shouldWaitForBrowserUrl =
+        paneId !== undefined &&
+        result.status === "failed" &&
+        result.errorCode === "materialization_failed" &&
+        result.materializedState?.navigationStatus === "started_unverified";
+      const payload = shouldWaitForBrowserUrl
+        ? await this.waitForBrowserUrlNavigation(surfaceId, Number(paneId), request.payload)
+        : result;
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply.result",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+
+    const materialization = request.payload.materialization;
+    if (!materialization) {
+      const payload: TargetApplyResponse["payload"] = {
+        appliedAt,
+        errorCode: "unsupported_target_kind",
+        message: `Unsupported target kind: ${request.payload.targetKind}`,
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.payload.requestId,
+        status: "rejected",
+        targetEpoch: request.payload.targetEpoch,
+        targetId: request.payload.targetId,
+      };
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply.result",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+    if (!this.compositorSocketPath) {
+      const payload: TargetApplyResponse["payload"] = {
+        appliedAt,
+        errorCode: "materialization_failed",
+        message: "SURF_ACE_COMPOSITOR_SOCKET is not configured",
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.payload.requestId,
+        status: "failed",
+        targetEpoch: request.payload.targetEpoch,
+        targetId: request.payload.targetId,
+      };
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply.result",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+
+    let hostRequest: CompositorControlRequest | null = null;
+    let preflightStatus: CompositorControlResponse | null = null;
+    let hostResponse: CompositorControlResponse | null = null;
+    let overlayRequest: CompositorControlRequest | null = null;
+    let overlayResponse: CompositorControlResponse | null = null;
+    try {
+      hostRequest = requestForCompositor(materialization);
+      preflightStatus = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      const statusFailure = compositorFailureMessage(preflightStatus);
+      if (statusFailure) {
+        throw new Error(statusFailure);
+      }
+      const geometryFailure = validateMaterializationAgainstCompositorStatus(hostRequest, preflightStatus);
+      if (geometryFailure) {
+        throw new Error(geometryFailure);
+      }
+      hostResponse = await sendCompositorControl(this.compositorSocketPath, hostRequest);
+      const hostFailure = compositorFailureMessage(hostResponse);
+      if (hostFailure) {
+        throw new Error(hostFailure);
+      }
+      overlayRequest = overlayRequestForCompositor(materialization);
+      overlayResponse = overlayRequest
+        ? await sendCompositorControl(this.compositorSocketPath, overlayRequest)
+        : null;
+      if (overlayResponse) {
+        const overlayFailure = compositorFailureMessage(overlayResponse);
+        if (overlayFailure) {
+          throw new Error(overlayFailure);
+        }
+      }
+      const payload: TargetApplyResponse["payload"] = {
+        appliedAt,
+        materializedState: {
+          hostRequest,
+          hostResponse,
+          overlayRequest,
+          overlayResponse,
+          preflightStatus,
+        },
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.payload.requestId,
+        status: "applied",
+        targetEpoch: request.payload.targetEpoch,
+        targetId: request.payload.targetId,
+      };
+      this.onNativeMaterialized?.(surfaceId, materialization);
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply.result",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    } catch (error) {
+      const payload: TargetApplyResponse["payload"] = {
+        appliedAt,
+        errorCode: "materialization_failed",
+        materializedState: {
+          hostRequest,
+          hostResponse,
+          overlayRequest,
+          overlayResponse,
+          preflightStatus,
+        },
+        message: error instanceof Error ? error.message : String(error),
+        paneLineageId: request.payload.paneLineageId,
+        requestId: request.payload.requestId,
+        status: "failed",
+        targetEpoch: request.payload.targetEpoch,
+        targetId: request.payload.targetId,
+      };
+      return {
+        id: request.id,
+        ok: true,
+        op: "target.apply.result",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
   }
 
   resolveBrowserUrlNavigation(
@@ -1032,10 +1196,7 @@ export class SurfaceWsServer {
   ): void {
     const key = browserUrlApplyKey(surfaceId, paneId);
     const pending = this.pendingBrowserUrlApplies.get(key);
-    if (!pending) {
-      return;
-    }
-    if (pending.payload.targetId !== evidence.targetId) {
+    if (!pending || pending.payload.targetId !== evidence.targetId) {
       return;
     }
     this.pendingBrowserUrlApplies.delete(key);
@@ -1116,48 +1277,27 @@ export class SurfaceWsServer {
     });
   }
 
-  private handleTargetRegister(request: Extract<Request, { op: "target.register" }>): Response {
-    return {
-      id: request.id,
-      ok: true,
-      op: "target.register.rejected",
-      payload: {
-        errorCode: "registration_failed",
-        idempotencyKey: request.payload.idempotencyKey,
-        message: "target.register is provider-bound and is not accepted by the surface server",
-        status: "rejected",
-      },
-      sentAt: Date.now(),
-      type: "response",
-      v: 1,
+  private targetApplyFailureResponse(
+    request: TargetApplyRequest,
+    appliedAt: string,
+    errorCode: TargetApplyResponse["payload"]["errorCode"],
+    message: string,
+  ): Response {
+    const payload: TargetApplyResponse["payload"] = {
+      appliedAt,
+      errorCode,
+      message,
+      paneLineageId: request.payload.paneLineageId,
+      requestId: request.payload.requestId,
+      status: "rejected",
+      targetEpoch: request.payload.targetEpoch,
+      targetId: request.payload.targetId,
     };
-  }
-
-  private async handleContentApply(socket: WebSocket, request: ContentApplyRequest): Promise<Response> {
-    const surfaceId = this.requirePairedSurfaceId(socket);
-    if ("clear" in request.payload) {
-      return {
-        id: request.id,
-        ok: true,
-        op: "content.apply",
-        payload: this.core.contentApply(surfaceId, request.payload),
-        sentAt: Date.now(),
-        type: "response",
-        v: 1,
-      };
-    }
-    const contentBytes = Buffer.byteLength(JSON.stringify(request.payload.content), "utf8");
-    if (contentBytes > DEFAULT_LIMITS.maxFrameBytes) {
-      throw new SurfaceCoreError("content_too_large", "Content exceeded max frame size");
-    }
-    if (!request.payload.historyOwnerToken) {
-      throw new SurfaceCoreError("invalid_payload", "content.apply requires historyOwnerToken");
-    }
     return {
       id: request.id,
       ok: true,
-      op: "content.apply",
-      payload: this.core.contentApply(surfaceId, request.payload),
+      op: "target.apply.result",
+      payload,
       sentAt: Date.now(),
       type: "response",
       v: 1,
@@ -1330,7 +1470,16 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleHeartbeat(request: HeartbeatPingRequest): Response {
+  private handleHeartbeat(socket: WebSocket, request: HeartbeatPingRequest): Response {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    const transport = this.transport(surfaceId);
+    if (transport.active?.socket !== socket) {
+      throw new SurfaceCoreError("not_paired", "Operation requires active pair.request first");
+    }
+    if (!transport.active.pairConfirmed) {
+      transport.active.pairConfirmed = true;
+      this.core.setConnectionBar(surfaceId, "connected");
+    }
     return {
       id: request.id,
       ok: true,
@@ -1358,6 +1507,16 @@ export class SurfaceWsServer {
     const created: SurfaceTransportState = { active: null, lock: null };
     this.transports.set(surfaceId, created);
     return created;
+  }
+
+  private capabilities() {
+    const capabilities = this.core.capabilities();
+    return {
+      ...capabilities,
+      targetCapabilities: this.compositorSocketPath
+        ? [...capabilities.targetCapabilities, "target.terminal_app.v1"]
+        : capabilities.targetCapabilities,
+    };
   }
 
   private activeSession(surfaceId: string): ActiveSession | null {
@@ -1663,30 +1822,6 @@ function errorResponse(
   };
 }
 
-function browserUrlApplyKey(surfaceId: string, paneId: number): string {
-  return `${surfaceId}::${paneId}`;
-}
-
-function browserUrlApplyResult(
-  payload: TargetApplyRequest["payload"],
-  status: TargetApplyResponse["payload"]["status"],
-  errorCode: TargetApplyResponse["payload"]["errorCode"] | undefined,
-  message: string,
-  materializedState: Record<string, unknown>,
-): TargetApplyResponse["payload"] {
-  return {
-    appliedAt: new Date().toISOString(),
-    errorCode,
-    materializedState,
-    message,
-    paneLineageId: payload.paneLineageId,
-    requestId: payload.requestId,
-    status,
-    targetEpoch: payload.targetEpoch,
-    targetId: payload.targetId,
-  };
-}
-
 function isSocketClosedError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -1743,6 +1878,30 @@ function isEventEnabled(profile: EventProfile, eventName: Event["op"]): boolean 
     return true;
   }
   return activeEventsForProfile(profile).includes(eventName as never);
+}
+
+function browserUrlApplyKey(surfaceId: string, paneId: number): string {
+  return `${surfaceId}::${paneId}`;
+}
+
+function browserUrlApplyResult(
+  payload: TargetApplyRequest["payload"],
+  status: TargetApplyResponse["payload"]["status"],
+  errorCode: TargetApplyResponse["payload"]["errorCode"] | undefined,
+  message: string,
+  materializedState: Record<string, unknown>,
+): TargetApplyResponse["payload"] {
+  return {
+    appliedAt: new Date().toISOString(),
+    errorCode,
+    materializedState,
+    message,
+    paneLineageId: payload.paneLineageId,
+    requestId: payload.requestId,
+    status,
+    targetEpoch: payload.targetEpoch,
+    targetId: payload.targetId,
+  };
 }
 
 function makeEventId(): Event["eventId"] {

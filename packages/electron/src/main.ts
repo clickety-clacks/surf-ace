@@ -4,9 +4,20 @@ import path from "node:path";
 
 import { app, BrowserWindow, Menu, ipcMain, screen, type WebContents } from "electron";
 
-import type { Stroke } from "../../protocol/src/index.js";
+import type { NativePaneMaterialization, Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import { loadOrCreateIdentity } from "./identity.js";
+import {
+  type CompositorControlRequest,
+  type CompositorControlResponse,
+  type CompositorOverlayRegion,
+  compositorFailureMessage,
+  nativePaneInstanceIdsForCompositor,
+  overlayRegionsClearRequestForCompositor,
+  overlayRegionsSetRequestForCompositor,
+  resolveCompositorControlSocketPath,
+  sendCompositorControl,
+} from "./native-pane-bridge.js";
 import {
   SurfaceCore,
   type PersistentSurfaceState,
@@ -37,9 +48,10 @@ if (gpuDisableRequested()) {
 }
 
 const windows = new Map<string, BrowserWindow>();
-const lastExplicitPaneIds = new Map<string, number>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const readyWindows = new Set<string>();
+const overlayDiagnostics = new Map<string, Record<string, unknown>>();
+const nativePaneInstances = new Map<string, Map<string, string>>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
@@ -79,6 +91,11 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
       endpointName: endpointName(),
       hostName: shortHostName(),
       onBusyChanged: () => advertiser?.refresh(),
+      getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
+      onNativeMaterialized: (surfaceId, materialization) => {
+        recordNativePaneInstances(surfaceId, materialization);
+        broadcastSurfaceState(surfaceId);
+      },
       port,
       viewport: () => displayViewport(),
     });
@@ -188,10 +205,6 @@ function broadcastSurfaceState(surfaceId: string): void {
     return;
   }
   const state = core.getRendererWindowState(surfaceId);
-  const activePaneId = lastExplicitPaneIds.get(surfaceId);
-  if (activePaneId && !state.panes.some((pane) => pane.paneId === activePaneId)) {
-    lastExplicitPaneIds.delete(surfaceId);
-  }
   const windowLabel = core.surfaceWindowLabel(surfaceId);
   window.setTitle(windowLabel ? `${endpointName()} · ${windowLabel}` : endpointName());
   if (!readyWindows.has(surfaceId)) {
@@ -199,6 +212,91 @@ function broadcastSurfaceState(surfaceId: string): void {
     return;
   }
   window.webContents.send("surface:state", state);
+}
+
+async function sendCompositorOverlayRequest(request: CompositorControlRequest): Promise<void> {
+  const socketPath = resolveCompositorControlSocketPath();
+  if (!socketPath) {
+    return;
+  }
+  await sendCompositorControl(socketPath, request);
+}
+
+function recordNativePaneInstances(surfaceId: string, materialization: NativePaneMaterialization): void {
+  const current = nativePaneInstances.get(surfaceId) ?? new Map<string, string>();
+  for (const [paneId, paneInstanceId] of nativePaneInstanceIdsForCompositor(materialization)) {
+    current.set(paneId, paneInstanceId);
+  }
+  nativePaneInstances.set(surfaceId, current);
+}
+
+function compositorOverlayRegions(surfaceId: string, regions: unknown[]): CompositorOverlayRegion[] {
+  const instances = nativePaneInstances.get(surfaceId);
+  return (regions as CompositorOverlayRegion[]).map((region) => {
+    const paneInstanceId = instances?.get(String(region.paneId));
+    return paneInstanceId ? { ...region, paneInstanceId } : region;
+  });
+}
+
+async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<string, unknown>): Promise<void> {
+  const regions = Array.isArray(payload.regions) ? payload.regions : [];
+  const socketPath = resolveCompositorControlSocketPath();
+  const rendererTopologyEpoch = payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch);
+  const diagnostic: Record<string, unknown> = {
+    compositorSocketConfigured: Boolean(socketPath),
+    lastRendererReportAt: new Date().toISOString(),
+    regionCount: regions.length,
+    revision: Number(payload.revision ?? 0),
+    topologyEpoch: rendererTopologyEpoch,
+    updateReason: typeof payload.updateReason === "string" ? payload.updateReason : null,
+  };
+  overlayDiagnostics.set(surfaceId, diagnostic);
+  if (!socketPath) {
+    diagnostic.forwardStatus = "skipped_no_socket";
+    return;
+  }
+  const requestForEpoch = (topologyEpoch: string) => overlayRegionsSetRequestForCompositor({
+    regions: compositorOverlayRegions(surfaceId, regions),
+    revision: Number(payload.revision ?? 0),
+    surfaceId,
+    topologyEpoch,
+    updateReason: typeof payload.updateReason === "string" ? payload.updateReason as never : undefined,
+    windowId: surfaceId,
+  });
+  const request = requestForEpoch(rendererTopologyEpoch);
+  diagnostic.forwardRequest = request;
+  try {
+    let response: CompositorControlResponse = await sendCompositorControl(socketPath, request);
+    const retryTopologyEpoch = staleOverlayTopologyEpoch(response);
+    if (retryTopologyEpoch) {
+      const retryRequest = requestForEpoch(retryTopologyEpoch);
+      diagnostic.retryReason = compositorFailureMessage(response);
+      diagnostic.retryRequest = retryRequest;
+      response = await sendCompositorControl(socketPath, retryRequest);
+      diagnostic.retryResponse = response;
+      diagnostic.topologyEpoch = retryTopologyEpoch;
+    }
+    const failure = compositorFailureMessage(response);
+    if (failure) {
+      throw new Error(failure);
+    }
+    diagnostic.forwardedAt = new Date().toISOString();
+    diagnostic.forwardResponse = response;
+    diagnostic.forwardStatus = "ok";
+  } catch (error) {
+    diagnostic.forwardError = error instanceof Error ? error.message : String(error);
+    diagnostic.forwardStatus = "error";
+    throw error;
+  }
+}
+
+function staleOverlayTopologyEpoch(response: CompositorControlResponse): string | null {
+  const message = compositorFailureMessage(response);
+  if (!message) {
+    return null;
+  }
+  const match = /stale overlay topology epoch:\s*\S+\s*!=\s*(\S+)/.exec(message);
+  return match?.[1] ?? null;
 }
 
 function focusExistingWindow(): void {
@@ -221,7 +319,7 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
       return;
     }
     const state = core.getRendererWindowState(surfaceId);
-    const activePaneId = lastExplicitPaneIds.get(surfaceId);
+    const activePaneId = core.activeKeyboardPaneId(surfaceId);
     if (!activePaneId || !state.panes.some((pane) => pane.paneId === activePaneId)) {
       return;
     }
@@ -296,9 +394,11 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   });
   window.on("closed", () => {
     windows.delete(surfaceId);
-    lastExplicitPaneIds.delete(surfaceId);
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
+    void sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId)).catch((error) => {
+      console.warn(`[surf-ace] compositor overlay region clear failed: ${error}`);
+    });
     if (!isQuitting) {
       void server.broadcastSurfaceRemoved(surfaceId);
       server.disconnectSurface(surfaceId, "provider_shutdown");
@@ -365,6 +465,7 @@ function installIpc(): void {
     }
     const state = core.getRendererWindowState(surfaceId);
     return {
+      overlayDebugBorders: Boolean(resolveCompositorControlSocketPath()),
       state,
       surfaceId,
     };
@@ -399,6 +500,16 @@ function installIpc(): void {
     });
   });
 
+  ipcMain.on("surface:overlay-regions", (event, payload) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || !payload || typeof payload !== "object") {
+      return;
+    }
+    void forwardRendererOverlayRegions(surfaceId, payload as Record<string, unknown>).catch((error) => {
+      console.warn(`[surf-ace] compositor overlay region update failed: ${error}`);
+    });
+  });
+
   ipcMain.on("surface:clear-toast", (event, payload) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) {
@@ -419,7 +530,7 @@ function installIpc(): void {
 
     const paneId = Number(payload.paneId ?? 0);
     if (paneId > 0) {
-      lastExplicitPaneIds.set(surfaceId, paneId);
+      core.setActiveKeyboardPane(surfaceId, paneId);
     }
     switch (payload.type) {
       case "focus-pane":
@@ -545,6 +656,10 @@ if (!singleInstanceLock) {
 
   app.on("before-quit", async () => {
     isQuitting = true;
+    await Promise.allSettled(
+      [...windows.keys()].map((surfaceId) =>
+        sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId))),
+    );
     advertiser?.refresh();
     await advertiser?.stop();
     await server.stop();

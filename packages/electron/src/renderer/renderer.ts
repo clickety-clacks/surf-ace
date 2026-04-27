@@ -28,6 +28,17 @@ type Stroke = {
   tool: "finger" | "mouse" | "pencil";
 };
 
+type OverlayCapture = "pointer_axis" | "pointer_button" | "pointer_hover";
+type OverlayRegionReport = {
+  captures: OverlayCapture[];
+  kind: "annotation_control" | "history_back" | "history_forward" | "other" | "pane_badge" | "pane_handle";
+  paneId: string;
+  paneInstanceId: string;
+  rect: { height: number; width: number; x: number; y: number };
+  regionId: string;
+  zIndex?: number;
+};
+
 type ImageContent = { alt?: string; data: string; mediaType: string };
 type PdfContent = { data: string };
 type HtmlContent = { baseUrl?: string; html: string };
@@ -35,13 +46,11 @@ type TerminalContent = { lines: string[]; scrollback: number };
 type MarkdownContent = { markdown: string };
 type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
-type BrowserUrlContent = { url: string; allowedSnapshotFallback?: boolean; fallbackSnapshotTargetId?: string };
+type BrowserUrlContent = { url: string };
 type BrowserUrlWebViewElement = HTMLElement & { src: string };
 type BrowserUrlWebViewErrorEvent = Event & {
-  errorCode?: number;
   errorDescription?: string;
   isMainFrame?: boolean;
-  validatedURL?: string;
 };
 type PaneContentValue =
   | null
@@ -55,6 +64,7 @@ type PaneContentValue =
   | VideoContent;
 
 type RendererPaneState = {
+  activeKeyboardPane: boolean;
   annotationBorderVisible: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -84,11 +94,13 @@ type RendererWindowState = {
   panes: RendererPaneState[];
   providerName: string | null;
   surfaceId: string;
+  topologyRevision: number;
   viewport: { height: number; scale: number; width: number };
   windowLabel: string;
 };
 
 type Bootstrap = {
+  overlayDebugBorders?: boolean;
   state: RendererWindowState;
   surfaceId: string;
 };
@@ -142,7 +154,18 @@ const paneViews = new Map<number, PaneView>();
 let bootstrap: Bootstrap | null = null;
 let latestState: RendererWindowState | null = null;
 let labelsHideTimer: number | null = null;
+let overlayRegionsFrame: number | null = null;
+let overlayRegionsTimer: number | null = null;
+let overlayRevision = 0;
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
+
+const OVERLAY_CAPTURES: OverlayCapture[] = ["pointer_hover", "pointer_button", "pointer_axis"];
+const OVERLAY_MARKER_ATTRIBUTE = "data-surf-ace-overlay";
+type SurfAceOverlayKind =
+  | "annotation-control"
+  | "history-back"
+  | "history-forward"
+  | "pane-handle";
 
 function escapeHtml(input: string): string {
   return input
@@ -231,6 +254,192 @@ function reportPaneSnapshot(view: PaneView): void {
     viewport,
     visibleText,
   });
+}
+
+function elementRect(element: Element): OverlayRegionReport["rect"] | null {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  return {
+    height: rect.height,
+    width: rect.width,
+    x: rect.x,
+    y: rect.y,
+  };
+}
+
+function outsetRect(
+  rect: OverlayRegionReport["rect"],
+  amount: number,
+): OverlayRegionReport["rect"] {
+  return {
+    height: rect.height + (amount * 2),
+    width: rect.width + (amount * 2),
+    x: rect.x - amount,
+    y: rect.y - amount,
+  };
+}
+
+function unionRects(rects: OverlayRegionReport["rect"][]): OverlayRegionReport["rect"] | null {
+  if (rects.length === 0) {
+    return null;
+  }
+  const left = Math.min(...rects.map((rect) => rect.x));
+  const top = Math.min(...rects.map((rect) => rect.y));
+  const right = Math.max(...rects.map((rect) => rect.x + rect.width));
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.height));
+  return {
+    height: bottom - top,
+    width: right - left,
+    x: left,
+    y: top,
+  };
+}
+
+function visibleOverlayRect(element: HTMLElement, marker: string | undefined): OverlayRegionReport["rect"] | null {
+  if (element.classList.contains("control-button")) {
+    const rect = elementRect(element);
+    return rect ? outsetRect(rect, 2) : null;
+  }
+  if (marker === "pane-handle") {
+    const childRects = [...element.querySelectorAll<HTMLElement>(".control-button")]
+      .filter((child) => isMarkedOverlayVisible(child, element))
+      .flatMap((child) => {
+        const rect = elementRect(child);
+        return rect ? [outsetRect(rect, 2)] : [];
+      });
+    return unionRects(childRects);
+  }
+  return elementRect(element);
+}
+
+function overlayRegionForElement(
+  pane: RendererPaneState,
+  element: HTMLElement,
+  idSuffix: string,
+  kind: OverlayRegionReport["kind"],
+  zIndex: number,
+  captures: OverlayCapture[] = OVERLAY_CAPTURES,
+): OverlayRegionReport | null {
+  const marker = element.getAttribute(OVERLAY_MARKER_ATTRIBUTE) ?? undefined;
+  const rect = visibleOverlayRect(element, marker);
+  if (!rect || !latestState) {
+    return null;
+  }
+  return {
+    captures,
+    kind,
+    paneId: String(pane.paneId),
+    paneInstanceId: `${latestState.surfaceId}:${pane.paneId}:${pane.content.contentId ?? "none"}`,
+    rect,
+    regionId: `surf-ace-pane-${pane.paneId}-${idSuffix}`,
+    zIndex,
+  };
+}
+
+function overlayMetadataForMarker(
+  marker: string | undefined,
+): { captures: OverlayCapture[]; kind: OverlayRegionReport["kind"]; suffix: string; zIndex: number } {
+  switch (marker) {
+    case "annotation-control":
+      return { captures: OVERLAY_CAPTURES, kind: "annotation_control", suffix: marker, zIndex: 20 };
+    case "history-back":
+      return { captures: OVERLAY_CAPTURES, kind: "history_back", suffix: marker, zIndex: 20 };
+    case "history-forward":
+      return { captures: OVERLAY_CAPTURES, kind: "history_forward", suffix: marker, zIndex: 20 };
+    case "pane-handle":
+      return { captures: OVERLAY_CAPTURES, kind: "pane_handle", suffix: marker, zIndex: 10 };
+    default:
+      return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker || "overlay", zIndex: 10 };
+  }
+}
+
+function surfAceOverlay<T extends HTMLElement>(element: T, kind: SurfAceOverlayKind): T {
+  element.setAttribute(OVERLAY_MARKER_ATTRIBUTE, kind);
+  return element;
+}
+
+function isMarkedOverlayVisible(element: HTMLElement, rootEl: HTMLElement): boolean {
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    if (current.hidden) {
+      return false;
+    }
+    const style = window.getComputedStyle(current);
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+      return false;
+    }
+    if (current === rootEl) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): OverlayRegionReport[] {
+  const markerSelector = `[${OVERLAY_MARKER_ATTRIBUTE}]`;
+  return [...view.rootEl.querySelectorAll<HTMLElement>(markerSelector)].flatMap((element, index) => {
+    if (!isMarkedOverlayVisible(element, view.rootEl)) {
+      return [];
+    }
+    const marker = element.getAttribute(OVERLAY_MARKER_ATTRIBUTE) ?? undefined;
+    const metadata = overlayMetadataForMarker(marker);
+    const region = overlayRegionForElement(
+      pane,
+      element,
+      `${metadata.suffix}-${index}`,
+      metadata.kind,
+      metadata.zIndex,
+      metadata.captures,
+    );
+    return region ? [region] : [];
+  });
+}
+
+function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "visibility"): void {
+  overlayRevision += 1;
+  if (!latestState) {
+    window.surfAce.reportOverlayRegions({
+      coordinateSpace: "surface_logical",
+      regions: [],
+      revision: overlayRevision,
+      topologyEpoch: "0",
+      updateReason,
+    });
+    return;
+  }
+
+  const regions: OverlayRegionReport[] = [];
+  for (const pane of latestState.panes) {
+    const view = paneViews.get(pane.paneId);
+    if (view) {
+      regions.push(...collectMarkedOverlayRegions(pane, view));
+    }
+  }
+  window.surfAce.reportOverlayRegions({
+    coordinateSpace: "surface_logical",
+    regions,
+    revision: overlayRevision,
+    topologyEpoch: String(latestState.topologyRevision),
+    updateReason,
+  });
+}
+
+function scheduleCompositorOverlayRegionReport(updateReason: "layout" | "resize" | "visibility"): void {
+  if (overlayRegionsFrame !== null) {
+    window.cancelAnimationFrame(overlayRegionsFrame);
+  }
+  if (overlayRegionsTimer !== null) {
+    window.clearTimeout(overlayRegionsTimer);
+  }
+  overlayRegionsFrame = window.requestAnimationFrame(() => {
+    overlayRegionsFrame = null;
+    reportCompositorOverlayRegions(updateReason);
+  });
+  overlayRegionsTimer = window.setTimeout(() => {
+    overlayRegionsTimer = null;
+    reportCompositorOverlayRegions(updateReason);
+  }, 80);
 }
 
 function currentViewport(view: PaneView): Viewport {
@@ -515,6 +724,7 @@ function ensurePaneView(paneId: number): PaneView {
   canvas.className = "annotation-layer";
   const controlsEl = document.createElement("div");
   controlsEl.className = "control-cluster";
+  surfAceOverlay(controlsEl, "pane-handle");
   const toastEl = document.createElement("div");
   toastEl.className = "pane-toast";
   toastEl.hidden = true;
@@ -568,30 +778,22 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  const paneLabel = createButton(pane.label, "pane-label-chip");
-  paneLabel.addEventListener("click", () => {
-    rememberPaneContext(pane.paneId);
-    document.body.classList.remove("labels-hidden");
-  });
-
-  const back = createButton("◀", "back", !pane.canGoBack);
+  const back = surfAceOverlay(createButton("◀", "back", !pane.canGoBack), "history-back");
   back.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ direction: "back", paneId: pane.paneId, type: "history" });
   });
-  const forward = createButton("▶", "forward", !pane.canGoForward);
+  const forward = surfAceOverlay(createButton("▶", "forward", !pane.canGoForward), "history-forward");
   forward.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ direction: "forward", paneId: pane.paneId, type: "history" });
   });
-  const annotate = createButton("👆", "annotate");
+  const annotate = surfAceOverlay(createButton("👆", "annotate"), "annotation-control");
   annotate.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
   });
   annotate.classList.toggle("active", pane.showDone);
-
-  view.controlsEl.appendChild(paneLabel);
 
   if (!pane.showDone) {
     view.controlsEl.append(back, forward);
@@ -600,7 +802,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.appendChild(annotate);
 
   if (pane.showDone) {
-    const done = createButton("Done", "done");
+    const done = surfAceOverlay(createButton("Done", "done"), "annotation-control");
     done.addEventListener("click", () => {
       rememberPaneContext(pane.paneId);
       window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
@@ -709,6 +911,7 @@ function htmlFrameBridgeScript(): string {
   });
 
   document.addEventListener("pointerdown", (event) => {
+    emit({ type: "focus" });
     if (navigationTarget(event.target)) {
       return;
     }
@@ -852,6 +1055,8 @@ function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement)
         position: payload.position,
         type: "tap",
       });
+    } else if (payload.type === "focus") {
+      rememberPaneContext(paneId);
     } else if (payload.type === "navigation") {
       sendNavigationIntent(view, paneId, String(payload.url ?? ""));
     } else if (payload.type === "ready") {
@@ -1204,6 +1409,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
 }
 
 function updatePane(view: PaneView, pane: RendererPaneState): void {
+  view.rootEl.classList.toggle("keyboard-active", pane.activeKeyboardPane);
   view.rootEl.classList.toggle("annotating", pane.annotationBorderVisible);
   view.rootEl.classList.toggle("flush-in-flight", pane.flushInFlight);
   view.annotationCanvas.classList.toggle("enabled", pane.annotationBorderVisible);
@@ -1270,10 +1476,12 @@ function renderWindow(state: RendererWindowState): void {
   }
   wrapper.append(windowTitlePill, layoutRoot);
   appRoot.replaceChildren(wrapper);
+  scheduleCompositorOverlayRegionReport("layout");
 }
 
 async function init(): Promise<void> {
   bootstrap = (await window.surfAce.getBootstrap()) as Bootstrap;
+  document.body.classList.toggle("overlay-debug-borders", Boolean(bootstrap.overlayDebugBorders));
   latestState = bootstrap.state;
   renderWindow(bootstrap.state);
 
@@ -1293,9 +1501,17 @@ async function init(): Promise<void> {
         reportPaneSnapshot(view);
       }
     }
+    scheduleCompositorOverlayRegionReport("resize");
   });
 
-  window.addEventListener("pointermove", scheduleLabelsHide, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    scheduleCompositorOverlayRegionReport("visibility");
+  });
+
+  window.addEventListener("pointermove", () => {
+    scheduleLabelsHide();
+    scheduleCompositorOverlayRegionReport("visibility");
+  }, { passive: true });
 }
 
 void init();

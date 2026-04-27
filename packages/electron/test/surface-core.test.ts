@@ -47,6 +47,49 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.equal(windowState.panes.length, 1);
   assert.equal(windowState.panes[0]?.paneId, 7);
   assert.equal(windowState.panes[0]?.label, "7");
+  assert.equal(windowState.panes[0]?.activeKeyboardPane, true);
+});
+
+test("surface core tracks the active keyboard pane and falls back when it closes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const initialPaneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.paneSplit(surface.surfaceId, {
+    count: 3,
+    direction: "horizontal",
+    newPaneIds: [9, 11],
+    newPaneLabels: [9, 11],
+    paneId: initialPaneId,
+  });
+
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), 7);
+  core.setActiveKeyboardPane(surface.surfaceId, 11);
+  let windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.deepEqual(
+    windowState.panes.map((pane) => [pane.paneId, pane.activeKeyboardPane]),
+    [
+      [7, false],
+      [9, false],
+      [11, true],
+    ],
+  );
+
+  core.paneClose(surface.surfaceId, 11);
+  windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), 7);
+  assert.deepEqual(
+    windowState.panes.map((pane) => [pane.paneId, pane.activeKeyboardPane]),
+    [
+      [7, true],
+      [9, false],
+    ],
+  );
 });
 
 test("surface core renders the visible pane label separately from paneId", () => {
@@ -161,7 +204,7 @@ test("surface core starts browser_url targets without reporting unverified navig
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   applyProviderBootstrap(core, surface.surfaceId, 7);
-  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
@@ -193,8 +236,6 @@ test("surface core starts browser_url targets without reporting unverified navig
   const snapshot = core.captureSnapshot(surface.surfaceId, 7);
   assert.equal(snapshot.contentId, null);
   assert.equal(snapshot.contentType, null);
-  assert.equal(snapshot.currentTarget?.targetId, "tg_google");
-  assert.equal(snapshot.currentTarget?.targetKind, "browser_url");
 });
 
 test("surface core records confirmed browser_url navigation success evidence", () => {
@@ -207,7 +248,7 @@ test("surface core records confirmed browser_url navigation success evidence", (
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   applyProviderBootstrap(core, surface.surfaceId, 7);
-  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
   core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
     ownershipSessionId: "sa_test",
@@ -237,7 +278,6 @@ test("surface core records confirmed browser_url navigation success evidence", (
 
   assert.equal(result?.status, "applied");
   assert.equal(result?.materializedState?.navigationStatus, "loaded");
-  assert.equal(core.captureSnapshot(surface.surfaceId, 7).currentTarget?.lastApplyEvidence?.status, "applied");
 });
 
 test("surface core records confirmed browser_url navigation failure evidence", () => {
@@ -250,7 +290,7 @@ test("surface core records confirmed browser_url navigation failure evidence", (
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   applyProviderBootstrap(core, surface.surfaceId, 7);
-  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
   core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
     ownershipSessionId: "sa_test",
@@ -282,7 +322,6 @@ test("surface core records confirmed browser_url navigation failure evidence", (
   assert.equal(result?.status, "failed");
   assert.equal(result?.errorCode, "materialization_failed");
   assert.equal(result?.materializedState?.navigationStatus, "failed");
-  assert.equal(core.captureSnapshot(surface.surfaceId, 7).currentTarget?.lastApplyEvidence?.status, "failed");
 });
 
 test("surface core rejects browser_url target when live browser capability is not requested", () => {
@@ -295,7 +334,7 @@ test("surface core rejects browser_url target when live browser capability is no
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   applyProviderBootstrap(core, surface.surfaceId, 7);
-  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
@@ -332,7 +371,7 @@ test("surface core rejects browser_url targets for non-web schemes", () => {
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   applyProviderBootstrap(core, surface.surfaceId, 7);
-  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
@@ -455,8 +494,8 @@ test("surface core assigns pane history and split topology", () => {
   assert.deepEqual(split.panes.map((pane) => pane.paneId), [initialPaneId, 9]);
   const paneViewports = core.panesList(surface.surfaceId).panes.map((pane) => pane.viewport);
   assert.deepEqual(paneViewports, [
-    { height: 800, scale: 2, width: 600 },
-    { height: 800, scale: 2, width: 600 },
+    { height: 400, scale: 2, width: 1200 },
+    { height: 400, scale: 2, width: 1200 },
   ]);
 
   core.contentSet(surface.surfaceId, {
@@ -615,7 +654,7 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
   });
 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
-  assert.deepEqual(listedPane.viewport, { height: 800, scale: 2, width: 600 });
+  assert.deepEqual(listedPane.viewport, { height: 400, scale: 2, width: 1200 });
 });
 
 test("surface core updates terminal content in place", () => {

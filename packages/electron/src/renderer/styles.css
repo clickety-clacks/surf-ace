@@ -144,11 +144,11 @@ body {
 }
 
 .layout-split.direction-horizontal {
-  flex-direction: row;
+  flex-direction: column;
 }
 
 .layout-split.direction-vertical {
-  flex-direction: column;
+  flex-direction: row;
 }
 
 .pane-shell {
@@ -159,6 +159,21 @@ body {
   min-height: 0;
   background: var(--pane);
   overflow: hidden;
+}
+
+.pane-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow: inset 0 0 0 10px rgba(255, 255, 255, 0.2);
+  transition: opacity 0.12s ease;
+}
+
+.pane-shell.keyboard-active::after {
+  opacity: 1;
 }
 
 .pane-shell + .pane-shell {
@@ -194,24 +209,32 @@ body {
 
 .pane-label {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+  right: 16px;
+  bottom: 74px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-end;
   pointer-events: none;
-  z-index: 25;
+  z-index: 22;
   transition: opacity 0.18s ease;
 }
 
 .pane-label span {
-  padding: 12px 24px;
-  border-radius: 16px;
-  background: rgba(12, 22, 42, 0.54);
-  border: 1px solid rgba(162, 187, 238, 0.34);
-  backdrop-filter: blur(14px);
-  font-size: clamp(28px, 4vw, 44px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0.78em;
+  min-height: 0.78em;
+  padding: 0 0.12em;
+  border-radius: 999px;
+  background: rgba(13, 22, 41, 0.05);
+  border: 1px solid rgba(164, 189, 235, 0.05);
+  color: rgba(238, 244, 255, 0.05);
+  font-size: 20vh;
   font-family: var(--ui-font-family);
-  font-weight: 100;
-  letter-spacing: 0.15em;
+  font-weight: 1000;
+  letter-spacing: 0;
+  line-height: 0.78;
   text-transform: uppercase;
 }
 
@@ -228,12 +251,14 @@ body {
   width: 100%;
 }
 
+.pane-content.type-browser_url,
 .pane-content.type-html,
 .pane-content.type-pdf {
   height: 100%;
   min-height: 100%;
 }
 
+.pane-content.type-browser_url,
 .pane-content.type-html {
   overflow: hidden;
 }
@@ -400,17 +425,27 @@ body {
   display: flex;
   gap: 6px;
   align-items: center;
-  padding: 7px 10px;
+  padding: 6px;
   border-radius: 999px;
-  background: rgba(13, 22, 41, 0.64);
-  border: 1px solid rgba(164, 189, 235, 0.32);
+  background:
+    radial-gradient(ellipse at center, rgba(8, 17, 31, 0.92), rgba(8, 17, 31, 0.68) 56%, rgba(8, 17, 31, 0));
+  border: 1px solid rgba(164, 189, 235, 0.18);
+  box-shadow:
+    0 14px 42px rgba(0, 0, 0, 0.36),
+    0 0 0 1px rgba(8, 17, 31, 0.28);
+  overflow: visible;
   backdrop-filter: blur(14px);
   z-index: 24;
 }
 
 .control-button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 44px;
-  min-height: 44px;
+  height: 44px;
+  padding: 0;
   border-radius: 999px;
   border: 1px solid rgba(119, 154, 215, 0.42);
   background: rgba(40, 62, 108, 0.88);
@@ -419,8 +454,14 @@ body {
   font-size: 14px;
   font-weight: var(--ui-font-weight);
   letter-spacing: 0.1em;
+  line-height: 1;
   text-transform: uppercase;
   cursor: pointer;
+}
+
+.overlay-debug-borders .control-button {
+  outline: 2px solid #ff00ff;
+  outline-offset: 2px;
 }
 
 .control-button:disabled {
@@ -436,15 +477,6 @@ body {
 .control-button.annotate.active {
   background: rgba(74, 101, 165, 0.98);
   border-color: rgba(160, 191, 255, 0.72);
-}
-
-.control-button.pane-label-chip {
-  min-width: 0;
-  padding: 0 14px;
-  border-color: rgba(164, 189, 235, 0.28);
-  background: rgba(10, 17, 31, 0.72);
-  color: rgba(243, 248, 255, 0.88);
-  opacity: 1;
 }
 
 .pane-toast {

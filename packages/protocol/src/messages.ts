@@ -14,6 +14,11 @@ export type {
   SnapshotGetRequest,
   SnapshotResponse,
   SurfaceViewport as Viewport,
+  TargetApplyRequest,
+  TargetApplyResponse,
+  TargetErrorCode,
+  TargetHeader,
+  TargetKind,
   SurfacesListRequest,
   SurfacesListResponse,
 } from "./index.js";

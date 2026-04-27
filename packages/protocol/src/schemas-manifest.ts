@@ -17,6 +17,11 @@ import {
   pairResponseSchema,
   relinquishRequestSchema,
   relinquishResponseSchema,
+  targetApplyRequestSchema,
+  targetApplyResponseSchema,
+  targetRegisterRejectedResponseSchema,
+  targetRegisteredResponseSchema,
+  targetRegisterRequestSchema,
   paneCloseRequestSchema,
   paneCloseResponseSchema,
   paneCreatedEventSchema,
@@ -39,11 +44,6 @@ import {
   surfacesListRequestSchema,
   surfacesListResponseSchema,
   tapEventSchema,
-  targetApplyRequestSchema,
-  targetApplyResponseSchema,
-  targetRegisterRejectedResponseSchema,
-  targetRegisteredResponseSchema,
-  targetRegisterRequestSchema,
 } from "./schemas.js";
 
 export const SURF_ACE_PROTOCOL_SCHEMAS = {

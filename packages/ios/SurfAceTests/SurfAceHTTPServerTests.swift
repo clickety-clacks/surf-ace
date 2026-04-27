@@ -103,6 +103,12 @@ final class SurfAceHTTPServerTests: XCTestCase {
         XCTAssertEqual(services, ["_surf-ace._tcp"])
     }
 
+    func testInfoPlistDeclaresMultipleSceneSupport() throws {
+        let info = try loadAppInfoPlist()
+        let sceneManifest = try XCTUnwrap(info["UIApplicationSceneManifest"] as? [String: Any])
+        XCTAssertEqual(sceneManifest["UIApplicationSupportsMultipleScenes"] as? Bool, true)
+    }
+
     private func nextAvailablePort() throws -> UInt16 {
         for candidate in UInt16(29_001)...UInt16(29_100) {
             let descriptor = socket(AF_INET, SOCK_STREAM, 0)

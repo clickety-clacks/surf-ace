@@ -8,7 +8,6 @@ import type {
   ContentApplyResponse,
   ContentAppendRequest,
   ContentClearRequest,
-  ContentId,
   ContentPatchRequest,
   ContentSetRequest,
   ContentType,
@@ -34,14 +33,13 @@ import type {
   SurfaceViewport,
   TargetApplyRequest,
   TargetApplyResponse,
-  PaneTargetState,
   TopologyApplyRequest,
   TopologyApplyResponse,
 } from "../../protocol/src/index.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
 type ContentDisplay = ContentSetRequest["payload"]["display"];
-type BrowserUrlPayload = { url: string; allowedSnapshotFallback?: boolean; fallbackSnapshotTargetId?: string };
+type BrowserUrlPayload = { url: string };
 type RenderableContentType = ContentType | "browser_url";
 type RenderablePayload = ContentPayload | BrowserUrlPayload;
 
@@ -53,7 +51,6 @@ type HistoryEntry = {
   display?: ContentDisplay;
   ownerToken: string | null;
   revision: number;
-  targetState?: PaneTargetState | null;
 };
 
 type PaneSnapshot = {
@@ -77,8 +74,8 @@ type PaneState = {
   latestContentEventAt: number;
   name: string | null;
   paneId: number;
-  paneLineageId: string;
   paneLabel: number;
+  paneLineageId: string;
   pendingAnnotationCommit: boolean;
   snapshot: PaneSnapshot;
   toast: string | null;
@@ -96,6 +93,7 @@ type LayoutNode =
     };
 
 type SurfaceState = {
+  activeKeyboardPaneId: number | null;
   connectionBar: "connected" | "connecting" | "disconnected";
   layout: LayoutNode | null;
   name: string;
@@ -114,6 +112,7 @@ export type PersistentSurfaceState = {
 };
 
 export type RendererPaneState = {
+  activeKeyboardPane: boolean;
   annotationBorderVisible: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -140,15 +139,9 @@ export type RendererWindowState = {
   panes: RendererPaneState[];
   providerName: string | null;
   surfaceId: string;
+  topologyRevision: number;
   viewport: SurfaceViewport;
   windowLabel: string;
-};
-
-export type BrowserUrlNavigationEvidence = {
-  errorMessage?: string;
-  status: "applied" | "failed";
-  targetId: string;
-  url: string;
 };
 
 export type CoreEvent =
@@ -303,6 +296,7 @@ export class SurfaceCore {
 
   getRendererWindowState(surfaceId: string): RendererWindowState {
     const surface = this.getSurface(surfaceId);
+    this.ensureActiveKeyboardPane(surface);
     return {
       connectionBar: surface.connectionBar,
       layout: surface.layout ? structuredClone(surface.layout) : null,
@@ -311,6 +305,7 @@ export class SurfaceCore {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
         return {
+          activeKeyboardPane: surface.activeKeyboardPaneId === paneId,
           annotationBorderVisible: pane.annotating,
           canGoBack: pane.historyIndex > 0,
           canGoForward: pane.historyIndex < pane.history.length - 1,
@@ -332,9 +327,25 @@ export class SurfaceCore {
       }),
       providerName: surface.providerName,
       surfaceId: surface.surfaceId,
+      topologyRevision: surface.topologyRevision,
       viewport: cloneViewport(surface.viewport),
       windowLabel: surface.windowLabel,
     };
+  }
+
+  activeKeyboardPaneId(surfaceId: string): number | null {
+    const surface = this.getSurface(surfaceId);
+    this.ensureActiveKeyboardPane(surface);
+    return surface.activeKeyboardPaneId;
+  }
+
+  setActiveKeyboardPane(surfaceId: string, paneId: number): void {
+    const surface = this.getSurface(surfaceId);
+    if (!surface.panes.has(paneId) || surface.activeKeyboardPaneId === paneId) {
+      return;
+    }
+    surface.activeKeyboardPaneId = paneId;
+    this.emit({ surfaceId, type: "surface-changed" });
   }
 
   clearToast(surfaceId: string, paneId: number): void {
@@ -389,7 +400,7 @@ export class SurfaceCore {
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({
-      contentId: currentEntry(pane).contentId,
+      contentId: protocolContentId(currentEntry(pane)),
       direction,
       paneId,
       revision: currentEntry(pane).revision,
@@ -408,10 +419,8 @@ export class SurfaceCore {
         return {
           activeContentId: protocolContentId(current),
           contentType: protocolContentType(current),
-          currentTarget: current.targetState ?? null,
           name: pane.name,
           paneId: pane.paneId as PaneId,
-          paneLineageId: pane.paneLineageId,
           paneLabel: pane.paneLabel,
           viewport: paneViewports.get(paneId) ?? structuredClone(pane.snapshot.viewport),
         };
@@ -428,11 +437,10 @@ export class SurfaceCore {
         return {
           contentType: protocolContentType(current),
           currentContentId: protocolContentId(current),
-          currentTarget: current.targetState ?? null,
           currentRevision: current.revision as Revision,
           paneId: pane.paneId as PaneId,
-          paneLineageId: pane.paneLineageId,
           paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
         };
       }),
     };
@@ -498,6 +506,7 @@ export class SurfaceCore {
     surface.panes = nextPanes;
     surface.topologyRevision = Number(payload.topologyRevision);
     surface.windowLabel = payload.windowLabel;
+    this.ensureActiveKeyboardPane(surface);
     this.emit({ surfaceId, type: "surface-changed" });
 
     return {
@@ -506,8 +515,8 @@ export class SurfaceCore {
         return {
           name: pane.name,
           paneId: pane.paneId as PaneId,
-          paneLineageId: pane.paneLineageId,
           paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
         };
       }),
       topologyRevision: payload.topologyRevision,
@@ -618,7 +627,7 @@ export class SurfaceCore {
   ): TargetApplyResponse["payload"] {
     const surface = this.getSurface(surfaceId);
     if (payload.surfaceId !== surface.surfaceId) {
-      return targetApplyResult(payload, "rejected", "materialization_failed", "target surfaceId does not match this surface");
+      return targetApplyResult(payload, "rejected", "materialization_failed", "target.apply surfaceId does not match this surface");
     }
     if (!payload.targetHeader.requiredCapabilities.every((capability) =>
       (SUPPORTED_TARGET_CAPABILITIES as readonly string[]).includes(capability)
@@ -626,7 +635,7 @@ export class SurfaceCore {
       return targetApplyResult(payload, "rejected", "capability_missing", "required target capability is not advertised");
     }
     if (payload.targetKind !== "browser_url") {
-      return targetApplyResult(payload, "rejected", "unsupported_target_kind", "unsupported target kind");
+      return targetApplyResult(payload, "rejected", "unsupported_target_kind", `Unsupported target kind: ${payload.targetKind}`);
     }
     if (payload.targetHeader.replaySemantics !== "navigate") {
       return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url requires navigate replay semantics");
@@ -654,23 +663,11 @@ export class SurfaceCore {
     }
     pane.history.push({
       annotations: [],
-      content: {
-        ...(targetPayload.allowedSnapshotFallback === undefined ? {} : { allowedSnapshotFallback: targetPayload.allowedSnapshotFallback }),
-        ...(targetPayload.fallbackSnapshotTargetId === undefined ? {} : { fallbackSnapshotTargetId: targetPayload.fallbackSnapshotTargetId }),
-        url: url.toString(),
-      },
+      content: { url: url.toString() },
       contentId: payload.targetId,
       contentType: "browser_url",
       ownerToken: null,
       revision: payload.targetEpoch,
-      targetState: {
-        currentState: "current",
-        paneLineageId: payload.paneLineageId,
-        restorePolicy: payload.restoreReason === "initial_apply" ? "confirm" : "auto",
-        targetEpoch: payload.targetEpoch,
-        targetId: payload.targetId,
-        targetKind: "browser_url",
-      },
     });
     pane.historyIndex = pane.history.length - 1;
     trimHistory(pane);
@@ -688,7 +685,7 @@ export class SurfaceCore {
   completeBrowserUrlNavigation(
     surfaceId: string,
     paneId: number,
-    evidence: BrowserUrlNavigationEvidence,
+    evidence: { errorMessage?: string; status: "applied" | "failed"; targetId: string; url: string },
     applyResult?: TargetApplyResponse["payload"],
   ): TargetApplyResponse["payload"] | null {
     const pane = this.expectPane(surfaceId, paneId);
@@ -696,27 +693,23 @@ export class SurfaceCore {
     if (entry.contentType !== "browser_url" || entry.contentId !== evidence.targetId) {
       return null;
     }
-    const payload = applyResult ?? {
-      appliedAt: new Date().toISOString(),
-      errorCode: evidence.status === "failed" ? "materialization_failed" as const : undefined,
-      materializedState: {
+    const payload = applyResult ?? targetApplyResult(
+      {
+        paneLineageId: pane.paneLineageId,
+        requestId: "",
+        targetEpoch: entry.revision,
+        targetId: evidence.targetId,
+      } as TargetApplyRequest["payload"],
+      evidence.status,
+      evidence.status === "failed" ? "materialization_failed" : undefined,
+      evidence.status === "applied" ? "browser_url navigation loaded" : evidence.errorMessage ?? "browser_url navigation failed",
+      {
         navigationStatus: evidence.status === "applied" ? "loaded" : "failed",
         replaySemantics: "navigate",
         url: evidence.url,
       },
-      message: evidence.status === "applied"
-        ? "browser_url navigation loaded"
-        : evidence.errorMessage ?? "browser_url navigation failed",
-      paneLineageId: pane.paneLineageId,
-      requestId: entry.targetState?.lastApplyEvidence?.requestId ?? "",
-      status: evidence.status,
-      targetEpoch: entry.revision,
-      targetId: evidence.targetId,
-    };
-    if (entry.targetState) {
-      entry.targetState.lastApplyEvidence = payload;
-      this.emit({ surfaceId, type: "surface-changed" });
-    }
+    );
+    this.emit({ surfaceId, type: "surface-changed" });
     return payload;
   }
 
@@ -747,6 +740,7 @@ export class SurfaceCore {
       surface.panes.set(pane.paneId, pane);
       surface.paneOrder.push(pane.paneId);
     }
+    surface.activeKeyboardPaneId = sourcePane.paneId;
     surface.layout = splitLayoutNode(surface.layout!, sourcePane.paneId, payload.direction, [
       sourcePane.paneId,
       ...newPaneIds,
@@ -801,6 +795,7 @@ export class SurfaceCore {
     surface.panes.delete(paneId);
     surface.paneOrder = surface.paneOrder.filter((entry) => entry !== paneId);
     surface.layout = collapseLayout(removePaneFromLayout(surface.layout!, paneId));
+    this.ensureActiveKeyboardPane(surface);
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({ paneId, surfaceId, type: "pane-removed" });
     return {
@@ -998,7 +993,6 @@ export class SurfaceCore {
     return {
       contentId: protocolContentId(current),
       contentType: protocolContentType(current),
-      currentTarget: current.targetState ?? null,
       paneId: pane.paneId as PaneId,
       revision: current.revision as Revision,
       selection: pane.snapshot.selection,
@@ -1236,6 +1230,7 @@ export class SurfaceCore {
   private createSurface(surfaceId: string, name: string, viewport: SurfaceViewport): SurfaceState {
     const bootstrapPane = createPaneState(BOOTSTRAP_PANE_ID, 0, this.now());
     const surface: SurfaceState = {
+      activeKeyboardPaneId: BOOTSTRAP_PANE_ID,
       connectionBar: "disconnected",
       layout: { paneId: BOOTSTRAP_PANE_ID, type: "pane" },
       name,
@@ -1295,6 +1290,7 @@ export class SurfaceCore {
     surface.panes.set(initialPaneId, replacementPane);
     surface.paneOrder = [initialPaneId];
     surface.layout = { paneId: initialPaneId, type: "pane" };
+    surface.activeKeyboardPaneId = initialPaneId;
     return true;
   }
 
@@ -1326,6 +1322,13 @@ export class SurfaceCore {
       listener(event);
     }
   }
+
+  private ensureActiveKeyboardPane(surface: SurfaceState): void {
+    if (surface.activeKeyboardPaneId !== null && surface.panes.has(surface.activeKeyboardPaneId)) {
+      return;
+    }
+    surface.activeKeyboardPaneId = surface.paneOrder[0] ?? null;
+  }
 }
 
 type PaneSplitState = {
@@ -1349,7 +1352,6 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
         contentType: null,
         ownerToken: null,
         revision: 0,
-        targetState: null,
       },
     ],
     historyIndex: 0,
@@ -1358,8 +1360,8 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     latestContentEventAt: now,
     name: null,
     paneId,
-    paneLineageId: makePaneLineageId(),
     paneLabel,
+    paneLineageId: `pl_${randomUUID().replaceAll("-", "")}`,
     pendingAnnotationCommit: false,
     snapshot: {
       bounds: null,
@@ -1380,49 +1382,8 @@ function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
 }
 
-function makePaneLineageId(): string {
-  return `pl_${randomBytes(8).toString("hex")}`;
-}
-
 function paneForLineage(surface: SurfaceState, lineageId: string): PaneState | null {
   return [...surface.panes.values()].find((pane) => pane.paneLineageId === lineageId) ?? null;
-}
-
-function protocolContentId(entry: HistoryEntry): ContentId | null {
-  return entry.contentType === "browser_url" ? null : entry.contentId as ContentId | null;
-}
-
-function protocolContentType(entry: HistoryEntry): ContentType | null {
-  return entry.contentType === "browser_url" ? null : entry.contentType as ContentType | null;
-}
-
-function parseSafeBrowserUrl(value: string): URL | null {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
-  } catch {
-    return null;
-  }
-}
-
-function targetApplyResult(
-  payload: TargetApplyRequest["payload"],
-  status: TargetApplyResponse["payload"]["status"],
-  errorCode?: TargetApplyResponse["payload"]["errorCode"],
-  message?: string,
-  materializedState?: Record<string, unknown>,
-): TargetApplyResponse["payload"] {
-  return {
-    appliedAt: new Date().toISOString(),
-    errorCode,
-    materializedState,
-    message,
-    paneLineageId: payload.paneLineageId,
-    requestId: payload.requestId,
-    status,
-    targetEpoch: payload.targetEpoch,
-    targetId: payload.targetId,
-  };
 }
 
 function shouldReplaceVisibleEntry(pane: PaneState, ownerToken: string): boolean {
@@ -1464,7 +1425,7 @@ function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {
   return { ...viewport };
 }
 
-function cloneContent(content: ContentPayload | null): ContentPayload | null {
+function cloneContent(content: RenderablePayload | null): RenderablePayload | null {
   return content ? structuredClone(content) : null;
 }
 
@@ -1493,11 +1454,48 @@ function snapshotVisibleText(pane: PaneState, entry: HistoryEntry): string {
 function currentMutationAck(pane: PaneState): MutationAckResponse["payload"] {
   const entry = currentEntry(pane);
   return {
-    contentId: entry.contentId,
-    contentType: entry.contentType,
-    currentContentId: entry.contentId,
+    contentId: protocolContentId(entry),
+    contentType: protocolContentType(entry),
+    currentContentId: protocolContentId(entry),
     currentRevision: entry.revision as Revision,
     paneId: pane.paneId as PaneId,
+  };
+}
+
+function protocolContentId(entry: HistoryEntry): ContentId | null {
+  return entry.contentType === "browser_url" ? null : entry.contentId as ContentId | null;
+}
+
+function protocolContentType(entry: HistoryEntry): ContentType | null {
+  return entry.contentType === "browser_url" ? null : entry.contentType as ContentType | null;
+}
+
+function parseSafeBrowserUrl(value: string): URL | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function targetApplyResult(
+  payload: TargetApplyRequest["payload"],
+  status: TargetApplyResponse["payload"]["status"],
+  errorCode?: TargetApplyResponse["payload"]["errorCode"],
+  message?: string,
+  materializedState?: Record<string, unknown>,
+): TargetApplyResponse["payload"] {
+  return {
+    appliedAt: new Date().toISOString(),
+    errorCode,
+    materializedState,
+    message,
+    paneLineageId: payload.paneLineageId,
+    requestId: payload.requestId,
+    status,
+    targetEpoch: payload.targetEpoch,
+    targetId: payload.targetId,
   };
 }
 
@@ -1624,7 +1622,7 @@ function layoutPaneViewports(
     for (const child of current.children) {
       visit(
         child,
-        current.direction === "horizontal"
+        current.direction === "vertical"
           ? {
               height: currentViewport.height,
               scale: currentViewport.scale,

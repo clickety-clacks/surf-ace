@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import WebSocket from "ws";
 
-import type { PairRequest, Request, Response, TargetApplyRequest } from "../../protocol/src/index.js";
+import type { PairRequest, Request, Response } from "../../protocol/src/index.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { SurfaceWsServer, __test } from "../src/ws-server.js";
 
@@ -247,28 +251,78 @@ function contentApplyRequest(paneId: number, revision: number): Request {
   };
 }
 
-function browserUrlTargetApplyRequest(
-  surfaceId: string,
-  sessionId: string,
-  ownershipEpoch: number,
-  paneLineageId: string,
-  options: {
-    targetId?: string;
-    url?: string;
-  } = {},
-): TargetApplyRequest {
-  const targetUrl = options.url ?? "https://google.com/";
+function targetApplyRequest(
+  overrides: Partial<{
+    geometry: { height: number; width: number; x: number; y: number };
+    ownershipSessionId: string;
+    paneLineageId: string;
+    surfaceId: string;
+  }> = {},
+): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "target.apply",
     payload: {
-      ownershipEpoch,
-      ownershipSessionId: sessionId as never,
-      paneLineageId: paneLineageId as never,
-      requestId: `tr_${Math.random().toString(16).slice(2)}` as never,
+      materialization: {
+        op: "native_pane.host",
+        panes: [
+          {
+            binding_id: "118:ct_top",
+            content_id: "ct_top",
+            geometry: { ...(overrides.geometry ?? { height: 384, width: 512, x: 512, y: 0 }), coordinateSpace: "compositor_logical" },
+            id: "118",
+            process: { args: ["top"], command: "foot" },
+            revision: 9 as never,
+            target: "terminal",
+          },
+        ],
+      },
+      ownershipEpoch: 1,
+      ownershipSessionId: overrides.ownershipSessionId ?? "sa_test",
+      paneLineageId: overrides.paneLineageId ?? "pl_118",
+      restoreReason: "resume_restore",
+      requestId: "restore_top_118",
+      surfaceId: (overrides.surfaceId ?? "sf_test") as never,
+      targetEpoch: 3,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.terminal_app.v1"],
+        safeToLogFields: [],
+        safetyClass: "process",
+        summary: "top",
+      },
+      targetId: "target_top_118",
+      targetKind: "terminal_app",
+      targetPayload: { command: "top" },
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
+function browserUrlTargetApplyRequest(
+  options: {
+    ownershipSessionId: string;
+    paneLineageId: string;
+    surfaceId: string;
+    targetId?: string;
+    url?: string;
+  },
+): Request {
+  const targetUrl = options.url ?? "https://example.com/";
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "target.apply",
+    payload: {
+      ownershipEpoch: 1,
+      ownershipSessionId: options.ownershipSessionId as never,
+      paneLineageId: options.paneLineageId as never,
       restoreReason: "initial_apply",
-      surfaceId: surfaceId as never,
-      targetEpoch: 1 as never,
+      requestId: "restore_url",
+      surfaceId: options.surfaceId as never,
+      targetEpoch: 3,
       targetHeader: {
         payloadSchemaVersion: 1,
         replaySemantics: "navigate",
@@ -277,7 +331,7 @@ function browserUrlTargetApplyRequest(
         safetyClass: "network",
         summary: targetUrl,
       },
-      targetId: (options.targetId ?? "tg_google") as never,
+      targetId: options.targetId ?? "target_url",
       targetKind: "browser_url",
       targetPayload: { url: targetUrl },
     },
@@ -328,8 +382,37 @@ function snapshotGetRequest(paneId: number): Request {
   };
 }
 
+function heartbeatRequest(): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "heartbeat.ping",
+    payload: {
+      nonce: `hb_${Math.random().toString(16).slice(2)}`,
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
+function overlayDiagnosticsRequest(): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "diagnostics.overlay_regions" as never,
+    payload: {},
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 async function withServer(
   run: (ctx: { core: SurfaceCore; surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
+  options: {
+    compositorSocketPath?: string | null;
+    getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
+    onNativeMaterialized?: (surfaceId: string) => void;
+  } = {},
 ): Promise<void> {
   const core = new SurfaceCore({
     persistentState: {
@@ -343,7 +426,10 @@ async function withServer(
     capturePaneImage: async () => null,
     core,
     endpointName: "Surf Ace",
+    getOverlayDiagnostics: options.getOverlayDiagnostics,
     hostName: "localhost",
+    compositorSocketPath: options.compositorSocketPath ?? null,
+    onNativeMaterialized: options.onNativeMaterialized,
     port,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
@@ -574,11 +660,31 @@ test("ws server exposes providerName while connected and clears it on relinquish
     const owner = await connect(url);
     const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", { providerName: "CLU / Surf Ace" }));
     assert.equal(paired.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
     assert.equal(core.getRendererWindowState(surfaceId).providerName, "CLU / Surf Ace");
+
+    const heartbeat = await request(owner, heartbeatRequest());
+    assert.equal(heartbeat.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     const relinquished = await request(owner, relinquishRequest());
     assert.equal(relinquished.ok, true);
     assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server does not show green until provider heartbeat confirms readiness", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+
+    const heartbeat = await request(owner, heartbeatRequest());
+    assert.equal(heartbeat.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     await closeSocket(owner);
   });
@@ -597,6 +703,501 @@ test("ws server rejects pair requests without providerName", async () => {
       socket.once("close", () => resolve());
     });
   });
+});
+
+test("ws server advertises terminal targets when compositor bridge is configured", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+
+    assert.equal(paired.ok, true);
+    assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.browser_url.v1", "target.terminal_app.v1"]);
+
+    await closeSocket(socket);
+  }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
+});
+
+test("ws server returns browser_url applied only after renderer load confirmation", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.browser_url.v1"]);
+
+    const apply = browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_example",
+      url: "https://example.com/",
+    });
+    const responsePromise = request(owner, apply);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentType, "browser_url");
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(paired.payload.state.panes[0]!.paneId), {
+      status: "applied",
+      targetId: "target_example",
+      url: "https://example.com/",
+    });
+
+    const response = await responsePromise;
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "target.apply.result");
+    assert.equal(response.payload.status, "applied");
+    assert.equal(response.payload.materializedState?.navigationStatus, "loaded");
+    assert.equal(core.captureSnapshot(surfaceId, Number(paired.payload.state.panes[0]!.paneId)).contentType, null);
+    await closeSocket(owner);
+  });
+});
+
+test("ws server returns browser_url failed when renderer reports blocked navigation", async () => {
+  await withServer(async ({ server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const responsePromise = request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_blocked",
+      url: "https://example.com/blocked",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(paired.payload.state.panes[0]!.paneId), {
+      errorMessage: "webview navigation failed: blocked",
+      status: "failed",
+      targetId: "target_blocked",
+      url: "https://example.com/blocked",
+    });
+
+    const response = await responsePromise;
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "target.apply.result");
+    assert.equal(response.payload.status, "failed");
+    assert.equal(response.payload.errorCode, "materialization_failed");
+    assert.equal(response.payload.materializedState?.navigationStatus, "failed");
+    await closeSocket(owner);
+  });
+});
+
+test("ws server fails an earlier browser_url apply when a later URL supersedes it", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    const pane = paired.payload.state.panes[0]!;
+
+    const firstResponsePromise = request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: pane.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_first",
+      url: "https://first.example/",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const secondResponsePromise = request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: pane.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_second",
+      url: "https://second.example/",
+    }));
+    const firstResponse = await firstResponsePromise;
+    assert.equal(firstResponse.ok, true);
+    assert.equal(firstResponse.op, "target.apply.result");
+    assert.equal(firstResponse.payload.status, "failed");
+    assert.equal(firstResponse.payload.errorCode, "materialization_failed");
+    assert.equal(firstResponse.payload.message, "browser_url navigation superseded before verification");
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(pane.paneId), {
+      status: "applied",
+      targetId: "target_first",
+      url: "https://first.example/",
+    });
+    assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentId, "target_second");
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(pane.paneId), {
+      status: "applied",
+      targetId: "target_second",
+      url: "https://second.example/",
+    });
+    const secondResponse = await secondResponsePromise;
+    assert.equal(secondResponse.ok, true);
+    assert.equal(secondResponse.op, "target.apply.result");
+    assert.equal(secondResponse.payload.status, "applied");
+    assert.equal(secondResponse.payload.materializedState?.navigationStatus, "loaded");
+    await closeSocket(owner);
+  });
+});
+
+test("ws server rejects stale browser_url load evidence after pane content changes", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    const pane = paired.payload.state.panes[0]!;
+
+    const responsePromise = request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: pane.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_stale",
+      url: "https://stale.example/",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const replaced = await request(owner, contentSetRequest(Number(pane.paneId), 4));
+    assert.equal(replaced.ok, true);
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(pane.paneId), {
+      status: "applied",
+      targetId: "target_stale",
+      url: "https://stale.example/",
+    });
+
+    const response = await responsePromise;
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "target.apply.result");
+    assert.equal(response.payload.status, "failed");
+    assert.equal(response.payload.errorCode, "materialization_failed");
+    assert.equal(response.payload.message, "browser_url navigation was superseded before verification");
+    assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentType, "html");
+    await closeSocket(owner);
+  });
+});
+
+test("ws server exposes renderer overlay forwarding diagnostics to the paired owner", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const diagnostics = await request(socket, overlayDiagnosticsRequest());
+    assert.equal(diagnostics.ok, true);
+    assert.equal(diagnostics.op, "diagnostics.overlay_regions");
+    assert.deepEqual((diagnostics as never as { payload: unknown }).payload, {
+      diagnostics: { forwardStatus: "ok", regionCount: 6 },
+      surfaceId,
+    });
+
+    await closeSocket(socket);
+  }, {
+    getOverlayDiagnostics: (surfaceId) => ({ forwardStatus: "ok", regionCount: surfaceId ? 6 : 0 }),
+  });
+});
+
+test("ws server forwards target.apply native pane host materialization to compositor", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const line = buffer.slice(0, newlineIndex);
+      const message = JSON.parse(line) as Record<string, unknown>;
+      received.push(message);
+      if (message.type === "get_status") {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            logical_surface_height: 3840,
+            logical_surface_width: 2160,
+            pane_geometry_coordinate_space: "compositor_logical",
+            physical_output_height: 2160,
+            physical_output_width: 3840,
+          },
+        })}\n`);
+      } else {
+        socket.write(`${JSON.stringify({ ok: true, status: { panes: [{ id: "118" }] } })}\n`);
+      }
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    const nativeMaterializedSurfaces: string[] = [];
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const applied = await request(socket, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(applied.ok, true);
+      assert.equal(applied.op, "target.apply.result");
+      assert.equal(applied.payload.status, "applied");
+      assert.deepEqual(received, [
+        {
+          type: "get_status",
+        },
+        {
+          panes: [
+            {
+              binding_id: "118:ct_top",
+              content_id: "ct_top",
+              geometry: { coordinateSpace: "compositor_logical", height: 384, width: 512, x: 512, y: 0 },
+              id: "118",
+              process: { args: ["top"], command: "foot" },
+              revision: 9,
+              target: "terminal",
+            },
+          ],
+          type: "native_pane.host",
+        },
+      ]);
+      assert.deepEqual(applied.payload.materializedState?.preflightStatus, {
+        ok: true,
+        status: {
+          logical_surface_height: 3840,
+          logical_surface_width: 2160,
+          pane_geometry_coordinate_space: "compositor_logical",
+          physical_output_height: 2160,
+          physical_output_width: 3840,
+        },
+      });
+      assert.deepEqual(applied.payload.materializedState?.hostRequest, received[1]);
+      assert.deepEqual(applied.payload.materializedState?.hostResponse, {
+        ok: true,
+        status: { panes: [{ id: "118" }] },
+      });
+      assert.deepEqual(nativeMaterializedSurfaces, [surfaceId]);
+
+      await closeSocket(socket);
+    }, {
+      compositorSocketPath: socketPath,
+      onNativeMaterialized: (surfaceId) => nativeMaterializedSurfaces.push(surfaceId),
+    });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server rejects stale target.apply lineage before compositor materialization", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const rejected = await request(socket, targetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: "pl_stale",
+      surfaceId: paired.payload.surfaceId,
+    }));
+
+    assert.equal(rejected.ok, true);
+    assert.equal(rejected.op, "target.apply.result");
+    assert.equal(rejected.payload.status, "rejected");
+    assert.equal(rejected.payload.errorCode, "pane_lineage_missing");
+
+    await closeSocket(socket);
+  }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
+});
+
+test("ws server reports compositor target.apply rejection as materialization failure", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as Record<string, unknown>;
+      received.push(message);
+      socket.write(`${JSON.stringify(message.type === "get_status"
+        ? {
+            ok: true,
+            status: {
+              logical_surface_height: 3840,
+              logical_surface_width: 2160,
+              pane_geometry_coordinate_space: "compositor_logical",
+            },
+          }
+        : { error: { message: "invalid pane 118" }, ok: false })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const failed = await request(socket, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(failed.ok, true);
+      assert.equal(failed.op, "target.apply.result");
+      assert.equal(failed.payload.status, "failed");
+      assert.equal(failed.payload.errorCode, "materialization_failed");
+      assert.equal(failed.payload.message, "invalid pane 118");
+      assert.deepEqual(received.map((message) => (message as { type: string }).type), ["get_status", "native_pane.host"]);
+
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server rejects target.apply geometry outside compositor logical status bounds", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as Record<string, unknown>;
+      received.push(message);
+      socket.write(`${JSON.stringify({
+        ok: true,
+        status: {
+          logical_surface_height: 3840,
+          logical_surface_width: 2160,
+          pane_geometry_coordinate_space: "compositor_logical",
+          physical_output_height: 2160,
+          physical_output_width: 3840,
+        },
+      })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const failed = await request(socket, targetApplyRequest({
+        geometry: { height: 2160, width: 3840, x: 0, y: 0 },
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(failed.ok, true);
+      assert.equal(failed.op, "target.apply.result");
+      assert.equal(failed.payload.status, "failed");
+      assert.equal(failed.payload.errorCode, "materialization_failed");
+      assert.match(failed.payload.message, /outside compositor logical surface 2160x3840/);
+      assert.deepEqual(received, [{ type: "get_status" }]);
+      assert.equal(failed.payload.materializedState?.hostResponse, null);
+      assert.deepEqual(failed.payload.materializedState?.preflightStatus, {
+        ok: true,
+        status: {
+          logical_surface_height: 3840,
+          logical_surface_width: 2160,
+          pane_geometry_coordinate_space: "compositor_logical",
+          physical_output_height: 2160,
+          physical_output_width: 3840,
+        },
+      });
+
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server rejects native pane geometry without typed coordinate space", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, buffer.indexOf("\n"))) as Record<string, unknown>;
+      received.push(message);
+      socket.write(`${JSON.stringify({
+        ok: true,
+        status: {
+          logical_surface_height: 3840,
+          logical_surface_width: 2160,
+          pane_geometry_coordinate_space: "compositor_logical",
+        },
+      })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const bareGeometryRequest = targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      });
+      const pane = bareGeometryRequest.payload.materialization.panes[0] as Record<string, unknown>;
+      delete (pane.geometry as Record<string, unknown>).coordinateSpace;
+
+      const failed = await request(socket, bareGeometryRequest);
+
+      assert.equal(failed.ok, true);
+      assert.equal(failed.op, "target.apply.result");
+      assert.equal(failed.payload.status, "failed");
+      assert.equal(failed.payload.errorCode, "materialization_failed");
+      assert.match(failed.payload.message, /geometry missing compositor_logical coordinate space/);
+      assert.deepEqual(received, []);
+      assert.equal(failed.payload.materializedState?.hostRequest, null);
+      assert.equal(failed.payload.materializedState?.hostResponse, null);
+
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
 });
 
 test("ws server ignores reply races when the requester closes before the response", async () => {
@@ -754,15 +1355,15 @@ test("ws server accepts topology.apply and content.apply over the paired surface
     assert.equal(topology.ok, true);
     assert.equal(topology.op, "topology.apply");
     assert.equal(topology.payload.topologyRevision, 7);
-    assert.deepEqual(topology.payload.panes.map((pane) => ({
-      name: pane.name,
-      paneId: pane.paneId,
-      paneLabel: pane.paneLabel,
-      hasLineage: pane.paneLineageId.startsWith("pl_"),
-    })), [
-      { name: "Left", paneId: 1, paneLabel: 41, hasLineage: true },
-      { name: "Right", paneId: 2, paneLabel: 42, hasLineage: true },
-    ]);
+    assert.equal(topology.payload.panes[0]?.name, "Left");
+    assert.equal(topology.payload.panes[0]?.paneId, 1);
+    assert.equal(topology.payload.panes[0]?.paneLabel, 41);
+    assert.match(topology.payload.panes[0]?.paneLineageId ?? "", /^pl_[a-f0-9]{32}$/);
+    assert.equal(topology.payload.panes[1]?.name, "Right");
+    assert.equal(topology.payload.panes[1]?.paneId, 2);
+    assert.equal(topology.payload.panes[1]?.paneLabel, 42);
+    assert.match(topology.payload.panes[1]?.paneLineageId ?? "", /^pl_[a-f0-9]{32}$/);
+    assert.notEqual(topology.payload.panes[0]?.paneLineageId, topology.payload.panes[1]?.paneLineageId);
 
     const content = await request(owner, contentApplyRequest(1, 1));
     assert.equal(content.ok, true);
@@ -784,149 +1385,6 @@ test("ws server accepts topology.apply and content.apply over the paired surface
       [2, 42, "Right"],
     ]);
 
-    await closeSocket(owner);
-  });
-});
-
-test("ws server returns browser_url applied only after renderer load confirmation", async () => {
-  await withServer(async ({ core, server, surfaceId, url }) => {
-    const owner = await connect(url);
-    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
-    assert.equal(paired.ok, true);
-    const paneLineageId = paired.payload.state.panes[0]!.paneLineageId;
-
-    const apply = browserUrlTargetApplyRequest(surfaceId, paired.payload.sessionId, paired.payload.ownershipEpoch, paneLineageId);
-    const responsePromise = request(owner, apply);
-    await new Promise((resolve) => {
-      setTimeout(resolve, 10);
-    });
-    server.resolveBrowserUrlNavigation(surfaceId, 1, {
-      status: "applied",
-      targetId: "tg_google",
-      url: "https://google.com/",
-    });
-
-    const response = await responsePromise;
-    assert.equal(response.ok, true);
-    assert.equal(response.op, "target.apply.result");
-    assert.equal(response.payload.status, "applied");
-    assert.equal(response.payload.materializedState?.navigationStatus, "loaded");
-    assert.equal(core.captureSnapshot(surfaceId, 1).currentTarget?.lastApplyEvidence?.status, "applied");
-    await closeSocket(owner);
-  });
-});
-
-test("ws server returns browser_url failed when renderer reports blocked navigation", async () => {
-  await withServer(async ({ core, server, surfaceId, url }) => {
-    const owner = await connect(url);
-    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
-    assert.equal(paired.ok, true);
-    const paneLineageId = paired.payload.state.panes[0]!.paneLineageId;
-
-    const apply = browserUrlTargetApplyRequest(surfaceId, paired.payload.sessionId, paired.payload.ownershipEpoch, paneLineageId, {
-      targetId: "tg_blocked",
-      url: "https://blocked.invalid/",
-    });
-    const responsePromise = request(owner, apply);
-    await new Promise((resolve) => {
-      setTimeout(resolve, 10);
-    });
-    server.resolveBrowserUrlNavigation(surfaceId, 1, {
-      errorMessage: "blocked by renderer",
-      status: "failed",
-      targetId: "tg_blocked",
-      url: "https://blocked.invalid/",
-    });
-
-    const response = await responsePromise;
-    assert.equal(response.ok, true);
-    assert.equal(response.op, "target.apply.result");
-    assert.equal(response.payload.status, "failed");
-    assert.equal(response.payload.errorCode, "materialization_failed");
-    assert.equal(response.payload.materializedState?.navigationStatus, "failed");
-    assert.equal(core.captureSnapshot(surfaceId, 1).currentTarget?.lastApplyEvidence?.status, "failed");
-    await closeSocket(owner);
-  });
-});
-
-test("ws server fails an earlier browser_url apply when a later URL supersedes it", async () => {
-  await withServer(async ({ core, server, surfaceId, url }) => {
-    const owner = await connect(url);
-    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
-    assert.equal(paired.ok, true);
-    const paneLineageId = paired.payload.state.panes[0]!.paneLineageId;
-
-    const firstApply = browserUrlTargetApplyRequest(surfaceId, paired.payload.sessionId, paired.payload.ownershipEpoch, paneLineageId, {
-      targetId: "tg_first",
-      url: "https://first.example/",
-    });
-    const firstResponsePromise = request(owner, firstApply);
-    await new Promise((resolve) => {
-      setTimeout(resolve, 10);
-    });
-
-    const secondApply = browserUrlTargetApplyRequest(surfaceId, paired.payload.sessionId, paired.payload.ownershipEpoch, paneLineageId, {
-      targetId: "tg_second",
-      url: "https://second.example/",
-    });
-    const secondResponsePromise = request(owner, secondApply);
-    const firstResponse = await firstResponsePromise;
-    assert.equal(firstResponse.ok, true);
-    assert.equal(firstResponse.payload.status, "failed");
-    assert.equal(firstResponse.payload.errorCode, "materialization_failed");
-    assert.equal(firstResponse.payload.message, "browser_url navigation superseded before verification");
-
-    server.resolveBrowserUrlNavigation(surfaceId, 1, {
-      status: "applied",
-      targetId: "tg_first",
-      url: "https://first.example/",
-    });
-    assert.notEqual(core.captureSnapshot(surfaceId, 1).currentTarget?.lastApplyEvidence?.targetId, "tg_first");
-
-    server.resolveBrowserUrlNavigation(surfaceId, 1, {
-      status: "applied",
-      targetId: "tg_second",
-      url: "https://second.example/",
-    });
-    const secondResponse = await secondResponsePromise;
-    assert.equal(secondResponse.ok, true);
-    assert.equal(secondResponse.payload.status, "applied");
-    assert.equal(secondResponse.payload.materializedState?.navigationStatus, "loaded");
-    assert.equal(core.captureSnapshot(surfaceId, 1).currentTarget?.lastApplyEvidence?.targetId, "tg_second");
-    await closeSocket(owner);
-  });
-});
-
-test("ws server rejects stale browser_url load evidence after pane content changes", async () => {
-  await withServer(async ({ core, server, surfaceId, url }) => {
-    const owner = await connect(url);
-    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
-    assert.equal(paired.ok, true);
-    const paneLineageId = paired.payload.state.panes[0]!.paneLineageId;
-
-    const apply = browserUrlTargetApplyRequest(surfaceId, paired.payload.sessionId, paired.payload.ownershipEpoch, paneLineageId, {
-      targetId: "tg_stale",
-      url: "https://stale.example/",
-    });
-    const responsePromise = request(owner, apply);
-    await new Promise((resolve) => {
-      setTimeout(resolve, 10);
-    });
-    const replaced = await request(owner, contentSetRequest(1, 2));
-    assert.equal(replaced.ok, true);
-
-    server.resolveBrowserUrlNavigation(surfaceId, 1, {
-      status: "applied",
-      targetId: "tg_stale",
-      url: "https://stale.example/",
-    });
-
-    const response = await responsePromise;
-    assert.equal(response.ok, true);
-    assert.equal(response.payload.status, "failed");
-    assert.equal(response.payload.errorCode, "materialization_failed");
-    assert.equal(response.payload.message, "browser_url navigation was superseded before verification");
-    assert.equal(core.captureSnapshot(surfaceId, 1).currentTarget?.targetKind, undefined);
     await closeSocket(owner);
   });
 });

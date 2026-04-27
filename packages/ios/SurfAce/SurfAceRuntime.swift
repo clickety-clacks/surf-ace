@@ -201,6 +201,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var isStarted = false
+    @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
     @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
     @ObservationIgnored private var sceneDisconnectObserversBySceneKey: [String: SurfAceSceneDisconnectObserver] = [:]
@@ -279,7 +280,9 @@ final class SurfAceRuntime {
     }
 
     func start() async {
-        guard !isStarted else { return }
+        guard !isStarted, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
         observeLifecycle()
         surfAceLifecycleLog(
             "event=app_launch \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
@@ -347,11 +350,16 @@ final class SurfAceRuntime {
         surfAceServerRuntimeLog("event=server_stop_complete")
     }
 
-    func registerSurface(sceneKey: String, scene: UIScene) -> SurfAceSurfaceModel {
-        ensureSceneDisconnectObservation(sceneKey: sceneKey, scene: scene)
+    func registerSurface(sceneKey: String, scene: UIScene? = nil) -> SurfAceSurfaceModel {
         if let existingSurfaceId = surfaceIdBySceneKey[sceneKey],
            let existing = surfaceById[existingSurfaceId] {
+            if let scene {
+                ensureSceneDisconnectObservation(sceneKey: sceneKey, scene: scene)
+            }
             return existing
+        }
+        if let scene {
+            ensureSceneDisconnectObservation(sceneKey: sceneKey, scene: scene)
         }
 
         let stored = identityMapping.surfacesBySceneKey[sceneKey]
@@ -373,6 +381,7 @@ final class SurfAceRuntime {
         if let persistedTopology = persistedSurfaceTopologies[surfaceId] {
             persistedTopology.apply(to: surface)
         }
+        ensureActiveKeyboardPane(surface: surface)
         surfaceById[surfaceId] = surface
         surfaceIdBySceneKey[sceneKey] = surfaceId
         surfaces.append(surface)
@@ -461,6 +470,7 @@ final class SurfAceRuntime {
 
     func setAnnotationMode(surfaceId: String, paneId: Int, enabled: Bool, fingerDrawEnabled: Bool) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
         let wasEnabled = pane.annotationMode
         pane.annotationMode = enabled
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
@@ -483,6 +493,7 @@ final class SurfAceRuntime {
 
     func navigateHistory(surfaceId: String, paneId: Int, direction: HistoryDirection) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
         guard !pane.annotationMode else {
             pane.toast = "Finish annotation (Done) to navigate"
             return
@@ -528,6 +539,13 @@ final class SurfAceRuntime {
                 surface?.labelsVisible = true
             }
         }
+    }
+
+    func activateKeyboardPane(surfaceId: String, paneId: Int) {
+        guard let surface = surfaceById[surfaceId],
+              surface.panesById[paneId] != nil else { return }
+        surface.activeKeyboardPaneId = paneId
+        noteInteraction(surfaceId: surfaceId)
     }
 
     func clearToast(surfaceId: String, paneId: Int) {
@@ -1407,6 +1425,7 @@ final class SurfAceRuntime {
         surface.panesById = panesById
         surface.paneLayout = layout
         surface.providerTopologyInitialized = topologyRevision > 0
+        ensureActiveKeyboardPane(surface: surface)
         persistSurfaceTopology(surfaceId: surfaceId)
 
         return [
@@ -1723,6 +1742,7 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "newPaneIds must be unique")
         }
         let children: [SurfAcePaneLayoutNode] = [.leaf(paneId)] + newPaneIds.map(SurfAcePaneLayoutNode.leaf)
+        surface.activeKeyboardPaneId = paneId
         surface.paneLayout = surface.paneLayout.replacingLeaf(
             paneId: paneId,
             with: .split(direction: direction, children: children)
@@ -1807,6 +1827,7 @@ final class SurfAceRuntime {
         if let newLayout = surface.paneLayout.removingLeaf(paneId: paneId) {
             surface.paneLayout = newLayout
         }
+        ensureActiveKeyboardPane(surface: surface)
         persistSurfaceTopology(surfaceId: surfaceId)
 
         sendLifecycleEvent(
@@ -2633,12 +2654,22 @@ final class SurfAceRuntime {
                 bootstrapPane.paneId = initialPaneId
                 surface.panesById[initialPaneId] = bootstrapPane
                 surface.paneLayout = surface.paneLayout.replacingPaneID(from: currentPaneId, to: initialPaneId)
+                surface.activeKeyboardPaneId = initialPaneId
             }
             bootstrapPane.paneLabel = initialPaneLabel
         }
         surface.panesById[initialPaneId]?.paneLabel = initialPaneLabel
+        ensureActiveKeyboardPane(surface: surface)
         surface.providerTopologyInitialized = true
         persistSurfaceTopology(surfaceId: surface.surfaceId)
+    }
+
+    private func ensureActiveKeyboardPane(surface: SurfAceSurfaceModel) {
+        if let activePaneId = surface.activeKeyboardPaneId,
+           surface.panesById[activePaneId] != nil {
+            return
+        }
+        surface.activeKeyboardPaneId = surface.paneLayout.paneIDs.first
     }
 
     private func parseTopologyLayoutNode(

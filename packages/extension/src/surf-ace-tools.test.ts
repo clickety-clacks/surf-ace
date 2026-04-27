@@ -82,12 +82,12 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.ok(pushTool);
   assert.deepEqual(
     Object.keys(pushTool.inputSchema.properties as Record<string, unknown>).sort(),
-    ["content", "contentType", "fingerprint", "paneId"].sort(),
+    ["content", "contentType", "diagnostic", "fingerprint", "paneId"].sort(),
   );
   assert.deepEqual(pushTool.inputSchema.required, ["fingerprint", "paneId", "contentType", "content"]);
   assert.equal(pushTool.inputSchema.additionalProperties, false);
   assert.deepEqual(
-    ((pushTool.inputSchema.properties as Record<string, any>).contentType as Record<string, unknown>).enum,
+    (pushTool.inputSchema.properties as { contentType: { enum: string[] } }).contentType.enum,
     ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "browser_url"],
   );
 
@@ -97,7 +97,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     Object.keys(splitTool.inputSchema.properties as Record<string, unknown>).sort(),
     ["count", "direction", "fingerprint", "paneId"].sort(),
   );
-  assert.deepEqual(splitTool.inputSchema.required, ["fingerprint", "paneId", "count", "direction"]);
+  assert.deepEqual(splitTool.inputSchema.required, ["fingerprint", "paneId", "count"]);
   assert.equal(splitTool.inputSchema.additionalProperties, false);
 
   const closePaneTool = tools.find((tool) => tool.name === "surf_ace_close_pane");

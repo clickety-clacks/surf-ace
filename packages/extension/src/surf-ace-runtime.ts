@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -29,6 +31,7 @@ import type {
   NavigationEvent,
   PaneCreatedEvent,
   PaneId as RemotePaneId,
+  PanesListResponse,
   PaneRemovedEvent,
   PaneRenamedEvent,
   PairRequest,
@@ -56,20 +59,17 @@ import type {
   SurfacesListResponse,
   SurfaceViewport,
   TapEvent,
+  TargetApplyReason,
   TargetApplyRequest,
   TargetApplyResponse,
-  TargetRegisterRequest,
-  TargetRegisteredResponse,
-  TargetRegisterRejectedResponse,
-  TargetHeader,
-  PaneTargetState,
-  RestorePolicy,
-  TargetCapability,
   TargetErrorCode,
+  TargetHeader,
   TargetKind,
   TopologyApplyResponse,
   Viewport,
   MutationAckResponse,
+  NativePaneMaterialization,
+  RestorePolicy,
   PageEvent,
   TopologyApplyRequest,
 } from "../../protocol/src/index.js";
@@ -84,9 +84,6 @@ import { SurfAceWireClient } from "./surf-ace-server.js";
 export type SurfAceConnectionState = "connected" | "connecting" | "unreachable";
 type Brand<T, TName extends string> = T & { readonly __brand: TName };
 export type PaneId = Brand<string, "PaneId">;
-type BrowserUrlContentType = "browser_url";
-type PushContentType = ContentType | BrowserUrlContentType;
-type BrowserUrlPayload = { url: string; allowedSnapshotFallback?: boolean; fallbackSnapshotTargetId?: string };
 
 export type SurfAceHistorySummary = {
   backCount: number;
@@ -103,10 +100,11 @@ export type SurfAcePaneSummary = {
         contentId: string;
         contentType: ContentType;
         revision: number;
-      }
+    }
     | null;
-  currentTarget?: PaneTargetState | null;
   historySummary: SurfAceHistorySummary;
+  target: SurfAcePaneTargetDiagnostic | null;
+  viewport: SurfaceViewport;
 };
 
 export type SurfAceScreenSummary = {
@@ -217,7 +215,6 @@ export type SurfAceSnapshotResult = {
   snapshot: {
     contentId: string | null;
     contentType: ContentType | null;
-    currentTarget?: PaneTargetState | null;
     drawings?: Stroke[];
     image?: string;
     revision: number;
@@ -243,22 +240,31 @@ export type SurfAceAnnotateRemoveResult = {
   removedStrokeIds: string[];
 };
 
-export type SurfAcePushInput =
-  {
-    content: string;
-    contentType: PushContentType;
-    fingerprint: string;
-    allowedSnapshotFallback?: boolean;
-    fallbackSnapshotTargetId?: string;
-    paneId: PaneId;
+export type SurfAcePushContentType = ContentType | "browser_url";
+
+export type SurfAcePushInput = {
+  content: string;
+  contentType: SurfAcePushContentType;
+  diagnostic?: {
+    derivedFromTargetId?: string;
+    kind: "placeholder" | "status" | "error";
+    summary: string;
   };
+  fingerprint: string;
+  paneId: PaneId;
+};
+
+type SurfAceContentPushInput = SurfAcePushInput & { contentType: ContentType };
+type SurfAceBrowserUrlPushInput = SurfAcePushInput & { contentType: "browser_url" };
 
 export type SurfAcePushResult = {
+  blockedReason?: TargetErrorCode | null;
   contentId: string | null;
   fingerprint: string;
   paneId: PaneId;
   paneLabel: number;
   revision: number;
+  targetApplyEvidence?: ApplyEvidence;
   targetId?: string;
   targetKind?: TargetKind;
 };
@@ -270,13 +276,101 @@ export type SurfAceClearResult = {
   revision: number;
 };
 
+export type ApplyEvidence = {
+  requestId: string;
+  status: "applied" | "rejected" | "failed";
+  errorCode?: TargetErrorCode;
+  message?: string;
+  materializedState?: Record<string, unknown>;
+  appliedAt: string;
+};
+
+export type PaneTargetRecord = {
+  targetId: string;
+  surfaceId: string;
+  surfaceInstanceId: string | null;
+  paneLineageId: string;
+  paneIdAtApply: string;
+  paneLabelAtApply: number | string | null;
+  targetEpoch: number;
+  targetKind: TargetKind;
+  targetHeader: TargetHeader;
+  targetPayload: unknown;
+  restorePolicy: RestorePolicy;
+  ownerProviderId: string;
+  ownershipSessionId: string;
+  ownershipEpoch: number;
+  appliedAt: string;
+  currentState: "current" | "superseded" | "tombstoned";
+  supersededByTargetId?: string;
+  lastApplyEvidence?: ApplyEvidence;
+};
+
+export type DiagnosticPaneContent = {
+  diagnosticContentId: string;
+  surfaceId: string;
+  paneLineageId: string;
+  kind: "placeholder" | "status" | "error";
+  summary: string;
+  derivedFromTargetId?: string;
+  shownAt: string;
+};
+
+export type SurfAcePaneTargetDiagnostic = {
+  blockedReason: TargetErrorCode | null;
+  diagnosticContent: DiagnosticPaneContent | null;
+  lastApplyEvidence: ApplyEvidence | null;
+  paneLineageId: string;
+  targetHeader: TargetHeader;
+  targetId: string;
+  targetKind: TargetKind;
+  targetPayload: unknown;
+  targetPolicy: RestorePolicy;
+};
+
+export type SurfAceTargetRegisterInput = {
+  fingerprint: string;
+  idempotencyKey: string;
+  paneId: PaneId;
+  ownershipEpoch: number;
+  ownershipSessionId: string;
+  paneLineageId: string;
+  expectedPreviousTargetEpoch: number | null;
+  targetKind: TargetKind;
+  targetHeader: TargetHeader;
+  targetPayload: unknown;
+  launchedAt?: string;
+  registrationState: "before_attach" | "attached";
+  restorePolicy?: RestorePolicy;
+};
+
+export type SurfAceTargetRegisterResult =
+  | {
+      idempotencyKey: string;
+      status: "registered";
+      targetEpoch: number;
+      targetId: string;
+    }
+  | {
+      errorCode: TargetErrorCode;
+      idempotencyKey: string;
+      message: string;
+      status: "rejected";
+    };
+
+export type SurfAceTargetRestoreResult = {
+  blockedReason: TargetErrorCode | null;
+  evidence: ApplyEvidence | null;
+  targetId: string;
+};
+
 export type SurfAceRelinquishResult = {
   relinquished: true;
 };
 
 export type SurfAceSplitInput = {
   count: number;
-  direction: "horizontal" | "vertical";
+  direction?: "horizontal" | "vertical";
   fingerprint: string;
   paneId: PaneId;
 };
@@ -340,7 +434,9 @@ export interface SurfAceRuntime {
   listScreens(): Promise<SurfAceScreenSummary[]>;
   push(input: SurfAcePushInput, context?: { sessionKey?: string }): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
+  registerTarget(input: SurfAceTargetRegisterInput): Promise<SurfAceTargetRegisterResult>;
   relinquish(input: { fingerprint: string }): Promise<SurfAceRelinquishResult>;
+  restoreTarget(input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string }): Promise<SurfAceTargetRestoreResult>;
   split(input: SurfAceSplitInput): Promise<SurfAceSplitResult>;
   snapshot(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceSnapshotResult>;
   start(): Promise<void>;
@@ -386,46 +482,31 @@ type ManagedHistoryEntry = {
   historyOwnerToken: string | null;
   revision: Revision;
   sessionKey: string | null;
-};
-
-type PaneTargetRecord = {
-  targetId: string;
-  surfaceId: SurfaceId;
-  surfaceInstanceId: string | null;
-  paneLineageId: string;
-  paneIdAtApply: string;
-  paneLabelAtApply: number | string | null;
-  targetEpoch: number;
-  targetKind: TargetKind;
-  targetHeader: TargetHeader;
-  targetPayload: unknown;
-  restorePolicy: RestorePolicy;
-  ownerProviderId: string;
-  ownershipSessionId: string;
-  ownershipEpoch: number;
-  appliedAt: string;
-  currentState: "current" | "superseded" | "tombstoned";
-  supersededByTargetId?: string;
-  lastApplyEvidence?: TargetApplyResponse["payload"];
+  targetId: string | null;
 };
 
 type ManagedPane = {
   activeContentId: ContentId | null;
   contentType: ContentType | null;
   contentValue: ContentSetRequest["payload"]["content"] | null;
+  currentTargetId: string | null;
   currentRevision: Revision;
+  diagnosticContent: DiagnosticPaneContent | null;
   historyEntries: ManagedHistoryEntry[];
   historySummary: SurfAceHistorySummary;
   historyOwnerToken: string | null;
+  lastRestoreBlockedReason: TargetErrorCode | null;
   name: string | null;
+  nonDurableTargetDiagnostic: SurfAcePaneTargetDiagnostic | null;
   ownerSessionKey: string | null;
   paneId: PaneId;
-  paneLineageId: string | null;
   paneLabel: number;
+  paneLineageId: string;
   pendingOwnerSessionKey: string | null;
   remotePaneId: RemotePaneId;
   snapshot: CachedSnapshot | null;
-  targetRecord: PaneTargetRecord | null;
+  staleTargetId: string | null;
+  targetEpoch: number;
   viewport: SurfaceViewport;
   buffer: MutablePaneBuffer;
 };
@@ -453,16 +534,18 @@ type ManagedSurface = {
   panes: Map<PaneId, ManagedPane>;
   recentEventIds: string[];
   recentEventIdsSet: Set<string>;
+  registeredTargetIdsByIdempotencyKey: Map<string, string>;
   reconnectAttempt: number;
   retryDelayResolver: (() => void) | null;
   sessionId: SessionId | null;
-  ownershipEpoch: number | null;
+  ownershipEpoch: number;
   snapshotBufferedEvents: Event[];
   snapshotSyncInFlight: boolean;
   stopRequested: boolean;
   surfaceId: SurfaceId;
+  targetCapabilities: Set<string>;
+  targetRecords: Map<string, PaneTargetRecord>;
   topologyRevision: number;
-  targetCapabilities: TargetCapability[];
   unreachableFailures: number;
   viewport: SurfaceViewport;
   windowLabel: string;
@@ -473,15 +556,41 @@ type RuntimeStateFile = {
   nextRemotePaneId: number;
   nextPaneLabel: number;
   nextWindowLabelIndex: number;
-  targetRegistrationAcks?: Record<string, { targetEpoch: number; targetId: string }>;
-  paneTargetRecords?: Record<string, PaneTargetRecord>;
   paneLabelsByPaneId: Record<string, number>;
   providerId: string;
+  targetStateBySurfaceId?: Record<string, PersistedSurfaceTargetState>;
   version: 1;
   windowLabels: Record<string, string>;
 };
 
+type PersistedRestartContentEntry = {
+  contentId: string;
+  contentType: ContentType;
+  contentValue: unknown;
+  historyOwnerToken: string | null;
+  paneLabel: number;
+  revision: number;
+  sessionKey: string | null;
+};
+
+type PersistedPaneTargetState = {
+  currentTargetId: string | null;
+  diagnosticContent: DiagnosticPaneContent | null;
+  lastRestoreBlockedReason: TargetErrorCode | null;
+  nonDurableTargetDiagnostic?: SurfAcePaneTargetDiagnostic | null;
+  paneLineageId: string;
+  targetEpoch: number;
+};
+
+type PersistedSurfaceTargetState = {
+  ownershipEpoch?: number;
+  paneTargets: Record<string, PersistedPaneTargetState>;
+  registeredTargetIdsByIdempotencyKey: Record<string, string>;
+  targetRecords: PaneTargetRecord[];
+};
+
 type PersistedScreenSnapshotFile = {
+  contentContinuity?: Record<string, PersistedRestartContentEntry[]>;
   screens: SurfAceScreenSummary[];
   updatedAt: number;
   version: 1;
@@ -517,6 +626,7 @@ const MAX_READ_FRAME_IMAGE_BYTES = 4 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const LEASE_HEARTBEAT_INTERVAL_MS = 30_000;
 const LEASE_STALE_THRESHOLD_MS = 90_000;
+const RESTART_SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60_000;
 const RECONNECT_BACKOFF_BASE_MS = 2_000;
 const RECONNECT_BACKOFF_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -530,6 +640,8 @@ const MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES = 3;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
 const SCREEN_SNAPSHOT_FILE_NAME = "surf-ace-runtime-screens.json";
 const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
+const OWNER_CONTROL_PATH = "/surf-ace-runtime-owner";
+const OWNER_CONTROL_MAX_BODY_BYTES = 1024 * 1024;
 
 export class SurfAceToolError extends Error {
   constructor(
@@ -543,15 +655,9 @@ export class SurfAceToolError extends Error {
       | "unsupported_content_type"
       | "render_failed"
       | "busy"
-      | "capability_missing"
       | "invalid_operation"
-      | "materialization_failed"
-      | "pane_lineage_missing"
-      | "policy_denied"
       | "rate_limited"
       | "stale_revision"
-      | "unsafe_payload"
-      | "unsupported_target_kind"
       | "unsupported_operation_for_content_type",
     message: string,
   ) {
@@ -559,6 +665,36 @@ export class SurfAceToolError extends Error {
     this.name = "SurfAceToolError";
   }
 }
+
+type OwnerControlCommand =
+  | {
+      context?: { sessionKey?: string };
+      input: SurfAcePushInput;
+      op: "push";
+    }
+  | {
+      input: { fingerprint: string; paneId: PaneId };
+      op: "clear" | "closePane" | "read" | "snapshot";
+    }
+  | {
+      input: SurfAceSplitInput;
+      op: "split";
+    }
+  | {
+      input: { fingerprint: string };
+      op: "relinquish";
+    }
+  | {
+      input: SurfAceAnnotateRemoveInput;
+      op: "annotateRemove";
+    };
+
+type RuntimeLeaseFile = {
+  controlPort?: number;
+  lastActiveAt?: number;
+  pid?: number;
+  startedAt?: number;
+};
 
 function asEpochMs(value: number): EpochMs {
   return value as EpochMs;
@@ -570,6 +706,15 @@ function asPaneId(value: string): PaneId {
 
 function asRemotePaneId(value: number): RemotePaneId {
   return value as RemotePaneId;
+}
+
+function isBoundRemotePaneId(value: RemotePaneId | null | undefined): value is RemotePaneId {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue > 0;
+}
+
+function legacyPaneLineageId(remotePaneId: RemotePaneId): string {
+  return `legacy_remote_pane_${remotePaneId}`;
 }
 
 function asRevision(value: number): Revision {
@@ -601,6 +746,10 @@ function makeProvisionalSurfaceId(endpointId: string): SurfaceId {
   return `sf_disc_${digest}` as SurfaceId;
 }
 
+function isProvisionalSurfaceId(surfaceId: SurfaceId): boolean {
+  return surfaceId.startsWith("sf_disc_");
+}
+
 function makeContentId(): ContentId {
   return `ct_${randomBytes(4).toString("hex")}` as ContentId;
 }
@@ -609,15 +758,8 @@ function makeTargetId(): string {
   return `tg_${randomBytes(8).toString("hex")}`;
 }
 
-function makeTargetRequestId(): string {
-  return `tr_${randomBytes(8).toString("hex")}`;
-}
-
-function paneLineageId(pane: ManagedPane): string {
-  if (!pane.paneLineageId) {
-    throw new SurfAceToolError("pane_lineage_missing", "Surf Ace surface did not report a paneLineageId for this pane.");
-  }
-  return pane.paneLineageId;
+function makeDiagnosticContentId(): string {
+  return `dc_${randomBytes(8).toString("hex")}`;
 }
 
 function makeFrameId(): string {
@@ -693,7 +835,9 @@ function createPane(
     buffer: createPaneBuffer(),
     contentType: null,
     contentValue: null,
+    currentTargetId: null,
     currentRevision: asRevision(0),
+    diagnosticContent: null,
     historyEntries: [],
     historySummary: {
       backCount: 0,
@@ -701,15 +845,18 @@ function createPane(
       visibleContentId: null,
     },
     historyOwnerToken: null,
+    lastRestoreBlockedReason: null,
     name: null,
+    nonDurableTargetDiagnostic: null,
     ownerSessionKey: null,
     paneId,
-    paneLineageId: null,
     paneLabel,
+    paneLineageId: legacyPaneLineageId(remotePaneId),
     pendingOwnerSessionKey: null,
     remotePaneId,
     snapshot: null,
-    targetRecord: null,
+    staleTargetId: null,
+    targetEpoch: 0,
     viewport: cloneViewport(viewport),
   };
 }
@@ -745,15 +892,17 @@ function createManagedSurface(
     panes: new Map<PaneId, ManagedPane>(),
     recentEventIds: [],
     recentEventIdsSet: new Set<string>(),
+    registeredTargetIdsByIdempotencyKey: new Map<string, string>(),
     reconnectAttempt: 0,
     retryDelayResolver: null,
     sessionId: null,
-    ownershipEpoch: null,
+    ownershipEpoch: 0,
     snapshotBufferedEvents: [],
     snapshotSyncInFlight: false,
     stopRequested: false,
     surfaceId,
-    targetCapabilities: [],
+    targetCapabilities: new Set<string>(),
+    targetRecords: new Map<string, PaneTargetRecord>(),
     topologyRevision: 0,
     unreachableFailures: 0,
     viewport: cloneViewport(viewport),
@@ -826,6 +975,91 @@ function collapseManagedLayout(node: ManagedLayoutNode | null): ManagedLayoutNod
   return {
     ...node,
     children: node.children.map((child) => collapseManagedLayout(child)),
+  };
+}
+
+function integerPaneRect(rect: Rect): Rect {
+  return {
+    height: Math.max(0, Math.round(rect.height)),
+    width: Math.max(0, Math.round(rect.width)),
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+  };
+}
+
+function collectManagedPaneRects(node: ManagedLayoutNode, rect: Rect, result: Map<PaneId, Rect>): void {
+  if (node.type === "pane") {
+    result.set(node.paneId, integerPaneRect(rect));
+    return;
+  }
+
+  if (node.children.length === 0) {
+    return;
+  }
+
+  if (node.direction === "vertical") {
+    node.children.forEach((child, index) => {
+      const childStart = Math.round(rect.x + (rect.width * index) / node.children.length);
+      const childEnd = Math.round(rect.x + (rect.width * (index + 1)) / node.children.length);
+      collectManagedPaneRects(
+        child,
+        {
+          height: rect.height,
+          width: Math.max(0, childEnd - childStart),
+          x: childStart,
+          y: rect.y,
+        },
+        result,
+      );
+    });
+    return;
+  }
+
+  node.children.forEach((child, index) => {
+    const childStart = Math.round(rect.y + (rect.height * index) / node.children.length);
+    const childEnd = Math.round(rect.y + (rect.height * (index + 1)) / node.children.length);
+    collectManagedPaneRects(
+      child,
+      {
+        height: Math.max(0, childEnd - childStart),
+        width: rect.width,
+        x: rect.x,
+        y: childStart,
+      },
+      result,
+    );
+  });
+}
+
+function managedPaneRects(surface: ManagedSurface): Map<PaneId, Rect> {
+  const result = new Map<PaneId, Rect>();
+  collectManagedPaneRects(
+    collapseManagedLayout(surface.layout),
+    {
+      height: surface.viewport.height,
+      width: surface.viewport.width,
+      x: 0,
+      y: 0,
+    },
+    result,
+  );
+  return result;
+}
+
+function getCompositorLogicalPaneGeometry(
+  surface: ManagedSurface,
+  pane: ManagedPane,
+): NativePaneMaterialization["panes"][number]["geometry"] {
+  const geometry = managedPaneRects(surface).get(pane.paneId);
+  if (!geometry) {
+    throw new SurfAceToolError(
+      "internal_error",
+      `No compositor logical geometry for pane ${pane.paneId} on surface ${surface.surfaceId}`,
+    );
+  }
+  return {
+    ...geometry,
+    coordinateSpace: "compositor_logical",
   };
 }
 
@@ -957,12 +1191,6 @@ function mutationErrorCode(
     case "stale_revision":
     case "unsupported_content_type":
     case "unsupported_operation_for_content_type":
-    case "capability_missing":
-    case "materialization_failed":
-    case "pane_lineage_missing":
-    case "policy_denied":
-    case "unsafe_payload":
-    case "unsupported_target_kind":
       return code;
     default:
       return "internal_error";
@@ -1036,6 +1264,326 @@ function normalizeContent(
   return content as ContentSetRequest["payload"]["content"];
 }
 
+function denormalizeContent(
+  contentType: ContentType,
+  content: ContentSetRequest["payload"]["content"],
+): unknown {
+  if (
+    contentType === "markdown" &&
+    typeof content === "object" &&
+    content !== null &&
+    "markdown" in content &&
+    typeof (content as { markdown?: unknown }).markdown === "string"
+  ) {
+    return (content as { markdown: string }).markdown;
+  }
+  if (
+    contentType === "html" &&
+    typeof content === "object" &&
+    content !== null &&
+    "html" in content &&
+    typeof (content as { html?: unknown }).html === "string"
+  ) {
+    return (content as { html: string }).html;
+  }
+  return structuredClone(content);
+}
+
+function isBrowserUrlPushInput(input: SurfAcePushInput): input is SurfAceBrowserUrlPushInput {
+  return input.contentType === "browser_url";
+}
+
+function isContentPushInput(input: SurfAcePushInput): input is SurfAceContentPushInput {
+  return input.contentType !== "browser_url";
+}
+
+function defaultRestorePolicyForTarget(
+  targetKind: TargetKind,
+  targetHeader: TargetHeader,
+): RestorePolicy {
+  if (targetHeader.safetyClass === "privileged") {
+    return "manual";
+  }
+  switch (targetKind) {
+    case "html":
+    case "markdown":
+    case "image":
+    case "web_snapshot":
+      return "auto";
+    case "browser_url":
+      return "confirm";
+    case "terminal_app":
+    case "native_app":
+    case "compositor_app":
+      return "confirm";
+    case "video":
+      return "never";
+  }
+}
+
+function requiredCapabilityForTargetKind(targetKind: TargetKind): string {
+  return `target.${targetKind}.v1`;
+}
+
+function isProcessBackedTargetKind(targetKind: TargetKind): boolean {
+  return targetKind === "terminal_app" || targetKind === "native_app" || targetKind === "compositor_app";
+}
+
+function contentTargetKind(contentType: ContentType): TargetKind | null {
+  switch (contentType) {
+    case "html":
+    case "markdown":
+    case "image":
+      return contentType;
+    default:
+      return null;
+  }
+}
+
+function passiveContentTargetHeader(
+  contentType: ContentType,
+  content: ContentSetRequest["payload"]["content"],
+): TargetHeader | null {
+  const targetKind = contentTargetKind(contentType);
+  if (!targetKind) {
+    return null;
+  }
+  const summary = (() => {
+    if (targetKind === "html" && typeof content === "object" && content && "html" in content) {
+      return String(content.html).slice(0, 80);
+    }
+    if (targetKind === "markdown" && typeof content === "object" && content && "markdown" in content) {
+      return String(content.markdown).slice(0, 80);
+    }
+    if (targetKind === "image") {
+      return "image";
+    }
+    return targetKind;
+  })();
+  return {
+    payloadSchemaVersion: 1,
+    replaySemantics: "bytes",
+    requiredCapabilities: [requiredCapabilityForTargetKind(targetKind)],
+    safeToLogFields: [],
+    safetyClass: "passive",
+    summary,
+  };
+}
+
+function contentPayloadForTarget(
+  targetKind: TargetKind,
+  targetPayload: unknown,
+): { content: ContentSetRequest["payload"]["content"]; contentType: ContentType } | null {
+  if (targetKind === "html" && typeof targetPayload === "object" && targetPayload && "html" in targetPayload) {
+    return {
+      content: structuredClone(targetPayload) as ContentSetRequest["payload"]["content"],
+      contentType: "html",
+    };
+  }
+  if (targetKind === "markdown" && typeof targetPayload === "object" && targetPayload && "markdown" in targetPayload) {
+    return {
+      content: structuredClone(targetPayload) as ContentSetRequest["payload"]["content"],
+      contentType: "markdown",
+    };
+  }
+  if (targetKind === "image" && typeof targetPayload === "object" && targetPayload && "data" in targetPayload) {
+    return {
+      content: structuredClone(targetPayload) as ContentSetRequest["payload"]["content"],
+      contentType: "image",
+    };
+  }
+  if (targetKind === "web_snapshot" && typeof targetPayload === "object" && targetPayload && "html" in targetPayload) {
+    const payload = targetPayload as { baseUrl?: string; html: string };
+    return {
+      content: {
+        baseUrl: payload.baseUrl,
+        html: payload.html,
+      },
+      contentType: "html",
+    };
+  }
+  return null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: string[]): boolean {
+  const allowed = new Set(allowedKeys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isSupportedTargetKind(value: unknown): value is TargetKind {
+  return value === "html" ||
+    value === "markdown" ||
+    value === "image" ||
+    value === "web_snapshot" ||
+    value === "browser_url" ||
+    value === "terminal_app" ||
+    value === "native_app" ||
+    value === "compositor_app" ||
+    value === "video";
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isPlainRecord(value) && Object.values(value).every((item) => typeof item === "string");
+}
+
+function validateTargetHeader(targetKind: TargetKind, targetHeader: TargetHeader): TargetErrorCode | null {
+  if (!isSupportedTargetKind(targetKind)) {
+    return "unsupported_target_kind";
+  }
+  if (
+    !isPlainRecord(targetHeader) ||
+    typeof targetHeader.summary !== "string" ||
+    !isStringArray(targetHeader.requiredCapabilities) ||
+    !isStringArray(targetHeader.safeToLogFields) ||
+    typeof targetHeader.payloadSchemaVersion !== "number" ||
+    !["passive", "network", "process", "privileged"].includes(String(targetHeader.safetyClass)) ||
+    !["bytes", "navigate", "launch_equivalent", "attach"].includes(String(targetHeader.replaySemantics))
+  ) {
+    return "unsafe_payload";
+  }
+  if (targetKind === "video") {
+    return "unsupported_target_kind";
+  }
+  if (!targetHeader.requiredCapabilities.includes(requiredCapabilityForTargetKind(targetKind))) {
+    return "capability_missing";
+  }
+  if (targetHeader.payloadSchemaVersion !== 1) {
+    return "unsupported_target_kind";
+  }
+  return null;
+}
+
+function validateTargetPayload(targetKind: TargetKind, targetPayload: unknown): TargetErrorCode | null {
+  if (!isPlainRecord(targetPayload)) {
+    return "unsafe_payload";
+  }
+  switch (targetKind) {
+    case "html":
+      return hasOnlyKeys(targetPayload, ["html", "baseUrl"]) &&
+        typeof targetPayload.html === "string" &&
+        (targetPayload.baseUrl === undefined || typeof targetPayload.baseUrl === "string")
+        ? null
+        : "unsafe_payload";
+    case "markdown":
+      return hasOnlyKeys(targetPayload, ["markdown"]) && typeof targetPayload.markdown === "string" ? null : "unsafe_payload";
+    case "image":
+      return hasOnlyKeys(targetPayload, ["data", "mediaType", "alt"]) &&
+        typeof targetPayload.data === "string" &&
+        typeof targetPayload.mediaType === "string" &&
+        (targetPayload.alt === undefined || typeof targetPayload.alt === "string")
+        ? null
+        : "unsafe_payload";
+    case "web_snapshot":
+      return hasOnlyKeys(targetPayload, ["html", "sourceUrl", "fetchedAt", "baseUrl"]) &&
+        typeof targetPayload.html === "string" &&
+        typeof targetPayload.sourceUrl === "string" &&
+        typeof targetPayload.fetchedAt === "string" &&
+        (targetPayload.baseUrl === undefined || typeof targetPayload.baseUrl === "string")
+        ? null
+        : "unsafe_payload";
+    case "browser_url":
+      return hasOnlyKeys(targetPayload, ["url", "allowedSnapshotFallback", "fallbackSnapshotTargetId"]) &&
+        typeof targetPayload.url === "string" &&
+        (targetPayload.allowedSnapshotFallback === undefined || typeof targetPayload.allowedSnapshotFallback === "boolean") &&
+        (targetPayload.fallbackSnapshotTargetId === undefined || typeof targetPayload.fallbackSnapshotTargetId === "string")
+        ? null
+        : "unsafe_payload";
+    case "terminal_app":
+      return hasOnlyKeys(targetPayload, ["command", "args", "cwd", "envPolicy", "env", "pty", "restartPolicy", "approvalTokenId"]) &&
+        typeof targetPayload.command === "string" &&
+        isStringArray(targetPayload.args) &&
+        (targetPayload.cwd === undefined || targetPayload.cwd === null || typeof targetPayload.cwd === "string") &&
+        (targetPayload.envPolicy === "surface_default" || targetPayload.envPolicy === "explicit_allowlist") &&
+        (targetPayload.env === undefined || isStringRecord(targetPayload.env)) &&
+        targetPayload.pty === true &&
+        (targetPayload.restartPolicy === "restore_new_process" || targetPayload.restartPolicy === "manual_only") &&
+        (targetPayload.approvalTokenId === undefined || typeof targetPayload.approvalTokenId === "string")
+        ? null
+        : "unsafe_payload";
+    case "native_app":
+      return hasOnlyKeys(targetPayload, ["appId", "args", "launchMode", "approvalTokenId", "clientOptions"]) &&
+        typeof targetPayload.appId === "string" &&
+        (targetPayload.args === undefined || isStringArray(targetPayload.args)) &&
+        (targetPayload.launchMode === "new_instance" || targetPayload.launchMode === "attach_or_launch") &&
+        (targetPayload.approvalTokenId === undefined || typeof targetPayload.approvalTokenId === "string") &&
+        (targetPayload.clientOptions === undefined || isPlainRecord(targetPayload.clientOptions))
+        ? null
+        : "unsafe_payload";
+    case "compositor_app":
+      return hasOnlyKeys(targetPayload, ["compositorAppId", "hostRuntime", "launchSpec", "approvalTokenId"]) &&
+        typeof targetPayload.compositorAppId === "string" &&
+        typeof targetPayload.hostRuntime === "string" &&
+        isPlainRecord(targetPayload.launchSpec) &&
+        (targetPayload.approvalTokenId === undefined || typeof targetPayload.approvalTokenId === "string")
+        ? null
+        : "unsafe_payload";
+    case "video":
+      return "unsupported_target_kind";
+  }
+  return "unsupported_target_kind";
+}
+
+function validatePaneTargetInput(targetKind: TargetKind, targetHeader: TargetHeader, targetPayload: unknown): TargetErrorCode | null {
+  return validateTargetHeader(targetKind, targetHeader) ?? validateTargetPayload(targetKind, targetPayload);
+}
+
+const targetErrorCodes = new Set<TargetErrorCode>([
+  "capability_missing",
+  "policy_denied",
+  "approval_required",
+  "unsafe_payload",
+  "ownership_epoch_mismatch",
+  "ownership_session_mismatch",
+  "pane_lineage_missing",
+  "pane_lineage_ambiguous",
+  "target_epoch_stale",
+  "target_superseded",
+  "registration_late_old_epoch",
+  "registration_duplicate",
+  "registration_failed",
+  "materialization_failed",
+  "unsupported_target_kind",
+  "restore_blocked_stale_target",
+  "restore_unregistered_local_target",
+  "restore_requires_confirmation",
+]);
+
+function targetErrorCodeFromResponse(errorCode: string): TargetErrorCode {
+  return targetErrorCodes.has(errorCode as TargetErrorCode)
+    ? errorCode as TargetErrorCode
+    : "materialization_failed";
+}
+
+function safeDiagnosticTargetPayload(
+  targetPayload: unknown,
+  safeToLogFields: string[],
+): Record<string, unknown> | null {
+  if (
+    safeToLogFields.length === 0 ||
+    typeof targetPayload !== "object" ||
+    targetPayload === null ||
+    Array.isArray(targetPayload)
+  ) {
+    return null;
+  }
+  const payload = targetPayload as Record<string, unknown>;
+  const safePayload: Record<string, unknown> = {};
+  for (const field of safeToLogFields) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      safePayload[field] = structuredClone(payload[field]);
+    }
+  }
+  return Object.keys(safePayload).length > 0 ? safePayload : null;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -1076,38 +1624,6 @@ function paneLabelStorageKey(surfaceId: string, remotePaneId: RemotePaneId): str
   return `${surfaceId}::${Number(remotePaneId)}`;
 }
 
-function paneTargetRecordStorageKey(surfaceId: SurfaceId, targetId: string): string {
-  return `${surfaceId}::${targetId}`;
-}
-
-function targetRegistrationStorageKey(surfaceId: SurfaceId, idempotencyKey: string): string {
-  return `${surfaceId}::${idempotencyKey}`;
-}
-
-function paneTargetState(record: PaneTargetRecord | null): PaneTargetState | null {
-  if (!record) {
-    return null;
-  }
-  return {
-    currentState: record.currentState,
-    lastApplyEvidence: record.lastApplyEvidence,
-    paneLineageId: record.paneLineageId,
-    restorePolicy: record.restorePolicy,
-    targetEpoch: record.targetEpoch,
-    targetId: record.targetId,
-    targetKind: record.targetKind,
-  };
-}
-
-function parseSafeBrowserUrl(value: string): URL | null {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
-  } catch {
-    return null;
-  }
-}
-
 function migratePersistedPaneId(fingerprint: string, legacyPaneId: unknown, paneLabel: number): PaneId {
   if (typeof legacyPaneId === "string") {
     return asPaneId(legacyPaneId);
@@ -1136,10 +1652,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     nextRemotePaneId: 1,
     nextPaneLabel: 1,
     nextWindowLabelIndex: 0,
-    targetRegistrationAcks: {},
-    paneTargetRecords: {},
     paneLabelsByPaneId: {},
     providerId: "",
+    targetStateBySurfaceId: {},
     version: 1,
     windowLabels: {},
   };
@@ -1150,7 +1665,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private runtimeLease: FileHandle | null = null;
   private leaseHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private ownsRuntimeLease = false;
+  private ownerControlPort: number | null = null;
+  private ownerControlServer: Server | null = null;
   private screenSnapshotWrite: Promise<void> = Promise.resolve();
+  private restartContentBySurface = new Map<string, PersistedRestartContentEntry[]>();
+  private restartSnapshots = new Map<string, SurfAceScreenSummary>();
 
   constructor(options: SurfAceRuntimeOptions = {}) {
     this.deliverSettledAnnotationTurn = options.deliverSettledAnnotationTurn;
@@ -1178,6 +1697,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       await ensureDirectory(this.stateDir);
       await this.loadState();
       this.ownsRuntimeLease = await this.acquireRuntimeLease();
+      if (this.ownsRuntimeLease) {
+        await this.startOwnerControlServer();
+        await this.refreshRuntimeLease();
+      }
       this.logger.info?.(`[surf-ace:runtime] start() — lease acquired: ${this.ownsRuntimeLease}`);
       if (!this.ownsRuntimeLease) {
         this.logger.info?.(
@@ -1186,6 +1709,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.started = true;
         return;
       }
+      await this.loadRestartSnapshots();
       // Clear stale workPromises left over from a previous lifecycle (e.g.
       // stop() was called but start() fires before its await-all resolves).
       // Surfaces with a stale workPromise would cause ensureSurfaceWorker to
@@ -1236,7 +1760,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.stopRequested = true;
       this.stopHeartbeat(surface);
       this.wakeSurfaceRetry(surface);
-      if (surface.client) {
+      if (typeof surface.client?.close === "function") {
         await surface.client.close(1000, clampCloseReason("provider_shutdown"));
       }
       await surface.workPromise;
@@ -1272,33 +1796,55 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     context?: { sessionKey?: string },
   ): Promise<SurfAcePushResult> {
     await this.start();
-    const surface = this.requireConnectedSurface(input.fingerprint);
-    if (input.contentType === "browser_url") {
-      return await this.browserUrlTargetApply(surface, { ...input, contentType: "browser_url" }, context?.sessionKey);
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAcePushResult>({
+        context,
+        input,
+        op: "push",
+      });
     }
-    return await this.contentSet(surface, { ...input, contentType: input.contentType as ContentType }, context?.sessionKey);
+    const surface = this.requireConnectedSurface(input.fingerprint);
+    if (isBrowserUrlPushInput(input)) {
+      return await this.browserUrlTargetSet(surface, input);
+    }
+    if (isContentPushInput(input)) {
+      return await this.contentSet(surface, input, context?.sessionKey);
+    }
+    throw new SurfAceToolError("unsupported_content_type", `Unsupported content type: ${String(input.contentType)}`);
   }
 
   async clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceClearResult>({ input, op: "clear" });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.contentClear(surface, input);
   }
 
   async split(input: SurfAceSplitInput): Promise<SurfAceSplitResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceSplitResult>({ input, op: "split" });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.paneSplit(surface, input);
   }
 
   async closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceClosePaneResult>({ input, op: "closePane" });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.paneClose(surface, input);
   }
 
   async relinquish(input: { fingerprint: string }): Promise<SurfAceRelinquishResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceRelinquishResult>({ input, op: "relinquish" });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     const response = await this.sendRequest(
       surface,
@@ -1324,6 +1870,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   async read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceReadResult>({ input, op: "read" });
+    }
     const pane = this.requirePane(input.fingerprint, input.paneId);
     const returnedFrames: SurfAceFrame[] = [];
     let returnedImageBytes = 0;
@@ -1387,8 +1936,139 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return result;
   }
 
+  async registerTarget(input: SurfAceTargetRegisterInput): Promise<SurfAceTargetRegisterResult> {
+    await this.start();
+    const surface = this.requireConnectedSurface(input.fingerprint);
+    const pane = this.requirePane(input.fingerprint, input.paneId);
+    if (
+      input.ownershipSessionId !== (surface.sessionId ?? "") ||
+      input.ownershipEpoch !== surface.ownershipEpoch
+    ) {
+      return await this.rejectTargetRegistration(
+        surface,
+        pane,
+        input,
+        "registration_late_old_epoch",
+        "Target registration ownership epoch does not match current surface ownership",
+      );
+    }
+    const duplicateTargetId = surface.registeredTargetIdsByIdempotencyKey.get(input.idempotencyKey);
+    if (duplicateTargetId) {
+      const duplicate = surface.targetRecords.get(duplicateTargetId);
+      if (duplicate) {
+        return {
+          idempotencyKey: input.idempotencyKey,
+          status: "registered",
+          targetEpoch: duplicate.targetEpoch,
+          targetId: duplicate.targetId,
+        };
+      }
+      return {
+        errorCode: "registration_duplicate",
+        idempotencyKey: input.idempotencyKey,
+        message: "Duplicate registration idempotency key no longer maps to a target record",
+        status: "rejected",
+      };
+    }
+    if (input.paneLineageId !== pane.paneLineageId) {
+      return await this.rejectTargetRegistration(
+        surface,
+        pane,
+        input,
+        "pane_lineage_missing",
+        "Target registration pane lineage does not match the current pane",
+      );
+    }
+    if ([...surface.panes.values()].filter((candidate) => candidate.paneLineageId === input.paneLineageId).length !== 1) {
+      return await this.rejectTargetRegistration(
+        surface,
+        pane,
+        input,
+        "pane_lineage_ambiguous",
+        "Target registration pane lineage is ambiguous",
+      );
+    }
+    const currentEpoch = pane.targetEpoch === 0 ? null : pane.targetEpoch;
+    if (currentEpoch !== input.expectedPreviousTargetEpoch) {
+      return await this.rejectTargetRegistration(
+        surface,
+        pane,
+        input,
+        "target_epoch_stale",
+        `Expected previous target epoch ${input.expectedPreviousTargetEpoch ?? "null"}, found ${currentEpoch ?? "null"}`,
+      );
+    }
+    const targetValidationError = validatePaneTargetInput(input.targetKind, input.targetHeader, input.targetPayload);
+    if (targetValidationError) {
+      return await this.rejectTargetRegistration(
+        surface,
+        pane,
+        input,
+        targetValidationError,
+        `Invalid target registration for ${input.targetKind}`,
+      );
+    }
+    if (typeof input.launchedAt !== "string" || input.launchedAt.length === 0) {
+      return await this.rejectTargetRegistration(
+        surface,
+        pane,
+        input,
+        "registration_failed",
+        "Target registration missing launchedAt evidence",
+      );
+    }
+
+    const target = await this.createPaneTargetRecord(surface, pane, {
+      appliedAt: input.launchedAt,
+      deferPersist: true,
+      restorePolicy: input.restorePolicy,
+      targetHeader: input.targetHeader,
+      targetKind: input.targetKind,
+      targetPayload: input.targetPayload,
+    });
+    surface.registeredTargetIdsByIdempotencyKey.set(input.idempotencyKey, target.targetId);
+    await this.persistSurfaceTargetStateImmediately(surface, "target registration");
+    return {
+      idempotencyKey: input.idempotencyKey,
+      status: "registered",
+      targetEpoch: target.targetEpoch,
+      targetId: target.targetId,
+    };
+  }
+
+  async restoreTarget(input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string }): Promise<SurfAceTargetRestoreResult> {
+    await this.start();
+    const surface = this.requireConnectedSurface(input.fingerprint);
+    const pane = this.requirePane(input.fingerprint, input.paneId);
+    const target = input.targetId
+      ? surface.targetRecords.get(input.targetId) ?? null
+      : this.currentTargetRecord(surface, pane);
+    if (!target) {
+      throw new SurfAceToolError("invalid_operation", `No target record for pane ${input.paneId}`);
+    }
+    const blockedReason = this.restoreBlockedReason(surface, pane, target, input.confirmed === true);
+    if (blockedReason) {
+      pane.lastRestoreBlockedReason = blockedReason;
+      await this.persistSurfaceTargetState(surface, "manual restore blocked");
+      return {
+        blockedReason,
+        evidence: null,
+        targetId: target.targetId,
+      };
+    }
+    const evidence = await this.materializeTargetRecord(surface, pane, target, input.confirmed ? "confirmed_restore" : "manual_restore");
+    return {
+      blockedReason: null,
+      evidence,
+      targetId: target.targetId,
+    };
+  }
+
   async snapshot(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceSnapshotResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceSnapshotResult>({ input, op: "snapshot" });
+    }
     const pane = this.requirePane(input.fingerprint, input.paneId);
     return {
       fingerprint: input.fingerprint,
@@ -1402,6 +2082,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     input: SurfAceAnnotateRemoveInput,
   ): Promise<SurfAceAnnotateRemoveResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceAnnotateRemoveResult>({
+        input,
+        op: "annotateRemove",
+      });
+    }
     const surface = this.requireConnectedSurface(input.fingerprint);
     const pane = this.requirePane(input.fingerprint, input.paneId);
 
@@ -1461,7 +2147,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     };
 
     const response = await this.sendRequest(surface, request);
-    return this.applyMutationResponse(surface, pane, response, request) as SurfAceClearResult;
+    return await this.applyMutationResponse(surface, pane, response, request) as SurfAceClearResult;
   }
 
   private async paneSplit(
@@ -1477,6 +2163,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     const currentLayout = collapseManagedLayout(surface.layout);
+    const direction = input.direction ?? this.defaultSplitDirection(surface, pane);
     const reservedPanes: ManagedPane[] = [];
     const additionalPaneCount = input.count - 1;
     for (let index = 0; index < additionalPaneCount; index += 1) {
@@ -1491,7 +2178,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.layout = splitManagedLayoutNode(
       currentLayout,
       pane.paneId,
-      input.direction,
+      direction,
       [pane.paneId, ...reservedPanes.map((reservedPane) => reservedPane.paneId)],
     );
 
@@ -1505,10 +2192,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       throw error;
     }
     this.queuePersistScreenSnapshot("pane split");
-    return this.orderedPanes(surface).map((managedPane) => ({
-      paneId: managedPane.paneId,
-      paneLabel: managedPane.paneLabel,
-    }));
+    return this.orderedPanes(surface)
+      .sort((left, right) => left.paneLabel - right.paneLabel || left.paneId.localeCompare(right.paneId))
+      .map((managedPane) => ({
+        paneId: managedPane.paneId,
+        paneLabel: managedPane.paneLabel,
+      }));
+  }
+
+  private defaultSplitDirection(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+  ): "horizontal" | "vertical" {
+    const rect = managedPaneRects(surface).get(pane.paneId);
+    const viewport = rect ?? {
+      height: pane.viewport.height || surface.viewport.height,
+      width: pane.viewport.width || surface.viewport.width,
+    };
+    return viewport.width >= viewport.height ? "vertical" : "horizontal";
   }
 
   private async paneClose(
@@ -1526,17 +2227,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const currentLayout = collapseManagedLayout(surface.layout);
     const nextLayout = collapseManagedLayout(removePaneFromManagedLayout(currentLayout, pane.paneId));
     surface.layout = nextLayout;
-    this.tombstoneCurrentTargetRecord(pane);
     surface.panes.delete(pane.paneId);
 
     try {
       await this.pushTopology(surface, { increment: true });
+      await this.tombstonePaneTarget(surface, pane);
     } catch (error) {
       surface.panes.set(pane.paneId, pane);
-      if (pane.targetRecord?.currentState === "tombstoned") {
-        pane.targetRecord.currentState = "current";
-        this.persistTargetRecord(pane.targetRecord);
-      }
       surface.layout = currentLayout;
       throw error;
     }
@@ -1551,7 +2248,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async contentSet(
     surface: ManagedSurface,
-    input: SurfAcePushInput & { contentType: ContentType },
+    input: SurfAceContentPushInput,
     sessionKey?: string,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
@@ -1589,7 +2286,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const previousVisibleText = pane.snapshot?.visibleText?.trim() ?? "";
     const response = await this.sendRequest(surface, request);
-    const result = this.applyMutationResponse(surface, pane, response, request, sessionKey) as SurfAcePushResult;
+    const result = await this.applyMutationResponse(surface, pane, response, request, sessionKey, {
+      diagnostic: input.diagnostic,
+    }) as SurfAcePushResult;
     if (input.contentType === "html") {
       await this.syncPaneSnapshot(surface, pane, {
         waitForVisibleText: true,
@@ -1599,149 +2298,46 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return result;
   }
 
-  private async browserUrlTargetApply(
+  private async browserUrlTargetSet(
     surface: ManagedSurface,
-    input: SurfAcePushInput & { contentType: BrowserUrlContentType },
-    sessionKey?: string,
+    input: SurfAceBrowserUrlPushInput,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     this.finalizeLiveFrame(surface, pane);
-    if (!surface.targetCapabilities.includes("target.browser_url.v1")) {
+    const requiredCapability = requiredCapabilityForTargetKind("browser_url");
+    if (!surface.targetCapabilities.has(requiredCapability)) {
       throw new SurfAceToolError(
-        "capability_missing",
-        "Surf Ace surface does not advertise target.browser_url.v1; refusing to fake a URL as HTML.",
+        "invalid_operation",
+        `Surface ${surface.surfaceId} does not advertise ${requiredCapability}`,
       );
     }
 
-    if (input.allowedSnapshotFallback || input.fallbackSnapshotTargetId) {
-      throw new SurfAceToolError(
-        "unsupported_target_kind",
-        "browser_url snapshot fallback is not implemented; request web_snapshot explicitly instead.",
-      );
-    }
-    const url = parseSafeBrowserUrl(input.content);
-    if (!url) {
-      throw new SurfAceToolError("unsafe_payload", "browser_url content must be an http or https URL.");
-    }
-
-    const targetId = makeTargetId();
-    const targetEpoch = (pane.targetRecord?.targetEpoch ?? 0) + 1;
-    const payload: BrowserUrlPayload = {
-      url: url.toString(),
-    };
     const targetHeader: TargetHeader = {
       payloadSchemaVersion: 1,
       replaySemantics: "navigate",
-      requiredCapabilities: ["target.browser_url.v1"],
+      requiredCapabilities: [requiredCapability],
       safeToLogFields: ["url"],
       safetyClass: "network",
-      summary: url.toString(),
+      summary: input.content,
     };
-    const lineageId = paneLineageId(pane);
-    const ownershipEpoch = surface.ownershipEpoch;
-    if (!surface.sessionId || ownershipEpoch === null) {
-      throw new SurfAceToolError("not_connected", "Surf Ace surface is not paired with an ownership epoch.");
-    }
-    const record: PaneTargetRecord = {
-      appliedAt: new Date(this.now()).toISOString(),
-      currentState: "current",
-      ownerProviderId: this.providerId(),
-      ownershipEpoch,
-      ownershipSessionId: surface.sessionId,
-      paneIdAtApply: String(pane.remotePaneId),
-      paneLabelAtApply: pane.paneLabel,
-      paneLineageId: lineageId,
-      restorePolicy: "confirm",
-      surfaceId: surface.surfaceId,
-      surfaceInstanceId: null,
-      targetEpoch,
+    const target = await this.createPaneTargetRecord(surface, pane, {
       targetHeader,
-      targetId,
       targetKind: "browser_url",
-      targetPayload: payload,
-    };
-    const request: TargetApplyRequest = {
-      id: makeBrandedRequestId(),
-      op: "target.apply",
-      payload: {
-        ownershipEpoch,
-        ownershipSessionId: surface.sessionId,
-        paneLineageId: lineageId,
-        requestId: makeTargetRequestId(),
-        restoreReason: "initial_apply",
-        surfaceId: surface.surfaceId,
-        targetEpoch,
-        targetHeader,
-        targetId,
-        targetKind: "browser_url",
-        targetPayload: payload,
-      },
-      sentAt: asEpochMs(this.now()),
-      type: "request",
-      v: 1,
-    };
+      targetPayload: { url: input.content },
+    });
+    pane.diagnosticContent = null;
 
-    pane.pendingOwnerSessionKey = sessionKey ?? null;
-    this.setCurrentTargetRecord(pane, record);
-    const response = await this.sendRequest(surface, request);
-    if (isErrorResponse(response)) {
-      pane.pendingOwnerSessionKey = null;
-      record.lastApplyEvidence = {
-        appliedAt: new Date(this.now()).toISOString(),
-        errorCode: mutationErrorCode(response.error.code) as TargetErrorCode,
-        message: response.error.message,
-        paneLineageId: lineageId,
-        requestId: request.payload.requestId,
-        status: "failed",
-        targetEpoch,
-        targetId,
-      };
-      this.persistTargetRecord(record);
-      throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
-    }
-    const result = (response as TargetApplyResponse).payload;
-    record.lastApplyEvidence = result;
-    this.persistTargetRecord(record);
-    if (result.status !== "applied") {
-      pane.pendingOwnerSessionKey = null;
-      throw new SurfAceToolError(
-        mutationErrorCode(result.errorCode ?? "materialization_failed"),
-        result.message ?? "browser_url target was not applied",
-      );
-    }
-
-    const previousVisibleEntry = this.visibleHistoryEntry(pane);
-    if (previousVisibleEntry) {
-      this.storeHiddenHistoryEntry(pane, previousVisibleEntry);
-    }
-    this.removeHiddenHistoryEntryForSession(pane, sessionKey ?? null);
-    pane.activeContentId = null;
-    pane.contentType = null;
-    pane.contentValue = null;
-    pane.historyOwnerToken = null;
-    pane.ownerSessionKey = pane.pendingOwnerSessionKey ?? sessionKey ?? null;
-    pane.historySummary.visibleContentId = null;
-    pane.pendingOwnerSessionKey = null;
-    pane.buffer.currentUrl = url.toString();
-    pane.snapshot = pane.snapshot
-      ? {
-          ...pane.snapshot,
-          contentId: null,
-          contentType: null,
-          drawings: [],
-          revision: pane.currentRevision,
-        }
-      : null;
-    this.queuePersistScreenSnapshot("target.apply browser_url");
-
+    const evidence = await this.materializeTargetRecord(surface, pane, target, "initial_apply");
     return {
+      blockedReason: evidence.status === "applied" ? null : evidence.errorCode ?? "materialization_failed",
       contentId: null,
       fingerprint: surface.surfaceId,
       paneId: pane.paneId,
       paneLabel: pane.paneLabel,
       revision: pane.currentRevision,
-      targetId,
-      targetKind: "browser_url",
+      targetApplyEvidence: evidence,
+      targetId: target.targetId,
+      targetKind: target.targetKind,
     };
   }
 
@@ -2065,13 +2661,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const targetEntry = this.takeHiddenHistoryEntryByContentId(pane, event.payload.contentId);
       if (targetEntry) {
         this.storeHiddenHistoryEntry(pane, previousVisibleEntry);
-        this.applyVisibleEntry(pane, {
+        this.applyVisibleEntry(surface, pane, {
           ...targetEntry,
           revision: event.payload.revision,
         });
       }
     } else {
       pane.currentRevision = event.payload.revision;
+    }
+    if (event.payload.contentId === null) {
+      this.selectVisiblePaneTarget(surface, pane, null);
     }
     const previousVisibleContentId = pane.historySummary.visibleContentId;
     pane.historySummary.visibleContentId = event.payload.contentId;
@@ -2206,6 +2805,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.runBackgroundTask(
       `surface resumed sync for ${surface.surfaceId}`,
       async () => {
+        await this.repushSurfaceContent(surface);
         await this.syncSurfaceSnapshots(surface);
       },
     );
@@ -2300,155 +2900,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         break;
     }
     this.queuePersistScreenSnapshot(`wire event ${event.op}`);
-  }
-
-  private handleWireRequest(surface: ManagedSurface, request: Request): Response {
-    if (request.op !== "target.register") {
-      return {
-        error: {
-          code: "invalid_operation",
-          message: `Surface-originated ${request.op} is not accepted by this provider`,
-        },
-        id: request.id,
-        ok: false,
-        op: request.op,
-        sentAt: asEpochMs(this.now()),
-        type: "response",
-        v: 1,
-      } as Response;
-    }
-    return this.handleTargetRegister(surface, request);
-  }
-
-  private handleTargetRegister(
-    surface: ManagedSurface,
-    request: TargetRegisterRequest,
-  ): TargetRegisteredResponse | TargetRegisterRejectedResponse {
-    const reject = (errorCode: TargetErrorCode, message: string): TargetRegisterRejectedResponse => ({
-      id: request.id,
-      ok: true,
-      op: "target.register.rejected",
-      payload: {
-        errorCode,
-        idempotencyKey: request.payload.idempotencyKey,
-        message,
-        status: "rejected",
-      },
-      sentAt: asEpochMs(this.now()),
-      type: "response",
-      v: 1,
-    });
-
-    if (request.payload.surfaceId !== surface.surfaceId) {
-      return reject("registration_failed", "target.register surfaceId does not match this provider surface");
-    }
-    if (!surface.sessionId || request.payload.ownershipSessionId !== surface.sessionId) {
-      return reject("ownership_session_mismatch", "target.register ownershipSessionId does not match active ownership");
-    }
-    if (surface.ownershipEpoch === null || request.payload.ownershipEpoch !== surface.ownershipEpoch) {
-      return reject("registration_late_old_epoch", "target.register ownershipEpoch does not match active ownership");
-    }
-    const duplicate = this.persistentState.targetRegistrationAcks?.[
-      targetRegistrationStorageKey(surface.surfaceId, request.payload.idempotencyKey)
-    ];
-    if (duplicate) {
-      return {
-        id: request.id,
-        ok: true,
-        op: "target.registered",
-        payload: {
-          idempotencyKey: request.payload.idempotencyKey,
-          status: "registered",
-          targetEpoch: duplicate.targetEpoch,
-          targetId: duplicate.targetId,
-        },
-        sentAt: asEpochMs(this.now()),
-        type: "response",
-        v: 1,
-      };
-    }
-    const pane = [...surface.panes.values()].find((candidate) => candidate.paneLineageId === request.payload.paneLineageId);
-    if (!pane) {
-      return reject("pane_lineage_missing", "target.register pane lineage is unknown");
-    }
-    const currentEpoch = pane.targetRecord?.currentState === "current" ? pane.targetRecord.targetEpoch : null;
-    if (request.payload.expectedPreviousTargetEpoch !== currentEpoch) {
-      return reject("target_epoch_stale", "target.register expectedPreviousTargetEpoch does not match current target epoch");
-    }
-    if (!request.payload.targetHeader.requiredCapabilities.every((capability) => surface.targetCapabilities.includes(capability))) {
-      return reject("capability_missing", "surface lacks required target capability");
-    }
-    if (request.payload.targetKind === "browser_url") {
-      const targetPayload = request.payload.targetPayload as Partial<BrowserUrlPayload>;
-      const payloadKeys = Object.keys(targetPayload);
-      if (
-        request.payload.targetHeader.safetyClass !== "network" ||
-        request.payload.targetHeader.replaySemantics !== "navigate" ||
-        !request.payload.targetHeader.requiredCapabilities.includes("target.browser_url.v1") ||
-        typeof targetPayload.url !== "string" ||
-        !parseSafeBrowserUrl(targetPayload.url) ||
-        payloadKeys.some((key) => key !== "url")
-      ) {
-        return reject("unsafe_payload", "browser_url target.register requires network safety, target.browser_url.v1, navigate semantics, only a url payload field, and an http or https url");
-      }
-    }
-
-    const targetId = makeTargetId();
-    const targetEpoch = (currentEpoch ?? 0) + 1;
-    const record: PaneTargetRecord = {
-      appliedAt: request.payload.launchedAt,
-      currentState: "current",
-      lastApplyEvidence: {
-        appliedAt: request.payload.launchedAt,
-        materializedState: {
-          registrationState: request.payload.registrationState,
-        },
-        paneLineageId: request.payload.paneLineageId,
-        requestId: request.id,
-        status: "applied",
-        targetEpoch,
-        targetId,
-      },
-      ownerProviderId: this.providerId(),
-      ownershipEpoch: request.payload.ownershipEpoch,
-      ownershipSessionId: request.payload.ownershipSessionId,
-      paneIdAtApply: String(pane.remotePaneId),
-      paneLabelAtApply: pane.paneLabel,
-      paneLineageId: request.payload.paneLineageId,
-      restorePolicy: request.payload.targetHeader.safetyClass === "passive" ? "auto" : "confirm",
-      surfaceId: surface.surfaceId,
-      surfaceInstanceId: request.payload.surfaceInstanceId,
-      targetEpoch,
-      targetHeader: structuredClone(request.payload.targetHeader),
-      targetId,
-      targetKind: request.payload.targetKind,
-      targetPayload: structuredClone(request.payload.targetPayload),
-    };
-    this.setCurrentTargetRecord(pane, record);
-    this.persistentState.targetRegistrationAcks ??= {};
-    this.persistentState.targetRegistrationAcks[
-      targetRegistrationStorageKey(surface.surfaceId, request.payload.idempotencyKey)
-    ] = { targetEpoch, targetId };
-    this.runBackgroundTask(
-      `persist target registration ${request.payload.idempotencyKey}`,
-      async () => {
-        await this.persistState();
-      },
-    );
-    return {
-      id: request.id,
-      ok: true,
-      op: "target.registered",
-      payload: {
-        idempotencyKey: request.payload.idempotencyKey,
-        status: "registered",
-        targetEpoch,
-        targetId,
-      },
-      sentAt: asEpochMs(this.now()),
-      type: "response",
-      v: 1,
-    };
   }
 
   private ingestDrawingFlush(surface: ManagedSurface, event: DrawingFlushEvent): void {
@@ -2796,7 +3247,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     remappedSurface.layout = preservedSurface.layout
       ? structuredClone(preservedSurface.layout)
       : null;
+    remappedSurface.registeredTargetIdsByIdempotencyKey = new Map(preservedSurface.registeredTargetIdsByIdempotencyKey);
+    remappedSurface.targetRecords = new Map(preservedSurface.targetRecords);
+    remappedSurface.ownershipEpoch = preservedSurface.ownershipEpoch;
     remappedSurface.topologyRevision = preservedSurface.topologyRevision;
+    remappedSurface.hasPairedInGatewaySession = preservedSurface.hasPairedInGatewaySession;
+    remappedSurface.sessionId = preservedSurface.sessionId;
+    remappedSurface.consecutiveResumeFailures = preservedSurface.consecutiveResumeFailures;
+    remappedSurface.consecutiveOwnershipLockFailures = preservedSurface.consecutiveOwnershipLockFailures;
   }
 
   private quiesceSupersededSurface(
@@ -2836,6 +3294,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (!surface.windowLabel) {
         surface.windowLabel = this.ensureWindowLabel(nextSurfaceId);
       }
+      this.restoreRestartOwnership(surface);
       return;
     }
 
@@ -2863,8 +3322,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       nextSurfaceId,
       surface.windowLabel,
     );
+    this.renamePersistedSurfaceTargetState(oldSurfaceId, nextSurfaceId);
     this.reconcilePaneLabelsBySurfaceId(oldSurfaceId, nextSurfaceId);
     this.surfaces.set(nextSurfaceId, surface);
+    this.restoreRestartOwnership(surface);
     this.runBackgroundTask(
       `persist remapped surface id ${surface.endpointId}`,
       async () => {
@@ -2895,6 +3356,176 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     ];
   }
 
+  private currentTargetRecord(surface: ManagedSurface, pane: ManagedPane): PaneTargetRecord | null {
+    if (!pane.currentTargetId) {
+      return null;
+    }
+    const target = surface.targetRecords.get(pane.currentTargetId);
+    if (!target || target.currentState !== "current") {
+      return null;
+    }
+    return target;
+  }
+
+  private async createPaneTargetRecord(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    input: {
+      appliedAt?: string;
+      deferPersist?: boolean;
+      restorePolicy?: RestorePolicy;
+      targetHeader: TargetHeader;
+      targetKind: TargetKind;
+      targetPayload: unknown;
+    },
+  ): Promise<PaneTargetRecord> {
+    const previous = this.currentTargetRecord(surface, pane);
+    pane.targetEpoch += 1;
+    const targetId = makeTargetId();
+    if (previous) {
+      previous.currentState = "superseded";
+      previous.supersededByTargetId = targetId;
+    }
+    const record: PaneTargetRecord = {
+      appliedAt: input.appliedAt ?? new Date(this.now()).toISOString(),
+      currentState: "current",
+      ownerProviderId: this.persistentState.providerId,
+      ownershipEpoch: surface.ownershipEpoch,
+      ownershipSessionId: surface.sessionId ?? "",
+      paneIdAtApply: pane.paneId,
+      paneLabelAtApply: pane.paneLabel,
+      paneLineageId: pane.paneLineageId,
+      restorePolicy: input.restorePolicy ?? defaultRestorePolicyForTarget(input.targetKind, input.targetHeader),
+      surfaceId: surface.surfaceId,
+      surfaceInstanceId: null,
+      targetEpoch: pane.targetEpoch,
+      targetHeader: structuredClone(input.targetHeader),
+      targetId,
+      targetKind: input.targetKind,
+      targetPayload: structuredClone(input.targetPayload),
+    };
+    surface.targetRecords.set(targetId, record);
+    pane.currentTargetId = targetId;
+    pane.staleTargetId = null;
+    pane.nonDurableTargetDiagnostic = null;
+    pane.lastRestoreBlockedReason = null;
+    if (input.deferPersist !== true) {
+      await this.persistSurfaceTargetState(surface, "target record");
+    }
+    return record;
+  }
+
+  private async rejectTargetRegistration(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    input: SurfAceTargetRegisterInput,
+    errorCode: TargetErrorCode,
+    message: string,
+  ): Promise<SurfAceTargetRegisterResult> {
+    if (input.registrationState === "attached") {
+      const now = new Date(this.now()).toISOString();
+      pane.nonDurableTargetDiagnostic = {
+        blockedReason: "registration_failed",
+        diagnosticContent: {
+          derivedFromTargetId: input.idempotencyKey,
+          diagnosticContentId: makeDiagnosticContentId(),
+          kind: "error",
+          paneLineageId: pane.paneLineageId,
+          shownAt: now,
+          summary: "visible target registration failed",
+          surfaceId: surface.surfaceId,
+        },
+        lastApplyEvidence: {
+          appliedAt: now,
+          errorCode,
+          message,
+          requestId: input.idempotencyKey,
+          status: "failed",
+        },
+        paneLineageId: pane.paneLineageId,
+        targetHeader: structuredClone(input.targetHeader),
+        targetId: input.idempotencyKey,
+        targetKind: input.targetKind,
+        targetPayload: safeDiagnosticTargetPayload(
+          input.targetPayload,
+          isStringArray(input.targetHeader.safeToLogFields) ? input.targetHeader.safeToLogFields : [],
+        ),
+        targetPolicy: "never",
+      };
+      pane.lastRestoreBlockedReason = "registration_failed";
+      await this.persistSurfaceTargetState(surface, "attached target registration failed");
+    }
+    return {
+      errorCode,
+      idempotencyKey: input.idempotencyKey,
+      message,
+      status: "rejected",
+    };
+  }
+
+  private async recordDiagnosticPaneContent(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    diagnostic: NonNullable<SurfAcePushInput["diagnostic"]>,
+  ): Promise<void> {
+    pane.diagnosticContent = {
+      derivedFromTargetId: diagnostic.derivedFromTargetId,
+      diagnosticContentId: makeDiagnosticContentId(),
+      kind: diagnostic.kind,
+      paneLineageId: pane.paneLineageId,
+      shownAt: new Date(this.now()).toISOString(),
+      summary: diagnostic.summary,
+      surfaceId: surface.surfaceId,
+    };
+    await this.persistSurfaceTargetState(surface, "diagnostic content");
+  }
+
+  private async tombstonePaneTarget(surface: ManagedSurface, pane: ManagedPane): Promise<void> {
+    const target = this.currentTargetRecord(surface, pane);
+    if (!target) {
+      return;
+    }
+    target.currentState = "tombstoned";
+    pane.currentTargetId = null;
+    pane.staleTargetId = null;
+    await this.persistSurfaceTargetState(surface, "target tombstone");
+  }
+
+  private paneTargetDiagnostic(surface: ManagedSurface, pane: ManagedPane): SurfAcePaneTargetDiagnostic | null {
+    const target = this.currentTargetRecord(surface, pane);
+    if (!target) {
+      const staleTarget = pane.staleTargetId ? surface.targetRecords.get(pane.staleTargetId) ?? null : null;
+      if (staleTarget && staleTarget.currentState === "current") {
+        return {
+          blockedReason: pane.lastRestoreBlockedReason ?? "restore_blocked_stale_target",
+          diagnosticContent: pane.diagnosticContent ? structuredClone(pane.diagnosticContent) : null,
+          lastApplyEvidence: staleTarget.lastApplyEvidence ? structuredClone(staleTarget.lastApplyEvidence) : null,
+          paneLineageId: pane.paneLineageId,
+          targetHeader: structuredClone(staleTarget.targetHeader),
+          targetId: staleTarget.targetId,
+          targetKind: staleTarget.targetKind,
+          targetPayload: safeDiagnosticTargetPayload(staleTarget.targetPayload, staleTarget.targetHeader.safeToLogFields),
+          targetPolicy: staleTarget.restorePolicy,
+        };
+      }
+      if (pane.nonDurableTargetDiagnostic) {
+        return structuredClone(pane.nonDurableTargetDiagnostic);
+      }
+      return null;
+    }
+    return {
+      blockedReason: pane.lastRestoreBlockedReason,
+      diagnosticContent: pane.diagnosticContent ? structuredClone(pane.diagnosticContent) : null,
+      lastApplyEvidence: target.lastApplyEvidence ? structuredClone(target.lastApplyEvidence) : null,
+      paneLineageId: pane.paneLineageId,
+      targetHeader: structuredClone(target.targetHeader),
+      targetId: target.targetId,
+      targetKind: target.targetKind,
+      targetPayload: safeDiagnosticTargetPayload(target.targetPayload, target.targetHeader.safeToLogFields),
+      targetPolicy: target.restorePolicy,
+    };
+  }
+
   private visibleHistoryEntry(pane: ManagedPane): ManagedHistoryEntry | null {
     if (!pane.activeContentId || !pane.contentType || pane.contentValue === null) {
       return null;
@@ -2906,6 +3537,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       historyOwnerToken: pane.historyOwnerToken,
       revision: pane.currentRevision,
       sessionKey: pane.ownerSessionKey,
+      targetId: pane.currentTargetId,
     };
   }
 
@@ -2926,40 +3558,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.historyEntries = pane.historyEntries.filter((entry) => !sameHistorySessionKey(entry.sessionKey, sessionKey));
   }
 
-  private setCurrentTargetRecord(
-    pane: ManagedPane,
-    record: PaneTargetRecord,
-  ): void {
-    if (pane.targetRecord && pane.targetRecord.targetId !== record.targetId) {
-      pane.targetRecord.currentState = "superseded";
-      pane.targetRecord.supersededByTargetId = record.targetId;
-      this.persistTargetRecord(pane.targetRecord);
-    }
-    pane.targetRecord = record;
-    this.persistTargetRecord(record);
-    this.queuePersistScreenSnapshot("target record current");
-  }
-
-  private persistTargetRecord(record: PaneTargetRecord): void {
-    this.persistentState.paneTargetRecords ??= {};
-    this.persistentState.paneTargetRecords[paneTargetRecordStorageKey(record.surfaceId, record.targetId)] = structuredClone(record);
-    this.runBackgroundTask(
-      `persist target record ${record.targetId}`,
-      async () => {
-        await this.persistState();
-      },
-    );
-  }
-
-  private tombstoneCurrentTargetRecord(pane: ManagedPane): void {
-    if (!pane.targetRecord) {
-      return;
-    }
-    pane.targetRecord.currentState = "tombstoned";
-    this.persistTargetRecord(pane.targetRecord);
-    pane.targetRecord = null;
-  }
-
   private takeHiddenHistoryEntryByContentId(
     pane: ManagedPane,
     contentId: ContentId,
@@ -2972,14 +3570,36 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return entry ?? null;
   }
 
-  private applyVisibleEntry(pane: ManagedPane, entry: ManagedHistoryEntry): void {
+  private applyVisibleEntry(surface: ManagedSurface, pane: ManagedPane, entry: ManagedHistoryEntry): void {
     pane.activeContentId = entry.contentId;
     pane.contentType = entry.contentType;
     pane.contentValue = structuredClone(entry.contentValue);
     pane.currentRevision = entry.revision;
     pane.historyOwnerToken = entry.historyOwnerToken;
     pane.ownerSessionKey = entry.sessionKey;
+    this.selectVisiblePaneTarget(surface, pane, entry.targetId);
     pane.historySummary.visibleContentId = entry.contentId;
+  }
+
+  private selectVisiblePaneTarget(surface: ManagedSurface, pane: ManagedPane, targetId: string | null): void {
+    pane.currentTargetId = targetId;
+    for (const target of surface.targetRecords.values()) {
+      if (target.paneLineageId !== pane.paneLineageId) {
+        continue;
+      }
+      if (target.targetId === targetId) {
+        target.currentState = "current";
+        delete target.supersededByTargetId;
+      } else if (target.currentState === "current") {
+        target.currentState = "superseded";
+        if (targetId) {
+          target.supersededByTargetId = targetId;
+        }
+      }
+    }
+    this.runBackgroundTask("persist target state after history navigation", async () => {
+      await this.persistSurfaceTargetState(surface, "history navigation target selection");
+    });
   }
 
   private clearVisiblePaneContent(pane: ManagedPane, revision: Revision): void {
@@ -2990,6 +3610,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.historyOwnerToken = null;
     pane.ownerSessionKey = null;
     pane.historySummary.visibleContentId = null;
+    pane.diagnosticContent = null;
+    pane.nonDurableTargetDiagnostic = null;
     pane.buffer.currentUrl = null;
     pane.snapshot = pane.snapshot
       ? {
@@ -3055,21 +3677,31 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         continue;
       }
       pane.name = paneState.name;
-      pane.paneLineageId = paneState.paneLineageId;
       pane.paneLabel = paneState.paneLabel;
-      pane.targetRecord = this.loadCurrentTargetRecord(surface, pane.paneLineageId) ?? pane.targetRecord;
+      if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
+        pane.paneLineageId = paneState.paneLineageId;
+      }
     }
     this.queuePersistScreenSnapshot("topology apply");
   }
 
   private async repushSurfaceContent(surface: ManagedSurface): Promise<void> {
     for (const pane of this.orderedPanes(surface)) {
-      if (pane.targetRecord?.currentState === "current") {
-        const replayed = await this.maybeReplayTargetRecord(surface, pane, pane.targetRecord);
-        if (!replayed) {
+      if (!isBoundRemotePaneId(pane.remotePaneId)) {
+        continue;
+      }
+      const target = this.currentTargetRecord(surface, pane);
+      if (target) {
+        const blockedReason = this.restoreBlockedReason(surface, pane, target, false);
+        if (blockedReason) {
+          pane.lastRestoreBlockedReason = blockedReason;
+          await this.persistSurfaceTargetState(surface, "restore blocked");
           continue;
         }
+        await this.materializeTargetRecord(surface, pane, target, "resume_restore");
+        continue;
       }
+
       if (!pane.activeContentId || !pane.contentType || pane.contentValue === null) {
         if (pane.currentRevision <= asRevision(0)) {
           continue;
@@ -3088,7 +3720,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           v: 1,
         };
         const clearResponse = await this.sendRequest(surface, clearRequest);
-        this.applyMutationResponse(surface, pane, clearResponse, clearRequest);
+        await this.applyMutationResponse(surface, pane, clearResponse, clearRequest);
         continue;
       }
 
@@ -3111,89 +3743,266 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         v: 1,
       };
       const contentResponse = await this.sendRequest(surface, contentRequest);
-      this.applyMutationResponse(surface, pane, contentResponse, contentRequest, pane.ownerSessionKey ?? undefined);
+      await this.applyMutationResponse(surface, pane, contentResponse, contentRequest, pane.ownerSessionKey ?? undefined);
     }
   }
 
-  private async maybeReplayTargetRecord(
+  private restoreBlockedReason(
     surface: ManagedSurface,
     pane: ManagedPane,
-    record: PaneTargetRecord,
-  ): Promise<boolean> {
-    const blocked = (errorCode: TargetErrorCode, message: string): false => {
-      record.lastApplyEvidence = {
-        appliedAt: new Date(this.now()).toISOString(),
-        errorCode,
-        message,
-        paneLineageId: record.paneLineageId,
-        requestId: makeTargetRequestId(),
-        status: "rejected",
-        targetEpoch: record.targetEpoch,
-        targetId: record.targetId,
-      };
-      this.persistTargetRecord(record);
-      return false;
+    target: PaneTargetRecord,
+    confirmed: boolean,
+  ): TargetErrorCode | null {
+    if (target.surfaceId !== surface.surfaceId || target.paneLineageId !== pane.paneLineageId) {
+      return "restore_blocked_stale_target";
+    }
+    if ([...surface.panes.values()].filter((candidate) => candidate.paneLineageId === target.paneLineageId).length > 1) {
+      return "pane_lineage_ambiguous";
+    }
+    if (target.ownershipSessionId !== (surface.sessionId ?? "")) {
+      return "ownership_session_mismatch";
+    }
+    if (target.ownershipEpoch !== surface.ownershipEpoch) {
+      return "ownership_epoch_mismatch";
+    }
+    if (target.currentState !== "current" || pane.currentTargetId !== target.targetId) {
+      return "target_superseded";
+    }
+    const requiredCapabilities = new Set([
+      requiredCapabilityForTargetKind(target.targetKind),
+      ...target.targetHeader.requiredCapabilities,
+    ]);
+    for (const requiredCapability of requiredCapabilities) {
+      if (!surface.targetCapabilities.has(requiredCapability)) {
+        return "capability_missing";
+      }
+    }
+    if (target.restorePolicy === "never") {
+      return "policy_denied";
+    }
+    if (target.restorePolicy === "manual" && !confirmed) {
+      return "restore_requires_confirmation";
+    }
+    if (target.restorePolicy === "confirm" && !confirmed) {
+      return "restore_requires_confirmation";
+    }
+    if ((target.targetHeader.safetyClass === "process" || isProcessBackedTargetKind(target.targetKind)) && target.restorePolicy === "auto") {
+      return "approval_required";
+    }
+    return null;
+  }
+
+  private nativePaneMaterializationForTarget(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    target: PaneTargetRecord,
+  ): NativePaneMaterialization | undefined {
+    if (!isProcessBackedTargetKind(target.targetKind)) {
+      return undefined;
+    }
+
+    const geometry = getCompositorLogicalPaneGeometry(surface, pane);
+    const revision = asRevision(target.targetEpoch);
+    const paneEntry: NativePaneMaterialization["panes"][number] = {
+      binding_id: `${pane.paneId}:${target.targetId}`,
+      content_id: target.targetId,
+      geometry,
+      id: pane.paneId,
+      revision,
     };
 
-    if (record.surfaceId !== surface.surfaceId) {
-      return blocked("restore_blocked_stale_target", "target surfaceId does not match paired surface");
+    if (target.targetKind === "terminal_app" && isPlainRecord(target.targetPayload)) {
+      const { args, command, cwd, env } = target.targetPayload;
+      if (typeof command === "string" && isStringArray(args)) {
+        paneEntry.target = "terminal";
+        paneEntry.process = {
+          args: [...args],
+          command,
+          ...(typeof cwd === "string" ? { cwd } : {}),
+          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
+        };
+      }
     }
-    if (!pane.paneLineageId || pane.paneLineageId !== record.paneLineageId) {
-      return blocked("pane_lineage_missing", "target pane lineage is not present on the paired surface");
-    }
-    if (record.currentState !== "current" || pane.targetRecord?.targetId !== record.targetId) {
-      return blocked("target_superseded", "target record is no longer current");
-    }
-    if (record.restorePolicy === "confirm") {
-      return blocked("restore_requires_confirmation", "browser_url restore requires operator confirmation");
-    }
-    if (record.restorePolicy === "manual" || record.restorePolicy === "never") {
-      return blocked("policy_denied", `restorePolicy ${record.restorePolicy} blocks automatic replay`);
-    }
-    if (!record.targetHeader.requiredCapabilities.every((capability) => surface.targetCapabilities.includes(capability))) {
-      return blocked("capability_missing", "surface lacks required target capability");
-    }
-    const browserUrlPayload = record.targetKind === "browser_url" ? record.targetPayload as BrowserUrlPayload : null;
-    if (browserUrlPayload && !parseSafeBrowserUrl(browserUrlPayload.url)) {
-      return blocked("unsafe_payload", "browser_url targetPayload.url must be http or https");
-    }
-    if (!surface.sessionId || surface.ownershipEpoch === null || record.ownershipEpoch !== surface.ownershipEpoch) {
-      return blocked("ownership_epoch_mismatch", "target ownership epoch does not match active ownership");
+    const overlayRect = {
+      height: geometry.height,
+      width: geometry.width,
+      x: geometry.x,
+      y: geometry.y,
+    };
+
+    return {
+      op: "native_pane.host",
+      overlaySet: {
+        coordinateSpace: "surface_logical",
+        regions: [
+          {
+            captures: [],
+            kind: "native_pane",
+            paneId: pane.paneId,
+            paneInstanceId: pane.paneLineageId,
+            rect: overlayRect,
+            regionId: `${pane.paneId}:${target.targetId}`,
+            zIndex: Math.max(0, flattenManagedLayout(surface.layout).indexOf(pane.paneId)),
+          },
+        ],
+        revision,
+        surfaceId: surface.surfaceId,
+        topologyEpoch: this.nextTopologyRevision(surface, true) as TopologyApplyRequest["payload"]["topologyRevision"],
+        windowId: surface.windowLabel,
+      },
+      panes: [paneEntry],
+    };
+  }
+
+  private async materializeTargetRecord(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    target: PaneTargetRecord,
+    restoreReason: TargetApplyReason,
+  ): Promise<ApplyEvidence> {
+    const contentTarget = contentPayloadForTarget(target.targetKind, target.targetPayload);
+    if (contentTarget) {
+      const overwritingDiagnosticContent = pane.diagnosticContent !== null;
+      const reuseExistingContentIdentity = restoreReason === "resume_restore" && Boolean(pane.activeContentId) && !overwritingDiagnosticContent;
+      const request: ContentApplyRequest = {
+        id: makeBrandedRequestId(),
+        op: "content.apply",
+        payload: {
+          content: contentTarget.content,
+          contentId: reuseExistingContentIdentity ? pane.activeContentId! : makeContentId(),
+          contentType: contentTarget.contentType,
+          historyOwnerToken: historyOwnerTokenForSession(pane.ownerSessionKey ?? undefined),
+          paneId: pane.remotePaneId,
+          revision: asRevision(
+            reuseExistingContentIdentity
+              ? Number(pane.currentRevision)
+              : Math.max(Number(pane.currentRevision), 0) + 1,
+          ),
+          topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
+        } as ContentApplyRequest["payload"],
+        sentAt: asEpochMs(this.now()),
+        type: "request",
+        v: 1,
+      };
+      const response = await this.sendRequest(surface, request);
+      if (isErrorResponse(response)) {
+        const evidence: ApplyEvidence = {
+          appliedAt: new Date(this.now()).toISOString(),
+          errorCode: "materialization_failed",
+          message: response.error.message,
+          requestId: request.id,
+          status: "failed",
+        };
+        target.lastApplyEvidence = evidence;
+        pane.lastRestoreBlockedReason = "materialization_failed";
+        await this.persistSurfaceTargetState(surface, "content target materialization failed");
+        return evidence;
+      }
+      if (pane.currentTargetId !== target.targetId || target.currentState !== "current") {
+        const evidence: ApplyEvidence = {
+          appliedAt: new Date(this.now()).toISOString(),
+          errorCode: "target_superseded",
+          message: "Ignored content target apply response after target supersession",
+          requestId: request.id,
+          status: "failed",
+        };
+        target.lastApplyEvidence = evidence;
+        await this.persistSurfaceTargetState(surface, "stale content target apply response");
+        return evidence;
+      }
+      await this.applyMutationResponse(surface, pane, response, request, pane.ownerSessionKey ?? undefined, {
+        skipTargetRecord: true,
+      });
+      const evidence: ApplyEvidence = {
+        appliedAt: new Date(this.now()).toISOString(),
+        materializedState: {
+          contentType: contentTarget.contentType,
+          paneId: pane.paneId,
+        },
+        requestId: request.id,
+        status: "applied",
+      };
+      target.lastApplyEvidence = evidence;
+      pane.lastRestoreBlockedReason = null;
+      pane.diagnosticContent = null;
+      await this.persistSurfaceTargetState(surface, "target materialized");
+      return evidence;
     }
 
-    const targetRequest: TargetApplyRequest = {
-      id: makeBrandedRequestId(),
+    const requestId = makeBrandedRequestId();
+    const request: TargetApplyRequest = {
+      id: requestId,
       op: "target.apply",
       payload: {
         ownershipEpoch: surface.ownershipEpoch,
-        ownershipSessionId: surface.sessionId,
-        paneLineageId: record.paneLineageId,
-        requestId: makeTargetRequestId(),
-        restoreReason: "resume_restore",
+        ownershipSessionId: surface.sessionId ?? "",
+        paneLineageId: target.paneLineageId,
+        requestId,
+        restoreReason,
         surfaceId: surface.surfaceId,
-        targetEpoch: record.targetEpoch,
-        targetHeader: record.targetHeader,
-        targetId: record.targetId,
-        targetKind: record.targetKind,
-        targetPayload: structuredClone(record.targetPayload),
+        materialization: this.nativePaneMaterializationForTarget(surface, pane, target),
+        targetEpoch: target.targetEpoch,
+        targetHeader: structuredClone(target.targetHeader),
+        targetId: target.targetId,
+        targetKind: target.targetKind,
+        targetPayload: structuredClone(target.targetPayload),
       },
       sentAt: asEpochMs(this.now()),
       type: "request",
       v: 1,
     };
-    const targetResponse = await this.sendRequest(surface, targetRequest);
-    if (isErrorResponse(targetResponse)) {
-      return blocked(mutationErrorCode(targetResponse.error.code) as TargetErrorCode, targetResponse.error.message);
+    const response = await this.sendRequest(surface, request);
+    if (isErrorResponse(response)) {
+      const evidence: ApplyEvidence = {
+        appliedAt: new Date(this.now()).toISOString(),
+        errorCode: targetErrorCodeFromResponse(response.error.code),
+        message: response.error.message,
+        requestId,
+        status: "failed",
+      };
+      target.lastApplyEvidence = evidence;
+      pane.lastRestoreBlockedReason = evidence.errorCode ?? "materialization_failed";
+      await this.persistSurfaceTargetState(surface, "target materialization failed");
+      return evidence;
     }
-    const targetResult = (targetResponse as TargetApplyResponse).payload;
-    record.lastApplyEvidence = targetResult;
-    this.persistTargetRecord(record);
-    if (targetResult.status !== "applied") {
-      return false;
+    const payload = (response as TargetApplyResponse).payload;
+    if (
+      payload.requestId !== requestId ||
+      payload.targetId !== target.targetId ||
+      payload.paneLineageId !== target.paneLineageId ||
+      payload.targetEpoch !== target.targetEpoch
+    ) {
+      const evidence: ApplyEvidence = {
+        appliedAt: new Date(this.now()).toISOString(),
+        errorCode: "materialization_failed",
+        message: "target.apply response did not match the requested target",
+        requestId,
+        status: "failed",
+      };
+      target.lastApplyEvidence = evidence;
+      pane.lastRestoreBlockedReason = "materialization_failed";
+      await this.persistSurfaceTargetState(surface, "target apply response mismatch");
+      return evidence;
     }
-    pane.buffer.currentUrl = browserUrlPayload?.url ?? null;
-    this.queuePersistScreenSnapshot("target restore");
-    return true;
+    const evidence: ApplyEvidence = {
+      appliedAt: payload.appliedAt,
+      errorCode: payload.errorCode,
+      materializedState: payload.materializedState,
+      message: payload.message,
+      requestId: payload.requestId,
+      status: payload.status,
+    };
+    target.lastApplyEvidence = evidence;
+    if (pane.currentTargetId !== target.targetId) {
+      await this.persistSurfaceTargetState(surface, "stale target apply response");
+      return evidence;
+    }
+    pane.lastRestoreBlockedReason = evidence.status === "applied" ? null : evidence.errorCode ?? "materialization_failed";
+    if (evidence.status === "applied") {
+      this.clearVisiblePaneContent(pane, pane.currentRevision);
+    }
+    await this.persistSurfaceTargetState(surface, "target apply response");
+    return evidence;
   }
 
   private allocatePaneId(): PaneId {
@@ -3229,13 +4038,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private allocatePaneLabel(): number {
     const paneLabel = this.persistentState.nextPaneLabel;
     this.persistentState.nextPaneLabel += 1;
+    this.persistPaneLabelState("next pane label");
+    return paneLabel;
+  }
+
+  private persistPaneLabelState(reason: string): void {
     this.runBackgroundTask(
-      "persist next pane label",
+      `persist ${reason}`,
       async () => {
         await this.persistState();
       },
     );
-    return paneLabel;
+  }
+
+  private applyPairPaneLabel(surface: ManagedSurface, pane: ManagedPane, paneLabel: number): boolean {
+    if (!Number.isInteger(paneLabel) || paneLabel <= 0) {
+      return false;
+    }
+    const previousPaneLabel = pane.paneLabel;
+    pane.paneLabel = paneLabel;
+    if (paneLabel >= this.persistentState.nextPaneLabel) {
+      this.persistentState.nextPaneLabel = paneLabel + 1;
+    }
+    const key = paneLabelStorageKey(surface.surfaceId, pane.remotePaneId);
+    const previousPersistedLabel = this.persistentState.paneLabelsByPaneId[key];
+    this.persistentState.paneLabelsByPaneId[key] = paneLabel;
+    return previousPaneLabel !== paneLabel || previousPersistedLabel !== paneLabel;
   }
 
   private ensurePaneLabel(
@@ -3314,10 +4142,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           nextRemotePaneId: parsed.nextRemotePaneId ?? (parsed as { nextPaneId?: number }).nextPaneId ?? 1,
           nextPaneLabel: parsed.nextPaneLabel ?? 1,
           nextWindowLabelIndex: parsed.nextWindowLabelIndex,
-          targetRegistrationAcks: parsed.targetRegistrationAcks ?? {},
-          paneTargetRecords: parsed.paneTargetRecords ?? {},
           paneLabelsByPaneId: parsed.paneLabelsByPaneId ?? {},
           providerId: parsed.providerId,
+          targetStateBySurfaceId: parsed.targetStateBySurfaceId ?? {},
           version: 1,
           windowLabels: parsed.windowLabels ?? {},
         };
@@ -3355,26 +4182,37 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private buildScreenSummary(surface: ManagedSurface): SurfAceScreenSummary {
+    const paneRects = surface.layout ? managedPaneRects(surface) : new Map<PaneId, Rect>();
+    const connectionState =
+      surface.connectionState === "connected" && !(surface.client?.isOpen() ?? false)
+        ? surface.autoRetryEnabled ? "connecting" : "unreachable"
+        : surface.connectionState;
     return {
-      connectionState: surface.connectionState,
+      connectionState,
       fingerprint: surface.surfaceId,
       lastSeenAt: surface.lastSeenAt,
       name: surface.name,
       panes: this.orderedPanes(surface)
-        .map((pane) => ({
-          activeContent: pane.activeContentId && pane.contentType
-            ? {
-                contentId: pane.activeContentId,
-                contentType: pane.contentType,
-                revision: pane.currentRevision,
-              }
-            : null,
-          currentTarget: paneTargetState(pane.targetRecord),
-          historySummary: structuredClone(pane.historySummary),
-          name: pane.name,
-          paneId: pane.paneId,
-          paneLabel: pane.paneLabel,
-        })),
+        .map((pane) => {
+          const rect = paneRects.get(pane.paneId);
+          return {
+            activeContent: pane.activeContentId && pane.contentType
+              ? {
+                  contentId: pane.activeContentId,
+                  contentType: pane.contentType,
+                  revision: pane.currentRevision,
+                }
+              : null,
+            historySummary: structuredClone(pane.historySummary),
+            name: pane.name,
+            paneId: pane.paneId,
+            paneLabel: pane.paneLabel,
+            target: this.paneTargetDiagnostic(surface, pane),
+            viewport: rect
+              ? { height: rect.height, scale: surface.viewport.scale, width: rect.width }
+              : cloneViewport(pane.viewport),
+          };
+        }),
       pendingEvents: this.pendingEventCount(surface),
       viewport: cloneViewport(surface.viewport),
       windowLabel: surface.windowLabel,
@@ -3400,28 +4238,227 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.stateWrite;
   }
 
+  private captureSurfaceTargetState(surface: ManagedSurface): void {
+    this.persistentState.targetStateBySurfaceId ??= {};
+    const retainedTargetIds = new Set<string>();
+    for (const target of surface.targetRecords.values()) {
+      if (target.currentState === "current") {
+        retainedTargetIds.add(target.targetId);
+      }
+    }
+    for (const pane of surface.panes.values()) {
+      if (pane.currentTargetId) {
+        retainedTargetIds.add(pane.currentTargetId);
+      }
+      if (pane.staleTargetId) {
+        retainedTargetIds.add(pane.staleTargetId);
+      }
+      for (const entry of pane.historyEntries) {
+        if (entry.targetId) {
+          retainedTargetIds.add(entry.targetId);
+        }
+      }
+    }
+    for (const targetId of surface.registeredTargetIdsByIdempotencyKey.values()) {
+      retainedTargetIds.add(targetId);
+    }
+    this.persistentState.targetStateBySurfaceId[surface.surfaceId] = {
+      ownershipEpoch: surface.ownershipEpoch,
+      paneTargets: Object.fromEntries(
+        [...surface.panes.values()].map((pane) => [
+          pane.paneLineageId,
+          {
+            currentTargetId: pane.currentTargetId,
+            diagnosticContent: pane.diagnosticContent ? structuredClone(pane.diagnosticContent) : null,
+            lastRestoreBlockedReason: pane.lastRestoreBlockedReason,
+            nonDurableTargetDiagnostic: pane.nonDurableTargetDiagnostic
+              ? structuredClone(pane.nonDurableTargetDiagnostic)
+              : null,
+            paneLineageId: pane.paneLineageId,
+            targetEpoch: pane.targetEpoch,
+          },
+        ]),
+      ),
+      registeredTargetIdsByIdempotencyKey: Object.fromEntries(surface.registeredTargetIdsByIdempotencyKey),
+      targetRecords: [...surface.targetRecords.values()]
+        .filter((record) => retainedTargetIds.has(record.targetId))
+        .map((record) => structuredClone(record)),
+    };
+  }
+
+  private async persistSurfaceTargetState(surface: ManagedSurface, reason: string): Promise<void> {
+    this.captureSurfaceTargetState(surface);
+    await this.persistState();
+    this.queuePersistScreenSnapshot(`target state (${reason})`);
+  }
+
+  private async persistSurfaceTargetStateImmediately(surface: ManagedSurface, reason: string): Promise<void> {
+    this.captureSurfaceTargetState(surface);
+    await this.persistState();
+    this.queuePersistScreenSnapshot(`target state (${reason})`);
+  }
+
+  private hydrateSurfaceTargetState(surface: ManagedSurface, resumed: boolean): void {
+    const persisted = this.persistentState.targetStateBySurfaceId?.[surface.surfaceId];
+    if (!persisted) {
+      return;
+    }
+    if (typeof persisted.ownershipEpoch === "number") {
+      surface.ownershipEpoch = Math.max(
+        surface.ownershipEpoch,
+        resumed ? persisted.ownershipEpoch : persisted.ownershipEpoch + 1,
+      );
+    }
+    surface.targetRecords = new Map(
+      persisted.targetRecords.map((record) => [record.targetId, structuredClone(record)]),
+    );
+    surface.registeredTargetIdsByIdempotencyKey = new Map(
+      Object.entries(persisted.registeredTargetIdsByIdempotencyKey ?? {}),
+    );
+    for (const pane of surface.panes.values()) {
+      const paneTarget = persisted.paneTargets[pane.paneLineageId];
+      if (!paneTarget) {
+        pane.currentTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        pane.nonDurableTargetDiagnostic = null;
+        pane.staleTargetId = null;
+        pane.targetEpoch = 0;
+        const currentTargets = persisted.targetRecords
+          .filter((record) => record.currentState === "current")
+          .sort((left, right) => right.targetEpoch - left.targetEpoch);
+        const staleTarget = currentTargets.find((record) => record.paneLabelAtApply === pane.paneLabel) ??
+          currentTargets.find((record) => record.paneIdAtApply === pane.paneId) ??
+          (currentTargets.length === 1 ? currentTargets[0] : undefined);
+        if (staleTarget) {
+          pane.staleTargetId = staleTarget.targetId;
+          pane.lastRestoreBlockedReason = "restore_blocked_stale_target";
+        }
+        continue;
+      }
+      pane.currentTargetId = paneTarget.currentTargetId;
+      pane.staleTargetId = null;
+      pane.diagnosticContent = paneTarget.diagnosticContent ? structuredClone(paneTarget.diagnosticContent) : null;
+      pane.lastRestoreBlockedReason = paneTarget.lastRestoreBlockedReason;
+      pane.nonDurableTargetDiagnostic = paneTarget.nonDurableTargetDiagnostic
+        ? structuredClone(paneTarget.nonDurableTargetDiagnostic)
+        : null;
+      pane.targetEpoch = paneTarget.targetEpoch;
+    }
+  }
+
+  private renamePersistedSurfaceTargetState(previousSurfaceId: string, nextSurfaceId: string): void {
+    if (previousSurfaceId === nextSurfaceId) {
+      return;
+    }
+    const targetStateBySurfaceId = this.persistentState.targetStateBySurfaceId;
+    const persisted = targetStateBySurfaceId?.[previousSurfaceId];
+    if (!targetStateBySurfaceId || !persisted || targetStateBySurfaceId[nextSurfaceId]) {
+      return;
+    }
+    targetStateBySurfaceId[nextSurfaceId] = persisted;
+    delete targetStateBySurfaceId[previousSurfaceId];
+  }
+
   private async loadPersistedScreenSnapshot(): Promise<SurfAceScreenSummary[]> {
+    return (await this.loadPersistedScreenSnapshotFile())?.screens ?? [];
+  }
+
+  private async loadPersistedScreenSnapshotFile(): Promise<PersistedScreenSnapshotFile | null> {
     const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
     try {
       const raw = await fs.readFile(snapshotPath, "utf8");
       const parsed = JSON.parse(raw) as PersistedScreenSnapshotFile;
       if (parsed.version !== 1 || !Array.isArray(parsed.screens)) {
-        return [];
+        return null;
       }
       const ageMs = this.now() - (parsed.updatedAt ?? 0);
-      if (ageMs > LEASE_STALE_THRESHOLD_MS) {
-        return [];
+      if (ageMs > RESTART_SNAPSHOT_MAX_AGE_MS) {
+        return null;
       }
-      return parsed.screens.map((screen) => ({
-        ...screen,
-        panes: screen.panes.map((pane) => ({
-          ...pane,
-          paneId: migratePersistedPaneId(screen.fingerprint, pane.paneId, pane.paneLabel),
+      return {
+        ...parsed,
+        screens: parsed.screens.map((screen) => ({
+          ...screen,
+          panes: screen.panes.map((pane) => ({
+            ...pane,
+            paneId: migratePersistedPaneId(screen.fingerprint, pane.paneId, pane.paneLabel),
+            target: pane.target ?? null,
+          })),
         })),
-      }));
+      };
     } catch {
-      return [];
+      return null;
     }
+  }
+
+  private async loadRestartSnapshots(): Promise<void> {
+    const snapshotFile = await this.loadPersistedScreenSnapshotFile();
+    const screens = snapshotFile?.screens ?? [];
+    this.restartSnapshots = new Map(
+      screens
+        .filter((screen) =>
+          screen._debug?.hasPairedInGatewaySession === true &&
+          typeof screen._debug.sessionId === "string" &&
+          screen._debug.sessionId.length > 0
+        )
+        .map((screen) => [screen.fingerprint, screen]),
+    );
+    this.restartContentBySurface = new Map(Object.entries(snapshotFile?.contentContinuity ?? {}));
+  }
+
+  private restoreRestartOwnership(surface: ManagedSurface): void {
+    if (surface.hasPairedInGatewaySession || surface.sessionId) {
+      return;
+    }
+    const snapshot = this.restartSnapshots.get(surface.surfaceId);
+    const sessionId = snapshot?._debug?.sessionId;
+    if (
+      !snapshot ||
+      snapshot._debug?.hasPairedInGatewaySession !== true ||
+      typeof sessionId !== "string" ||
+      sessionId.length === 0
+    ) {
+      return;
+    }
+    surface.hasPairedInGatewaySession = true;
+    surface.sessionId = asSessionId(sessionId);
+    if (!surface.windowLabel && snapshot.windowLabel) {
+      surface.windowLabel = snapshot.windowLabel;
+    }
+    this.restartSnapshots.delete(surface.surfaceId);
+    this.logger.info?.(
+      runtimeDiagnostic("restart_ownership_restored", {
+        session_id: sessionId,
+        surface_id: surface.surfaceId,
+      }),
+    );
+  }
+
+  private restoreRestartContent(surface: ManagedSurface): void {
+    const entries = this.restartContentBySurface.get(surface.surfaceId);
+    if (!entries || entries.length === 0) {
+      return;
+    }
+
+    const panes = this.orderedPanes(surface);
+    for (const entry of entries) {
+      const pane =
+        panes.find((candidate) => candidate.paneLabel === entry.paneLabel) ??
+        (panes.length === 1 && entries.length === 1 ? panes[0] : null);
+      if (!pane) {
+        continue;
+      }
+      this.applyVisibleEntry(surface, pane, {
+        contentId: entry.contentId as ContentId,
+        contentType: entry.contentType,
+        contentValue: normalizeContent(entry.contentType, entry.contentValue),
+        historyOwnerToken: entry.historyOwnerToken,
+        revision: entry.revision as Revision,
+        sessionKey: entry.sessionKey,
+        targetId: null,
+      });
+    }
+    this.restartContentBySurface.delete(surface.surfaceId);
   }
 
   private queuePersistScreenSnapshot(reason: string): void {
@@ -3442,6 +4479,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
     const payload: PersistedScreenSnapshotFile = {
+      contentContinuity: this.buildContentContinuitySnapshot(),
       screens: this.buildScreenSummaries(),
       updatedAt: this.now(),
       version: 1,
@@ -3454,8 +4492,193 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.screenSnapshotWrite;
   }
 
+  private buildContentContinuitySnapshot(): Record<string, PersistedRestartContentEntry[]> {
+    const contentContinuity: Record<string, PersistedRestartContentEntry[]> = {};
+    for (const surface of this.surfaces.values()) {
+      const entries = this.orderedPanes(surface)
+        .map((pane): PersistedRestartContentEntry | null => {
+          const entry = this.visibleHistoryEntry(pane);
+          if (!entry) {
+            return null;
+          }
+          return {
+            contentId: entry.contentId,
+            contentType: entry.contentType,
+            contentValue: denormalizeContent(entry.contentType, entry.contentValue),
+            historyOwnerToken: entry.historyOwnerToken,
+            paneLabel: pane.paneLabel,
+            revision: entry.revision,
+            sessionKey: entry.sessionKey,
+          };
+        })
+        .filter((entry): entry is PersistedRestartContentEntry => entry !== null);
+      if (entries.length > 0) {
+        contentContinuity[surface.surfaceId] = entries;
+      }
+    }
+    return contentContinuity;
+  }
+
   private providerId(): ProviderId {
     return makeProviderId(this.persistentState.providerId);
+  }
+
+  private async forwardToRuntimeOwner<TResult>(command: OwnerControlCommand): Promise<TResult> {
+    const lease = await this.readRuntimeLease();
+    const controlPort = lease.controlPort;
+    if (typeof controlPort !== "number" || controlPort <= 0) {
+      throw new SurfAceToolError(
+        "internal_error",
+        "Surf Ace runtime owner is active but does not expose a tool control endpoint.",
+      );
+    }
+
+    let response: globalThis.Response;
+    try {
+      response = await fetch(`http://127.0.0.1:${controlPort}${OWNER_CONTROL_PATH}`, {
+        body: JSON.stringify(command),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+    } catch (error) {
+      throw new SurfAceToolError(
+        "internal_error",
+        `Surf Ace runtime owner control request failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const payload = await response.json().catch(() => null) as
+      | { error?: { code?: SurfAceToolError["code"]; message?: string }; ok?: boolean; result?: TResult }
+      | null;
+    if (!response.ok || payload?.ok !== true) {
+      const code = payload?.error?.code ?? "internal_error";
+      const message = payload?.error?.message ?? "Surf Ace runtime owner control request failed.";
+      throw new SurfAceToolError(code, message);
+    }
+    return payload.result as TResult;
+  }
+
+  private async startOwnerControlServer(): Promise<void> {
+    if (this.ownerControlServer) {
+      return;
+    }
+
+    const server = createServer((request, response) => {
+      void this.handleOwnerControlRequest(request, response);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(0, "127.0.0.1");
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      server.close();
+      throw new SurfAceToolError("internal_error", "Surf Ace runtime owner control endpoint failed to bind.");
+    }
+    server.unref();
+    this.ownerControlServer = server;
+    this.ownerControlPort = address.port;
+  }
+
+  private async stopOwnerControlServer(): Promise<void> {
+    const server = this.ownerControlServer;
+    this.ownerControlServer = null;
+    this.ownerControlPort = null;
+    if (!server) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  }
+
+  private async handleOwnerControlRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    if (request.method !== "POST" || request.url !== OWNER_CONTROL_PATH) {
+      this.writeOwnerControlResponse(response, 404, {
+        error: { code: "invalid_operation", message: "Unknown Surf Ace runtime owner control route." },
+        ok: false,
+      });
+      return;
+    }
+
+    try {
+      const command = await this.readOwnerControlCommand(request);
+      const result = await this.executeOwnerControlCommand(command);
+      this.writeOwnerControlResponse(response, 200, { ok: true, result });
+    } catch (error) {
+      const code = error instanceof SurfAceToolError ? error.code : "internal_error";
+      const message = error instanceof Error ? error.message : String(error);
+      this.writeOwnerControlResponse(response, 500, {
+        error: { code, message },
+        ok: false,
+      });
+    }
+  }
+
+  private async readOwnerControlCommand(request: IncomingMessage): Promise<OwnerControlCommand> {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > OWNER_CONTROL_MAX_BODY_BYTES) {
+        throw new SurfAceToolError("content_too_large", "Surf Ace runtime owner control request is too large.");
+      }
+      chunks.push(buffer);
+    }
+    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as OwnerControlCommand;
+    return parsed;
+  }
+
+  private async executeOwnerControlCommand(command: OwnerControlCommand): Promise<unknown> {
+    switch (command.op) {
+      case "annotateRemove":
+        return await this.annotateRemove(command.input);
+      case "clear":
+        return await this.clear(command.input);
+      case "closePane":
+        return await this.closePane(command.input);
+      case "push":
+        return await this.push(command.input, command.context);
+      case "read":
+        return await this.read(command.input);
+      case "relinquish":
+        return await this.relinquish(command.input);
+      case "snapshot":
+        return await this.snapshot(command.input);
+      case "split":
+        return await this.split(command.input);
+    }
+  }
+
+  private writeOwnerControlResponse(
+    response: ServerResponse,
+    statusCode: number,
+    payload: Record<string, unknown>,
+  ): void {
+    response.writeHead(statusCode, { "content-type": "application/json" });
+    response.end(JSON.stringify(payload));
+  }
+
+  private async readRuntimeLease(): Promise<RuntimeLeaseFile> {
+    const leasePath = path.join(this.stateDir, RUNTIME_LEASE_FILE_NAME);
+    try {
+      return JSON.parse(await fs.readFile(leasePath, "utf8")) as RuntimeLeaseFile;
+    } catch {
+      return {};
+    }
   }
 
   private async acquireRuntimeLease(): Promise<boolean> {
@@ -3484,6 +4707,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private async writeLeaseContent(handle: FileHandle): Promise<void> {
     const content = JSON.stringify(
       {
+        controlPort: this.ownerControlPort,
         pid: process.pid,
         startedAt: this.now(),
         lastActiveAt: this.now(),
@@ -3493,6 +4717,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
     await handle.truncate(0);
     await handle.write(content, 0, "utf8");
+  }
+
+  private async refreshRuntimeLease(): Promise<void> {
+    const handle = this.runtimeLease;
+    if (!handle) {
+      return;
+    }
+    await this.writeLeaseContent(handle);
   }
 
   private startLeaseHeartbeat(): void {
@@ -3533,7 +4765,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     let ownerPid: number | null = null;
     let lastActiveAt: number | null = null;
     try {
-      const parsed = JSON.parse(contents) as { pid?: number; lastActiveAt?: number };
+      const parsed = JSON.parse(contents) as RuntimeLeaseFile;
       ownerPid = typeof parsed.pid === "number" ? parsed.pid : null;
       lastActiveAt = typeof parsed.lastActiveAt === "number" ? parsed.lastActiveAt : null;
     } catch {
@@ -3578,6 +4810,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async releaseRuntimeLease(): Promise<void> {
     this.stopLeaseHeartbeat();
+    await this.stopOwnerControlServer();
     const lease = this.runtimeLease;
     this.runtimeLease = null;
     this.ownsRuntimeLease = false;
@@ -3648,9 +4881,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         surface_name: endpoint.name,
       }),
     );
-    const existing = this.reusableSurface(
-      [...this.surfaces.values()].find((s) => s.endpointId === endpoint.endpointId),
+    const existingByEndpoint = this.reusableSurfacesMatching((surface) =>
+      surface.endpointId === endpoint.endpointId
     );
+
+    if (existingByEndpoint.length > 1) {
+      for (const surface of existingByEndpoint) {
+        this.assignEndpoint(surface, endpoint, { preserveLiveAlias: false });
+        this.ensureSurfaceWorker(surface);
+      }
+      return;
+    }
+
+    const existing = existingByEndpoint[0];
 
     if (existing) {
       this.logger.info?.(
@@ -3665,27 +4908,45 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    const existingByFingerprint = this.reusableSurface(
-      endpoint.fingerprintPrefix
-        ? [...this.surfaces.values()].find((s) => s.fingerprintPrefix === endpoint.fingerprintPrefix)
-        : undefined,
-    );
+    const existingByFingerprint = endpoint.fingerprintPrefix
+      ? this.reusableSurfacesMatching((surface) => surface.fingerprintPrefix === endpoint.fingerprintPrefix)
+      : [];
 
-    if (existingByFingerprint) {
+    if (existingByFingerprint.length > 1) {
+      for (const surface of existingByFingerprint) {
+        this.assignEndpoint(surface, endpoint, { preserveLiveAlias: false });
+        this.ensureSurfaceWorker(surface);
+      }
+      return;
+    }
+
+    const existingFingerprintSurface = existingByFingerprint[0];
+
+    if (existingFingerprintSurface) {
       this.logger.info?.(
         runtimeDiagnostic("endpoint_adopt", {
           action: "reuse_by_fingerprint",
           endpoint_id: endpoint.endpointId,
           fingerprint: endpoint.fingerprintPrefix || "none",
-          surface_id: existingByFingerprint.surfaceId,
+          surface_id: existingFingerprintSurface.surfaceId,
         }),
       );
-      this.assignEndpoint(existingByFingerprint, endpoint);
-      this.ensureSurfaceWorker(existingByFingerprint);
+      this.assignEndpoint(existingFingerprintSurface, endpoint);
+      this.ensureSurfaceWorker(existingFingerprintSurface);
       return;
     }
 
-    const surfaceId = makeProvisionalSurfaceId(endpoint.endpointId);
+    const stoppedCandidate = [...this.surfaces.values()].find(
+      (surface) =>
+        surface.stopRequested &&
+        (surface.endpointId === endpoint.endpointId ||
+          (Boolean(endpoint.fingerprintPrefix) &&
+            surface.fingerprintPrefix === endpoint.fingerprintPrefix)),
+    );
+    if (stoppedCandidate) {
+      this.surfaces.delete(stoppedCandidate.surfaceId);
+    }
+    const surfaceId = stoppedCandidate?.surfaceId ?? makeProvisionalSurfaceId(endpoint.endpointId);
     this.logger.info?.(
       runtimeDiagnostic("endpoint_adopt", {
         action: "create_surface",
@@ -3714,13 +4975,60 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!surface.stopRequested) {
       return surface;
     }
-    this.surfaces.delete(surface.surfaceId);
     return undefined;
   }
 
-  private assignEndpoint(surface: ManagedSurface, endpoint: SurfAceDiscoveryEndpoint): void {
+  private reusableSurfacesMatching(predicate: (surface: ManagedSurface) => boolean): ManagedSurface[] {
+    const surfaces: ManagedSurface[] = [];
+    for (const surface of [...this.surfaces.values()]) {
+      if (!predicate(surface)) {
+        continue;
+      }
+      const reusable = this.reusableSurface(surface);
+      if (reusable) {
+        surfaces.push(reusable);
+      }
+    }
+    return surfaces;
+  }
+
+  private assignEndpoint(
+    surface: ManagedSurface,
+    endpoint: SurfAceDiscoveryEndpoint,
+    options: { preserveLiveAlias?: boolean } = {},
+  ): void {
     const previousEndpointId = surface.endpointId;
     const endpointChanged = previousEndpointId !== endpoint.endpointId;
+    const endpointUrlChanged = buildWsUrl(surface.endpoint) !== buildWsUrl(endpoint);
+    const sameFingerprint =
+      Boolean(endpoint.fingerprintPrefix) &&
+      endpoint.fingerprintPrefix === surface.fingerprintPrefix;
+    if (
+      endpointChanged &&
+      endpointUrlChanged &&
+      sameFingerprint &&
+      (options.preserveLiveAlias ?? true) &&
+      surface.hasPairedInGatewaySession &&
+      surface.client?.isOpen()
+    ) {
+      surface.lastSeenAt = this.now();
+      surface.name = endpoint.name;
+      surface.viewport = cloneViewport(endpoint.viewport);
+      this.logger.info?.(
+        runtimeDiagnostic("endpoint_alias_observed", {
+          fingerprint: endpoint.fingerprintPrefix || "none",
+          observed_endpoint_id: endpoint.endpointId,
+          retained_endpoint_id: previousEndpointId,
+          surface_id: surface.surfaceId,
+        }),
+      );
+      return;
+    }
+    if (endpointChanged && endpointUrlChanged) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] refreshed stale endpoint for ${surface.surfaceId}: ${previousEndpointId} -> ${endpoint.endpointId}`,
+      );
+    }
     surface.endpoint = endpoint;
     surface.endpointId = endpoint.endpointId;
     surface.fingerprintPrefix = endpoint.fingerprintPrefix;
@@ -3742,19 +5050,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     surface.reconnectAttempt = 0;
     surface.unreachableFailures = 0;
-    if (surface.connectionState !== "connected") {
-      surface.connectionState = "connecting";
-    }
-    if (surface.connectionState !== "connected") {
-      this.runBackgroundTask(
-        `refresh surface client after endpoint change ${surface.surfaceId}`,
-        async () => {
-          if (surface.client) {
-            await this.closeSurfaceClient(surface, surface.client, clampCloseReason("provider_shutdown"));
-          }
-        },
-      );
-    }
+    surface.connectionState = "connecting";
+    this.runBackgroundTask(
+      `refresh surface client after endpoint change ${surface.surfaceId}`,
+      async () => {
+        if (surface.client) {
+          await this.closeSurfaceClient(surface, surface.client, clampCloseReason("provider_shutdown"));
+        }
+      },
+    );
     this.wakeSurfaceRetry(surface);
 
   }
@@ -3790,16 +5094,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return [];
     }
 
-    const matchedRemoteSurface =
-      remoteSurfaces.find((remoteSurface) => remoteSurface.surfaceId === surface.surfaceId) ??
-      remoteSurfaces[0];
-    const matchedRemoteSurfaceId = asSurfaceId(matchedRemoteSurface.surfaceId);
+    const matchedRemoteSurface = remoteSurfaces.find((remoteSurface) => remoteSurface.surfaceId === surface.surfaceId);
+    if (matchedRemoteSurface) {
+      const matchedRemoteSurfaceId = asSurfaceId(matchedRemoteSurface.surfaceId);
+      this.adoptCanonicalSurfaceId(surface, matchedRemoteSurfaceId, "surfaces.list");
 
-    this.adoptCanonicalSurfaceId(surface, matchedRemoteSurfaceId, "surfaces.list");
+      surface.lastSeenAt = this.now();
+      surface.name = matchedRemoteSurface.name;
+      surface.viewport = cloneViewport(matchedRemoteSurface.viewport);
+    } else if (isProvisionalSurfaceId(surface.surfaceId)) {
+      const canonicalRemoteSurface = remoteSurfaces[0]!;
+      const canonicalRemoteSurfaceId = asSurfaceId(canonicalRemoteSurface.surfaceId);
+      this.adoptCanonicalSurfaceId(surface, canonicalRemoteSurfaceId, "surfaces.list");
 
-    surface.lastSeenAt = this.now();
-    surface.name = matchedRemoteSurface.name;
-    surface.viewport = cloneViewport(matchedRemoteSurface.viewport);
+      surface.lastSeenAt = this.now();
+      surface.name = canonicalRemoteSurface.name;
+      surface.viewport = cloneViewport(canonicalRemoteSurface.viewport);
+    }
 
     const siblingsToStart: ManagedSurface[] = [];
     for (const remoteSurface of remoteSurfaces) {
@@ -3905,11 +5216,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         sendPairRequest,
       );
       if (isResumeSessionMismatch(response)) {
-        this.logger.warn?.(
-          `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; retrying fresh owner pair`,
-        );
-        surface.sessionId = null;
-        response = await sendPairRequest(false, null);
+        if (!surface.hasPairedInGatewaySession) {
+          this.logger.warn?.(
+            `[surf-ace:runtime] resume session mismatch for ${surface.surfaceId}; retrying fresh owner pair`,
+          );
+          surface.sessionId = null;
+          response = await sendPairRequest(false, null);
+        }
       }
     }
 
@@ -3934,11 +5247,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (isErrorResponse(response)) {
       if (isOwnershipLockResponse(response)) {
         const ownershipLockCode = response.error.code === "busy" ? "busy" : "invalid_resume";
-        const shouldRotateIdentity = this.noteOwnershipLockFailure(surface, ownershipLockCode);
-        if (shouldRotateIdentity) {
-          await this.rotateProviderIdentityForOwnershipLock(surface, ownershipLockCode);
-          response = await sendPairRequest(false, null);
-        }
+        this.noteOwnershipLockFailure(surface, ownershipLockCode);
       } else {
         surface.consecutiveOwnershipLockFailures = 0;
       }
@@ -4067,7 +5376,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 );
               }
             },
-            onRequest: async (request) => this.handleWireRequest(surface, request),
           });
 
           await this.assignSurfaceClient(surface, client);
@@ -4099,11 +5407,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             asSurfaceId(pairResponse.payload.surfaceId),
             "pair.response",
           );
-          this.markPairConnected(
-            surface,
-            asSessionId(pairResponse.payload.sessionId),
-            pairResponse.payload.ownershipEpoch,
-          );
+          this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId), pairResponse.payload.resumed);
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
               panes: pairResponse.payload.state.panes.length,
@@ -4113,12 +5417,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             }),
           );
           surface.unreachableFailures = 0;
-          this.applyPairState(surface, pairResponse);
-          await this.pushTopology(surface);
+          const shouldRestoreProviderTopology =
+            surface.topologyRevision > 0 ||
+            surface.panes.size > pairResponse.payload.state.panes.length;
+          this.applyPairState(surface, pairResponse, {
+            pruneStalePanes: !shouldRestoreProviderTopology,
+          });
+          this.restoreRestartContent(surface);
+          if (shouldRestoreProviderTopology) {
+            await this.pushTopology(surface);
+          }
           await this.repushSurfaceContent(surface);
           this.startHeartbeat(surface);
           await this.syncSurfaceSnapshots(surface, true);
           surface.connectionState = "connected";
+          this.queuePersistScreenSnapshot("connection ready");
           for (const siblingSurface of siblingSurfaces) {
             this.ensureSurfaceWorker(siblingSurface);
           }
@@ -4135,7 +5448,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             error instanceof SurfAceToolError &&
             (error.code === "busy" || error.message.toLowerCase().includes("ownership lock") || error.message.toLowerCase().includes("resume"))
           ) {
-            if (surface.sessionId !== null) {
+            if (surface.sessionId !== null && !surface.hasPairedInGatewaySession) {
               this.logger.warn?.(
                 runtimeDiagnostic("resume_state_cleared", {
                   reason: "ownership_lock_or_resume_mismatch",
@@ -4185,19 +5498,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async waitForSurfaceRetry(surface: ManagedSurface, delayMs: number): Promise<void> {
-    await Promise.race([
-      sleep(delayMs),
-      new Promise<void>((resolve) => {
-        const wake = () => {
-          if (surface.retryDelayResolver === wake) {
-            surface.retryDelayResolver = null;
-          }
-          resolve();
-        };
-        surface.retryDelayResolver = wake;
-      }),
-    ]);
-    surface.retryDelayResolver = null;
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        if (surface.retryDelayResolver === finish) {
+          surface.retryDelayResolver = null;
+        }
+        resolve();
+      };
+      const timeout = setTimeout(finish, delayMs);
+      surface.retryDelayResolver = finish;
+    });
   }
 
   private wakeSurfaceRetry(surface: ManagedSurface): void {
@@ -4236,6 +5552,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
+    const previousEndpointId = surface.endpointId;
     try {
       await this.discovery.refreshNow();
     } catch (refreshError) {
@@ -4249,6 +5566,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       (endpoint) => endpoint.fingerprintPrefix === surface.fingerprintPrefix,
     );
     if (!replacement || replacement.endpointId === surface.endpointId) {
+      if (replacement && replacement.endpointId !== previousEndpointId) {
+        this.logger.warn?.(
+          `[surf-ace:runtime] refreshed stale endpoint for ${surface.surfaceId}: ${previousEndpointId} -> ${replacement.endpointId}`,
+        );
+      }
       return;
     }
 
@@ -4371,8 +5693,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     surface.snapshotSyncInFlight = true;
     try {
+      await this.syncRemotePaneList(surface);
       const panes = this.layoutPanes(surface);
       for (const pane of panes) {
+        if (!isBoundRemotePaneId(pane.remotePaneId)) {
+          continue;
+        }
         await this.syncPaneSnapshot(surface, pane);
       }
     } catch (error) {
@@ -4387,6 +5713,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       for (const event of buffered) {
         this.handleWireEvent(surface, event);
       }
+    }
+  }
+
+  private async syncRemotePaneList(surface: ManagedSurface): Promise<void> {
+    if (!this.canSendRequests(surface)) {
+      return;
+    }
+
+    let response: Response;
+    try {
+      response = await this.sendRequest(surface, this.requestEnvelope("panes.list"));
+    } catch (error) {
+      if (error instanceof SurfAceToolError && error.code === "not_connected") {
+        return;
+      }
+      throw error;
+    }
+    if (isErrorResponse(response)) {
+      return;
+    }
+
+    for (const paneState of (response as PanesListResponse).payload.panes) {
+      const pane = this.ensurePane(surface, paneState.paneId);
+      pane.name = paneState.name;
+      pane.paneLabel = this.ensurePaneLabel(surface, pane, paneState.paneId);
+      pane.viewport = cloneViewport(paneState.viewport);
     }
   }
 
@@ -4452,14 +5804,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private markPairConnected(surface: ManagedSurface, sessionId: SessionId, ownershipEpoch: number): void {
+  private markPairConnected(surface: ManagedSurface, sessionId: SessionId, resumed: boolean): void {
     surface.consecutiveResumeFailures = 0;
     surface.consecutiveOwnershipLockFailures = 0;
     surface.connectedAt = this.now();
     surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
+    if (!resumed || surface.sessionId !== sessionId) {
+      surface.ownershipEpoch += 1;
+    }
     surface.sessionId = sessionId;
-    surface.ownershipEpoch = ownershipEpoch;
     this.queuePersistScreenSnapshot("pair connected");
   }
 
@@ -4487,37 +5841,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private noteOwnershipLockFailure(
     surface: ManagedSurface,
     code: "busy" | "invalid_resume",
-  ): boolean {
+  ): void {
     surface.consecutiveOwnershipLockFailures += 1;
     if (
       surface.consecutiveOwnershipLockFailures <
       MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES
     ) {
-      return false;
+      return;
     }
     this.logger.warn?.(
-      `[surf-ace:runtime] ${code} persisted for ${surface.surfaceId} with provider ${this.persistentState.providerId}; rotating provider identity`,
+      `[surf-ace:runtime] ${code} persisted for ${surface.surfaceId} with provider ${this.persistentState.providerId}; preserving ownership identity`,
     );
-    return true;
   }
 
   private clearSurfaceResumeState(surface: ManagedSurface): void {
     surface.sessionId = null;
     surface.hasPairedInGatewaySession = false;
     surface.consecutiveResumeFailures = 0;
-  }
-
-  private async rotateProviderIdentityForOwnershipLock(
-    surface: ManagedSurface,
-    code: "busy" | "invalid_resume",
-  ): Promise<void> {
-    this.persistentState.providerId = `pv_${randomUUID().replaceAll("-", "")}`;
-    surface.consecutiveOwnershipLockFailures = 0;
-    this.clearSurfaceResumeState(surface);
-    await this.persistState();
-    this.logger.warn?.(
-      `[surf-ace:runtime] rotated provider identity after repeated ${code} for ${surface.surfaceId}`,
-    );
   }
 
   private shouldAttemptResume(surface: ManagedSurface): boolean {
@@ -4537,43 +5877,137 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       });
   }
 
-  private applyPairState(surface: ManagedSurface, response: PairResponse): void {
+  private applyPairState(
+    surface: ManagedSurface,
+    response: PairResponse,
+    options: { pruneStalePanes?: boolean } = {},
+  ): void {
     surface.name = response.payload.surfaceName;
-    surface.targetCapabilities = response.payload.capabilities.targetCapabilities ?? [];
     surface.viewport = cloneViewport(response.payload.viewport);
-    if (response.payload.state.panes.length === 1 && surface.panes.size === 1) {
-      const paneState = response.payload.state.panes[0]!;
-      const pane =
-        this.consumeBootstrapPaneForPairState(surface, paneState.paneId) ??
-        this.recoverSolePaneForTopologySync(surface, paneState.paneId, response.payload.state.panes.length);
-      if (pane) {
+    surface.targetCapabilities = this.targetCapabilitiesForPair(response);
+    this.applyPairPaneState(
+      surface,
+      response.payload.state.panes,
+      response.payload.resumed === true,
+      options,
+    );
+    this.hydrateSurfaceTargetState(surface, response.payload.resumed === true);
+    this.queuePersistScreenSnapshot("apply pair state");
+  }
+
+  private applyPairPaneState(
+    surface: ManagedSurface,
+    paneStates: PairResponse["payload"]["state"]["panes"],
+    sameSession: boolean,
+    options: { pruneStalePanes?: boolean } = {},
+  ): void {
+    const preserveExtensionTopology =
+      sameSession &&
+      surface.hasPairedInGatewaySession &&
+      surface.sessionId !== null &&
+      surface.topologyRevision > 0 &&
+      paneStates.length < surface.panes.size;
+    let paneLabelsChanged = false;
+    const shouldAdoptPairPaneLabels = paneStates.length > 1;
+    if (preserveExtensionTopology) {
+      for (const paneState of paneStates) {
+        const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+        if (!pane) {
+          continue;
+        }
+        if (shouldAdoptPairPaneLabels) {
+          paneLabelsChanged = this.applyPairPaneLabel(surface, pane, paneState.paneLabel) || paneLabelsChanged;
+        }
+        if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
+          pane.paneLineageId = paneState.paneLineageId;
+        }
         pane.viewport = cloneViewport(surface.viewport);
-        pane.paneLineageId = paneState.paneLineageId;
-        pane.targetRecord = this.loadCurrentTargetRecord(surface, pane.paneLineageId);
       }
+      if (paneLabelsChanged) {
+        this.persistPaneLabelState("apply preserved pair pane labels");
+      }
+      return;
     }
-    for (const paneState of response.payload.state.panes) {
-      const pane = this.findPaneByRemoteId(surface, paneState.paneId);
-      if (!pane) {
-        continue;
+    const nextPanes = new Map<PaneId, ManagedPane>();
+    for (const paneState of paneStates) {
+      const pane =
+        this.findPaneByRemoteId(surface, paneState.paneId) ??
+        this.consumeBootstrapPaneForPairState(surface, paneState.paneId) ??
+        this.recoverSolePaneForTopologySync(surface, paneState.paneId, paneStates.length) ??
+        this.ensurePane(surface, paneState.paneId);
+      if (shouldAdoptPairPaneLabels) {
+        paneLabelsChanged = this.applyPairPaneLabel(surface, pane, paneState.paneLabel) || paneLabelsChanged;
       }
-      pane.paneLineageId = paneState.paneLineageId;
-      pane.targetRecord = this.loadCurrentTargetRecord(surface, pane.paneLineageId);
+      if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
+        pane.paneLineageId = paneState.paneLineageId;
+      }
+      pane.viewport = cloneViewport(surface.viewport);
+      nextPanes.set(pane.paneId, pane);
+    }
+
+    if (!(options.pruneStalePanes ?? true)) {
+      if (paneLabelsChanged) {
+        this.persistPaneLabelState("apply pair pane labels");
+      }
+      this.queuePersistScreenSnapshot("apply pair state");
+      return;
+    }
+
+    surface.panes = nextPanes;
+    const paneIds = [...nextPanes.keys()];
+    if (paneIds.length === 0) {
+      surface.layout = null;
+    } else if (paneIds.length === 1) {
+      surface.layout = { paneId: paneIds[0]!, type: "pane" };
+    } else {
+      const preservedPaneIds = new Set(paneIds);
+      const preservedLayout = surface.layout ? this.filterLayoutToPanes(surface.layout, preservedPaneIds) : null;
+      surface.layout = preservedLayout ?? {
+        children: paneIds.map((paneId) => ({ paneId, type: "pane" as const })),
+        direction: "horizontal",
+        type: "split",
+      };
+    }
+    if (paneLabelsChanged) {
+      this.persistPaneLabelState("apply pair pane labels");
     }
     this.queuePersistScreenSnapshot("apply pair state");
   }
 
-  private loadCurrentTargetRecord(surface: ManagedSurface, paneLineageId: string | null): PaneTargetRecord | null {
-    if (!paneLineageId) {
+  private filterLayoutToPanes(
+    node: ManagedLayoutNode,
+    paneIds: Set<PaneId>,
+  ): ManagedLayoutNode | null {
+    if (node.type === "pane") {
+      return paneIds.has(node.paneId) ? node : null;
+    }
+    const children = node.children
+      .map((child) => this.filterLayoutToPanes(child, paneIds))
+      .filter((child): child is ManagedLayoutNode => child !== null);
+    if (children.length === 0) {
       return null;
     }
-    const record = Object.values(this.persistentState.paneTargetRecords ?? {})
-      .find((candidate) =>
-        candidate.surfaceId === surface.surfaceId &&
-        candidate.paneLineageId === paneLineageId &&
-        candidate.currentState === "current"
-      ) ?? null;
-    return record && record.currentState === "current" ? structuredClone(record) : null;
+    if (children.length === 1) {
+      return children[0]!;
+    }
+    return {
+      ...node,
+      children,
+    };
+  }
+
+  private targetCapabilitiesForPair(response: PairResponse): Set<string> {
+    const capabilities = new Set(response.payload.capabilities.targetCapabilities ?? []);
+    for (const contentType of response.payload.capabilities.contentTypes) {
+      const targetKind = contentTargetKind(contentType);
+      if (targetKind) {
+        capabilities.add(requiredCapabilityForTargetKind(targetKind));
+      }
+      if (contentType === "html") {
+        capabilities.add("target.web_snapshot.v1");
+      }
+    }
+    return capabilities;
   }
 
   private applySnapshot(
@@ -4590,7 +6024,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       cachedAt: this.now(),
       contentId: payload.contentId,
       contentType: payload.contentType,
-      currentTarget: payload.currentTarget,
       drawings: payload.drawings ? structuredClone(payload.drawings) : undefined,
       image: payload.image,
       revision: payload.revision,
@@ -4676,13 +6109,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private applyMutationResponse(
+  private async applyMutationResponse(
     surface: ManagedSurface,
     pane: ManagedPane,
     response: Response,
     request: ContentApplyRequest | ContentClearRequest | ContentSetRequest,
     sessionKey?: string,
-  ): SurfAcePushResult | SurfAceClearResult {
+    options: { diagnostic?: SurfAcePushInput["diagnostic"]; skipTargetRecord?: boolean } = {},
+  ): Promise<SurfAcePushResult | SurfAceClearResult> {
     if (isErrorResponse(response)) {
       pane.pendingOwnerSessionKey = null;
       throw new SurfAceToolError(
@@ -4722,10 +6156,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     if (isClearRequest) {
-      this.tombstoneCurrentTargetRecord(pane);
       this.clearVisiblePaneContent(pane, payload.currentRevision);
+      await this.tombstonePaneTarget(surface, pane);
     } else {
-      this.tombstoneCurrentTargetRecord(pane);
       if (contentChanged) {
         this.storeHiddenHistoryEntry(pane, previousVisibleEntry);
       }
@@ -4743,6 +6176,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         pane.snapshot.revision = payload.currentRevision;
       }
       pane.buffer.currentUrl = null;
+      if (options.diagnostic) {
+        await this.recordDiagnosticPaneContent(surface, pane, options.diagnostic);
+      } else if (!options.skipTargetRecord && setPayload) {
+        const targetKind = contentTargetKind(setPayload.contentType);
+        const targetHeader = passiveContentTargetHeader(setPayload.contentType, setPayload.content);
+        if (targetKind && targetHeader) {
+          await this.createPaneTargetRecord(surface, pane, {
+            targetHeader,
+            targetKind,
+            targetPayload: setPayload.content,
+          });
+          pane.diagnosticContent = null;
+          await this.persistSurfaceTargetState(surface, "diagnostic cleared by target record");
+        } else {
+          pane.diagnosticContent = null;
+          await this.tombstonePaneTarget(surface, pane);
+        }
+      }
     }
 
     pane.pendingOwnerSessionKey = null;

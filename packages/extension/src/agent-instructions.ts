@@ -1,7 +1,7 @@
 export function buildSurfAceAgentInstructions(): string {
   return [
     "Surf Ace is pane-scoped. Always call `surf_ace_list` first, resolve the intended `{ fingerprint, windowLabel, paneLabel }`, then use the returned internal `paneId` for subsequent pane-scoped calls.",
-    "Use `surf_ace_push` for full `content.set` replacements only.",
+    "Use `surf_ace_push` for full pane replacements; `contentType:\"browser_url\"` is a live URL target, not static HTML.",
     "Use `surf_ace_clear` to clear the currently visible content in a pane.",
     "Use `surf_ace_relinquish` to voluntarily release a surface lock; after that, the provider will not auto-reconnect until it is explicitly claimed again.",
     "Use `surf_ace_split` to split a specific pane into a larger provider-assigned pane topology.",
@@ -15,4 +15,10 @@ export function buildSurfAceAgentInstructions(): string {
     "If a different CLU session replaces visible content in a pane, the provider emits a local `event.content_superseded` for the displaced owner.",
     "Use `surf_ace_annotations_remove` only for live overlay stroke removal on the currently visible pane content.",
   ].join("\n");
+}
+
+export function buildSurfAcePromptBuildHookResult() {
+  return {
+    prependSystemContext: buildSurfAceAgentInstructions(),
+  };
 }
