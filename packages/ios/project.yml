@@ -9,7 +9,6 @@ settings:
     DEVELOPMENT_TEAM: ""
     SUPPORTS_MACCATALYST: NO
     TARGETED_DEVICE_FAMILY: "1,2"
-    INFOPLIST_KEY_UIApplicationSupportsMultipleScenes: YES
 targets:
   SurfAce:
     type: application
