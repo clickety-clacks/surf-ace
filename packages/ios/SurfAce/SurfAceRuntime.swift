@@ -1639,6 +1639,46 @@ final class SurfAceRuntime {
         if activeSessions[surfaceId]?.ownershipEpoch != payload["ownershipEpoch"] as? Int {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "ownership_epoch_mismatch", message: "target.apply ownershipEpoch does not match the active session")
         }
+        return await materializeTargetApply(id: id, payload: payload, surfaceId: surfaceId)
+    }
+
+    private func materializeTargetApply(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
+        func result(
+            requestId: String,
+            targetId: String,
+            paneLineageId: String,
+            targetEpoch: Int,
+            status: String,
+            errorCode: String? = nil,
+            message: String? = nil,
+            materializedState: [String: Any]? = nil
+        ) -> [String: Any] {
+            var resultPayload: [String: Any] = [
+                "requestId": requestId,
+                "targetId": targetId,
+                "paneLineageId": paneLineageId,
+                "targetEpoch": targetEpoch,
+                "status": status,
+                "appliedAt": isoTimestampNow(),
+            ]
+            if let errorCode { resultPayload["errorCode"] = errorCode }
+            if let message { resultPayload["message"] = message }
+            if let materializedState { resultPayload["materializedState"] = materializedState }
+            return [
+                "v": 1,
+                "type": "response",
+                "op": "target.apply.result",
+                "id": id,
+                "ok": true,
+                "sentAt": timestampNow(),
+                "payload": resultPayload,
+            ]
+        }
+
+        let requestId = payload["requestId"] as? String ?? ""
+        let targetId = payload["targetId"] as? String ?? ""
+        let paneLineageId = payload["paneLineageId"] as? String ?? ""
+        let targetEpoch = payload["targetEpoch"] as? Int ?? 0
         guard payload["targetKind"] as? String == "browser_url" else {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsupported_target_kind", message: "unsupported target kind")
         }
@@ -3041,6 +3081,14 @@ final class SurfAceRuntime {
         return "Server failed on fixed port \(fixedServerPort): \(error.localizedDescription)"
     }
 }
+
+#if DEBUG
+extension SurfAceRuntime {
+    func materializeTargetApplyForTesting(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
+        await materializeTargetApply(id: id, payload: payload, surfaceId: surfaceId)
+    }
+}
+#endif
 
 private struct AnyEncodable: Encodable {
     private let encodeImpl: (Encoder) throws -> Void

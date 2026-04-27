@@ -10,6 +10,7 @@
 		13EF6FFC169CB6EDFF47597E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2A8249A9765412039C07EDD5 /* Assets.xcassets */; };
 		1FFF04D1B747F5A964BC374B /* SurfAceANSI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */; };
 		2F01C4F42B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F01C4F32B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift */; };
+		3B41D60AA93042C0B820BDB9 /* SurfAceBrowserURLTargetApplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B41D609A93042C0B820BDB9 /* SurfAceBrowserURLTargetApplyTests.swift */; };
 		4A276F1C4C06E696FCA8D872 /* SurfAceBonjourPublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 856099927C9D1E8B57CB1A1D /* SurfAceBonjourPublisherTests.swift */; };
 		5964DDDD0A9B7A881AECDA0C /* SurfAceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C230CE2F392C57A940FD796E /* SurfAceModels.swift */; };
 		6661F25504963451BE3CE25C /* SurfAceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */; };
@@ -37,6 +38,7 @@
 		2A8249A9765412039C07EDD5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2F01C4F32B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceViewportPreservationTests.swift; sourceTree = "<group>"; };
 		314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
+		3B41D609A93042C0B820BDB9 /* SurfAceBrowserURLTargetApplyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBrowserURLTargetApplyTests.swift; sourceTree = "<group>"; };
 		4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceSurfaceView.swift; sourceTree = "<group>"; };
 		856099927C9D1E8B57CB1A1D /* SurfAceBonjourPublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisherTests.swift; sourceTree = "<group>"; };
 		71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceANSI.swift; sourceTree = "<group>"; };
@@ -79,6 +81,7 @@
 		6897A8D003370E2CC8B694CB /* SurfAceTests */ = {
 			isa = PBXGroup;
 			children = (
+				3B41D609A93042C0B820BDB9 /* SurfAceBrowserURLTargetApplyTests.swift */,
 				856099927C9D1E8B57CB1A1D /* SurfAceBonjourPublisherTests.swift */,
 				176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */,
 				2F01C4F32B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift */,
@@ -189,6 +192,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3B41D60AA93042C0B820BDB9 /* SurfAceBrowserURLTargetApplyTests.swift in Sources */,
 				4A276F1C4C06E696FCA8D872 /* SurfAceBonjourPublisherTests.swift in Sources */,
 				B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */,
 				2F01C4F42B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift in Sources */,
