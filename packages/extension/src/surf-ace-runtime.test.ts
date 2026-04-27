@@ -2338,6 +2338,89 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider uses rotated logical surface dimensions for native pane geometry", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.addSurface({
+          surfaceId: server.surfaceId,
+          viewport: { height: 3840, scale: 1, width: 2160 },
+        });
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const registered = await runtime.registerTarget({
+          expectedPreviousTargetEpoch: null,
+          fingerprint: server.surfaceId,
+          idempotencyKey: "terminal:top:racter-deg90-logical",
+          ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+          paneId: firstPaneId,
+          registrationState: "attached",
+          restorePolicy: "manual",
+          targetHeader: {
+            payloadSchemaVersion: 1,
+            replaySemantics: "launch_equivalent",
+            requiredCapabilities: ["target.terminal_app.v1"],
+            safeToLogFields: ["command", "args"],
+            safetyClass: "process",
+            summary: "top deg90",
+          },
+          targetKind: "terminal_app",
+          targetPayload: {
+            args: [],
+            command: "top",
+            envPolicy: "surface_default",
+            pty: true,
+            restartPolicy: "restore_new_process",
+          },
+        });
+        assert.equal(registered.status, "registered");
+
+        const restored = await runtime.restoreTarget({
+          confirmed: true,
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(restored.blockedReason, null);
+        assert.equal(server.targetApplyRequests.length, 1);
+
+        const [applyRequest] = server.targetApplyRequests;
+        assert.ok(applyRequest);
+        assert.deepEqual(applyRequest.materialization, {
+          op: "native_pane.host",
+          overlaySet: {
+            coordinateSpace: "surface_logical",
+            regions: [
+              {
+                captures: [],
+                kind: "native_pane",
+                paneId: firstPaneId,
+                paneInstanceId: applyRequest.paneLineageId,
+                rect: { height: 3840, width: 2160, x: 0, y: 0 },
+                regionId: `${firstPaneId}:${registered.targetId}`,
+                zIndex: 0,
+              },
+            ],
+            revision: registered.targetEpoch,
+            surfaceId: server.surfaceId,
+            topologyEpoch: 1,
+            windowId: "a",
+          },
+          panes: [
+            {
+              binding_id: `${firstPaneId}:${registered.targetId}`,
+              content_id: registered.targetId,
+              geometry: { height: 3840, width: 2160, x: 0, y: 0 },
+              id: firstPaneId,
+              process: { args: [], command: "top" },
+              revision: registered.targetEpoch,
+              target: "terminal",
+            },
+          ],
+        });
+      },
+    });
+  });
+
   await t.test("provider includes pane geometry for native app target materialization", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
