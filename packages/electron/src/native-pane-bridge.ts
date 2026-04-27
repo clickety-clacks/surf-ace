@@ -145,6 +145,9 @@ export function compositorFailureMessage(response: CompositorControlResponse): s
     return message;
   }
   const error = response.error;
+  if (typeof error === "string" && error.length > 0) {
+    return error;
+  }
   if (error && typeof error === "object") {
     const errorRecord = error as Record<string, unknown>;
     if (typeof errorRecord.message === "string" && errorRecord.message.length > 0) {

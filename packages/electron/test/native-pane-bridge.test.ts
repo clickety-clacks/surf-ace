@@ -201,6 +201,10 @@ test("native pane bridge normalizes compositor failures", () => {
     compositorFailureMessage({ error: { code: "invalid_state" }, ok: false }),
     "invalid_state",
   );
+  assert.equal(
+    compositorFailureMessage({ error: "stale overlay topology epoch: 1 != topology-2", ok: false }),
+    "stale overlay topology epoch: 1 != topology-2",
+  );
   assert.equal(compositorFailureMessage({ ok: false }), "compositor rejected materialization");
 });
 

@@ -11,6 +11,7 @@ import {
   type CompositorControlRequest,
   type CompositorControlResponse,
   type CompositorOverlayRegion,
+  compositorFailureMessage,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
   resolveCompositorControlSocketPath,
@@ -219,12 +220,13 @@ async function sendCompositorOverlayRequest(request: CompositorControlRequest): 
 async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<string, unknown>): Promise<void> {
   const regions = Array.isArray(payload.regions) ? payload.regions : [];
   const socketPath = resolveCompositorControlSocketPath();
+  const rendererTopologyEpoch = payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch);
   const diagnostic: Record<string, unknown> = {
     compositorSocketConfigured: Boolean(socketPath),
     lastRendererReportAt: new Date().toISOString(),
     regionCount: regions.length,
     revision: Number(payload.revision ?? 0),
-    topologyEpoch: payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch),
+    topologyEpoch: rendererTopologyEpoch,
     updateReason: typeof payload.updateReason === "string" ? payload.updateReason : null,
   };
   overlayDiagnostics.set(surfaceId, diagnostic);
@@ -232,17 +234,31 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
     diagnostic.forwardStatus = "skipped_no_socket";
     return;
   }
-  const request = overlayRegionsSetRequestForCompositor({
+  const requestForEpoch = (topologyEpoch: string) => overlayRegionsSetRequestForCompositor({
     regions: regions as CompositorOverlayRegion[],
     revision: Number(payload.revision ?? 0),
     surfaceId,
-    topologyEpoch: payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch),
+    topologyEpoch,
     updateReason: typeof payload.updateReason === "string" ? payload.updateReason as never : undefined,
     windowId: surfaceId,
   });
+  const request = requestForEpoch(rendererTopologyEpoch);
   diagnostic.forwardRequest = request;
   try {
-    const response: CompositorControlResponse = await sendCompositorControl(socketPath, request);
+    let response: CompositorControlResponse = await sendCompositorControl(socketPath, request);
+    const retryTopologyEpoch = staleOverlayTopologyEpoch(response);
+    if (retryTopologyEpoch) {
+      const retryRequest = requestForEpoch(retryTopologyEpoch);
+      diagnostic.retryReason = compositorFailureMessage(response);
+      diagnostic.retryRequest = retryRequest;
+      response = await sendCompositorControl(socketPath, retryRequest);
+      diagnostic.retryResponse = response;
+      diagnostic.topologyEpoch = retryTopologyEpoch;
+    }
+    const failure = compositorFailureMessage(response);
+    if (failure) {
+      throw new Error(failure);
+    }
     diagnostic.forwardedAt = new Date().toISOString();
     diagnostic.forwardResponse = response;
     diagnostic.forwardStatus = "ok";
@@ -251,6 +267,15 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
     diagnostic.forwardStatus = "error";
     throw error;
   }
+}
+
+function staleOverlayTopologyEpoch(response: CompositorControlResponse): string | null {
+  const message = compositorFailureMessage(response);
+  if (!message) {
+    return null;
+  }
+  const match = /stale overlay topology epoch:\s*\S+\s*!=\s*(\S+)/.exec(message);
+  return match?.[1] ?? null;
 }
 
 function focusExistingWindow(): void {
