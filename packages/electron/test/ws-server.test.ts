@@ -302,6 +302,45 @@ function targetApplyRequest(
   };
 }
 
+function browserUrlTargetApplyRequest(
+  options: {
+    ownershipSessionId: string;
+    paneLineageId: string;
+    surfaceId: string;
+    targetId?: string;
+    url?: string;
+  },
+): Request {
+  const targetUrl = options.url ?? "https://example.com/";
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "target.apply",
+    payload: {
+      ownershipEpoch: 1,
+      ownershipSessionId: options.ownershipSessionId as never,
+      paneLineageId: options.paneLineageId as never,
+      restoreReason: "initial_apply",
+      requestId: "restore_url",
+      surfaceId: options.surfaceId as never,
+      targetEpoch: 3,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "navigate",
+        requiredCapabilities: ["target.browser_url.v1"],
+        safeToLogFields: ["url"],
+        safetyClass: "network",
+        summary: targetUrl,
+      },
+      targetId: options.targetId ?? "target_url",
+      targetKind: "browser_url",
+      targetPayload: { url: targetUrl },
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 function paneSplitRequest(
   paneId: number,
   options: {
@@ -672,10 +711,76 @@ test("ws server advertises terminal targets when compositor bridge is configured
     const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
 
     assert.equal(paired.ok, true);
-    assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.terminal_app.v1"]);
+    assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.browser_url.v1", "target.terminal_app.v1"]);
 
     await closeSocket(socket);
   }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
+});
+
+test("ws server returns browser_url applied only after renderer load confirmation", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.browser_url.v1"]);
+
+    const apply = browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_example",
+      url: "https://example.com/",
+    });
+    const responsePromise = request(owner, apply);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentType, "browser_url");
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(paired.payload.state.panes[0]!.paneId), {
+      status: "applied",
+      targetId: "target_example",
+      url: "https://example.com/",
+    });
+
+    const response = await responsePromise;
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "target.apply");
+    assert.equal(response.payload.status, "applied");
+    assert.equal(response.payload.materializedState?.navigationStatus, "loaded");
+    assert.equal(core.captureSnapshot(surfaceId, Number(paired.payload.state.panes[0]!.paneId)).contentType, null);
+    await closeSocket(owner);
+  });
+});
+
+test("ws server returns browser_url failed when renderer reports blocked navigation", async () => {
+  await withServer(async ({ server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const responsePromise = request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_blocked",
+      url: "https://example.com/blocked",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(paired.payload.state.panes[0]!.paneId), {
+      errorMessage: "webview navigation failed: blocked",
+      status: "failed",
+      targetId: "target_blocked",
+      url: "https://example.com/blocked",
+    });
+
+    const response = await responsePromise;
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "target.apply");
+    assert.equal(response.payload.status, "failed");
+    assert.equal(response.payload.errorCode, "materialization_failed");
+    assert.equal(response.payload.materializedState?.navigationStatus, "failed");
+    await closeSocket(owner);
+  });
 });
 
 test("ws server exposes renderer overlay forwarding diagnostics to the paired owner", async () => {

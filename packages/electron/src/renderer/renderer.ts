@@ -46,8 +46,15 @@ type TerminalContent = { lines: string[]; scrollback: number };
 type MarkdownContent = { markdown: string };
 type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
+type BrowserUrlContent = { url: string };
+type BrowserUrlWebViewElement = HTMLElement & { src: string };
+type BrowserUrlWebViewErrorEvent = Event & {
+  errorDescription?: string;
+  isMainFrame?: boolean;
+};
 type PaneContentValue =
   | null
+  | BrowserUrlContent
   | CanvasContent
   | HtmlContent
   | ImageContent
@@ -64,7 +71,7 @@ type RendererPaneState = {
   content: {
     content: PaneContentValue;
     contentId: string | null;
-    contentType: "canvas" | "html" | "image" | "markdown" | "pdf" | "terminal" | "video" | null;
+    contentType: "browser_url" | "canvas" | "html" | "image" | "markdown" | "pdf" | "terminal" | "video" | null;
     display?: { interactive?: boolean; scrollable?: boolean; title?: string };
     revision: number;
   };
@@ -1382,6 +1389,54 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
         assignSrcdoc();
       });
     }
+    return;
+  }
+
+  if (pane.content.contentType === "browser_url") {
+    const browserUrl = pane.content.content as BrowserUrlContent;
+    const browserView = document.createElement("webview") as BrowserUrlWebViewElement;
+    browserView.className = "content-html-frame content-browser-url-frame";
+    browserView.setAttribute("allowpopups", "true");
+    view.contentEl.appendChild(browserView);
+    sizeWebViewToPane(view, browserView);
+    let reported = false;
+    const reportNavigation = (status: "applied" | "failed", errorMessage?: string) => {
+      if (reported || renderToken !== view.currentRenderToken) {
+        return;
+      }
+      reported = true;
+      window.surfAce.command({
+        ...(errorMessage ? { errorMessage } : {}),
+        paneId: pane.paneId,
+        status,
+        targetId: pane.content.contentId,
+        type: "browser-url-navigation",
+        url: browserUrl.url,
+      });
+    };
+    browserView.addEventListener(
+      "did-finish-load",
+      () => {
+        reportNavigation("applied");
+        window.setTimeout(() => {
+          reportPaneSnapshot(view);
+        }, 0);
+      },
+      { once: true },
+    );
+    browserView.addEventListener(
+      "did-fail-load",
+      (event) => {
+        const failure = event as BrowserUrlWebViewErrorEvent;
+        if (failure.isMainFrame === false) {
+          return;
+        }
+        const description = failure.errorDescription ? `: ${failure.errorDescription}` : "";
+        reportNavigation("failed", `webview navigation failed${description}`);
+      },
+      { once: true },
+    );
+    browserView.src = browserUrl.url;
     return;
   }
 

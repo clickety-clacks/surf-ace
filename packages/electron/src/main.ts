@@ -360,6 +360,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     webPreferences: {
       contextIsolation: true,
       preload: path.join(distDir, "preload.cjs"),
+      webviewTag: true,
     },
     width: Math.max(960, surface.viewport.width),
   });
@@ -572,6 +573,16 @@ function installIpc(): void {
         if (!result.blocked) {
           void server.emitNavigation(surfaceId, paneId, url);
         }
+        break;
+      }
+      case "browser-url-navigation": {
+        const status = payload.status === "applied" ? "applied" : "failed";
+        server.resolveBrowserUrlNavigation(surfaceId, paneId, {
+          errorMessage: payload.errorMessage ? String(payload.errorMessage) : undefined,
+          status,
+          targetId: String(payload.targetId ?? ""),
+          url: String(payload.url ?? ""),
+        });
         break;
       }
       case "draw-stroke":

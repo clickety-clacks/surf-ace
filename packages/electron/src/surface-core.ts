@@ -31,18 +31,23 @@ import type {
   StrokeId,
   SurfaceId,
   SurfaceViewport,
+  TargetApplyRequest,
+  TargetApplyResponse,
   TopologyApplyRequest,
   TopologyApplyResponse,
 } from "../../protocol/src/index.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
 type ContentDisplay = ContentSetRequest["payload"]["display"];
+type BrowserUrlPayload = { url: string };
+type RenderableContentType = ContentType | "browser_url";
+type RenderablePayload = ContentPayload | BrowserUrlPayload;
 
 type HistoryEntry = {
   annotations: Stroke[];
-  content: ContentPayload | null;
+  content: RenderablePayload | null;
   contentId: string | null;
-  contentType: ContentType | null;
+  contentType: RenderableContentType | null;
   display?: ContentDisplay;
   ownerToken: string | null;
   revision: number;
@@ -112,9 +117,9 @@ export type RendererPaneState = {
   canGoBack: boolean;
   canGoForward: boolean;
   content: {
-    content: ContentPayload | null;
+    content: RenderablePayload | null;
     contentId: string | null;
-    contentType: ContentType | null;
+    contentType: RenderableContentType | null;
     display?: ContentDisplay;
     revision: number;
   };
@@ -185,6 +190,9 @@ const SUPPORTED_CONTENT_TYPES: ContentType[] = [
   "terminal",
   "markdown",
 ];
+const SUPPORTED_TARGET_CAPABILITIES = [
+  "target.browser_url.v1",
+] as const;
 
 export class SurfaceCore {
   private readonly surfaces = new Map<string, SurfaceState>();
@@ -392,7 +400,7 @@ export class SurfaceCore {
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({
-      contentId: currentEntry(pane).contentId,
+      contentId: protocolContentId(currentEntry(pane)),
       direction,
       paneId,
       revision: currentEntry(pane).revision,
@@ -409,8 +417,8 @@ export class SurfaceCore {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
         return {
-          activeContentId: current.contentId,
-          contentType: current.contentType,
+          activeContentId: protocolContentId(current),
+          contentType: protocolContentType(current),
           name: pane.name,
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
@@ -427,8 +435,8 @@ export class SurfaceCore {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
         return {
-          contentType: current.contentType,
-          currentContentId: current.contentId,
+          contentType: protocolContentType(current),
+          currentContentId: protocolContentId(current),
           currentRevision: current.revision as Revision,
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
@@ -611,6 +619,98 @@ export class SurfaceCore {
       ...currentMutationAck(pane),
       topologyRevision: payload.topologyRevision,
     };
+  }
+
+  targetApply(
+    surfaceId: string,
+    payload: TargetApplyRequest["payload"],
+  ): TargetApplyResponse["payload"] {
+    const surface = this.getSurface(surfaceId);
+    if (payload.surfaceId !== surface.surfaceId) {
+      return targetApplyResult(payload, "rejected", "materialization_failed", "target.apply surfaceId does not match this surface");
+    }
+    if (!payload.targetHeader.requiredCapabilities.every((capability) =>
+      (SUPPORTED_TARGET_CAPABILITIES as readonly string[]).includes(capability)
+    )) {
+      return targetApplyResult(payload, "rejected", "capability_missing", "required target capability is not advertised");
+    }
+    if (payload.targetKind !== "browser_url") {
+      return targetApplyResult(payload, "rejected", "unsupported_target_kind", `Unsupported target kind: ${payload.targetKind}`);
+    }
+    if (payload.targetHeader.replaySemantics !== "navigate") {
+      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url requires navigate replay semantics");
+    }
+    const targetPayload = payload.targetPayload as Partial<BrowserUrlPayload>;
+    if (typeof targetPayload.url !== "string" || targetPayload.url.trim() === "") {
+      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url is required");
+    }
+    const url = parseSafeBrowserUrl(targetPayload.url);
+    if (!url) {
+      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url must be http or https");
+    }
+    const pane = paneForLineage(surface, payload.paneLineageId);
+    if (!pane) {
+      return targetApplyResult(payload, "rejected", "pane_lineage_missing", "pane lineage is unknown");
+    }
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      return targetApplyResult(payload, "rejected", "policy_denied", "annotation mode is active");
+    }
+
+    if (pane.historyIndex < pane.history.length - 1) {
+      pane.history = pane.history.slice(0, pane.historyIndex + 1);
+    }
+    pane.history.push({
+      annotations: [],
+      content: { url: url.toString() },
+      contentId: payload.targetId,
+      contentType: "browser_url",
+      ownerToken: null,
+      revision: payload.targetEpoch,
+    });
+    pane.historyIndex = pane.history.length - 1;
+    trimHistory(pane);
+    pane.toast = null;
+    pane.latestContentEventAt = this.now();
+    clearDirtyState(pane);
+    this.emit({ surfaceId, type: "surface-changed" });
+    return targetApplyResult(payload, "failed", "materialization_failed", "browser_url navigation started but has not been verified by the renderer", {
+      navigationStatus: "started_unverified",
+      replaySemantics: "navigate",
+      url: url.toString(),
+    });
+  }
+
+  completeBrowserUrlNavigation(
+    surfaceId: string,
+    paneId: number,
+    evidence: { errorMessage?: string; status: "applied" | "failed"; targetId: string; url: string },
+    applyResult?: TargetApplyResponse["payload"],
+  ): TargetApplyResponse["payload"] | null {
+    const pane = this.expectPane(surfaceId, paneId);
+    const entry = currentEntry(pane);
+    if (entry.contentType !== "browser_url" || entry.contentId !== evidence.targetId) {
+      return null;
+    }
+    const payload = applyResult ?? targetApplyResult(
+      {
+        paneLineageId: pane.paneLineageId,
+        requestId: "",
+        targetEpoch: entry.revision,
+        targetId: evidence.targetId,
+      } as TargetApplyRequest["payload"],
+      evidence.status,
+      evidence.status === "failed" ? "materialization_failed" : undefined,
+      evidence.status === "applied" ? "browser_url navigation loaded" : evidence.errorMessage ?? "browser_url navigation failed",
+      {
+        navigationStatus: evidence.status === "applied" ? "loaded" : "failed",
+        replaySemantics: "navigate",
+        url: evidence.url,
+      },
+    );
+    this.emit({ surfaceId, type: "surface-changed" });
+    return payload;
   }
 
   paneSplit(
@@ -891,8 +991,8 @@ export class SurfaceCore {
     const pane = this.expectPane(surfaceId, paneId);
     const current = currentEntry(pane);
     return {
-      contentId: current.contentId,
-      contentType: current.contentType,
+      contentId: protocolContentId(current),
+      contentType: protocolContentType(current),
       paneId: pane.paneId as PaneId,
       revision: current.revision as Revision,
       selection: pane.snapshot.selection,
@@ -1123,7 +1223,7 @@ export class SurfaceCore {
         "event.pane_removed",
         "event.pane_renamed",
       ],
-      targetCapabilities: [],
+      targetCapabilities: [...SUPPORTED_TARGET_CAPABILITIES],
     };
   }
 
@@ -1282,6 +1382,10 @@ function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
 }
 
+function paneForLineage(surface: SurfaceState, lineageId: string): PaneState | null {
+  return [...surface.panes.values()].find((pane) => pane.paneLineageId === lineageId) ?? null;
+}
+
 function shouldReplaceVisibleEntry(pane: PaneState, ownerToken: string): boolean {
   const current = currentEntry(pane);
   if (current.contentId === null) {
@@ -1321,7 +1425,7 @@ function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {
   return { ...viewport };
 }
 
-function cloneContent(content: ContentPayload | null): ContentPayload | null {
+function cloneContent(content: RenderablePayload | null): RenderablePayload | null {
   return content ? structuredClone(content) : null;
 }
 
@@ -1350,11 +1454,48 @@ function snapshotVisibleText(pane: PaneState, entry: HistoryEntry): string {
 function currentMutationAck(pane: PaneState): MutationAckResponse["payload"] {
   const entry = currentEntry(pane);
   return {
-    contentId: entry.contentId,
-    contentType: entry.contentType,
-    currentContentId: entry.contentId,
+    contentId: protocolContentId(entry),
+    contentType: protocolContentType(entry),
+    currentContentId: protocolContentId(entry),
     currentRevision: entry.revision as Revision,
     paneId: pane.paneId as PaneId,
+  };
+}
+
+function protocolContentId(entry: HistoryEntry): ContentId | null {
+  return entry.contentType === "browser_url" ? null : entry.contentId as ContentId | null;
+}
+
+function protocolContentType(entry: HistoryEntry): ContentType | null {
+  return entry.contentType === "browser_url" ? null : entry.contentType as ContentType | null;
+}
+
+function parseSafeBrowserUrl(value: string): URL | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function targetApplyResult(
+  payload: TargetApplyRequest["payload"],
+  status: TargetApplyResponse["payload"]["status"],
+  errorCode?: TargetApplyResponse["payload"]["errorCode"],
+  message?: string,
+  materializedState?: Record<string, unknown>,
+): TargetApplyResponse["payload"] {
+  return {
+    appliedAt: new Date().toISOString(),
+    errorCode,
+    materializedState,
+    message,
+    paneLineageId: payload.paneLineageId,
+    requestId: payload.requestId,
+    status,
+    targetEpoch: payload.targetEpoch,
+    targetId: payload.targetId,
   };
 }
 
