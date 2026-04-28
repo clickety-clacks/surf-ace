@@ -176,14 +176,14 @@ body {
 
 .keyboard-focus-edge {
   position: absolute;
-  background: rgba(124, 173, 255, 0.28);
+  background: rgba(124, 173, 255, 0.16);
 }
 
 .keyboard-focus-edge--top,
 .keyboard-focus-edge--bottom {
   left: 0;
   right: 0;
-  height: 3px;
+  height: 1px;
 }
 
 .keyboard-focus-edge--top {
@@ -198,7 +198,7 @@ body {
 .keyboard-focus-edge--right {
   top: 0;
   bottom: 0;
-  width: 3px;
+  width: 1px;
 }
 
 .keyboard-focus-edge--left {
@@ -209,13 +209,12 @@ body {
   right: 0;
 }
 
-.pane-shell + .pane-shell {
-  border-left: 2px solid var(--pane-edge);
+.direction-horizontal > .pane-shell + .pane-shell {
+  border-top: 1px solid rgba(116, 141, 182, 0.14);
 }
 
 .direction-vertical > .pane-shell + .pane-shell {
-  border-left: 0;
-  border-top: 2px solid var(--pane-edge);
+  border-left: 1px solid rgba(116, 141, 182, 0.14);
 }
 
 .pane-shell.annotating {
@@ -258,10 +257,10 @@ body {
   min-height: 0.78em;
   padding: 0 0.12em;
   border-radius: 999px;
-  background: rgba(13, 22, 41, 0.08);
-  border: 1px solid rgba(164, 189, 235, 0.08);
-  color: rgba(238, 244, 255, 0.08);
-  font-size: 20vh;
+  background: rgba(13, 22, 41, 0.04);
+  border: 1px solid rgba(164, 189, 235, 0.05);
+  color: rgba(238, 244, 255, 0.045);
+  font-size: 14vh;
   font-family: var(--ui-font-family);
   font-weight: 1000;
   letter-spacing: 0;
@@ -451,7 +450,7 @@ body {
 .control-cluster {
   position: absolute;
   left: 50%;
-  bottom: 32px;
+  bottom: 56px;
   transform: translateX(-50%);
   display: flex;
   gap: 6px;
