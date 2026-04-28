@@ -25,6 +25,7 @@ import {
   type PersistentSurfaceState,
   type RendererWindowState,
 } from "./surface-core.js";
+import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
 
 const DEFAULT_WS_PORT = 19001;
@@ -64,13 +65,6 @@ let server: SurfaceWsServer;
 let stateDir = "";
 let stateWrite = Promise.resolve();
 
-function isAddressInUse(error: unknown): boolean {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as NodeJS.ErrnoException).code === "EADDRINUSE";
-}
-
 function candidatePorts(preferredPort: number): number[] {
   if (EXPLICIT_WS_PORT) {
     return [preferredPort];
@@ -86,6 +80,13 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
   const ports = candidatePorts(WS_PORT);
   let lastError: unknown;
   for (const port of ports) {
+    if (BIND_ADDRESS === "0.0.0.0" && await isPortBoundOnIpv6Any(port)) {
+      lastError = Object.assign(new Error(`Port ${port} is already bound on IPv6`), { code: "EADDRINUSE" });
+      if (port === ports.at(-1)) {
+        throw lastError;
+      }
+      continue;
+    }
     const candidate = new SurfaceWsServer({
       bindAddress: BIND_ADDRESS,
       capturePaneImage,
