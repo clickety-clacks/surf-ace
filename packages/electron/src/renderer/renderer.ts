@@ -576,7 +576,7 @@ function createButton(label: string, className: string, disabled = false): HTMLB
 
 function setPaneChromeMetrics(view: PaneView): void {
   const rect = view.rootEl.getBoundingClientRect();
-  const paneNumberSize = Math.max(1, Math.min(rect.width, rect.height) / 5);
+  const paneNumberSize = Math.max(1, Math.min(rect.width, rect.height) / 4);
   view.rootEl.style.setProperty("--pane-number-size", `${paneNumberSize}px`);
 }
 

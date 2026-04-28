@@ -78,7 +78,7 @@ body {
 }
 
 .pane-shell {
-  --pane-number-size: 20vmin;
+  --pane-number-size: 25vmin;
   flex: 1 1 0;
   position: relative;
   height: 100%;
@@ -188,7 +188,7 @@ body {
   border: max(1px, calc(var(--pane-number-size) * 0.008)) solid currentColor;
   border-radius: calc(var(--pane-number-size) * 0.04);
   color: rgba(128, 128, 128, 0.25);
-  font-size: calc(var(--pane-number-size) * 0.14);
+  font-size: calc(var(--pane-number-size) * 0.2);
   font-family: var(--ui-font-family);
   font-weight: 400;
   letter-spacing: 0;

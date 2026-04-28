@@ -2907,6 +2907,7 @@ Each window is assigned a short alphabetic identifier using an auto-incrementing
 - Displayed immediately before the pane label inside each pane identity overlay as uppercase text inside the outline box. Do not render literal square brackets; `[a]12` is only protocol shorthand for an outlined `A` box followed by `12`.
 - Rendered in Rajdhani Regular.
 - Rendered as a rounded-rectangle outline box with no filled background. The box height is 1/3 of the pane-number height.
+- Text is sized large within that fixed outline box; implementations MUST NOT increase the box height to enlarge the text.
 - Bottom-aligned with the pane-number text using font metrics or baseline alignment, not manual visual offsets, so the box bottom edge and pane-number baseline / bottom visual line read as one clean baseline.
 - Colored according to the window's connection state, with both outline and letters at 25% opacity.
 - Rendered in the overlay layer — it does not scroll with content.
@@ -2915,7 +2916,7 @@ The window label is the primary addressing handle. It MUST be visible when the s
 
 Each pane is assigned a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier. Optional pane names do not replace it. The pane label MUST be:
 - Displayed as plain overlay text with no pill, background, or border.
-- Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/5 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
+- Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/4 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
 - Rendered in Rajdhani Bold, with visually consistent heavy weight across Electron and iOS.
 - Rendered with tight digit spacing; implementations SHOULD use negative Rajdhani tracking/letter-spacing of about `-0.04em`.
 - Colored 50% gray at 25% opacity.

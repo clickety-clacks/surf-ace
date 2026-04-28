@@ -235,14 +235,14 @@ private struct SurfAcePaneIdentityOverlay: View {
     let connectionState: SurfAceConnectionBarState
 
     private var fontSize: CGFloat {
-        max(1, min(paneSize.width, paneSize.height) / 5)
+        max(1, min(paneSize.width, paneSize.height) / 4)
     }
 
     var body: some View {
         HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * 0.08) {
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
-                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * 0.14))
+                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * 0.2))
                     .foregroundStyle(connectionColor.opacity(0.25))
                     .lineLimit(1)
                     .padding(.horizontal, fontSize * 0.04)
