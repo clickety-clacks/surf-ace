@@ -727,8 +727,9 @@ function ensurePaneView(paneId: number): PaneView {
   shieldEl.className = "annotation-shield";
   const labelEl = document.createElement("div");
   labelEl.className = "pane-label";
-  labelEl.innerHTML = "<span></span>";
-  surfAceOverlay(labelEl, "pane-label");
+  const labelTextEl = document.createElement("span");
+  surfAceOverlay(labelTextEl, "pane-label");
+  labelEl.appendChild(labelTextEl);
   const focusOverlayEl = document.createElement("div");
   focusOverlayEl.className = "keyboard-focus-overlay";
   for (const edge of ["top", "right", "bottom", "left"]) {
