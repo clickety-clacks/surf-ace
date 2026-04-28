@@ -56,6 +56,7 @@ await build({
     path.join(rootDir, "test", "native-pane-bridge.test.ts"),
     path.join(rootDir, "test", "port-selection.test.ts"),
     path.join(rootDir, "test", "surface-core.test.ts"),
+    path.join(rootDir, "test", "window-options.test.ts"),
     path.join(rootDir, "test", "ws-server.test.ts"),
   ],
   external: ["bonjour-service", "ws"],

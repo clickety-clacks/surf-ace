@@ -27,6 +27,7 @@ import {
 } from "./surface-core.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { surfaceWindowOptions } from "./window-options.js";
 
 const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
@@ -371,17 +372,17 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
 
   const surface = core.getSurface(surfaceId);
   const window = new BrowserWindow({
-    backgroundColor: "#0b1324",
-    height: Math.max(720, surface.viewport.height),
-    show: false,
-    title: surface.windowLabel ? `${endpointName()} · ${surface.windowLabel}` : endpointName(),
-    useContentSize: true,
+    ...surfaceWindowOptions({
+      compositorSocketPath: resolveCompositorControlSocketPath(),
+      endpointName: endpointName(),
+      viewport: surface.viewport,
+      windowLabel: surface.windowLabel,
+    }),
     webPreferences: {
       contextIsolation: true,
       preload: path.join(distDir, "preload.cjs"),
       webviewTag: true,
     },
-    width: Math.max(960, surface.viewport.width),
   });
 
   windows.set(surfaceId, window);

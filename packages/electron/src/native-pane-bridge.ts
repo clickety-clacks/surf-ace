@@ -83,8 +83,6 @@ export type ResolvedNativePaneGeometry = Required<PaneGeometry> & {
   paneInstanceId: string;
 };
 
-const PANE_CHROME_BOTTOM_INSET = 49;
-
 export function resolveCompositorControlSocketPath(
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
@@ -173,35 +171,15 @@ export function resolvedOverlayRegionsForCompositor(
   panes: Iterable<ResolvedNativePaneGeometry>,
 ): CompositorOverlayRegion[] {
   const paneById = new Map([...panes].map((pane) => [String(pane.id), pane]));
-  const handleByPaneId = new Map<string, CompositorOverlayRegion>();
-  for (const region of regions) {
-    if (region.kind === "pane_handle") {
-      handleByPaneId.set(String(region.paneId), region);
-    }
-  }
 
   return regions.map((region) => {
     const pane = paneById.get(String(region.paneId));
     if (!pane) {
       return region;
     }
-    const handle = handleByPaneId.get(String(region.paneId));
-    if (!handle || !isPaneChromeRegion(region.kind)) {
-      return {
-        ...region,
-        paneInstanceId: pane.paneInstanceId,
-      };
-    }
-    const resolvedHandle = resolvedPaneHandleRect(pane, handle.rect);
     return {
       ...region,
       paneInstanceId: pane.paneInstanceId,
-      rect: {
-        height: region.rect.height,
-        width: region.rect.width,
-        x: resolvedHandle.x + (region.rect.x - handle.rect.x),
-        y: resolvedHandle.y + (region.rect.y - handle.rect.y),
-      },
     };
   });
 }
@@ -267,25 +245,6 @@ export function validatePaneHandleOverlayAlignment(snapshot: {
   }
 
   return errors;
-}
-
-function isPaneChromeRegion(kind: CompositorOverlayKind): boolean {
-  return kind === "pane_handle" ||
-    kind === "history_back" ||
-    kind === "history_forward" ||
-    kind === "annotation_control";
-}
-
-function resolvedPaneHandleRect(
-  pane: ResolvedNativePaneGeometry,
-  handleRect: CompositorOverlayRegion["rect"],
-): CompositorOverlayRegion["rect"] {
-  return {
-    height: handleRect.height,
-    width: handleRect.width,
-    x: pane.geometry.x + ((pane.geometry.width - handleRect.width) / 2),
-    y: pane.geometry.y + pane.geometry.height - handleRect.height - PANE_CHROME_BOTTOM_INSET,
-  };
 }
 
 export function compositorFailureMessage(response: CompositorControlResponse): string | null {

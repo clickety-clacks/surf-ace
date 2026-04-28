@@ -57,6 +57,7 @@ const compositorSocket = String(
 const providerId = String(args.providerId ?? args["provider-id"] ?? "pv_racter_overlay_verify");
 const providerName = String(args.providerName ?? args["provider-name"] ?? "Surf Ace Racter Overlay Verify");
 const windowLabel = String(args.windowLabel ?? args["window-label"] ?? "RACTER Overlay Verify");
+const splitDirection = String(args.splitDirection ?? args["split-direction"] ?? "horizontal");
 const btopPaneId = Number(args.btopPaneId ?? args["btop-pane-id"] ?? 1);
 const topPaneId = Number(args.topPaneId ?? args["top-pane-id"] ?? 2);
 const btopProcess = resolveNativeProcess(args, {
@@ -111,7 +112,7 @@ try {
         { paneId: btopPaneId, type: "pane" },
         { paneId: topPaneId, type: "pane" },
       ],
-      direction: "vertical",
+      direction: splitDirection,
       type: "split",
     },
     panes: [

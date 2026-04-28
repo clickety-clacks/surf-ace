@@ -213,7 +213,7 @@ test("native pane bridge validates deg90 full-height pane handle alignment", () 
   );
 });
 
-test("native pane bridge resolves renderer chrome from native pane geometry", () => {
+test("native pane bridge preserves renderer-measured chrome rects and resolves live native identity", () => {
   const panes = [
     {
       geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 0, y: 0 },
@@ -232,7 +232,7 @@ test("native pane bridge resolves renderer chrome from native pane geometry", ()
       kind: "pane_handle",
       paneId: "1",
       paneInstanceId: "stale",
-      rect: { height: 48, width: 148, x: 1006, y: 1837 },
+      rect: { height: 62, width: 170, x: 455, y: 3762 },
       regionId: "surf-ace-pane-1-pane-handle-0",
       zIndex: 10,
     },
@@ -241,7 +241,7 @@ test("native pane bridge resolves renderer chrome from native pane geometry", ()
       kind: "history_back",
       paneId: "1",
       paneInstanceId: "stale",
-      rect: { height: 48, width: 48, x: 1006, y: 1837 },
+      rect: { height: 48, width: 48, x: 461, y: 3768 },
       regionId: "surf-ace-pane-1-history-back-1",
       zIndex: 20,
     },
@@ -250,7 +250,7 @@ test("native pane bridge resolves renderer chrome from native pane geometry", ()
       kind: "history_forward",
       paneId: "1",
       paneInstanceId: "stale",
-      rect: { height: 48, width: 48, x: 1056, y: 1837 },
+      rect: { height: 48, width: 48, x: 511, y: 3768 },
       regionId: "surf-ace-pane-1-history-forward-2",
       zIndex: 20,
     },
@@ -259,7 +259,7 @@ test("native pane bridge resolves renderer chrome from native pane geometry", ()
       kind: "annotation_control",
       paneId: "1",
       paneInstanceId: "stale",
-      rect: { height: 48, width: 48, x: 1106, y: 1837 },
+      rect: { height: 48, width: 48, x: 561, y: 3768 },
       regionId: "surf-ace-pane-1-annotation-control-3",
       zIndex: 20,
     },
@@ -269,22 +269,18 @@ test("native pane bridge resolves renderer chrome from native pane geometry", ()
     {
       ...badRendererRegions[0],
       paneInstanceId: "1:target_racter_btop",
-      rect: { height: 48, width: 148, x: 466, y: 3743 },
     },
     {
       ...badRendererRegions[1],
       paneInstanceId: "1:target_racter_btop",
-      rect: { height: 48, width: 48, x: 466, y: 3743 },
     },
     {
       ...badRendererRegions[2],
       paneInstanceId: "1:target_racter_btop",
-      rect: { height: 48, width: 48, x: 516, y: 3743 },
     },
     {
       ...badRendererRegions[3],
       paneInstanceId: "1:target_racter_btop",
-      rect: { height: 48, width: 48, x: 566, y: 3743 },
     },
   ]);
 });
