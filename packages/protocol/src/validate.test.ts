@@ -90,6 +90,47 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   });
   assert.deepEqual(panesListRequest, { ok: true });
 
+  const panesListResponse = validateEnvelopeType("panes.list", {
+    id: "req_2",
+    ok: true,
+    op: "panes.list",
+    payload: {
+      panes: [
+        {
+          activeContentId: null,
+          contentType: null,
+          geometry: {
+            contentViewport: { height: 384, width: 1024, x: 0, y: 384 },
+            coordinateSpace: "surface_logical",
+            geometryRevision: 4,
+            paneFrame: { height: 384, width: 1024, x: 0, y: 384 },
+            paneId: 1,
+            paneInstanceId: "pl_1",
+            protocolViewport: {
+              coordinateSpace: "protocol_viewport",
+              rect: { height: 384, width: 1024, x: 0, y: 384 },
+              viewport: { height: 384, scale: 2, width: 1024 },
+            },
+            safeAreaInsets: { bottom: 0, left: 0, right: 0, top: 0 },
+            scale: 2,
+            splitSpacingInsets: { bottom: 0, left: 0, right: 0, top: 0 },
+            surfaceBounds: { height: 768, width: 1024, x: 0, y: 0 },
+            surfaceEpoch: "sf_1:1",
+            topologyEpoch: 2,
+          },
+          name: null,
+          paneId: 1,
+          paneLabel: 1,
+          viewport: { height: 384, scale: 2, width: 1024 },
+        },
+      ],
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(panesListResponse, { ok: true });
+
   const relinquishRequest = validateEnvelopeType("ownership.relinquish", {
     id: "req_3",
     op: "ownership.relinquish",

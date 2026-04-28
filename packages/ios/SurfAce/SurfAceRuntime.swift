@@ -449,9 +449,48 @@ final class SurfAceRuntime {
 
     func updateViewport(surfaceId: String, size: CGSize, scale: CGFloat) {
         guard let surface = surfaceById[surfaceId], size.width > 0, size.height > 0 else { return }
+        let nextScale = max(scale, 1)
+        if surface.viewportSize != size || surface.viewportScale != nextScale {
+            surface.surfaceEpoch += 1
+        }
         surface.viewportSize = size
-        surface.viewportScale = scale
+        surface.viewportScale = nextScale
         refreshBonjourTXT()
+    }
+
+    func updatePaneGeometrySnapshot(
+        surfaceId: String,
+        paneId: Int,
+        paneFrame: CGRect,
+        contentViewport: CGRect,
+        splitSpacing: CGFloat
+    ) {
+        guard let surface = surfaceById[surfaceId],
+              let pane = surface.panesById[paneId],
+              paneFrame.width > 0,
+              paneFrame.height > 0,
+              contentViewport.width > 0,
+              contentViewport.height > 0 else {
+            return
+        }
+
+        let candidate = SurfAcePaneGeometrySnapshot(
+            paneId: paneId,
+            paneInstanceId: pane.paneInstanceId,
+            topologyEpoch: surface.topologyEpoch,
+            surfaceEpoch: surface.surfaceEpoch,
+            geometryRevision: pane.geometrySnapshot?.geometryRevision ?? 0,
+            coordinateSpace: SurfAcePaneGeometrySnapshot.coordinateSpace,
+            surfaceBounds: CGRect(origin: .zero, size: surface.viewportSize),
+            paneFrame: paneFrame,
+            contentViewport: contentViewport,
+            splitSpacing: splitSpacing,
+            scale: surface.viewportScale
+        )
+
+        guard pane.geometrySnapshot != candidate else { return }
+        surface.geometryRevision += 1
+        pane.geometrySnapshot = candidate.withGeometryRevision(surface.geometryRevision)
     }
 
     func attachPaneBridge(surfaceId: String, paneId: Int, bridge: any SurfAcePaneBridging) {
@@ -1352,6 +1391,7 @@ final class SurfAceRuntime {
                         "activeContentId": jsonValue(pane.currentEntry.contentId),
                         "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
                         "viewport": paneViewportPayload(surfaceId: surfaceId, paneId: pane.paneId),
+                        "geometry": paneGeometryPayload(surfaceId: surfaceId, paneId: pane.paneId),
                     ]
                 },
             ],
@@ -1387,6 +1427,7 @@ final class SurfAceRuntime {
         surface.name = "\(screenName) \(windowLabel.uppercased())"
         surface.panesById = panesById
         surface.paneLayout = layout
+        surface.topologyEpoch += 1
         surface.providerTopologyInitialized = topologyRevision > 0
         ensureActiveKeyboardPane(surface: surface)
         persistSurfaceTopology(surfaceId: surfaceId)
@@ -1582,6 +1623,7 @@ final class SurfAceRuntime {
             paneId: paneId,
             with: .split(direction: direction, children: children)
         )
+        surface.topologyEpoch += 1
 
         for (index, newPaneId) in newPaneIds.enumerated() {
             let newPaneLabel = newPaneLabels[index]
@@ -1662,6 +1704,7 @@ final class SurfAceRuntime {
         if let newLayout = surface.paneLayout.removingLeaf(paneId: paneId) {
             surface.paneLayout = newLayout
         }
+        surface.topologyEpoch += 1
         ensureActiveKeyboardPane(surface: surface)
         persistSurfaceTopology(surfaceId: surfaceId)
 
@@ -2487,6 +2530,7 @@ final class SurfAceRuntime {
                 surface.panesById[initialPaneId] = bootstrapPane
                 surface.paneLayout = surface.paneLayout.replacingPaneID(from: currentPaneId, to: initialPaneId)
                 surface.activeKeyboardPaneId = initialPaneId
+                surface.topologyEpoch += 1
             }
             bootstrapPane.paneLabel = initialPaneLabel
         }
@@ -2543,56 +2587,138 @@ final class SurfAceRuntime {
         ]
     }
 
-    private func paneViewportPayload(surfaceId: String, paneId: Int) -> [String: Any] {
-        guard let surface = surfaceById[surfaceId] else {
-            return ["width": 1, "height": 1, "scale": 1]
+    func paneViewportPayload(surfaceId: String, paneId: Int) -> [String: Any] {
+        guard let surface = surfaceById[surfaceId],
+              let pane = surface.panesById[paneId] else {
+            return [
+                "width": 1,
+                "height": 1,
+                "scale": 1,
+            ]
         }
-        let rect = paneRect(in: CGRect(origin: .zero, size: surface.viewportSize), layout: surface.paneLayout, targetPaneId: paneId) ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        guard let snapshot = currentPaneGeometrySnapshot(surface: surface, pane: pane) else {
+            return [
+                "width": 1,
+                "height": 1,
+                "scale": Double(max(surface.viewportScale, 1)),
+            ]
+        }
+        let rect = snapshot.contentViewport
         return [
             "width": max(Int(rect.width.rounded()), 1),
             "height": max(Int(rect.height.rounded()), 1),
-            "scale": Double(max(surface.viewportScale, 1)),
+            "scale": Double(max(snapshot.scale, 1)),
         ]
     }
 
-    private func paneRect(in rect: CGRect, layout: SurfAcePaneLayoutNode, targetPaneId: Int) -> CGRect? {
-        switch layout {
-        case .empty:
-            return nil
-        case .leaf(let paneId):
-            return paneId == targetPaneId ? rect : nil
-        case .split(let direction, let children):
-            guard !children.isEmpty else { return nil }
-            switch direction {
-            case .horizontal:
-                let childHeight = rect.height / CGFloat(children.count)
-                for (index, child) in children.enumerated() {
-                    let childRect = CGRect(
-                        x: rect.minX,
-                        y: rect.minY + CGFloat(index) * childHeight,
-                        width: rect.width,
-                        height: childHeight
-                    )
-                    if let match = paneRect(in: childRect, layout: child, targetPaneId: targetPaneId) {
-                        return match
-                    }
-                }
-            case .vertical:
-                let childWidth = rect.width / CGFloat(children.count)
-                for (index, child) in children.enumerated() {
-                    let childRect = CGRect(
-                        x: rect.minX + CGFloat(index) * childWidth,
-                        y: rect.minY,
-                        width: childWidth,
-                        height: rect.height
-                    )
-                    if let match = paneRect(in: childRect, layout: child, targetPaneId: targetPaneId) {
-                        return match
-                    }
-                }
-            }
+    func paneGeometryPayload(surfaceId: String, paneId: Int) -> [String: Any] {
+        guard let surface = surfaceById[surfaceId],
+              let pane = surface.panesById[paneId] else {
+            return fallbackPaneGeometryPayload(
+                paneId: paneId,
+                paneInstanceId: "",
+                topologyEpoch: 0,
+                surfaceEpoch: 0,
+                scale: 1,
+                surfaceBounds: CGRect(x: 0, y: 0, width: 1, height: 1)
+            )
+        }
+        guard let snapshot = currentPaneGeometrySnapshot(surface: surface, pane: pane) else {
+            return fallbackPaneGeometryPayload(
+                paneId: paneId,
+                paneInstanceId: pane.paneInstanceId,
+                topologyEpoch: surface.topologyEpoch,
+                surfaceEpoch: surface.surfaceEpoch,
+                scale: surface.viewportScale,
+                surfaceBounds: CGRect(origin: .zero, size: surface.viewportSize)
+            )
+        }
+        let viewport = paneViewportPayload(surfaceId: surfaceId, paneId: paneId)
+        return paneGeometryPayload(from: snapshot, viewport: viewport)
+    }
+
+    private func currentPaneGeometrySnapshot(surface: SurfAceSurfaceModel, pane: SurfAcePaneModel) -> SurfAcePaneGeometrySnapshot? {
+        guard let snapshot = pane.geometrySnapshot,
+              snapshot.topologyEpoch == surface.topologyEpoch,
+              snapshot.surfaceEpoch == surface.surfaceEpoch else {
             return nil
         }
+        return snapshot
+    }
+
+    private func paneGeometryPayload(from snapshot: SurfAcePaneGeometrySnapshot, viewport: [String: Any]) -> [String: Any] {
+        [
+            "paneId": snapshot.paneId,
+            "paneInstanceId": snapshot.paneInstanceId,
+            "topologyEpoch": snapshot.topologyEpoch,
+            "surfaceEpoch": String(snapshot.surfaceEpoch),
+            "geometryRevision": snapshot.geometryRevision,
+            "coordinateSpace": snapshot.coordinateSpace,
+            "surfaceBounds": rectPayload(snapshot.surfaceBounds),
+            "paneFrame": rectPayload(snapshot.paneFrame),
+            "contentViewport": rectPayload(snapshot.contentViewport),
+            "protocolViewport": [
+                "coordinateSpace": "protocol_viewport",
+                "rect": rectPayload(snapshot.contentViewport),
+                "viewport": viewport,
+            ],
+            "splitSpacingInsets": zeroInsetsPayload(),
+            "safeAreaInsets": zeroInsetsPayload(),
+            "scale": Double(max(snapshot.scale, 1)),
+        ]
+    }
+
+    private func fallbackPaneGeometryPayload(
+        paneId: Int,
+        paneInstanceId: String,
+        topologyEpoch: Int,
+        surfaceEpoch: Int,
+        scale: CGFloat,
+        surfaceBounds: CGRect
+    ) -> [String: Any] {
+        let rect = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let viewport: [String: Any] = [
+            "width": 1,
+            "height": 1,
+            "scale": Double(max(scale, 1)),
+        ]
+        return [
+            "paneId": paneId,
+            "paneInstanceId": paneInstanceId.isEmpty ? "unknown" : paneInstanceId,
+            "topologyEpoch": topologyEpoch,
+            "surfaceEpoch": String(surfaceEpoch),
+            "geometryRevision": 0,
+            "coordinateSpace": SurfAcePaneGeometrySnapshot.coordinateSpace,
+            "surfaceBounds": rectPayload(surfaceBounds),
+            "paneFrame": rectPayload(rect),
+            "contentViewport": rectPayload(rect),
+            "protocolViewport": [
+                "coordinateSpace": "protocol_viewport",
+                "rect": rectPayload(rect),
+                "viewport": viewport,
+            ],
+            "splitSpacingInsets": zeroInsetsPayload(),
+            "safeAreaInsets": zeroInsetsPayload(),
+            "scale": Double(max(scale, 1)),
+        ]
+    }
+
+    private func rectPayload(_ rect: CGRect) -> [String: Any] {
+        [
+            "x": Double(rect.minX),
+            "y": Double(rect.minY),
+            "width": Double(rect.width),
+            "height": Double(rect.height),
+        ]
+    }
+
+    private func zeroInsetsPayload() -> [String: Any] {
+        [
+            "top": 0,
+            "right": 0,
+            "bottom": 0,
+            "left": 0,
+        ]
     }
 
     private func publishBonjour() {

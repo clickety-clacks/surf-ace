@@ -47,7 +47,17 @@ function materialization(
       {
         binding_id: "118:target_top",
         content_id: "target_top",
-        geometry: { coordinateSpace: "compositor_logical", height: 384, width: 512, x: 512, y: 0 },
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: 3 as never,
+          height: 384,
+          paneInstanceId: "pl_118",
+          surfaceEpoch: "sf_test:1",
+          topologyEpoch: 2 as never,
+          width: 512,
+          x: 512,
+          y: 0,
+        },
         id: 118 as never,
         process: { args: ["top"], command: "foot" },
         revision: 3 as never,
@@ -82,7 +92,7 @@ test("native pane bridge serializes host and overlay requests from protocol mate
     regions: [
       {
         ...input.overlaySet!.regions[0]!,
-        paneInstanceId: "118:target_top",
+        paneInstanceId: "pl_118",
       },
     ],
     type: "overlay_regions.set",
@@ -111,7 +121,7 @@ test("native pane bridge derives native overlay rectangles from pane geometry", 
     regions: [
       {
         ...input.overlaySet!.regions[0]!,
-        paneInstanceId: "118:target_top",
+        paneInstanceId: "pl_118",
         rect: { height: 384, width: 512, x: 512, y: 0 },
       },
     ],
@@ -357,7 +367,13 @@ test("native pane bridge validates compositor logical status bounds", () => {
       panes: [
         {
           ...materialization().panes[0]!,
-          geometry: { coordinateSpace: "compositor_logical", height: 2160, width: 3840, x: 0, y: 0 },
+          geometry: {
+            ...materialization().panes[0]!.geometry,
+            height: 2160,
+            width: 3840,
+            x: 0,
+            y: 0,
+          },
         },
       ],
     })), {

@@ -451,6 +451,54 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   assert.deepEqual(listedPane.viewport, { height: 400, scale: 2, width: 1200 });
+  assert.deepEqual(listedPane.geometry.contentViewport, { height: 400, width: 1200, x: 0, y: 0 });
+  assert.deepEqual(listedPane.geometry.protocolViewport, {
+    coordinateSpace: "protocol_viewport",
+    rect: { height: 400, width: 1200, x: 0, y: 0 },
+    viewport: { height: 400, scale: 2, width: 1200 },
+  });
+  assert.equal(listedPane.geometry.coordinateSpace, "surface_logical");
+  assert.equal(listedPane.geometry.geometryRevision, 3);
+  assert.equal(listedPane.geometry.topologyEpoch, 0);
+});
+
+test("surface core advances geometry revision when pane chrome state changes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const initialRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
+
+  core.setAnnotating(surface.surfaceId, paneId, true);
+  const annotatingRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
+  assert.equal(annotatingRevision, initialRevision + 1);
+
+  core.setAnnotating(surface.surfaceId, paneId, false);
+  const controlsRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
+  assert.equal(controlsRevision, annotatingRevision + 1);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>Hello</p>" },
+    contentId: "ct_content" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_content",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  const contentSetRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
+  assert.equal(contentSetRevision, controlsRevision + 1);
+
+  core.contentClear(surface.surfaceId, {
+    paneId: paneId as never,
+    revision: 2 as never,
+  });
+  const contentClearRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
+  assert.equal(contentClearRevision, contentSetRevision + 1);
 });
 
 test("surface core updates terminal content in place", () => {

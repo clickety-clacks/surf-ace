@@ -231,7 +231,11 @@ function recordNativePaneInstances(surfaceId: string, materialization: NativePan
     const paneId = String(pane.id);
     current.set(paneId, {
       geometry: {
+        geometryRevision: pane.geometry.geometryRevision,
         height: pane.geometry.height,
+        paneInstanceId: pane.geometry.paneInstanceId,
+        surfaceEpoch: pane.geometry.surfaceEpoch,
+        topologyEpoch: pane.geometry.topologyEpoch,
         width: pane.geometry.width,
         x: pane.geometry.x,
         y: pane.geometry.y,

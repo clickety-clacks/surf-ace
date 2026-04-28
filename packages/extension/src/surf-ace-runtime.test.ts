@@ -14,6 +14,12 @@ type TestPane = {
   contentId: string | null;
   contentType: string | null;
   drawings: string[];
+  frame: {
+    height: number;
+    width: number;
+    x: number;
+    y: number;
+  };
   name: string | null;
   paneLabel: number;
   revision: number;
@@ -166,6 +172,12 @@ class FakeSurfAceWsServer {
           contentId: null,
           contentType: null,
           drawings: [],
+          frame: {
+            height: 768,
+            width: 1024,
+            x: 0,
+            y: 0,
+          },
           name: null,
           paneLabel: this.initialRemotePaneId,
           revision: 0,
@@ -260,6 +272,12 @@ class FakeSurfAceWsServer {
             contentId: null,
             contentType: null,
             drawings: [],
+            frame: {
+              height: viewport.height,
+              width: viewport.width,
+              x: 0,
+              y: 0,
+            },
             name: null,
             paneLabel: initialRemotePaneId,
             revision: 0,
@@ -719,12 +737,19 @@ class FakeSurfAceWsServer {
             contentId: previousPane?.contentId ?? null,
             contentType: previousPane?.contentType ?? null,
             drawings: previousPane?.drawings ? [...previousPane.drawings] : [],
+            frame: previousPane?.frame ?? {
+              height: targetSurface.viewport.height,
+              width: targetSurface.viewport.width,
+              x: 0,
+              y: 0,
+            },
             name: paneState.name,
             paneLabel: paneState.paneLabel,
             revision: previousPane?.revision ?? 0,
             viewport: previousPane?.viewport ?? { ...targetSurface.viewport },
           });
         }
+        this.applyTopologyFrames(targetSurface, message.payload?.layout);
         socket.send(
           JSON.stringify(
             this.response(message.id, "topology.apply", {
@@ -840,10 +865,15 @@ class FakeSurfAceWsServer {
               panes: [...targetSurface.panes.entries()].map(([paneId, pane]) => ({
                 activeContentId: pane.contentId,
                 contentType: pane.contentType,
+                geometry: this.paneGeometry(targetSurface, paneId, pane),
                 name: pane.name,
                 paneId,
                 paneLabel: pane.paneLabel,
-                viewport: pane.viewport,
+                viewport: {
+                  height: pane.frame.height,
+                  scale: pane.viewport.scale,
+                  width: pane.frame.width,
+                },
               })),
             }),
           ),
@@ -970,16 +1000,46 @@ class FakeSurfAceWsServer {
           newPaneLabels,
           paneId,
         });
+        const splitDirection = String(message.payload?.direction ?? "");
+        const splitCount = newPaneIds.length + 1;
+        const sourceFrame = { ...sourcePane.frame };
+        const sourceViewport = { ...sourcePane.viewport };
+        if (splitDirection === "horizontal") {
+          const height = sourceFrame.height / splitCount;
+          sourcePane.frame = { ...sourceFrame, height };
+          sourcePane.viewport = { ...sourceViewport, height };
+        } else {
+          const width = sourceFrame.width / splitCount;
+          sourcePane.frame = { ...sourceFrame, width };
+          sourcePane.viewport = { ...sourceViewport, width };
+        }
         for (const [index, newPaneId] of newPaneIds.entries()) {
+          const segmentIndex = index + 1;
+          const frame = splitDirection === "horizontal"
+            ? {
+                height: sourcePane.frame.height,
+                width: sourceFrame.width,
+                x: sourceFrame.x,
+                y: sourceFrame.y + sourcePane.frame.height * segmentIndex,
+              }
+            : {
+                height: sourceFrame.height,
+                width: sourcePane.frame.width,
+                x: sourceFrame.x + sourcePane.frame.width * segmentIndex,
+                y: sourceFrame.y,
+              };
           targetSurface.panes.set(newPaneId, {
             contentId: null,
             contentType: null,
             drawings: [],
+            frame,
             name: null,
             paneLabel: newPaneLabels[index] ?? newPaneId,
             revision: 0,
             viewport: {
-              ...sourcePane.viewport,
+              height: frame.height,
+              scale: sourcePane.viewport.scale,
+              width: frame.width,
             },
           });
         }
@@ -1099,6 +1159,84 @@ class FakeSurfAceWsServer {
       type: "response",
       v: 1,
     };
+  }
+
+  private paneGeometry(surface: TestSurfaceState, paneId: number, pane: TestPane) {
+    const topologyEpoch = this.topologyApplyRequests.at(-1)?.topologyRevision ?? 0;
+    const contentViewport = { ...pane.frame };
+    return {
+      contentViewport,
+      coordinateSpace: "surface_logical",
+      geometryRevision: topologyEpoch + 2,
+      paneFrame: { ...pane.frame },
+      paneId,
+      paneInstanceId: `pl_${surface.surfaceId}_${paneId}`,
+      protocolViewport: {
+        coordinateSpace: "protocol_viewport",
+        rect: { ...pane.frame },
+        viewport: {
+          height: pane.frame.height,
+          scale: pane.viewport.scale,
+          width: pane.frame.width,
+        },
+      },
+      safeAreaInsets: { bottom: 0, left: 0, right: 0, top: 0 },
+      scale: pane.viewport.scale,
+      splitSpacingInsets: { bottom: 0, left: 0, right: 0, top: 0 },
+      surfaceBounds: {
+        height: surface.viewport.height,
+        width: surface.viewport.width,
+        x: 0,
+        y: 0,
+      },
+      surfaceEpoch: `${surface.surfaceId}:1`,
+      topologyEpoch,
+    };
+  }
+
+  private applyTopologyFrames(surface: TestSurfaceState, layout: unknown): void {
+    const assign = (node: unknown, rect: { height: number; width: number; x: number; y: number }): void => {
+      if (!node || typeof node !== "object") {
+        return;
+      }
+      const record = node as Record<string, unknown>;
+      if (record.type === "pane") {
+        const paneId = Number(record.paneId ?? 0);
+        const pane = surface.panes.get(paneId);
+        if (!pane) {
+          return;
+        }
+        pane.frame = { ...rect };
+        pane.viewport = {
+          height: rect.height,
+          scale: surface.viewport.scale,
+          width: rect.width,
+        };
+        return;
+      }
+      if (record.type !== "split" || !Array.isArray(record.children) || record.children.length === 0) {
+        return;
+      }
+      const children = record.children;
+      if (record.direction === "horizontal") {
+        const height = rect.height / children.length;
+        children.forEach((child, index) => {
+          assign(child, { height, width: rect.width, x: rect.x, y: rect.y + height * index });
+        });
+        return;
+      }
+      const width = rect.width / children.length;
+      children.forEach((child, index) => {
+        assign(child, { height: rect.height, width, x: rect.x + width * index, y: rect.y });
+      });
+    };
+
+    assign(layout, {
+      height: surface.viewport.height,
+      width: surface.viewport.width,
+      x: 0,
+      y: 0,
+    });
   }
 
   private errorResponse(
@@ -1555,6 +1693,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentId: null,
         contentType: null,
         drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
         paneLabel: 77,
         revision: 0,
@@ -1581,6 +1720,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentId: null,
         contentType: null,
         drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
         paneLabel: 2,
         revision: 0,
@@ -2170,7 +2310,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
               {
                 binding_id: `${firstPaneId}:${target?.targetId}`,
                 content_id: target?.targetId,
-                geometry: { coordinateSpace: "compositor_logical", height: 768, width: 1024, x: 0, y: 0 },
+                geometry: {
+                  coordinateSpace: "compositor_logical",
+                  geometryRevision: 2,
+                  height: 768,
+                  paneInstanceId: targetAfterPlaceholder?.paneLineageId,
+                  surfaceEpoch: `${server.surfaceId}:1`,
+                  topologyEpoch: 0,
+                  width: 1024,
+                  x: 0,
+                  y: 0,
+                },
                 id: firstPaneId,
                 process: {
                   args: [],
@@ -2350,7 +2500,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           {
             binding_id: `${secondPane.paneId}:${registered.targetId}`,
             content_id: registered.targetId,
-            geometry: { coordinateSpace: "compositor_logical", height: 384, width: 1024, x: 0, y: 384 },
+            geometry: {
+              coordinateSpace: "compositor_logical",
+              geometryRevision: 3,
+              height: 384,
+              paneInstanceId: applyRequest.paneLineageId,
+              surfaceEpoch: `${server.surfaceId}:1`,
+              topologyEpoch: 1,
+              width: 1024,
+              x: 0,
+              y: 384,
+            },
             id: secondPane.paneId,
             process: { args: ["--utf-force"], command: "btop" },
             revision: registered.targetEpoch,
@@ -2432,7 +2592,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             {
               binding_id: `${firstPaneId}:${registered.targetId}`,
               content_id: registered.targetId,
-              geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 2160, x: 0, y: 0 },
+              geometry: {
+                coordinateSpace: "compositor_logical",
+                geometryRevision: 2,
+                height: 3840,
+                paneInstanceId: applyRequest.paneLineageId,
+                surfaceEpoch: `${server.surfaceId}:1`,
+                topologyEpoch: 0,
+                width: 2160,
+                x: 0,
+                y: 0,
+              },
               id: firstPaneId,
               process: { args: [], command: "top" },
               revision: registered.targetEpoch,
@@ -2505,7 +2675,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           {
             binding_id: `${firstPaneId}:${registered.targetId}`,
             content_id: registered.targetId,
-            geometry: { coordinateSpace: "compositor_logical", height: 768, width: 1024, x: 0, y: 0 },
+            geometry: {
+              coordinateSpace: "compositor_logical",
+              geometryRevision: 2,
+              height: 768,
+              paneInstanceId: applyRequest.paneLineageId,
+              surfaceEpoch: `${server.surfaceId}:1`,
+              topologyEpoch: 0,
+              width: 1024,
+              x: 0,
+              y: 0,
+            },
             id: firstPaneId,
             revision: registered.targetEpoch,
           },
@@ -2832,6 +3012,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentId: null,
         contentType: null,
         drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
         paneLabel: 1,
         revision: 0,
@@ -3991,6 +4172,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentId: null,
         contentType: null,
         drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
         paneLabel: 900,
         revision: 0,

@@ -263,13 +263,81 @@
     "NativePaneGeometry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["x", "y", "width", "height", "coordinateSpace"],
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height",
+        "coordinateSpace",
+        "paneInstanceId",
+        "topologyEpoch",
+        "surfaceEpoch",
+        "geometryRevision"
+      ],
       "properties": {
         "x": { "type": "number" },
         "y": { "type": "number" },
         "width": { "type": "number", "minimum": 0 },
         "height": { "type": "number", "minimum": 0 },
-        "coordinateSpace": { "const": "compositor_logical" }
+        "coordinateSpace": { "const": "compositor_logical" },
+        "paneInstanceId": { "type": "string", "minLength": 1 },
+        "topologyEpoch": { "$ref": "#/$defs/TopologyRevision" },
+        "surfaceEpoch": { "type": "string", "minLength": 1 },
+        "geometryRevision": { "$ref": "#/$defs/Revision" }
+      }
+    },
+    "Insets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["top", "right", "bottom", "left"],
+      "properties": {
+        "top": { "type": "number" },
+        "right": { "type": "number" },
+        "bottom": { "type": "number" },
+        "left": { "type": "number" }
+      }
+    },
+    "PaneGeometryProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paneId",
+        "paneInstanceId",
+        "topologyEpoch",
+        "surfaceEpoch",
+        "geometryRevision",
+        "coordinateSpace",
+        "surfaceBounds",
+        "paneFrame",
+        "contentViewport",
+        "protocolViewport",
+        "splitSpacingInsets",
+        "safeAreaInsets",
+        "scale"
+      ],
+      "properties": {
+        "paneId": { "$ref": "#/$defs/PaneId" },
+        "paneInstanceId": { "type": "string", "minLength": 1 },
+        "topologyEpoch": { "$ref": "#/$defs/TopologyRevision" },
+        "surfaceEpoch": { "type": "string", "minLength": 1 },
+        "geometryRevision": { "$ref": "#/$defs/Revision" },
+        "coordinateSpace": { "const": "surface_logical" },
+        "surfaceBounds": { "$ref": "#/$defs/Rect" },
+        "paneFrame": { "$ref": "#/$defs/Rect" },
+        "contentViewport": { "$ref": "#/$defs/Rect" },
+        "protocolViewport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["coordinateSpace", "rect", "viewport"],
+          "properties": {
+            "coordinateSpace": { "const": "protocol_viewport" },
+            "rect": { "$ref": "#/$defs/Rect" },
+            "viewport": { "$ref": "#/$defs/SurfaceViewport" }
+          }
+        },
+        "splitSpacingInsets": { "$ref": "#/$defs/Insets" },
+        "safeAreaInsets": { "$ref": "#/$defs/Insets" },
+        "scale": { "type": "number" }
       }
     },
     "NativePaneMaterializationPane": {
@@ -1623,7 +1691,7 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["paneId", "paneLabel", "name", "activeContentId", "contentType", "viewport"],
+                "required": ["paneId", "paneLabel", "name", "activeContentId", "contentType", "viewport", "geometry"],
                 "properties": {
                   "paneId": { "$ref": "#/$defs/PaneId" },
                   "paneLabel": { "type": "integer", "minimum": 1 },
@@ -1640,7 +1708,8 @@
                   "contentType": {
                     "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
                   },
-                  "viewport": { "$ref": "#/$defs/SurfaceViewport" }
+                  "viewport": { "$ref": "#/$defs/SurfaceViewport" },
+                  "geometry": { "$ref": "#/$defs/PaneGeometryProjection" }
                 }
               }
             }

@@ -67,7 +67,11 @@ export type CompositorControlResponse = Record<string, unknown>;
 type PaneGeometry = {
   geometry?: {
     coordinateSpace?: string;
+    geometryRevision?: number;
     height: number;
+    paneInstanceId?: string;
+    surfaceEpoch?: string;
+    topologyEpoch?: number | string;
     width: number;
     x: number;
     y: number;
@@ -95,6 +99,9 @@ export function requestForCompositor(
       if (pane.geometry.coordinateSpace !== "compositor_logical") {
         throw new Error(`native pane ${pane.id} geometry missing compositor_logical coordinate space`);
       }
+      if (!pane.geometry.paneInstanceId || pane.geometry.topologyEpoch === undefined || !pane.geometry.surfaceEpoch || pane.geometry.geometryRevision === undefined) {
+        throw new Error(`native pane ${pane.id} geometry missing canonical revision identity`);
+      }
       return pane;
     }),
     type: materialization.op,
@@ -117,7 +124,7 @@ export function overlayRequestForCompositor(
       }
       return {
         ...region,
-        paneInstanceId: String(pane.binding_id ?? region.paneInstanceId),
+        paneInstanceId: String(pane.geometry.paneInstanceId ?? pane.binding_id ?? region.paneInstanceId),
         rect: {
           height: pane.geometry.height,
           width: pane.geometry.width,
@@ -126,6 +133,8 @@ export function overlayRequestForCompositor(
         },
       };
     }),
+    revision: materialization.panes[0]?.geometry.geometryRevision ?? materialization.overlaySet.revision,
+    topologyEpoch: materialization.panes[0]?.geometry.topologyEpoch ?? materialization.overlaySet.topologyEpoch,
     type: "overlay_regions.set",
     updateReason: materialization.op === "native_pane.host" ? "initial" : "update",
   };
@@ -202,7 +211,7 @@ export function nativePaneInstanceIdsForCompositor(
 ): Map<string, string> {
   return new Map(materialization.panes.map((pane) => [
     String(pane.id),
-    String(pane.binding_id ?? `${pane.id}:${pane.content_id ?? "none"}`),
+    String(pane.geometry.paneInstanceId ?? pane.binding_id ?? `${pane.id}:${pane.content_id ?? "none"}`),
   ]));
 }
 

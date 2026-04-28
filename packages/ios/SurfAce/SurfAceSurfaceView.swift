@@ -6,6 +6,8 @@ import SwiftUI
 import UIKit
 import WebKit
 
+private let surfAceSurfaceCoordinateSpaceName = "SurfAce.surface.logical"
+
 struct SurfAceRootView: View {
     @Bindable var runtime: SurfAceRuntime
     @Environment(\.displayScale) private var displayScale
@@ -57,6 +59,7 @@ private struct SurfAceWindowView: View {
             ZStack(alignment: .top) {
                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout)
                     .background(Color.black.opacity(0.94))
+                    .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
                     .onAppear {
                         runtime.updateViewport(surfaceId: surface.surfaceId, size: proxy.size, scale: displayScale)
                     }
@@ -99,14 +102,14 @@ private struct SurfAcePaneTreeView: View {
         case .split(let direction, let children):
             Group {
                 if direction == .vertical {
-                    HStack(spacing: 1) {
+                    HStack(spacing: surfAcePaneSplitSpacing) {
                         ForEach(children, id: \.layoutIdentity) { child in
                             SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                 } else {
-                    VStack(spacing: 1) {
+                    VStack(spacing: surfAcePaneSplitSpacing) {
                         ForEach(children, id: \.layoutIdentity) { child in
                             SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -126,6 +129,7 @@ private struct SurfAcePaneView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let paneFrame = proxy.frame(in: .named(surfAceSurfaceCoordinateSpaceName))
             ZStack {
                 SurfAcePaneRepresentable(
                     runtime: runtime,
@@ -182,6 +186,18 @@ private struct SurfAcePaneView: View {
             .onChange(of: proxy.size) { _, newSize in
                 pane.lastMeasuredSize = newSize
             }
+            .onAppear {
+                publishGeometrySnapshot(paneFrame: paneFrame)
+            }
+            .onChange(of: paneFrame) { _, newFrame in
+                publishGeometrySnapshot(paneFrame: newFrame)
+            }
+            .onChange(of: surface.surfaceEpoch) { _, _ in
+                publishGeometrySnapshot(paneFrame: paneFrame)
+            }
+            .onChange(of: surface.topologyEpoch) { _, _ in
+                publishGeometrySnapshot(paneFrame: paneFrame)
+            }
         }
         .contentShape(Rectangle())
         .simultaneousGesture(
@@ -190,6 +206,16 @@ private struct SurfAcePaneView: View {
             }
         )
         .clipped()
+    }
+
+    private func publishGeometrySnapshot(paneFrame: CGRect) {
+        runtime.updatePaneGeometrySnapshot(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            paneFrame: paneFrame,
+            contentViewport: paneFrame,
+            splitSpacing: surfAcePaneSplitSpacing
+        )
     }
 }
 

@@ -137,6 +137,10 @@ export type Rect = {
 
 export type NativePaneGeometry = Rect & {
   coordinateSpace: "compositor_logical";
+  paneInstanceId: string;
+  topologyEpoch: TopologyRevision;
+  surfaceEpoch: string;
+  geometryRevision: Revision;
 };
 
 export type Viewport = {
@@ -152,6 +156,36 @@ export type Viewport = {
 export type SurfaceViewport = {
   width: number;
   height: number;
+  scale: number;
+};
+
+export type PaneGeometryProjection = {
+  paneId: PaneId;
+  paneInstanceId: string;
+  topologyEpoch: TopologyRevision;
+  surfaceEpoch: string;
+  geometryRevision: Revision;
+  coordinateSpace: "surface_logical";
+  surfaceBounds: Rect;
+  paneFrame: Rect;
+  contentViewport: Rect;
+  protocolViewport: {
+    coordinateSpace: "protocol_viewport";
+    rect: Rect;
+    viewport: SurfaceViewport;
+  };
+  splitSpacingInsets: {
+    top: number;
+    right: number;
+    bottom: number;
+    left: number;
+  };
+  safeAreaInsets: {
+    top: number;
+    right: number;
+    bottom: number;
+    left: number;
+  };
   scale: number;
 };
 
@@ -610,6 +644,7 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
       activeContentId: ContentId | null;
       contentType: ContentType | null;
       viewport: SurfaceViewport;
+      geometry: PaneGeometryProjection;
     }>;
   };
 };

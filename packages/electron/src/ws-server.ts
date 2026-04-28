@@ -1059,8 +1059,8 @@ export class SurfaceWsServer {
       };
     }
 
-    const materialization = request.payload.materialization;
-    if (!materialization) {
+    const requestedMaterialization = request.payload.materialization;
+    if (!requestedMaterialization) {
       const payload: TargetApplyResponse["payload"] = {
         appliedAt,
         errorCode: "unsupported_target_kind",
@@ -1080,6 +1080,17 @@ export class SurfaceWsServer {
         type: "response",
         v: 1,
       };
+    }
+    let materialization: NativePaneMaterialization;
+    try {
+      materialization = this.core.projectNativePaneMaterialization(
+        surfaceId,
+        requestedMaterialization,
+        request.payload.paneLineageId,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "native pane materialization identity is invalid";
+      return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", message);
     }
     if (!this.compositorSocketPath) {
       const payload: TargetApplyResponse["payload"] = {

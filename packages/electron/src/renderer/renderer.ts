@@ -89,6 +89,7 @@ type LayoutNode =
 
 type RendererWindowState = {
   connectionBar: "connected" | "connecting" | "disconnected";
+  geometryRevision?: number;
   layout: LayoutNode | null;
   name: string;
   panes: RendererPaneState[];
@@ -419,7 +420,7 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
   window.surfAce.reportOverlayRegions({
     coordinateSpace: "surface_logical",
     regions,
-    revision: overlayRevision,
+    revision: latestState.geometryRevision ?? overlayRevision,
     topologyEpoch: String(latestState.topologyRevision),
     updateReason,
   });

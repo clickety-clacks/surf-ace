@@ -516,6 +516,40 @@ protocol SurfAcePaneBridging: AnyObject {
     func clearDrawings()
 }
 
+let surfAcePaneSplitSpacing: CGFloat = 1
+
+struct SurfAcePaneGeometrySnapshot: Equatable {
+    static let coordinateSpace = "surface_logical"
+
+    let paneId: Int
+    let paneInstanceId: String
+    let topologyEpoch: Int
+    let surfaceEpoch: Int
+    let geometryRevision: Int
+    let coordinateSpace: String
+    let surfaceBounds: CGRect
+    let paneFrame: CGRect
+    let contentViewport: CGRect
+    let splitSpacing: CGFloat
+    let scale: CGFloat
+
+    func withGeometryRevision(_ geometryRevision: Int) -> SurfAcePaneGeometrySnapshot {
+        SurfAcePaneGeometrySnapshot(
+            paneId: paneId,
+            paneInstanceId: paneInstanceId,
+            topologyEpoch: topologyEpoch,
+            surfaceEpoch: surfaceEpoch,
+            geometryRevision: geometryRevision,
+            coordinateSpace: coordinateSpace,
+            surfaceBounds: surfaceBounds,
+            paneFrame: paneFrame,
+            contentViewport: contentViewport,
+            splitSpacing: splitSpacing,
+            scale: scale
+        )
+    }
+}
+
 @MainActor
 @Observable
 final class SurfAcePaneModel {
@@ -542,6 +576,7 @@ final class SurfAcePaneModel {
     var lastNavigationURL: String?
     var lastPage: (page: Int, totalPages: Int, pageText: String?)?
     var lastMeasuredSize = CGSize(width: 1, height: 1)
+    var geometrySnapshot: SurfAcePaneGeometrySnapshot?
     var pendingFlushStrokes: [SurfAceStroke] = []
     var deliveredClosedFrameCount = 0
     var firstPendingStrokeAt: Int64?
@@ -550,11 +585,13 @@ final class SurfAcePaneModel {
     var pendingAnnotationCommit = false
     @ObservationIgnored var pendingFlushTask: Task<Void, Never>?
     @ObservationIgnored weak var bridge: (any SurfAcePaneBridging)?
+    let paneInstanceId: String
 
     init(paneId: Int, paneLabel: Int? = nil, name: String? = nil) {
         self.paneId = paneId
         self.paneLabel = paneLabel ?? paneId
         self.name = name
+        self.paneInstanceId = UUID().uuidString
         self.backStack = []
         self.currentEntry = .empty()
         self.forwardStack = []
@@ -585,6 +622,9 @@ final class SurfAceSurfaceModel {
     var labelsVisible = true
     var viewportSize = CGSize(width: 1, height: 1)
     var viewportScale: CGFloat = 1
+    var surfaceEpoch = 0
+    var topologyEpoch = 0
+    var geometryRevision = 0
     var lastError: String?
     @ObservationIgnored var labelRestoreTask: Task<Void, Never>?
 

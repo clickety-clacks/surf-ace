@@ -69,6 +69,7 @@ import type {
   Viewport,
   MutationAckResponse,
   NativePaneMaterialization,
+  PaneGeometryProjection,
   RestorePolicy,
   PageEvent,
   TopologyApplyRequest,
@@ -504,6 +505,7 @@ type ManagedPane = {
   paneLineageId: string;
   pendingOwnerSessionKey: string | null;
   remotePaneId: RemotePaneId;
+  geometry: PaneGeometryProjection | null;
   snapshot: CachedSnapshot | null;
   staleTargetId: string | null;
   targetEpoch: number;
@@ -854,6 +856,7 @@ function createPane(
     paneLineageId: legacyPaneLineageId(remotePaneId),
     pendingOwnerSessionKey: null,
     remotePaneId,
+    geometry: null,
     snapshot: null,
     staleTargetId: null,
     targetEpoch: 0,
@@ -1047,19 +1050,25 @@ function managedPaneRects(surface: ManagedSurface): Map<PaneId, Rect> {
 }
 
 function getCompositorLogicalPaneGeometry(
-  surface: ManagedSurface,
   pane: ManagedPane,
 ): NativePaneMaterialization["panes"][number]["geometry"] {
-  const geometry = managedPaneRects(surface).get(pane.paneId);
-  if (!geometry) {
+  if (!pane.geometry) {
     throw new SurfAceToolError(
       "internal_error",
-      `No compositor logical geometry for pane ${pane.paneId} on surface ${surface.surfaceId}`,
+      `No canonical pane geometry for pane ${pane.paneId}`,
     );
   }
+  const { contentViewport } = pane.geometry;
   return {
-    ...geometry,
     coordinateSpace: "compositor_logical",
+    geometryRevision: pane.geometry.geometryRevision,
+    height: contentViewport.height,
+    paneInstanceId: pane.geometry.paneInstanceId,
+    surfaceEpoch: pane.geometry.surfaceEpoch,
+    topologyEpoch: pane.geometry.topologyEpoch,
+    width: contentViewport.width,
+    x: contentViewport.x,
+    y: contentViewport.y,
   };
 }
 
@@ -3801,7 +3810,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return undefined;
     }
 
-    const geometry = getCompositorLogicalPaneGeometry(surface, pane);
+    const geometry = getCompositorLogicalPaneGeometry(pane);
     const revision = asRevision(target.targetEpoch);
     const paneEntry: NativePaneMaterialization["panes"][number] = {
       binding_id: `${pane.paneId}:${target.targetId}`,
@@ -3852,6 +3861,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       },
       panes: [paneEntry],
     };
+  }
+
+  private async ensureNativePaneGeometry(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+  ): Promise<void> {
+    await this.syncRemotePaneList(surface);
   }
 
   private async materializeTargetRecord(
@@ -3927,6 +3943,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       pane.diagnosticContent = null;
       await this.persistSurfaceTargetState(surface, "target materialized");
       return evidence;
+    }
+
+    if (isProcessBackedTargetKind(target.targetKind)) {
+      await this.ensureNativePaneGeometry(surface, pane);
     }
 
     const requestId = makeBrandedRequestId();
@@ -5739,6 +5759,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       pane.name = paneState.name;
       pane.paneLabel = this.ensurePaneLabel(surface, pane, paneState.paneId);
       pane.viewport = cloneViewport(paneState.viewport);
+      pane.geometry = structuredClone(paneState.geometry);
     }
   }
 
