@@ -52,6 +52,10 @@ body {
   overflow: hidden;
 }
 
+body.compositor-hosted {
+  background: transparent;
+}
+
 .surface-window {
   position: relative;
   height: 100%;
@@ -86,6 +90,15 @@ body {
   min-height: 0;
   background: var(--pane);
   overflow: hidden;
+}
+
+body.compositor-hosted .pane-shell.native-backed {
+  background: transparent;
+}
+
+body.compositor-hosted .pane-shell.native-backed .pane-scroll,
+body.compositor-hosted .pane-shell.native-backed .pane-content {
+  background: transparent;
 }
 
 .keyboard-focus-overlay {
