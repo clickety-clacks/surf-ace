@@ -173,7 +173,7 @@ body {
   display: flex;
   align-items: flex-end;
   justify-content: flex-end;
-  gap: calc(var(--pane-number-size) * 0.08);
+  gap: calc(var(--pane-number-size) * 0.04);
   pointer-events: none;
   z-index: 22;
 }
@@ -182,16 +182,16 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: calc(var(--pane-number-size) / 3);
-  min-width: calc(var(--pane-number-size) / 3);
-  padding: 0 calc(var(--pane-number-size) * 0.04);
+  height: calc(var(--pane-number-size) / 2);
+  min-width: calc(var(--pane-number-size) / 2);
+  padding: 0 calc(var(--pane-number-size) * 0.025);
   border: max(1px, calc(var(--pane-number-size) * 0.008)) solid currentColor;
   border-radius: calc(var(--pane-number-size) * 0.04);
   color: rgba(128, 128, 128, 0.25);
   font-size: calc(var(--pane-number-size) * 0.2);
   font-family: var(--ui-font-family);
   font-weight: 400;
-  letter-spacing: 0;
+  letter-spacing: -0.02em;
   line-height: 1;
   text-transform: uppercase;
 }

@@ -15,7 +15,11 @@ private enum SurfAceChromeFont {
 
 private enum SurfAceRajdhaniMetrics {
     static let paneNumberTrackingRatio: CGFloat = -0.04
-    static let windowBoxHeightRatio: CGFloat = 1.0 / 3.0
+    static let windowTextRatio: CGFloat = 0.2
+    static let windowBoxHeightRatio: CGFloat = 0.5
+    static let windowBoxPaddingRatio: CGFloat = 0.025
+    static let windowTrackingRatio: CGFloat = -0.02
+    static let identitySpacingRatio: CGFloat = 0.04
 }
 
 private enum SurfAceIdentityBaseline: AlignmentID {
@@ -239,13 +243,14 @@ private struct SurfAcePaneIdentityOverlay: View {
     }
 
     var body: some View {
-        HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * 0.08) {
+        HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
-                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * 0.2))
+                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
                     .foregroundStyle(connectionColor.opacity(0.25))
                     .lineLimit(1)
-                    .padding(.horizontal, fontSize * 0.04)
+                    .tracking(fontSize * SurfAceRajdhaniMetrics.windowTextRatio * SurfAceRajdhaniMetrics.windowTrackingRatio)
+                    .padding(.horizontal, fontSize * SurfAceRajdhaniMetrics.windowBoxPaddingRatio)
                     .frame(minWidth: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
                     .frame(height: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
                     .overlay {
