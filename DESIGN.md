@@ -2920,7 +2920,7 @@ Each pane is assigned a stable visible numeric `paneLabel` that is distinct from
 - Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/4 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
 - Rendered in Rajdhani Bold, with visually consistent heavy weight across Electron and iOS.
 - Rendered with tight digit spacing; implementations SHOULD use negative Rajdhani tracking/letter-spacing of about `-0.04em`.
-- Colored 50% gray at 25% opacity.
+- Colored 50% gray at 30% opacity.
 - Rendered separately from the pane control cluster. The pane label MUST NOT appear as a toolbar/control-cluster button or label unless a future explicit control need is specified separately.
 
 The combined identity overlay is always visible and MUST be reported as an overlay region / hit-region where the platform reports chrome regions.

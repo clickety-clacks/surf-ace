@@ -209,7 +209,7 @@ body {
 }
 
 .pane-label__number {
-  color: rgba(128, 128, 128, 0.25);
+  color: rgba(128, 128, 128, 0.3);
   font-size: var(--pane-number-size);
   font-family: var(--ui-font-family);
   font-weight: 700;

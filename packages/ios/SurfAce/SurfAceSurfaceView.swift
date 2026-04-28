@@ -464,7 +464,7 @@ private struct SurfAcePaneNumberText: View {
             .font(.custom(SurfAceChromeFont.boldName, size: fontSize))
             .monospacedDigit()
             .tracking(fontSize * SurfAceRajdhaniMetrics.paneNumberTrackingRatio)
-            .foregroundStyle(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.25))
+            .foregroundStyle(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.3))
     }
 }
 
