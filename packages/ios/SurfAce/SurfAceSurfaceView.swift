@@ -12,6 +12,21 @@ private enum SurfAceChromeFont {
     static let name = "ShareTechMono-Regular"
 }
 
+private enum SurfAceShareTechMonoMetrics {
+    static let paneNumberTrackingRatio: CGFloat = -0.04
+    static let windowBoxHeightRatio: CGFloat = 0.25
+}
+
+private enum SurfAceIdentityBaseline: AlignmentID {
+    static func defaultValue(in context: ViewDimensions) -> CGFloat {
+        context[.bottom]
+    }
+}
+
+private extension VerticalAlignment {
+    static let surfAceIdentityBaseline = VerticalAlignment(SurfAceIdentityBaseline.self)
+}
+
 struct SurfAceRootView: View {
     @Bindable var runtime: SurfAceRuntime
     @Environment(\.displayScale) private var displayScale
@@ -223,26 +238,30 @@ private struct SurfAcePaneIdentityOverlay: View {
     }
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: fontSize * 0.08) {
+        HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * 0.08) {
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
-                    .font(.custom(SurfAceChromeFont.name, size: fontSize * 0.24))
+                    .font(.custom(SurfAceChromeFont.name, size: fontSize * 0.14))
                     .foregroundStyle(connectionColor.opacity(0.25))
                     .lineLimit(1)
-                    .padding(.horizontal, fontSize * 0.08)
-                    .frame(minWidth: fontSize * 0.5, minHeight: fontSize * 0.5)
+                    .padding(.horizontal, fontSize * 0.04)
+                    .frame(minWidth: fontSize * SurfAceShareTechMonoMetrics.windowBoxHeightRatio)
+                    .frame(height: fontSize * SurfAceShareTechMonoMetrics.windowBoxHeightRatio)
                     .overlay {
-                        RoundedRectangle(cornerRadius: fontSize * 0.08, style: .continuous)
-                            .strokeBorder(connectionColor.opacity(0.25), lineWidth: max(1, fontSize * 0.012))
+                        RoundedRectangle(cornerRadius: fontSize * 0.04, style: .continuous)
+                            .strokeBorder(connectionColor.opacity(0.25), lineWidth: max(1, fontSize * 0.008))
                     }
+                    .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
             }
 
             Text(paneLabel)
                 .font(.custom(SurfAceChromeFont.name, size: fontSize))
                 .monospacedDigit()
+                .tracking(fontSize * SurfAceShareTechMonoMetrics.paneNumberTrackingRatio)
                 .foregroundStyle(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.25))
                 .lineLimit(1)
                 .minimumScaleFactor(0.35)
+                .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
         }
     }
 
