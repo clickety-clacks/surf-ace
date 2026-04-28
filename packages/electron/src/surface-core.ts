@@ -25,12 +25,14 @@ import type {
   PanesListResponse,
   Position,
   Revision,
+  Rect,
   Selection,
   SnapshotResponse,
   Stroke,
   StrokeId,
   SurfaceId,
   SurfaceViewport,
+  NativePaneMaterialization,
   TargetApplyRequest,
   TargetApplyResponse,
   TopologyApplyRequest,
@@ -426,6 +428,28 @@ export class SurfaceCore {
         };
       }),
     };
+  }
+
+  validateNativePaneMaterializationLayout(
+    surfaceId: string,
+    materialization: NativePaneMaterialization,
+  ): string | null {
+    const surface = this.getSurface(surfaceId);
+    const paneRects = layoutPaneRects(surface.layout!, surface.viewport);
+    for (const pane of materialization.panes) {
+      const paneId = Number(pane.id);
+      if (!Number.isInteger(paneId)) {
+        return `native pane ${pane.id} does not map to a Surf Ace pane`;
+      }
+      const expected = paneRects.get(paneId);
+      if (!expected) {
+        return `native pane ${pane.id} is not present in the resolved Surf Ace layout`;
+      }
+      if (!sameRect(pane.geometry, expected)) {
+        return `native pane ${pane.id} geometry ${formatRect(pane.geometry)} does not match resolved Surf Ace pane geometry ${formatRect(expected)}`;
+      }
+    }
+    return null;
   }
 
   pairState(surfaceId: string): PairResponse["payload"]["state"] {
@@ -1639,6 +1663,66 @@ function layoutPaneViewports(
 
   visit(node, viewport);
   return byPaneId;
+}
+
+function layoutPaneRects(
+  node: LayoutNode,
+  viewport: SurfaceViewport,
+): Map<number, Rect> {
+  const byPaneId = new Map<number, Rect>();
+
+  const visit = (current: LayoutNode, rect: Rect): void => {
+    if (current.type === "pane") {
+      byPaneId.set(current.paneId, {
+        height: rect.height,
+        width: rect.width,
+        x: rect.x,
+        y: rect.y,
+      });
+      return;
+    }
+
+    const childCount = current.children.length || 1;
+    current.children.forEach((child, index) => {
+      visit(
+        child,
+        current.direction === "vertical"
+          ? {
+              height: rect.height,
+              width: rect.width / childCount,
+              x: rect.x + (rect.width * index) / childCount,
+              y: rect.y,
+            }
+          : {
+              height: rect.height / childCount,
+              width: rect.width,
+              x: rect.x,
+              y: rect.y + (rect.height * index) / childCount,
+            },
+      );
+    });
+  };
+
+  visit(node, {
+    height: viewport.height,
+    width: viewport.width,
+    x: 0,
+    y: 0,
+  });
+  return byPaneId;
+}
+
+function sameRect(left: Rect, right: Rect): boolean {
+  return (
+    Math.abs(left.height - right.height) < 0.5 &&
+    Math.abs(left.width - right.width) < 0.5 &&
+    Math.abs(left.x - right.x) < 0.5 &&
+    Math.abs(left.y - right.y) < 0.5
+  );
+}
+
+function formatRect(rect: Rect): string {
+  return `{x:${rect.x},y:${rect.y},width:${rect.width},height:${rect.height}}`;
 }
 
 function patchHtml(

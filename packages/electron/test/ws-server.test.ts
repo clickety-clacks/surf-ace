@@ -255,10 +255,12 @@ function targetApplyRequest(
   overrides: Partial<{
     geometry: { height: number; width: number; x: number; y: number };
     ownershipSessionId: string;
+    paneId: number;
     paneLineageId: string;
     surfaceId: string;
   }> = {},
 ): Request {
+  const paneId = overrides.paneId ?? 1;
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "target.apply",
@@ -267,10 +269,10 @@ function targetApplyRequest(
         op: "native_pane.host",
         panes: [
           {
-            binding_id: "118:ct_top",
+            binding_id: `${paneId}:ct_top`,
             content_id: "ct_top",
-            geometry: { ...(overrides.geometry ?? { height: 384, width: 512, x: 512, y: 0 }), coordinateSpace: "compositor_logical" },
-            id: "118",
+            geometry: { ...(overrides.geometry ?? { height: 800, width: 1200, x: 0, y: 0 }), coordinateSpace: "compositor_logical" },
+            id: String(paneId),
             process: { args: ["top"], command: "foot" },
             revision: 9 as never,
             target: "terminal",
@@ -831,7 +833,7 @@ test("ws server forwards target.apply native pane host materialization to compos
           },
         })}\n`);
       } else {
-        socket.write(`${JSON.stringify({ ok: true, status: { panes: [{ id: "118" }] } })}\n`);
+        socket.write(`${JSON.stringify({ ok: true, status: { panes: [{ id: "1" }] } })}\n`);
       }
       socket.end();
     });
@@ -863,10 +865,10 @@ test("ws server forwards target.apply native pane host materialization to compos
         {
           panes: [
             {
-              binding_id: "118:ct_top",
+              binding_id: "1:ct_top",
               content_id: "ct_top",
-              geometry: { coordinateSpace: "compositor_logical", height: 384, width: 512, x: 512, y: 0 },
-              id: "118",
+              geometry: { coordinateSpace: "compositor_logical", height: 800, width: 1200, x: 0, y: 0 },
+              id: "1",
               process: { args: ["top"], command: "foot" },
               revision: 9,
               target: "terminal",
@@ -888,7 +890,7 @@ test("ws server forwards target.apply native pane host materialization to compos
       assert.deepEqual(applied.payload.materializedState?.hostRequest, received[1]);
       assert.deepEqual(applied.payload.materializedState?.hostResponse, {
         ok: true,
-        status: { panes: [{ id: "118" }] },
+        status: { panes: [{ id: "1" }] },
       });
       assert.deepEqual(nativeMaterializedSurfaces, [surfaceId]);
 
@@ -897,6 +899,71 @@ test("ws server forwards target.apply native pane host materialization to compos
       compositorSocketPath: socketPath,
       onNativeMaterialized: (surfaceId) => nativeMaterializedSurfaces.push(surfaceId),
     });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server rejects native pane geometry that disagrees with resolved topology", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      socket.write(`${JSON.stringify({
+        ok: true,
+        status: {
+          logical_surface_height: 800,
+          logical_surface_width: 1200,
+          pane_geometry_coordinate_space: "compositor_logical",
+        },
+      })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const topology = await request(socket, topologyApplyRequest());
+      assert.equal(topology.ok, true);
+      const paneLineageId = topology.payload.panes.find((pane) => Number(pane.paneId) === 1)?.paneLineageId;
+      assert.ok(paneLineageId);
+
+      const failed = await request(socket, targetApplyRequest({
+        geometry: { height: 800, width: 600, x: 0, y: 0 },
+        ownershipSessionId: paired.payload.sessionId,
+        paneId: 1,
+        paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(failed.ok, true);
+      assert.equal(failed.op, "target.apply");
+      assert.equal(failed.payload.status, "failed");
+      assert.equal(failed.payload.errorCode, "materialization_failed");
+      assert.match(failed.payload.message, /does not match resolved Surf Ace pane geometry/);
+      assert.deepEqual(received, [{ type: "get_status" }]);
+      assert.equal(failed.payload.materializedState?.hostResponse, null);
+
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
   } finally {
     await new Promise<void>((resolve) => compositor.close(() => resolve()));
     await rm(tempDir, { force: true, recursive: true });
@@ -947,7 +1014,7 @@ test("ws server reports compositor target.apply rejection as materialization fai
               pane_geometry_coordinate_space: "compositor_logical",
             },
           }
-        : { error: { message: "invalid pane 118" }, ok: false })}\n`);
+        : { error: { message: "invalid pane 1" }, ok: false })}\n`);
       socket.end();
     });
   });
@@ -971,7 +1038,7 @@ test("ws server reports compositor target.apply rejection as materialization fai
       assert.equal(failed.op, "target.apply");
       assert.equal(failed.payload.status, "failed");
       assert.equal(failed.payload.errorCode, "materialization_failed");
-      assert.equal(failed.payload.message, "invalid pane 118");
+      assert.equal(failed.payload.message, "invalid pane 1");
       assert.deepEqual(received.map((message) => (message as { type: string }).type), ["get_status", "native_pane.host"]);
 
       await closeSocket(socket);

@@ -1119,6 +1119,10 @@ export class SurfaceWsServer {
       if (geometryFailure) {
         throw new Error(geometryFailure);
       }
+      const layoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+      if (layoutFailure) {
+        throw new Error(layoutFailure);
+      }
       hostResponse = await sendCompositorControl(this.compositorSocketPath, hostRequest);
       const hostFailure = compositorFailureMessage(hostResponse);
       if (hostFailure) {

@@ -90,8 +90,25 @@ export function overlayRequestForCompositor(
   if (!materialization.overlaySet) {
     return null;
   }
+  const panesById = new Map(materialization.panes.map((pane) => [String(pane.id), pane]));
   return {
     ...materialization.overlaySet,
+    regions: materialization.overlaySet.regions.map((region) => {
+      const pane = panesById.get(String(region.paneId));
+      if (!pane || region.kind !== "native_pane") {
+        return region;
+      }
+      return {
+        ...region,
+        paneInstanceId: String(pane.binding_id ?? region.paneInstanceId),
+        rect: {
+          height: pane.geometry.height,
+          width: pane.geometry.width,
+          x: pane.geometry.x,
+          y: pane.geometry.y,
+        },
+      };
+    }),
     type: "overlay_regions.set",
     updateReason: materialization.op === "native_pane.host" ? "initial" : "update",
   };

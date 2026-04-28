@@ -77,11 +77,45 @@ test("native pane bridge serializes host and overlay requests from protocol mate
   });
   assert.deepEqual(overlayRequestForCompositor(input), {
     ...input.overlaySet,
+    regions: [
+      {
+        ...input.overlaySet!.regions[0]!,
+        paneInstanceId: "118:target_top",
+      },
+    ],
     type: "overlay_regions.set",
     updateReason: "initial",
   });
   assert.equal(overlayRequestForCompositor(materialization({ op: "native_pane.update" }))?.updateReason, "update");
   assert.equal(overlayRequestForCompositor(materialization({ overlaySet: undefined })), null);
+});
+
+test("native pane bridge derives native overlay rectangles from pane geometry", () => {
+  const input = materialization({
+    overlaySet: {
+      ...materialization().overlaySet!,
+      regions: [
+        {
+          ...materialization().overlaySet!.regions[0]!,
+          paneInstanceId: "stale_lineage",
+          rect: { height: 1, width: 1, x: 0, y: 0 },
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(overlayRequestForCompositor(input), {
+    ...input.overlaySet,
+    regions: [
+      {
+        ...input.overlaySet!.regions[0]!,
+        paneInstanceId: "118:target_top",
+        rect: { height: 384, width: 512, x: 512, y: 0 },
+      },
+    ],
+    type: "overlay_regions.set",
+    updateReason: "initial",
+  });
 });
 
 test("native pane bridge serializes renderer overlay region updates without coordinate rounding", () => {
