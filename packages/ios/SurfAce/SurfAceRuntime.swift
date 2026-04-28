@@ -227,6 +227,9 @@ final class SurfAceRuntime {
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
+    private let targetCapabilities = [
+        "target.browser_url.v1",
+    ]
     private let eventTypes = [
         "event.drawing_flush",
         "event.annotation_committed",
@@ -1285,7 +1288,7 @@ final class SurfAceRuntime {
                 "capabilities": [
                     "contentTypes": supportedContentTypes.map(\.rawValue),
                     "eventTypes": eventTypes,
-                    "targetCapabilities": ["target.browser_url.v1"],
+                    "targetCapabilities": targetCapabilities,
                 ],
                 "eventConfig": [
                     "profile": eventProfile.rawValue,
@@ -3084,6 +3087,10 @@ final class SurfAceRuntime {
 
 #if DEBUG
 extension SurfAceRuntime {
+    func targetCapabilitiesForTesting() -> [String] {
+        targetCapabilities
+    }
+
     func materializeTargetApplyForTesting(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
         await materializeTargetApply(id: id, payload: payload, surfaceId: surfaceId)
     }

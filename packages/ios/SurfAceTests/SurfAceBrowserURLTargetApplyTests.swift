@@ -4,6 +4,12 @@ import XCTest
 
 @MainActor
 final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
+    func testIOSAdvertisesLiveBrowserURLTargetCapability() {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+
+        XCTAssertEqual(runtime.targetCapabilitiesForTesting(), ["target.browser_url.v1"])
+    }
+
     func testBrowserURLTargetApplyWaitsForNavigationEvidenceBeforeReturningApplied() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "browser-url-success")
