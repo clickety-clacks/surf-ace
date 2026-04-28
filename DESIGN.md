@@ -2910,7 +2910,7 @@ Each window is assigned a short alphabetic identifier using an auto-incrementing
 - Text is sized large within that fixed outline box, approximately 0.28x the pane-number height; implementations MUST NOT increase the box height to enlarge the text.
 - The gap between the window box and pane number, and the window-box horizontal padding/tracking, must be tight so the two parts read as one compact identity mark.
 - Bottom-aligned with the pane-number text using font metrics or baseline alignment, not manual visual offsets, so the box bottom edge and pane-number baseline / bottom visual line read as one clean baseline.
-- Colored according to the window's connection state, with both outline and letters at 50% opacity.
+- Colored according to the window's connection state, with both outline and letters at 35% opacity.
 - Rendered in the overlay layer — it does not scroll with content.
 
 The window label is the primary addressing handle. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity.
