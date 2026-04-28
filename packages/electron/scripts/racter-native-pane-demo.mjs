@@ -112,7 +112,7 @@ try {
         { paneId: btopPaneId, type: "pane" },
         { paneId: topPaneId, type: "pane" },
       ],
-      direction: "horizontal",
+      direction: "vertical",
       type: "split",
     },
     panes: [
