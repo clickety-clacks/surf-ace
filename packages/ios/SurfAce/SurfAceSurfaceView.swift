@@ -247,7 +247,7 @@ private struct SurfAcePaneIdentityOverlay: View {
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
                     .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
-                    .foregroundStyle(connectionColor.opacity(0.25))
+                    .foregroundStyle(connectionColor.opacity(0.5))
                     .lineLimit(1)
                     .tracking(fontSize * SurfAceRajdhaniMetrics.windowTextRatio * SurfAceRajdhaniMetrics.windowTrackingRatio)
                     .padding(.horizontal, fontSize * SurfAceRajdhaniMetrics.windowBoxPaddingRatio)
@@ -255,7 +255,7 @@ private struct SurfAcePaneIdentityOverlay: View {
                     .frame(height: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
                     .overlay {
                         RoundedRectangle(cornerRadius: fontSize * 0.04, style: .continuous)
-                            .strokeBorder(connectionColor.opacity(0.25), lineWidth: max(1, fontSize * 0.008))
+                            .strokeBorder(connectionColor.opacity(0.5), lineWidth: max(1, fontSize * 0.008))
                     }
                     .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
             }
