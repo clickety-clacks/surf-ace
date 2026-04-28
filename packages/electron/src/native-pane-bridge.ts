@@ -64,6 +64,17 @@ export type CompositorControlRequest =
 
 export type CompositorControlResponse = Record<string, unknown>;
 
+type PaneGeometry = {
+  geometry?: {
+    coordinateSpace?: string;
+    height: number;
+    width: number;
+    x: number;
+    y: number;
+  };
+  id: number | string;
+};
+
 export function resolveCompositorControlSocketPath(
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
@@ -160,6 +171,43 @@ export function overlayRegionsClearRequestForCompositor(
     type: "overlay_regions.clear",
     ...(windowId ? { windowId } : {}),
   };
+}
+
+export function validatePaneHandleOverlayAlignment(snapshot: {
+  maxBottomInset?: number;
+  panes: PaneGeometry[];
+  regions: CompositorOverlayRegion[];
+  tolerance?: number;
+}): string[] {
+  const tolerance = snapshot.tolerance ?? 2;
+  const maxBottomInset = snapshot.maxBottomInset ?? 128;
+  const paneById = new Map(snapshot.panes.map((pane) => [String(pane.id), pane]));
+  const errors: string[] = [];
+
+  for (const region of snapshot.regions) {
+    if (region.kind !== "pane_handle") {
+      continue;
+    }
+    const pane = paneById.get(String(region.paneId));
+    if (!pane?.geometry) {
+      errors.push(`pane handle ${region.regionId} references pane ${region.paneId} without geometry`);
+      continue;
+    }
+    if (pane.geometry.coordinateSpace && pane.geometry.coordinateSpace !== "compositor_logical") {
+      errors.push(`pane ${pane.id} geometry coordinate space is ${pane.geometry.coordinateSpace}, expected compositor_logical`);
+      continue;
+    }
+    const expectedX = pane.geometry.x + ((pane.geometry.width - region.rect.width) / 2);
+    const bottomInset = (pane.geometry.y + pane.geometry.height) - (region.rect.y + region.rect.height);
+    if (Math.abs(region.rect.x - expectedX) > tolerance) {
+      errors.push(`pane ${pane.id} handle x=${region.rect.x} is not centered in resolved pane x=${pane.geometry.x} width=${pane.geometry.width}`);
+    }
+    if (bottomInset < -tolerance || bottomInset > maxBottomInset) {
+      errors.push(`pane ${pane.id} handle bottom inset ${bottomInset} is not bottom-aligned within resolved pane y=${pane.geometry.y} height=${pane.geometry.height}`);
+    }
+  }
+
+  return errors;
 }
 
 export function compositorFailureMessage(response: CompositorControlResponse): string | null {

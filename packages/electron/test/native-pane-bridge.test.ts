@@ -15,6 +15,7 @@ import {
   requestForCompositor,
   resolveCompositorControlSocketPath,
   sendCompositorControl,
+  validatePaneHandleOverlayAlignment,
   validateMaterializationAgainstCompositorStatus,
 } from "../src/native-pane-bridge.js";
 
@@ -158,6 +159,47 @@ test("native pane bridge serializes renderer overlay region updates without coor
     updateReason: "layout",
     windowId: "window-a",
   });
+});
+
+test("native pane bridge validates deg90 full-height pane handle alignment", () => {
+  const panes = [
+    { id: "1", geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 0, y: 0 } },
+    { id: "2", geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 1080, y: 0 } },
+  ];
+  const regions = [
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "pane_handle",
+      paneId: "1",
+      paneInstanceId: "1:target_racter_btop",
+      rect: { height: 48, width: 148, x: 466, y: 3743 },
+      regionId: "surf-ace-pane-1-pane-handle-0",
+      zIndex: 10,
+    },
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "pane_handle",
+      paneId: "2",
+      paneInstanceId: "2:target_racter_top",
+      rect: { height: 48, width: 148, x: 1546, y: 3743 },
+      regionId: "surf-ace-pane-2-pane-handle-0",
+      zIndex: 10,
+    },
+  ] as const;
+
+  assert.deepEqual(validatePaneHandleOverlayAlignment({ panes, regions: [...regions] }), []);
+  assert.match(
+    validatePaneHandleOverlayAlignment({
+      panes,
+      regions: [
+        {
+          ...regions[0],
+          rect: { height: 48, width: 148, x: 1006, y: 1837 },
+        },
+      ],
+    }).join("\n"),
+    /not bottom-aligned/,
+  );
 });
 
 test("native pane bridge indexes live compositor pane instances from materialization bindings", () => {
