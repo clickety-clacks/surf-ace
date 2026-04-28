@@ -161,19 +161,52 @@ body {
   overflow: hidden;
 }
 
-.pane-shell::after {
-  content: "";
+.keyboard-focus-overlay {
   position: absolute;
   inset: 0;
   z-index: 80;
   pointer-events: none;
   opacity: 0;
-  box-shadow: inset 0 0 0 10px rgba(255, 255, 255, 0.2);
   transition: opacity 0.12s ease;
 }
 
-.pane-shell.keyboard-active::after {
+.pane-shell.keyboard-active .keyboard-focus-overlay {
   opacity: 1;
+}
+
+.keyboard-focus-edge {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.keyboard-focus-edge--top,
+.keyboard-focus-edge--bottom {
+  left: 0;
+  right: 0;
+  height: 10px;
+}
+
+.keyboard-focus-edge--top {
+  top: 0;
+}
+
+.keyboard-focus-edge--bottom {
+  bottom: 0;
+}
+
+.keyboard-focus-edge--left,
+.keyboard-focus-edge--right {
+  top: 0;
+  bottom: 0;
+  width: 10px;
+}
+
+.keyboard-focus-edge--left {
+  left: 0;
+}
+
+.keyboard-focus-edge--right {
+  right: 0;
 }
 
 .pane-shell + .pane-shell {
@@ -227,9 +260,9 @@ body {
   min-height: 0.78em;
   padding: 0 0.12em;
   border-radius: 999px;
-  background: rgba(13, 22, 41, 0.05);
-  border: 1px solid rgba(164, 189, 235, 0.05);
-  color: rgba(238, 244, 255, 0.05);
+  background: rgba(13, 22, 41, 0.08);
+  border: 1px solid rgba(164, 189, 235, 0.08);
+  color: rgba(238, 244, 255, 0.08);
   font-size: 20vh;
   font-family: var(--ui-font-family);
   font-weight: 1000;

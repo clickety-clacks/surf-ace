@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
@@ -74,6 +75,15 @@ class FakeBonjour {
 
   destroy(): void {
     this.destroyed = true;
+  }
+}
+
+class FakeChildProcess extends EventEmitter {
+  killed = false;
+
+  kill(): boolean {
+    this.killed = true;
+    return true;
   }
 }
 
@@ -244,4 +254,33 @@ test("bonjour advertiser disables mDNS when discovery throws ENETUNREACH", async
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test("bonjour advertiser handles missing dns-sd isolated publisher without crashing", async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  const child = new FakeChildProcess();
+  const fakeSpawn: typeof spawn = (() => child) as never;
+  const advertiser = new BonjourAdvertiser({
+    bonjour: new FakeBonjour(),
+    isolatedPublisherSpawn: fakeSpawn,
+    name: "TARS Surf Ace",
+    port: 18791,
+    txtProvider: () => ({ pk: "sf_test" }),
+  });
+
+  console.warn = (message?: unknown) => {
+    warnings.push(String(message));
+  };
+  try {
+    await (advertiser as unknown as {
+      publishWithIsolatedPublisher(name: string): Promise<void>;
+    }).publishWithIsolatedPublisher("TARS Surf Ace");
+    child.emit("error", Object.assign(new Error("spawn dns-sd ENOENT"), { code: "ENOENT" }));
+    await advertiser.stop();
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.match(warnings.join("\n"), /\[surf-ace:bonjour\] event=publish_isolated_error .*error=ENOENT/);
 });

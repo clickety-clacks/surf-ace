@@ -123,7 +123,10 @@ function endpointFromResolvedService(params: {
 }): SurfAceDiscoveryEndpoint {
   const host = params.host.replace(/\.$/, "").trim();
   const wsPath = normalizeWsPath(params.txt.ws);
-  const endpointId = `${host}:${params.port}${wsPath}`;
+  const serviceDiscriminator = encodeURIComponent(
+    (params.txt.pk?.trim().toLowerCase() || params.instanceName).trim(),
+  );
+  const endpointId = `${host}:${params.port}${wsPath}#${serviceDiscriminator}`;
 
   return {
     busy: params.txt.busy === "1",
@@ -567,8 +570,9 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       return endpoints;
     }
     const knownIds = new Set(endpoints.map((ep) => ep.endpointId));
+    const knownInstances = new Set(endpoints.map((ep) => ep.instanceName));
     for (const ep of dnsSdEndpoints) {
-      if (!knownIds.has(ep.endpointId)) {
+      if (!knownIds.has(ep.endpointId) && !knownInstances.has(ep.instanceName)) {
         endpoints.push(ep);
       }
     }

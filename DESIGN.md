@@ -234,15 +234,16 @@ Provider reconnect policy:
 1. Exponential backoff with jitter: 0.5s, 1s, 2s, 4s, 8s, 16s, max 30s.
 2. Reconnect uses the same discovered surface address.
 3. Normal recovery sends `pair.request` again with the same `providerId` and, when available, `resume.sessionId` from the prior paired session.
-4. Providers MUST treat `takeover=true` as a user-directed escalation path, not as standard reconnect logic. Routine owner recovery is always resume/reconnect by the current lock owner.
-5. If resume fails because the surface no longer recognizes the resumable session, the provider continues retrying or prompts for operator action; the lock still remains reserved for the existing owner until explicit relinquish or explicit takeover occurs.
+4. Providers MUST treat foreign-owner `takeover=true` as a user-directed escalation path, not as standard reconnect logic. Routine owner recovery is always resume/reconnect by the current lock owner.
+5. In the normal single-user network model, a provider that can identify the surface as previously self-owned MAY perform an automatic self-reclaim with the same stable `providerId` when the surface is reachable but returns `busy` or rejects a stale resume session. Self-reclaim is not provider-id rotation and is not a silent foreign takeover; it is recovery of the provider's own stale/orphaned lock.
+6. If the provider cannot classify the busy lock as self-owned, it MUST NOT silently reclaim it. Busy owned by an unknown or different provider remains an explicit operator reclaim/relinquish scenario.
 
 Surface ownership behavior:
 1. On any disconnect (abnormal or normal close), the surface keeps displayed content, pane topology, annotations, and ownership lock intact indefinitely. Socket death does not free the surface for another provider.
 2. Only the lock owner may reconnect and resume normal control without takeover. A successful owner resume restores the active session and MAY emit `event.surface_resumed`.
 3. A different provider connecting without `takeover=true` receives `busy` while the lock is held, regardless of whether the owner socket is currently live.
 4. A different provider connecting with `takeover=true` is requesting explicit ownership transfer. The surface MUST treat this as exceptional control transfer, not routine recovery semantics.
-5. On accepted takeover, the surface transfers the lock to the new `providerId`, closes any still-live old owner socket with `1000` reason `superseded`, and preserves displayed content/state until the new owner changes it.
+5. On accepted takeover or self-reclaim, the surface transfers the lock to the requesting stable `providerId`, closes any still-live old owner socket with `1000` reason `superseded`, and preserves displayed content/state until the owner changes it.
 6. On accepted `ownership.relinquish`, the surface clears the lock immediately, preserves displayed content/state, and becomes available for a later fresh claim by any provider. The relinquishing provider MUST disable its auto-retry loop for that surface after success.
 
 **Invariant: connection state MUST NOT affect displayed content.** Content is never cleared by a disconnect, restart, relinquish, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`. A surface showing content will continue showing that content indefinitely until told otherwise.
@@ -3108,6 +3109,55 @@ This section is the authoritative list of unresolved design decisions. Items her
 **Decision:** No on-device semantic classification. The surface sends raw stroke geometry in the buffer. CLU receives and interprets the geometry directly, using whatever approach it sees fit. No `semanticHints` field, no wire extension, no on-device model integration. Closed; will not be revisited.
 
 ---
+
+## 16. Common Pane Geometry Architecture
+
+Status: normative architecture amendment, 2026-04-27. Source spec: `/Users/mike/shared-workspace/surf-ace/specs/common-geometry-architecture.md`.
+
+Surf Ace has one resolved geometry truth per pane. Each pane produces a canonical resolved geometry snapshot; content viewport, controls, overlays, hit regions, target materialization, capture masks, debug visuals, and protocol-reported pane viewport MUST derive from that snapshot.
+
+### 16.1 Canonical snapshot invariant
+
+A pane geometry snapshot is a resolved fact, not a recipe. Topology, split direction, pane count, DOM measurements, SwiftUI view hierarchy, and safe-area inputs may participate in resolving the snapshot only at the geometry authority layer. Display rotation and physical scanout mode are below the Surf Ace boundary; Surf Ace consumes the already-normalized logical surface bounds. Downstream consumers MUST NOT reconstruct pane placement from those inputs.
+
+Every cross-boundary geometry payload MUST include coordinate-space identity. Placement payloads that can be applied asynchronously MUST also carry pane identity and sufficient revision/generation identity to reject stale writes: pane id, pane instance/binding identity, topology epoch, surface/window epoch when available, and geometry revision or an explicitly documented equivalent.
+
+### 16.2 Required snapshot projections
+
+The following are projections of the same pane geometry snapshot:
+
+- content/target viewport
+- native/compositor host/update geometry
+- Surf Ace pane controls and floating chrome
+- overlay/hit regions sent to compositor or local input routing
+- annotation/capture exclusion masks when applicable
+- protocol `panes.list` / pane viewport metadata
+- debug borders and diagnostic geometry
+
+If a consumer needs a new rectangle, the geometry authority adds a named projection. The consumer does not recompute from topology, split direction, physical display dimensions, or renderer-local measurements.
+
+### 16.3 Electron requirement
+
+Electron surfaces have explicit geometry seams between renderer UI, Electron main, native/compositor hosting, overlay reporting, hit routing, and protocol reporting. Electron MUST treat the resolved pane snapshot as the only placement authority. Renderer DOM overlay measurements may provide semantic control presence, intrinsic size, and relative offsets, but they MUST NOT define the pane placement basis once native pane geometry exists. Compositor payloads consume `panes[].geometry` and `regions[].rect` as resolved rectangles; compositor MUST NOT infer pane layout from Surf Ace topology intent.
+
+Racter tall-logical-surface remains a required fixture: Surf Ace receives a logical surface of `2160x3840` and must treat it exactly like any other `2160x3840` monitor/window. Native panes, Surf Ace controls, overlay regions, and hit regions must align in that logical coordinate space. Surf Ace must not reason from display rotation or physical scanout shape.
+
+### 16.4 iOS requirement
+
+iOS should preserve its cleaner visual seam: pane content and controls live in one SwiftUI pane layout context. That SwiftUI-resolved pane frame is the iOS geometry authority. Protocol reporting MUST consume the resolved pane geometry from that authority; it MUST NOT independently recompute pane rectangles from topology in a way that can drift from visible layout. Split spacing, safe area, scale, and scene/window changes must be represented consistently in the resolved snapshot and protocol viewport projection.
+
+### 16.5 Failure modes forbidden by this architecture
+
+The architecture forbids these classes of bugs:
+
+- native content and Surf Ace chrome disagree about pane position
+- renderer overlay rectangles move chrome independently of accepted pane geometry
+- protocol viewport metadata differs from visible pane layout because it recomputes split math
+- stale geometry applies after resize, split, close, scene recreation, or pane id reuse
+- hit regions route input under Surf Ace controls because they were derived from a different revision
+- debug/capture masks use a separate measurement path from the real applied geometry
+
+Acceptance tests MUST cover both Electron and iOS: one snapshot revision produces content viewport, controls/chrome, overlay/hit regions, materialization geometry, and protocol viewport for that pane.
 
 ## Appendix A. Design Rationale and Decision Notes
 

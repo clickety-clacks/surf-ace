@@ -14,6 +14,12 @@ type TestPane = {
   contentId: string | null;
   contentType: string | null;
   drawings: string[];
+  frame: {
+    height: number;
+    width: number;
+    x: number;
+    y: number;
+  };
   name: string | null;
   paneLabel: number;
   revision: number;
@@ -166,6 +172,12 @@ class FakeSurfAceWsServer {
           contentId: null,
           contentType: null,
           drawings: [],
+          frame: {
+            height: 768,
+            width: 1024,
+            x: 0,
+            y: 0,
+          },
           name: null,
           paneLabel: this.initialRemotePaneId,
           revision: 0,
@@ -260,6 +272,12 @@ class FakeSurfAceWsServer {
             contentId: null,
             contentType: null,
             drawings: [],
+            frame: {
+              height: viewport.height,
+              width: viewport.width,
+              x: 0,
+              y: 0,
+            },
             name: null,
             paneLabel: initialRemotePaneId,
             revision: 0,
@@ -604,7 +622,10 @@ class FakeSurfAceWsServer {
             );
             return;
           }
-          if (attemptedResumeSessionId !== this.lockedSessionId) {
+          if (message.payload?.takeover) {
+            pairResponseResumed = false;
+            pairResponseSessionId = "sa_test_session";
+          } else if (attemptedResumeSessionId !== this.lockedSessionId) {
             socket.send(
               JSON.stringify(
                 this.errorResponse(
@@ -616,9 +637,10 @@ class FakeSurfAceWsServer {
               ),
             );
             return;
+          } else {
+            pairResponseResumed = true;
+            pairResponseSessionId = this.lockedSessionId;
           }
-          pairResponseResumed = true;
-          pairResponseSessionId = this.lockedSessionId;
         }
         const requestedSurface = this.requireSurface(String(message.payload?.surfaceId ?? this.surfaceId));
         this.pairedSocketsBySurfaceId.set(requestedSurface.surfaceId, socket);
@@ -719,12 +741,19 @@ class FakeSurfAceWsServer {
             contentId: previousPane?.contentId ?? null,
             contentType: previousPane?.contentType ?? null,
             drawings: previousPane?.drawings ? [...previousPane.drawings] : [],
+            frame: previousPane?.frame ?? {
+              height: targetSurface.viewport.height,
+              width: targetSurface.viewport.width,
+              x: 0,
+              y: 0,
+            },
             name: paneState.name,
             paneLabel: paneState.paneLabel,
             revision: previousPane?.revision ?? 0,
             viewport: previousPane?.viewport ?? { ...targetSurface.viewport },
           });
         }
+        this.applyTopologyFrames(targetSurface, message.payload?.layout);
         socket.send(
           JSON.stringify(
             this.response(message.id, "topology.apply", {
@@ -840,10 +869,15 @@ class FakeSurfAceWsServer {
               panes: [...targetSurface.panes.entries()].map(([paneId, pane]) => ({
                 activeContentId: pane.contentId,
                 contentType: pane.contentType,
+                geometry: this.paneGeometry(targetSurface, paneId, pane),
                 name: pane.name,
                 paneId,
                 paneLabel: pane.paneLabel,
-                viewport: pane.viewport,
+                viewport: {
+                  height: pane.frame.height,
+                  scale: pane.viewport.scale,
+                  width: pane.frame.width,
+                },
               })),
             }),
           ),
@@ -970,16 +1004,46 @@ class FakeSurfAceWsServer {
           newPaneLabels,
           paneId,
         });
+        const splitDirection = String(message.payload?.direction ?? "");
+        const splitCount = newPaneIds.length + 1;
+        const sourceFrame = { ...sourcePane.frame };
+        const sourceViewport = { ...sourcePane.viewport };
+        if (splitDirection === "horizontal") {
+          const height = sourceFrame.height / splitCount;
+          sourcePane.frame = { ...sourceFrame, height };
+          sourcePane.viewport = { ...sourceViewport, height };
+        } else {
+          const width = sourceFrame.width / splitCount;
+          sourcePane.frame = { ...sourceFrame, width };
+          sourcePane.viewport = { ...sourceViewport, width };
+        }
         for (const [index, newPaneId] of newPaneIds.entries()) {
+          const segmentIndex = index + 1;
+          const frame = splitDirection === "horizontal"
+            ? {
+                height: sourcePane.frame.height,
+                width: sourceFrame.width,
+                x: sourceFrame.x,
+                y: sourceFrame.y + sourcePane.frame.height * segmentIndex,
+              }
+            : {
+                height: sourceFrame.height,
+                width: sourcePane.frame.width,
+                x: sourceFrame.x + sourcePane.frame.width * segmentIndex,
+                y: sourceFrame.y,
+              };
           targetSurface.panes.set(newPaneId, {
             contentId: null,
             contentType: null,
             drawings: [],
+            frame,
             name: null,
             paneLabel: newPaneLabels[index] ?? newPaneId,
             revision: 0,
             viewport: {
-              ...sourcePane.viewport,
+              height: frame.height,
+              scale: sourcePane.viewport.scale,
+              width: frame.width,
             },
           });
         }
@@ -1099,6 +1163,84 @@ class FakeSurfAceWsServer {
       type: "response",
       v: 1,
     };
+  }
+
+  private paneGeometry(surface: TestSurfaceState, paneId: number, pane: TestPane) {
+    const topologyEpoch = this.topologyApplyRequests.at(-1)?.topologyRevision ?? 0;
+    const contentViewport = { ...pane.frame };
+    return {
+      contentViewport,
+      coordinateSpace: "surface_logical",
+      geometryRevision: topologyEpoch + 2,
+      paneFrame: { ...pane.frame },
+      paneId,
+      paneInstanceId: `pl_${surface.surfaceId}_${paneId}`,
+      protocolViewport: {
+        coordinateSpace: "protocol_viewport",
+        rect: { ...pane.frame },
+        viewport: {
+          height: pane.frame.height,
+          scale: pane.viewport.scale,
+          width: pane.frame.width,
+        },
+      },
+      safeAreaInsets: { bottom: 0, left: 0, right: 0, top: 0 },
+      scale: pane.viewport.scale,
+      splitSpacingInsets: { bottom: 0, left: 0, right: 0, top: 0 },
+      surfaceBounds: {
+        height: surface.viewport.height,
+        width: surface.viewport.width,
+        x: 0,
+        y: 0,
+      },
+      surfaceEpoch: `${surface.surfaceId}:1`,
+      topologyEpoch,
+    };
+  }
+
+  private applyTopologyFrames(surface: TestSurfaceState, layout: unknown): void {
+    const assign = (node: unknown, rect: { height: number; width: number; x: number; y: number }): void => {
+      if (!node || typeof node !== "object") {
+        return;
+      }
+      const record = node as Record<string, unknown>;
+      if (record.type === "pane") {
+        const paneId = Number(record.paneId ?? 0);
+        const pane = surface.panes.get(paneId);
+        if (!pane) {
+          return;
+        }
+        pane.frame = { ...rect };
+        pane.viewport = {
+          height: rect.height,
+          scale: surface.viewport.scale,
+          width: rect.width,
+        };
+        return;
+      }
+      if (record.type !== "split" || !Array.isArray(record.children) || record.children.length === 0) {
+        return;
+      }
+      const children = record.children;
+      if (record.direction === "horizontal") {
+        const height = rect.height / children.length;
+        children.forEach((child, index) => {
+          assign(child, { height, width: rect.width, x: rect.x, y: rect.y + height * index });
+        });
+        return;
+      }
+      const width = rect.width / children.length;
+      children.forEach((child, index) => {
+        assign(child, { height: rect.height, width, x: rect.x + width * index, y: rect.y });
+      });
+    };
+
+    assign(layout, {
+      height: surface.viewport.height,
+      width: surface.viewport.width,
+      x: 0,
+      y: 0,
+    });
   }
 
   private errorResponse(
@@ -1555,6 +1697,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentId: null,
         contentType: null,
         drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
         paneLabel: 77,
         revision: 0,
@@ -1581,6 +1724,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentId: null,
         contentType: null,
         drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
         paneLabel: 2,
         revision: 0,
@@ -2170,7 +2314,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
               {
                 binding_id: `${firstPaneId}:${target?.targetId}`,
                 content_id: target?.targetId,
-                geometry: { coordinateSpace: "compositor_logical", height: 768, width: 1024, x: 0, y: 0 },
+                geometry: {
+                  coordinateSpace: "compositor_logical",
+                  geometryRevision: 2,
+                  height: 768,
+                  paneInstanceId: targetAfterPlaceholder?.paneLineageId,
+                  surfaceEpoch: `${server.surfaceId}:1`,
+                  topologyEpoch: 0,
+                  width: 1024,
+                  x: 0,
+                  y: 0,
+                },
                 id: firstPaneId,
                 process: {
                   args: [],
@@ -2382,7 +2536,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           {
             binding_id: `${secondPane.paneId}:${registered.targetId}`,
             content_id: registered.targetId,
-            geometry: { coordinateSpace: "compositor_logical", height: 384, width: 1024, x: 0, y: 384 },
+            geometry: {
+              coordinateSpace: "compositor_logical",
+              geometryRevision: 3,
+              height: 384,
+              paneInstanceId: applyRequest.paneLineageId,
+              surfaceEpoch: `${server.surfaceId}:1`,
+              topologyEpoch: 1,
+              width: 1024,
+              x: 0,
+              y: 384,
+            },
             id: secondPane.paneId,
             process: { args: ["--utf-force"], command: "btop" },
             revision: registered.targetEpoch,
@@ -2464,7 +2628,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             {
               binding_id: `${firstPaneId}:${registered.targetId}`,
               content_id: registered.targetId,
-              geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 2160, x: 0, y: 0 },
+              geometry: {
+                coordinateSpace: "compositor_logical",
+                geometryRevision: 2,
+                height: 3840,
+                paneInstanceId: applyRequest.paneLineageId,
+                surfaceEpoch: `${server.surfaceId}:1`,
+                topologyEpoch: 0,
+                width: 2160,
+                x: 0,
+                y: 0,
+              },
               id: firstPaneId,
               process: { args: [], command: "top" },
               revision: registered.targetEpoch,
@@ -2537,7 +2711,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           {
             binding_id: `${firstPaneId}:${registered.targetId}`,
             content_id: registered.targetId,
-            geometry: { coordinateSpace: "compositor_logical", height: 768, width: 1024, x: 0, y: 0 },
+            geometry: {
+              coordinateSpace: "compositor_logical",
+              geometryRevision: 2,
+              height: 768,
+              paneInstanceId: applyRequest.paneLineageId,
+              surfaceEpoch: `${server.surfaceId}:1`,
+              topologyEpoch: 0,
+              width: 1024,
+              x: 0,
+              y: 0,
+            },
             id: firstPaneId,
             revision: registered.targetEpoch,
           },
@@ -2864,6 +3048,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentId: null,
         contentType: null,
         drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
         paneLabel: 1,
         revision: 0,
@@ -3689,7 +3874,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("repeated busy reconnect failures preserve provider identity", async () => {
+  await t.test("known self-owned busy reconnect self-reclaims with stable provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -3698,30 +3883,29 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const initialProviderId = server.pairAttemptDetails[0]?.providerId;
       assert.equal(typeof initialProviderId, "string");
-      server.lockUntilNewProviderIdCode = "busy";
-      server.lockUntilNewProviderIdProviderId = initialProviderId ?? null;
+      server.busyWithoutTakeoverResponsesRemaining = 1;
 
-      await surface.client.close(1000, "test_busy_provider_rotation");
+      await surface.client.close(1000, "test_busy_self_reclaim_identity");
 
       await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
-      internalRuntime.wakeSurfaceRetry(surface);
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
-      internalRuntime.wakeSurfaceRetry(surface);
-      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
 
       const reconnectAttempts = server.pairAttemptDetails.slice(1);
       assert.deepEqual(
-        reconnectAttempts.slice(0, 3).map((attempt) => attempt.providerId),
-        [initialProviderId, initialProviderId, initialProviderId],
+        reconnectAttempts.slice(0, 2).map((attempt) => attempt.providerId),
+        [initialProviderId, initialProviderId],
       );
-      assert.ok(reconnectAttempts.every((attempt) => attempt.takeover === false));
+      assert.deepEqual(
+        reconnectAttempts.slice(0, 2).map((attempt) => attempt.takeover),
+        [false, true],
+      );
       assert.ok(
-        warnings.some((warning) => warning.includes("preserving ownership identity")),
+        warnings.some((warning) => warning.includes("ownership_self_reclaim")),
       );
     });
   });
 
-  await t.test("repeated invalid_resume reconnect failures preserve provider identity", async () => {
+  await t.test("known self-owned invalid_resume reconnect self-reclaims with stable provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -3733,22 +3917,22 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       server.lockUntilNewProviderIdCode = "invalid_resume";
       server.lockUntilNewProviderIdProviderId = initialProviderId ?? null;
 
-      await surface.client.close(1000, "test_invalid_resume_provider_rotation");
+      await surface.client.close(1000, "test_invalid_resume_self_reclaim_identity");
 
       await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
-      internalRuntime.wakeSurfaceRetry(surface);
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
-      internalRuntime.wakeSurfaceRetry(surface);
-      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
 
       const reconnectAttempts = server.pairAttemptDetails.slice(1);
       assert.deepEqual(
-        reconnectAttempts.slice(0, 3).map((attempt) => attempt.providerId),
-        [initialProviderId, initialProviderId, initialProviderId],
+        reconnectAttempts.slice(0, 2).map((attempt) => attempt.providerId),
+        [initialProviderId, initialProviderId],
       );
-      assert.ok(reconnectAttempts.every((attempt) => attempt.takeover === false));
+      assert.deepEqual(
+        reconnectAttempts.slice(0, 2).map((attempt) => attempt.takeover),
+        [false, true],
+      );
       assert.ok(
-        warnings.some((warning) => warning.includes("preserving ownership identity")),
+        warnings.some((warning) => warning.includes("ownership_self_reclaim")),
       );
     });
   });
@@ -4023,6 +4207,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         contentId: null,
         contentType: null,
         drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
         paneLabel: 900,
         revision: 0,
@@ -4396,8 +4581,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
       assert.equal(server.pairAttemptDetails[0]?.takeover, false);
       assert.equal(server.pairAttemptDetails[1]?.providerId, providerId);
-      assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, sessionId);
-      assert.equal(server.pairAttemptDetails[1]?.takeover, false);
+      assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, null);
+      assert.equal(server.pairAttemptDetails[1]?.takeover, true);
     } finally {
       await runtime.stop();
       await server.close();
@@ -4426,7 +4611,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("busy after a cold-start reconnect backs off without takeover", async () => {
+  await t.test("busy on a known self-owned cold-start surface self-reclaims with stable provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -4435,48 +4620,85 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.hasPairedInGatewaySession = false;
       surface.sessionId = null;
 
-      // Return busy once, then allow the next non-takeover retry to succeed.
-      server.busyWithoutTakeoverResponsesRemaining = 1;
-      await surface.client.close(1000, "test_cold_start_busy_backoff");
+      const providerId = server.pairAttemptDetails[0]?.providerId;
 
-      // Wait for reconnect: first attempt gets busy, the next retry stays non-takeover and succeeds.
+      // Return busy once, then allow the stable-provider self-reclaim to succeed.
+      server.busyWithoutTakeoverResponsesRemaining = 1;
+      await surface.client.close(1000, "test_cold_start_busy_self_reclaim");
+
+      // Wait for reconnect: first attempt gets busy, the next attempt reclaims with the same provider id.
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
+      assert.equal(server.pairAttemptDetails[1]?.takeover, false);
+      assert.equal(server.pairAttemptDetails[2]?.takeover, true);
+      assert.equal(server.pairAttemptDetails[2]?.providerId, providerId);
       assert.ok(
-        server.pairAttemptDetails.slice(1, 3).every((attempt) => attempt.takeover === false),
-        "cold-start busy recovery must not escalate to takeover",
-      );
-      assert.ok(
-        warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
+        warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
       );
     });
   });
 
-  await t.test("busy after a live-session drop backs off without takeover", async () => {
+  await t.test("busy after a live-session drop self-reclaims with stable provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
       assert.ok(surface.client);
       assert.equal(surface.hasPairedInGatewaySession, true);
+      const providerId = server.pairAttemptDetails[0]?.providerId;
 
-      // Return busy once, then succeed — validates no takeover on retry
+      // Return busy once, then self-reclaim with the same provider identity.
       server.busyWithoutTakeoverResponsesRemaining = 1;
-      await surface.client.close(1000, "test_live_session_busy_backoff");
+      await surface.client.close(1000, "test_live_session_busy_self_reclaim");
 
-      // Wait for reconnect: first attempt gets busy, second succeeds
+      // Wait for reconnect: first attempt gets busy, second succeeds as self-reclaim.
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
+      assert.equal(server.pairAttemptDetails[1]?.takeover, false);
+      assert.equal(server.pairAttemptDetails[2]?.takeover, true);
+      assert.equal(server.pairAttemptDetails[2]?.providerId, providerId);
       assert.ok(
-        server.pairAttemptDetails.slice(1).every((attempt) => attempt.takeover === false),
-        "no reconnect attempt should use takeover",
+        warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
+      );
+    });
+  });
+
+  await t.test("busy on an unknown surface remains explicit operator reclaim", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_foreign_busy" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-foreign-busy-"));
+    const warnings: string[] = [];
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({
+      discovery,
+      logger: {
+        error: () => {},
+        info: () => {},
+        warn: (message: string) => warnings.push(message),
+      },
+      stateDir,
+    });
+    server.busyWithoutTakeoverResponsesRemaining = 1;
+
+    try {
+      await runtime.start();
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.takeover),
+        [false, false],
       );
       assert.ok(
         warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
       );
-    });
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
   });
 
   await t.test("invalid_resume after a cold-start reconnect retries fresh without takeover", async () => {

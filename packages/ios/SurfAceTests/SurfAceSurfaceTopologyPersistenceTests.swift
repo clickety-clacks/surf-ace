@@ -98,3 +98,120 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(restoredFI.panes.map(\.paneLabel), [166])
     }
 }
+
+final class SurfAcePaneGeometrySnapshotTests: XCTestCase {
+    @MainActor
+    func testPaneViewportPayloadUsesSwiftUIResolvedSnapshotIncludingSplitSpacing() {
+        let runtime = SurfAceRuntime()
+        let surface = runtime.registerSurface(sceneKey: "geometry-split")
+        runtime.updateViewport(surfaceId: surface.surfaceId, size: CGSize(width: 601, height: 300), scale: 2)
+        surface.panesById = [
+            1: SurfAcePaneModel(paneId: 1, paneLabel: 1),
+            2: SurfAcePaneModel(paneId: 2, paneLabel: 2),
+        ]
+        surface.paneLayout = .split(direction: .vertical, children: [.leaf(1), .leaf(2)])
+        surface.topologyEpoch = 7
+
+        runtime.updatePaneGeometrySnapshot(
+            surfaceId: surface.surfaceId,
+            paneId: 1,
+            paneFrame: CGRect(x: 0, y: 0, width: 300, height: 300),
+            contentViewport: CGRect(x: 0, y: 0, width: 300, height: 300),
+            splitSpacing: surfAcePaneSplitSpacing
+        )
+        runtime.updatePaneGeometrySnapshot(
+            surfaceId: surface.surfaceId,
+            paneId: 2,
+            paneFrame: CGRect(x: 301, y: 0, width: 300, height: 300),
+            contentViewport: CGRect(x: 301, y: 0, width: 300, height: 300),
+            splitSpacing: surfAcePaneSplitSpacing
+        )
+
+        let firstPayload = runtime.paneViewportPayload(surfaceId: surface.surfaceId, paneId: 1)
+        let secondPayload = runtime.paneViewportPayload(surfaceId: surface.surfaceId, paneId: 2)
+        let firstGeometry = runtime.paneGeometryPayload(surfaceId: surface.surfaceId, paneId: 1)
+        let secondGeometry = runtime.paneGeometryPayload(surfaceId: surface.surfaceId, paneId: 2)
+        let firstContentViewport = firstGeometry["contentViewport"] as? [String: Double]
+        let secondContentViewport = secondGeometry["contentViewport"] as? [String: Double]
+
+        XCTAssertEqual(firstPayload["width"] as? Int, 300)
+        XCTAssertEqual(secondPayload["width"] as? Int, 300)
+        XCTAssertEqual(firstPayload["scale"] as? Double, 2)
+        XCTAssertNil(firstPayload["x"])
+        XCTAssertNil(firstPayload["coordinateSpace"])
+        XCTAssertEqual(firstContentViewport?["x"], 0)
+        XCTAssertEqual(firstContentViewport?["width"], 300)
+        XCTAssertEqual(secondContentViewport?["x"], 301)
+        XCTAssertEqual(secondContentViewport?["width"], 300)
+        XCTAssertEqual(firstGeometry["coordinateSpace"] as? String, SurfAcePaneGeometrySnapshot.coordinateSpace)
+        XCTAssertEqual(firstGeometry["topologyEpoch"] as? Int, 7)
+        XCTAssertEqual(firstGeometry["surfaceEpoch"] as? String, String(surface.surfaceEpoch))
+        XCTAssertEqual(firstGeometry["geometryRevision"] as? Int, surface.panesById[1]?.geometrySnapshot?.geometryRevision)
+        XCTAssertEqual(firstGeometry["paneInstanceId"] as? String, surface.panesById[1]?.paneInstanceId)
+    }
+
+    @MainActor
+    func testPaneGeometryRevisionChangesOnlyWhenAppliedSnapshotChanges() {
+        let runtime = SurfAceRuntime()
+        let surface = runtime.registerSurface(sceneKey: "geometry-revision")
+        runtime.updateViewport(surfaceId: surface.surfaceId, size: CGSize(width: 400, height: 300), scale: 1)
+
+        let frame = CGRect(x: 0, y: 0, width: 400, height: 300)
+        runtime.updatePaneGeometrySnapshot(
+            surfaceId: surface.surfaceId,
+            paneId: 1,
+            paneFrame: frame,
+            contentViewport: frame,
+            splitSpacing: surfAcePaneSplitSpacing
+        )
+        let initialRevision = surface.panesById[1]?.geometrySnapshot?.geometryRevision
+
+        runtime.updatePaneGeometrySnapshot(
+            surfaceId: surface.surfaceId,
+            paneId: 1,
+            paneFrame: frame,
+            contentViewport: frame,
+            splitSpacing: surfAcePaneSplitSpacing
+        )
+        XCTAssertEqual(surface.panesById[1]?.geometrySnapshot?.geometryRevision, initialRevision)
+
+        let resizedFrame = CGRect(x: 0, y: 0, width: 320, height: 300)
+        runtime.updatePaneGeometrySnapshot(
+            surfaceId: surface.surfaceId,
+            paneId: 1,
+            paneFrame: resizedFrame,
+            contentViewport: resizedFrame,
+            splitSpacing: surfAcePaneSplitSpacing
+        )
+        XCTAssertNotEqual(surface.panesById[1]?.geometrySnapshot?.geometryRevision, initialRevision)
+        XCTAssertEqual(runtime.paneViewportPayload(surfaceId: surface.surfaceId, paneId: 1)["width"] as? Int, 320)
+    }
+
+    @MainActor
+    func testPaneViewportPayloadDoesNotReportStaleSnapshotAfterTopologyEpochChanges() {
+        let runtime = SurfAceRuntime()
+        let surface = runtime.registerSurface(sceneKey: "geometry-stale")
+        runtime.updateViewport(surfaceId: surface.surfaceId, size: CGSize(width: 400, height: 300), scale: 2)
+
+        let frame = CGRect(x: 0, y: 0, width: 400, height: 300)
+        runtime.updatePaneGeometrySnapshot(
+            surfaceId: surface.surfaceId,
+            paneId: 1,
+            paneFrame: frame,
+            contentViewport: frame,
+            splitSpacing: surfAcePaneSplitSpacing
+        )
+        XCTAssertEqual(runtime.paneViewportPayload(surfaceId: surface.surfaceId, paneId: 1)["width"] as? Int, 400)
+
+        surface.topologyEpoch += 1
+
+        let staleViewport = runtime.paneViewportPayload(surfaceId: surface.surfaceId, paneId: 1)
+        let staleGeometry = runtime.paneGeometryPayload(surfaceId: surface.surfaceId, paneId: 1)
+        let staleContentViewport = staleGeometry["contentViewport"] as? [String: Double]
+
+        XCTAssertEqual(staleViewport["width"] as? Int, 1)
+        XCTAssertEqual(staleGeometry["geometryRevision"] as? Int, 0)
+        XCTAssertEqual(staleGeometry["topologyEpoch"] as? Int, surface.topologyEpoch)
+        XCTAssertEqual(staleContentViewport?["width"], 1)
+    }
+}

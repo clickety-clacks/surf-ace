@@ -76,6 +76,7 @@ type RendererPaneState = {
     revision: number;
   };
   drawings: Stroke[];
+  externalNative: boolean;
   flushInFlight: boolean;
   label: string;
   paneId: number;
@@ -89,6 +90,7 @@ type LayoutNode =
 
 type RendererWindowState = {
   connectionBar: "connected" | "connecting" | "disconnected";
+  geometryRevision?: number;
   layout: LayoutNode | null;
   name: string;
   panes: RendererPaneState[];
@@ -164,7 +166,9 @@ const OVERLAY_MARKER_ATTRIBUTE = "data-surf-ace-overlay";
 type SurfAceOverlayKind =
   | "annotation-control"
   | "history-back"
+  | "keyboard-focus-edge"
   | "history-forward"
+  | "pane-label"
   | "pane-handle";
 
 function escapeHtml(input: string): string {
@@ -200,7 +204,7 @@ function markdownToHtml(markdown: string): string {
 }
 
 function contentKey(pane: RendererPaneState): string {
-  return `${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}`;
+  return `${pane.externalNative ? "native" : "renderer"}:${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}`;
 }
 
 function drawingsKey(drawings: Stroke[]): string {
@@ -348,6 +352,10 @@ function overlayMetadataForMarker(
       return { captures: OVERLAY_CAPTURES, kind: "history_back", suffix: marker, zIndex: 20 };
     case "history-forward":
       return { captures: OVERLAY_CAPTURES, kind: "history_forward", suffix: marker, zIndex: 20 };
+    case "keyboard-focus-edge":
+      return { captures: ["pointer_hover"], kind: "other", suffix: marker, zIndex: 25 };
+    case "pane-label":
+      return { captures: ["pointer_hover"], kind: "pane_badge", suffix: marker, zIndex: 15 };
     case "pane-handle":
       return { captures: OVERLAY_CAPTURES, kind: "pane_handle", suffix: marker, zIndex: 10 };
     default:
@@ -419,7 +427,7 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
   window.surfAce.reportOverlayRegions({
     coordinateSpace: "surface_logical",
     regions,
-    revision: overlayRevision,
+    revision: latestState.geometryRevision ?? overlayRevision,
     topologyEpoch: String(latestState.topologyRevision),
     updateReason,
   });
@@ -720,6 +728,15 @@ function ensurePaneView(paneId: number): PaneView {
   const labelEl = document.createElement("div");
   labelEl.className = "pane-label";
   labelEl.innerHTML = "<span></span>";
+  surfAceOverlay(labelEl, "pane-label");
+  const focusOverlayEl = document.createElement("div");
+  focusOverlayEl.className = "keyboard-focus-overlay";
+  for (const edge of ["top", "right", "bottom", "left"]) {
+    const edgeEl = document.createElement("div");
+    edgeEl.className = `keyboard-focus-edge keyboard-focus-edge--${edge}`;
+    surfAceOverlay(edgeEl, "keyboard-focus-edge");
+    focusOverlayEl.appendChild(edgeEl);
+  }
   const canvas = document.createElement("canvas");
   canvas.className = "annotation-layer";
   const controlsEl = document.createElement("div");
@@ -729,7 +746,7 @@ function ensurePaneView(paneId: number): PaneView {
   toastEl.className = "pane-toast";
   toastEl.hidden = true;
 
-  rootEl.append(scrollEl, shieldEl, canvas, labelEl, controlsEl, toastEl);
+  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, toastEl);
 
   const view: PaneView = {
     annotationCanvas: canvas,
@@ -1270,6 +1287,11 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   view.currentContentKey = key;
   const renderToken = resetDynamicContent(view);
   view.contentEl.className = `pane-content type-${pane.content.contentType ?? "empty"}`;
+
+  if (pane.externalNative && (!pane.content.contentType || pane.content.content === null)) {
+    reportPaneSnapshot(view);
+    return;
+  }
 
   if (!pane.content.contentType || pane.content.content === null) {
     renderIdleState(view, "Surface ready", "Waiting for content.");

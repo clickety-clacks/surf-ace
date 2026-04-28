@@ -64,6 +64,25 @@ export type CompositorControlRequest =
 
 export type CompositorControlResponse = Record<string, unknown>;
 
+type PaneGeometry = {
+  geometry?: {
+    coordinateSpace?: string;
+    geometryRevision?: number;
+    height: number;
+    paneInstanceId?: string;
+    surfaceEpoch?: string;
+    topologyEpoch?: number | string;
+    width: number;
+    x: number;
+    y: number;
+  };
+  id: number | string;
+};
+
+export type ResolvedNativePaneGeometry = Required<PaneGeometry> & {
+  paneInstanceId: string;
+};
+
 export function resolveCompositorControlSocketPath(
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
@@ -78,6 +97,9 @@ export function requestForCompositor(
       if (pane.geometry.coordinateSpace !== "compositor_logical") {
         throw new Error(`native pane ${pane.id} geometry missing compositor_logical coordinate space`);
       }
+      if (!pane.geometry.paneInstanceId || pane.geometry.topologyEpoch === undefined || !pane.geometry.surfaceEpoch || pane.geometry.geometryRevision === undefined) {
+        throw new Error(`native pane ${pane.id} geometry missing canonical revision identity`);
+      }
       return pane;
     }),
     type: materialization.op,
@@ -90,8 +112,27 @@ export function overlayRequestForCompositor(
   if (!materialization.overlaySet) {
     return null;
   }
+  const panesById = new Map(materialization.panes.map((pane) => [String(pane.id), pane]));
   return {
     ...materialization.overlaySet,
+    regions: materialization.overlaySet.regions.map((region) => {
+      const pane = panesById.get(String(region.paneId));
+      if (!pane || region.kind !== "native_pane") {
+        return region;
+      }
+      return {
+        ...region,
+        paneInstanceId: nativePaneInstanceIdForCompositor(pane),
+        rect: {
+          height: pane.geometry.height,
+          width: pane.geometry.width,
+          x: pane.geometry.x,
+          y: pane.geometry.y,
+        },
+      };
+    }),
+    revision: materialization.panes[0]?.geometry.geometryRevision ?? materialization.overlaySet.revision,
+    topologyEpoch: materialization.panes[0]?.geometry.topologyEpoch ?? materialization.overlaySet.topologyEpoch,
     type: "overlay_regions.set",
     updateReason: materialization.op === "native_pane.host" ? "initial" : "update",
   };
@@ -125,13 +166,37 @@ export function overlayRegionsSetRequestForCompositor(snapshot: {
   };
 }
 
+export function resolvedOverlayRegionsForCompositor(
+  regions: CompositorOverlayRegion[],
+  panes: Iterable<ResolvedNativePaneGeometry>,
+): CompositorOverlayRegion[] {
+  const paneById = new Map([...panes].map((pane) => [String(pane.id), pane]));
+
+  return regions.map((region) => {
+    const pane = paneById.get(String(region.paneId));
+    if (!pane) {
+      return region;
+    }
+    return {
+      ...region,
+      paneInstanceId: pane.paneInstanceId,
+    };
+  });
+}
+
 export function nativePaneInstanceIdsForCompositor(
   materialization: NativePaneMaterialization,
 ): Map<string, string> {
   return new Map(materialization.panes.map((pane) => [
     String(pane.id),
-    String(pane.binding_id ?? `${pane.id}:${pane.content_id ?? "none"}`),
+    nativePaneInstanceIdForCompositor(pane),
   ]));
+}
+
+function nativePaneInstanceIdForCompositor(
+  pane: NativePaneMaterialization["panes"][number],
+): string {
+  return String(pane.binding_id ?? `${pane.id}:${pane.content_id ?? pane.geometry.paneInstanceId ?? "none"}`);
 }
 
 export function overlayRegionsClearRequestForCompositor(
@@ -143,6 +208,43 @@ export function overlayRegionsClearRequestForCompositor(
     type: "overlay_regions.clear",
     ...(windowId ? { windowId } : {}),
   };
+}
+
+export function validatePaneHandleOverlayAlignment(snapshot: {
+  maxBottomInset?: number;
+  panes: PaneGeometry[];
+  regions: CompositorOverlayRegion[];
+  tolerance?: number;
+}): string[] {
+  const tolerance = snapshot.tolerance ?? 2;
+  const maxBottomInset = snapshot.maxBottomInset ?? 128;
+  const paneById = new Map(snapshot.panes.map((pane) => [String(pane.id), pane]));
+  const errors: string[] = [];
+
+  for (const region of snapshot.regions) {
+    if (region.kind !== "pane_handle") {
+      continue;
+    }
+    const pane = paneById.get(String(region.paneId));
+    if (!pane?.geometry) {
+      errors.push(`pane handle ${region.regionId} references pane ${region.paneId} without geometry`);
+      continue;
+    }
+    if (pane.geometry.coordinateSpace && pane.geometry.coordinateSpace !== "compositor_logical") {
+      errors.push(`pane ${pane.id} geometry coordinate space is ${pane.geometry.coordinateSpace}, expected compositor_logical`);
+      continue;
+    }
+    const expectedX = pane.geometry.x + ((pane.geometry.width - region.rect.width) / 2);
+    const bottomInset = (pane.geometry.y + pane.geometry.height) - (region.rect.y + region.rect.height);
+    if (Math.abs(region.rect.x - expectedX) > tolerance) {
+      errors.push(`pane ${pane.id} handle x=${region.rect.x} is not centered in resolved pane x=${pane.geometry.x} width=${pane.geometry.width}`);
+    }
+    if (bottomInset < -tolerance || bottomInset > maxBottomInset) {
+      errors.push(`pane ${pane.id} handle bottom inset ${bottomInset} is not bottom-aligned within resolved pane y=${pane.geometry.y} height=${pane.geometry.height}`);
+    }
+  }
+
+  return errors;
 }
 
 export function compositorFailureMessage(response: CompositorControlResponse): string | null {

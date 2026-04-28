@@ -57,6 +57,7 @@ const compositorSocket = String(
 const providerId = String(args.providerId ?? args["provider-id"] ?? "pv_racter_overlay_verify");
 const providerName = String(args.providerName ?? args["provider-name"] ?? "Surf Ace Racter Overlay Verify");
 const windowLabel = String(args.windowLabel ?? args["window-label"] ?? "RACTER Overlay Verify");
+const splitDirection = String(args.splitDirection ?? args["split-direction"] ?? "horizontal");
 const btopPaneId = Number(args.btopPaneId ?? args["btop-pane-id"] ?? 1);
 const topPaneId = Number(args.topPaneId ?? args["top-pane-id"] ?? 2);
 const btopProcess = resolveNativeProcess(args, {
@@ -75,7 +76,6 @@ const topProcess = resolveNativeProcess(args, {
 });
 
 const initialStatus = await getCompositorStatus(compositorSocket);
-const geometry = resolvePaneGeometries(initialStatus, args);
 const socket = await connectWebSocket(url);
 const client = new SurfAceClient(socket);
 
@@ -112,7 +112,7 @@ try {
         { paneId: btopPaneId, type: "pane" },
         { paneId: topPaneId, type: "pane" },
       ],
-      direction: "horizontal",
+      direction: splitDirection,
       type: "split",
     },
     panes: [
@@ -126,9 +126,11 @@ try {
   const panesById = new Map(topology.payload.panes.map((pane) => [Number(pane.paneId), pane]));
   const btopPane = requirePane(panesById, btopPaneId);
   const topPane = requirePane(panesById, topPaneId);
+  const paneGeometry = await client.request("panes.list", {});
+  const geometriesById = new Map(paneGeometry.payload.panes.map((pane) => [Number(pane.paneId), pane.geometry]));
 
   const btopApply = await client.request("target.apply", targetApplyPayload({
-    geometry: geometry.btop,
+    geometry: requireNativeGeometry(geometriesById, btopPaneId),
     ownershipSessionId: pair.payload.sessionId,
     pane: btopPane,
     process: btopProcess,
@@ -141,7 +143,7 @@ try {
     zIndex: 0,
   }), 15000);
   const topApply = await client.request("target.apply", targetApplyPayload({
-    geometry: geometry.top,
+    geometry: requireNativeGeometry(geometriesById, topPaneId),
     ownershipSessionId: pair.payload.sessionId,
     pane: topPane,
     process: topProcess,
@@ -198,10 +200,7 @@ function targetApplyPayload(options) {
         {
           binding_id: `${compositorPaneId}:${options.targetId}`,
           content_id: options.targetId,
-          geometry: {
-            ...options.geometry,
-            coordinateSpace: "compositor_logical",
-          },
+          geometry: options.geometry,
           id: compositorPaneId,
           process: {
             args: options.process.args,
@@ -311,29 +310,30 @@ function summarizeCompositorStatus(response, surfaceId) {
   };
 }
 
-function resolvePaneGeometries(statusResponse, parsedArgs) {
-  const status = statusResponse.status ?? statusResponse;
-  const logicalWidth = Number(
-    parsedArgs.logicalWidth ?? parsedArgs["logical-width"] ?? status.logical_surface_width ?? 2160,
-  );
-  const logicalHeight = Number(
-    parsedArgs.logicalHeight ?? parsedArgs["logical-height"] ?? status.logical_surface_height ?? 3840,
-  );
-  const paneWidth = logicalWidth / 2;
-  const bottomControlGutter = Number(parsedArgs.bottomControlGutter ?? parsedArgs["bottom-control-gutter"] ?? 0);
-  const nativePaneHeight = Math.max(1, logicalHeight - bottomControlGutter);
-  return {
-    btop: { height: nativePaneHeight, width: paneWidth, x: 0, y: 0 },
-    top: { height: nativePaneHeight, width: logicalWidth - paneWidth, x: paneWidth, y: 0 },
-  };
-}
-
 function requirePane(panesById, paneId) {
   const pane = panesById.get(paneId);
   if (!pane?.paneLineageId) {
     throw new Error(`topology.apply did not return paneLineageId for pane ${paneId}`);
   }
   return pane;
+}
+
+function requireNativeGeometry(geometriesById, paneId) {
+  const geometry = geometriesById.get(paneId);
+  if (!geometry?.contentViewport) {
+    throw new Error(`panes.list did not return canonical geometry for pane ${paneId}`);
+  }
+  return {
+    coordinateSpace: "compositor_logical",
+    geometryRevision: geometry.geometryRevision,
+    height: geometry.contentViewport.height,
+    paneInstanceId: geometry.paneInstanceId,
+    surfaceEpoch: geometry.surfaceEpoch,
+    topologyEpoch: geometry.topologyEpoch,
+    width: geometry.contentViewport.width,
+    x: geometry.contentViewport.x,
+    y: geometry.contentViewport.y,
+  };
 }
 
 function connectWebSocket(targetUrl) {

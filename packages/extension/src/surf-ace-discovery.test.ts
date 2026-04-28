@@ -66,7 +66,7 @@ DATE: ---Sat 21 Mar 2026---
   assert.deepEqual(endpoint, {
     busy: true,
     capabilitiesBitmask: 31,
-    endpointId: "eezo.local:55386/ws",
+    endpointId: "eezo.local:55386/ws#e305802b",
     fingerprintPrefix: "e305802b",
     host: "eezo.local",
     instanceName: "Surf Ace - iPad Pro 13-inch (M5)",
@@ -81,6 +81,36 @@ DATE: ---Sat 21 Mar 2026---
     },
     wsPath: "/ws",
   });
+});
+
+test("parseDnsSdLookupOutput gives same host and port distinct service identities", () => {
+  const electron = __test.parseDnsSdLookupOutput(
+    "eezo Surf Ace (eezo)",
+    `Lookup eezo\\032Surf\\032Ace\\032\\(eezo\\)._surf-ace._tcp.local.
+DATE: ---Mon 27 Apr 2026---
+ 21:52:00.000  eezo\\032Surf\\032Ace\\032\\(eezo\\)._surf-ace._tcp.local. can be reached at eezo.local.:19001 (interface 15) Flags: 1
+ s=1 h=1410 tls=0 cap=31 w=5120 pk=b0ddd36d name=eezo\\ Surf\\ Ace busy=1 ws=/ws v=1
+`,
+    () => 1234,
+  );
+  const simulator = __test.parseDnsSdLookupOutput(
+    "Surf Ace - iPad Pro 13-inch (M5) (eezo)",
+    `Lookup Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032\\(M5\\)\\032\\(eezo\\)._surf-ace._tcp.local.
+DATE: ---Mon 27 Apr 2026---
+ 21:52:00.000  Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032\\(M5\\)\\032\\(eezo\\)._surf-ace._tcp.local. can be reached at eezo.local.:19001 (interface 15) Flags: 1
+ s=2 h=1024 tls=0 cap=31 w=768 pk=2bb97f09 name=Surf\\ Ace\\ -\\ iPad\\ Pro\\ 13-inch\\ \\(M5\\)\\ \\(eezo\\) busy=0 ws=/ws v=1
+`,
+    () => 1234,
+  );
+
+  assert.ok(electron);
+  assert.ok(simulator);
+  assert.equal(electron.host, "eezo.local");
+  assert.equal(simulator.host, "eezo.local");
+  assert.equal(electron.port, simulator.port);
+  assert.notEqual(electron.endpointId, simulator.endpointId);
+  assert.equal(electron.endpointId, "eezo.local:19001/ws#b0ddd36d");
+  assert.equal(simulator.endpointId, "eezo.local:19001/ws#2bb97f09");
 });
 
 test("refreshNow clears stale endpoints when a full refresh returns no advertisements", async () => {

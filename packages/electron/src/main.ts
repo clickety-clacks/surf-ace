@@ -11,11 +11,13 @@ import {
   type CompositorControlRequest,
   type CompositorControlResponse,
   type CompositorOverlayRegion,
+  type ResolvedNativePaneGeometry,
   compositorFailureMessage,
   nativePaneInstanceIdsForCompositor,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
   resolveCompositorControlSocketPath,
+  resolvedOverlayRegionsForCompositor,
   sendCompositorControl,
 } from "./native-pane-bridge.js";
 import {
@@ -23,7 +25,9 @@ import {
   type PersistentSurfaceState,
   type RendererWindowState,
 } from "./surface-core.js";
+import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { surfaceWindowOptions } from "./window-options.js";
 
 const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
@@ -51,7 +55,7 @@ const windows = new Map<string, BrowserWindow>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const readyWindows = new Set<string>();
 const overlayDiagnostics = new Map<string, Record<string, unknown>>();
-const nativePaneInstances = new Map<string, Map<string, string>>();
+const nativePaneInstances = new Map<string, Map<string, ResolvedNativePaneGeometry>>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
@@ -61,13 +65,6 @@ let isQuitting = false;
 let server: SurfaceWsServer;
 let stateDir = "";
 let stateWrite = Promise.resolve();
-
-function isAddressInUse(error: unknown): boolean {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as NodeJS.ErrnoException).code === "EADDRINUSE";
-}
 
 function candidatePorts(preferredPort: number): number[] {
   if (EXPLICIT_WS_PORT) {
@@ -84,6 +81,13 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
   const ports = candidatePorts(WS_PORT);
   let lastError: unknown;
   for (const port of ports) {
+    if (BIND_ADDRESS === "0.0.0.0" && await isPortBoundOnIpv6Any(port)) {
+      lastError = Object.assign(new Error(`Port ${port} is already bound on IPv6`), { code: "EADDRINUSE" });
+      if (port === ports.at(-1)) {
+        throw lastError;
+      }
+      continue;
+    }
     const candidate = new SurfaceWsServer({
       bindAddress: BIND_ADDRESS,
       capturePaneImage,
@@ -223,19 +227,35 @@ async function sendCompositorOverlayRequest(request: CompositorControlRequest): 
 }
 
 function recordNativePaneInstances(surfaceId: string, materialization: NativePaneMaterialization): void {
-  const current = nativePaneInstances.get(surfaceId) ?? new Map<string, string>();
-  for (const [paneId, paneInstanceId] of nativePaneInstanceIdsForCompositor(materialization)) {
-    current.set(paneId, paneInstanceId);
+  const current = nativePaneInstances.get(surfaceId) ?? new Map<string, ResolvedNativePaneGeometry>();
+  const paneInstanceIds = nativePaneInstanceIdsForCompositor(materialization);
+  for (const pane of materialization.panes) {
+    const paneId = String(pane.id);
+    current.set(paneId, {
+      geometry: {
+        geometryRevision: pane.geometry.geometryRevision,
+        height: pane.geometry.height,
+        paneInstanceId: pane.geometry.paneInstanceId,
+        surfaceEpoch: pane.geometry.surfaceEpoch,
+        topologyEpoch: pane.geometry.topologyEpoch,
+        width: pane.geometry.width,
+        x: pane.geometry.x,
+        y: pane.geometry.y,
+        coordinateSpace: pane.geometry.coordinateSpace,
+      },
+      id: paneId,
+      paneInstanceId: paneInstanceIds.get(paneId) ?? `${paneId}:${pane.content_id ?? "none"}`,
+    });
   }
   nativePaneInstances.set(surfaceId, current);
 }
 
 function compositorOverlayRegions(surfaceId: string, regions: unknown[]): CompositorOverlayRegion[] {
   const instances = nativePaneInstances.get(surfaceId);
-  return (regions as CompositorOverlayRegion[]).map((region) => {
-    const paneInstanceId = instances?.get(String(region.paneId));
-    return paneInstanceId ? { ...region, paneInstanceId } : region;
-  });
+  return resolvedOverlayRegionsForCompositor(
+    regions as CompositorOverlayRegion[],
+    instances?.values() ?? [],
+  );
 }
 
 async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<string, unknown>): Promise<void> {
@@ -352,17 +372,17 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
 
   const surface = core.getSurface(surfaceId);
   const window = new BrowserWindow({
-    backgroundColor: "#0b1324",
-    height: Math.max(720, surface.viewport.height),
-    show: false,
-    title: surface.windowLabel ? `${endpointName()} · ${surface.windowLabel}` : endpointName(),
-    useContentSize: true,
+    ...surfaceWindowOptions({
+      compositorSocketPath: resolveCompositorControlSocketPath(),
+      endpointName: endpointName(),
+      viewport: surface.viewport,
+      windowLabel: surface.windowLabel,
+    }),
     webPreferences: {
       contextIsolation: true,
       preload: path.join(distDir, "preload.cjs"),
       webviewTag: true,
     },
-    width: Math.max(960, surface.viewport.width),
   });
 
   windows.set(surfaceId, window);

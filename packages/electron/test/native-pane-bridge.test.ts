@@ -14,7 +14,9 @@ import {
   overlayRequestForCompositor,
   requestForCompositor,
   resolveCompositorControlSocketPath,
+  resolvedOverlayRegionsForCompositor,
   sendCompositorControl,
+  validatePaneHandleOverlayAlignment,
   validateMaterializationAgainstCompositorStatus,
 } from "../src/native-pane-bridge.js";
 
@@ -45,7 +47,17 @@ function materialization(
       {
         binding_id: "118:target_top",
         content_id: "target_top",
-        geometry: { coordinateSpace: "compositor_logical", height: 384, width: 512, x: 512, y: 0 },
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: 3 as never,
+          height: 384,
+          paneInstanceId: "pl_118",
+          surfaceEpoch: "sf_test:1",
+          topologyEpoch: 2 as never,
+          width: 512,
+          x: 512,
+          y: 0,
+        },
         id: 118 as never,
         process: { args: ["top"], command: "foot" },
         revision: 3 as never,
@@ -77,11 +89,45 @@ test("native pane bridge serializes host and overlay requests from protocol mate
   });
   assert.deepEqual(overlayRequestForCompositor(input), {
     ...input.overlaySet,
+    regions: [
+      {
+        ...input.overlaySet!.regions[0]!,
+        paneInstanceId: "118:target_top",
+      },
+    ],
     type: "overlay_regions.set",
     updateReason: "initial",
   });
   assert.equal(overlayRequestForCompositor(materialization({ op: "native_pane.update" }))?.updateReason, "update");
   assert.equal(overlayRequestForCompositor(materialization({ overlaySet: undefined })), null);
+});
+
+test("native pane bridge derives native overlay rectangles from pane geometry", () => {
+  const input = materialization({
+    overlaySet: {
+      ...materialization().overlaySet!,
+      regions: [
+        {
+          ...materialization().overlaySet!.regions[0]!,
+          paneInstanceId: "stale_lineage",
+          rect: { height: 1, width: 1, x: 0, y: 0 },
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(overlayRequestForCompositor(input), {
+    ...input.overlaySet,
+    regions: [
+      {
+        ...input.overlaySet!.regions[0]!,
+        paneInstanceId: "118:target_top",
+        rect: { height: 384, width: 512, x: 512, y: 0 },
+      },
+    ],
+    type: "overlay_regions.set",
+    updateReason: "initial",
+  });
 });
 
 test("native pane bridge serializes renderer overlay region updates without coordinate rounding", () => {
@@ -126,6 +172,119 @@ test("native pane bridge serializes renderer overlay region updates without coor
   });
 });
 
+test("native pane bridge validates deg90 full-height pane handle alignment", () => {
+  const panes = [
+    { id: "1", geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 0, y: 0 } },
+    { id: "2", geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 1080, y: 0 } },
+  ];
+  const regions = [
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "pane_handle",
+      paneId: "1",
+      paneInstanceId: "1:target_racter_btop",
+      rect: { height: 48, width: 148, x: 466, y: 3743 },
+      regionId: "surf-ace-pane-1-pane-handle-0",
+      zIndex: 10,
+    },
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "pane_handle",
+      paneId: "2",
+      paneInstanceId: "2:target_racter_top",
+      rect: { height: 48, width: 148, x: 1546, y: 3743 },
+      regionId: "surf-ace-pane-2-pane-handle-0",
+      zIndex: 10,
+    },
+  ] as const;
+
+  assert.deepEqual(validatePaneHandleOverlayAlignment({ panes, regions: [...regions] }), []);
+  assert.match(
+    validatePaneHandleOverlayAlignment({
+      panes,
+      regions: [
+        {
+          ...regions[0],
+          rect: { height: 48, width: 148, x: 1006, y: 1837 },
+        },
+      ],
+    }).join("\n"),
+    /not bottom-aligned/,
+  );
+});
+
+test("native pane bridge preserves renderer-measured chrome rects and resolves live native identity", () => {
+  const panes = [
+    {
+      geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 0, y: 0 },
+      id: "1",
+      paneInstanceId: "1:target_racter_btop",
+    },
+    {
+      geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 1080, y: 0 },
+      id: "2",
+      paneInstanceId: "2:target_racter_top",
+    },
+  ] as const;
+  const badRendererRegions = [
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "pane_handle",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 62, width: 170, x: 455, y: 3762 },
+      regionId: "surf-ace-pane-1-pane-handle-0",
+      zIndex: 10,
+    },
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "history_back",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 48, width: 48, x: 461, y: 3768 },
+      regionId: "surf-ace-pane-1-history-back-1",
+      zIndex: 20,
+    },
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "history_forward",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 48, width: 48, x: 511, y: 3768 },
+      regionId: "surf-ace-pane-1-history-forward-2",
+      zIndex: 20,
+    },
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "annotation_control",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 48, width: 48, x: 561, y: 3768 },
+      regionId: "surf-ace-pane-1-annotation-control-3",
+      zIndex: 20,
+    },
+  ] as const;
+
+  assert.deepEqual(resolvedOverlayRegionsForCompositor([...badRendererRegions], panes), [
+    {
+      ...badRendererRegions[0],
+      paneInstanceId: "1:target_racter_btop",
+    },
+    {
+      ...badRendererRegions[1],
+      paneInstanceId: "1:target_racter_btop",
+    },
+    {
+      ...badRendererRegions[2],
+      paneInstanceId: "1:target_racter_btop",
+    },
+    {
+      ...badRendererRegions[3],
+      paneInstanceId: "1:target_racter_btop",
+    },
+  ]);
+});
+
 test("native pane bridge indexes live compositor pane instances from materialization bindings", () => {
   assert.deepEqual(
     [...nativePaneInstanceIdsForCompositor(materialization({
@@ -133,14 +292,34 @@ test("native pane bridge indexes live compositor pane instances from materializa
         {
           binding_id: "1:target_btop",
           content_id: "target_btop",
-          geometry: { coordinateSpace: "compositor_logical", height: 100, width: 100, x: 0, y: 0 },
+          geometry: {
+            coordinateSpace: "compositor_logical",
+            geometryRevision: 1 as never,
+            height: 100,
+            paneInstanceId: "pl_btop",
+            surfaceEpoch: "sf_test:1",
+            topologyEpoch: 1 as never,
+            width: 100,
+            x: 0,
+            y: 0,
+          },
           id: "1",
           revision: 1 as never,
           target: "terminal",
         },
         {
           content_id: "target_top",
-          geometry: { coordinateSpace: "compositor_logical", height: 100, width: 100, x: 100, y: 0 },
+          geometry: {
+            coordinateSpace: "compositor_logical",
+            geometryRevision: 1 as never,
+            height: 100,
+            paneInstanceId: "pl_top",
+            surfaceEpoch: "sf_test:1",
+            topologyEpoch: 1 as never,
+            width: 100,
+            x: 100,
+            y: 0,
+          },
           id: "2",
           revision: 1 as never,
           target: "terminal",
@@ -204,7 +383,13 @@ test("native pane bridge validates compositor logical status bounds", () => {
       panes: [
         {
           ...materialization().panes[0]!,
-          geometry: { coordinateSpace: "compositor_logical", height: 2160, width: 3840, x: 0, y: 0 },
+          geometry: {
+            ...materialization().panes[0]!.geometry,
+            height: 2160,
+            width: 3840,
+            x: 0,
+            y: 0,
+          },
         },
       ],
     })), {
