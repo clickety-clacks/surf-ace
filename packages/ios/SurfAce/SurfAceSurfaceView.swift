@@ -224,22 +224,22 @@ private struct SurfAcePaneNumberIndicator: View {
     let paneHeight: CGFloat
 
     private var fontSize: CGFloat {
-        max(64, paneHeight / 6)
+        max(64, paneHeight / 5)
     }
 
     var body: some View {
         Text(label)
             .font(.system(size: fontSize, weight: .black, design: .rounded))
             .monospacedDigit()
-            .foregroundStyle(.white.opacity(0.20))
+            .foregroundStyle(.white.opacity(0.12))
             .lineLimit(1)
             .minimumScaleFactor(0.35)
             .padding(.horizontal, fontSize * 0.12)
             .frame(minWidth: fontSize * 0.78, minHeight: fontSize * 0.78)
-            .background(.black.opacity(0.05), in: Capsule())
+            .background(.black.opacity(0.08), in: Capsule())
             .overlay {
                 Capsule()
-                    .strokeBorder(.white.opacity(0.05), lineWidth: 1)
+                    .strokeBorder(.white.opacity(0.14), lineWidth: 1)
             }
     }
 }

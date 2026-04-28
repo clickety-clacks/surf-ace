@@ -597,7 +597,7 @@ final class SurfAcePaneModel {
         self.forwardStack = []
     }
 
-    var labelText: String { name ?? "\(paneLabel)" }
+    var labelText: String { "\(paneLabel)" }
     var activeContentId: String? { currentEntry.contentId }
     var activeContentType: SurfAceContentType? { currentEntry.contentType }
     var currentRevision: Int { currentEntry.revision }

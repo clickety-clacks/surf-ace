@@ -3,6 +3,13 @@ import XCTest
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     @MainActor
+    func testPaneLabelTextUsesVisiblePaneLabelNotOptionalName() {
+        let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")
+
+        XCTAssertEqual(pane.labelText, "42")
+    }
+
+    @MainActor
     func testRegisterSurfaceRestoresPersistedPaneTopologyAfterRelaunch() {
         let suiteName = "SurfAceSurfaceTopologyPersistenceTests.\(UUID().uuidString)"
         guard let userDefaults = UserDefaults(suiteName: suiteName) else {

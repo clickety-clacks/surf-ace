@@ -127,7 +127,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 2. **One ownership lock per surface.** Each surface is either unlocked or locked to exactly one `providerId`. While locked, only the lock owner may pair or resume normally; other providers are rejected with `busy` unless they explicitly request a user-directed takeover.
 3. **Content persistence through reconnect.** Connection state MUST NOT affect displayed content or release ownership. Content is never cleared by a disconnect, restart, relinquish, or takeover. Ownership lock changes only through explicit relinquish or explicit takeover; content changes only when CLU explicitly calls `content.set` or `content.clear`.
 4. **Reads are local-only.** CLU reads exclusively from the provider's local buffer. No `surf_ace_*` read operation triggers a live network call to a surface.
-5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a stable internal `paneId` and a stable visible `paneLabel`. CLU resolves human references through `surf_ace_list` using `windowLabel` / `paneLabel`, then targets the pane explicitly by `paneId`. There is no concept of a "focused pane" and no default-pane resolution.
+5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a stable internal `paneId` and a stable visible `paneLabel`. CLU resolves human references through `surf_ace_list` using `windowLabel` / `paneLabel`, then targets the pane explicitly by `paneId`. Keyboard focus is a local input affordance only; it does not create default-pane routing or default-pane resolution.
 6. **Single-visible-owner with history.** Each pane shows one piece of content at a time (the most recent `content.set`). Prior content enters the Back stack. The user can navigate Back/Forward. Subsequent pushes from the same session update the current view in-place. A push from a different session displaces the current view (supersede).
 7. **Provider-injected session identity.** `sessionId` is injected by the provider from the authenticated WS session context. CLU MUST NOT pass `sessionId` as a wire field on any operation. Surface implementations MUST NOT accept `sessionId` from the wire payload.
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
@@ -2912,7 +2912,8 @@ The window label is the primary addressing handle. It MUST be visible when the s
 Each pane is assigned a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier. Optional pane names do not replace it. The pane label MUST be:
 - Displayed as a large floating translucent overlay in the bottom-right of the pane content area, with toolbar-matched border styling, very bold type around 20vh, and low opacity.
 - Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
-- On touch interfaces: a control in the bottom bar displays the pane's assigned `paneLabel`. This control is both the pane label identifier and the manual re-show affordance; tapping it re-shows all labels, and any tap while labels are visible hides them again.
+- Rendered separately from the pane control cluster. The pane label MUST NOT appear as a toolbar/control-cluster button or label unless a future explicit control need is specified separately.
+- On touch interfaces: tapping pane chrome or content while labels are hidden MAY re-show labels, and any tap while labels are visible MAY hide them again. This must not require a pane-number toolbar control.
 - On pointer interfaces: moving the pointer hides labels; hovering the pane control bar restores them.
 
 #### All platforms
@@ -2923,7 +2924,11 @@ Each pane is assigned a stable visible numeric `paneLabel` that is distinct from
 
 #### Annotation mode visual state (all platforms)
 
-When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator. No badge, label, or additional chrome is added. Pane labels MUST remain visible. While annotation mode is active, Back and Forward are hidden; the pane-label control, 👆 control, and Done button remain in the control cluster.
+When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator. No badge, label, or additional chrome is added. Pane labels MUST remain visible. While annotation mode is active, Back and Forward are hidden; the 👆 control and Done button remain in the control cluster.
+
+#### Keyboard focus visual state (all platforms)
+
+When keyboard focus is assigned to a pane, that pane MUST render a visible focus outline or equivalent affordance. This affordance is separate from the pane label and from annotation mode; it MUST NOT change the pane's visible `paneLabel` or add a pane-number control to the toolbar.
 
 #### Behavioral constraints while in annotation mode (all platforms)
 
@@ -2954,12 +2959,12 @@ Pane controls float above content rather than occupying a fixed header bar. The 
 
 Required defaults:
 - Pane label is displayed as a large floating translucent overlay in the bottom-right of the pane (see §15.1 for visibility rules).
-- All pane controls (pane-label control, Back, Forward, 👆, Done) live in a single floating control cluster at the bottom-center of the pane.
+- Pane labels are not controls. The user-facing pane id is the floating pane label.
+- All pane controls (Back, Forward, 👆, Done, and degraded-state warning icons) live in a single floating control cluster at the bottom-center of the pane.
 - Back/Forward controls appear only when history exists in that direction; hidden otherwise.
 - Done appears only while annotation mode is active; hidden otherwise.
 - 👆 (drawing input) button is always present in the control cluster.
-- On touch interfaces, the pane-label control uses the pane's assigned `paneLabel` as its visible button text.
-- Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. There is no focused-pane concept — all panes are visually equal when not in annotation mode.
+- Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. Keyboard focus may add the visible focus affordance from §15.1, but it does not create a default target for CLU routing and does not replace explicit `paneId` targeting.
 
 #### Icon assets
 
@@ -3069,8 +3074,9 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Drawing Input Button (👆)** — "A single drawing-input button MUST be present in the pane control bar at all times." Source: §15.1
 - **Done Exit Control** — "While annotation mode is active, a Done button MUST be visible in the bottom-center floating control cluster." Source: §15.1 / §15.3
 - **Annotation Mode Visual State** — "When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator." Source: §15.1
-- **Control Cluster Rule** — "All pane controls (Back, Forward, 👆, Done) live in a single floating control cluster at the bottom-center of the pane." Source: §15.3
-- **No Focused Pane Concept** — "There is no focused-pane concept — all panes are visually equal when not in annotation mode." Source: §15.3
+- **Control Cluster Rule** — "All pane controls (Back, Forward, 👆, Done, and degraded-state warning icons) live in a single floating control cluster at the bottom-center of the pane." Source: §15.3
+- **Keyboard Focus Affordance** — "Keyboard-focused panes MUST render a visible focus outline or equivalent affordance, separate from pane labels and toolbar controls." Source: §15.1
+- **Explicit Pane Routing** — "Keyboard focus does not create a default target for CLU routing and does not replace explicit `paneId` targeting." Source: §15.3
 - **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
 - **Accessibility Contrast** — "All chrome labels and controls MUST meet WCAG AA contrast." Source: §15.2
 - **Electron Shortcut Defaults** — "`A` enters annotation mode, `D` exits annotation mode via Done, `Cmd-[` navigates Back, `Cmd-]` navigates Forward." Source: §15.2

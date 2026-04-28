@@ -176,14 +176,14 @@ body {
 
 .keyboard-focus-edge {
   position: absolute;
-  background: rgba(124, 173, 255, 0.16);
+  background: rgba(124, 173, 255, 0.34);
 }
 
 .keyboard-focus-edge--top,
 .keyboard-focus-edge--bottom {
   left: 0;
   right: 0;
-  height: 1px;
+  height: 2px;
 }
 
 .keyboard-focus-edge--top {
@@ -198,7 +198,7 @@ body {
 .keyboard-focus-edge--right {
   top: 0;
   bottom: 0;
-  width: 1px;
+  width: 2px;
 }
 
 .keyboard-focus-edge--left {
