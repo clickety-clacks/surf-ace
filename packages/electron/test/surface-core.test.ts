@@ -168,7 +168,7 @@ test("surface core ignores snapshot updates for stale pane ids", () => {
   assert.ok(warnings.some((warning) => warning.includes("unknown pane 819")));
 });
 
-test("surface core falls back to authoritative html text when renderer snapshot is still placeholder", () => {
+test("surface core falls back to authoritative html text when renderer snapshot is still empty", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -188,7 +188,7 @@ test("surface core falls back to authoritative html text when renderer snapshot 
     revision: 1 as never,
   });
   core.updatePaneSnapshot(surface.surfaceId, paneId, {
-    visibleText: "Surface readyWaiting for content.",
+    visibleText: "",
   });
 
   const snapshot = core.captureSnapshot(surface.surfaceId, paneId);
@@ -656,6 +656,74 @@ test("surface core keeps history when a different paired session displaces conte
   core.navigateHistory(surface.surfaceId, paneId, "back");
   const restored = core.getRendererWindowState(surface.surfaceId).panes[0]!;
   assert.equal(restored.content.contentId, "ct_owner_a");
+});
+
+test("surface core reports the current history entry owner name for chrome", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 15);
+  core.setProviderName(surface.surfaceId, "Fallback Session");
+
+  core.contentSet(
+    surface.surfaceId,
+    {
+      content: { markdown: "# First" },
+      contentId: "ct_owner_a" as never,
+      contentType: "markdown",
+      display: { title: "Session A" },
+      historyOwnerToken: "hot_session_a",
+      paneId: paneId as never,
+      revision: 1 as never,
+    },
+  );
+  core.contentSet(
+    surface.surfaceId,
+    {
+      content: { markdown: "# Second" },
+      contentId: "ct_owner_b" as never,
+      contentType: "markdown",
+      display: { title: "Session B" },
+      historyOwnerToken: "hot_session_b",
+      paneId: paneId as never,
+      revision: 2 as never,
+    },
+  );
+
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.ownerName, "Session B");
+  core.navigateHistory(surface.surfaceId, paneId, "back");
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.ownerName, "Session A");
+});
+
+test("surface core bumps geometry revision when fallback owner name changes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 15);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Untitled" },
+    contentId: "ct_untitled" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_untitled",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  const initialRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
+  core.setProviderName(surface.surfaceId, "Fallback Session");
+  const providerRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
+  assert.equal(providerRevision, initialRevision + 1);
+
+  core.setConnectionBar(surface.surfaceId, "connecting");
+  assert.equal(core.getRendererWindowState(surface.surfaceId).geometryRevision, providerRevision + 1);
 });
 
 test("surface core returns the number of flushed annotation batches discarded on pane close", () => {

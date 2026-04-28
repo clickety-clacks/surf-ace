@@ -136,6 +136,7 @@ export type RendererPaneState = {
   flushInFlight: boolean;
   label: string;
   name: string | null;
+  ownerName: string | null;
   paneId: number;
   showDone: boolean;
   toast: string | null;
@@ -288,9 +289,14 @@ export class SurfaceCore {
     if (surface.connectionBar === state && (state === "connected" || surface.providerName === null)) {
       return;
     }
+    const previousProviderName = surface.providerName;
+    const shouldBumpChromeGeometry = hasTitlelessVisibleContent(surface);
     surface.connectionBar = state;
     if (state !== "connected") {
       surface.providerName = null;
+    }
+    if (surface.providerName !== previousProviderName && shouldBumpChromeGeometry) {
+      bumpGeometryRevision(surface);
     }
     this.emit({ surfaceId, type: "surface-changed" });
   }
@@ -300,7 +306,11 @@ export class SurfaceCore {
     if (surface.providerName === providerName) {
       return;
     }
+    const shouldBumpChromeGeometry = hasTitlelessVisibleContent(surface);
     surface.providerName = providerName;
+    if (shouldBumpChromeGeometry) {
+      bumpGeometryRevision(surface);
+    }
     this.emit({ surfaceId, type: "surface-changed" });
   }
 
@@ -331,6 +341,7 @@ export class SurfaceCore {
           flushInFlight: pane.flushInFlight,
           label: pane.paneLabel > 0 ? String(pane.paneLabel) : "",
           name: pane.name,
+          ownerName: current.display?.title ?? surface.providerName,
           paneId,
           showDone: pane.annotating,
           toast: pane.toast,
@@ -1520,6 +1531,13 @@ function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
 }
 
+function hasTitlelessVisibleContent(surface: SurfaceState): boolean {
+  return [...surface.panes.values()].some((pane) => {
+    const current = currentEntry(pane);
+    return current.contentId !== null && !current.display?.title;
+  });
+}
+
 function paneForLineage(surface: SurfaceState, lineageId: string): PaneState | null {
   return [...surface.panes.values()].find((pane) => pane.paneLineageId === lineageId) ?? null;
 }
@@ -1583,7 +1601,7 @@ function snapshotVisibleText(pane: PaneState, entry: HistoryEntry): string {
   ) {
     return snapshotText;
   }
-  if (snapshotText && snapshotText !== "Surface readyWaiting for content.") {
+  if (snapshotText) {
     return snapshotText;
   }
   return htmlVisibleText(entry.content as HtmlContent) ?? snapshotText;

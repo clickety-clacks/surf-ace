@@ -176,7 +176,7 @@ Naming system:
 6. The extension is the sole authority on topology and visible labeling. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
 7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each.
 8. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the `windowLabel`, initial internal `paneId`, and initial visible `paneLabel`. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
-9. Labels are displayed on the surface — window label as a centered-top floating overlay, pane label as a bottom-right floating overlay within the pane. See §15.1 for visibility rules.
+9. Labels are displayed on the surface — window identity immediately precedes the pane label as a bottom-right floating overlay within each pane, e.g. `[a]12`. See §15.1 for visibility rules.
 
 
 TXT keys used by WS protocol:
@@ -263,10 +263,10 @@ Pair timeout:
 2. If no `pair.response` arrives in 10s, provider closes socket and enters reconnect backoff.
 
 **Surface UI connectivity indicator (required):**
-The surface MUST display a persistent visual indicator of connection state via the connection state bar (§15.7). Required behavior:
-- Connected — green: render the persistent 2px connection state bar as a solid green line.
-- Connecting / reconnecting — yellow: render the same bar in the warning state with the animated sweep defined in §15.7.
-- Disconnected — red: render the same bar as a solid red line.
+The surface MUST display connection state only through the window ID outline/text color in the bottom-right identity overlay (§15.1). Required behavior:
+- Connected — green window ID outline/text.
+- Connecting / reconnecting — yellow window ID outline/text.
+- Disconnected — red window ID outline/text.
 Content is never cleared by any of these states (see §4.4 invariant).
 
 ### 4.6 iOS / iPadOS Background Behavior
@@ -448,11 +448,11 @@ These rules are normative for the single-visible-owner history model:
 8. `content.append` / `content.patch` remain valid only against the currently visible content in that pane, enforced by `contentId` + `revision`.
 9. `content.clear` clears the currently visible content for the targeted pane. Any history bookkeeping needed to preserve older pane states is internal to the surface/provider and not part of the CLU call surface.
 
-**Surface default affordances:**
-- Back/Forward controls SHOULD appear in the bottom-center floating control cluster.
+- Each pane's bottom controls are split into two side-by-side floating pills: a left navigation pill for history controls and visible owner name, and a right annotation pill for annotation controls.
+- The navigation pill appears only when pushed content/history exists for that pane. Back/Forward controls appear in that navigation pill.
 - Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances.
 - v1 SHOULD NOT display history depth counters.
-- If overlay restoration fails, the surface SHOULD show a non-blocking toast plus a warning icon in the bottom-center floating control cluster.
+- If overlay restoration fails, the surface SHOULD show a non-blocking toast plus a warning icon in the bottom controls.
 
 ---
 
@@ -2897,35 +2897,35 @@ This section is **normative**. Surface implementations MUST conform to the requi
 
 ### 15.1 Persistent Indicators
 
-Surface implementations MUST display the following identifiers. Labels are visible by default and hidden only during active pointer movement or touch interaction — they are always visible at rest, which satisfies the core requirement of readability from across the room. Labels MUST NOT be hidden based on content type, connection state, or annotation mode.
+Surface implementations MUST always display the following identifiers. Labels MUST NOT be hidden based on pointer movement, touch interaction, hover state, content type, connection state, or annotation mode.
 
-#### Window label
+#### Window and pane identity overlay
 
 Each window is assigned a short alphabetic identifier using an auto-incrementing sequence: `a`, `b`, `c` … `z`, `aa`, `ab`, … This label MUST be:
-- Displayed prominently, centered at the top of the window, as a floating translucent overlay above all pane content.
-- Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
+- Displayed immediately before the pane label inside each pane identity overlay, e.g. `[a]12`.
+- Rendered as a rounded-rectangle outline box with no filled background. The box height is about half the pane-number height.
+- Colored according to the window's connection state, with both outline and letters at 25% opacity.
 - Rendered in the overlay layer — it does not scroll with content.
 
 The window label is the primary addressing handle. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity.
 
-#### Pane label
-
 Each pane is assigned a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier. Optional pane names do not replace it. The pane label MUST be:
-- Displayed as a large floating translucent overlay in the bottom-right of the pane content area, with toolbar-matched border styling, very bold type around 20vh, and low opacity.
-- Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
+- Displayed as plain overlay text with no pill, background, or border.
+- Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/5 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
+- Colored 50% gray at 25% opacity.
 - Rendered separately from the pane control cluster. The pane label MUST NOT appear as a toolbar/control-cluster button or label unless a future explicit control need is specified separately.
-- On touch interfaces: tapping pane chrome or content while labels are hidden MAY re-show labels, and any tap while labels are visible MAY hide them again. This must not require a pane-number toolbar control.
-- On pointer interfaces: moving the pointer hides labels; hovering the pane control bar restores them.
+
+The combined identity overlay is always visible and MUST be reported as an overlay region / hit-region where the platform reports chrome regions.
 
 #### All platforms
 
 - **Finger/stylus button (👆):** A single drawing-input button MUST be present in the pane control bar at all times, including when annotation mode is inactive. Tapping it enables finger/stylus input as a drawing tool — entering annotation mode if not already active, or toggling finger draw on/off within an active pencil session.
 - **Apple Pencil (pencil platforms only):** Pencil contact with the screen MUST automatically enter annotation mode. No button tap is required.
-- **Done button:** While annotation mode is active, a **Done** button MUST be visible in the bottom-center floating control cluster. Tapping it exits annotation mode. No other gesture is required to exit.
+- **Done button:** While annotation mode is active, a **Done** button MUST be visible in the annotation pill. Tapping it exits annotation mode. No other gesture is required to exit.
 
 #### Annotation mode visual state (all platforms)
 
-When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator. No badge, label, or additional chrome is added. Pane labels MUST remain visible. While annotation mode is active, Back and Forward are hidden; the 👆 control and Done button remain in the control cluster.
+When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator. No badge, label, or additional chrome is added. Pane labels MUST remain visible. The navigation pill remains governed by history/content state; annotation controls stay in the separate annotation pill.
 
 #### Keyboard focus visual state (all platforms)
 
@@ -2961,10 +2961,11 @@ Pane controls float above content rather than occupying a fixed header bar. The 
 Required defaults:
 - Pane label is displayed as a large floating translucent overlay in the bottom-right of the pane (see §15.1 for visibility rules).
 - Pane labels are not controls. The user-facing pane id is the floating pane label.
-- All pane controls (Back, Forward, 👆, Done, and degraded-state warning icons) live in a single floating control cluster at the bottom-center of the pane.
+- Bottom controls are two side-by-side floating pills at the bottom-center of each pane.
+- The left navigation pill appears only when pushed content/history exists. It contains Back, Forward, and the session/chat display name for the currently visible pane-history entry. Back/Forward navigation MUST update that name to the owner/name of the newly visible history entry.
 - Back/Forward controls appear only when history exists in that direction; hidden otherwise.
-- Done appears only while annotation mode is active; hidden otherwise.
-- 👆 (drawing input) button is always present in the control cluster.
+- The right annotation pill contains annotation controls only: 👆 and, while annotation mode is active, Done. It MUST NOT contain the pane label or window label.
+- 👆 (drawing input) button is always present in the annotation pill.
 - Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. Keyboard focus may add the visible focus affordance from §15.1, but it does not create a default target for CLU routing and does not replace explicit `paneId` targeting.
 
 #### Icon assets
@@ -2982,10 +2983,11 @@ History controls default behavior:
 ### 15.4 Degraded and Empty States
 
 Default user-visible handling for degraded or unavailable states:
-- Overlay restore failure shows a non-blocking toast plus a warning icon in the bottom-center floating control cluster.
+- Overlay restore failure shows a non-blocking toast plus a warning icon in the bottom controls.
 - Blocked navigation or blocked content replacement during annotation mode shows a small toast: `"Finish annotation (Done) to navigate"`.
 - Unsupported content renders a centered empty-state message.
-- Reconnect/resume state is shown via the connection state bar (see §15.7).
+- The initial no-content/ready state MUST NOT render a centered "Surface Ready" or similar empty-screen indicator; the pane may show its normal idle background plus the always-visible identity overlay and controls.
+- Reconnect/resume state is shown via the window ID outline/text color in the identity overlay (see §15.7).
 
 ---
 
@@ -3029,17 +3031,17 @@ These constraints are synchronized with annotation mode state and are lifted onl
 
 ---
 
-### 15.7 Connection State Bar
+### 15.7 Connection State Indicator
 
-A 2px overlay line MUST be rendered at the bottom edge of each window, spanning the full window width. It sits as an overlay above pane content at 80% opacity. It MUST persist during annotation mode.
+Connection state MUST be expressed only through the window ID outline/text in the bottom-right identity overlay. The app MUST NOT render a separate full-width bottom connection bar or strip.
 
 **States and colors (Clawline design system tokens):**
 
 | State | Color token | Hex | Behavior |
 |---|---|---|---|
-| Connected | `--ok` | `#22c55e` | Solid line |
-| Connecting / Reconnecting | `--warn` | `#f59e0b` | Animated: a bright highlight sweeps left↔right continuously (KITT/Cylon-style bounce), repeating until connected |
-| Disconnected | `--destructive` | `#ef4444` | Solid line |
+| Connected | `--ok` | `#22c55e` | Window ID outline/text |
+| Connecting / Reconnecting | `--warn` | `#f59e0b` | Window ID outline/text |
+| Disconnected | `--destructive` | `#ef4444` | Window ID outline/text |
 
 **Platform color references:**
 - iOS/iPadOS/macOS native: map tokens to `Color.green` / `Color.yellow` / `Color.red` system colors, or use exact hex values above.
@@ -3053,29 +3055,29 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Window Letter Labels** — "Window labels (a, b, c…) are assigned by provider/extension, not the surface." Source: §3.1.1
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
 - **Pane Label Authority** — "Pane labels are provider-assigned visible numeric identifiers distinct from internal `paneId`." Source: §3.1.1
-- **Prominent Surface Labels** — "Window label: centered-top floating overlay. Pane label: bottom-right floating overlay within pane. Visibility rules: visible at rest, hidden on active interaction." Source: §3.1.1 / §15.1
+- **Prominent Surface Labels** — "Window label and pane label render together as an always-visible bottom-right identity overlay in each pane." Source: §3.1.1 / §15.1
 - **Displayed Content Persistence** — "The surface renders content and keeps it displayed until CLU explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
 - **History Navigation Controls** — "Previously visible content in that pane remains navigable through the surface's Back/Forward controls." Source: §6.1.1
-- **Floating History Controls** — "Back/Forward controls SHOULD appear in the bottom-center floating control cluster." Source: §6.1.1 / §15.3
+- **Floating History Controls** — "Back/Forward controls appear in the left navigation pill when history exists." Source: §6.1.1 / §15.3
 - **Disabled History Controls** — "Disabled Back/Forward controls SHOULD render at 40% opacity and SHOULD NOT show hover affordances." Source: §6.1.1 / §15.3
 - **No History Counters** — "v1 SHOULD NOT display history depth counters." Source: §6.1.1 / §15.3
 - **Degraded Restore Safety** — "The surface MUST still show that state's content payload when available, clear the overlay for safety." Source: §6.1.1
-- **Restore Failure UI** — "The surface SHOULD show a non-blocking toast plus a warning icon in the bottom-center floating control cluster." Source: §6.1.1 / §15.4
-- **Connection State Bar** — "The surface MUST display a persistent visual indicator of connection state via the connection state bar." Source: §4.5 / §15.7
-- **Connected State UI** — "Connected — green: render the persistent 2px connection state bar as a solid green line." Source: §4.5 / §15.7
-- **Connecting State UI** — "Connecting / reconnecting — yellow: render the same bar in the warning state with the animated sweep defined in §15.7." Source: §4.5 / §15.7
-- **Disconnected State UI** — "Disconnected — red: render the same bar as a solid red line." Source: §4.5 / §15.7
-- **Window Label Placement** — "Floating translucent overlay, centered top of window, above all pane content." Source: §15.1
-- **Window Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; never hidden by content or connection state." Source: §15.1
+- **Restore Failure UI** — "The surface SHOULD show a non-blocking toast plus a warning icon in the bottom controls." Source: §6.1.1 / §15.4
+- **Connection State Indicator** — "Connection state is expressed only through the window ID outline/text color in the bottom-right identity overlay." Source: §4.5 / §15.7
+- **Connected State UI** — "Connected — green window ID outline/text." Source: §4.5 / §15.7
+- **Connecting State UI** — "Connecting / reconnecting — yellow window ID outline/text." Source: §4.5 / §15.7
+- **Disconnected State UI** — "Disconnected — red window ID outline/text." Source: §4.5 / §15.7
+- **Window Label Placement** — "Window label precedes pane number in the bottom-right identity overlay." Source: §15.1
+- **Window Label Visibility** — "Always visible as the window box preceding each pane number; never hidden by pointer/touch movement, content, connection state, or annotation mode." Source: §15.1
 - **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible when the surface is at rest." Source: §15.1
 - **Pane Label Placement** — "Large floating translucent overlay in the bottom-right of the pane content area." Source: §15.1
-- **Pane Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; restored on idle." Source: §15.1
+- **Pane Label Visibility** — "Always visible as plain translucent bottom-right overlay text; never hidden by pointer/touch movement." Source: §15.1
 - **Pencil Auto Entry** — "Pencil contact with the screen MUST automatically enter annotation mode." Source: §15.1
 - **Drawing Input Button (👆)** — "A single drawing-input button MUST be present in the pane control bar at all times." Source: §15.1
-- **Done Exit Control** — "While annotation mode is active, a Done button MUST be visible in the bottom-center floating control cluster." Source: §15.1 / §15.3
+- **Done Exit Control** — "While annotation mode is active, a Done button MUST be visible in the annotation pill." Source: §15.1 / §15.3
 - **Annotation Mode Visual State** — "When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator." Source: §15.1
-- **Control Cluster Rule** — "All pane controls (Back, Forward, 👆, Done, and degraded-state warning icons) live in a single floating control cluster at the bottom-center of the pane." Source: §15.3
+- **Two-Pill Control Rule** — "Navigation controls and current visible owner/name live in the left navigation pill; annotation controls live in the right annotation pill." Source: §15.3
 - **Keyboard Focus Affordance** — "Keyboard-focused panes MUST render a visible mid-gray focus outline or equivalent affordance, legible on both white and dark-ish content backgrounds." Source: §15.1
 - **Explicit Pane Routing** — "Keyboard focus does not create a default target for CLU routing and does not replace explicit `paneId` targeting." Source: §15.3
 - **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
@@ -3320,7 +3322,7 @@ However, geometry-based inference of the "between" region still requires underst
 
 **Decision:** On pencil-supported devices, pencil contact automatically enters annotation mode; fingers do normal operations (scroll, select, tap, follow links) by default. A single 👆 drawing-input button is always visible and, when tapped, adds finger drawing capability to annotation mode. On non-pencil platforms (Electron), that same 👆 button is the entry point for annotation mode and enables drawing input. This is the only surface-level mode distinction and it is UI-only; the wire protocol and register model do not change based on mode.
 
-**UI defaults alignment:** Drawing controls live in the bottom-center floating control cluster. The Done control appears in that cluster while annotation mode is active. Blocked navigation or blocked content replacement during annotation mode produces a small toast directing the user to finish annotation first.
+**UI defaults alignment:** Drawing controls live in the annotation pill. The Done control appears in that pill while annotation mode is active. Blocked navigation or blocked content replacement during annotation mode produces a small toast directing the user to finish annotation first.
 
 **Data model:** The provider MUST store surface state in a context dictionary keyed by `contextKey`, where `contextKey` is:
 - For CLU-pushed content: the `contentId` (e.g. `ct_a1b2c3d4`)
@@ -3453,31 +3455,28 @@ Dedicated native-overlay model markups may eventually become full interactive UI
 
 **Related sections:** §3.1.1 (topology), §6.1.1 (pane lifecycle, history operations, and history routing rules), §13.2 (annotation buffering), §14.3 (`surf_ace_list` occupancy).
 
-### 15.8 Provider Name Display
+### 15.8 Current Owner Name Display
 
-When the paired provider sends a `providerName` in `pair.request`, the surface MUST display it in the window title area. `providerName` is required for successful pairing, so every paired surface has one. The subtitle text MUST follow the current connection state instead of collapsing all missing-name cases into `not connected`.
+When the paired provider sends a `providerName` in `pair.request`, the surface stores it as the default connected owner/session label. Each visible pane-history entry may also carry display metadata from `content.set`; when a display title is present for the current entry, that title is the preferred current owner/session/chat name for the navigation pill.
 
-**Layout — Liquid Glass pill (iOS/iPadOS/macOS):**
-The window title area renders as a Liquid Glass pill containing two lines:
-1. **Window name** — large font, primary weight. This is the surface own display name (e.g. "Surf Ace - Emanator (host)").
-2. **Connected agent name** (`providerName`) — smaller font, secondary/muted weight, below the window name.
-
-The subtitle row is always present.
+**Layout:**
+- The current owner/session/chat name appears in the left navigation pill, alongside Back and Forward.
+- The name is shown only when the navigation pill is shown.
+- The name is truncated with ellipsis if too long to fit and MUST NOT wrap.
+- The name MUST NOT be interactive.
+- The top-centered window title pill is not part of the MVP chrome.
 
 **Behavior:**
-- Subtitle line is always visible.
-- Disconnected -> subtitle shows `not connected`.
-- Connecting / reconnecting -> subtitle shows `connecting…`.
-- Connected -> subtitle shows the paired `providerName` value.
-- Truncated with ellipsis if text is too long to fit; MUST NOT wrap.
-- MUST NOT be interactive (no tap target).
-- MUST persist during annotation mode.
-- If the provider name changes mid-session (e.g. reconnect with different name), update immediately.
+- Back/Forward navigation MUST update the visible name to the newly visible history entry's owner/session/chat name.
+- If the current entry lacks display title metadata, the surface falls back to the paired `providerName`.
+- If neither value is available, the navigation pill omits the name rather than inventing a label.
+- The name persists during annotation mode whenever the navigation pill is otherwise visible.
 
 **Protocol integration:**
 - Surface stores the most recently received required `providerName` from `pair.request`.
 - Clears stored name on ownership relinquish or socket disconnect.
 - Re-applies name on next successful `pair.request`.
+- Surface stores per-history-entry display title metadata received on `content.set` / `content.apply`.
 
 **Invariant index entry:**
-- **Provider Name Display** — "Window title pill: large window name + smaller subtitle below. Subtitle always visible; `not connected` when disconnected, `connecting…` while reconnecting, and the required paired `providerName` when connected. Cleared on disconnect/relinquish." Source: §15.8
+- **Current Owner Name Display** — "The left navigation pill shows the current visible pane-history entry's display title when present, otherwise the paired providerName; Back/Forward updates the name with the visible entry." Source: §15.8

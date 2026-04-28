@@ -139,4 +139,41 @@ final class SurfAceViewportPreservationTests: XCTestCase {
             )
         )
     }
+
+    func testPaneOwnerDisplayNameTracksVisibleHistoryEntry() {
+        let pane = SurfAcePaneModel(paneId: 7, paneLabel: 12)
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_a",
+            revision: 1,
+            historyOwnerToken: "owner-a",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# A"),
+            title: "Session A",
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+        pane.backStack.append(
+            SurfAcePaneEntry(
+                contentId: "ct_b",
+                revision: 2,
+                historyOwnerToken: "owner-b",
+                contentType: .markdown,
+                payload: .markdown(markdown: "# B"),
+                title: "Session B",
+                scrollable: true,
+                interactive: true,
+                url: nil,
+                drawingData: Data(),
+                strokesById: [:]
+            )
+        )
+
+        XCTAssertEqual(pane.currentOwnerDisplayName(fallbackProviderName: "Fallback"), "Session A")
+        pane.forwardStack.append(pane.currentEntry)
+        pane.currentEntry = pane.backStack.removeLast()
+        XCTAssertEqual(pane.currentOwnerDisplayName(fallbackProviderName: "Fallback"), "Session B")
+    }
 }
