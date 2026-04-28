@@ -16,7 +16,7 @@ private enum SurfAceChromeFont {
 private enum SurfAceRajdhaniMetrics {
     static let paneNumberTrackingRatio: CGFloat = -0.04
     static let windowTextRatio: CGFloat = 0.2
-    static let windowBoxHeightRatio: CGFloat = 0.5
+    static let windowBoxHeightRatio: CGFloat = 0.4
     static let windowBoxPaddingRatio: CGFloat = 0.025
     static let windowTrackingRatio: CGFloat = -0.02
     static let identitySpacingRatio: CGFloat = 0.04

@@ -2906,7 +2906,7 @@ Surf Ace chrome text, including identity overlays, button labels, toast labels, 
 Each window is assigned a short alphabetic identifier using an auto-incrementing sequence: `a`, `b`, `c` … `z`, `aa`, `ab`, … This label MUST be:
 - Displayed immediately before the pane label inside each pane identity overlay as uppercase text inside the outline box. Do not render literal square brackets; `[a]12` is only protocol shorthand for an outlined `A` box followed by `12`.
 - Rendered in Rajdhani Regular.
-- Rendered as a rounded-rectangle outline box with no filled background. The box height is 1/2 of the pane-number height.
+- Rendered as a rounded-rectangle outline box with no filled background. The box height is 1/2.5 (0.4x) of the pane-number height.
 - Text is sized large within that fixed outline box; implementations MUST NOT increase the box height to enlarge the text.
 - The gap between the window box and pane number, and the window-box horizontal padding/tracking, must be tight so the two parts read as one compact identity mark.
 - Bottom-aligned with the pane-number text using font metrics or baseline alignment, not manual visual offsets, so the box bottom edge and pane-number baseline / bottom visual line read as one clean baseline.

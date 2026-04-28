@@ -182,8 +182,8 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: calc(var(--pane-number-size) / 2);
-  min-width: calc(var(--pane-number-size) / 2);
+  height: calc(var(--pane-number-size) * 0.4);
+  min-width: calc(var(--pane-number-size) * 0.4);
   padding: 0 calc(var(--pane-number-size) * 0.025);
   border: max(1px, calc(var(--pane-number-size) * 0.008)) solid currentColor;
   border-radius: calc(var(--pane-number-size) * 0.04);
