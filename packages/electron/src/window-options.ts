@@ -16,11 +16,12 @@ export function surfaceWindowOptions(params: {
   viewport: SurfaceViewport;
   windowLabel?: string | null;
 }): SurfaceWindowOptions {
+  const hostedByCompositor = params.compositorSocketPath !== null;
   return {
     backgroundColor: "#0b1324",
-    frame: params.compositorSocketPath === null,
+    frame: !hostedByCompositor,
     height: Math.max(720, params.viewport.height),
-    show: false,
+    show: hostedByCompositor,
     title: params.windowLabel ? `${params.endpointName} · ${params.windowLabel}` : params.endpointName,
     useContentSize: true,
     width: Math.max(960, params.viewport.width),

@@ -12,6 +12,7 @@ test("surface window is frameless when hosted by the compositor", () => {
   });
 
   assert.equal(options.frame, false);
+  assert.equal(options.show, true);
   assert.equal(options.useContentSize, true);
   assert.equal(options.height, 3840);
   assert.equal(options.width, 2160);
@@ -26,6 +27,7 @@ test("surface window keeps the platform frame outside compositor hosting", () =>
   });
 
   assert.equal(options.frame, true);
+  assert.equal(options.show, false);
   assert.equal(options.height, 812);
   assert.equal(options.width, 960);
   assert.equal(options.title, "eezo Surf Ace");
