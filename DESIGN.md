@@ -3109,6 +3109,55 @@ This section is the authoritative list of unresolved design decisions. Items her
 
 ---
 
+## 16. Common Pane Geometry Architecture
+
+Status: normative architecture amendment, 2026-04-27. Source spec: `/Users/mike/shared-workspace/surf-ace/specs/common-geometry-architecture.md`.
+
+Surf Ace has one resolved geometry truth per pane. Each pane produces a canonical resolved geometry snapshot; content viewport, controls, overlays, hit regions, target materialization, capture masks, debug visuals, and protocol-reported pane viewport MUST derive from that snapshot.
+
+### 16.1 Canonical snapshot invariant
+
+A pane geometry snapshot is a resolved fact, not a recipe. Topology, split direction, pane count, display orientation, physical output mode, DOM measurements, SwiftUI view hierarchy, compositor state, and safe-area inputs may participate in resolving the snapshot only at the geometry authority layer. Downstream consumers MUST NOT reconstruct pane placement from those inputs.
+
+Every cross-boundary geometry payload MUST include coordinate-space identity. Placement payloads that can be applied asynchronously MUST also carry pane identity and sufficient revision/generation identity to reject stale writes: pane id, pane instance/binding identity, topology epoch, surface/window epoch when available, and geometry revision or an explicitly documented equivalent.
+
+### 16.2 Required snapshot projections
+
+The following are projections of the same pane geometry snapshot:
+
+- content/target viewport
+- native/compositor host/update geometry
+- Surf Ace pane controls and floating chrome
+- overlay/hit regions sent to compositor or local input routing
+- annotation/capture exclusion masks when applicable
+- protocol `panes.list` / pane viewport metadata
+- debug borders and diagnostic geometry
+
+If a consumer needs a new rectangle, the geometry authority adds a named projection. The consumer does not recompute from topology, split direction, physical display dimensions, or renderer-local measurements.
+
+### 16.3 Electron requirement
+
+Electron surfaces have explicit geometry seams between renderer UI, Electron main, native/compositor hosting, overlay reporting, hit routing, and protocol reporting. Electron MUST treat the resolved pane snapshot as the only placement authority. Renderer DOM overlay measurements may provide semantic control presence, intrinsic size, and relative offsets, but they MUST NOT define the pane placement basis once native pane geometry exists. Compositor payloads consume `panes[].geometry` and `regions[].rect` as resolved rectangles; compositor MUST NOT infer pane layout from Surf Ace topology intent.
+
+Racter deg90 remains a required fixture: physical output `3840x2160`, logical/compositor surface `2160x3840`. Native panes, Surf Ace controls, overlay regions, and hit regions must align in the logical/compositor coordinate space.
+
+### 16.4 iOS requirement
+
+iOS should preserve its cleaner visual seam: pane content and controls live in one SwiftUI pane layout context. That SwiftUI-resolved pane frame is the iOS geometry authority. Protocol reporting MUST consume the resolved pane geometry from that authority; it MUST NOT independently recompute pane rectangles from topology in a way that can drift from visible layout. Split spacing, safe area, scale, and scene/window changes must be represented consistently in the resolved snapshot and protocol viewport projection.
+
+### 16.5 Failure modes forbidden by this architecture
+
+The architecture forbids these classes of bugs:
+
+- native content and Surf Ace chrome disagree about pane position
+- renderer overlay rectangles move chrome independently of accepted pane geometry
+- protocol viewport metadata differs from visible pane layout because it recomputes split math
+- stale geometry applies after resize, split, close, scene recreation, or pane id reuse
+- hit regions route input under Surf Ace controls because they were derived from a different revision
+- debug/capture masks use a separate measurement path from the real applied geometry
+
+Acceptance tests MUST cover both Electron and iOS: one snapshot revision produces content viewport, controls/chrome, overlay/hit regions, materialization geometry, and protocol viewport for that pane.
+
 ## Appendix A. Design Rationale and Decision Notes
 
 This appendix contains rationale context, background, and historical record for design decisions. **This appendix is not normative for unresolved items.** Open topics live in `## Open Topics` (the authoritative source); entries here are rationale and reference only. Resolved entries are historical record of decisions already encoded in normative sections above.
