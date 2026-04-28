@@ -8,6 +8,25 @@ import WebKit
 
 private let surfAceSurfaceCoordinateSpaceName = "SurfAce.surface.logical"
 
+private enum SurfAceChromeFont {
+    static let name = "ShareTechMono-Regular"
+}
+
+private enum SurfAceShareTechMonoMetrics {
+    static let paneNumberTrackingRatio: CGFloat = -0.04
+    static let windowBoxHeightRatio: CGFloat = 0.25
+}
+
+private enum SurfAceIdentityBaseline: AlignmentID {
+    static func defaultValue(in context: ViewDimensions) -> CGFloat {
+        context[.bottom]
+    }
+}
+
+private extension VerticalAlignment {
+    static let surfAceIdentityBaseline = VerticalAlignment(SurfAceIdentityBaseline.self)
+}
+
 struct SurfAceRootView: View {
     @Bindable var runtime: SurfAceRuntime
     @Environment(\.displayScale) private var displayScale
@@ -56,7 +75,7 @@ private struct SurfAceWindowView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            ZStack(alignment: .top) {
+            ZStack {
                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout)
                     .background(Color.black.opacity(0.94))
                     .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
@@ -66,19 +85,6 @@ private struct SurfAceWindowView: View {
                     .onChange(of: proxy.size) { _, newSize in
                         runtime.updateViewport(surfaceId: surface.surfaceId, size: newSize, scale: displayScale)
                     }
-
-                if surface.labelsVisible {
-                    SurfAceWindowTitlePill(
-                        name: surface.name,
-                        providerName: surface.providerName,
-                        connectionState: surface.connectionBarState
-                    )
-                        .padding(.top, 18)
-                        .transition(.opacity)
-                }
-            }
-            .overlay(alignment: .bottom) {
-                SurfAceConnectionStateBar(state: surface.connectionBarState)
             }
         }
     }
@@ -138,21 +144,23 @@ private struct SurfAcePaneView: View {
                 )
                 .background(Color.black.opacity(0.92))
 
-                if surface.labelsVisible {
-                    SurfAcePaneNumberIndicator(label: pane.labelText, paneHeight: proxy.size.height)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                        .padding(.trailing, 28)
-                        .padding(.bottom, 28)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                        .transition(.opacity)
-                }
+                SurfAcePaneIdentityOverlay(
+                    windowLabel: surface.windowLabel,
+                    paneLabel: pane.labelText,
+                    paneSize: proxy.size,
+                    connectionState: surface.connectionBarState
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 28)
+                .padding(.bottom, 28)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
 
                 if let toast = pane.toast {
                     VStack {
                         Spacer()
                         Text(toast)
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .font(.custom(SurfAceChromeFont.name, size: 13))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -219,28 +227,53 @@ private struct SurfAcePaneView: View {
     }
 }
 
-private struct SurfAcePaneNumberIndicator: View {
-    let label: String
-    let paneHeight: CGFloat
+private struct SurfAcePaneIdentityOverlay: View {
+    let windowLabel: String
+    let paneLabel: String
+    let paneSize: CGSize
+    let connectionState: SurfAceConnectionBarState
 
     private var fontSize: CGFloat {
-        max(64, paneHeight / 6)
+        max(1, min(paneSize.width, paneSize.height) / 5)
     }
 
     var body: some View {
-        Text(label)
-            .font(.system(size: fontSize, weight: .black, design: .rounded))
-            .monospacedDigit()
-            .foregroundStyle(.white.opacity(0.20))
-            .lineLimit(1)
-            .minimumScaleFactor(0.35)
-            .padding(.horizontal, fontSize * 0.12)
-            .frame(minWidth: fontSize * 0.78, minHeight: fontSize * 0.78)
-            .background(.black.opacity(0.05), in: Capsule())
-            .overlay {
-                Capsule()
-                    .strokeBorder(.white.opacity(0.05), lineWidth: 1)
+        HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * 0.08) {
+            if !windowLabel.isEmpty {
+                Text(windowLabel.uppercased())
+                    .font(.custom(SurfAceChromeFont.name, size: fontSize * 0.14))
+                    .foregroundStyle(connectionColor.opacity(0.25))
+                    .lineLimit(1)
+                    .padding(.horizontal, fontSize * 0.04)
+                    .frame(minWidth: fontSize * SurfAceShareTechMonoMetrics.windowBoxHeightRatio)
+                    .frame(height: fontSize * SurfAceShareTechMonoMetrics.windowBoxHeightRatio)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: fontSize * 0.04, style: .continuous)
+                            .strokeBorder(connectionColor.opacity(0.25), lineWidth: max(1, fontSize * 0.008))
+                    }
+                    .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
             }
+
+            Text(paneLabel)
+                .font(.custom(SurfAceChromeFont.name, size: fontSize))
+                .monospacedDigit()
+                .tracking(fontSize * SurfAceShareTechMonoMetrics.paneNumberTrackingRatio)
+                .foregroundStyle(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.25))
+                .lineLimit(1)
+                .minimumScaleFactor(0.35)
+                .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
+        }
+    }
+
+    private var connectionColor: Color {
+        switch connectionState {
+        case .connected:
+            return Color(red: 0.13, green: 0.77, blue: 0.37)
+        case .connecting:
+            return Color(red: 0.96, green: 0.65, blue: 0.04)
+        case .disconnected:
+            return Color(red: 0.94, green: 0.27, blue: 0.27)
+        }
     }
 }
 
@@ -250,80 +283,96 @@ private struct SurfAcePaneControls: View {
     @Bindable var pane: SurfAcePaneModel
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             if pane.drawingRestoreWarningVisible {
                 SurfAceWarningIndicator()
             }
 
-            if pane.annotationMode {
-                Button {
-                    runtime.setAnnotationMode(
-                        surfaceId: surface.surfaceId,
-                        paneId: pane.paneId,
-                        enabled: true,
-                        fingerDrawEnabled: !pane.fingerDrawEnabled
-                    )
-                } label: {
-                    Image(systemName: "hand.draw")
-                }
-                .buttonStyle(SurfAceGlassButtonStyle())
-
-                Button("Done") {
-                    runtime.setAnnotationMode(
-                        surfaceId: surface.surfaceId,
-                        paneId: pane.paneId,
-                        enabled: false,
-                        fingerDrawEnabled: false
-                    )
-                }
-                .buttonStyle(SurfAceGlassButtonStyle())
-            } else {
-                if pane.canGoBack {
-                    Button {
-                        runtime.navigateHistory(
-                            surfaceId: surface.surfaceId,
-                            paneId: pane.paneId,
-                            direction: .back
-                        )
-                    } label: {
-                        Image(systemName: "chevron.backward")
+            if hasNavigationContext && (ownerName != nil || pane.canGoBack || pane.canGoForward) {
+                HStack(spacing: 6) {
+                    if pane.canGoBack {
+                        Button {
+                            runtime.navigateHistory(
+                                surfaceId: surface.surfaceId,
+                                paneId: pane.paneId,
+                                direction: .back
+                            )
+                        } label: {
+                            Image(systemName: "chevron.backward")
+                        }
+                        .buttonStyle(SurfAceGlassButtonStyle())
                     }
-                    .buttonStyle(SurfAceGlassButtonStyle())
-                }
 
-                if pane.canGoForward {
-                    Button {
-                        runtime.navigateHistory(
-                            surfaceId: surface.surfaceId,
-                            paneId: pane.paneId,
-                            direction: .forward
-                        )
-                    } label: {
-                        Image(systemName: "chevron.forward")
+                    if pane.canGoForward {
+                        Button {
+                            runtime.navigateHistory(
+                                surfaceId: surface.surfaceId,
+                                paneId: pane.paneId,
+                                direction: .forward
+                            )
+                        } label: {
+                            Image(systemName: "chevron.forward")
+                        }
+                        .buttonStyle(SurfAceGlassButtonStyle())
                     }
-                    .buttonStyle(SurfAceGlassButtonStyle())
-                }
 
-                Button {
-                    runtime.setAnnotationMode(
-                        surfaceId: surface.surfaceId,
-                        paneId: pane.paneId,
-                        enabled: true,
-                        fingerDrawEnabled: true
-                    )
-                } label: {
-                    Image(systemName: "hand.draw")
+                    if let ownerName {
+                        Text(ownerName)
+                            .font(.custom(SurfAceChromeFont.name, size: 13))
+                            .foregroundStyle(.white.opacity(0.86))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .padding(.leading, 4)
+                            .padding(.trailing, 10)
+                    }
                 }
-                .buttonStyle(SurfAceGlassButtonStyle())
+                .padding(6)
+                .background(.black.opacity(0.58), in: Capsule())
             }
+
+            HStack(spacing: 6) {
+                Button {
+                    runtime.setAnnotationMode(
+                        surfaceId: surface.surfaceId,
+                        paneId: pane.paneId,
+                        enabled: true,
+                        fingerDrawEnabled: pane.annotationMode ? !pane.fingerDrawEnabled : true
+                    )
+                } label: {
+                    Image(systemName: "hand.draw")
+                }
+                .buttonStyle(SurfAceGlassButtonStyle())
+
+                if pane.annotationMode {
+                    Button("Done") {
+                        runtime.setAnnotationMode(
+                            surfaceId: surface.surfaceId,
+                            paneId: pane.paneId,
+                            enabled: false,
+                            fingerDrawEnabled: false
+                        )
+                    }
+                    .buttonStyle(SurfAceGlassButtonStyle())
+                }
+            }
+            .padding(6)
+            .background(.black.opacity(0.58), in: Capsule())
         }
+    }
+
+    private var ownerName: String? {
+        pane.currentOwnerDisplayName()
+    }
+
+    private var hasNavigationContext: Bool {
+        pane.currentEntry.contentId != nil || pane.canGoBack || pane.canGoForward
     }
 }
 
 private struct SurfAceWarningIndicator: View {
     var body: some View {
         Image(systemName: "exclamationmark.triangle.fill")
-            .font(.system(size: 18, weight: .semibold))
+            .font(.custom(SurfAceChromeFont.name, size: 18))
             .foregroundStyle(Color.yellow)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
@@ -335,7 +384,7 @@ private struct SurfAceWarningIndicator: View {
 private struct SurfAceGlassButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 18, weight: .semibold))
+            .font(.custom(SurfAceChromeFont.name, size: 18))
             .foregroundStyle(.white)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
@@ -374,94 +423,9 @@ private struct SurfAceKeyboardActiveBorder: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 0, style: .continuous)
-            .strokeBorder(Color.white.opacity(active ? 0.20 : 0), lineWidth: 10)
+            .strokeBorder(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(active ? 1 : 0), lineWidth: 10)
             .allowsHitTesting(false)
             .animation(.easeOut(duration: 0.12), value: active)
-    }
-}
-
-private struct SurfAceConnectionStateBar: View {
-    let state: SurfAceConnectionBarState
-    @State private var highlightOffset: CGFloat = -1
-
-    var body: some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .leading) {
-                Rectangle()
-                    .fill(baseColor.opacity(0.8))
-
-                if state == .connecting {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(Color.white.opacity(0.5))
-                        .frame(width: max(44, proxy.size.width * 0.18))
-                        .offset(x: highlightOffset * max(proxy.size.width - max(44, proxy.size.width * 0.18), 1))
-                        .animation(.linear(duration: 1.2).repeatForever(autoreverses: true), value: highlightOffset)
-                        .onAppear {
-                            highlightOffset = 1
-                        }
-                }
-            }
-        }
-        .frame(height: 2)
-        .ignoresSafeArea(edges: .bottom)
-    }
-
-    private var baseColor: Color {
-        switch state {
-        case .connected:
-            return Color(red: 0.13, green: 0.77, blue: 0.37)
-        case .connecting:
-            return Color(red: 0.96, green: 0.65, blue: 0.04)
-        case .disconnected:
-            return Color(red: 0.94, green: 0.27, blue: 0.27)
-        }
-    }
-}
-
-private struct SurfAceWindowTitlePill: View {
-    let name: String
-    let providerName: String?
-    let connectionState: SurfAceConnectionBarState
-
-    var body: some View {
-        VStack(spacing: 2) {
-            Text(name)
-                .font(.system(.title2, design: .rounded).weight(.semibold))
-                .foregroundStyle(.white.opacity(0.94))
-                .lineLimit(1)
-                .truncationMode(.tail)
-
-            Text(subtitleText)
-                .font(.system(.caption, design: .rounded).weight(.medium))
-                .foregroundStyle(.white.opacity(0.68))
-                .lineLimit(1)
-                .truncationMode(.tail)
-        }
-        .frame(maxWidth: 520)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 0.8)
-        }
-        .padding(.horizontal, 20)
-        .allowsHitTesting(false)
-    }
-
-    private var subtitleText: String {
-        switch connectionState {
-        case .connected:
-            if let providerName,
-               !providerName.isEmpty {
-                return providerName
-            }
-            return "unknown agent"
-        case .connecting:
-            return "connecting…"
-        case .disconnected:
-            return "not connected"
-        }
     }
 }
 
@@ -1454,7 +1418,16 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     }
 
     private func standbyHTML() -> String {
-        idleConstellationHTML(title: "Surface ready", detail: "Waiting for content.")
+        """
+        <!doctype html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+          <style>html, body { margin: 0; min-height: 100%; background: #000; overflow: hidden; }</style>
+        </head>
+        <body></body>
+        </html>
+        """
     }
 
     private func imageHTML(data: String, mediaType: String, alt: String?) -> String {
@@ -1565,198 +1538,6 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             <h1>\(escapedTitle)</h1>
             <p>\(escapedDetail)</p>
           </div>
-        </body>
-        </html>
-        """
-    }
-
-    private func idleConstellationHTML(title: String, detail: String) -> String {
-        let escapedTitle = escapeHTML(title)
-        let escapedDetail = escapeHTML(detail)
-        return """
-        <!doctype html>
-        <html>
-        <head>
-          <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-          <style>
-            html, body {
-              margin: 0;
-              min-height: 100%;
-              background: #000;
-              color: #edf8f2;
-              overflow: hidden;
-            }
-            body {
-              min-height: 100vh;
-              display: grid;
-              place-items: center;
-              padding: 24px;
-              position: relative;
-              text-align: center;
-              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            }
-            .idle {
-              position: absolute;
-              inset: 0;
-              isolation: isolate;
-            }
-            canvas {
-              position: absolute;
-              inset: 0;
-              width: 100%;
-              height: 100%;
-              display: block;
-              z-index: 0;
-            }
-            .copy {
-              position: relative;
-              z-index: 1;
-              max-width: 32ch;
-              padding: 24px 28px;
-              border-radius: 18px;
-              background: rgba(0, 0, 0, 0.28);
-              border: 1px solid rgba(130, 199, 255, 0.18);
-              backdrop-filter: blur(14px);
-            }
-            h1 {
-              margin: 0 0 8px;
-              color: #f7fbff;
-              font-size: 20px;
-              font-weight: 300;
-              letter-spacing: 0.14em;
-              text-transform: uppercase;
-            }
-            p {
-              margin: 0;
-              color: rgba(237, 248, 242, 0.72);
-              font-size: 14px;
-              font-weight: 500;
-              letter-spacing: 0.1em;
-              text-transform: uppercase;
-              line-height: 1.45;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="idle">
-            <canvas id="constellation"></canvas>
-          </div>
-          <div class="copy">
-            <h1>\(escapedTitle)</h1>
-            <p>\(escapedDetail)</p>
-          </div>
-          <script>
-            (function() {
-              const canvas = document.getElementById("constellation");
-              const host = document.body;
-              if (!canvas || !host) {
-                return;
-              }
-
-              const context = canvas.getContext("2d");
-              if (!context) {
-                return;
-              }
-
-              const particleCount = 120;
-              const connectionDistance = 100;
-              const maxSpeed = 0.22;
-              const particles = [];
-              let width = 1;
-              let height = 1;
-
-              function randomBetween(min, max) {
-                return min + Math.random() * (max - min);
-              }
-
-              function seedParticle() {
-                return {
-                  alpha: randomBetween(0.55, 0.95),
-                  hue: randomBetween(180, 240),
-                  radius: randomBetween(1.4, 3.4),
-                  vx: randomBetween(-maxSpeed, maxSpeed),
-                  vy: randomBetween(-maxSpeed, maxSpeed),
-                  x: randomBetween(0, width),
-                  y: randomBetween(0, height)
-                };
-              }
-
-              function resize() {
-                const rect = host.getBoundingClientRect();
-                width = Math.max(1, Math.floor(rect.width));
-                height = Math.max(1, Math.floor(rect.height));
-                const dpr = window.devicePixelRatio || 1;
-                canvas.width = Math.max(1, Math.floor(width * dpr));
-                canvas.height = Math.max(1, Math.floor(height * dpr));
-                canvas.style.width = width + "px";
-                canvas.style.height = height + "px";
-                context.setTransform(dpr, 0, 0, dpr, 0, 0);
-              }
-
-              resize();
-              for (let index = 0; index < particleCount; index += 1) {
-                particles.push(seedParticle());
-              }
-
-              function draw() {
-                resize();
-                context.clearRect(0, 0, width, height);
-                context.fillStyle = "#000";
-                context.fillRect(0, 0, width, height);
-
-                for (const particle of particles) {
-                  particle.x += particle.vx;
-                  particle.y += particle.vy;
-                  if (particle.x <= 0 || particle.x >= width) {
-                    particle.vx *= -1;
-                    particle.x = Math.max(0, Math.min(width, particle.x));
-                  }
-                  if (particle.y <= 0 || particle.y >= height) {
-                    particle.vy *= -1;
-                    particle.y = Math.max(0, Math.min(height, particle.y));
-                  }
-                }
-
-                for (let left = 0; left < particles.length; left += 1) {
-                  const source = particles[left];
-                  for (let right = left + 1; right < particles.length; right += 1) {
-                    const target = particles[right];
-                    const dx = target.x - source.x;
-                    const dy = target.y - source.y;
-                    const distance = Math.hypot(dx, dy);
-                    if (distance > connectionDistance) {
-                      continue;
-                    }
-                    const intensity = 1 - distance / connectionDistance;
-                    const hue = (source.hue + target.hue) / 2;
-                    context.beginPath();
-                    context.moveTo(source.x, source.y);
-                    context.lineTo(target.x, target.y);
-                    context.strokeStyle = "hsla(" + hue + ", 90%, 70%, " + (0.1 + intensity * 0.3) + ")";
-                    context.lineWidth = 0.7 + intensity * 0.9;
-                    context.shadowBlur = 12 * intensity;
-                    context.shadowColor = "hsla(" + hue + ", 100%, 72%, " + (0.35 * intensity) + ")";
-                    context.stroke();
-                  }
-                }
-
-                context.shadowBlur = 0;
-                for (const particle of particles) {
-                  context.beginPath();
-                  context.fillStyle = "hsla(" + particle.hue + ", 100%, 72%, " + particle.alpha + ")";
-                  context.arc(particle.x, particle.y, particle.radius, 0, Math.PI * 2);
-                  context.shadowBlur = 14;
-                  context.shadowColor = "hsla(" + particle.hue + ", 100%, 72%, " + (particle.alpha * 0.5) + ")";
-                  context.fill();
-                }
-                context.shadowBlur = 0;
-
-                window.requestAnimationFrame(draw);
-              }
-
-              window.requestAnimationFrame(draw);
-            })();
-          </script>
         </body>
         </html>
         """

@@ -412,7 +412,6 @@ final class SurfAceRuntime {
             return
         }
 
-        surface.labelRestoreTask?.cancel()
         persistedSurfaceTopologies[surfaceId] = SurfAcePersistedSurfaceTopology(surface: surface)
         persistSurfaceTopologies()
         surfAceLifecycleLog(
@@ -517,19 +516,8 @@ final class SurfAceRuntime {
         pane.annotationMode = enabled
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
         pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
-        noteInteraction(surfaceId: surfaceId)
         if wasEnabled && !enabled {
             requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
-        }
-    }
-
-    func toggleLabelsVisibility(surfaceId: String) {
-        guard let surface = surfaceById[surfaceId] else { return }
-        if surface.labelsVisible {
-            noteInteraction(surfaceId: surfaceId)
-        } else {
-            surface.labelRestoreTask?.cancel()
-            surface.labelsVisible = true
         }
     }
 
@@ -567,27 +555,12 @@ final class SurfAceRuntime {
                 ]
             )
         }
-        noteInteraction(surfaceId: surfaceId)
-    }
-
-    func noteInteraction(surfaceId: String) {
-        guard let surface = surfaceById[surfaceId] else { return }
-        surface.labelsVisible = false
-        surface.labelRestoreTask?.cancel()
-        surface.labelRestoreTask = Task { [weak surface] in
-            try? await Task.sleep(for: .seconds(1.5))
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                surface?.labelsVisible = true
-            }
-        }
     }
 
     func activateKeyboardPane(surfaceId: String, paneId: Int) {
         guard let surface = surfaceById[surfaceId],
               surface.panesById[paneId] != nil else { return }
         surface.activeKeyboardPaneId = paneId
-        noteInteraction(surfaceId: surfaceId)
     }
 
     func clearToast(surfaceId: String, paneId: Int) {
@@ -723,7 +696,6 @@ final class SurfAceRuntime {
         drawingData: Data
     ) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId), !strokes.isEmpty else { return }
-        noteInteraction(surfaceId: surfaceId)
 
         if !pane.annotationMode {
             pane.annotationMode = true

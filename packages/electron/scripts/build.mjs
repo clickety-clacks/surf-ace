@@ -11,6 +11,7 @@ const distDir = path.join(rootDir, "dist");
 
 await fs.rm(distDir, { force: true, recursive: true });
 await fs.mkdir(path.join(distDir, "renderer"), { recursive: true });
+await fs.mkdir(path.join(distDir, "renderer", "fonts"), { recursive: true });
 await fs.mkdir(path.join(distDir, "test"), { recursive: true });
 
 const shared = {
@@ -72,4 +73,12 @@ await fs.copyFile(
 await fs.copyFile(
   path.join(srcDir, "renderer", "styles.css"),
   path.join(distDir, "renderer", "styles.css"),
+);
+await fs.copyFile(
+  path.join(srcDir, "renderer", "fonts", "ShareTechMono-Regular.ttf"),
+  path.join(distDir, "renderer", "fonts", "ShareTechMono-Regular.ttf"),
+);
+await fs.copyFile(
+  path.join(srcDir, "renderer", "fonts", "OFL-ShareTechMono.txt"),
+  path.join(distDir, "renderer", "fonts", "OFL-ShareTechMono.txt"),
 );

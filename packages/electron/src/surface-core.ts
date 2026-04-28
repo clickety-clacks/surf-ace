@@ -136,6 +136,7 @@ export type RendererPaneState = {
   flushInFlight: boolean;
   label: string;
   name: string | null;
+  ownerName: string | null;
   paneId: number;
   showDone: boolean;
   toast: string | null;
@@ -331,6 +332,7 @@ export class SurfaceCore {
           flushInFlight: pane.flushInFlight,
           label: pane.paneLabel > 0 ? String(pane.paneLabel) : "",
           name: pane.name,
+          ownerName: current.display?.title ?? null,
           paneId,
           showDone: pane.annotating,
           toast: pane.toast,
@@ -1583,7 +1585,7 @@ function snapshotVisibleText(pane: PaneState, entry: HistoryEntry): string {
   ) {
     return snapshotText;
   }
-  if (snapshotText && snapshotText !== "Surface readyWaiting for content.") {
+  if (snapshotText) {
     return snapshotText;
   }
   return htmlVisibleText(entry.content as HtmlContent) ?? snapshotText;

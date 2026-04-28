@@ -1,5 +1,3 @@
-import idleConstellationTemplate from "../../../shared/idle-constellation.html";
-
 type Selection =
   | null
   | {
@@ -79,6 +77,7 @@ type RendererPaneState = {
   externalNative: boolean;
   flushInFlight: boolean;
   label: string;
+  ownerName: string | null;
   paneId: number;
   showDone: boolean;
   toast: string | null;
@@ -123,7 +122,6 @@ type PaneView = {
   currentRenderToken: number;
   currentScrollHandler: (() => void) | null;
   currentWebViewResizeObserver: ResizeObserver | null;
-  idleAnimationStop: (() => void) | null;
   lastNavigation: NavigationMemo | null;
   paneId: number;
   rootEl: HTMLDivElement;
@@ -155,7 +153,6 @@ const appRoot = document.querySelector("#app") as HTMLDivElement;
 const paneViews = new Map<number, PaneView>();
 let bootstrap: Bootstrap | null = null;
 let latestState: RendererWindowState | null = null;
-let labelsHideTimer: number | null = null;
 let overlayRegionsFrame: number | null = null;
 let overlayRegionsTimer: number | null = null;
 let overlayRevision = 0;
@@ -224,17 +221,6 @@ function rememberPaneContext(paneId: number): void {
     return;
   }
   window.surfAce.command({ paneId, type: "focus-pane" });
-}
-
-function scheduleLabelsHide(): void {
-  document.body.classList.add("labels-hidden");
-  if (labelsHideTimer) {
-    window.clearTimeout(labelsHideTimer);
-  }
-  labelsHideTimer = window.setTimeout(() => {
-    document.body.classList.remove("labels-hidden");
-    labelsHideTimer = null;
-  }, 900);
 }
 
 function paneBounds(view: PaneView) {
@@ -307,7 +293,7 @@ function visibleOverlayRect(element: HTMLElement, marker: string | undefined): O
     return rect ? outsetRect(rect, 2) : null;
   }
   if (marker === "pane-handle") {
-    const childRects = [...element.querySelectorAll<HTMLElement>(".control-button")]
+    const childRects = [...element.querySelectorAll<HTMLElement>(".control-pill")]
       .filter((child) => isMarkedOverlayVisible(child, element))
       .flatMap((child) => {
         const rect = elementRect(child);
@@ -588,6 +574,18 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   return button;
 }
 
+function setPaneChromeMetrics(view: PaneView): void {
+  const rect = view.rootEl.getBoundingClientRect();
+  const paneNumberSize = Math.max(1, Math.min(rect.width, rect.height) / 5);
+  view.rootEl.style.setProperty("--pane-number-size", `${paneNumberSize}px`);
+}
+
+function setAllPaneChromeMetrics(): void {
+  for (const view of paneViews.values()) {
+    setPaneChromeMetrics(view);
+  }
+}
+
 function blockInteractionWhileAnnotating(view: PaneView, event: Event): void {
   if (!paneStateFor(view)?.annotationBorderVisible) {
     return;
@@ -684,10 +682,6 @@ function attachCommonEvents(view: PaneView): void {
   view.rootEl.addEventListener("pointerdown", () => {
     rememberPaneContext(view.paneId);
   });
-  view.rootEl.addEventListener("pointermove", scheduleLabelsHide, { passive: true });
-  view.controlsEl.addEventListener("mouseenter", () => {
-    document.body.classList.remove("labels-hidden");
-  });
   view.scrollEl.addEventListener("scroll", () => {
     reportPaneSnapshot(view);
     view.currentScrollHandler?.();
@@ -727,9 +721,12 @@ function ensurePaneView(paneId: number): PaneView {
   shieldEl.className = "annotation-shield";
   const labelEl = document.createElement("div");
   labelEl.className = "pane-label";
+  surfAceOverlay(labelEl, "pane-label");
+  const windowLabelEl = document.createElement("span");
+  windowLabelEl.className = "pane-label__window";
   const labelTextEl = document.createElement("span");
-  surfAceOverlay(labelTextEl, "pane-label");
-  labelEl.appendChild(labelTextEl);
+  labelTextEl.className = "pane-label__number";
+  labelEl.append(windowLabelEl, labelTextEl);
   const focusOverlayEl = document.createElement("div");
   focusOverlayEl.className = "keyboard-focus-overlay";
   for (const edge of ["top", "right", "bottom", "left"]) {
@@ -760,7 +757,6 @@ function ensurePaneView(paneId: number): PaneView {
     currentRenderToken: 0,
     currentScrollHandler: null,
     currentWebViewResizeObserver: null,
-    idleAnimationStop: null,
     lastNavigation: null,
     paneId,
     rootEl,
@@ -796,28 +792,45 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  const back = surfAceOverlay(createButton("◀", "back", !pane.canGoBack), "history-back");
-  back.addEventListener("click", () => {
-    rememberPaneContext(pane.paneId);
-    window.surfAce.command({ direction: "back", paneId: pane.paneId, type: "history" });
-  });
-  const forward = surfAceOverlay(createButton("▶", "forward", !pane.canGoForward), "history-forward");
-  forward.addEventListener("click", () => {
-    rememberPaneContext(pane.paneId);
-    window.surfAce.command({ direction: "forward", paneId: pane.paneId, type: "history" });
-  });
+  const hasPushedContent = pane.content.contentId !== null;
+  if (hasPushedContent || pane.canGoBack || pane.canGoForward) {
+    const navigationPill = document.createElement("div");
+    navigationPill.className = "control-pill navigation-pill";
+    if (pane.canGoBack) {
+      const back = surfAceOverlay(createButton("◀", "back"), "history-back");
+      back.addEventListener("click", () => {
+        rememberPaneContext(pane.paneId);
+        window.surfAce.command({ direction: "back", paneId: pane.paneId, type: "history" });
+      });
+      navigationPill.appendChild(back);
+    }
+    if (pane.canGoForward) {
+      const forward = surfAceOverlay(createButton("▶", "forward"), "history-forward");
+      forward.addEventListener("click", () => {
+        rememberPaneContext(pane.paneId);
+        window.surfAce.command({ direction: "forward", paneId: pane.paneId, type: "history" });
+      });
+      navigationPill.appendChild(forward);
+    }
+    if (pane.ownerName) {
+      const ownerName = document.createElement("span");
+      ownerName.className = "navigation-pill__owner";
+      ownerName.textContent = pane.ownerName;
+      navigationPill.appendChild(ownerName);
+    }
+    if (navigationPill.childElementCount > 0) {
+      view.controlsEl.appendChild(navigationPill);
+    }
+  }
+  const annotationPill = document.createElement("div");
+  annotationPill.className = "control-pill annotation-pill";
   const annotate = surfAceOverlay(createButton("👆", "annotate"), "annotation-control");
   annotate.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
   });
   annotate.classList.toggle("active", pane.showDone);
-
-  if (!pane.showDone) {
-    view.controlsEl.append(back, forward);
-  }
-
-  view.controlsEl.appendChild(annotate);
+  annotationPill.appendChild(annotate);
 
   if (pane.showDone) {
     const done = surfAceOverlay(createButton("Done", "done"), "annotation-control");
@@ -825,8 +838,9 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
       rememberPaneContext(pane.paneId);
       window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
     });
-    view.controlsEl.appendChild(done);
+    annotationPill.appendChild(done);
   }
+  view.controlsEl.appendChild(annotationPill);
 }
 
 function sendNavigationIntent(view: PaneView, paneId: number, url: string): void {
@@ -1106,50 +1120,7 @@ function scheduleHtmlSnapshotRefresh(view: PaneView, renderToken: number): void 
   }
 }
 
-function stopIdleAnimation(view: PaneView): void {
-  view.idleAnimationStop?.();
-  view.idleAnimationStop = null;
-}
-
-function idleConstellationHTML(title: string, detail: string, hideCopy: boolean): string {
-  return idleConstellationTemplate
-    .replaceAll("__SURF_ACE_TITLE__", escapeHtml(title))
-    .replaceAll("__SURF_ACE_DETAIL__", escapeHtml(detail))
-    .replaceAll("__SURF_ACE_HIDE_COPY__", hideCopy ? "true" : "false");
-}
-
-function startIdleConstellation(frame: HTMLIFrameElement, title: string, detail: string, hideCopy: boolean): () => void {
-  frame.srcdoc = idleConstellationHTML(title, detail, hideCopy);
-  return () => {
-    frame.srcdoc = "about:blank";
-  };
-}
-
-function renderIdleState(view: PaneView, title: string, detail?: string): void {
-  stopIdleAnimation(view);
-  const empty = document.createElement("div");
-  empty.className = "content-empty content-empty-idle";
-  const frame = document.createElement("iframe");
-  frame.className = "content-idle-frame";
-  frame.setAttribute("sandbox", "allow-scripts");
-  const overlay = document.createElement("div");
-  overlay.className = "content-empty-copy";
-  const titleEl = document.createElement("strong");
-  titleEl.textContent = title;
-  overlay.appendChild(titleEl);
-  if (detail) {
-    const detailEl = document.createElement("p");
-    detailEl.textContent = detail;
-    overlay.appendChild(detailEl);
-  }
-  empty.append(frame, overlay);
-  view.contentEl.appendChild(empty);
-  view.idleAnimationStop = startIdleConstellation(frame, title, detail ?? "", true);
-  reportPaneSnapshot(view);
-}
-
 function renderCenteredState(view: PaneView, title: string, detail?: string): void {
-  stopIdleAnimation(view);
   const empty = document.createElement("div");
   empty.className = "content-empty";
   const titleEl = document.createElement("strong");
@@ -1271,7 +1242,6 @@ function resetDynamicContent(view: PaneView): number {
   view.currentHtmlFrameCleanup = null;
   clearWebViewSizer(view);
   view.currentScrollHandler = null;
-  stopIdleAnimation(view);
   view.rootEl.dataset.pdfReportKey = "";
   view.contentEl.style.height = "";
   view.contentEl.style.minHeight = "";
@@ -1295,7 +1265,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   }
 
   if (!pane.content.contentType || pane.content.content === null) {
-    renderIdleState(view, "Surface ready", "Waiting for content.");
+    reportPaneSnapshot(view);
     return;
   }
 
@@ -1432,13 +1402,16 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
 }
 
 function updatePane(view: PaneView, pane: RendererPaneState): void {
+  setPaneChromeMetrics(view);
   view.rootEl.classList.toggle("keyboard-active", pane.activeKeyboardPane);
   view.rootEl.classList.toggle("annotating", pane.annotationBorderVisible);
   view.rootEl.classList.toggle("flush-in-flight", pane.flushInFlight);
   view.annotationCanvas.classList.toggle("enabled", pane.annotationBorderVisible);
   view.annotationShield.classList.toggle("enabled", pane.annotationBorderVisible);
   const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement;
-  const label = labelWrap.querySelector("span") as HTMLSpanElement;
+  const windowLabel = labelWrap.querySelector(".pane-label__window") as HTMLSpanElement;
+  const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
+  windowLabel.textContent = latestState?.windowLabel ? latestState.windowLabel.toUpperCase() : "";
   label.textContent = pane.label;
   labelWrap.hidden = !pane.label;
   buildControls(view, pane);
@@ -1477,28 +1450,16 @@ function renderWindow(state: RendererWindowState): void {
   const panesById = new Map(state.panes.map((pane) => [pane.paneId, pane]));
   const wrapper = document.createElement("div");
   wrapper.className = `surface-window connection-${state.connectionBar}`;
-  const windowTitlePill = document.createElement("div");
-  windowTitlePill.className = "window-title-pill";
-  const windowTitle = document.createElement("div");
-  windowTitle.className = "window-title-pill__title";
-  windowTitle.textContent = state.windowLabel || state.name;
-  const windowSubtitle = document.createElement("div");
-  windowSubtitle.className = "window-title-pill__subtitle";
-  const subtitleText = state.connectionBar === "connected"
-    ? (state.providerName ?? "")
-    : state.connectionBar === "connecting"
-      ? "connecting…"
-      : "not connected";
-  windowSubtitle.textContent = subtitleText;
-  windowTitlePill.append(windowTitle, windowSubtitle);
   const layoutRoot = document.createElement("div");
   layoutRoot.className = "layout-root";
   if (state.layout) {
     layoutRoot.appendChild(renderLayout(state.layout, panesById));
   } else {
   }
-  wrapper.append(windowTitlePill, layoutRoot);
+  wrapper.append(layoutRoot);
   appRoot.replaceChildren(wrapper);
+  setAllPaneChromeMetrics();
+  window.requestAnimationFrame(setAllPaneChromeMetrics);
   scheduleCompositorOverlayRegionReport("layout");
 }
 
@@ -1520,10 +1481,12 @@ async function init(): Promise<void> {
       const view = paneViews.get(pane.paneId);
       if (view) {
         redrawDrawings(view, pane.drawings);
+        setPaneChromeMetrics(view);
         view.currentScrollHandler?.();
         reportPaneSnapshot(view);
       }
     }
+    window.requestAnimationFrame(setAllPaneChromeMetrics);
     scheduleCompositorOverlayRegionReport("resize");
   });
 
@@ -1532,7 +1495,6 @@ async function init(): Promise<void> {
   });
 
   window.addEventListener("pointermove", () => {
-    scheduleLabelsHide();
     scheduleCompositorOverlayRegionReport("visibility");
   }, { passive: true });
 }

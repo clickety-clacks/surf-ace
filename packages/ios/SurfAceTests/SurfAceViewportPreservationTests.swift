@@ -220,4 +220,60 @@ final class SurfAceViewportPreservationTests: XCTestCase {
         XCTAssertEqual(materializedState?["replaySemantics"] as? String, "navigate")
         XCTAssertEqual(materializedState?["url"] as? String, "https://blocked.invalid/")
     }
+
+    func testPaneOwnerDisplayNameTracksVisibleHistoryEntry() {
+        let pane = SurfAcePaneModel(paneId: 7, paneLabel: 12)
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_a",
+            revision: 1,
+            historyOwnerToken: "owner-a",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# A"),
+            title: "Session A",
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+        pane.backStack.append(
+            SurfAcePaneEntry(
+                contentId: "ct_b",
+                revision: 2,
+                historyOwnerToken: "owner-b",
+                contentType: .markdown,
+                payload: .markdown(markdown: "# B"),
+                title: "Session B",
+                scrollable: true,
+                interactive: true,
+                url: nil,
+                drawingData: Data(),
+                strokesById: [:]
+            )
+        )
+
+        XCTAssertEqual(pane.currentOwnerDisplayName(), "Session A")
+        pane.forwardStack.append(pane.currentEntry)
+        pane.currentEntry = pane.backStack.removeLast()
+        XCTAssertEqual(pane.currentOwnerDisplayName(), "Session B")
+    }
+
+    func testPaneOwnerDisplayNameDoesNotFallBackToProviderName() {
+        let pane = SurfAcePaneModel(paneId: 1, paneLabel: 1)
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_a",
+            revision: 1,
+            historyOwnerToken: "owner-a",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# A"),
+            title: nil,
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+
+        XCTAssertNil(pane.currentOwnerDisplayName())
+    }
 }

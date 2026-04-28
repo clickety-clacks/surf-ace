@@ -655,13 +655,21 @@ final class SurfAcePaneModel {
         self.forwardStack = []
     }
 
-    var labelText: String { name ?? "\(paneLabel)" }
+    var labelText: String { "\(paneLabel)" }
     var activeContentId: String? { currentEntry.contentId }
     var activeContentType: SurfAceContentType? { currentEntry.contentType }
     var currentRevision: Int { currentEntry.revision }
     var canGoBack: Bool { !backStack.isEmpty }
     var canGoForward: Bool { !forwardStack.isEmpty }
     var activeStrokes: [SurfAceStroke] { currentEntry.strokesById.values.sorted { $0.strokeId < $1.strokeId } }
+
+    func currentOwnerDisplayName() -> String? {
+        if let title = currentEntry.title,
+           !title.isEmpty {
+            return title
+        }
+        return nil
+    }
 }
 
 @MainActor
@@ -677,14 +685,12 @@ final class SurfAceSurfaceModel {
     var activeKeyboardPaneId: Int?
     var providerTopologyInitialized = false
     var connectionBarState: SurfAceConnectionBarState = .disconnected
-    var labelsVisible = true
     var viewportSize = CGSize(width: 1, height: 1)
     var viewportScale: CGFloat = 1
     var surfaceEpoch = 0
     var topologyEpoch = 0
     var geometryRevision = 0
     var lastError: String?
-    @ObservationIgnored var labelRestoreTask: Task<Void, Never>?
 
     init(sceneKey: String, surfaceId: String, windowLabel: String, name: String) {
         self.sceneKey = sceneKey
