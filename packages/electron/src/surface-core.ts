@@ -69,6 +69,7 @@ type PaneState = {
   annotationFrameOpen: boolean;
   deliveredClosedFrameCount: number;
   dirtyStrokeIds: string[];
+  externalNative: boolean;
   firstDirtyStrokeAt: number | null;
   flushInFlight: boolean;
   history: HistoryEntry[];
@@ -131,6 +132,7 @@ export type RendererPaneState = {
     revision: number;
   };
   drawings: Stroke[];
+  externalNative: boolean;
   flushInFlight: boolean;
   label: string;
   name: string | null;
@@ -321,15 +323,16 @@ export class SurfaceCore {
             content: cloneContent(current.content),
             contentId: current.contentId,
             contentType: current.contentType,
-          display: current.display ? { ...current.display } : undefined,
-          revision: current.revision,
-        },
-        drawings: structuredClone(current.annotations),
-        flushInFlight: pane.flushInFlight,
-        label: pane.paneLabel > 0 ? String(pane.paneLabel) : "",
-        name: pane.name,
-        paneId,
-        showDone: pane.annotating,
+            display: current.display ? { ...current.display } : undefined,
+            revision: current.revision,
+          },
+          drawings: structuredClone(current.annotations),
+          externalNative: pane.externalNative,
+          flushInFlight: pane.flushInFlight,
+          label: pane.paneLabel > 0 ? String(pane.paneLabel) : "",
+          name: pane.name,
+          paneId,
+          showDone: pane.annotating,
           toast: pane.toast,
         };
       }),
@@ -408,6 +411,7 @@ export class SurfaceCore {
     }
 
     pane.toast = null;
+    pane.externalNative = false;
     clearDirtyState(pane);
     bumpGeometryRevision(this.getSurface(surfaceId));
     this.emit({ surfaceId, type: "surface-changed" });
@@ -521,6 +525,26 @@ export class SurfaceCore {
       }
     }
     return null;
+  }
+
+  markNativePaneMaterialized(
+    surfaceId: string,
+    materialization: NativePaneMaterialization,
+  ): void {
+    const surface = this.getSurface(surfaceId);
+    let didChange = false;
+    for (const materializedPane of materialization.panes) {
+      const paneId = Number(materializedPane.id);
+      const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
+      if (!pane || pane.externalNative) {
+        continue;
+      }
+      pane.externalNative = true;
+      didChange = true;
+    }
+    if (didChange) {
+      this.emit({ surfaceId, type: "surface-changed" });
+    }
   }
 
   pairState(surfaceId: string): PairResponse["payload"]["state"] {
@@ -661,6 +685,7 @@ export class SurfaceCore {
       pane.historyIndex = pane.history.length - 1;
       trimHistory(pane);
       pane.toast = null;
+      pane.externalNative = false;
       pane.latestContentEventAt = this.now();
       clearDirtyState(pane);
       this.emit({ surfaceId, type: "surface-changed" });
@@ -709,6 +734,7 @@ export class SurfaceCore {
     }
     trimHistory(pane);
     pane.toast = null;
+    pane.externalNative = false;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     bumpGeometryRevision(surface);
@@ -770,6 +796,7 @@ export class SurfaceCore {
     pane.historyIndex = pane.history.length - 1;
     trimHistory(pane);
     pane.toast = null;
+    pane.externalNative = false;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
@@ -944,6 +971,7 @@ export class SurfaceCore {
     }
     trimHistory(pane);
     pane.toast = null;
+    pane.externalNative = false;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     bumpGeometryRevision(surface);
@@ -977,6 +1005,7 @@ export class SurfaceCore {
     pane.historyIndex = pane.history.length - 1;
     trimHistory(pane);
     pane.toast = null;
+    pane.externalNative = false;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     bumpGeometryRevision(surface);
@@ -1451,6 +1480,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     deliveredClosedFrameCount: 0,
     dirtyStrokeIds: [],
     firstDirtyStrokeAt: null,
+    externalNative: false,
     flushInFlight: false,
     history: [
       {

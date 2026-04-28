@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { NativePaneMaterialization, Revision } from "../../protocol/src/index.js";
 import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
 
 function applyProviderBootstrap(core: SurfaceCore, surfaceId: string, initialPaneId: number): number {
@@ -460,6 +461,52 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
   assert.equal(listedPane.geometry.coordinateSpace, "surface_logical");
   assert.equal(listedPane.geometry.geometryRevision, 3);
   assert.equal(listedPane.geometry.topologyEpoch, 0);
+});
+
+test("surface core exposes native materialized panes to the renderer until content changes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  const materialization: NativePaneMaterialization = {
+    op: "native_pane.host",
+    panes: [
+      {
+        id: String(paneId),
+        binding_id: `${paneId}:target_top`,
+        content_id: "target_top",
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: listedPane.geometry.geometryRevision,
+          height: listedPane.geometry.contentViewport.height,
+          paneInstanceId: listedPane.geometry.paneInstanceId,
+          surfaceEpoch: listedPane.geometry.surfaceEpoch,
+          topologyEpoch: listedPane.geometry.topologyEpoch,
+          width: listedPane.geometry.contentViewport.width,
+          x: listedPane.geometry.contentViewport.x,
+          y: listedPane.geometry.contentViewport.y,
+        },
+        process: { args: ["top"], command: "btop" },
+        revision: 1 as Revision,
+        target: "terminal",
+      },
+    ],
+  };
+
+  core.markNativePaneMaterialized(surface.surfaceId, materialization);
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.externalNative, true);
+
+  core.contentClear(surface.surfaceId, {
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.externalNative, false);
 });
 
 test("surface core advances geometry revision when pane chrome state changes", () => {

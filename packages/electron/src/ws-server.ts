@@ -1164,6 +1164,7 @@ export class SurfaceWsServer {
         targetEpoch: request.payload.targetEpoch,
         targetId: request.payload.targetId,
       };
+      this.core.markNativePaneMaterialized(surfaceId, materialization);
       this.onNativeMaterialized?.(surfaceId, materialization);
       return {
         id: request.id,

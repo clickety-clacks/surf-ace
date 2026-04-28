@@ -76,6 +76,7 @@ type RendererPaneState = {
     revision: number;
   };
   drawings: Stroke[];
+  externalNative: boolean;
   flushInFlight: boolean;
   label: string;
   paneId: number;
@@ -203,7 +204,7 @@ function markdownToHtml(markdown: string): string {
 }
 
 function contentKey(pane: RendererPaneState): string {
-  return `${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}`;
+  return `${pane.externalNative ? "native" : "renderer"}:${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}`;
 }
 
 function drawingsKey(drawings: Stroke[]): string {
@@ -1286,6 +1287,11 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   view.currentContentKey = key;
   const renderToken = resetDynamicContent(view);
   view.contentEl.className = `pane-content type-${pane.content.contentType ?? "empty"}`;
+
+  if (pane.externalNative && (!pane.content.contentType || pane.content.content === null)) {
+    reportPaneSnapshot(view);
+    return;
+  }
 
   if (!pane.content.contentType || pane.content.content === null) {
     renderIdleState(view, "Surface ready", "Waiting for content.");
