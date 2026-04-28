@@ -3117,7 +3117,7 @@ Surf Ace has one resolved geometry truth per pane. Each pane produces a canonica
 
 ### 16.1 Canonical snapshot invariant
 
-A pane geometry snapshot is a resolved fact, not a recipe. Topology, split direction, pane count, display orientation, physical output mode, DOM measurements, SwiftUI view hierarchy, compositor state, and safe-area inputs may participate in resolving the snapshot only at the geometry authority layer. Downstream consumers MUST NOT reconstruct pane placement from those inputs.
+A pane geometry snapshot is a resolved fact, not a recipe. Topology, split direction, pane count, DOM measurements, SwiftUI view hierarchy, and safe-area inputs may participate in resolving the snapshot only at the geometry authority layer. Display rotation and physical scanout mode are below the Surf Ace boundary; Surf Ace consumes the already-normalized logical surface bounds. Downstream consumers MUST NOT reconstruct pane placement from those inputs.
 
 Every cross-boundary geometry payload MUST include coordinate-space identity. Placement payloads that can be applied asynchronously MUST also carry pane identity and sufficient revision/generation identity to reject stale writes: pane id, pane instance/binding identity, topology epoch, surface/window epoch when available, and geometry revision or an explicitly documented equivalent.
 
@@ -3139,7 +3139,7 @@ If a consumer needs a new rectangle, the geometry authority adds a named project
 
 Electron surfaces have explicit geometry seams between renderer UI, Electron main, native/compositor hosting, overlay reporting, hit routing, and protocol reporting. Electron MUST treat the resolved pane snapshot as the only placement authority. Renderer DOM overlay measurements may provide semantic control presence, intrinsic size, and relative offsets, but they MUST NOT define the pane placement basis once native pane geometry exists. Compositor payloads consume `panes[].geometry` and `regions[].rect` as resolved rectangles; compositor MUST NOT infer pane layout from Surf Ace topology intent.
 
-Racter deg90 remains a required fixture: physical output `3840x2160`, logical/compositor surface `2160x3840`. Native panes, Surf Ace controls, overlay regions, and hit regions must align in the logical/compositor coordinate space.
+Racter tall-logical-surface remains a required fixture: Surf Ace receives a logical surface of `2160x3840` and must treat it exactly like any other `2160x3840` monitor/window. Native panes, Surf Ace controls, overlay regions, and hit regions must align in that logical coordinate space. Surf Ace must not reason from display rotation or physical scanout shape.
 
 ### 16.4 iOS requirement
 
