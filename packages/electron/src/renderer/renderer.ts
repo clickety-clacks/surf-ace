@@ -1411,7 +1411,7 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement;
   const windowLabel = labelWrap.querySelector(".pane-label__window") as HTMLSpanElement;
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
-  windowLabel.textContent = latestState?.windowLabel ? `[${latestState.windowLabel}]` : "";
+  windowLabel.textContent = latestState?.windowLabel ? latestState.windowLabel.toUpperCase() : "";
   label.textContent = pane.label;
   labelWrap.hidden = !pane.label;
   buildControls(view, pane);

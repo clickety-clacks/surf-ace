@@ -154,7 +154,7 @@ body {
   right: clamp(28px, 3.2vw, 96px);
   bottom: clamp(32px, 4vh, 128px);
   display: flex;
-  align-items: baseline;
+  align-items: flex-end;
   justify-content: flex-end;
   gap: calc(var(--pane-number-size) * 0.08);
   pointer-events: none;
@@ -176,8 +176,7 @@ body {
   font-weight: 850;
   letter-spacing: 0;
   line-height: 1;
-  text-transform: lowercase;
-  transform: translateY(calc(var(--pane-number-size) * -0.06));
+  text-transform: uppercase;
 }
 
 .connection-connected .pane-label__window {

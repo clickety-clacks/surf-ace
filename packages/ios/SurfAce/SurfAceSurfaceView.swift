@@ -219,9 +219,9 @@ private struct SurfAcePaneIdentityOverlay: View {
     }
 
     var body: some View {
-        HStack(alignment: .lastTextBaseline, spacing: fontSize * 0.08) {
+        HStack(alignment: .bottom, spacing: fontSize * 0.08) {
             if !windowLabel.isEmpty {
-                Text("[\(windowLabel)]")
+                Text(windowLabel.uppercased())
                     .font(.system(size: fontSize * 0.24, weight: .heavy, design: .rounded))
                     .foregroundStyle(connectionColor.opacity(0.25))
                     .lineLimit(1)
@@ -231,7 +231,6 @@ private struct SurfAcePaneIdentityOverlay: View {
                         RoundedRectangle(cornerRadius: fontSize * 0.08, style: .continuous)
                             .strokeBorder(connectionColor.opacity(0.25), lineWidth: max(1, fontSize * 0.012))
                     }
-                    .offset(y: -fontSize * 0.06)
             }
 
             Text(paneLabel)

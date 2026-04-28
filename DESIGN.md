@@ -176,7 +176,7 @@ Naming system:
 6. The extension is the sole authority on topology and visible labeling. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
 7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each.
 8. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the `windowLabel`, initial internal `paneId`, and initial visible `paneLabel`. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
-9. Labels are displayed on the surface — window identity immediately precedes the pane label as a bottom-right floating overlay within each pane, e.g. `[a]12`. See §15.1 for visibility rules.
+9. Labels are displayed on the surface — window identity immediately precedes the pane label as a bottom-right floating overlay within each pane. The window identity is uppercase text inside a rounded-rectangle outline, followed by the plain pane number, e.g. an outlined `A` box next to `12`. See §15.1 for visibility rules.
 
 
 TXT keys used by WS protocol:
@@ -2902,8 +2902,9 @@ Surface implementations MUST always display the following identifiers. Labels MU
 #### Window and pane identity overlay
 
 Each window is assigned a short alphabetic identifier using an auto-incrementing sequence: `a`, `b`, `c` … `z`, `aa`, `ab`, … This label MUST be:
-- Displayed immediately before the pane label inside each pane identity overlay, e.g. `[a]12`.
+- Displayed immediately before the pane label inside each pane identity overlay as uppercase text inside the outline box. Do not render literal square brackets; `[a]12` is only protocol shorthand for an outlined `A` box followed by `12`.
 - Rendered as a rounded-rectangle outline box with no filled background. The box height is about half the pane-number height.
+- Bottom-aligned with the pane-number text so the box bottom edge and pane-number bottom visual line read as one clean baseline.
 - Colored according to the window's connection state, with both outline and letters at 25% opacity.
 - Rendered in the overlay layer — it does not scroll with content.
 
