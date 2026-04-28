@@ -58,6 +58,7 @@ const providerId = String(args.providerId ?? args["provider-id"] ?? "pv_racter_o
 const providerName = String(args.providerName ?? args["provider-name"] ?? "Surf Ace Racter Overlay Verify");
 const windowLabel = String(args.windowLabel ?? args["window-label"] ?? "RACTER Overlay Verify");
 const splitDirection = String(args.splitDirection ?? args["split-direction"] ?? "horizontal");
+const targetSuffix = String(args.targetSuffix ?? args["target-suffix"] ?? "");
 const btopPaneId = Number(args.btopPaneId ?? args["btop-pane-id"] ?? 1);
 const topPaneId = Number(args.topPaneId ?? args["top-pane-id"] ?? 2);
 const btopProcess = resolveNativeProcess(args, {
@@ -137,7 +138,7 @@ try {
     restoreReason: "initial_apply",
     surfaceId: pair.payload.surfaceId,
     targetEpoch: 1,
-    targetId: "target_racter_btop",
+    targetId: targetIdWithSuffix("target_racter_btop"),
     topologyEpoch: topology.payload.topologyRevision,
     windowLabel,
     zIndex: 0,
@@ -150,7 +151,7 @@ try {
     restoreReason: "initial_apply",
     surfaceId: pair.payload.surfaceId,
     targetEpoch: 1,
-    targetId: "target_racter_top",
+    targetId: targetIdWithSuffix("target_racter_top"),
     topologyEpoch: topology.payload.topologyRevision,
     windowLabel,
     zIndex: 1,
@@ -165,6 +166,7 @@ try {
 
   const finalStatus = await getCompositorStatus(compositorSocket);
   const panes = await client.request("panes.list", {});
+  const holdMs = Number(args.holdMs ?? args["hold-ms"] ?? 0);
 
   console.log(JSON.stringify({
     applies: [
@@ -185,6 +187,9 @@ try {
     topology: topology.payload,
     url,
   }, null, 2));
+  if (Number.isFinite(holdMs) && holdMs > 0) {
+    await sleep(holdMs);
+  }
 } finally {
   socket.close(1000, "racter_overlay_verify_done");
 }
@@ -233,6 +238,10 @@ function targetApplyPayload(options) {
       command: options.process.command,
     },
   };
+}
+
+function targetIdWithSuffix(base) {
+  return targetSuffix.length > 0 ? `${base}_${targetSuffix}` : base;
 }
 
 async function waitForRendererOverlayRegions({ client, minRegionCount, socketPath, timeoutMs }) {
