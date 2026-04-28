@@ -175,7 +175,7 @@ Naming system:
 6. The extension is the sole authority on topology and visible labeling. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
 7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each.
 8. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the `windowLabel`, initial internal `paneId`, and initial visible `paneLabel`. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
-9. Labels are displayed on the surface — window label as a centered-top floating overlay, pane label as a centered floating overlay within the pane. See §15.1 for visibility rules.
+9. Labels are displayed on the surface — window label as a centered-top floating overlay, pane label as a bottom-right floating overlay within the pane. See §15.1 for visibility rules.
 
 
 TXT keys used by WS protocol:
@@ -2910,7 +2910,7 @@ The window label is the primary addressing handle. It MUST be visible when the s
 #### Pane label
 
 Each pane is assigned a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier. Optional pane names do not replace it. The pane label MUST be:
-- Displayed as a large floating translucent overlay centered within the pane content area.
+- Displayed as a large floating translucent overlay in the bottom-right of the pane content area, with toolbar-matched border styling, very bold type around 20vh, and low opacity.
 - Visible by default (at rest); hidden on active pointer movement or multitouch interaction; restored on pointer/interaction idle.
 - On touch interfaces: a control in the bottom bar displays the pane's assigned `paneLabel`. This control is both the pane label identifier and the manual re-show affordance; tapping it re-shows all labels, and any tap while labels are visible hides them again.
 - On pointer interfaces: moving the pointer hides labels; hovering the pane control bar restores them.
@@ -2953,7 +2953,7 @@ Electron keyboard defaults:
 Pane controls float above content rather than occupying a fixed header bar. The pane itself is chrome-free — content fills the entire pane area.
 
 Required defaults:
-- Pane label is displayed as a large floating translucent overlay centered in the pane (see §15.1 for visibility rules).
+- Pane label is displayed as a large floating translucent overlay in the bottom-right of the pane (see §15.1 for visibility rules).
 - All pane controls (pane-label control, Back, Forward, 👆, Done) live in a single floating control cluster at the bottom-center of the pane.
 - Back/Forward controls appear only when history exists in that direction; hidden otherwise.
 - Done appears only while annotation mode is active; hidden otherwise.
@@ -3047,7 +3047,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Window Letter Labels** — "Window labels (a, b, c…) are assigned by provider/extension, not the surface." Source: §3.1.1
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
 - **Pane Label Authority** — "Pane labels are provider-assigned visible numeric identifiers distinct from internal `paneId`." Source: §3.1.1
-- **Prominent Surface Labels** — "Window label: centered-top floating overlay. Pane label: centered floating overlay within pane. Visibility rules: visible at rest, hidden on active interaction." Source: §3.1.1 / §15.1
+- **Prominent Surface Labels** — "Window label: centered-top floating overlay. Pane label: bottom-right floating overlay within pane. Visibility rules: visible at rest, hidden on active interaction." Source: §3.1.1 / §15.1
 - **Displayed Content Persistence** — "The surface renders content and keeps it displayed until CLU explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
 - **History Navigation Controls** — "Previously visible content in that pane remains navigable through the surface's Back/Forward controls." Source: §6.1.1
@@ -3063,7 +3063,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Window Label Placement** — "Floating translucent overlay, centered top of window, above all pane content." Source: §15.1
 - **Window Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; never hidden by content or connection state." Source: §15.1
 - **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible when the surface is at rest." Source: §15.1
-- **Pane Label Placement** — "Large floating translucent overlay centered within the pane content area." Source: §15.1
+- **Pane Label Placement** — "Large floating translucent overlay in the bottom-right of the pane content area." Source: §15.1
 - **Pane Label Visibility** — "Visible by default at rest; hidden during active pointer movement or touch; restored on idle." Source: §15.1
 - **Pencil Auto Entry** — "Pencil contact with the screen MUST automatically enter annotation mode." Source: §15.1
 - **Drawing Input Button (👆)** — "A single drawing-input button MUST be present in the pane control bar at all times." Source: §15.1

@@ -241,9 +241,11 @@ body {
 
 .pane-label {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+  right: clamp(28px, 3.2vw, 96px);
+  bottom: clamp(32px, 4vh, 128px);
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
   pointer-events: none;
   z-index: 22;
   transition: opacity 0.18s ease;
@@ -257,10 +259,10 @@ body {
   min-height: 0.78em;
   padding: 0 0.12em;
   border-radius: 999px;
-  background: rgba(13, 22, 41, 0.04);
-  border: 1px solid rgba(164, 189, 235, 0.05);
-  color: rgba(238, 244, 255, 0.045);
-  font-size: 14vh;
+  background: rgba(13, 22, 41, 0.035);
+  border: 1px solid rgba(164, 189, 235, 0.18);
+  color: rgba(238, 244, 255, 0.055);
+  font-size: clamp(72px, 20vh, 420px);
   font-family: var(--ui-font-family);
   font-weight: 1000;
   letter-spacing: 0;
