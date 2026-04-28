@@ -100,6 +100,7 @@ export class BonjourAdvertiser {
   private static readonly VISIBILITY_FAILURES_BEFORE_ISOLATION = 3;
   private readonly baseName: string;
   private readonly bonjourBindings: BonjourBinding[];
+  private readonly isolatedPublisherSpawn: typeof spawn;
   private readonly port: number;
   private readonly txtProvider: () => Record<string, string>;
   private readonly useIsolatedPublisherByDefault: boolean;
@@ -116,6 +117,7 @@ export class BonjourAdvertiser {
 
   constructor(options: {
     bonjour?: BonjourClient;
+    isolatedPublisherSpawn?: typeof spawn;
     name: string;
     port: number;
     txtProvider: () => Record<string, string>;
@@ -124,6 +126,7 @@ export class BonjourAdvertiser {
     this.bonjourBindings = options.bonjour
       ? [{ client: options.bonjour, destroyed: false, disabled: false, interfaceAddress: null }]
       : this.createBonjourBindings();
+    this.isolatedPublisherSpawn = options.isolatedPublisherSpawn ?? spawn;
     this.port = options.port;
     this.serviceName = options.name;
     this.txtProvider = options.txtProvider;
@@ -527,11 +530,23 @@ export class BonjourAdvertiser {
         port: this.port,
       }),
     );
-    const child = spawn(
+    const child = this.isolatedPublisherSpawn(
       "dns-sd",
       ["-R", name, "_surf-ace._tcp", "local.", String(this.port), ...txtArgs],
       { stdio: ["ignore", "ignore", "ignore"] },
     );
+    child.on("error", (error: Error) => {
+      if (this.isolatedPublisher !== child) {
+        return;
+      }
+      console.warn(
+        bonjourDiagnostic("publish_isolated_error", {
+          error: (error as BonjourError).code ?? error.message,
+          name: this.serviceName,
+        }),
+      );
+      this.isolatedPublisher = null;
+    });
     child.on("exit", (code) => {
       if (this.isolatedPublisher === child) {
         console.warn(
