@@ -124,7 +124,7 @@ export function overlayRequestForCompositor(
       }
       return {
         ...region,
-        paneInstanceId: String(pane.geometry.paneInstanceId ?? pane.binding_id ?? region.paneInstanceId),
+        paneInstanceId: nativePaneInstanceIdForCompositor(pane),
         rect: {
           height: pane.geometry.height,
           width: pane.geometry.width,
@@ -211,8 +211,14 @@ export function nativePaneInstanceIdsForCompositor(
 ): Map<string, string> {
   return new Map(materialization.panes.map((pane) => [
     String(pane.id),
-    String(pane.geometry.paneInstanceId ?? pane.binding_id ?? `${pane.id}:${pane.content_id ?? "none"}`),
+    nativePaneInstanceIdForCompositor(pane),
   ]));
+}
+
+function nativePaneInstanceIdForCompositor(
+  pane: NativePaneMaterialization["panes"][number],
+): string {
+  return String(pane.binding_id ?? `${pane.id}:${pane.content_id ?? pane.geometry.paneInstanceId ?? "none"}`);
 }
 
 export function overlayRegionsClearRequestForCompositor(
