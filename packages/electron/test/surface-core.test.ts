@@ -699,7 +699,7 @@ test("surface core reports the current history entry owner name for chrome", () 
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.ownerName, "Session A");
 });
 
-test("surface core bumps geometry revision when fallback owner name changes", () => {
+test("surface core does not leak provider name as chrome owner fallback", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -717,13 +717,9 @@ test("surface core bumps geometry revision when fallback owner name changes", ()
     revision: 1 as never,
   });
 
-  const initialRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
   core.setProviderName(surface.surfaceId, "Fallback Session");
-  const providerRevision = core.getRendererWindowState(surface.surfaceId).geometryRevision;
-  assert.equal(providerRevision, initialRevision + 1);
-
-  core.setConnectionBar(surface.surfaceId, "connecting");
-  assert.equal(core.getRendererWindowState(surface.surfaceId).geometryRevision, providerRevision + 1);
+  const visible = core.getRendererWindowState(surface.surfaceId).panes[0];
+  assert.equal(visible?.ownerName, null);
 });
 
 test("surface core returns the number of flushed annotation batches discarded on pane close", () => {

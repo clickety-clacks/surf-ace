@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		13EF6FFC169CB6EDFF47597E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2A8249A9765412039C07EDD5 /* Assets.xcassets */; };
+		1A4F6B9C2D7E8F9012345678 /* ShareTechMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 1A4F6B9C2D7E8F9012345676 /* ShareTechMono-Regular.ttf */; };
+		1A4F6B9C2D7E8F9012345679 /* OFL-ShareTechMono.txt in Resources */ = {isa = PBXBuildFile; fileRef = 1A4F6B9C2D7E8F9012345677 /* OFL-ShareTechMono.txt */; };
 		1FFF04D1B747F5A964BC374B /* SurfAceANSI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */; };
 		2F01C4F42B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F01C4F32B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift */; };
 		4A276F1C4C06E696FCA8D872 /* SurfAceBonjourPublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 856099927C9D1E8B57CB1A1D /* SurfAceBonjourPublisherTests.swift */; };
@@ -35,6 +37,8 @@
 
 /* Begin PBXFileReference section */
 		176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServerTests.swift; sourceTree = "<group>"; };
+		1A4F6B9C2D7E8F9012345676 /* ShareTechMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "ShareTechMono-Regular.ttf"; sourceTree = "<group>"; };
+		1A4F6B9C2D7E8F9012345677 /* OFL-ShareTechMono.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-ShareTechMono.txt"; sourceTree = "<group>"; };
 		2A8249A9765412039C07EDD5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2F01C4F32B42A75F5F038A8E /* SurfAceViewportPreservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceViewportPreservationTests.swift; sourceTree = "<group>"; };
 		314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
@@ -66,6 +70,7 @@
 			isa = PBXGroup;
 			children = (
 				2A8249A9765412039C07EDD5 /* Assets.xcassets */,
+				1A4F6B9C2D7E8F9012345675 /* Fonts */,
 				8E6FB2404CFB46518AF12A34 /* LaunchScreen.storyboard */,
 				71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */,
 				F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */,
@@ -77,6 +82,15 @@
 				4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */,
 			);
 			path = SurfAce;
+			sourceTree = "<group>";
+		};
+		1A4F6B9C2D7E8F9012345675 /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				1A4F6B9C2D7E8F9012345676 /* ShareTechMono-Regular.ttf */,
+				1A4F6B9C2D7E8F9012345677 /* OFL-ShareTechMono.txt */,
+			);
+			path = Fonts;
 			sourceTree = "<group>";
 		};
 		6897A8D003370E2CC8B694CB /* SurfAceTests */ = {
@@ -182,6 +196,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				13EF6FFC169CB6EDFF47597E /* Assets.xcassets in Resources */,
+				1A4F6B9C2D7E8F9012345678 /* ShareTechMono-Regular.ttf in Resources */,
+				1A4F6B9C2D7E8F9012345679 /* OFL-ShareTechMono.txt in Resources */,
 				8E6FB2414CFB46518AF12A34 /* LaunchScreen.storyboard in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

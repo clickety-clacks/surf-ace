@@ -355,7 +355,7 @@ Flow:
 3. `surfaceId` (target window surface on multi-window endpoints).
 4. `resume` (optional prior `sessionId`, owner-only reconnect path).
 5. `takeover` (optional bool, explicit ownership transfer request; MUST only be used for user-directed takeover, not routine recovery).
-6. `providerName` (required human-readable session/chat label for UI indicators). Surfaces MUST reject `pair.request` with `missing_provider_name` if absent.
+6. `providerName` (required human-readable provider/connection label for ownership diagnostics; it is not a visible navigation-pill fallback). Surfaces MUST reject `pair.request` with `missing_provider_name` if absent.
 7. `eventProfile` (optional, default `minimum_deep`).
 8. `drawingFlushConfig` (optional, provider-preferred idle/max interval values).
 9. `windowLabel` (required provider-assigned window label for this surface bootstrap).
@@ -2899,6 +2899,8 @@ This section is **normative**. Surface implementations MUST conform to the requi
 
 Surface implementations MUST always display the following identifiers. Labels MUST NOT be hidden based on pointer movement, touch interaction, hover state, content type, connection state, or annotation mode.
 
+Surf Ace chrome text, including identity overlays, button labels, toast labels, and navigation/control pill text, MUST use bundled Share Tech Mono assets on Electron and iOS. Implementations MUST NOT depend on network font loading at runtime. The bundled font is distributed under the SIL Open Font License 1.1 and the OFL text MUST be included with app/package assets.
+
 #### Window and pane identity overlay
 
 Each window is assigned a short alphabetic identifier using an auto-incrementing sequence: `a`, `b`, `c` … `z`, `aa`, `ab`, … This label MUST be:
@@ -3458,7 +3460,7 @@ Dedicated native-overlay model markups may eventually become full interactive UI
 
 ### 15.8 Current Owner Name Display
 
-When the paired provider sends a `providerName` in `pair.request`, the surface stores it as the default connected owner/session label. Each visible pane-history entry may also carry display metadata from `content.set`; when a display title is present for the current entry, that title is the preferred current owner/session/chat name for the navigation pill.
+When the paired provider sends a `providerName` in `pair.request`, the surface stores it for protocol/diagnostic ownership state only. It MUST NOT be shown as the current owner/session/chat name in the navigation pill. Each visible pane-history entry may carry display metadata from `content.set`; when a display title is present for the current entry, that title is the current owner/session/chat name for the navigation pill.
 
 **Layout:**
 - The current owner/session/chat name appears in the left navigation pill, alongside Back and Forward.
@@ -3469,15 +3471,14 @@ When the paired provider sends a `providerName` in `pair.request`, the surface s
 
 **Behavior:**
 - Back/Forward navigation MUST update the visible name to the newly visible history entry's owner/session/chat name.
-- If the current entry lacks display title metadata, the surface falls back to the paired `providerName`.
-- If neither value is available, the navigation pill omits the name rather than inventing a label.
+- If the current entry lacks display title metadata, the navigation pill omits the name rather than inventing a label or falling back to `providerName`.
 - The name persists during annotation mode whenever the navigation pill is otherwise visible.
 
 **Protocol integration:**
-- Surface stores the most recently received required `providerName` from `pair.request`.
+- Surface stores the most recently received required `providerName` from `pair.request` for connection state and diagnostics, not for visible owner-name fallback.
 - Clears stored name on ownership relinquish or socket disconnect.
 - Re-applies name on next successful `pair.request`.
 - Surface stores per-history-entry display title metadata received on `content.set` / `content.apply`.
 
 **Invariant index entry:**
-- **Current Owner Name Display** — "The left navigation pill shows the current visible pane-history entry's display title when present, otherwise the paired providerName; Back/Forward updates the name with the visible entry." Source: §15.8
+- **Current Owner Name Display** — "The left navigation pill shows the current visible pane-history entry's display title when present; Back/Forward updates the name with the visible entry; providerName is not used as visible fallback." Source: §15.8

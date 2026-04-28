@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Share Tech Mono";
+  font-style: normal;
+  font-weight: 400;
+  src: url("./fonts/ShareTechMono-Regular.ttf") format("truetype");
+}
+
 :root {
   --bg: #08111f;
   --pane: rgba(15, 24, 44, 0.92);
@@ -9,9 +16,9 @@
   --ok: #22c55e;
   --warn: #f59e0b;
   --destructive: #ef4444;
-  --ui-font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --ui-font-weight: 200;
-  --ui-letter-spacing: 0.12em;
+  --ui-font-family: "Share Tech Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --ui-font-weight: 400;
+  --ui-letter-spacing: 0;
 }
 
 * {

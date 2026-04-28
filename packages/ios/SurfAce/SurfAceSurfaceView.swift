@@ -8,6 +8,10 @@ import WebKit
 
 private let surfAceSurfaceCoordinateSpaceName = "SurfAce.surface.logical"
 
+private enum SurfAceChromeFont {
+    static let name = "ShareTechMono-Regular"
+}
+
 struct SurfAceRootView: View {
     @Bindable var runtime: SurfAceRuntime
     @Environment(\.displayScale) private var displayScale
@@ -141,7 +145,7 @@ private struct SurfAcePaneView: View {
                     VStack {
                         Spacer()
                         Text(toast)
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .font(.custom(SurfAceChromeFont.name, size: 13))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -222,7 +226,7 @@ private struct SurfAcePaneIdentityOverlay: View {
         HStack(alignment: .bottom, spacing: fontSize * 0.08) {
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
-                    .font(.system(size: fontSize * 0.24, weight: .heavy, design: .rounded))
+                    .font(.custom(SurfAceChromeFont.name, size: fontSize * 0.24))
                     .foregroundStyle(connectionColor.opacity(0.25))
                     .lineLimit(1)
                     .padding(.horizontal, fontSize * 0.08)
@@ -234,7 +238,7 @@ private struct SurfAcePaneIdentityOverlay: View {
             }
 
             Text(paneLabel)
-                .font(.system(size: fontSize, weight: .black, design: .rounded))
+                .font(.custom(SurfAceChromeFont.name, size: fontSize))
                 .monospacedDigit()
                 .foregroundStyle(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.25))
                 .lineLimit(1)
@@ -295,7 +299,7 @@ private struct SurfAcePaneControls: View {
 
                     if let ownerName {
                         Text(ownerName)
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .font(.custom(SurfAceChromeFont.name, size: 13))
                             .foregroundStyle(.white.opacity(0.86))
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -338,7 +342,7 @@ private struct SurfAcePaneControls: View {
     }
 
     private var ownerName: String? {
-        pane.currentOwnerDisplayName(fallbackProviderName: surface.providerName)
+        pane.currentOwnerDisplayName()
     }
 
     private var hasNavigationContext: Bool {
@@ -349,7 +353,7 @@ private struct SurfAcePaneControls: View {
 private struct SurfAceWarningIndicator: View {
     var body: some View {
         Image(systemName: "exclamationmark.triangle.fill")
-            .font(.system(size: 18, weight: .semibold))
+            .font(.custom(SurfAceChromeFont.name, size: 18))
             .foregroundStyle(Color.yellow)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
@@ -361,7 +365,7 @@ private struct SurfAceWarningIndicator: View {
 private struct SurfAceGlassButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 18, weight: .semibold))
+            .font(.custom(SurfAceChromeFont.name, size: 18))
             .foregroundStyle(.white)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)

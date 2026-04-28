@@ -605,14 +605,10 @@ final class SurfAcePaneModel {
     var canGoForward: Bool { !forwardStack.isEmpty }
     var activeStrokes: [SurfAceStroke] { currentEntry.strokesById.values.sorted { $0.strokeId < $1.strokeId } }
 
-    func currentOwnerDisplayName(fallbackProviderName: String?) -> String? {
+    func currentOwnerDisplayName() -> String? {
         if let title = currentEntry.title,
            !title.isEmpty {
             return title
-        }
-        if let fallbackProviderName,
-           !fallbackProviderName.isEmpty {
-            return fallbackProviderName
         }
         return nil
     }

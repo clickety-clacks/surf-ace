@@ -171,9 +171,28 @@ final class SurfAceViewportPreservationTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(pane.currentOwnerDisplayName(fallbackProviderName: "Fallback"), "Session A")
+        XCTAssertEqual(pane.currentOwnerDisplayName(), "Session A")
         pane.forwardStack.append(pane.currentEntry)
         pane.currentEntry = pane.backStack.removeLast()
-        XCTAssertEqual(pane.currentOwnerDisplayName(fallbackProviderName: "Fallback"), "Session B")
+        XCTAssertEqual(pane.currentOwnerDisplayName(), "Session B")
+    }
+
+    func testPaneOwnerDisplayNameDoesNotFallBackToProviderName() {
+        let pane = SurfAcePaneModel(paneId: 1, paneLabel: 1)
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_a",
+            revision: 1,
+            historyOwnerToken: "owner-a",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# A"),
+            title: nil,
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+
+        XCTAssertNil(pane.currentOwnerDisplayName())
     }
 }
