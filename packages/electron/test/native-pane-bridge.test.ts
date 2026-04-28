@@ -14,6 +14,7 @@ import {
   overlayRequestForCompositor,
   requestForCompositor,
   resolveCompositorControlSocketPath,
+  resolvedOverlayRegionsForCompositor,
   sendCompositorControl,
   validatePaneHandleOverlayAlignment,
   validateMaterializationAgainstCompositorStatus,
@@ -200,6 +201,82 @@ test("native pane bridge validates deg90 full-height pane handle alignment", () 
     }).join("\n"),
     /not bottom-aligned/,
   );
+});
+
+test("native pane bridge resolves renderer chrome from native pane geometry", () => {
+  const panes = [
+    {
+      geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 0, y: 0 },
+      id: "1",
+      paneInstanceId: "1:target_racter_btop",
+    },
+    {
+      geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 1080, y: 0 },
+      id: "2",
+      paneInstanceId: "2:target_racter_top",
+    },
+  ] as const;
+  const badRendererRegions = [
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "pane_handle",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 48, width: 148, x: 1006, y: 1837 },
+      regionId: "surf-ace-pane-1-pane-handle-0",
+      zIndex: 10,
+    },
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "history_back",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 48, width: 48, x: 1006, y: 1837 },
+      regionId: "surf-ace-pane-1-history-back-1",
+      zIndex: 20,
+    },
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "history_forward",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 48, width: 48, x: 1056, y: 1837 },
+      regionId: "surf-ace-pane-1-history-forward-2",
+      zIndex: 20,
+    },
+    {
+      captures: ["pointer_hover", "pointer_button", "pointer_axis"],
+      kind: "annotation_control",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 48, width: 48, x: 1106, y: 1837 },
+      regionId: "surf-ace-pane-1-annotation-control-3",
+      zIndex: 20,
+    },
+  ] as const;
+
+  assert.deepEqual(resolvedOverlayRegionsForCompositor([...badRendererRegions], panes), [
+    {
+      ...badRendererRegions[0],
+      paneInstanceId: "1:target_racter_btop",
+      rect: { height: 48, width: 148, x: 466, y: 3743 },
+    },
+    {
+      ...badRendererRegions[1],
+      paneInstanceId: "1:target_racter_btop",
+      rect: { height: 48, width: 48, x: 466, y: 3743 },
+    },
+    {
+      ...badRendererRegions[2],
+      paneInstanceId: "1:target_racter_btop",
+      rect: { height: 48, width: 48, x: 516, y: 3743 },
+    },
+    {
+      ...badRendererRegions[3],
+      paneInstanceId: "1:target_racter_btop",
+      rect: { height: 48, width: 48, x: 566, y: 3743 },
+    },
+  ]);
 });
 
 test("native pane bridge indexes live compositor pane instances from materialization bindings", () => {

@@ -11,11 +11,13 @@ import {
   type CompositorControlRequest,
   type CompositorControlResponse,
   type CompositorOverlayRegion,
+  type ResolvedNativePaneGeometry,
   compositorFailureMessage,
   nativePaneInstanceIdsForCompositor,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
   resolveCompositorControlSocketPath,
+  resolvedOverlayRegionsForCompositor,
   sendCompositorControl,
 } from "./native-pane-bridge.js";
 import {
@@ -51,7 +53,7 @@ const windows = new Map<string, BrowserWindow>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const readyWindows = new Set<string>();
 const overlayDiagnostics = new Map<string, Record<string, unknown>>();
-const nativePaneInstances = new Map<string, Map<string, string>>();
+const nativePaneInstances = new Map<string, Map<string, ResolvedNativePaneGeometry>>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
@@ -223,19 +225,31 @@ async function sendCompositorOverlayRequest(request: CompositorControlRequest): 
 }
 
 function recordNativePaneInstances(surfaceId: string, materialization: NativePaneMaterialization): void {
-  const current = nativePaneInstances.get(surfaceId) ?? new Map<string, string>();
-  for (const [paneId, paneInstanceId] of nativePaneInstanceIdsForCompositor(materialization)) {
-    current.set(paneId, paneInstanceId);
+  const current = nativePaneInstances.get(surfaceId) ?? new Map<string, ResolvedNativePaneGeometry>();
+  const paneInstanceIds = nativePaneInstanceIdsForCompositor(materialization);
+  for (const pane of materialization.panes) {
+    const paneId = String(pane.id);
+    current.set(paneId, {
+      geometry: {
+        height: pane.geometry.height,
+        width: pane.geometry.width,
+        x: pane.geometry.x,
+        y: pane.geometry.y,
+        coordinateSpace: pane.geometry.coordinateSpace,
+      },
+      id: paneId,
+      paneInstanceId: paneInstanceIds.get(paneId) ?? `${paneId}:${pane.content_id ?? "none"}`,
+    });
   }
   nativePaneInstances.set(surfaceId, current);
 }
 
 function compositorOverlayRegions(surfaceId: string, regions: unknown[]): CompositorOverlayRegion[] {
   const instances = nativePaneInstances.get(surfaceId);
-  return (regions as CompositorOverlayRegion[]).map((region) => {
-    const paneInstanceId = instances?.get(String(region.paneId));
-    return paneInstanceId ? { ...region, paneInstanceId } : region;
-  });
+  return resolvedOverlayRegionsForCompositor(
+    regions as CompositorOverlayRegion[],
+    instances?.values() ?? [],
+  );
 }
 
 async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<string, unknown>): Promise<void> {
