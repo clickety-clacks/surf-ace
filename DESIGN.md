@@ -234,15 +234,16 @@ Provider reconnect policy:
 1. Exponential backoff with jitter: 0.5s, 1s, 2s, 4s, 8s, 16s, max 30s.
 2. Reconnect uses the same discovered surface address.
 3. Normal recovery sends `pair.request` again with the same `providerId` and, when available, `resume.sessionId` from the prior paired session.
-4. Providers MUST treat `takeover=true` as a user-directed escalation path, not as standard reconnect logic. Routine owner recovery is always resume/reconnect by the current lock owner.
-5. If resume fails because the surface no longer recognizes the resumable session, the provider continues retrying or prompts for operator action; the lock still remains reserved for the existing owner until explicit relinquish or explicit takeover occurs.
+4. Providers MUST treat foreign-owner `takeover=true` as a user-directed escalation path, not as standard reconnect logic. Routine owner recovery is always resume/reconnect by the current lock owner.
+5. In the normal single-user network model, a provider that can identify the surface as previously self-owned MAY perform an automatic self-reclaim with the same stable `providerId` when the surface is reachable but returns `busy` or rejects a stale resume session. Self-reclaim is not provider-id rotation and is not a silent foreign takeover; it is recovery of the provider's own stale/orphaned lock.
+6. If the provider cannot classify the busy lock as self-owned, it MUST NOT silently reclaim it. Busy owned by an unknown or different provider remains an explicit operator reclaim/relinquish scenario.
 
 Surface ownership behavior:
 1. On any disconnect (abnormal or normal close), the surface keeps displayed content, pane topology, annotations, and ownership lock intact indefinitely. Socket death does not free the surface for another provider.
 2. Only the lock owner may reconnect and resume normal control without takeover. A successful owner resume restores the active session and MAY emit `event.surface_resumed`.
 3. A different provider connecting without `takeover=true` receives `busy` while the lock is held, regardless of whether the owner socket is currently live.
 4. A different provider connecting with `takeover=true` is requesting explicit ownership transfer. The surface MUST treat this as exceptional control transfer, not routine recovery semantics.
-5. On accepted takeover, the surface transfers the lock to the new `providerId`, closes any still-live old owner socket with `1000` reason `superseded`, and preserves displayed content/state until the new owner changes it.
+5. On accepted takeover or self-reclaim, the surface transfers the lock to the requesting stable `providerId`, closes any still-live old owner socket with `1000` reason `superseded`, and preserves displayed content/state until the owner changes it.
 6. On accepted `ownership.relinquish`, the surface clears the lock immediately, preserves displayed content/state, and becomes available for a later fresh claim by any provider. The relinquishing provider MUST disable its auto-retry loop for that surface after success.
 
 **Invariant: connection state MUST NOT affect displayed content.** Content is never cleared by a disconnect, restart, relinquish, or takeover. Content changes only when CLU explicitly calls `content.set` or `content.clear`. A surface showing content will continue showing that content indefinitely until told otherwise.

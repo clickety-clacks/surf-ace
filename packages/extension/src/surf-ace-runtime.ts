@@ -121,6 +121,7 @@ export type SurfAceScreenSummary = {
     autoRetryEnabled: boolean;
     endpointId: string;
     hasPairedInGatewaySession: boolean;
+    ownershipRecovery: "active" | "foreign_or_unknown" | "known_self";
     reconnectAttempt: number;
     sessionId: string | null;
     unreachableFailures: number;
@@ -4240,6 +4241,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         autoRetryEnabled: surface.autoRetryEnabled,
         endpointId: surface.endpointId,
         hasPairedInGatewaySession: surface.hasPairedInGatewaySession,
+        ownershipRecovery: surface.hasPairedInGatewaySession
+          ? "active"
+          : this.isKnownSelfOwnedSurface(surface) ? "known_self" : "foreign_or_unknown",
         reconnectAttempt: surface.reconnectAttempt,
         sessionId: surface.sessionId,
         unreachableFailures: surface.unreachableFailures,
@@ -5257,7 +5261,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
-    response = await this.maybeRecoverFromColdStartBusy(
+    response = await this.maybeRecoverKnownSelfOwnershipLock(
       surface,
       response,
       resumeSessionId,
@@ -5312,7 +5316,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return sendPairRequest(false, null);
   }
 
-  private async maybeRecoverFromColdStartBusy(
+  private async maybeRecoverKnownSelfOwnershipLock(
     surface: ManagedSurface,
     response: Response,
     resumeSessionId: SessionId | null,
@@ -5323,14 +5327,35 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   ): Promise<Response> {
     if (
       !isErrorResponse(response) ||
-      response.error.code !== "busy" ||
-      surface.hasPairedInGatewaySession ||
-      resumeSessionId !== null
+      (response.error.code !== "busy" && response.error.code !== "invalid_resume") ||
+      !this.isKnownSelfOwnedSurface(surface)
     ) {
       return response;
     }
-    void sendPairRequest;
-    return response;
+    this.logger.warn?.(
+      runtimeDiagnostic("ownership_self_reclaim", {
+        had_paired_session: surface.hasPairedInGatewaySession,
+        had_resume_session: Boolean(resumeSessionId),
+        provider_id: this.persistentState.providerId,
+        reason: response.error.code,
+        surface_id: surface.surfaceId,
+      }),
+    );
+    this.clearSurfaceResumeState(surface);
+    return sendPairRequest(true, null);
+  }
+
+  private isKnownSelfOwnedSurface(surface: ManagedSurface): boolean {
+    if (surface.hasPairedInGatewaySession || surface.sessionId) {
+      return true;
+    }
+    if (this.persistentState.targetStateBySurfaceId?.[surface.surfaceId]) {
+      return true;
+    }
+    const paneLabelPrefix = `${surface.surfaceId}::`;
+    return Object.keys(this.persistentState.paneLabelsByPaneId).some((key) =>
+      key.startsWith(paneLabelPrefix)
+    );
   }
 
   private requestEnvelope<TOp extends Request["op"]>(

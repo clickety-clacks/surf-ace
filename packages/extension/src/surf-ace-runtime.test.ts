@@ -622,7 +622,10 @@ class FakeSurfAceWsServer {
             );
             return;
           }
-          if (attemptedResumeSessionId !== this.lockedSessionId) {
+          if (message.payload?.takeover) {
+            pairResponseResumed = false;
+            pairResponseSessionId = "sa_test_session";
+          } else if (attemptedResumeSessionId !== this.lockedSessionId) {
             socket.send(
               JSON.stringify(
                 this.errorResponse(
@@ -634,9 +637,10 @@ class FakeSurfAceWsServer {
               ),
             );
             return;
+          } else {
+            pairResponseResumed = true;
+            pairResponseSessionId = this.lockedSessionId;
           }
-          pairResponseResumed = true;
-          pairResponseSessionId = this.lockedSessionId;
         }
         const requestedSurface = this.requireSurface(String(message.payload?.surfaceId ?? this.surfaceId));
         this.pairedSocketsBySurfaceId.set(requestedSurface.surfaceId, socket);
@@ -3838,7 +3842,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("repeated busy reconnect failures preserve provider identity", async () => {
+  await t.test("known self-owned busy reconnect self-reclaims with stable provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -3847,30 +3851,29 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const initialProviderId = server.pairAttemptDetails[0]?.providerId;
       assert.equal(typeof initialProviderId, "string");
-      server.lockUntilNewProviderIdCode = "busy";
-      server.lockUntilNewProviderIdProviderId = initialProviderId ?? null;
+      server.busyWithoutTakeoverResponsesRemaining = 1;
 
-      await surface.client.close(1000, "test_busy_provider_rotation");
+      await surface.client.close(1000, "test_busy_self_reclaim_identity");
 
       await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
-      internalRuntime.wakeSurfaceRetry(surface);
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
-      internalRuntime.wakeSurfaceRetry(surface);
-      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
 
       const reconnectAttempts = server.pairAttemptDetails.slice(1);
       assert.deepEqual(
-        reconnectAttempts.slice(0, 3).map((attempt) => attempt.providerId),
-        [initialProviderId, initialProviderId, initialProviderId],
+        reconnectAttempts.slice(0, 2).map((attempt) => attempt.providerId),
+        [initialProviderId, initialProviderId],
       );
-      assert.ok(reconnectAttempts.every((attempt) => attempt.takeover === false));
+      assert.deepEqual(
+        reconnectAttempts.slice(0, 2).map((attempt) => attempt.takeover),
+        [false, true],
+      );
       assert.ok(
-        warnings.some((warning) => warning.includes("preserving ownership identity")),
+        warnings.some((warning) => warning.includes("ownership_self_reclaim")),
       );
     });
   });
 
-  await t.test("repeated invalid_resume reconnect failures preserve provider identity", async () => {
+  await t.test("known self-owned invalid_resume reconnect self-reclaims with stable provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -3882,22 +3885,22 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       server.lockUntilNewProviderIdCode = "invalid_resume";
       server.lockUntilNewProviderIdProviderId = initialProviderId ?? null;
 
-      await surface.client.close(1000, "test_invalid_resume_provider_rotation");
+      await surface.client.close(1000, "test_invalid_resume_self_reclaim_identity");
 
       await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
-      internalRuntime.wakeSurfaceRetry(surface);
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
-      internalRuntime.wakeSurfaceRetry(surface);
-      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
 
       const reconnectAttempts = server.pairAttemptDetails.slice(1);
       assert.deepEqual(
-        reconnectAttempts.slice(0, 3).map((attempt) => attempt.providerId),
-        [initialProviderId, initialProviderId, initialProviderId],
+        reconnectAttempts.slice(0, 2).map((attempt) => attempt.providerId),
+        [initialProviderId, initialProviderId],
       );
-      assert.ok(reconnectAttempts.every((attempt) => attempt.takeover === false));
+      assert.deepEqual(
+        reconnectAttempts.slice(0, 2).map((attempt) => attempt.takeover),
+        [false, true],
+      );
       assert.ok(
-        warnings.some((warning) => warning.includes("preserving ownership identity")),
+        warnings.some((warning) => warning.includes("ownership_self_reclaim")),
       );
     });
   });
@@ -4546,8 +4549,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
       assert.equal(server.pairAttemptDetails[0]?.takeover, false);
       assert.equal(server.pairAttemptDetails[1]?.providerId, providerId);
-      assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, sessionId);
-      assert.equal(server.pairAttemptDetails[1]?.takeover, false);
+      assert.equal(server.pairAttemptDetails[1]?.resumeSessionId, null);
+      assert.equal(server.pairAttemptDetails[1]?.takeover, true);
     } finally {
       await runtime.stop();
       await server.close();
@@ -4576,7 +4579,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("busy after a cold-start reconnect backs off without takeover", async () => {
+  await t.test("busy on a known self-owned cold-start surface self-reclaims with stable provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -4585,48 +4588,85 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.hasPairedInGatewaySession = false;
       surface.sessionId = null;
 
-      // Return busy once, then allow the next non-takeover retry to succeed.
-      server.busyWithoutTakeoverResponsesRemaining = 1;
-      await surface.client.close(1000, "test_cold_start_busy_backoff");
+      const providerId = server.pairAttemptDetails[0]?.providerId;
 
-      // Wait for reconnect: first attempt gets busy, the next retry stays non-takeover and succeeds.
+      // Return busy once, then allow the stable-provider self-reclaim to succeed.
+      server.busyWithoutTakeoverResponsesRemaining = 1;
+      await surface.client.close(1000, "test_cold_start_busy_self_reclaim");
+
+      // Wait for reconnect: first attempt gets busy, the next attempt reclaims with the same provider id.
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
+      assert.equal(server.pairAttemptDetails[1]?.takeover, false);
+      assert.equal(server.pairAttemptDetails[2]?.takeover, true);
+      assert.equal(server.pairAttemptDetails[2]?.providerId, providerId);
       assert.ok(
-        server.pairAttemptDetails.slice(1, 3).every((attempt) => attempt.takeover === false),
-        "cold-start busy recovery must not escalate to takeover",
-      );
-      assert.ok(
-        warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
+        warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
       );
     });
   });
 
-  await t.test("busy after a live-session drop backs off without takeover", async () => {
+  await t.test("busy after a live-session drop self-reclaims with stable provider identity", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
       assert.ok(surface.client);
       assert.equal(surface.hasPairedInGatewaySession, true);
+      const providerId = server.pairAttemptDetails[0]?.providerId;
 
-      // Return busy once, then succeed — validates no takeover on retry
+      // Return busy once, then self-reclaim with the same provider identity.
       server.busyWithoutTakeoverResponsesRemaining = 1;
-      await surface.client.close(1000, "test_live_session_busy_backoff");
+      await surface.client.close(1000, "test_live_session_busy_self_reclaim");
 
-      // Wait for reconnect: first attempt gets busy, second succeeds
+      // Wait for reconnect: first attempt gets busy, second succeeds as self-reclaim.
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
+      assert.equal(server.pairAttemptDetails[1]?.takeover, false);
+      assert.equal(server.pairAttemptDetails[2]?.takeover, true);
+      assert.equal(server.pairAttemptDetails[2]?.providerId, providerId);
       assert.ok(
-        server.pairAttemptDetails.slice(1).every((attempt) => attempt.takeover === false),
-        "no reconnect attempt should use takeover",
+        warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
+      );
+    });
+  });
+
+  await t.test("busy on an unknown surface remains explicit operator reclaim", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_foreign_busy" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-foreign-busy-"));
+    const warnings: string[] = [];
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({
+      discovery,
+      logger: {
+        error: () => {},
+        info: () => {},
+        warn: (message: string) => warnings.push(message),
+      },
+      stateDir,
+    });
+    server.busyWithoutTakeoverResponsesRemaining = 1;
+
+    try {
+      await runtime.start();
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.takeover),
+        [false, false],
       );
       assert.ok(
         warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
       );
-    });
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
   });
 
   await t.test("invalid_resume after a cold-start reconnect retries fresh without takeover", async () => {
