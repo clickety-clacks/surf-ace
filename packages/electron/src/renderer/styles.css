@@ -176,7 +176,7 @@ body {
 
 .keyboard-focus-edge {
   position: absolute;
-  background: rgba(124, 173, 255, 0.34);
+  background: rgb(128, 128, 128);
 }
 
 .keyboard-focus-edge--top,

@@ -109,6 +109,30 @@ final class SurfAceHTTPServerTests: XCTestCase {
         XCTAssertEqual(sceneManifest["UIApplicationSupportsMultipleScenes"] as? Bool, true)
     }
 
+    func testInfoPlistDeclaresLaunchStoryboardForFullResolutionIPadSizing() throws {
+        let info = try loadAppInfoPlist()
+        XCTAssertEqual(info["UILaunchStoryboardName"] as? String, "LaunchScreen")
+    }
+
+    func testInfoPlistRequiresFullScreenForDeviceWidthIPadSizing() throws {
+        let info = try loadAppInfoPlist()
+        XCTAssertEqual(info["UIRequiresFullScreen"] as? Bool, true)
+    }
+
+    func testInfoPlistDeclaresAllIPadOrientationsForLandscapeAndPortraitScenes() throws {
+        let info = try loadAppInfoPlist()
+        let orientations = try XCTUnwrap(info["UISupportedInterfaceOrientations~ipad"] as? [String])
+        XCTAssertEqual(
+            Set(orientations),
+            [
+                "UIInterfaceOrientationPortrait",
+                "UIInterfaceOrientationPortraitUpsideDown",
+                "UIInterfaceOrientationLandscapeLeft",
+                "UIInterfaceOrientationLandscapeRight",
+            ]
+        )
+    }
+
     private func nextAvailablePort() throws -> UInt16 {
         for candidate in UInt16(29_001)...UInt16(29_100) {
             let descriptor = socket(AF_INET, SOCK_STREAM, 0)

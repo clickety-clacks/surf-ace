@@ -158,6 +158,7 @@ Window rules:
 3. Windows are enumerated in-band over WS (`surfaces.list`) and can appear/disappear at runtime (`event.surface_appeared`, `event.surface_removed`).
 4. Provider maintains one paired WS session per active window/surface, even when multiple windows share the same device endpoint.
 5. Creating/removing a window does not require mDNS rebroadcast; only app endpoint lifecycle affects mDNS advertisement/goodbye.
+6. On iPadOS, each Surf Ace scene MUST occupy the full device extent in landscape and portrait. The app MUST opt out of iPad multitasking/Stage Manager compatibility sizing when needed so the system does not hand Surf Ace a narrow letterboxed or resized scene. Reported viewport, visible content, pane geometry, and chrome must all derive from the same full-size scene.
 
 Pane rules (Phase 1 committed work, see §2.3):
 1. Each window may contain one or more panes, each with a stable internal numeric `paneId` and a stable visible numeric `paneLabel`.
@@ -2928,7 +2929,7 @@ When annotation mode is active, the pane MUST render a 2px accent border as the 
 
 #### Keyboard focus visual state (all platforms)
 
-When keyboard focus is assigned to a pane, that pane MUST render a visible focus outline or equivalent affordance. This affordance is separate from the pane label and from annotation mode; it MUST NOT change the pane's visible `paneLabel` or add a pane-number control to the toolbar.
+When keyboard focus is assigned to a pane, that pane MUST render a visible mid-gray focus outline or equivalent affordance. The outline MUST remain legible on both white and dark-ish content backgrounds; pale white, pale blue, or otherwise low-contrast outlines are not sufficient. This affordance is separate from the pane label and from annotation mode; it MUST NOT change the pane's visible `paneLabel` or add a pane-number control to the toolbar.
 
 #### Behavioral constraints while in annotation mode (all platforms)
 
@@ -3075,7 +3076,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Done Exit Control** — "While annotation mode is active, a Done button MUST be visible in the bottom-center floating control cluster." Source: §15.1 / §15.3
 - **Annotation Mode Visual State** — "When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator." Source: §15.1
 - **Control Cluster Rule** — "All pane controls (Back, Forward, 👆, Done, and degraded-state warning icons) live in a single floating control cluster at the bottom-center of the pane." Source: §15.3
-- **Keyboard Focus Affordance** — "Keyboard-focused panes MUST render a visible focus outline or equivalent affordance, separate from pane labels and toolbar controls." Source: §15.1
+- **Keyboard Focus Affordance** — "Keyboard-focused panes MUST render a visible mid-gray focus outline or equivalent affordance, legible on both white and dark-ish content backgrounds." Source: §15.1
 - **Explicit Pane Routing** — "Keyboard focus does not create a default target for CLU routing and does not replace explicit `paneId` targeting." Source: §15.3
 - **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
 - **Accessibility Contrast** — "All chrome labels and controls MUST meet WCAG AA contrast." Source: §15.2

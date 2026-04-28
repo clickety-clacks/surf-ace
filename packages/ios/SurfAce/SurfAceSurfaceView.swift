@@ -374,7 +374,7 @@ private struct SurfAceKeyboardActiveBorder: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 0, style: .continuous)
-            .strokeBorder(Color.white.opacity(active ? 0.20 : 0), lineWidth: 10)
+            .strokeBorder(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(active ? 1 : 0), lineWidth: 10)
             .allowsHitTesting(false)
             .animation(.easeOut(duration: 0.12), value: active)
     }

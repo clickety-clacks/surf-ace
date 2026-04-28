@@ -16,6 +16,7 @@
 		72B46388216FEB0A75BE1771 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B686887B1553129CAEF435A0 /* SurfAceSurfaceTopologyPersistenceTests.swift */; };
 		7440C200D139A9CDEB4071DA /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
 		78FE925CC623EE70BD36510C /* SurfAceSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */; };
+		8E6FB2414CFB46518AF12A34 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 8E6FB2404CFB46518AF12A34 /* LaunchScreen.storyboard */; };
 		AB13C11EA76DDA755EEEED0A /* SurfAceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */; };
 		B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */; };
 		D615F803FC49278657471A62 /* SurfAceIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */; };
@@ -39,6 +40,7 @@
 		314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
 		4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceSurfaceView.swift; sourceTree = "<group>"; };
 		856099927C9D1E8B57CB1A1D /* SurfAceBonjourPublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisherTests.swift; sourceTree = "<group>"; };
+		8E6FB2404CFB46518AF12A34 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceANSI.swift; sourceTree = "<group>"; };
 		7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisher.swift; sourceTree = "<group>"; };
 		AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServer.swift; sourceTree = "<group>"; };
@@ -64,6 +66,7 @@
 			isa = PBXGroup;
 			children = (
 				2A8249A9765412039C07EDD5 /* Assets.xcassets */,
+				8E6FB2404CFB46518AF12A34 /* LaunchScreen.storyboard */,
 				71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */,
 				F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */,
 				7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */,
@@ -179,6 +182,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				13EF6FFC169CB6EDFF47597E /* Assets.xcassets in Resources */,
+				8E6FB2414CFB46518AF12A34 /* LaunchScreen.storyboard in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
