@@ -188,7 +188,7 @@ body {
   border: max(1px, calc(var(--pane-number-size) * 0.008)) solid currentColor;
   border-radius: calc(var(--pane-number-size) * 0.04);
   color: rgba(128, 128, 128, 0.25);
-  font-size: calc(var(--pane-number-size) * 0.2);
+  font-size: calc(var(--pane-number-size) * 0.28);
   font-family: var(--ui-font-family);
   font-weight: 400;
   letter-spacing: -0.02em;
