@@ -328,8 +328,7 @@ private struct SurfAcePaneControls: View {
                             .padding(.trailing, 10)
                     }
                 }
-                .padding(6)
-                .background(.black.opacity(0.58), in: Capsule())
+                .surfAceControlPillChrome()
             }
 
             HStack(spacing: 6) {
@@ -357,8 +356,7 @@ private struct SurfAcePaneControls: View {
                     .buttonStyle(SurfAceGlassButtonStyle())
                 }
             }
-            .padding(6)
-            .background(.black.opacity(0.58), in: Capsule())
+            .surfAceControlPillChrome()
         }
     }
 
@@ -390,9 +388,31 @@ private struct SurfAceGlassButtonStyle: ButtonStyle {
             .foregroundStyle(.white)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
-            .background(.black.opacity(configuration.isPressed ? 0.78 : 0.58), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(.white.opacity(configuration.isPressed ? 0.32 : 0.18), lineWidth: 1)
+            }
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct SurfAceControlPillChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(6)
+            .glassEffect(.regular, in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+            }
+    }
+}
+
+private extension View {
+    func surfAceControlPillChrome() -> some View {
+        modifier(SurfAceControlPillChrome())
     }
 }
 

@@ -2974,6 +2974,7 @@ Required defaults:
 - Back/Forward controls appear only when history exists in that direction; hidden otherwise.
 - The right annotation pill contains annotation controls only: 👆 and, while annotation mode is active, Done. It MUST NOT contain the pane label or window label.
 - 👆 (drawing input) button is always present in the annotation pill.
+- On iOS and iPadOS, the navigation and annotation pills MUST use native Liquid Glass-style capsule material/chrome for their background and border. Electron keeps its platform-specific pill styling.
 - Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. Keyboard focus may add the visible focus affordance from §15.1, but it does not create a default target for CLU routing and does not replace explicit `paneId` targeting.
 
 #### Icon assets
