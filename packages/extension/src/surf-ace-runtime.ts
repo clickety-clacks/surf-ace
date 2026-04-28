@@ -4056,11 +4056,50 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
   }
 
-  private allocatePaneLabel(): number {
-    const paneLabel = this.persistentState.nextPaneLabel;
-    this.persistentState.nextPaneLabel += 1;
+  private allocatePaneLabel(surface: ManagedSurface): number {
+    const usedPaneLabels = new Set<number>();
+    for (const pane of surface.panes.values()) {
+      if (Number.isInteger(pane.paneLabel) && pane.paneLabel > 0) {
+        usedPaneLabels.add(pane.paneLabel);
+      }
+    }
+    const prefix = `${surface.surfaceId}::`;
+    for (const [key, paneLabel] of Object.entries(this.persistentState.paneLabelsByPaneId)) {
+      if (key.startsWith(prefix) && Number.isInteger(paneLabel) && paneLabel > 0) {
+        usedPaneLabels.add(paneLabel);
+      }
+    }
+    let paneLabel = 1;
+    while (usedPaneLabels.has(paneLabel)) {
+      paneLabel += 1;
+    }
+    if (paneLabel >= this.persistentState.nextPaneLabel) {
+      this.persistentState.nextPaneLabel = paneLabel + 1;
+    }
     this.persistPaneLabelState("next pane label");
     return paneLabel;
+  }
+
+  private maximumCompactPaneLabel(surface: ManagedSurface): number {
+    const prefix = `${surface.surfaceId}::`;
+    let persistedCount = 0;
+    for (const key of Object.keys(this.persistentState.paneLabelsByPaneId)) {
+      if (key.startsWith(prefix)) {
+        persistedCount += 1;
+      }
+    }
+    return Math.max(1, surface.panes.size + persistedCount + 1);
+  }
+
+  private isPersistedPaneLabelUsable(surface: ManagedSurface, remotePaneId: RemotePaneId, paneLabel: unknown): paneLabel is number {
+    if (typeof paneLabel !== "number" || !Number.isInteger(paneLabel) || paneLabel <= 0) {
+      return false;
+    }
+    const numericRemotePaneId = Number(remotePaneId);
+    if (paneLabel === numericRemotePaneId && numericRemotePaneId > this.maximumCompactPaneLabel(surface)) {
+      return false;
+    }
+    return true;
   }
 
   private persistPaneLabelState(reason: string): void {
@@ -4072,21 +4111,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
   }
 
-  private applyPairPaneLabel(surface: ManagedSurface, pane: ManagedPane, paneLabel: number): boolean {
-    if (!Number.isInteger(paneLabel) || paneLabel <= 0) {
-      return false;
-    }
-    const previousPaneLabel = pane.paneLabel;
-    pane.paneLabel = paneLabel;
-    if (paneLabel >= this.persistentState.nextPaneLabel) {
-      this.persistentState.nextPaneLabel = paneLabel + 1;
-    }
-    const key = paneLabelStorageKey(surface.surfaceId, pane.remotePaneId);
-    const previousPersistedLabel = this.persistentState.paneLabelsByPaneId[key];
-    this.persistentState.paneLabelsByPaneId[key] = paneLabel;
-    return previousPaneLabel !== paneLabel || previousPersistedLabel !== paneLabel;
-  }
-
   private ensurePaneLabel(
     surface: ManagedSurface,
     pane: ManagedPane | null,
@@ -4095,17 +4119,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (remotePaneId && remotePaneId > asRemotePaneId(0)) {
       const key = paneLabelStorageKey(surface.surfaceId, remotePaneId);
       const existing = this.persistentState.paneLabelsByPaneId[key];
-      if (typeof existing === "number" && existing > 0) {
+      if (this.isPersistedPaneLabelUsable(surface, remotePaneId, existing)) {
         return existing;
       }
+      delete this.persistentState.paneLabelsByPaneId[key];
 
       const paneLabel =
         pane?.paneLabel && pane.paneLabel > 0
           ? pane.paneLabel
-          : Number(remotePaneId);
-      if (paneLabel >= this.persistentState.nextPaneLabel) {
-        this.persistentState.nextPaneLabel = paneLabel + 1;
-      }
+          : this.allocatePaneLabel(surface);
       this.persistentState.paneLabelsByPaneId[key] = paneLabel;
       this.runBackgroundTask(
         `persist pane label for ${surface.surfaceId}/${remotePaneId}`,
@@ -4120,7 +4142,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return pane.paneLabel;
     }
 
-    return this.allocatePaneLabel();
+    return this.allocatePaneLabel(surface);
   }
 
   private reconcilePaneLabelsBySurfaceId(previousSurfaceId: string, nextSurfaceId: string): void {
@@ -5953,24 +5975,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.sessionId !== null &&
       surface.topologyRevision > 0 &&
       paneStates.length < surface.panes.size;
-    let paneLabelsChanged = false;
-    const shouldAdoptPairPaneLabels = paneStates.length > 1;
     if (preserveExtensionTopology) {
       for (const paneState of paneStates) {
         const pane = this.findPaneByRemoteId(surface, paneState.paneId);
         if (!pane) {
           continue;
         }
-        if (shouldAdoptPairPaneLabels) {
-          paneLabelsChanged = this.applyPairPaneLabel(surface, pane, paneState.paneLabel) || paneLabelsChanged;
-        }
         if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
           pane.paneLineageId = paneState.paneLineageId;
         }
         pane.viewport = cloneViewport(surface.viewport);
-      }
-      if (paneLabelsChanged) {
-        this.persistPaneLabelState("apply preserved pair pane labels");
       }
       return;
     }
@@ -5981,9 +5995,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.consumeBootstrapPaneForPairState(surface, paneState.paneId) ??
         this.recoverSolePaneForTopologySync(surface, paneState.paneId, paneStates.length) ??
         this.ensurePane(surface, paneState.paneId);
-      if (shouldAdoptPairPaneLabels) {
-        paneLabelsChanged = this.applyPairPaneLabel(surface, pane, paneState.paneLabel) || paneLabelsChanged;
-      }
       if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
         pane.paneLineageId = paneState.paneLineageId;
       }
@@ -5992,9 +6003,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     if (!(options.pruneStalePanes ?? true)) {
-      if (paneLabelsChanged) {
-        this.persistPaneLabelState("apply pair pane labels");
-      }
       this.queuePersistScreenSnapshot("apply pair state");
       return;
     }
@@ -6013,9 +6021,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         direction: "horizontal",
         type: "split",
       };
-    }
-    if (paneLabelsChanged) {
-      this.persistPaneLabelState("apply pair pane labels");
     }
     this.queuePersistScreenSnapshot("apply pair state");
   }

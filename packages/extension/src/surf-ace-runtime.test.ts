@@ -1687,7 +1687,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("previously unseen remote panes seed paneLabel from remotePaneId once during migration", async () => {
+  await t.test("previously unseen remote panes allocate local pane labels instead of using remotePaneId", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -1710,23 +1710,23 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       await internalRuntime.syncSurfaceSnapshots(surface, true);
       const screens = await runtime.listScreens();
-      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 77]);
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 2]);
     });
   });
 
-  await t.test("migration-seeded pane labels advance the allocator before later splits", async () => {
+  await t.test("remote pane ids do not advance visible pane label allocation before later splits", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
 
-      server.panes.set(2, {
+      server.panes.set(77, {
         contentId: null,
         contentType: null,
         drawings: [],
         frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
-        paneLabel: 2,
+        paneLabel: 77,
         revision: 0,
         viewport: {
           height: 768,
@@ -1753,15 +1753,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           .sort((left, right) => left.paneLabel - right.paneLabel),
         [
           { paneId: server.initialRemotePaneId, paneLabel: 1 },
-          { paneId: 2, paneLabel: 2 },
-          { paneId: 42, paneLabel: 3 },
+          { paneId: 77, paneLabel: 2 },
+          { paneId: 78, paneLabel: 3 },
         ],
       );
       assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
     });
   });
 
-  await t.test("multiple surfaces get unique window labels and globally unique first pane ids", async () => {
+  await t.test("multiple surfaces get unique window labels and local first pane labels", async () => {
     const portA = nextPort++;
     const portB = nextPort++;
     const serverA = new FakeSurfAceWsServer(portA, { surfaceId: "sf_surface-a" });
@@ -1790,7 +1790,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         })),
         [
           { panes: [1], windowLabel: "a" },
-          { panes: [2], windowLabel: "b" },
+          { panes: [1], windowLabel: "b" },
         ],
       );
       assert.equal(new Set(firstPaneIds).size, firstPaneIds.length);
@@ -1802,7 +1802,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [1, 2],
+        [1, 1],
       );
     } finally {
       await runtime.stop();
@@ -1843,8 +1843,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         })),
         [
           { fingerprint: "sf_surface-a", panes: [1], windowLabel: "a" },
-          { fingerprint: "sf_surface-b", panes: [2], windowLabel: "b" },
-          { fingerprint: "sf_surface-c", panes: [3], windowLabel: "c" },
+          { fingerprint: "sf_surface-b", panes: [1], windowLabel: "b" },
+          { fingerprint: "sf_surface-c", panes: [1], windowLabel: "c" },
         ],
       );
 
@@ -1862,6 +1862,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(
         [...requestsBySurface.values()].map((request) => request?.initialPaneId).sort(),
         [1, 42, 43],
+      );
+      assert.deepEqual(
+        [...requestsBySurface.values()].map((request) => request?.initialPaneLabel).sort(),
+        [1, 1, 1],
       );
     } finally {
       await runtime.stop();
@@ -4386,6 +4390,61 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     } finally {
       await runtimeB.stop();
       await runtimeA.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("polluted persisted remote pane labels are compacted instead of displayed", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, {
+      initialRemotePaneId: 6243,
+      surfaceId: "sf_surface-a",
+    });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-pane-label-polluted-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 6244,
+            nextRemotePaneId: 6244,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {
+              [`${server.surfaceId}::6243`]: 6243,
+            },
+            providerId: "pv_test_provider",
+            version: 1,
+            windowLabels: {
+              [server.surfaceId]: "a",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      await runtime.start();
+      await waitFor(() => server.pairedSocket !== null);
+
+      const screen = (await runtime.listScreens())[0];
+      assert.ok(screen);
+      assertPaneLabelsWithOpaqueIds(screen.panes, [1]);
+      assert.equal(server.pairRequests[0]?.initialPaneLabel, 1);
+
+      const split = await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: screen.panes[0]!.paneId,
+      });
+      assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+      assert.deepEqual(server.topologyApplyRequests.at(-1)?.paneLabels, [1, 2]);
+    } finally {
+      await runtime.stop();
       await server.close();
       await fs.rm(stateDir, { force: true, recursive: true });
     }
