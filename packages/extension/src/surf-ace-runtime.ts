@@ -2439,7 +2439,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const targetPaneIds = new Set(
       targetPaneId
         ? flattenManagedLayout(currentLayout).filter((paneId) => paneId === targetPaneId)
-        : flattenManagedLayout(currentLayout),
+        : [...surface.panes.keys()],
     );
     if (targetPaneId && targetPaneIds.size === 0) {
       throw new SurfAceToolError("invalid_operation", `Pane ${targetPaneId} is not present in the current topology.`);
