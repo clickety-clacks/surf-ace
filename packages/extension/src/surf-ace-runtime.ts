@@ -108,6 +108,17 @@ export type SurfAcePaneSummary = {
   viewport: SurfaceViewport;
 };
 
+export type SurfAceTopologySummaryNode =
+  | {
+      paneId: PaneId;
+      type: "pane";
+    }
+  | {
+      children: SurfAceTopologySummaryNode[];
+      direction: "horizontal" | "vertical";
+      type: "split";
+    };
+
 export type SurfAceScreenSummary = {
   connectionState: SurfAceConnectionState;
   fingerprint: string;
@@ -115,6 +126,8 @@ export type SurfAceScreenSummary = {
   name: string;
   panes: SurfAcePaneSummary[];
   pendingEvents: number;
+  topology: SurfAceTopologySummaryNode | null;
+  topologyRevision: number;
   viewport: SurfaceViewport;
   windowLabel: string;
   _debug?: {
@@ -382,6 +395,45 @@ export type SurfAceSplitResult = Array<{
   paneLabel: number;
 }>;
 
+export type SurfAceRealizeTopologyNode =
+  | {
+      children: SurfAceRealizeTopologyNode[];
+      direction: "horizontal" | "vertical";
+      type?: "split";
+    }
+  | {
+      name?: string | null;
+      paneId?: PaneId;
+      type?: "pane";
+    };
+
+export type SurfAceRealizeTopologyInput = {
+  allowDestroyPaneIds: PaneId[];
+  desired: SurfAceRealizeTopologyNode;
+  expectedTopologyRevision: number;
+  fingerprint: string;
+  target:
+    | { root: true; paneId?: never }
+    | { paneId: PaneId; root?: never };
+};
+
+export type SurfAceRealizeTopologyResult = {
+  createdPaneIds: PaneId[];
+  destroyedPaneIds: PaneId[];
+  ok: true;
+  panes: Array<{
+    activeContentId: string | null;
+    contentType: ContentType | null;
+    name: string | null;
+    paneId: PaneId;
+    paneLabel: number;
+  }>;
+  preservedPaneIds: PaneId[];
+  target: SurfAceRealizeTopologyInput["target"];
+  topology: SurfAceTopologySummaryNode;
+  topologyRevision: number;
+};
+
 export type SurfAceClosePaneResult = {
   ok: true;
   paneId: PaneId;
@@ -436,6 +488,7 @@ export interface SurfAceRuntime {
   listScreens(): Promise<SurfAceScreenSummary[]>;
   push(input: SurfAcePushInput, context?: { sessionKey?: string }): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
+  realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult>;
   registerTarget(input: SurfAceTargetRegisterInput): Promise<SurfAceTargetRegisterResult>;
   relinquish(input: { fingerprint: string }): Promise<SurfAceRelinquishResult>;
   restoreTarget(input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string }): Promise<SurfAceTargetRestoreResult>;
@@ -682,6 +735,10 @@ type OwnerControlCommand =
   | {
       input: SurfAceSplitInput;
       op: "split";
+    }
+  | {
+      input: SurfAceRealizeTopologyInput;
+      op: "realizeTopology";
     }
   | {
       input: { fingerprint: string };
@@ -1094,6 +1151,49 @@ function remoteLayoutToTopologyLayout(
     children: node.children.map((child) => remoteLayoutToTopologyLayout(surface, child)),
     direction: node.direction,
     type: "split",
+  };
+}
+
+function managedLayoutToSummary(node: ManagedLayoutNode | null): SurfAceTopologySummaryNode | null {
+  if (!node) {
+    return null;
+  }
+  if (node.type === "pane") {
+    return {
+      paneId: node.paneId,
+      type: "pane",
+    };
+  }
+  return {
+    children: node.children.map((child) => managedLayoutToSummary(child)!),
+    direction: node.direction,
+    type: "split",
+  };
+}
+
+function replacePaneInManagedLayout(
+  node: ManagedLayoutNode,
+  paneId: PaneId,
+  replacement: ManagedLayoutNode,
+): { found: boolean; layout: ManagedLayoutNode } {
+  if (node.type === "pane") {
+    if (node.paneId !== paneId) {
+      return { found: false, layout: node };
+    }
+    return { found: true, layout: replacement };
+  }
+  let found = false;
+  const children = node.children.map((child) => {
+    const result = replacePaneInManagedLayout(child, paneId, replacement);
+    found ||= result.found;
+    return result.layout;
+  });
+  return {
+    found,
+    layout: {
+      ...node,
+      children,
+    },
   };
 }
 
@@ -1848,6 +1948,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return await this.paneSplit(surface, input);
   }
 
+  async realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult> {
+    await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceRealizeTopologyResult>({
+        input,
+        op: "realizeTopology",
+      });
+    }
+    const surface = this.requireConnectedSurface(input.fingerprint);
+    return await this.realizeSurfaceTopology(surface, input);
+  }
+
   async closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult> {
     await this.start();
     if (!this.ownsRuntimeLease) {
@@ -2227,6 +2339,175 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       width: pane.viewport.width || surface.viewport.width,
     };
     return viewport.width >= viewport.height ? "vertical" : "horizontal";
+  }
+
+  private realizeDesiredTopologyNode(
+    surface: ManagedSurface,
+    panes: Map<PaneId, ManagedPane>,
+    node: SurfAceRealizeTopologyNode,
+    options: {
+      createdPaneIds: PaneId[];
+      desiredRoot: boolean;
+      preservePaneIds: Set<PaneId>;
+      targetPaneId: PaneId | null;
+      targetPaneIds: Set<PaneId>;
+    },
+  ): ManagedLayoutNode {
+    if (!node || typeof node !== "object") {
+      throw new SurfAceToolError("invalid_operation", "Topology realization nodes must be objects.");
+    }
+    const maybeSplit = node as Extract<SurfAceRealizeTopologyNode, { children: SurfAceRealizeTopologyNode[] }>;
+    if (Array.isArray(maybeSplit.children)) {
+      if (maybeSplit.direction !== "horizontal" && maybeSplit.direction !== "vertical") {
+        throw new SurfAceToolError("invalid_operation", "Split topology nodes require horizontal or vertical direction.");
+      }
+      if (maybeSplit.children.length < 2) {
+        throw new SurfAceToolError("invalid_operation", "Split topology nodes require at least two children.");
+      }
+      return {
+        children: maybeSplit.children.map((child) =>
+          this.realizeDesiredTopologyNode(surface, panes, child, {
+            ...options,
+            desiredRoot: false,
+          })
+        ),
+        direction: maybeSplit.direction,
+        type: "split",
+      };
+    }
+
+    const leaf = node as Extract<SurfAceRealizeTopologyNode, { paneId?: PaneId }>;
+    const requestedPaneId = leaf.paneId ?? (
+      options.desiredRoot && options.targetPaneId ? options.targetPaneId : undefined
+    );
+    if (requestedPaneId) {
+      const pane = panes.get(requestedPaneId);
+      if (!pane) {
+        throw new SurfAceToolError("invalid_operation", `Unknown Surf Ace pane ${requestedPaneId} on ${surface.surfaceId}`);
+      }
+      if (!options.targetPaneIds.has(requestedPaneId)) {
+        throw new SurfAceToolError(
+          "invalid_operation",
+          `Topology realization cannot preserve pane ${requestedPaneId} outside the targeted subtree.`,
+        );
+      }
+      if (options.preservePaneIds.has(requestedPaneId)) {
+        throw new SurfAceToolError("invalid_operation", `Topology realization repeats pane ${requestedPaneId}.`);
+      }
+      if ("name" in leaf) {
+        pane.name = leaf.name ?? null;
+      }
+      options.preservePaneIds.add(requestedPaneId);
+      return {
+        paneId: requestedPaneId,
+        type: "pane",
+      };
+    }
+
+    const paneId = this.allocatePaneId();
+    const remotePaneId = this.allocateRemotePaneId();
+    const paneLabel = this.ensurePaneLabel(surface, null, remotePaneId);
+    const created = createPane(paneId, paneLabel, remotePaneId, surface.viewport);
+    if ("name" in leaf) {
+      created.name = leaf.name ?? null;
+    }
+    panes.set(created.paneId, created);
+    options.createdPaneIds.push(created.paneId);
+    return {
+      paneId: created.paneId,
+      type: "pane",
+    };
+  }
+
+  private async realizeSurfaceTopology(
+    surface: ManagedSurface,
+    input: SurfAceRealizeTopologyInput,
+  ): Promise<SurfAceRealizeTopologyResult> {
+    if (!Number.isInteger(input.expectedTopologyRevision) || input.expectedTopologyRevision !== surface.topologyRevision) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Topology realization expected revision ${input.expectedTopologyRevision}, current revision is ${surface.topologyRevision}.`,
+      );
+    }
+
+    const currentLayout = collapseManagedLayout(surface.layout);
+    const targetPaneId = "paneId" in input.target ? input.target.paneId ?? null : null;
+    if (targetPaneId && !surface.panes.has(targetPaneId)) {
+      throw new SurfAceToolError("invalid_operation", `Unknown Surf Ace pane ${targetPaneId} on ${surface.surfaceId}`);
+    }
+
+    const targetPaneIds = new Set(
+      targetPaneId
+        ? flattenManagedLayout(currentLayout).filter((paneId) => paneId === targetPaneId)
+        : flattenManagedLayout(currentLayout),
+    );
+    if (targetPaneId && targetPaneIds.size === 0) {
+      throw new SurfAceToolError("invalid_operation", `Pane ${targetPaneId} is not present in the current topology.`);
+    }
+
+    const nextPanes = new Map<PaneId, ManagedPane>(
+      [...surface.panes.entries()].map(([paneId, pane]) => [paneId, structuredClone(pane)]),
+    );
+    const createdPaneIds: PaneId[] = [];
+    const preservedPaneIds = new Set<PaneId>();
+    const replacement = this.realizeDesiredTopologyNode(surface, nextPanes, input.desired, {
+      createdPaneIds,
+      desiredRoot: true,
+      preservePaneIds: preservedPaneIds,
+      targetPaneId,
+      targetPaneIds,
+    });
+    const nextLayout = targetPaneId
+      ? replacePaneInManagedLayout(currentLayout, targetPaneId, replacement)
+      : { found: true, layout: replacement };
+    if (!nextLayout.found) {
+      throw new SurfAceToolError("invalid_operation", `Pane ${targetPaneId} is not present in the current topology.`);
+    }
+
+    const destroyedPaneIds = [...targetPaneIds].filter((paneId) => !preservedPaneIds.has(paneId));
+    const allowedDestroyPaneIds = new Set(input.allowDestroyPaneIds ?? []);
+    const undeclaredDestroyedPaneIds = destroyedPaneIds.filter((paneId) => !allowedDestroyPaneIds.has(paneId));
+    if (undeclaredDestroyedPaneIds.length > 0) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Topology realization would destroy pane(s) ${undeclaredDestroyedPaneIds.join(", ")} without allowDestroyPaneIds.`,
+      );
+    }
+
+    for (const paneId of destroyedPaneIds) {
+      nextPanes.delete(paneId);
+    }
+
+    const previousLayout = surface.layout;
+    const previousPanes = surface.panes;
+    surface.layout = collapseManagedLayout(nextLayout.layout);
+    surface.panes = nextPanes;
+    try {
+      await this.pushTopology(surface, { increment: true });
+    } catch (error) {
+      surface.layout = previousLayout;
+      surface.panes = previousPanes;
+      throw error;
+    }
+
+    this.queuePersistScreenSnapshot("topology realization");
+    const topology = managedLayoutToSummary(collapseManagedLayout(surface.layout))!;
+    return {
+      createdPaneIds,
+      destroyedPaneIds,
+      ok: true,
+      panes: this.orderedPanes(surface).map((pane) => ({
+        activeContentId: pane.activeContentId,
+        contentType: pane.contentType,
+        name: pane.name,
+        paneId: pane.paneId,
+        paneLabel: pane.paneLabel,
+      })),
+      preservedPaneIds: [...preservedPaneIds],
+      target: input.target,
+      topology,
+      topologyRevision: surface.topologyRevision,
+    };
   }
 
   private async paneClose(
@@ -4359,6 +4640,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           };
         }),
       pendingEvents: this.pendingEventCount(surface),
+      topology: managedLayoutToSummary(surface.layout),
+      topologyRevision: surface.topologyRevision,
       viewport: cloneViewport(surface.viewport),
       windowLabel: surface.windowLabel,
       _debug: {
@@ -4802,6 +5085,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.push(command.input, command.context);
       case "read":
         return await this.read(command.input);
+      case "realizeTopology":
+        return await this.realizeTopology(command.input);
       case "relinquish":
         return await this.relinquish(command.input);
       case "snapshot":

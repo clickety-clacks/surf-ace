@@ -393,6 +393,8 @@ Returns current pane layout for the paired surface.
 
 **Response fields per pane:** `paneId`, `paneLabel`, `name` (extension-assigned or null), `activeContentId` (or null), `contentType` (or null), `viewport`.
 
+The CLU-facing `surf_ace_list` response also exposes the provider-owned `topologyRevision` and recursive `topology` tree. Agents must plan one-call topology mutations against those fields rather than inferring structure from the flat pane list.
+
 #### `pane.split`
 Splits an existing pane into N panes.
 
@@ -2681,7 +2683,7 @@ revision       int      Revision after clear
 
 #### `surf_ace_split`
 
-Split an existing pane into `count` total panes. Write.
+Compatibility helper for splitting one pane. For larger topology changes, use `surf_ace_realize_topology` so the provider can apply the desired layout in one topology mutation. Write.
 
 **Params:**
 ```
@@ -2698,6 +2700,33 @@ direction      enum     "horizontal" | "vertical"
 paneId         integer  Effective pane id after the split. Includes the source pane and each newly created pane.
 paneLabel      integer  Visible pane label for that pane.
 ```
+
+**Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
+
+---
+
+#### `surf_ace_realize_topology`
+
+Realize a desired root layout or pane subtree in one provider-side topology operation. Write.
+
+**Params:**
+```
+fingerprint               string   Target screen
+target                    object   `{ root: true }` for the whole layout, or `{ paneId }` to replace one pane slot
+expectedTopologyRevision  integer  Revision token from the latest `surf_ace_list`
+allowDestroyPaneIds       array    Existing internal pane ids this call may destroy; use [] for non-destructive changes
+desired                   object   Recursive desired subtree
+```
+
+**Desired subtree shape:**
+```
+split node: { "type": "split", "direction": "horizontal" | "vertical", "children": [...] }
+pane node:  { "type": "pane", "paneId"?: paneId, "name"?: string | null }
+```
+
+**Behavior:** The provider verifies `expectedTopologyRevision`, allocates any new internal pane ids and visible `paneLabel` values, verifies that omitted existing panes are explicitly listed in `allowDestroyPaneIds`, then sends one `topology.apply` to the surface. Existing pane identity is preserved only for desired leaves that keep an existing `paneId`, plus the non-root shorthand where `{ target: { paneId }, desired: { type: "pane" } }` preserves that target pane.
+
+**Returns:** `ok`, `target`, `topologyRevision`, current `topology`, current `panes`, `preservedPaneIds`, `createdPaneIds`, and `destroyedPaneIds`.
 
 **Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
 

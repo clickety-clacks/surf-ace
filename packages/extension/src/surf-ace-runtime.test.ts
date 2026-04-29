@@ -1632,12 +1632,16 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           "name",
           "panes",
           "pendingEvents",
+          "topology",
+          "topologyRevision",
           "viewport",
           "windowLabel",
         ].sort(),
       );
       assert.equal(screen.fingerprint, server.surfaceId);
       assert.equal(screen.windowLabel, "a");
+      assert.deepEqual(screen.topology, { paneId: screen.panes[0]?.paneId, type: "pane" });
+      assert.equal(screen.topologyRevision, 0);
       assertPaneLabelsWithOpaqueIds(screen.panes, [1]);
       assert.equal(server.initialRemotePaneId, 41);
       assert.deepEqual(
@@ -3116,6 +3120,95 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const afterCloseScreens = await runtime.listScreens();
       assertPaneLabelsWithOpaqueIds(afterCloseScreens[0]?.panes ?? [], [1, 3]);
+    });
+  });
+
+  await t.test("provider realizes a desired root topology in one topology.apply", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const before = (await runtime.listScreens())[0]!;
+      const firstPaneId = paneByLabel(before, 1).paneId;
+      assert.deepEqual(before.topology, { paneId: firstPaneId, type: "pane" });
+      assert.equal(before.topologyRevision, 0);
+
+      const realized = await runtime.realizeTopology({
+        allowDestroyPaneIds: [],
+        desired: {
+          children: [
+            { paneId: firstPaneId, type: "pane" },
+            { type: "pane" },
+            { name: "scratch", type: "pane" },
+          ],
+          direction: "vertical",
+          type: "split",
+        },
+        expectedTopologyRevision: before.topologyRevision,
+        fingerprint: server.surfaceId,
+        target: { root: true },
+      });
+
+      assert.deepEqual(server.splitRequests, []);
+      assert.equal(server.topologyApplyRequests.length, 1);
+      assert.deepEqual(server.topologyApplyRequests[0], {
+        layout: {
+          children: [
+            { paneId: server.initialRemotePaneId, type: "pane" },
+            { paneId: 42, type: "pane" },
+            { paneId: 43, type: "pane" },
+          ],
+          direction: "vertical",
+          type: "split",
+        },
+        paneIds: [server.initialRemotePaneId, 42, 43],
+        paneLabels: [1, 2, 3],
+        topologyRevision: 1,
+        windowLabel: "a",
+      });
+      assert.deepEqual(realized.createdPaneIds.length, 2);
+      assert.deepEqual(realized.destroyedPaneIds, []);
+      assert.deepEqual(realized.preservedPaneIds, [firstPaneId]);
+      assert.deepEqual(realized.panes.map((pane) => pane.paneLabel), [1, 2, 3]);
+      assert.deepEqual(realized.topology, {
+        children: [
+          { paneId: firstPaneId, type: "pane" },
+          { paneId: realized.createdPaneIds[0], type: "pane" },
+          { paneId: realized.createdPaneIds[1], type: "pane" },
+        ],
+        direction: "vertical",
+        type: "split",
+      });
+
+      const after = (await runtime.listScreens())[0]!;
+      assert.deepEqual(after.topology, realized.topology);
+      assert.equal(after.topologyRevision, 1);
+      assertPaneLabelsWithOpaqueIds(after.panes, [1, 2, 3]);
+    });
+  });
+
+  await t.test("provider rejects stale or undeclared destructive topology realization before publish", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await assert.rejects(
+        runtime.realizeTopology({
+          allowDestroyPaneIds: [],
+          desired: { paneId: firstPaneId, type: "pane" },
+          expectedTopologyRevision: 99,
+          fingerprint: server.surfaceId,
+          target: { root: true },
+        }),
+        /expected revision 99, current revision is 0/,
+      );
+
+      await assert.rejects(
+        runtime.realizeTopology({
+          allowDestroyPaneIds: [],
+          desired: { type: "pane" },
+          expectedTopologyRevision: 0,
+          fingerprint: server.surfaceId,
+          target: { root: true },
+        }),
+        /would destroy pane/,
+      );
+      assert.equal(server.topologyApplyRequests.length, 0);
     });
   });
 

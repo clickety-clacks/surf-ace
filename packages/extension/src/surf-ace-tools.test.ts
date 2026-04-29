@@ -48,6 +48,16 @@ function createStubRuntime(): SurfAceRuntime {
     relinquish: async () => ({
       relinquished: true,
     }),
+    realizeTopology: async () => ({
+      createdPaneIds: [],
+      destroyedPaneIds: [],
+      ok: true,
+      panes: [],
+      preservedPaneIds: [],
+      target: { root: true },
+      topology: { paneId: "pn_1" as never, type: "pane" },
+      topologyRevision: 1,
+    }),
     split: async () => [{ paneId: 1 }, { paneId: 2 }],
     snapshot: async () => ({
       fingerprint: "sf_1",
@@ -69,6 +79,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_clear",
     "surf_ace_relinquish",
     "surf_ace_split",
+    "surf_ace_realize_topology",
     "surf_ace_close_pane",
     "surf_ace_read",
     "surf_ace_annotations_remove",
@@ -99,6 +110,21 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(splitTool.inputSchema.required, ["fingerprint", "paneId", "count"]);
   assert.equal(splitTool.inputSchema.additionalProperties, false);
+
+  const realizeTool = tools.find((tool) => tool.name === "surf_ace_realize_topology");
+  assert.ok(realizeTool);
+  assert.deepEqual(
+    Object.keys(realizeTool.inputSchema.properties as Record<string, unknown>).sort(),
+    ["allowDestroyPaneIds", "desired", "expectedTopologyRevision", "fingerprint", "target"].sort(),
+  );
+  assert.deepEqual(realizeTool.inputSchema.required, [
+    "fingerprint",
+    "target",
+    "expectedTopologyRevision",
+    "allowDestroyPaneIds",
+    "desired",
+  ]);
+  assert.equal(realizeTool.inputSchema.additionalProperties, false);
 
   const closePaneTool = tools.find((tool) => tool.name === "surf_ace_close_pane");
   assert.ok(closePaneTool);
