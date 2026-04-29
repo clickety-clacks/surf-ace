@@ -120,6 +120,7 @@ class FakeSurfAceWsServer {
   }> = [];
   readonly pairRequests: Array<{ initialPaneId: number; initialPaneLabel: number; windowLabel: string }> = [];
   readonly pairRequestSurfaceIds: string[] = [];
+  panesListRequests = 0;
   readonly panes: Map<number, TestPane>;
   readonly splitRequests: Array<{
     count: number;
@@ -884,6 +885,7 @@ class FakeSurfAceWsServer {
         return;
       }
       case "panes.list": {
+        this.panesListRequests += 1;
         const targetSurface = this.requirePairedSurface(socket);
         socket.send(
           JSON.stringify(
@@ -2606,6 +2608,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
   await t.test("surf_ace_push browser_url blocks when the surface lacks live browser capability", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const panesListRequestsBeforePush = server.panesListRequests;
+      const topologyApplyRequestsBeforePush = server.topologyApplyRequests.length;
 
       await assert.rejects(
         async () => await runtime.push({
@@ -2618,6 +2622,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.equal(server.contentSetRequests.length, 0);
       assert.equal(server.targetApplyRequests.length, 0);
+      assert.equal(server.panesListRequests, panesListRequestsBeforePush);
+      assert.equal(server.topologyApplyRequests.length, topologyApplyRequestsBeforePush);
     });
   });
 

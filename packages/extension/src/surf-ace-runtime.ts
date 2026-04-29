@@ -2605,8 +2605,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     input: SurfAceBrowserUrlPushInput,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
-    await this.ensureCurrentPaneLineage(surface, pane);
-    this.finalizeLiveFrame(surface, pane);
     const requiredCapability = requiredCapabilityForTargetKind("browser_url");
     if (!surface.targetCapabilities.has(requiredCapability)) {
       throw new SurfAceToolError(
@@ -2614,6 +2612,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         `Surface ${surface.surfaceId} does not advertise ${requiredCapability}`,
       );
     }
+    await this.ensureCurrentPaneLineage(surface, pane);
+    this.finalizeLiveFrame(surface, pane);
 
     const targetHeader: TargetHeader = {
       payloadSchemaVersion: 1,
