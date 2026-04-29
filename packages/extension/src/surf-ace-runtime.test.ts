@@ -1393,6 +1393,7 @@ async function withRuntimeHarness(
           alertBodies: Array<Record<string, unknown>>;
           annotationTurns: import("./surf-ace-runtime.js").SurfAceAnnotationIntentTurn[];
           discovery: StaticDiscoveryService;
+          infos: string[];
           warnings: string[];
           runtime: ReturnType<typeof createSurfAceRuntime>;
           server: FakeSurfAceWsServer;
@@ -1406,6 +1407,7 @@ async function withRuntimeHarness(
           alertBodies: Array<Record<string, unknown>>;
           annotationTurns: import("./surf-ace-runtime.js").SurfAceAnnotationIntentTurn[];
           discovery: StaticDiscoveryService;
+          infos: string[];
           warnings: string[];
           runtime: ReturnType<typeof createSurfAceRuntime>;
           server: FakeSurfAceWsServer;
@@ -1421,6 +1423,7 @@ async function withRuntimeHarness(
   options.configureServer?.(server);
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-"));
   const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+  const infos: string[] = [];
   const warnings: string[] = [];
   const annotationTurns: import("./surf-ace-runtime.js").SurfAceAnnotationIntentTurn[] = [];
   const runtime = createSurfAceRuntime({
@@ -1429,6 +1432,9 @@ async function withRuntimeHarness(
     },
     discovery,
     logger: {
+      info: (message: string) => {
+        infos.push(message);
+      },
       warn: (message: string) => {
         warnings.push(message);
       },
@@ -1448,7 +1454,7 @@ async function withRuntimeHarness(
 
     await runtime.start();
     await waitFor(() => server.pairedSocket !== null);
-    await options.run({ alertBodies, annotationTurns, discovery, runtime, server, warnings });
+    await options.run({ alertBodies, annotationTurns, discovery, infos, runtime, server, warnings });
   } finally {
     globalThis.fetch = originalFetch;
     await runtime.stop();
@@ -5627,7 +5633,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("busy on a known self-owned cold-start surface self-reclaims with stable provider identity", async () => {
+  await t.test("busy on nil-session cold-start surface with persisted capability state does not self-reclaim", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -5638,19 +5644,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const providerId = server.pairAttemptDetails[0]?.providerId;
 
-      // Return busy once, then allow the stable-provider self-reclaim to succeed.
       server.busyWithoutTakeoverResponsesRemaining = 1;
-      await surface.client.close(1000, "test_cold_start_busy_self_reclaim");
+      await surface.client.close(1000, "test_cold_start_busy_no_self_reclaim");
 
-      // Wait for reconnect: first attempt gets busy, the next attempt reclaims with the same provider id.
       await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
       assert.equal(server.pairAttemptDetails[1]?.takeover, false);
-      assert.equal(server.pairAttemptDetails[2]?.takeover, true);
+      assert.equal(server.pairAttemptDetails[2]?.takeover, false);
       assert.equal(server.pairAttemptDetails[2]?.providerId, providerId);
       assert.ok(
-        warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
+        warnings.some((warning) => warning.includes("ownership_self_reclaim_blocked") && warning.includes(server.surfaceId)),
       );
     });
   });
@@ -5800,6 +5804,102 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           warning.includes("retrying fresh (no takeover)")),
       );
       assert.equal(surface.sessionId, "sa_test_session");
+    });
+  });
+
+  await t.test("busy with persisted target state but no resume session does not self-reclaim", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      surface.hasPairedInGatewaySession = false;
+      surface.sessionId = null;
+      internalRuntime.persistentState.targetStateBySurfaceId = {
+        [server.surfaceId]: {
+          paneTargets: {},
+          registeredTargetIdsByIdempotencyKey: {},
+          targetRecords: [],
+        },
+      };
+
+      server.busyWithoutTakeoverResponsesRemaining = 1;
+      await surface.client.close(1000, "test_persisted_target_state_no_takeover");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
+        [false, false],
+      );
+      assert.ok(
+        warnings.some((warning) =>
+          warning.includes("ownership_self_reclaim_blocked") &&
+          warning.includes("had_persisted_target_state=true")),
+      );
+    });
+  });
+
+  await t.test("stale content during resumed replay is skipped without provider shutdown loop", async () => {
+    await withRuntimeHarness(async ({ infos, runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push({
+        content: "<p>before reconnect</p>",
+        contentType: "html",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      surface.topologyRevision = 1;
+
+      server.nextContentApplyError = {
+        code: "stale_content",
+        message: "content.apply targeted stale content",
+      };
+      await surface.client.close(1000, "test_stale_replay_skip");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.ok(
+        infos.some((info) =>
+          info.includes("event=resume_replay_outcome") &&
+          info.includes("outcome=skipped_stale") &&
+          info.includes("error_code=stale_content")),
+      );
+    });
+  });
+
+  await t.test("topology apply diagnostics include payload and before/after pane sets", async () => {
+    await withRuntimeHarness(async ({ infos, runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+
+      assert.ok(
+        infos.some((info) =>
+          info.includes("event=topology_apply_begin") &&
+          info.includes("payload=") &&
+          info.includes("before_pane_ids=") &&
+          info.includes("expected_topology_revision=")),
+      );
+      assert.ok(
+        infos.some((info) =>
+          info.includes("event=topology_apply_ok") &&
+          info.includes("after_pane_ids=") &&
+          info.includes("created_pane_ids=") &&
+          info.includes("response_panes=")),
+      );
+      assert.equal(server.topologyApplyRequests.length, 1);
     });
   });
 
