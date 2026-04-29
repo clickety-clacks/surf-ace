@@ -1618,6 +1618,28 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
         url: browserUrl.url,
       });
     };
+    const verifyAndReportNavigation = (reason: BrowserUrlDiagnosticReason) => {
+      void resetBrowserUrlGuestScroll(browserView).finally(() => {
+        const eventReason = reason === "dom-ready:guest-viewport" ? "dom-ready" : "did-finish-load";
+        reportBrowserUrlDiagnostics(view, browserView, eventReason);
+        void verifyBrowserUrlGuestViewport(view, browserView, reason).then(({ mismatch }) => {
+          if (renderToken !== view.currentRenderToken) {
+            return;
+          }
+          if (mismatch) {
+            reportNavigation(
+              "failed",
+              `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
+            );
+            return;
+          }
+          reportNavigation("applied");
+          window.setTimeout(() => {
+            reportPaneSnapshot(view);
+          }, 0);
+        });
+      });
+    };
     browserView.addEventListener(
       "did-attach",
       () => {
@@ -1627,34 +1649,13 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     browserView.addEventListener(
       "dom-ready",
       () => {
-        void resetBrowserUrlGuestScroll(browserView).finally(() => {
-          reportBrowserUrlDiagnostics(view, browserView, "dom-ready");
-          void verifyBrowserUrlGuestViewport(view, browserView, "dom-ready:guest-viewport");
-        });
+        verifyAndReportNavigation("dom-ready:guest-viewport");
       },
     );
     browserView.addEventListener(
       "did-finish-load",
       () => {
-        void resetBrowserUrlGuestScroll(browserView).finally(() => {
-          reportBrowserUrlDiagnostics(view, browserView, "did-finish-load");
-          void verifyBrowserUrlGuestViewport(view, browserView, "did-finish-load:guest-viewport").then(({ mismatch }) => {
-            if (renderToken !== view.currentRenderToken) {
-              return;
-            }
-            if (mismatch) {
-              reportNavigation(
-                "failed",
-                `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
-              );
-              return;
-            }
-            reportNavigation("applied");
-            window.setTimeout(() => {
-              reportPaneSnapshot(view);
-            }, 0);
-          });
-        });
+        verifyAndReportNavigation("did-finish-load:guest-viewport");
       },
       { once: true },
     );

@@ -67,8 +67,8 @@ test("browser_url diagnostics report host and guest sizing through surface comma
   assert.match(source.slice(diagnosticsIndex, browserUrlIndex), /scroll: elementDiagnostics\(view\.scrollEl\)/);
   assert.match(source.slice(diagnosticsIndex, browserUrlIndex), /webview: elementDiagnostics\(webview\)/);
   assert.match(source.slice(diagnosticsIndex, browserUrlIndex), /browserUrlGuestDiagnostics\(webview\)/);
-  assert.match(source.slice(browserUrlIndex), /reportBrowserUrlDiagnostics\(view, browserView, "dom-ready"\)/);
-  assert.match(source.slice(browserUrlIndex), /reportBrowserUrlDiagnostics\(view, browserView, "did-finish-load"\)/);
+  assert.match(source.slice(browserUrlIndex), /reason === "dom-ready:guest-viewport" \? "dom-ready" : "did-finish-load"/);
+  assert.match(source.slice(browserUrlIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\)/);
 });
 
 test("browser_url render resets guest scroll before verification", async () => {
@@ -83,7 +83,7 @@ test("browser_url render resets guest scroll before verification", async () => {
   assert.match(source.slice(resetGuestIndex, browserUrlIndex), /window\.history\.scrollRestoration = "manual"/);
   assert.match(source.slice(resetGuestIndex, browserUrlIndex), /window\.scrollTo\(0, 0\)/);
   assert.match(source.slice(diagnosticsIndex, resetGuestIndex), /scrollY: Math\.round\(window\.scrollY\)/);
-  assert.match(source.slice(browserUrlIndex), /resetBrowserUrlGuestScroll\(browserView\)[\s\S]*verifyBrowserUrlGuestViewport\(view, browserView, "did-finish-load:guest-viewport"\)/);
+  assert.match(source.slice(browserUrlIndex), /resetBrowserUrlGuestScroll\(browserView\)[\s\S]*verifyBrowserUrlGuestViewport\(view, browserView, reason\)/);
 });
 
 test("browser_url navigation verifies the guest viewport before reporting success", async () => {
@@ -91,17 +91,22 @@ test("browser_url navigation verifies the guest viewport before reporting succes
   const mismatchIndex = source.indexOf("function browserUrlViewportMismatch");
   const verifierIndex = source.indexOf("function verifyBrowserUrlGuestViewport");
   const browserUrlIndex = source.indexOf("if (pane.content.contentType === \"browser_url\")");
+  const helperIndex = source.indexOf("const verifyAndReportNavigation", browserUrlIndex);
+  const domReadyIndex = source.indexOf("\"dom-ready\"", browserUrlIndex);
   const finishIndex = source.indexOf("\"did-finish-load\"", browserUrlIndex);
 
   assert.ok(mismatchIndex > -1);
   assert.ok(verifierIndex > -1);
+  assert.ok(helperIndex > -1);
   assert.match(source.slice(mismatchIndex, verifierIndex), /Math\.abs\(guest\.innerHeight - hostHeight\)/);
   assert.match(source.slice(mismatchIndex, verifierIndex), /Math\.abs\(guest\.innerWidth - hostWidth\)/);
   assert.match(source.slice(verifierIndex, browserUrlIndex), /browserUrlViewportMismatch\(webview, guest\)/);
   assert.match(source.slice(verifierIndex, browserUrlIndex), /nudgeBrowserUrlWebViewResize\(view, webview\)/);
-  assert.match(source.slice(finishIndex), /verifyBrowserUrlGuestViewport\(view, browserView, "did-finish-load:guest-viewport"\)/);
-  assert.match(source.slice(finishIndex), /webview guest viewport stuck at/);
-  assert.match(source.slice(finishIndex), /reportNavigation\("applied"\)/);
+  assert.match(source.slice(helperIndex), /verifyBrowserUrlGuestViewport\(view, browserView, reason\)/);
+  assert.match(source.slice(helperIndex), /webview guest viewport stuck at/);
+  assert.match(source.slice(helperIndex), /reportNavigation\("applied"\)/);
+  assert.match(source.slice(domReadyIndex), /verifyAndReportNavigation\("dom-ready:guest-viewport"\)/);
+  assert.match(source.slice(finishIndex), /verifyAndReportNavigation\("did-finish-load:guest-viewport"\)/);
 });
 
 test("browser_url diagnostics do not change the active keyboard pane", async () => {
