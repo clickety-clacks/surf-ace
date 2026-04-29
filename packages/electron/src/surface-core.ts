@@ -450,6 +450,7 @@ export class SurfaceCore {
         return {
           activeContentId: protocolContentId(current),
           contentType: protocolContentType(current),
+          externalNative: pane.externalNative,
           geometry,
           name: pane.name,
           paneId: pane.paneId as PaneId,

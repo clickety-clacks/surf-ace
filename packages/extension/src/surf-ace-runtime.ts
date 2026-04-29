@@ -547,6 +547,7 @@ type ManagedPane = {
   currentTargetId: string | null;
   currentRevision: Revision;
   diagnosticContent: DiagnosticPaneContent | null;
+  externalNative: boolean;
   historyEntries: ManagedHistoryEntry[];
   historySummary: SurfAceHistorySummary;
   historyOwnerToken: string | null;
@@ -898,6 +899,7 @@ function createPane(
     currentTargetId: null,
     currentRevision: asRevision(0),
     diagnosticContent: null,
+    externalNative: false,
     historyEntries: [],
     historySummary: {
       backCount: 0,
@@ -6197,9 +6199,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const pane = this.ensurePane(surface, paneState.paneId);
       pane.name = paneState.name;
       pane.paneLabel = this.ensurePaneLabel(surface, pane, paneState.paneId);
+      pane.externalNative = paneState.externalNative === true;
       pane.viewport = cloneViewport(paneState.viewport);
       pane.geometry = structuredClone(paneState.geometry);
+      if (pane.externalNative) {
+        await this.clearBrowserUrlTargetForNativePane(surface, pane);
+      }
     }
+  }
+
+  private async clearBrowserUrlTargetForNativePane(surface: ManagedSurface, pane: ManagedPane): Promise<void> {
+    const target = this.currentTargetRecord(surface, pane);
+    if (!target || target.targetKind !== "browser_url") {
+      return;
+    }
+    this.clearVisiblePaneContent(pane, pane.currentRevision);
+    target.currentState = "tombstoned";
+    pane.currentTargetId = null;
+    pane.staleTargetId = null;
+    pane.lastRestoreBlockedReason = null;
+    pane.nonDurableTargetDiagnostic = null;
+    await this.persistSurfaceTargetState(surface, "native pane superseded browser_url target");
   }
 
   private canSendRequests(surface: ManagedSurface): boolean {

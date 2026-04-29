@@ -179,6 +179,7 @@ try {
     panes: panes.payload.panes.map((pane) => ({
       activeContentId: pane.activeContentId,
       contentType: pane.contentType,
+      externalNative: pane.externalNative,
       paneId: pane.paneId,
       viewport: pane.viewport,
     })),

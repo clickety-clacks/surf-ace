@@ -14,6 +14,7 @@ type TestPane = {
   contentId: string | null;
   contentType: string | null;
   drawings: string[];
+  externalNative?: boolean;
   frame: {
     height: number;
     width: number;
@@ -795,6 +796,7 @@ class FakeSurfAceWsServer {
           pane.contentId = null;
           pane.contentType = null;
           pane.drawings = [];
+          pane.externalNative = false;
           pane.revision = Number(message.payload.revision ?? pane.revision);
           this.clearRequests.push({
             paneId,
@@ -863,6 +865,17 @@ class FakeSurfAceWsServer {
           );
           return;
         }
+        if (message.payload?.materialization?.op === "native_pane.host") {
+          const targetSurface = this.requirePairedSurface(socket);
+          for (const paneMaterialization of message.payload.materialization.panes ?? []) {
+            const pane = targetSurface.panes.get(Number(paneMaterialization.id));
+            if (pane) {
+              pane.contentId = null;
+              pane.contentType = null;
+              pane.externalNative = true;
+            }
+          }
+        }
         socket.send(
           JSON.stringify(
             this.response(message.id, "target.apply.result", {
@@ -886,6 +899,7 @@ class FakeSurfAceWsServer {
               panes: [...targetSurface.panes.entries()].map(([paneId, pane]) => ({
                 activeContentId: pane.contentId,
                 contentType: pane.contentType,
+                externalNative: pane.externalNative ?? false,
                 geometry: this.paneGeometry(targetSurface, paneId, pane),
                 name: pane.name,
                 paneId,
@@ -948,6 +962,7 @@ class FakeSurfAceWsServer {
         assert.ok(pane);
         pane.contentId = String(message.payload?.contentId);
         pane.contentType = String(message.payload?.contentType);
+        pane.externalNative = false;
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
         pane.drawings = [];
         this.contentSetRequests.push({
@@ -980,6 +995,7 @@ class FakeSurfAceWsServer {
         pane.contentId = null;
         pane.contentType = null;
         pane.drawings = [];
+        pane.externalNative = false;
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
         this.clearRequests.push({
           paneId,
@@ -2560,6 +2576,20 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(target?.targetKind, "browser_url");
         assert.equal(target?.targetPolicy, "confirm");
         assert.deepEqual(target?.targetPayload, { url: "https://google.com" });
+
+        const remotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(remotePane);
+        remotePane.contentId = null;
+        remotePane.contentType = null;
+        remotePane.externalNative = true;
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        await internalRuntime.syncRemotePaneList(surface);
+
+        const screensAfterNative = await runtime.listScreens();
+        assert.equal(screensAfterNative[0]?.panes[0]?.activeContent, null);
+        assert.equal(screensAfterNative[0]?.panes[0]?.target, null);
       },
     });
   });

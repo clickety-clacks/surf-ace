@@ -677,6 +677,7 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
       name: string | null;
       activeContentId: ContentId | null;
       contentType: ContentType | null;
+      externalNative?: boolean;
       viewport: SurfaceViewport;
       geometry: PaneGeometryProjection;
     }>;
