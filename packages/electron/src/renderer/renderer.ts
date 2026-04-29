@@ -63,10 +63,25 @@ type BrowserUrlDiagnosticReason =
   | "did-attach"
   | "did-fail-load"
   | "did-finish-load"
+  | "did-finish-load:guest-viewport"
   | "dom-ready"
+  | "dom-ready:guest-viewport"
+  | "guest-viewport-retry"
   | "navigation-assigned"
   | "pre-navigation"
   | "resize";
+type BrowserUrlGuestMetrics = {
+  bodyRect: { height: number; width: number; x: number; y: number } | null;
+  devicePixelRatio: number;
+  innerHeight: number;
+  innerWidth: number;
+  location: string;
+  rootClientHeight: number | null;
+  rootClientWidth: number | null;
+  rootScrollHeight: number | null;
+  rootScrollWidth: number | null;
+  visualViewport: { height: number; scale: number; width: number } | null;
+};
 type PaneContentValue =
   | null
   | BrowserUrlContent
@@ -1144,6 +1159,14 @@ async function browserUrlGuestDiagnostics(webview: BrowserUrlWebViewElement): Pr
   }
 }
 
+function isBrowserUrlGuestMetrics(value: unknown): value is BrowserUrlGuestMetrics {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const metrics = value as Partial<BrowserUrlGuestMetrics>;
+  return typeof metrics.innerHeight === "number" && typeof metrics.innerWidth === "number";
+}
+
 function browserUrlWebContentsId(webview: BrowserUrlWebViewElement): number | null {
   try {
     return webview.getWebContentsId?.() ?? null;
@@ -1152,10 +1175,84 @@ function browserUrlWebContentsId(webview: BrowserUrlWebViewElement): number | nu
   }
 }
 
+function browserUrlViewportMismatch(
+  webview: BrowserUrlWebViewElement,
+  guest: unknown,
+): Record<string, number | string> | null {
+  if (!isBrowserUrlGuestMetrics(guest)) {
+    return null;
+  }
+  const hostHeight = webview.clientHeight || Math.round(webview.getBoundingClientRect().height);
+  const hostWidth = webview.clientWidth || Math.round(webview.getBoundingClientRect().width);
+  const tolerance = 2;
+  if (hostHeight <= 0 || hostWidth <= 0) {
+    return null;
+  }
+  const heightDelta = Math.abs(guest.innerHeight - hostHeight);
+  const widthDelta = Math.abs(guest.innerWidth - hostWidth);
+  if (heightDelta <= tolerance && widthDelta <= tolerance) {
+    return null;
+  }
+  return {
+    guestHeight: guest.innerHeight,
+    guestWidth: guest.innerWidth,
+    heightDelta,
+    hostHeight,
+    hostWidth,
+    tolerance,
+    widthDelta,
+  };
+}
+
+function nudgeBrowserUrlWebViewResize(view: PaneView, webview: BrowserUrlWebViewElement): void {
+  const rect = paneFrameRect(view);
+  if (!rect) {
+    return;
+  }
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  webview.style.display = "flex";
+  webview.style.width = `${Math.max(1, width - 1)}px`;
+  webview.style.height = `${Math.max(1, height - 1)}px`;
+  void webview.offsetHeight;
+  applyPaneFrameSize(view, webview);
+}
+
+async function verifyBrowserUrlGuestViewport(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+  reason: BrowserUrlDiagnosticReason,
+): Promise<{ guest: unknown; mismatch: Record<string, number | string> | null }> {
+  const delays = [0, 50, 150, 300, 600];
+  let guest: unknown = null;
+  let mismatch: Record<string, number | string> | null = null;
+  for (const delay of delays) {
+    if (delay > 0) {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, delay);
+      });
+    }
+    if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
+      return { guest, mismatch: null };
+    }
+    applyPaneFrameSize(view, webview);
+    guest = await browserUrlGuestDiagnostics(webview);
+    mismatch = browserUrlViewportMismatch(webview, guest);
+    reportBrowserUrlDiagnostics(view, webview, delay === 0 ? reason : "guest-viewport-retry", guest, mismatch);
+    if (!mismatch) {
+      return { guest, mismatch: null };
+    }
+    nudgeBrowserUrlWebViewResize(view, webview);
+  }
+  return { guest, mismatch };
+}
+
 function reportBrowserUrlDiagnostics(
   view: PaneView,
   webview: BrowserUrlWebViewElement,
   reason: BrowserUrlDiagnosticReason,
+  guest?: unknown,
+  viewportMismatch?: Record<string, number | string> | null,
 ): void {
   if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
     return;
@@ -1185,6 +1282,8 @@ function reportBrowserUrlDiagnostics(
       : null,
     webContentsId: browserUrlWebContentsId(webview),
     webview: elementDiagnostics(webview),
+    ...(guest === undefined ? {} : { guest }),
+    ...(viewportMismatch ? { viewportMismatch } : {}),
   };
   window.surfAce.command(payload);
   if (reason === "dom-ready" || reason === "did-finish-load") {
@@ -1192,9 +1291,11 @@ function reportBrowserUrlDiagnostics(
       if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
         return;
       }
+      const mismatch = browserUrlViewportMismatch(webview, guest);
       window.surfAce.command({
         ...payload,
         guest,
+        ...(mismatch ? { viewportMismatch: mismatch } : {}),
         reason: `${reason}:guest`,
       });
     });
@@ -1534,16 +1635,29 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
       "dom-ready",
       () => {
         reportBrowserUrlDiagnostics(view, browserView, "dom-ready");
+        void verifyBrowserUrlGuestViewport(view, browserView, "dom-ready:guest-viewport");
       },
     );
     browserView.addEventListener(
       "did-finish-load",
       () => {
         reportBrowserUrlDiagnostics(view, browserView, "did-finish-load");
-        reportNavigation("applied");
-        window.setTimeout(() => {
-          reportPaneSnapshot(view);
-        }, 0);
+        void verifyBrowserUrlGuestViewport(view, browserView, "did-finish-load:guest-viewport").then(({ mismatch }) => {
+          if (renderToken !== view.currentRenderToken) {
+            return;
+          }
+          if (mismatch) {
+            reportNavigation(
+              "failed",
+              `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
+            );
+            return;
+          }
+          reportNavigation("applied");
+          window.setTimeout(() => {
+            reportPaneSnapshot(view);
+          }, 0);
+        });
       },
       { once: true },
     );

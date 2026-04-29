@@ -298,6 +298,10 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   background: #fff;
 }
 
+.content-browser-url-frame {
+  display: flex;
+}
+
 .content-pdf-stack {
   min-height: 100%;
 }
