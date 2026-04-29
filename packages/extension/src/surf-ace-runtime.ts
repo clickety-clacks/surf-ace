@@ -2441,7 +2441,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const targetPaneIds = new Set(
       targetPaneId
         ? flattenManagedLayout(currentLayout).filter((paneId) => paneId === targetPaneId)
-        : flattenManagedLayout(currentLayout),
+        : [...surface.panes.keys()],
     );
     if (targetPaneId && targetPaneIds.size === 0) {
       throw new SurfAceToolError("invalid_operation", `Pane ${targetPaneId} is not present in the current topology.`);
@@ -4322,7 +4322,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     pane.lastRestoreBlockedReason = evidence.status === "applied" ? null : evidence.errorCode ?? "materialization_failed";
     if (evidence.status === "applied") {
-      this.clearVisiblePaneContent(pane, pane.currentRevision);
+      this.clearVisiblePaneContent(pane, asRevision(Math.max(Number(pane.currentRevision), target.targetEpoch)));
     }
     await this.persistSurfaceTargetState(surface, "target apply response");
     return evidence;
@@ -5321,10 +5321,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
 
     if (existingByEndpoint.length > 1) {
-      for (const surface of existingByEndpoint) {
-        this.assignEndpoint(surface, endpoint, { preserveLiveAlias: false });
-        this.ensureSurfaceWorker(surface);
-      }
+      this.reconcileDuplicateEndpointSurfaces(endpoint, existingByEndpoint, "endpoint");
       return;
     }
 
@@ -5348,10 +5345,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       : [];
 
     if (existingByFingerprint.length > 1) {
-      for (const surface of existingByFingerprint) {
-        this.assignEndpoint(surface, endpoint, { preserveLiveAlias: false });
-        this.ensureSurfaceWorker(surface);
-      }
+      this.reconcileDuplicateEndpointSurfaces(endpoint, existingByFingerprint, "fingerprint");
       return;
     }
 
@@ -5401,6 +5395,107 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     this.surfaces.set(surfaceId, surface);
     this.ensureSurfaceWorker(surface);
+  }
+
+  private reconcileDuplicateEndpointSurfaces(
+    endpoint: SurfAceDiscoveryEndpoint,
+    candidates: ManagedSurface[],
+    match: "endpoint" | "fingerprint",
+  ): void {
+    const retained = this.preferredEndpointSurface(candidates);
+    const retiredSurfaceIds: string[] = [];
+    for (const surface of candidates) {
+      if (surface !== retained && this.shouldRetireDuplicateEndpointSurface(surface, retained)) {
+        retiredSurfaceIds.push(surface.surfaceId);
+        this.retireDuplicateEndpointSurface(surface, retained, endpoint, match);
+        continue;
+      }
+      this.assignEndpoint(surface, endpoint);
+      this.ensureSurfaceWorker(surface);
+    }
+    if (retiredSurfaceIds.length === 0) {
+      return;
+    }
+    this.logger.warn?.(
+      runtimeDiagnostic("endpoint_duplicate_surfaces_reconciled", {
+        endpoint_id: endpoint.endpointId,
+        fingerprint: endpoint.fingerprintPrefix || "none",
+        match,
+        retired_surface_ids: retiredSurfaceIds.join(","),
+        retained_surface_id: retained.surfaceId,
+      }),
+    );
+  }
+
+  private preferredEndpointSurface(candidates: ManagedSurface[]): ManagedSurface {
+    return [...candidates].sort((left, right) => {
+      const score = (surface: ManagedSurface): number => {
+        let value = 0;
+        if (surface.client?.isOpen()) {
+          value += 1000;
+        }
+        if (surface.connectionState === "connected") {
+          value += 500;
+        }
+        if (surface.hasPairedInGatewaySession) {
+          value += 250;
+        }
+        if (surface.sessionId) {
+          value += 100;
+        }
+        value += Math.min(surface.panes.size, 20);
+        return value;
+      };
+      const byScore = score(right) - score(left);
+      if (byScore !== 0) {
+        return byScore;
+      }
+      return right.lastSeenAt - left.lastSeenAt;
+    })[0]!;
+  }
+
+  private shouldRetireDuplicateEndpointSurface(surface: ManagedSurface, retained: ManagedSurface): boolean {
+    if (
+      retained.connectionState !== "connected" &&
+      !retained.hasPairedInGatewaySession &&
+      !retained.sessionId
+    ) {
+      return false;
+    }
+    return isProvisionalSurfaceId(surface.surfaceId) &&
+      !surface.hasPairedInGatewaySession &&
+      !surface.sessionId &&
+      surface.connectionState !== "connected";
+  }
+
+  private retireDuplicateEndpointSurface(
+    surface: ManagedSurface,
+    retained: ManagedSurface,
+    endpoint: SurfAceDiscoveryEndpoint,
+    match: "endpoint" | "fingerprint",
+  ): void {
+    surface.stopRequested = true;
+    surface.autoRetryEnabled = false;
+    surface.connectionState = "unreachable";
+    this.surfaces.delete(surface.surfaceId);
+    this.wakeSurfaceRetry(surface);
+    this.logger.warn?.(
+      runtimeDiagnostic("endpoint_duplicate_surface_retired", {
+        endpoint_id: endpoint.endpointId,
+        fingerprint: endpoint.fingerprintPrefix || "none",
+        match,
+        retained_surface_id: retained.surfaceId,
+        retired_surface_id: surface.surfaceId,
+      }),
+    );
+    if (surface.client) {
+      this.runBackgroundTask(
+        `close duplicate endpoint surface ${surface.surfaceId}`,
+        async () => {
+          await surface.client?.close(1000, clampCloseReason("provider_shutdown"));
+        },
+      );
+    }
   }
 
   private reusableSurface(surface: ManagedSurface | undefined): ManagedSurface | undefined {
@@ -6023,6 +6118,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
+    if (this.surfaces.get(surface.surfaceId) !== surface) {
+      surface.stopRequested = true;
+      return;
+    }
+
     const replacement = this.discovery.getSnapshot().find(
       (endpoint) => endpoint.fingerprintPrefix === surface.fingerprintPrefix,
     );
@@ -6195,7 +6295,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
+    const providerOwnedRemotePaneIds =
+      surface.topologyRevision > 0 ? this.layoutRemotePaneIds(surface) : null;
     for (const paneState of (response as PanesListResponse).payload.panes) {
+      if (providerOwnedRemotePaneIds && !providerOwnedRemotePaneIds.has(paneState.paneId)) {
+        continue;
+      }
       const pane = this.ensurePane(surface, paneState.paneId);
       pane.name = paneState.name;
       pane.paneLabel = this.ensurePaneLabel(surface, pane, paneState.paneId);
@@ -6235,6 +6340,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
     return panes;
+  }
+
+  private layoutRemotePaneIds(surface: ManagedSurface): Set<RemotePaneId> {
+    const remotePaneIds = new Set<RemotePaneId>();
+    for (const pane of this.layoutPanes(surface)) {
+      if (isBoundRemotePaneId(pane.remotePaneId)) {
+        remotePaneIds.add(pane.remotePaneId);
+      }
+    }
+    return remotePaneIds;
   }
 
   private async syncPaneSnapshot(
