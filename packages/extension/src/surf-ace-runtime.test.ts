@@ -3241,6 +3241,38 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider pane-list sync ignores client stale panes outside provider-owned topology", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const before = (await runtime.listScreens())[0]!;
+      const firstPaneId = paneByLabel(before, 1).paneId;
+      const realized = await runtime.realizeTopology({
+        allowDestroyPaneIds: [firstPaneId],
+        desired: {
+          children: [{ type: "pane" }, { type: "pane" }],
+          direction: "vertical",
+          type: "split",
+        },
+        expectedTopologyRevision: before.topologyRevision,
+        fingerprint: server.surfaceId,
+        target: { root: true },
+      });
+      const firstServerPane = server.panes.values().next().value as TestPane;
+      server.panes.set(999, {
+        ...structuredClone(firstServerPane),
+        paneLabel: 999,
+      });
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await internalRuntime.syncRemotePaneList(surface);
+
+      const after = (await runtime.listScreens())[0]!;
+      assert.deepEqual(after.panes.map((pane) => pane.paneId).sort(), realized.createdPaneIds.sort());
+      assert.deepEqual(after.panes.map((pane) => pane.paneLabel), realized.panes.map((pane) => pane.paneLabel));
+    });
+  });
+
   await t.test("provider rejects stale or undeclared destructive topology realization before publish", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);

@@ -6292,7 +6292,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
+    const providerOwnedRemotePaneIds =
+      surface.topologyRevision > 0 ? this.layoutRemotePaneIds(surface) : null;
     for (const paneState of (response as PanesListResponse).payload.panes) {
+      if (providerOwnedRemotePaneIds && !providerOwnedRemotePaneIds.has(paneState.paneId)) {
+        continue;
+      }
       const pane = this.ensurePane(surface, paneState.paneId);
       pane.name = paneState.name;
       pane.paneLabel = this.ensurePaneLabel(surface, pane, paneState.paneId);
@@ -6314,6 +6319,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
     return panes;
+  }
+
+  private layoutRemotePaneIds(surface: ManagedSurface): Set<RemotePaneId> {
+    const remotePaneIds = new Set<RemotePaneId>();
+    for (const pane of this.layoutPanes(surface)) {
+      if (isBoundRemotePaneId(pane.remotePaneId)) {
+        remotePaneIds.add(pane.remotePaneId);
+      }
+    }
+    return remotePaneIds;
   }
 
   private async syncPaneSnapshot(
