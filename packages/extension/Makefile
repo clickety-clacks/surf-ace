@@ -21,6 +21,7 @@ package:
 	printf '{\n  "type": "module",\n  "openclaw": {\n    "extensions": [\n      "./surf-ace.ts"\n    ]\n  },\n  "dependencies": {\n    "bonjour-service": "^1.3.0",\n    "ws": "^8.18.0"\n  }\n}\n' > $(PKG_DIR)/package.json
 	rsync -a src/ $(PKG_DIR)/extension/src/
 	rsync -a ../protocol/src/ $(PKG_DIR)/protocol/src/
+	cp ../protocol/schema.json $(PKG_DIR)/protocol/schema.json
 	rsync -a skills/ $(PKG_DIR)/skills/
 	npm install --prefix $(PKG_DIR) --omit=dev --silent
 
