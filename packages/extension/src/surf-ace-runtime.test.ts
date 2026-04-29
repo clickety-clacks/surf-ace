@@ -23,6 +23,7 @@ type TestPane = {
   };
   name: string | null;
   paneLabel: number;
+  paneLineageId: string;
   revision: number;
   viewport: {
     height: number;
@@ -121,6 +122,7 @@ class FakeSurfAceWsServer {
   }> = [];
   readonly pairRequests: Array<{ initialPaneId: number; initialPaneLabel: number; windowLabel: string }> = [];
   readonly pairRequestSurfaceIds: string[] = [];
+  panesListRequests = 0;
   readonly panes: Map<number, TestPane>;
   readonly splitRequests: Array<{
     count: number;
@@ -157,6 +159,7 @@ class FakeSurfAceWsServer {
   rejectNextResumePairWithSessionMismatch = false;
   resumePairMismatchResponsesRemaining = 0;
   resumePairMismatchMessage = "Resume session did not match active ownership lock";
+  includePairPaneLineageIds = true;
 
   pairedSocket: import("ws").WebSocket | null = null;
   readonly surfaceId: string;
@@ -187,6 +190,7 @@ class FakeSurfAceWsServer {
           },
           name: null,
           paneLabel: this.initialRemotePaneId,
+          paneLineageId: `pl_${this.surfaceId}_${this.initialRemotePaneId}`,
           revision: 0,
           viewport: {
             height: 768,
@@ -287,6 +291,7 @@ class FakeSurfAceWsServer {
             },
             name: null,
             paneLabel: initialRemotePaneId,
+            paneLineageId: `pl_${options.surfaceId}_${initialRemotePaneId}`,
             revision: 0,
             viewport: { ...viewport },
           },
@@ -706,7 +711,7 @@ class FakeSurfAceWsServer {
                   currentRevision: pane.revision,
                   paneId,
                   paneLabel: pane.paneLabel,
-                  paneLineageId: `pl_${requestedSurface.surfaceId}_${paneId}`,
+                  ...(this.includePairPaneLineageIds ? { paneLineageId: pane.paneLineageId } : {}),
                 })),
               },
               surfaceId: requestedSurface.surfaceId,
@@ -770,6 +775,7 @@ class FakeSurfAceWsServer {
             },
             name: paneState.name,
             paneLabel: paneState.paneLabel,
+            paneLineageId: previousPane?.paneLineageId ?? `pl_${targetSurface.surfaceId}_${paneState.paneId}`,
             revision: previousPane?.revision ?? 0,
             viewport: previousPane?.viewport ?? { ...targetSurface.viewport },
           });
@@ -782,7 +788,7 @@ class FakeSurfAceWsServer {
                 name: pane.name,
                 paneId: pane.paneId,
                 paneLabel: this.nextTopologyApplyResponsePaneLabels?.[index] ?? pane.paneLabel,
-                paneLineageId: `pl_${targetSurface.surfaceId}_${pane.paneId}`,
+                paneLineageId: targetSurface.panes.get(pane.paneId)?.paneLineageId ?? `pl_${targetSurface.surfaceId}_${pane.paneId}`,
               })),
               topologyRevision: Number(message.payload?.topologyRevision ?? 0),
             }),
@@ -925,6 +931,7 @@ class FakeSurfAceWsServer {
         return;
       }
       case "panes.list": {
+        this.panesListRequests += 1;
         const targetSurface = this.requirePairedSurface(socket);
         socket.send(
           JSON.stringify(
@@ -937,6 +944,7 @@ class FakeSurfAceWsServer {
                 name: pane.name,
                 paneId,
                 paneLabel: pane.paneLabel,
+                paneLineageId: pane.paneLineageId,
                 viewport: {
                   height: pane.frame.height,
                   scale: pane.viewport.scale,
@@ -2594,6 +2602,58 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider blocks non-legacy stale lineage discovered during process target restore", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const registered = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "terminal:btop:stale-lineage",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached",
+        restorePolicy: "manual",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "launch_equivalent",
+          requiredCapabilities: ["target.terminal_app.v1"],
+          safeToLogFields: ["command", "args"],
+          safetyClass: "process",
+          summary: "btop",
+        },
+        targetKind: "terminal_app",
+        targetPayload: {
+          args: [],
+          command: "btop",
+          cwd: "/tmp",
+          env: { TERM: "xterm-256color" },
+          envPolicy: "explicit_allowlist",
+          pty: true,
+          restartPolicy: "restore_new_process",
+        },
+      });
+      assert.equal(registered.status, "registered");
+
+      const serverPane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(serverPane);
+      serverPane.paneLineageId = `pl_${server.surfaceId}_recreated`;
+
+      const restored = await runtime.restoreTarget({
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+
+      assert.equal(restored.blockedReason, null);
+      assert.equal(restored.evidence?.status, "failed");
+      assert.equal(restored.evidence?.errorCode, "restore_blocked_stale_target");
+      assert.equal(server.targetApplyRequests.length, 0);
+      const screens = await runtime.listScreens();
+      assert.equal(screens[0]?.panes[0]?.target?.blockedReason, "restore_blocked_stale_target");
+      assert.equal(screens[0]?.panes[0]?.target?.paneLineageId, `pl_${server.surfaceId}_recreated`);
+    });
+  });
+
   await t.test("surf_ace_push browser_url creates a live URL target instead of static HTML", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
@@ -2784,9 +2844,44 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("surf_ace_list repairs legacy provider pane lineage before browser_url target.apply", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.includePairPaneLineageIds = false;
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        const pushed = await runtime.push({
+          content: "https://arstechnica.com",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(pushed.targetApplyEvidence?.status, "applied");
+        const [applyRequest] = server.targetApplyRequests;
+        assert.ok(applyRequest);
+        assert.equal(applyRequest.paneLineageId, `pl_${server.surfaceId}_${server.initialRemotePaneId}`);
+        assert.doesNotMatch(applyRequest.paneLineageId, /^legacy_remote_pane_/);
+        const screens = await runtime.listScreens();
+        assert.equal(
+          screens[0]?.panes[0]?.target?.paneLineageId,
+          `pl_${server.surfaceId}_${server.initialRemotePaneId}`,
+        );
+      },
+    });
+  });
+
   await t.test("surf_ace_push browser_url blocks when the surface lacks live browser capability", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const panesListRequestsBeforePush = server.panesListRequests;
+      const topologyApplyRequestsBeforePush = server.topologyApplyRequests.length;
 
       await assert.rejects(
         async () => await runtime.push({
@@ -2799,6 +2894,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.equal(server.contentSetRequests.length, 0);
       assert.equal(server.targetApplyRequests.length, 0);
+      assert.equal(server.panesListRequests, panesListRequestsBeforePush);
+      assert.equal(server.topologyApplyRequests.length, topologyApplyRequestsBeforePush);
     });
   });
 

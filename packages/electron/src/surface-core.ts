@@ -455,6 +455,7 @@ export class SurfaceCore {
           name: pane.name,
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
           viewport: structuredClone(geometry.protocolViewport.viewport),
         };
       }),

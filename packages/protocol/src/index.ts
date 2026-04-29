@@ -683,6 +683,7 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
     panes: Array<{
       paneId: PaneId;
       paneLabel: number;
+      paneLineageId?: string;
       name: string | null;
       activeContentId: ContentId | null;
       contentType: ContentType | null;

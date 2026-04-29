@@ -826,6 +826,10 @@ function legacyPaneLineageId(remotePaneId: RemotePaneId): string {
   return `legacy_remote_pane_${remotePaneId}`;
 }
 
+function isLegacyPaneLineageId(lineageId: string): boolean {
+  return lineageId.startsWith("legacy_remote_pane_");
+}
+
 function asRevision(value: number): Revision {
   return value as Revision;
 }
@@ -2760,7 +2764,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     input: SurfAceBrowserUrlPushInput,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
-    this.finalizeLiveFrame(surface, pane);
     const requiredCapability = requiredCapabilityForTargetKind("browser_url");
     if (!surface.targetCapabilities.has(requiredCapability)) {
       throw new SurfAceToolError(
@@ -2768,6 +2771,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         `Surface ${surface.surfaceId} does not advertise ${requiredCapability}`,
       );
     }
+    await this.ensureCurrentPaneLineage(surface, pane);
+    this.finalizeLiveFrame(surface, pane);
 
     const targetHeader: TargetHeader = {
       payloadSchemaVersion: 1,
@@ -4140,6 +4145,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const payload = (response as TopologyApplyResponse).payload;
     surface.topologyRevision = Number(payload.topologyRevision);
+    let lineageChanged = false;
     for (const paneState of payload.panes) {
       const pane = this.findPaneByRemoteId(surface, paneState.paneId);
       if (!pane) {
@@ -4147,10 +4153,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
       pane.name = paneState.name;
       if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
-        pane.paneLineageId = paneState.paneLineageId;
+        lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
       }
     }
     this.repairLivePaneLabelInvariant("topology response");
+    if (lineageChanged) {
+      await this.persistSurfaceTargetState(surface, "topology lineage repair");
+    }
     this.queuePersistScreenSnapshot("topology apply");
   }
 
@@ -4407,6 +4416,31 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     if (isProcessBackedTargetKind(target.targetKind)) {
       await this.ensureNativePaneGeometry(surface, pane);
+    }
+    if (isLegacyPaneLineageId(target.paneLineageId) || target.paneLineageId !== pane.paneLineageId) {
+      await this.ensureCurrentPaneLineage(surface, pane);
+      if (
+        isLegacyPaneLineageId(target.paneLineageId) &&
+        target.currentState === "current" &&
+        pane.currentTargetId === target.targetId &&
+        target.paneLineageId !== pane.paneLineageId
+      ) {
+        target.paneLineageId = pane.paneLineageId;
+        await this.persistSurfaceTargetState(surface, "target lineage repair before apply");
+      }
+      if (target.paneLineageId !== pane.paneLineageId) {
+        const evidence: ApplyEvidence = {
+          appliedAt: new Date(this.now()).toISOString(),
+          errorCode: "restore_blocked_stale_target",
+          message: "Target pane lineage does not match the current pane",
+          requestId: "",
+          status: "failed",
+        };
+        target.lastApplyEvidence = evidence;
+        pane.lastRestoreBlockedReason = "restore_blocked_stale_target";
+        await this.persistSurfaceTargetState(surface, "target lineage stale before apply");
+        return evidence;
+      }
     }
 
     const requestId = makeBrandedRequestId();
@@ -6457,6 +6491,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const providerOwnedRemotePaneIds =
       surface.topologyRevision > 0 ? this.layoutRemotePaneIds(surface) : null;
+    let lineageChanged = false;
     for (const paneState of (response as PanesListResponse).payload.panes) {
       if (providerOwnedRemotePaneIds && !providerOwnedRemotePaneIds.has(paneState.paneId)) {
         continue;
@@ -6470,7 +6505,54 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (pane.externalNative) {
         await this.clearBrowserUrlTargetForNativePane(surface, pane);
       }
+      if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
+        lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
+      }
     }
+    if (lineageChanged) {
+      await this.persistSurfaceTargetState(surface, "pane list lineage repair");
+    }
+  }
+
+  private async ensureCurrentPaneLineage(surface: ManagedSurface, pane: ManagedPane): Promise<void> {
+    await this.syncRemotePaneList(surface);
+    if (!isLegacyPaneLineageId(pane.paneLineageId)) {
+      return;
+    }
+    await this.pushTopology(surface);
+  }
+
+  private adoptPaneLineage(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    nextLineageId: string,
+  ): boolean {
+    const previousLineageId = pane.paneLineageId;
+    if (previousLineageId === nextLineageId) {
+      return false;
+    }
+    pane.paneLineageId = nextLineageId;
+
+    for (const target of surface.targetRecords.values()) {
+      if (target.paneLineageId !== previousLineageId) {
+        continue;
+      }
+      const samePane =
+        target.paneIdAtApply === pane.paneId ||
+        target.paneLabelAtApply === pane.paneLabel ||
+        target.targetId === pane.currentTargetId ||
+        target.targetId === pane.staleTargetId;
+      if (samePane && isLegacyPaneLineageId(previousLineageId)) {
+        target.paneLineageId = nextLineageId;
+      }
+    }
+    if (pane.diagnosticContent?.paneLineageId === previousLineageId) {
+      pane.diagnosticContent.paneLineageId = nextLineageId;
+    }
+    if (pane.nonDurableTargetDiagnostic?.paneLineageId === previousLineageId) {
+      pane.nonDurableTargetDiagnostic.paneLineageId = nextLineageId;
+    }
+    return true;
   }
 
   private async clearBrowserUrlTargetForNativePane(surface: ManagedSurface, pane: ManagedPane): Promise<void> {
@@ -6676,19 +6758,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.topologyRevision > 0 &&
       paneStates.length < surface.panes.size;
     if (preserveExtensionTopology) {
+      let lineageChanged = false;
       for (const paneState of paneStates) {
         const pane = this.findPaneByRemoteId(surface, paneState.paneId);
         if (!pane) {
           continue;
         }
         if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
-          pane.paneLineageId = paneState.paneLineageId;
+          lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
         }
         pane.viewport = cloneViewport(surface.viewport);
+      }
+      if (lineageChanged) {
+        this.runBackgroundTask("persist pair lineage repair", async () => {
+          await this.persistSurfaceTargetState(surface, "pair lineage repair");
+        });
       }
       return;
     }
     const nextPanes = new Map<PaneId, ManagedPane>();
+    let lineageChanged = false;
     for (const paneState of paneStates) {
       const pane =
         this.findPaneByRemoteId(surface, paneState.paneId) ??
@@ -6696,7 +6785,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.recoverSolePaneForTopologySync(surface, paneState.paneId, paneStates.length) ??
         this.ensurePane(surface, paneState.paneId);
       if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
-        pane.paneLineageId = paneState.paneLineageId;
+        lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
       }
       pane.viewport = cloneViewport(surface.viewport);
       nextPanes.set(pane.paneId, pane);
@@ -6721,6 +6810,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         direction: "horizontal",
         type: "split",
       };
+    }
+    if (lineageChanged) {
+      this.runBackgroundTask("persist pair lineage repair", async () => {
+        await this.persistSurfaceTargetState(surface, "pair lineage repair");
+      });
     }
     this.queuePersistScreenSnapshot("apply pair state");
   }
