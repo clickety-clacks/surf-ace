@@ -273,8 +273,8 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 .content-html-frame {
   position: absolute;
   inset: 0;
-  height: auto;
-  min-height: 0;
+  height: 100%;
+  min-height: 100%;
   border: 0;
   background: #fff;
 }

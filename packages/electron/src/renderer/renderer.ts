@@ -993,26 +993,99 @@ function clearWebViewSizer(view: PaneView): void {
   view.currentWebViewResizeObserver = null;
 }
 
+function currentPaneFrameElement(view: PaneView): HTMLElement | null {
+  return view.contentEl.querySelector<HTMLElement>(".content-html-frame");
+}
+
+function paneFrameRect(view: PaneView): { height: number; width: number } | null {
+  if (!view.rootEl.isConnected) {
+    return null;
+  }
+  const rootRect = view.rootEl.getBoundingClientRect();
+  const scrollRect = view.scrollEl.getBoundingClientRect();
+  const width = scrollRect.width > 0 ? scrollRect.width : rootRect.width;
+  const height = scrollRect.height > 0 ? scrollRect.height : rootRect.height;
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+  return { height, width };
+}
+
+function applyPaneFrameSize(view: PaneView, element: HTMLElement): boolean {
+  const rect = paneFrameRect(view);
+  if (!rect) {
+    return false;
+  }
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  view.contentEl.style.height = `${height}px`;
+  view.contentEl.style.minHeight = `${height}px`;
+  element.style.width = `${width}px`;
+  element.style.height = `${height}px`;
+  return true;
+}
+
+function schedulePaneFrameSizeRefresh(view: PaneView, element: HTMLElement): void {
+  const refresh = () => {
+    if (!element.isConnected || currentPaneFrameElement(view) !== element) {
+      return;
+    }
+    applyPaneFrameSize(view, element);
+  };
+  window.requestAnimationFrame(refresh);
+  window.setTimeout(refresh, 50);
+  window.setTimeout(refresh, 200);
+}
+
 function sizeWebViewToPane(view: PaneView, element: HTMLElement): void {
   clearWebViewSizer(view);
 
-  const applySize = () => {
-    const rect = view.scrollEl.getBoundingClientRect();
-    view.contentEl.style.height = `${Math.max(1, Math.floor(rect.height))}px`;
-    view.contentEl.style.minHeight = `${Math.max(1, Math.floor(rect.height))}px`;
-    element.style.width = `${Math.max(1, Math.floor(rect.width))}px`;
-    element.style.height = `${Math.max(1, Math.floor(rect.height))}px`;
-  };
-
-  applySize();
+  applyPaneFrameSize(view, element);
   const observer = new ResizeObserver(() => {
-    applySize();
+    applyPaneFrameSize(view, element);
   });
+  observer.observe(view.rootEl);
   observer.observe(view.scrollEl);
   view.currentWebViewResizeObserver = observer;
-  window.requestAnimationFrame(() => {
-    applySize();
-  });
+  schedulePaneFrameSizeRefresh(view, element);
+}
+
+function refreshDynamicPaneFrames(): void {
+  if (!latestState) {
+    return;
+  }
+  for (const pane of latestState.panes) {
+    const view = paneViews.get(pane.paneId);
+    if (!view?.rootEl.isConnected) {
+      continue;
+    }
+    const frame = currentPaneFrameElement(view);
+    if (frame) {
+      applyPaneFrameSize(view, frame);
+      reportPaneSnapshot(view);
+    }
+  }
+}
+
+function deferUntilPaneFrameReady(
+  view: PaneView,
+  element: HTMLElement,
+  renderToken: number,
+  callback: () => void,
+): void {
+  let attempts = 0;
+  const tick = () => {
+    if (renderToken !== view.currentRenderToken || currentPaneFrameElement(view) !== element) {
+      return;
+    }
+    if (applyPaneFrameSize(view, element) || attempts >= 12) {
+      callback();
+      return;
+    }
+    attempts += 1;
+    window.requestAnimationFrame(tick);
+  };
+  window.requestAnimationFrame(tick);
 }
 
 function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement): void {
@@ -1321,7 +1394,9 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
       },
       { once: true },
     );
-    browserView.src = browserUrl.url;
+    deferUntilPaneFrameReady(view, browserView, renderToken, () => {
+      browserView.src = browserUrl.url;
+    });
     return;
   }
 
@@ -1428,7 +1503,11 @@ function renderWindow(state: RendererWindowState): void {
   wrapper.append(layoutRoot);
   appRoot.replaceChildren(wrapper);
   setAllPaneChromeMetrics();
-  window.requestAnimationFrame(setAllPaneChromeMetrics);
+  refreshDynamicPaneFrames();
+  window.requestAnimationFrame(() => {
+    setAllPaneChromeMetrics();
+    refreshDynamicPaneFrames();
+  });
   scheduleCompositorOverlayRegionReport("layout");
 }
 
@@ -1454,6 +1533,10 @@ async function init(): Promise<void> {
         redrawDrawings(view, pane.drawings);
         setPaneChromeMetrics(view);
         view.currentScrollHandler?.();
+        const frame = currentPaneFrameElement(view);
+        if (frame) {
+          applyPaneFrameSize(view, frame);
+        }
         reportPaneSnapshot(view);
       }
     }
