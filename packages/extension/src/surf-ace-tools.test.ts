@@ -125,6 +125,20 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "desired",
   ]);
   assert.equal(realizeTool.inputSchema.additionalProperties, false);
+  const realizeProperties = realizeTool.inputSchema.properties as Record<string, any>;
+  assert.ok(Array.isArray(realizeProperties.target.anyOf));
+  assert.deepEqual(
+    realizeProperties.target.anyOf.map((variant: any) => Object.keys(variant.properties).sort()),
+    [["root"], ["paneId"]],
+  );
+  assert.ok(Array.isArray(realizeProperties.desired.anyOf));
+  const splitDesired = realizeProperties.desired.anyOf.find((variant: any) => variant.properties.children);
+  assert.ok(splitDesired);
+  assert.deepEqual(Object.keys(splitDesired.properties).sort(), ["children", "direction", "type"]);
+  assert.ok(Array.isArray(splitDesired.properties.children.items.anyOf));
+  const paneDesired = realizeProperties.desired.anyOf.find((variant: any) => variant.properties.paneId);
+  assert.ok(paneDesired);
+  assert.deepEqual(Object.keys(paneDesired.properties).sort(), ["name", "paneId", "type"]);
 
   const closePaneTool = tools.find((tool) => tool.name === "surf_ace_close_pane");
   assert.ok(closePaneTool);

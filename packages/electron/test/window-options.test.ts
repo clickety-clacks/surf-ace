@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import test from "node:test";
 
-import { surfaceWindowOptions } from "../src/window-options.js";
+import { surfaceWindowLoadQuery, surfaceWindowOptions } from "../src/window-options.js";
 
 test("surface window is frameless when hosted by the compositor", () => {
   const options = surfaceWindowOptions({
@@ -13,7 +14,8 @@ test("surface window is frameless when hosted by the compositor", () => {
 
   assert.equal(options.frame, false);
   assert.equal(options.backgroundColor, "#00000000");
-  assert.equal(options.show, true);
+  assert.equal(options.hasShadow, false);
+  assert.equal(options.show, false);
   assert.equal(options.transparent, true);
   assert.equal(options.useContentSize, true);
   assert.equal(options.height, 3840);
@@ -30,9 +32,40 @@ test("surface window keeps the platform frame outside compositor hosting", () =>
 
   assert.equal(options.frame, true);
   assert.equal(options.backgroundColor, "#0b1324");
+  assert.equal(options.hasShadow, true);
   assert.equal(options.show, false);
   assert.equal(options.transparent, false);
   assert.equal(options.height, 812);
   assert.equal(options.width, 960);
   assert.equal(options.title, "eezo Surf Ace");
+});
+
+test("surface window load query flags compositor hosting before first paint", () => {
+  assert.deepEqual(surfaceWindowLoadQuery({
+    compositorSocketPath: "/tmp/surf-ace-compositor.sock",
+    surfaceId: "sf_alpha",
+  }), {
+    compositorHosted: "1",
+    surfaceId: "sf_alpha",
+  });
+
+  assert.deepEqual(surfaceWindowLoadQuery({
+    compositorSocketPath: null,
+    surfaceId: "sf_normal",
+  }), {
+    surfaceId: "sf_normal",
+  });
+});
+
+test("renderer enters compositor transparent mode before stylesheet paint", async () => {
+  const indexHtml = await fs.readFile(new URL("../renderer/index.html", import.meta.url), "utf8");
+  const stylesCss = await fs.readFile(new URL("../renderer/styles.css", import.meta.url), "utf8");
+  const bootstrapScript = indexHtml.indexOf("document.documentElement.classList.add(\"compositor-hosted\")");
+  const stylesheetLink = indexHtml.indexOf("<link rel=\"stylesheet\"");
+
+  assert.notEqual(bootstrapScript, -1);
+  assert.notEqual(stylesheetLink, -1);
+  assert.ok(bootstrapScript < stylesheetLink);
+  assert.match(stylesCss, /html\.compositor-hosted body,\s*body\.compositor-hosted\s*{\s*background: transparent;/);
+  assert.match(stylesCss, /html\.compositor-hosted body \.pane-shell,\s*body\.compositor-hosted \.pane-shell\s*{\s*background: transparent;/);
 });

@@ -239,6 +239,73 @@ test("surface core starts browser_url targets without reporting unverified navig
   assert.equal(snapshot.contentType, null);
 });
 
+test("surface core rejects browser_url targets while the pane is native-hosted", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  const materialization: NativePaneMaterialization = {
+    op: "native_pane.host",
+    panes: [
+      {
+        id: String(paneId),
+        binding_id: `${paneId}:target_top`,
+        content_id: "target_top",
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: listedPane.geometry.geometryRevision,
+          height: listedPane.geometry.contentViewport.height,
+          paneInstanceId: listedPane.geometry.paneInstanceId,
+          surfaceEpoch: listedPane.geometry.surfaceEpoch,
+          topologyEpoch: listedPane.geometry.topologyEpoch,
+          width: listedPane.geometry.contentViewport.width,
+          x: listedPane.geometry.contentViewport.x,
+          y: listedPane.geometry.contentViewport.y,
+        },
+        process: { args: ["top"], command: "top" },
+        revision: 1 as Revision,
+        target: "terminal",
+      },
+    ],
+  };
+  core.markNativePaneMaterialized(surface.surfaceId, materialization);
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
+
+  const result = core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId,
+    requestId: "tr_test",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://example.com/",
+    },
+    targetId: "tg_example",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://example.com/" },
+  });
+
+  assert.equal(result.status, "rejected");
+  assert.equal(result.errorCode, "materialization_failed");
+  assert.match(result.message, /native-hosted pane/);
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(pane.externalNative, true);
+  assert.equal(pane.content.contentType, null);
+});
+
 test("surface core records confirmed browser_url navigation success evidence", () => {
   const core = new SurfaceCore({
     persistentState: {

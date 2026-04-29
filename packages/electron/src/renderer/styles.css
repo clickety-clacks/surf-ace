@@ -52,7 +52,13 @@ body {
   overflow: hidden;
 }
 
+html.compositor-hosted body,
 body.compositor-hosted {
+  background: transparent;
+}
+
+html.compositor-hosted body .pane-shell,
+body.compositor-hosted .pane-shell {
   background: transparent;
 }
 
@@ -92,10 +98,6 @@ body.compositor-hosted {
   overflow: hidden;
 }
 
-body.compositor-hosted .pane-shell.native-backed {
-  background: transparent;
-}
-
 body.compositor-hosted .pane-shell.native-backed .pane-scroll,
 body.compositor-hosted .pane-shell.native-backed .pane-content {
   background: transparent;
@@ -111,7 +113,7 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 }
 
 .pane-shell.keyboard-active .keyboard-focus-overlay {
-  opacity: 0.25;
+  opacity: 1;
 }
 
 .keyboard-focus-edge {

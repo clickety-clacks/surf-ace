@@ -52,6 +52,79 @@ const paneIdParam = {
   type: "string",
 };
 
+const realizeTopologyTargetSchema = {
+  anyOf: [
+    {
+      additionalProperties: false,
+      properties: {
+        root: {
+          enum: [true],
+          type: "boolean",
+        },
+      },
+      required: ["root"],
+      type: "object",
+    },
+    {
+      additionalProperties: false,
+      properties: {
+        paneId: paneIdParam,
+      },
+      required: ["paneId"],
+      type: "object",
+    },
+  ],
+  description: "Use `{ root: true }` to replace the whole layout, or `{ paneId }` to replace one pane slot.",
+};
+
+function createRealizeTopologyNodeSchema(depth = 8): Record<string, unknown> {
+  const paneNodeSchema = {
+    additionalProperties: false,
+    properties: {
+      name: {
+        type: ["string", "null"],
+      },
+      paneId: paneIdParam,
+      type: {
+        enum: ["pane"],
+        type: "string",
+      },
+    },
+    type: "object",
+  };
+  if (depth <= 0) {
+    return paneNodeSchema;
+  }
+  return {
+    anyOf: [
+      {
+        additionalProperties: false,
+        properties: {
+          children: {
+            items: createRealizeTopologyNodeSchema(depth - 1),
+            minItems: 2,
+            type: "array",
+          },
+          direction: {
+            enum: ["horizontal", "vertical"],
+            type: "string",
+          },
+          type: {
+            enum: ["split"],
+            type: "string",
+          },
+        },
+        required: ["direction", "children"],
+        type: "object",
+      },
+      paneNodeSchema,
+    ],
+    description: "Recursive desired subtree. Split nodes use `{ type:\"split\", direction, children }`; pane leaves use `{ type:\"pane\", paneId?, name? }`. Leaves without paneId allocate provider-owned pane ids/labels.",
+  };
+}
+
+const realizeTopologyDesiredSchema = createRealizeTopologyNodeSchema();
+
 export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefinition<any>[] {
   return [
     {
@@ -162,8 +235,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
             type: "array",
           },
           desired: {
-            description: "Recursive desired subtree. Split nodes use `{ type:\"split\", direction, children }`; pane leaves use `{ type:\"pane\", paneId?, name? }`. Leaves without paneId allocate provider-owned pane ids/labels.",
-            type: "object",
+            ...realizeTopologyDesiredSchema,
           },
           expectedTopologyRevision: {
             description: "Required topologyRevision from the latest `surf_ace_list` read.",
@@ -172,8 +244,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
           },
           fingerprint: fingerprintParam,
           target: {
-            description: "Use `{ root: true }` to replace the whole layout, or `{ paneId }` to replace one pane slot.",
-            type: "object",
+            ...realizeTopologyTargetSchema,
           },
         },
         required: ["fingerprint", "target", "expectedTopologyRevision", "allowDestroyPaneIds", "desired"],
