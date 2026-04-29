@@ -1410,6 +1410,10 @@ function displayForPusherProvenance(context?: SurfAceSessionContext): ContentDis
   };
 }
 
+function pusherSessionKeyFromContext(context?: SurfAceSessionContext): string | undefined {
+  return pusherProvenanceFromContext(context)?.sessionKey;
+}
+
 function sameHistorySessionKey(left: string | null, right: string | null): boolean {
   return left === right;
 }
@@ -2786,7 +2790,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       `[surf-ace:runtime] contentSet pane=${pane.paneId}(remote=${pane.remotePaneId}) type=${input.contentType} contentPreview=${contentPreview}`,
     );
 
-    const sessionKey = context?.sessionKey;
+    const sessionKey = pusherSessionKeyFromContext(context);
     const display = displayForPusherProvenance(context);
     const nextContentId =
       sessionKey && pane.ownerSessionKey === sessionKey && pane.activeContentId

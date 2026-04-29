@@ -2442,6 +2442,54 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider uses nested pusher session keys for content ownership", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const first = await runtime.push(
+        {
+          content: "# alpha",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        {
+          pushedBy: {
+            displayName: "Alpha Stream",
+            sessionKey: "agent:test:nested-alpha",
+          },
+        },
+      );
+      const second = await runtime.push(
+        {
+          content: "# beta",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        {
+          sourceProvenance: {
+            displayName: "Beta Stream",
+            sessionKey: "agent:test:nested-beta",
+          },
+        },
+      );
+
+      assert.notEqual(first.contentId, second.contentId);
+      assert.notEqual(
+        server.contentSetRequests[0]?.historyOwnerToken,
+        server.contentSetRequests[1]?.historyOwnerToken,
+      );
+      assert.deepEqual(
+        server.contentSetRequests.map((request) => request.displayTitle),
+        ["Alpha Stream", "Beta Stream"],
+      );
+
+      const screens = await runtime.listScreens();
+      assert.equal(screens[0]?.panes[0]?.historySummary.backCount, 1);
+      assert.equal(screens[0]?.panes[0]?.historySummary.visibleContentId, second.contentId);
+    });
+  });
+
   await t.test("provider skips immediate html snapshot sync while renderer is pending", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
