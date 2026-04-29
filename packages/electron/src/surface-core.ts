@@ -602,6 +602,7 @@ export class SurfaceCore {
     payload: TopologyApplyRequest["payload"],
   ): TopologyApplyResponse["payload"] {
     const surface = this.getSurface(surfaceId);
+    assertUniqueVisiblePaneLabels(payload.panes);
     const paneStateById = new Map<number, TopologyApplyRequest["payload"]["panes"][number]>();
     for (const pane of payload.panes) {
       paneStateById.set(Number(pane.paneId), pane);
@@ -856,6 +857,10 @@ export class SurfaceCore {
 
     const newPaneIds = payload.newPaneIds.map((paneId) => Math.trunc(paneId));
     const newPaneLabels = payload.newPaneLabels.map((paneLabel) => Math.trunc(paneLabel));
+    assertUniqueVisiblePaneLabels([
+      ...[...surface.panes.values()].map((pane) => ({ paneLabel: pane.paneLabel })),
+      ...newPaneLabels.map((paneLabel) => ({ paneLabel })),
+    ]);
     for (const paneId of newPaneIds) {
       if (surface.panes.has(paneId)) {
         throw new SurfaceCoreError("invalid_payload", `Pane already exists: ${paneId}`);
@@ -1516,6 +1521,19 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     },
     toast: null,
   };
+}
+
+function assertUniqueVisiblePaneLabels(panes: Array<{ paneLabel: number }>): void {
+  const usedPaneLabels = new Set<number>();
+  for (const pane of panes) {
+    if (!Number.isInteger(pane.paneLabel) || pane.paneLabel <= 0) {
+      throw new SurfaceCoreError("invalid_payload", "paneLabel must be a positive integer");
+    }
+    if (usedPaneLabels.has(pane.paneLabel)) {
+      throw new SurfaceCoreError("invalid_payload", `Duplicate paneLabel: ${pane.paneLabel}`);
+    }
+    usedPaneLabels.add(pane.paneLabel);
+  }
 }
 
 function currentEntry(pane: PaneState): HistoryEntry {

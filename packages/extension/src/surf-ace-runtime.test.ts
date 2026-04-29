@@ -127,6 +127,7 @@ class FakeSurfAceWsServer {
     newPaneLabels: number[];
     paneId: number;
   }> = [];
+  nextTopologyApplyResponsePaneLabels: number[] | null = null;
   snapshotDelayMs = 0;
   snapshotImage = "aGVsbG8=";
   snapshotRequests: Array<{ includeImage: boolean; includeVisibleText: boolean; paneId: number }> = [];
@@ -757,16 +758,17 @@ class FakeSurfAceWsServer {
         socket.send(
           JSON.stringify(
             this.response(message.id, "topology.apply", {
-              panes: panes.map((pane) => ({
+              panes: panes.map((pane, index) => ({
                 name: pane.name,
                 paneId: pane.paneId,
-                paneLabel: pane.paneLabel,
+                paneLabel: this.nextTopologyApplyResponsePaneLabels?.[index] ?? pane.paneLabel,
                 paneLineageId: `pl_${targetSurface.surfaceId}_${pane.paneId}`,
               })),
               topologyRevision: Number(message.payload?.topologyRevision ?? 0),
             }),
           ),
         );
+        this.nextTopologyApplyResponsePaneLabels = null;
         return;
       }
       case "content.apply": {
@@ -1761,7 +1763,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("multiple surfaces get unique window labels and local first pane labels", async () => {
+  await t.test("multiple surfaces get unique window labels and globally unique first pane labels", async () => {
     const portA = nextPort++;
     const portB = nextPort++;
     const serverA = new FakeSurfAceWsServer(portA, { surfaceId: "sf_surface-a" });
@@ -1790,7 +1792,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         })),
         [
           { panes: [1], windowLabel: "a" },
-          { panes: [1], windowLabel: "b" },
+          { panes: [2], windowLabel: "b" },
         ],
       );
       assert.equal(new Set(firstPaneIds).size, firstPaneIds.length);
@@ -1802,7 +1804,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [1, 1],
+        [1, 2],
       );
     } finally {
       await runtime.stop();
@@ -1843,8 +1845,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         })),
         [
           { fingerprint: "sf_surface-a", panes: [1], windowLabel: "a" },
-          { fingerprint: "sf_surface-b", panes: [1], windowLabel: "b" },
-          { fingerprint: "sf_surface-c", panes: [1], windowLabel: "c" },
+          { fingerprint: "sf_surface-b", panes: [2], windowLabel: "b" },
+          { fingerprint: "sf_surface-c", panes: [3], windowLabel: "c" },
         ],
       );
 
@@ -1865,13 +1867,105 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         [...requestsBySurface.values()].map((request) => request?.initialPaneLabel).sort(),
-        [1, 1, 1],
+        [1, 2, 3],
       );
     } finally {
       await runtime.stop();
       await server.close();
       await fs.rm(stateDir, { force: true, recursive: true });
     }
+  });
+
+  await t.test("polluted duplicate pane labels are repaired across live surfaces before exposure", async () => {
+    const portA = nextPort++;
+    const portB = nextPort++;
+    const serverA = new FakeSurfAceWsServer(portA, {
+      initialRemotePaneId: 6242,
+      surfaceId: "sf_surface-a",
+    });
+    const serverB = new FakeSurfAceWsServer(portB, {
+      initialRemotePaneId: 6243,
+      surfaceId: "sf_surface-b",
+    });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-duplicate-pane-labels-"));
+    const discovery = new StaticDiscoveryService([
+      discoveryEndpoint(portA, "aaaabbbb"),
+      discoveryEndpoint(portB, "ccccdddd"),
+    ]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 6244,
+            nextRemotePaneId: 6244,
+            nextWindowLabelIndex: 2,
+            paneLabelsByPaneId: {
+              [`${serverA.surfaceId}::6242`]: 1,
+              [`${serverB.surfaceId}::6243`]: 1,
+            },
+            providerId: "pv_test_provider",
+            version: 1,
+            windowLabels: {
+              [serverA.surfaceId]: "fx",
+              [serverB.surfaceId]: "fw",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      await runtime.start();
+      await waitFor(() => serverA.pairedSocket !== null && serverB.pairedSocket !== null);
+
+      const screens = await runtime.listScreens();
+      assert.deepEqual(
+        screens.map((screen) => ({
+          panes: screen.panes.map((pane) => pane.paneLabel),
+          windowLabel: screen.windowLabel,
+        })),
+        [
+          { panes: [2], windowLabel: "fw" },
+          { panes: [1], windowLabel: "fx" },
+        ],
+      );
+      assert.deepEqual(
+        [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
+        [1, 2],
+      );
+      const repairedState = JSON.parse(await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"));
+      assert.deepEqual(
+        Object.values(repairedState.paneLabelsByPaneId).sort(),
+        [1, 2],
+      );
+      assert.equal(repairedState.nextPaneLabel, 3);
+    } finally {
+      await runtime.stop();
+      await serverB.close();
+      await serverA.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("client topology responses cannot overwrite provider pane labels with duplicates", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      server.nextTopologyApplyResponsePaneLabels = [77, 77, 77];
+
+      const split = await runtime.split({
+        count: 3,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: await livePaneId(runtime, server.surfaceId, 1),
+      });
+
+      assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assertPaneLabelsWithOpaqueIds(screen?.panes ?? [], [1, 2, 3]);
+      assert.deepEqual(server.topologyApplyRequests.at(-1)?.paneLabels, [1, 2, 3]);
+    });
   });
 
   await t.test("surfaces.list does not remap an established missing surface to the first sibling", async () => {

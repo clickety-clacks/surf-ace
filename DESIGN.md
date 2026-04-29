@@ -101,7 +101,7 @@ Before the protocol details, these terms are used consistently throughout this s
 
 **Pane** — a rendering scope nested inside a surface window. Each pane has a stable internal identity (`paneId`) and a separate stable visible identity (`paneLabel`).
 
-**Pane label** — the provider-assigned user-visible identifier for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from `paneId`.
+**Pane label** — the provider-assigned user-visible identifier for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from `paneId` and is a secondary key for the live Surf Ace topology.
 
 **Endpoint** — the app/device WS host:port advertised via mDNS. One endpoint may host multiple surfaces (windows).
 
@@ -171,10 +171,10 @@ Naming system:
 1. **Window labels** (a, b, c … z, aa, ab …) are assigned by the **provider/extension**, not the surface.
 2. `windowLabel` allocation is monotonic and provider-owned. It is persisted by `surfaceId`, survives reconnect/remap, and MUST NOT be recycled while the provider's persisted Surf Ace state remains intact. It resets only when that persisted label state is explicitly reset.
 3. **Pane IDs** are assigned by the **provider/extension** and sent to the surface in topology commands. They are stable internal routing identifiers. The surface never generates pane IDs independently.
-4. **Pane labels** are assigned by the **provider/extension** and are the user-visible pane identifiers. They use a monotonic numeric sequence (`1`, `2`, `3`, ...), are persisted by internal `paneId`, and MUST NOT be recycled while the provider's persisted Surf Ace state remains intact. Closing a pane retires its `paneLabel`; a newly created pane consumes the next label.
+4. **Pane labels** are assigned by the **provider/extension** and are the user-visible secondary keys for the live Surf Ace topology. Across currently live/connected Surf Ace surfaces, no two live panes may publish the same `paneLabel`. Allocation is compact and provider-owned; it MUST NOT be seeded from internal `paneId`, remote/client pane ids, tool ids, or client-reported labels. Persisted duplicate or polluted labels MUST be repaired by the provider before they become observable in `surf_ace_list`, pair/bootstrap payloads, topology payloads, or persisted screen snapshots.
 5. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. Pane names are optional metadata and MUST NOT replace `paneLabel` as the visible identity or addressing token.
 6. The extension is the sole authority on topology and visible labeling. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
-7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each.
+7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each. Surfaces MUST reject topology mutations that contain duplicate or invalid visible `paneLabel` values.
 8. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the `windowLabel`, initial internal `paneId`, and initial visible `paneLabel`. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
 9. Labels are displayed on the surface — window identity immediately precedes the pane label as a bottom-right floating overlay within each pane. The window identity is uppercase text inside a rounded-rectangle outline, followed by the plain pane number, e.g. an outlined `A` box next to `12`. See §15.1 for visibility rules.
 
@@ -2915,7 +2915,7 @@ Each window is assigned a short alphabetic identifier using an auto-incrementing
 
 The window label is the primary addressing handle. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity.
 
-Each pane is assigned a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier. Optional pane names do not replace it. The pane label MUST be:
+Each pane is assigned a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier and live-topology secondary key; it MUST remain unique across live Surf Ace surfaces so references such as "pane 1" are not ambiguous between visible windows. Optional pane names do not replace it. The pane label MUST be:
 - Displayed as plain overlay text with no pill, background, or border.
 - Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/4 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
 - Rendered in Rajdhani Bold, with visually consistent heavy weight across Electron and iOS.

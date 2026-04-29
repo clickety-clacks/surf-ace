@@ -378,6 +378,65 @@ test("surface core topology.apply reuses existing pane content and replaces prov
   assert.equal(windowState.panes.find((pane) => pane.paneId === 9)?.label, "42");
 });
 
+test("surface core rejects topology.apply with duplicate visible pane labels", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  assert.throws(
+    () => core.topologyApply(surface.surfaceId, {
+      layout: {
+        children: [
+          { paneId: 7 as never, type: "pane" },
+          { paneId: 9 as never, type: "pane" },
+        ],
+        direction: "horizontal",
+        type: "split",
+      },
+      panes: [
+        { name: "Left", paneId: 7 as never, paneLabel: 41 },
+        { name: "Right", paneId: 9 as never, paneLabel: 41 },
+      ],
+      topologyRevision: 3 as never,
+      windowLabel: "b",
+    }),
+    /Duplicate paneLabel: 41/,
+  );
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
+});
+
+test("surface core rejects pane.split with duplicate visible pane labels", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  assert.throws(
+    () => core.paneSplit(surface.surfaceId, {
+      count: 2,
+      direction: "horizontal",
+      newPaneIds: [9],
+      newPaneLabels: [7],
+      paneId,
+    }),
+    /Duplicate paneLabel: 7/,
+  );
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
+});
+
 test("surface core emits history navigation after back/forward", () => {
   const core = new SurfaceCore({
     persistentState: {

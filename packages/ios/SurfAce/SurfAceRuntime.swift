@@ -1380,11 +1380,16 @@ final class SurfAceRuntime {
         }
 
         var panesById: [Int: SurfAcePaneModel] = [:]
+        var visiblePaneLabels = Set<Int>()
         for panePayload in panesPayload {
             guard let paneId = panePayload["paneId"] as? Int,
                   let paneLabel = panePayload["paneLabel"] as? Int else {
                 return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply panes")
             }
+            guard paneLabel > 0, !visiblePaneLabels.contains(paneLabel) else {
+                return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "duplicate or invalid paneLabel")
+            }
+            visiblePaneLabels.insert(paneLabel)
             let pane = surface.panesById[paneId] ?? SurfAcePaneModel(paneId: paneId, paneLabel: paneLabel)
             pane.paneLabel = paneLabel
             pane.name = (panePayload["name"] as? String)?.isEmpty == true ? nil : panePayload["name"] as? String
@@ -1588,6 +1593,13 @@ final class SurfAceRuntime {
 
         for newPaneId in newPaneIds where surface.panesById[newPaneId] != nil {
             return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "newPaneIds must be unique")
+        }
+        var visiblePaneLabels = Set(surface.panesById.values.map(\.paneLabel))
+        for newPaneLabel in newPaneLabels {
+            guard newPaneLabel > 0, !visiblePaneLabels.contains(newPaneLabel) else {
+                return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "duplicate or invalid paneLabel")
+            }
+            visiblePaneLabels.insert(newPaneLabel)
         }
         let children: [SurfAcePaneLayoutNode] = [.leaf(paneId)] + newPaneIds.map(SurfAcePaneLayoutNode.leaf)
         surface.activeKeyboardPaneId = paneId
