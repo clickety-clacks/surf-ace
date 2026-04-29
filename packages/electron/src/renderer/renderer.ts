@@ -575,6 +575,42 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   return button;
 }
 
+function createLucideIcon(name: "pen-line"): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("class", `lucide lucide-${name}`);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("height", "22");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "22");
+  const pathsByIcon: Record<typeof name, string[]> = {
+    "pen-line": [
+      "M12 20h9",
+      "M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z",
+    ],
+  };
+  for (const pathData of pathsByIcon[name]) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathData);
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
+function createIconButton(iconName: "pen-line", accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = `control-button icon-button ${className}`;
+  button.disabled = disabled;
+  button.setAttribute("aria-label", accessibleLabel);
+  button.title = accessibleLabel;
+  button.appendChild(createLucideIcon(iconName));
+  return button;
+}
+
 function setPaneChromeMetrics(view: PaneView): void {
   const rect = view.rootEl.getBoundingClientRect();
   const paneNumberSize = Math.max(1, Math.min(rect.width, rect.height) / 4);
@@ -825,7 +861,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   }
   const annotationPill = document.createElement("div");
   annotationPill.className = "control-pill annotation-pill";
-  const annotate = surfAceOverlay(createButton("👆", "annotate"), "annotation-control");
+  const annotate = surfAceOverlay(createIconButton("pen-line", "Sketch", "annotate"), "annotation-control");
   annotate.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });

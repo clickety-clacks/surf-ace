@@ -463,6 +463,17 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   cursor: default;
 }
 
+.control-button.icon-button {
+  letter-spacing: 0;
+}
+
+.control-button .lucide {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  pointer-events: none;
+}
+
 .control-button.done {
   background: rgba(22, 66, 42, 0.95);
   border-color: rgba(76, 215, 120, 0.6);
