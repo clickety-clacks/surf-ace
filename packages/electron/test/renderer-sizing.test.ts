@@ -71,6 +71,21 @@ test("browser_url diagnostics report host and guest sizing through surface comma
   assert.match(source.slice(browserUrlIndex), /reportBrowserUrlDiagnostics\(view, browserView, "did-finish-load"\)/);
 });
 
+test("browser_url render resets guest scroll before verification", async () => {
+  const source = await rendererSource();
+  const diagnosticsIndex = source.indexOf("async function browserUrlGuestDiagnostics");
+  const resetGuestIndex = source.indexOf("function resetBrowserUrlGuestScroll");
+  const browserUrlIndex = source.indexOf("if (pane.content.contentType === \"browser_url\")");
+
+  assert.ok(diagnosticsIndex > -1);
+  assert.ok(resetGuestIndex > -1);
+  assert.ok(resetGuestIndex > diagnosticsIndex);
+  assert.match(source.slice(resetGuestIndex, browserUrlIndex), /window\.history\.scrollRestoration = "manual"/);
+  assert.match(source.slice(resetGuestIndex, browserUrlIndex), /window\.scrollTo\(0, 0\)/);
+  assert.match(source.slice(diagnosticsIndex, resetGuestIndex), /scrollY: Math\.round\(window\.scrollY\)/);
+  assert.match(source.slice(browserUrlIndex), /resetBrowserUrlGuestScroll\(browserView\)[\s\S]*verifyBrowserUrlGuestViewport\(view, browserView, "did-finish-load:guest-viewport"\)/);
+});
+
 test("browser_url navigation verifies the guest viewport before reporting success", async () => {
   const source = await rendererSource();
   const mismatchIndex = source.indexOf("function browserUrlViewportMismatch");

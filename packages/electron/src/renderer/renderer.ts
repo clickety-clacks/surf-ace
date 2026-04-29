@@ -78,6 +78,8 @@ type BrowserUrlGuestMetrics = {
   location: string;
   rootClientHeight: number | null;
   rootClientWidth: number | null;
+  scrollX: number;
+  scrollY: number;
   rootScrollHeight: number | null;
   rootScrollWidth: number | null;
   visualViewport: { height: number; scale: number; width: number } | null;
@@ -1145,6 +1147,8 @@ async function browserUrlGuestDiagnostics(webview: BrowserUrlWebViewElement): Pr
         location: window.location.href,
         rootClientHeight: root ? root.clientHeight : null,
         rootClientWidth: root ? root.clientWidth : null,
+        scrollX: Math.round(window.scrollX),
+        scrollY: Math.round(window.scrollY),
         rootScrollHeight: root ? root.scrollHeight : null,
         rootScrollWidth: root ? root.scrollWidth : null,
         visualViewport: window.visualViewport ? {
@@ -1156,6 +1160,24 @@ async function browserUrlGuestDiagnostics(webview: BrowserUrlWebViewElement): Pr
     })()`);
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function resetBrowserUrlGuestScroll(webview: BrowserUrlWebViewElement): Promise<void> {
+  if (!webview.executeJavaScript) {
+    return;
+  }
+  try {
+    await webview.executeJavaScript(`(() => {
+      if ("scrollRestoration" in window.history) {
+        window.history.scrollRestoration = "manual";
+      }
+      window.scrollTo(0, 0);
+      document.documentElement?.scrollTo?.(0, 0);
+      document.body?.scrollTo?.(0, 0);
+    })()`);
+  } catch {
+    // Guest scripting can reject during navigation churn; viewport verification still reports diagnostics.
   }
 }
 
@@ -1636,29 +1658,33 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     browserView.addEventListener(
       "dom-ready",
       () => {
-        reportBrowserUrlDiagnostics(view, browserView, "dom-ready");
-        void verifyBrowserUrlGuestViewport(view, browserView, "dom-ready:guest-viewport");
+        void resetBrowserUrlGuestScroll(browserView).finally(() => {
+          reportBrowserUrlDiagnostics(view, browserView, "dom-ready");
+          void verifyBrowserUrlGuestViewport(view, browserView, "dom-ready:guest-viewport");
+        });
       },
     );
     browserView.addEventListener(
       "did-finish-load",
       () => {
-        reportBrowserUrlDiagnostics(view, browserView, "did-finish-load");
-        void verifyBrowserUrlGuestViewport(view, browserView, "did-finish-load:guest-viewport").then(({ mismatch }) => {
-          if (renderToken !== view.currentRenderToken) {
-            return;
-          }
-          if (mismatch) {
-            reportNavigation(
-              "failed",
-              `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
-            );
-            return;
-          }
-          reportNavigation("applied");
-          window.setTimeout(() => {
-            reportPaneSnapshot(view);
-          }, 0);
+        void resetBrowserUrlGuestScroll(browserView).finally(() => {
+          reportBrowserUrlDiagnostics(view, browserView, "did-finish-load");
+          void verifyBrowserUrlGuestViewport(view, browserView, "did-finish-load:guest-viewport").then(({ mismatch }) => {
+            if (renderToken !== view.currentRenderToken) {
+              return;
+            }
+            if (mismatch) {
+              reportNavigation(
+                "failed",
+                `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
+              );
+              return;
+            }
+            reportNavigation("applied");
+            window.setTimeout(() => {
+              reportPaneSnapshot(view);
+            }, 0);
+          });
         });
       },
       { once: true },

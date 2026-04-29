@@ -176,15 +176,15 @@ export function resolvedOverlayRegionsForCompositor(
 ): CompositorOverlayRegion[] {
   const paneById = new Map([...panes].map((pane) => [String(pane.id), pane]));
 
-  return regions.map((region) => {
+  return regions.flatMap((region) => {
     const pane = paneById.get(String(region.paneId));
     if (!pane) {
-      return region;
+      return [];
     }
-    return {
+    return [{
       ...region,
       paneInstanceId: pane.paneInstanceId,
-    };
+    }];
   });
 }
 

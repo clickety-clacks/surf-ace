@@ -287,6 +287,53 @@ test("native pane bridge preserves renderer-measured chrome rects and resolves l
   ]);
 });
 
+test("native pane bridge omits renderer overlay regions for non-native panes", () => {
+  const panes = [
+    {
+      geometry: {
+        coordinateSpace: "compositor_logical",
+        geometryRevision: 1,
+        height: 1920,
+        paneInstanceId: "sf_test:1:target_top",
+        surfaceEpoch: 1,
+        topologyEpoch: 1,
+        width: 2160,
+        x: 0,
+        y: 0,
+      },
+      id: "1",
+      paneInstanceId: "1:target_top",
+    },
+  ] as const;
+  const regions = [
+    {
+      captures: ["pointer_hover"],
+      kind: "pane_badge",
+      paneId: "1",
+      paneInstanceId: "stale",
+      rect: { height: 200, width: 200, x: 1900, y: 1700 },
+      regionId: "surf-ace-pane-1-label",
+      zIndex: 15,
+    },
+    {
+      captures: ["pointer_hover"],
+      kind: "pane_badge",
+      paneId: "2",
+      paneInstanceId: "browser-pane",
+      rect: { height: 200, width: 200, x: 1900, y: 3600 },
+      regionId: "surf-ace-pane-2-label",
+      zIndex: 15,
+    },
+  ] as const;
+
+  assert.deepEqual(resolvedOverlayRegionsForCompositor([...regions], panes), [
+    {
+      ...regions[0],
+      paneInstanceId: "1:target_top",
+    },
+  ]);
+});
+
 test("native pane bridge indexes live compositor pane instances from materialization bindings", () => {
   assert.deepEqual(
     [...nativePaneInstanceIdsForCompositor(materialization({
