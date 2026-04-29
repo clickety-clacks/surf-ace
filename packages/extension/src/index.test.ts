@@ -1,22 +1,21 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { WebSocketServer } from "ws";
 
-import {
-  buildSurfAceAgentInstructions,
-  buildSurfAcePromptBuildHookResult,
-} from "./agent-instructions.js";
 import {
   deliverSettledAnnotationIntentTurn,
   type SurfAceAnnotationIntentTurn,
   __test,
 } from "./annotation-intent-delivery.js";
 
-test("Surf Ace prompt hook keeps static guidance out of per-turn user prompts", () => {
-  const hookResult = buildSurfAcePromptBuildHookResult();
+test("Surf Ace extension does not inject static instructions through prompt-build hooks", () => {
+  const indexSource = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const instructionSource = readFileSync(new URL("./agent-instructions.ts", import.meta.url), "utf8");
 
-  assert.equal("prependContext" in hookResult, false);
-  assert.equal(hookResult.prependSystemContext, buildSurfAceAgentInstructions());
+  assert.equal(indexSource.includes("before_prompt_build"), false);
+  assert.equal(instructionSource.includes("prependContext"), false);
+  assert.equal(instructionSource.includes("prependSystemContext"), false);
 });
 
 test("settled annotation delivery connects to the gateway and sends the image attachment via agent", async () => {

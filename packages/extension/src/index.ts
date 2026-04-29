@@ -1,6 +1,5 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
-import { buildSurfAcePromptBuildHookResult } from "./agent-instructions.js";
 import { deliverSettledAnnotationIntentTurn } from "./annotation-intent-delivery.js";
 import { createSurfAceRuntime } from "./surf-ace-runtime.js";
 import { createSurfAceTools } from "./surf-ace-tools.js";
@@ -62,8 +61,6 @@ const plugin = {
         },
       }));
     }
-
-    api.on("before_prompt_build", async () => buildSurfAcePromptBuildHookResult());
   },
 };
 

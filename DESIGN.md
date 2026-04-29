@@ -2357,10 +2357,7 @@ Protocol is ready for implementation when these checks pass in integration tests
 15. Surf Ace extension skills are present at these provider paths and load successfully:
    - `extensions/surf-ace/skills/surf-ace-ops/SKILL.md` (tool usage for list/push/read/clear/pane ops)
    - `extensions/surf-ace/skills/surf-ace-markup/SKILL.md` (annotation interpretation + markup workflow)
-16. Surf Ace agent-instruction injection is present and wired from these provider paths:
-   - `extensions/surf-ace/src/agent-instructions.ts` (builds Surf Ace instruction snippet)
-   - `extensions/surf-ace/index.ts` (registers/injects Surf Ace instruction snippet into agent runtime prompt)
-   The injected instructions MUST cover event semantics (`event.drawing_flush`, pane lifecycle events, navigation/page/selection handling) so agents can correctly interpret Surf Ace alerts.
+16. Static Surf Ace guidance is delivered only through contributed extension skills or an explicitly contributed system prompt. The extension MUST NOT attach static guidance from `before_prompt_build`, `prependContext`, `prependSystemContext`, or any other per-turn prompt-build hook.
 
 Implementation status: ready for implementation.
 
@@ -2925,24 +2922,19 @@ When unread annotation activity first appears (live dirty update and/or closed f
 | `stale_content` | `contentId` param does not match currently active content |
 | `internal_error` | Unhandled provider or surface error |
 
-### 14.6 Extension Skills and Agent Instruction Injection (Required Paths)
+### 14.6 Extension Skills and Instruction Channels
 
-Surf Ace implementation is not complete unless both extension skills and agent instruction injection are present at these provider paths.
+Surf Ace implementation is not complete unless extension skills are present at these provider paths. Static Surf Ace guidance MUST NOT be injected by the extension through per-turn prompt-build hooks.
 
 **Required skill files:**
 - `extensions/surf-ace/skills/surf-ace-ops/SKILL.md`
 - `extensions/surf-ace/skills/surf-ace-markup/SKILL.md`
 
-**Required instruction-injection files:**
-- `extensions/surf-ace/src/agent-instructions.ts`
-- `extensions/surf-ace/index.ts` (wires instruction injection into extension registration)
+**Allowed instruction channels:**
+- Contributed extension skills.
+- An explicitly contributed system prompt, if the host supports one.
 
-The injected Surf Ace instruction text MUST teach agents how to interpret surface-originated events, including at minimum:
-- `event.drawing_flush`
-- `event.navigation`
-- `event.page`
-- `event.selection` (v1 text-only handling)
-- `event.pane_created` / `event.pane_removed` / `event.pane_renamed`
+The extension MUST NOT use `before_prompt_build`, `prependContext`, or `prependSystemContext` to attach static Surf Ace instructions. Annotation intent delivery remains a separate event-driven workflow: it may create a concrete follow-up turn for a settled annotation frame and image attachment, but it is not a static guidance channel.
 
 Standalone-provider note: Surf Ace MAY run as a standalone extension without Clawline coupling, provided it implements gateway wake/routing plumbing comparable to existing channel extensions (for example, Discord-style wake + route behavior) rather than relying on Clawline-specific internal helpers.
 
