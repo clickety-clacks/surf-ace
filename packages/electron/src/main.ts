@@ -263,7 +263,9 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
   const regions = Array.isArray(payload.regions) ? payload.regions : [];
   const socketPath = resolveCompositorControlSocketPath();
   const rendererTopologyEpoch = payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch);
+  const currentDiagnostic = overlayDiagnostics.get(surfaceId) ?? {};
   const diagnostic: Record<string, unknown> = {
+    ...(currentDiagnostic.browserUrlDiagnostics ? { browserUrlDiagnostics: currentDiagnostic.browserUrlDiagnostics } : {}),
     compositorSocketConfigured: Boolean(socketPath),
     lastRendererReportAt: new Date().toISOString(),
     regionCount: regions.length,
@@ -321,6 +323,25 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
     diagnostic.forwardStatus = "error";
     throw error;
   }
+}
+
+function recordBrowserUrlDiagnostics(surfaceId: string, paneId: number, payload: Record<string, unknown>): void {
+  const current = overlayDiagnostics.get(surfaceId) ?? {};
+  const existingByPane =
+    current.browserUrlDiagnostics && typeof current.browserUrlDiagnostics === "object"
+      ? current.browserUrlDiagnostics as Record<string, unknown>
+      : {};
+  const diagnostic = {
+    ...current,
+    browserUrlDiagnostics: {
+      ...existingByPane,
+      [String(paneId)]: {
+        ...payload,
+        receivedAt: new Date().toISOString(),
+      },
+    },
+  };
+  overlayDiagnostics.set(surfaceId, diagnostic);
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -572,6 +593,10 @@ function installIpc(): void {
     }
 
     const paneId = Number(payload.paneId ?? 0);
+    if (payload.type === "browser-url-diagnostics") {
+      recordBrowserUrlDiagnostics(surfaceId, paneId, payload as Record<string, unknown>);
+      return;
+    }
     if (paneId > 0) {
       core.setActiveKeyboardPane(surfaceId, paneId);
     }

@@ -50,11 +50,23 @@ type MarkdownContent = { markdown: string };
 type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
 type BrowserUrlContent = { url: string };
-type BrowserUrlWebViewElement = HTMLElement & { src: string };
+type BrowserUrlWebViewElement = HTMLElement & {
+  executeJavaScript?: (code: string) => Promise<unknown>;
+  getWebContentsId?: () => number;
+  src: string;
+};
 type BrowserUrlWebViewErrorEvent = Event & {
   errorDescription?: string;
   isMainFrame?: boolean;
 };
+type BrowserUrlDiagnosticReason =
+  | "did-attach"
+  | "did-fail-load"
+  | "did-finish-load"
+  | "dom-ready"
+  | "navigation-assigned"
+  | "pre-navigation"
+  | "resize";
 type PaneContentValue =
   | null
   | BrowserUrlContent
@@ -1022,6 +1034,13 @@ function applyPaneFrameSize(view: PaneView, element: HTMLElement): boolean {
   view.contentEl.style.minHeight = `${height}px`;
   element.style.width = `${width}px`;
   element.style.height = `${height}px`;
+  if (element.matches("webview.content-browser-url-frame")) {
+    element.setAttribute("autosize", "on");
+    element.setAttribute("minwidth", String(width));
+    element.setAttribute("minheight", String(height));
+    element.setAttribute("maxwidth", String(width));
+    element.setAttribute("maxheight", String(height));
+  }
   return true;
 }
 
@@ -1043,11 +1062,143 @@ function sizeWebViewToPane(view: PaneView, element: HTMLElement): void {
   applyPaneFrameSize(view, element);
   const observer = new ResizeObserver(() => {
     applyPaneFrameSize(view, element);
+    if (element.matches("webview.content-browser-url-frame")) {
+      reportBrowserUrlDiagnostics(view, element as BrowserUrlWebViewElement, "resize");
+    }
   });
   observer.observe(view.rootEl);
   observer.observe(view.scrollEl);
   view.currentWebViewResizeObserver = observer;
   schedulePaneFrameSizeRefresh(view, element);
+}
+
+function rectDiagnostics(rect: DOMRect): Record<string, number> {
+  return {
+    bottom: Math.round(rect.bottom),
+    height: Math.round(rect.height),
+    left: Math.round(rect.left),
+    right: Math.round(rect.right),
+    top: Math.round(rect.top),
+    width: Math.round(rect.width),
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+  };
+}
+
+function elementDiagnostics(element: HTMLElement): Record<string, unknown> {
+  const style = window.getComputedStyle(element);
+  return {
+    boundingRect: rectDiagnostics(element.getBoundingClientRect()),
+    client: { height: element.clientHeight, width: element.clientWidth },
+    computed: {
+      display: style.display,
+      height: style.height,
+      inset: style.inset,
+      maxHeight: style.maxHeight,
+      maxWidth: style.maxWidth,
+      minHeight: style.minHeight,
+      minWidth: style.minWidth,
+      overflow: style.overflow,
+      position: style.position,
+      transform: style.transform,
+      width: style.width,
+    },
+    offset: { height: element.offsetHeight, width: element.offsetWidth },
+    scroll: { height: element.scrollHeight, width: element.scrollWidth, x: element.scrollLeft, y: element.scrollTop },
+  };
+}
+
+async function browserUrlGuestDiagnostics(webview: BrowserUrlWebViewElement): Promise<unknown> {
+  if (!webview.executeJavaScript) {
+    return null;
+  }
+  try {
+    return await webview.executeJavaScript(`(() => {
+      const root = document.documentElement;
+      const body = document.body;
+      const bodyRect = body ? body.getBoundingClientRect() : null;
+      return {
+        bodyRect: bodyRect ? {
+          height: Math.round(bodyRect.height),
+          width: Math.round(bodyRect.width),
+          x: Math.round(bodyRect.x),
+          y: Math.round(bodyRect.y)
+        } : null,
+        devicePixelRatio: window.devicePixelRatio,
+        innerHeight: window.innerHeight,
+        innerWidth: window.innerWidth,
+        location: window.location.href,
+        rootClientHeight: root ? root.clientHeight : null,
+        rootClientWidth: root ? root.clientWidth : null,
+        rootScrollHeight: root ? root.scrollHeight : null,
+        rootScrollWidth: root ? root.scrollWidth : null,
+        visualViewport: window.visualViewport ? {
+          height: Math.round(window.visualViewport.height),
+          scale: window.visualViewport.scale,
+          width: Math.round(window.visualViewport.width)
+        } : null
+      };
+    })()`);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function browserUrlWebContentsId(webview: BrowserUrlWebViewElement): number | null {
+  try {
+    return webview.getWebContentsId?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function reportBrowserUrlDiagnostics(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+  reason: BrowserUrlDiagnosticReason,
+): void {
+  if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
+    return;
+  }
+  const payload = {
+    attributes: {
+      autosize: webview.getAttribute("autosize"),
+      maxheight: webview.getAttribute("maxheight"),
+      maxwidth: webview.getAttribute("maxwidth"),
+      minheight: webview.getAttribute("minheight"),
+      minwidth: webview.getAttribute("minwidth"),
+    },
+    content: elementDiagnostics(view.contentEl),
+    devicePixelRatio: window.devicePixelRatio,
+    inner: { height: window.innerHeight, width: window.innerWidth },
+    pane: elementDiagnostics(view.rootEl),
+    paneId: view.paneId,
+    reason,
+    scroll: elementDiagnostics(view.scrollEl),
+    type: "browser-url-diagnostics",
+    visualViewport: window.visualViewport
+      ? {
+          height: Math.round(window.visualViewport.height),
+          scale: window.visualViewport.scale,
+          width: Math.round(window.visualViewport.width),
+        }
+      : null,
+    webContentsId: browserUrlWebContentsId(webview),
+    webview: elementDiagnostics(webview),
+  };
+  window.surfAce.command(payload);
+  if (reason === "dom-ready" || reason === "did-finish-load") {
+    void browserUrlGuestDiagnostics(webview).then((guest) => {
+      if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
+        return;
+      }
+      window.surfAce.command({
+        ...payload,
+        guest,
+        reason: `${reason}:guest`,
+      });
+    });
+  }
 }
 
 function refreshDynamicPaneFrames(): void {
@@ -1357,6 +1508,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     browserView.setAttribute("allowpopups", "true");
     view.contentEl.appendChild(browserView);
     sizeWebViewToPane(view, browserView);
+    reportBrowserUrlDiagnostics(view, browserView, "pre-navigation");
     let reported = false;
     const reportNavigation = (status: "applied" | "failed", errorMessage?: string) => {
       if (reported || renderToken !== view.currentRenderToken) {
@@ -1373,8 +1525,21 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
       });
     };
     browserView.addEventListener(
+      "did-attach",
+      () => {
+        reportBrowserUrlDiagnostics(view, browserView, "did-attach");
+      },
+    );
+    browserView.addEventListener(
+      "dom-ready",
+      () => {
+        reportBrowserUrlDiagnostics(view, browserView, "dom-ready");
+      },
+    );
+    browserView.addEventListener(
       "did-finish-load",
       () => {
+        reportBrowserUrlDiagnostics(view, browserView, "did-finish-load");
         reportNavigation("applied");
         window.setTimeout(() => {
           reportPaneSnapshot(view);
@@ -1389,6 +1554,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
         if (failure.isMainFrame === false) {
           return;
         }
+        reportBrowserUrlDiagnostics(view, browserView, "did-fail-load");
         const description = failure.errorDescription ? `: ${failure.errorDescription}` : "";
         reportNavigation("failed", `webview navigation failed${description}`);
       },
@@ -1396,6 +1562,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     );
     deferUntilPaneFrameReady(view, browserView, renderToken, () => {
       browserView.src = browserUrl.url;
+      reportBrowserUrlDiagnostics(view, browserView, "navigation-assigned");
     });
     return;
   }
