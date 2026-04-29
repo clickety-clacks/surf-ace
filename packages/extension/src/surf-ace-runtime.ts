@@ -3690,6 +3690,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const response = await this.sendRequest(surface, request);
     if (isErrorResponse(response)) {
+      this.logger.warn?.(
+        `[surf-ace:runtime] event=topology_apply_error surface_id=${surface.surfaceId} window_label=${surface.windowLabel || "<none>"} session_id=${surface.sessionId ?? "<none>"} topology_revision=${topologyRevision} pane_count=${request.payload.panes.length} remote_pane_ids=${request.payload.panes.map((pane) => Number(pane.paneId)).join(",")} pane_labels=${request.payload.panes.map((pane) => pane.paneLabel).join(",")} error_code=${response.error.code} error_message=${JSON.stringify(response.error.message)}`,
+      );
       throw new SurfAceToolError(
         mutationErrorCode(response.error.code),
         response.error.message,

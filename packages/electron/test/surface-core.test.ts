@@ -378,7 +378,7 @@ test("surface core topology.apply reuses existing pane content and replaces prov
   assert.equal(windowState.panes.find((pane) => pane.paneId === 9)?.label, "42");
 });
 
-test("surface core rejects topology.apply with duplicate visible pane labels", () => {
+test("surface core rejects topology.apply with duplicate pane labels inside one surface payload", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -405,14 +405,14 @@ test("surface core rejects topology.apply with duplicate visible pane labels", (
       topologyRevision: 3 as never,
       windowLabel: "b",
     }),
-    /Duplicate paneLabel: 41/,
+    /Duplicate paneLabel in surface payload: 41/,
   );
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
 });
 
-test("surface core rejects pane.split with duplicate visible pane labels", () => {
+test("surface core rejects pane.split with duplicate pane labels inside one surface", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -430,7 +430,7 @@ test("surface core rejects pane.split with duplicate visible pane labels", () =>
       newPaneLabels: [7],
       paneId,
     }),
-    /Duplicate paneLabel: 7/,
+    /Duplicate paneLabel in surface payload: 7/,
   );
 
   const windowState = core.getRendererWindowState(surface.surfaceId);

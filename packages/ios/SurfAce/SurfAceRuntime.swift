@@ -1387,7 +1387,7 @@ final class SurfAceRuntime {
                 return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply panes")
             }
             guard paneLabel > 0, !visiblePaneLabels.contains(paneLabel) else {
-                return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "duplicate or invalid paneLabel")
+                return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "duplicate or invalid paneLabel in surface payload")
             }
             visiblePaneLabels.insert(paneLabel)
             let pane = surface.panesById[paneId] ?? SurfAcePaneModel(paneId: paneId, paneLabel: paneLabel)
@@ -1597,7 +1597,7 @@ final class SurfAceRuntime {
         var visiblePaneLabels = Set(surface.panesById.values.map(\.paneLabel))
         for newPaneLabel in newPaneLabels {
             guard newPaneLabel > 0, !visiblePaneLabels.contains(newPaneLabel) else {
-                return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "duplicate or invalid paneLabel")
+                return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "duplicate or invalid paneLabel in surface payload")
             }
             visiblePaneLabels.insert(newPaneLabel)
         }

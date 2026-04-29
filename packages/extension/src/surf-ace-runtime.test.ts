@@ -127,6 +127,7 @@ class FakeSurfAceWsServer {
     newPaneLabels: number[];
     paneId: number;
   }> = [];
+  nextTopologyApplyError: { code: string; message: string } | null = null;
   nextTopologyApplyResponsePaneLabels: number[] | null = null;
   snapshotDelayMs = 0;
   snapshotImage = "aGVsbG8=";
@@ -734,6 +735,20 @@ class FakeSurfAceWsServer {
           topologyRevision: Number(message.payload?.topologyRevision ?? 0),
           windowLabel: String(message.payload?.windowLabel ?? ""),
         });
+        if (this.nextTopologyApplyError) {
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "topology.apply",
+                this.nextTopologyApplyError.code,
+                this.nextTopologyApplyError.message,
+              ),
+            ),
+          );
+          this.nextTopologyApplyError = null;
+          return;
+        }
         const previousPanes = new Map(targetSurface.panes);
         targetSurface.panes.clear();
         for (const paneState of panes) {
@@ -1965,6 +1980,39 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
       assertPaneLabelsWithOpaqueIds(screen?.panes ?? [], [1, 2, 3]);
       assert.deepEqual(server.topologyApplyRequests.at(-1)?.paneLabels, [1, 2, 3]);
+    });
+  });
+
+  await t.test("client topology rejection is logged with pane label context", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      server.nextTopologyApplyError = {
+        code: "invalid_payload",
+        message: "duplicate or invalid paneLabel in surface payload",
+      };
+
+      await assert.rejects(
+        runtime.split({
+          count: 2,
+          direction: "horizontal",
+          fingerprint: server.surfaceId,
+          paneId: await livePaneId(runtime, server.surfaceId, 1),
+        }),
+        /duplicate or invalid paneLabel in surface payload/,
+      );
+
+      assert.ok(
+        warnings.some((warning) =>
+          warning.includes("event=topology_apply_error") &&
+          warning.includes(`surface_id=${server.surfaceId}`) &&
+          warning.includes("window_label=a") &&
+          warning.includes("session_id=sa_test_session") &&
+          warning.includes("pane_count=2") &&
+          warning.includes("remote_pane_ids=41,42") &&
+          warning.includes("pane_labels=1,2") &&
+          warning.includes("error_code=invalid_payload") &&
+          warning.includes("duplicate or invalid paneLabel in surface payload")
+        ),
+      );
     });
   });
 
