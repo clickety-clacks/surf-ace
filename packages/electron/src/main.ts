@@ -13,6 +13,7 @@ import {
   type CompositorOverlayRegion,
   type ResolvedNativePaneGeometry,
   compositorFailureMessage,
+  isOverlayNativePaneLivenessFailure,
   nativePaneInstanceIdsForCompositor,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
@@ -286,15 +287,27 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
   const request = requestForEpoch(rendererTopologyEpoch);
   diagnostic.forwardRequest = request;
   try {
-    let response: CompositorControlResponse = await sendCompositorControl(socketPath, request);
-    const retryTopologyEpoch = staleOverlayTopologyEpoch(response);
-    if (retryTopologyEpoch) {
-      const retryRequest = requestForEpoch(retryTopologyEpoch);
-      diagnostic.retryReason = compositorFailureMessage(response);
-      diagnostic.retryRequest = retryRequest;
-      response = await sendCompositorControl(socketPath, retryRequest);
-      diagnostic.retryResponse = response;
-      diagnostic.topologyEpoch = retryTopologyEpoch;
+    let activeRequest = request;
+    let response: CompositorControlResponse = { ok: false, error: "overlay forwarding was not attempted" };
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      response = await sendCompositorControl(socketPath, activeRequest);
+      const retryTopologyEpoch = staleOverlayTopologyEpoch(response);
+      if (retryTopologyEpoch) {
+        const retryRequest = requestForEpoch(retryTopologyEpoch);
+        diagnostic.retryReason = compositorFailureMessage(response);
+        diagnostic.retryRequest = retryRequest;
+        diagnostic.retryResponse = response;
+        diagnostic.topologyEpoch = retryTopologyEpoch;
+        activeRequest = retryRequest;
+        continue;
+      }
+      if (isOverlayNativePaneLivenessFailure(response)) {
+        diagnostic.lifecycleRetryReason = compositorFailureMessage(response);
+        diagnostic.lifecycleRetryAttempts = attempt + 1;
+        await sleep(50);
+        continue;
+      }
+      break;
     }
     const failure = compositorFailureMessage(response);
     if (failure) {
@@ -308,6 +321,12 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
     diagnostic.forwardStatus = "error";
     throw error;
   }
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function staleOverlayTopologyEpoch(response: CompositorControlResponse): string | null {

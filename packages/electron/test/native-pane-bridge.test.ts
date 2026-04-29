@@ -8,6 +8,7 @@ import test from "node:test";
 import type { NativePaneMaterialization } from "../../protocol/src/index.js";
 import {
   compositorFailureMessage,
+  isOverlayNativePaneLivenessFailure,
   nativePaneInstanceIdsForCompositor,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
@@ -420,6 +421,24 @@ test("native pane bridge normalizes compositor failures", () => {
     "stale overlay topology epoch: 1 != topology-2",
   );
   assert.equal(compositorFailureMessage({ ok: false }), "compositor rejected materialization");
+});
+
+test("native pane bridge identifies transient overlay native-pane liveness failures", () => {
+  assert.equal(
+    isOverlayNativePaneLivenessFailure({
+      error: "invalid overlay region: pane PaneId(\"1\") is not a live native-hosted pane",
+      ok: false,
+    }),
+    true,
+  );
+  assert.equal(
+    isOverlayNativePaneLivenessFailure({
+      error: "stale overlay topology epoch: 1 != topology-2",
+      ok: false,
+    }),
+    false,
+  );
+  assert.equal(isOverlayNativePaneLivenessFailure({ ok: true }), false);
 });
 
 test("native pane bridge sends newline-delimited compositor control requests", async () => {

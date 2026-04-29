@@ -271,6 +271,11 @@ export function compositorFailureMessage(response: CompositorControlResponse): s
   return "compositor rejected materialization";
 }
 
+export function isOverlayNativePaneLivenessFailure(response: CompositorControlResponse): boolean {
+  const message = compositorFailureMessage(response);
+  return Boolean(message && /^invalid overlay region: pane .+ is not a live native-hosted pane$/.test(message));
+}
+
 function statusNumber(response: CompositorControlResponse, field: string): number | null {
   const direct = response[field];
   if (typeof direct === "number") {
