@@ -58,6 +58,10 @@ function createStubRuntime(): SurfAceRuntime {
       topology: { paneId: "pn_1" as never, type: "pane" },
       topologyRevision: 1,
     }),
+    realizeTopologies: async () => ({
+      applied: [],
+      ok: true,
+    }),
     split: async () => [{ paneId: 1 }, { paneId: 2 }],
     snapshot: async () => ({
       fingerprint: "sf_1",
@@ -80,6 +84,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_relinquish",
     "surf_ace_split",
     "surf_ace_realize_topology",
+    "surf_ace_realize_topologies",
     "surf_ace_close_pane",
     "surf_ace_read",
     "surf_ace_annotations_remove",
@@ -139,6 +144,35 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   const paneDesired = realizeProperties.desired.anyOf.find((variant: any) => variant.properties.paneId);
   assert.ok(paneDesired);
   assert.deepEqual(Object.keys(paneDesired.properties).sort(), ["name", "paneId", "type"]);
+
+  const realizeBatchTool = tools.find((tool) => tool.name === "surf_ace_realize_topologies");
+  assert.ok(realizeBatchTool);
+  assert.deepEqual(Object.keys(realizeBatchTool.inputSchema.properties as Record<string, unknown>), ["operations"]);
+  assert.deepEqual(realizeBatchTool.inputSchema.required, ["operations"]);
+  assert.equal(realizeBatchTool.inputSchema.additionalProperties, false);
+  const operationsSchema = (realizeBatchTool.inputSchema.properties as Record<string, any>).operations;
+  assert.equal(operationsSchema.type, "array");
+  assert.equal(operationsSchema.minItems, 1);
+  assert.deepEqual(
+    Object.keys(operationsSchema.items.properties).sort(),
+    [
+      "allowDestroyPaneIds",
+      "desired",
+      "expectedTopologyRevision",
+      "fingerprint",
+      "operationId",
+      "target",
+      "windowLabel",
+    ].sort(),
+  );
+  assert.deepEqual(operationsSchema.items.required, [
+    "fingerprint",
+    "target",
+    "expectedTopologyRevision",
+    "allowDestroyPaneIds",
+    "desired",
+  ]);
+  assert.equal(operationsSchema.items.additionalProperties, false);
 
   const closePaneTool = tools.find((tool) => tool.name === "surf_ace_close_pane");
   assert.ok(closePaneTool);

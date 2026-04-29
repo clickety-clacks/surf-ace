@@ -3,6 +3,7 @@ import {
   type SurfAceAnnotateRemoveInput,
   type PaneId,
   type SurfAceRealizeTopologyInput,
+  type SurfAceRealizeTopologiesInput,
   type SurfAceSplitInput,
   type SurfAcePushInput,
   type SurfAceRuntime,
@@ -17,6 +18,7 @@ export const surfAceToolNames = [
   "surf_ace_relinquish",
   "surf_ace_split",
   "surf_ace_realize_topology",
+  "surf_ace_realize_topologies",
   "surf_ace_close_pane",
   "surf_ace_read",
   "surf_ace_annotations_remove",
@@ -75,6 +77,31 @@ const realizeTopologyTargetSchema = {
   ],
   description: "Use `{ root: true }` to replace the whole layout, or `{ paneId }` to replace one pane slot.",
 };
+
+const realizeTopologyInputProperties = {
+  allowDestroyPaneIds: {
+    description: "Existing internal pane ids that this call is explicitly allowed to destroy. Use [] for non-destructive realization.",
+    items: paneIdParam,
+    type: "array",
+  },
+  expectedTopologyRevision: {
+    description: "Required topologyRevision from the latest `surf_ace_list` read.",
+    minimum: 0,
+    type: "integer",
+  },
+  fingerprint: fingerprintParam,
+  target: {
+    ...realizeTopologyTargetSchema,
+  },
+};
+
+const realizeTopologyRequiredProperties = [
+  "fingerprint",
+  "target",
+  "expectedTopologyRevision",
+  "allowDestroyPaneIds",
+  "desired",
+];
 
 function createRealizeTopologyNodeSchema(depth = 8): Record<string, unknown> {
   const paneNodeSchema = {
@@ -225,28 +252,50 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       inputSchema: {
         additionalProperties: false,
         properties: {
-          allowDestroyPaneIds: {
-            description: "Existing internal pane ids that this call is explicitly allowed to destroy. Use [] for non-destructive realization.",
-            items: paneIdParam,
-            type: "array",
-          },
+          ...realizeTopologyInputProperties,
           desired: {
             ...realizeTopologyDesiredSchema,
           },
-          expectedTopologyRevision: {
-            description: "Required topologyRevision from the latest `surf_ace_list` read.",
-            minimum: 0,
-            type: "integer",
-          },
-          fingerprint: fingerprintParam,
-          target: {
-            ...realizeTopologyTargetSchema,
-          },
         },
-        required: ["fingerprint", "target", "expectedTopologyRevision", "allowDestroyPaneIds", "desired"],
+        required: realizeTopologyRequiredProperties,
         type: "object",
       },
       name: "surf_ace_realize_topology",
+    },
+    {
+      description: "Realize desired Surf Ace topology changes across multiple surfaces in one CLU-facing operation.",
+      execute: async (args: SurfAceRealizeTopologiesInput) => await runtime.realizeTopologies(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          operations: {
+            items: {
+              additionalProperties: false,
+              properties: {
+                ...realizeTopologyInputProperties,
+                desired: {
+                  ...realizeTopologyDesiredSchema,
+                },
+                operationId: {
+                  description: "Optional caller-supplied identifier echoed in per-surface results.",
+                  type: "string",
+                },
+                windowLabel: {
+                  description: "Optional current window label guard from `surf_ace_list`.",
+                  type: "string",
+                },
+              },
+              required: realizeTopologyRequiredProperties,
+              type: "object",
+            },
+            minItems: 1,
+            type: "array",
+          },
+        },
+        required: ["operations"],
+        type: "object",
+      },
+      name: "surf_ace_realize_topologies",
     },
     {
       description: "Close an existing Surf Ace pane.",

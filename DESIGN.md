@@ -2732,6 +2732,36 @@ pane node:  { "type": "pane", "paneId"?: paneId, "name"?: string | null }
 
 ---
 
+#### `surf_ace_realize_topologies`
+
+Realize desired topology changes across multiple Surf Ace surfaces/windows in one CLU-facing operation. Write.
+
+**Params:**
+```
+operations                array    One or more per-surface topology operations
+```
+
+Each operation has the same required fields as `surf_ace_realize_topology`:
+```
+fingerprint               string   Target screen
+windowLabel               string?  Optional current window label guard from `surf_ace_list`
+operationId               string?  Optional caller id echoed in results
+target                    object   `{ root: true }` for the whole layout, or `{ paneId }` to replace one pane slot
+expectedTopologyRevision  integer  Revision token from the latest `surf_ace_list`
+allowDestroyPaneIds       array    Existing internal pane ids this call may destroy; use [] for non-destructive changes
+desired                   object   Recursive desired subtree
+```
+
+**Behavior:** The provider applies each operation through the same provider-owned topology authority as `surf_ace_realize_topology`. Content pushes remain pane-scoped; this tool only batches topology realization across surfaces/windows/devices.
+
+**Partial failure semantics:** The provider reports unambiguous partial state. If every operation applies, the result is `{ ok: true, applied: [...] }`. If an operation fails, the result is `{ ok: false, applied, failed, skipped }`, where `applied` lists earlier operations that already committed, `failed` identifies the failed operation by index/fingerprint/windowLabel/operationId/code/message, and `skipped` lists later operations not attempted. This is not transactional across devices; callers must inspect `ok` before assuming every surface changed.
+
+**Returns per applied surface:** `fingerprint`, `windowLabel`, `operationId?`, `target`, `topologyRevision`, current `topology`, current `panes`, `preservedPaneIds`, `createdPaneIds`, and `destroyedPaneIds`.
+
+**Errors:** `invalid_operation` for malformed empty operation lists before any per-surface apply. Per-surface failures are returned in the structured `failed` result.
+
+---
+
 #### `surf_ace_close_pane`
 
 Close an existing pane and remove it from the current layout. Write.

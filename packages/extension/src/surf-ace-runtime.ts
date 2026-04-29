@@ -417,6 +417,13 @@ export type SurfAceRealizeTopologyInput = {
     | { paneId: PaneId; root?: never };
 };
 
+export type SurfAceRealizeTopologiesInput = {
+  operations: Array<SurfAceRealizeTopologyInput & {
+    operationId?: string;
+    windowLabel?: string;
+  }>;
+};
+
 export type SurfAceRealizeTopologyResult = {
   createdPaneIds: PaneId[];
   destroyedPaneIds: PaneId[];
@@ -433,6 +440,36 @@ export type SurfAceRealizeTopologyResult = {
   topology: SurfAceTopologySummaryNode;
   topologyRevision: number;
 };
+
+export type SurfAceRealizeTopologyOperationResult = SurfAceRealizeTopologyResult & {
+  fingerprint: string;
+  operationId?: string;
+  windowLabel: string;
+};
+
+export type SurfAceRealizeTopologiesResult =
+  | {
+      applied: SurfAceRealizeTopologyOperationResult[];
+      ok: true;
+    }
+  | {
+      applied: SurfAceRealizeTopologyOperationResult[];
+      failed: {
+        code: string;
+        fingerprint: string;
+        index: number;
+        message: string;
+        operationId?: string;
+        windowLabel?: string;
+      };
+      ok: false;
+      skipped: Array<{
+        fingerprint: string;
+        index: number;
+        operationId?: string;
+        windowLabel?: string;
+      }>;
+    };
 
 export type SurfAceClosePaneResult = {
   ok: true;
@@ -489,6 +526,7 @@ export interface SurfAceRuntime {
   push(input: SurfAcePushInput, context?: { sessionKey?: string }): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
   realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult>;
+  realizeTopologies(input: SurfAceRealizeTopologiesInput): Promise<SurfAceRealizeTopologiesResult>;
   registerTarget(input: SurfAceTargetRegisterInput): Promise<SurfAceTargetRegisterResult>;
   relinquish(input: { fingerprint: string }): Promise<SurfAceRelinquishResult>;
   restoreTarget(input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string }): Promise<SurfAceTargetRestoreResult>;
@@ -739,6 +777,10 @@ type OwnerControlCommand =
   | {
       input: SurfAceRealizeTopologyInput;
       op: "realizeTopology";
+    }
+  | {
+      input: SurfAceRealizeTopologiesInput;
+      op: "realizeTopologies";
     }
   | {
       input: { fingerprint: string };
@@ -1958,6 +2000,67 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const surface = this.requireConnectedSurface(input.fingerprint);
     return await this.realizeSurfaceTopology(surface, input);
+  }
+
+  async realizeTopologies(input: SurfAceRealizeTopologiesInput): Promise<SurfAceRealizeTopologiesResult> {
+    await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceRealizeTopologiesResult>({
+        input,
+        op: "realizeTopologies",
+      });
+    }
+
+    const operations = input.operations;
+    if (!Array.isArray(operations) || operations.length === 0) {
+      throw new SurfAceToolError("invalid_operation", "Topology realization requires at least one operation.");
+    }
+
+    const applied: SurfAceRealizeTopologyOperationResult[] = [];
+    for (const [index, operation] of operations.entries()) {
+      try {
+        const surface = this.requireConnectedSurface(operation.fingerprint);
+        if (operation.windowLabel && surface.windowLabel !== operation.windowLabel) {
+          throw new SurfAceToolError(
+            "screen_not_found",
+            `Surf Ace surface ${operation.fingerprint} has window label ${surface.windowLabel}, expected ${operation.windowLabel}.`,
+          );
+        }
+        const result = await this.realizeSurfaceTopology(surface, operation);
+        applied.push({
+          ...result,
+          fingerprint: surface.surfaceId,
+          operationId: operation.operationId,
+          windowLabel: surface.windowLabel,
+        });
+      } catch (error) {
+        const failure = error instanceof SurfAceToolError
+          ? { code: error.code, message: error.message }
+          : { code: "invalid_operation", message: String(error) };
+        return {
+          applied,
+          failed: {
+            ...failure,
+            fingerprint: operation.fingerprint,
+            index,
+            operationId: operation.operationId,
+            windowLabel: operation.windowLabel,
+          },
+          ok: false,
+          skipped: operations.slice(index + 1).map((skipped, skippedOffset) => ({
+            fingerprint: skipped.fingerprint,
+            index: index + 1 + skippedOffset,
+            operationId: skipped.operationId,
+            windowLabel: skipped.windowLabel,
+          })),
+        };
+      }
+    }
+
+    return {
+      applied,
+      ok: true,
+    };
   }
 
   async closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult> {
@@ -5087,6 +5190,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.read(command.input);
       case "realizeTopology":
         return await this.realizeTopology(command.input);
+      case "realizeTopologies":
+        return await this.realizeTopologies(command.input);
       case "relinquish":
         return await this.relinquish(command.input);
       case "snapshot":

@@ -3193,6 +3193,130 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider realizes topology across multiple surfaces in one CLU operation", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.addSurface({
+          initialRemotePaneId: 51,
+          name: "Surface B",
+          surfaceId: "sf_surface-b",
+        });
+      },
+      run: async ({ runtime, server }) => {
+        const before = await runtime.listScreens();
+        const surfaceA = before.find((screen) => screen.fingerprint === server.surfaceId);
+        const surfaceB = before.find((screen) => screen.fingerprint === "sf_surface-b");
+        assert.ok(surfaceA);
+        assert.ok(surfaceB);
+        const paneA = surfaceA.panes[0]!;
+        const paneB = surfaceB.panes[0]!;
+
+        const realized = await runtime.realizeTopologies({
+          operations: [
+            {
+              allowDestroyPaneIds: [],
+              desired: {
+                children: [{ paneId: paneA.paneId, type: "pane" }, { name: "A scratch", type: "pane" }],
+                direction: "vertical",
+                type: "split",
+              },
+              expectedTopologyRevision: surfaceA.topologyRevision,
+              fingerprint: surfaceA.fingerprint,
+              operationId: "surface-a",
+              target: { root: true },
+              windowLabel: surfaceA.windowLabel,
+            },
+            {
+              allowDestroyPaneIds: [],
+              desired: {
+                children: [{ paneId: paneB.paneId, type: "pane" }, { name: "B scratch", type: "pane" }],
+                direction: "vertical",
+                type: "split",
+              },
+              expectedTopologyRevision: surfaceB.topologyRevision,
+              fingerprint: surfaceB.fingerprint,
+              operationId: "surface-b",
+              target: { root: true },
+              windowLabel: surfaceB.windowLabel,
+            },
+          ],
+        });
+
+        assert.equal(realized.ok, true);
+        assert.deepEqual(realized.applied.map((result) => result.operationId), ["surface-a", "surface-b"]);
+        assert.deepEqual(realized.applied.map((result) => result.fingerprint), [surfaceA.fingerprint, surfaceB.fingerprint]);
+        assert.deepEqual(realized.applied.map((result) => result.createdPaneIds.length), [1, 1]);
+        assert.equal(server.topologyApplyRequests.length, 2);
+
+        const after = await runtime.listScreens();
+        const afterA = after.find((screen) => screen.fingerprint === surfaceA.fingerprint);
+        const afterB = after.find((screen) => screen.fingerprint === surfaceB.fingerprint);
+        assert.equal(afterA?.panes.length, 2);
+        assert.equal(afterB?.panes.length, 2);
+        assert.equal(afterA?.topologyRevision, 1);
+        assert.equal(afterB?.topologyRevision, 1);
+      },
+    });
+  });
+
+  await t.test("provider multi-surface topology reports clear partial failure", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.addSurface({
+          initialRemotePaneId: 51,
+          name: "Surface B",
+          surfaceId: "sf_surface-b",
+        });
+      },
+      run: async ({ runtime, server }) => {
+        const before = await runtime.listScreens();
+        const surfaceA = before.find((screen) => screen.fingerprint === server.surfaceId);
+        const surfaceB = before.find((screen) => screen.fingerprint === "sf_surface-b");
+        assert.ok(surfaceA);
+        assert.ok(surfaceB);
+        const result = await runtime.realizeTopologies({
+          operations: [
+            {
+              allowDestroyPaneIds: [surfaceA.panes[0]!.paneId],
+              desired: { children: [{ type: "pane" }, { type: "pane" }], direction: "vertical", type: "split" },
+              expectedTopologyRevision: surfaceA.topologyRevision,
+              fingerprint: surfaceA.fingerprint,
+              operationId: "applies-first",
+              target: { root: true },
+            },
+            {
+              allowDestroyPaneIds: [],
+              desired: { children: [{ type: "pane" }, { type: "pane" }], direction: "vertical", type: "split" },
+              expectedTopologyRevision: surfaceB.topologyRevision + 1,
+              fingerprint: surfaceB.fingerprint,
+              operationId: "fails-second",
+              target: { root: true },
+            },
+            {
+              allowDestroyPaneIds: [],
+              desired: { type: "pane" },
+              expectedTopologyRevision: surfaceA.topologyRevision,
+              fingerprint: surfaceA.fingerprint,
+              operationId: "skipped-third",
+              target: { root: true },
+            },
+          ],
+        });
+
+        assert.equal(result.ok, false);
+        assert.deepEqual(result.applied.map((applied) => applied.operationId), ["applies-first"]);
+        assert.equal(result.failed.operationId, "fails-second");
+        assert.equal(result.failed.index, 1);
+        assert.equal(result.failed.code, "invalid_operation");
+        assert.deepEqual(result.skipped.map((skipped) => skipped.operationId), ["skipped-third"]);
+
+        const after = await runtime.listScreens();
+        assert.equal(after.find((screen) => screen.fingerprint === surfaceA.fingerprint)?.topologyRevision, 1);
+        assert.equal(after.find((screen) => screen.fingerprint === surfaceB.fingerprint)?.topologyRevision, 0);
+      },
+    });
+  });
+
   await t.test("provider root realization removes allowed stale panes outside the current layout", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const before = (await runtime.listScreens())[0]!;
