@@ -17,6 +17,7 @@ import type {
   ContentClearRequest,
   ContentId,
   ContentPatchRequest,
+  ContentSetPayload,
   ContentSetRequest,
   ContentType,
   DrawingFlushConfig,
@@ -291,6 +292,11 @@ export type SurfAceClearResult = {
   revision: number;
 };
 
+type SurfAceSessionContext = {
+  sessionDisplayName?: string;
+  sessionKey?: string;
+};
+
 export type ApplyEvidence = {
   requestId: string;
   status: "applied" | "rejected" | "failed";
@@ -486,7 +492,7 @@ export interface SurfAceRuntime {
   clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult>;
   closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult>;
   listScreens(): Promise<SurfAceScreenSummary[]>;
-  push(input: SurfAcePushInput, context?: { sessionKey?: string }): Promise<SurfAcePushResult>;
+  push(input: SurfAcePushInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
   realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult>;
   registerTarget(input: SurfAceTargetRegisterInput): Promise<SurfAceTargetRegisterResult>;
@@ -724,7 +730,7 @@ export class SurfAceToolError extends Error {
 
 type OwnerControlCommand =
   | {
-      context?: { sessionKey?: string };
+      context?: SurfAceSessionContext;
       input: SurfAcePushInput;
       op: "push";
     }
@@ -1279,12 +1285,9 @@ function historyOwnerTokenForSession(sessionKey?: string): string {
   return `hot_${hash.digest("hex").slice(0, 16)}`;
 }
 
-function displayNameForSession(sessionKey?: string): string {
-  if (!sessionKey) {
-    return "anonymous";
-  }
-  const parts = sessionKey.split(":").filter(Boolean);
-  return parts.findLast((part) => !/^s_[A-Za-z0-9]+$/.test(part)) ?? sessionKey;
+function trustedSessionDisplayName(context?: SurfAceSessionContext): string | null {
+  const name = context?.sessionDisplayName?.trim();
+  return name ? name : null;
 }
 
 function sameHistorySessionKey(left: string | null, right: string | null): boolean {
@@ -1293,6 +1296,18 @@ function sameHistorySessionKey(left: string | null, right: string | null): boole
 
 function isErrorResponse(response: Response): response is ErrorResponse {
   return (response as ErrorResponse).ok === false;
+}
+
+function mutationRenderStatus(response: Response): string | null {
+  if (isErrorResponse(response)) {
+    return null;
+  }
+  const render = ((response as { payload?: { render?: unknown } }).payload)?.render;
+  if (!render || typeof render !== "object") {
+    return null;
+  }
+  const status = (render as { status?: unknown }).status;
+  return typeof status === "string" ? status : null;
 }
 
 function mutationErrorCode(
@@ -1918,7 +1933,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   async push(
     input: SurfAcePushInput,
-    context?: { sessionKey?: string },
+    context?: SurfAceSessionContext,
   ): Promise<SurfAcePushResult> {
     await this.start();
     if (!this.ownsRuntimeLease) {
@@ -1933,7 +1948,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return await this.browserUrlTargetSet(surface, input);
     }
     if (isContentPushInput(input)) {
-      return await this.contentSet(surface, input, context?.sessionKey);
+      return await this.contentSet(surface, input, context);
     }
     throw new SurfAceToolError("unsupported_content_type", `Unsupported content type: ${String(input.contentType)}`);
   }
@@ -2555,7 +2570,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private async contentSet(
     surface: ManagedSurface,
     input: SurfAceContentPushInput,
-    sessionKey?: string,
+    context?: SurfAceSessionContext,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     this.finalizeLiveFrame(surface, pane);
@@ -2567,27 +2582,31 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       `[surf-ace:runtime] contentSet pane=${pane.paneId}(remote=${pane.remotePaneId}) type=${input.contentType} contentPreview=${contentPreview}`,
     );
 
+    const sessionKey = context?.sessionKey;
+    const displayTitle = trustedSessionDisplayName(context);
     const nextContentId =
       sessionKey && pane.ownerSessionKey === sessionKey && pane.activeContentId
         ? pane.activeContentId
         : makeContentId();
     pane.pendingOwnerSessionKey = sessionKey ?? null;
 
+    const payload = {
+      content: normalizedContent,
+      contentId: nextContentId,
+      contentType: input.contentType,
+      historyOwnerToken: historyOwnerTokenForSession(sessionKey),
+      paneId: pane.remotePaneId,
+      revision: asRevision((pane.currentRevision as number) + 1),
+      topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
+    } as ContentSetPayload & { topologyRevision?: TopologyApplyRequest["payload"]["topologyRevision"] };
+    if (displayTitle) {
+      payload.display = { title: displayTitle };
+    }
+
     const request: ContentApplyRequest = {
       id: makeBrandedRequestId(),
       op: "content.apply",
-      payload: {
-        content: normalizedContent,
-        contentId: nextContentId,
-        contentType: input.contentType,
-        display: {
-          title: displayNameForSession(sessionKey),
-        },
-        historyOwnerToken: historyOwnerTokenForSession(sessionKey),
-        paneId: pane.remotePaneId,
-        revision: asRevision((pane.currentRevision as number) + 1),
-        topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
-      } as ContentApplyRequest["payload"],
+      payload,
       sentAt: asEpochMs(this.now()),
       type: "request",
       v: 1,
@@ -2595,10 +2614,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const previousVisibleText = pane.snapshot?.visibleText?.trim() ?? "";
     const response = await this.sendRequest(surface, request);
+    const renderStatus = mutationRenderStatus(response);
     const result = await this.applyMutationResponse(surface, pane, response, request, sessionKey, {
       diagnostic: input.diagnostic,
     }) as SurfAcePushResult;
-    if (input.contentType === "html") {
+    if (input.contentType === "html" && renderStatus !== "pending_renderer") {
       await this.syncPaneSnapshot(surface, pane, {
         waitForVisibleText: true,
         waitForVisibleTextChangeFrom: previousVisibleText,

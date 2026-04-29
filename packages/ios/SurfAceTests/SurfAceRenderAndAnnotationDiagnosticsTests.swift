@@ -4,23 +4,53 @@ import XCTest
 
 @MainActor
 final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
-    func testContentApplyRejectsWhenPaneRendererIsUnavailable() async throws {
+    func testContentApplyReportsPendingRendererAndRendersOnAttach() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
-        let surface = runtime.registerSurface(sceneKey: "render-unavailable")
+        let surface = runtime.registerSurface(sceneKey: "render-pending")
         let pane = try XCTUnwrap(surface.panes.first)
 
         let response = await runtime.contentApplyForTesting(
-            id: "rq_render_unavailable",
+            id: "rq_render_pending",
             payload: htmlApplyPayload(paneId: pane.paneId, revision: 1),
             surfaceId: surface.surfaceId
         )
-        let error = try XCTUnwrap(response["error"] as? [String: Any])
+        let payload = try XCTUnwrap(response["payload"] as? [String: Any])
+        let render = try XCTUnwrap(payload["render"] as? [String: Any])
 
-        XCTAssertEqual(response["ok"] as? Bool, false)
-        XCTAssertEqual(error["code"] as? String, "render_failed")
-        XCTAssertEqual(pane.currentEntry.contentId, nil)
-        XCTAssertEqual(pane.lastRenderDiagnostics.status, "failed")
+        XCTAssertEqual(response["ok"] as? Bool, true)
+        XCTAssertEqual(pane.currentEntry.contentId, "ct_1234abcd")
+        XCTAssertEqual(render["status"] as? String, "pending_renderer")
         XCTAssertEqual(pane.lastRenderDiagnostics.bridgeAttached, false)
+        XCTAssertEqual(render["bridgeAttached"] as? Bool, false)
+
+        let bridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd"])
+        XCTAssertEqual(pane.lastRenderDiagnostics.status, "render_requested")
+        XCTAssertTrue(pane.lastRenderDiagnostics.bridgeAttached)
+    }
+
+    func testPendingNonHTMLRendererDefersSnapshotHintUntilAttach() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "render-pending-image")
+        let pane = try XCTUnwrap(surface.panes.first)
+
+        let response = await runtime.contentApplyForTesting(
+            id: "rq_render_pending_image",
+            payload: imageApplyPayload(paneId: pane.paneId, revision: 1),
+            surfaceId: surface.surfaceId
+        )
+
+        XCTAssertEqual(response["ok"] as? Bool, true)
+        XCTAssertEqual(pane.lastRenderDiagnostics.status, "pending_renderer")
+        XCTAssertEqual(pane.pendingSnapshotHintReason, "after_render")
+
+        let bridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abce"])
+        XCTAssertNil(pane.pendingSnapshotHintReason)
     }
 
     func testContentApplyReportsRenderDiagnosticsAndOwnerTitle() async throws {
@@ -104,6 +134,20 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             payload["display"] = ["title": title]
         }
         return payload
+    }
+
+    private func imageApplyPayload(paneId: Int, revision: Int) -> [String: Any] {
+        [
+            "content": [
+                "data": "iVBORw0KGgo=",
+                "mediaType": "image/png",
+            ],
+            "contentId": "ct_1234abce",
+            "contentType": "image",
+            "historyOwnerToken": "hot_test",
+            "paneId": paneId,
+            "revision": revision,
+        ]
     }
 }
 

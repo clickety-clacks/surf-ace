@@ -49,7 +49,10 @@ const plugin = {
               {
                 type: "text" as const,
                 text: JSON.stringify(
-                  await tool.execute(params as never, { sessionKey: ctx.sessionKey }),
+                  await tool.execute(params as never, {
+                    sessionDisplayName: ctx.sessionDisplayName,
+                    sessionKey: ctx.sessionKey,
+                  }),
                   null,
                   2,
                 ),

@@ -1,5 +1,6 @@
 declare module "openclaw/plugin-sdk" {
   export type ToolContext = {
+    sessionDisplayName?: string;
     sessionKey?: string;
   };
 

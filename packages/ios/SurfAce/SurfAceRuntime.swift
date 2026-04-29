@@ -510,21 +510,33 @@ final class SurfAceRuntime {
         )
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         bridge.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
+        if pane.currentEntry.contentType != .html,
+           let reason = pane.pendingSnapshotHintReason {
+            pane.pendingSnapshotHintReason = nil
+            sendSnapshotHint(surfaceId: surfaceId, reason: reason)
+        }
     }
 
     func detachPaneBridge(surfaceId: String, paneId: Int) {
         pane(surfaceId: surfaceId, paneId: paneId)?.bridge = nil
     }
 
-    func setAnnotationMode(surfaceId: String, paneId: Int, enabled: Bool, fingerDrawEnabled: Bool) {
+    func setAnnotationMode(
+        surfaceId: String,
+        paneId: Int,
+        enabled: Bool,
+        fingerDrawEnabled: Bool,
+        source: String? = nil
+    ) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
         let wasEnabled = pane.annotationMode
         pane.annotationMode = enabled
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
         pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
+        let transitionSource = source ?? (enabled ? (fingerDrawEnabled ? "finger_button" : "annotation_button") : "done_button")
         surfAceLifecycleLog(
-            "event=annotation_mode_changed \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", paneId), ("enabled", pane.annotationMode), ("finger_draw_enabled", pane.fingerDrawEnabled), ("source", fingerDrawEnabled ? "finger_button" : "pencil_or_done")]))"
+            "event=annotation_mode_changed \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", paneId), ("enabled", pane.annotationMode), ("finger_draw_enabled", pane.fingerDrawEnabled), ("source", transitionSource)]))"
         )
         if wasEnabled && !enabled {
             requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
@@ -708,9 +720,13 @@ final class SurfAceRuntime {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId), !strokes.isEmpty else { return }
 
         if !pane.annotationMode {
-            pane.annotationMode = true
-            pane.fingerDrawEnabled = false
-            pane.bridge?.setInteraction(annotationMode: true, fingerDrawEnabled: false)
+            setAnnotationMode(
+                surfaceId: surfaceId,
+                paneId: paneId,
+                enabled: true,
+                fingerDrawEnabled: false,
+                source: "pencil_stroke"
+            )
         }
 
         pane.currentEntry.drawingData = drawingData
@@ -1599,16 +1615,6 @@ final class SurfAceRuntime {
         } else {
             restoreViewport = nil
         }
-        guard let bridge = pane.bridge else {
-            noteRenderDiagnostics(
-                surfaceId: surfaceId,
-                pane: pane,
-                bridgeAttached: false,
-                status: "failed",
-                message: "pane renderer unavailable"
-            )
-            return makeErrorResponse(op: "content.apply", id: id, code: "render_failed", message: "pane renderer unavailable")
-        }
         let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
         pane.currentTarget = nil
 
@@ -1618,17 +1624,27 @@ final class SurfAceRuntime {
         pane.lastSelection = nil
         pane.lastNavigationURL = nil
         pane.lastPage = nil
-        pane.pendingSnapshotHintReason = frame.contentType == .html ? "after_render" : nil
-        bridge.render(entry: pane.currentEntry, restoreViewport: restoreViewport)
-        noteRenderDiagnostics(
-            surfaceId: surfaceId,
-            pane: pane,
-            bridgeAttached: true,
-            status: "render_requested",
-            message: nil
-        )
+        pane.pendingSnapshotHintReason = pane.bridge == nil || frame.contentType == .html ? "after_render" : nil
+        if let bridge = pane.bridge {
+            bridge.render(entry: pane.currentEntry, restoreViewport: restoreViewport)
+            noteRenderDiagnostics(
+                surfaceId: surfaceId,
+                pane: pane,
+                bridgeAttached: true,
+                status: "render_requested",
+                message: nil
+            )
+        } else {
+            noteRenderDiagnostics(
+                surfaceId: surfaceId,
+                pane: pane,
+                bridgeAttached: false,
+                status: "pending_renderer",
+                message: "pane renderer not attached"
+            )
+        }
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
-        if frame.contentType != .html {
+        if frame.contentType != .html, pane.bridge != nil {
             sendSnapshotHint(surfaceId: surfaceId, reason: "after_render")
         }
 

@@ -25,6 +25,7 @@ export const surfAceToolNames = [
 export type SurfAceToolName = (typeof surfAceToolNames)[number];
 
 export type SurfAceToolContext = {
+  sessionDisplayName?: string;
   sessionKey?: string;
 };
 
@@ -66,7 +67,10 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
     {
       description: "Push content or a live browser URL target to a Surf Ace pane, replacing whatever is currently visible.",
       execute: async (args: SurfAcePushInput, context?: SurfAceToolContext) =>
-        await runtime.push(args, { sessionKey: context?.sessionKey }),
+        await runtime.push(args, {
+          sessionDisplayName: context?.sessionDisplayName,
+          sessionKey: context?.sessionKey,
+        }),
       inputSchema: {
         additionalProperties: false,
         properties: {

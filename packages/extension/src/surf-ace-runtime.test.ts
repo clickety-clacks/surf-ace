@@ -130,6 +130,7 @@ class FakeSurfAceWsServer {
   }> = [];
   nextTopologyApplyError: { code: string; message: string } | null = null;
   nextTopologyApplyResponsePaneLabels: number[] | null = null;
+  nextContentApplyRenderStatus: string | null = null;
   snapshotDelayMs = 0;
   snapshotImage = "aGVsbG8=";
   snapshotRequests: Array<{ includeImage: boolean; includeVisibleText: boolean; paneId: number }> = [];
@@ -831,16 +832,28 @@ class FakeSurfAceWsServer {
           paneId,
           revision: pane.revision,
         });
+        const renderStatus = this.nextContentApplyRenderStatus;
+        this.nextContentApplyRenderStatus = null;
+        const responsePayload: Record<string, unknown> = {
+          contentId: pane.contentId,
+          contentType: pane.contentType,
+          currentContentId: pane.contentId,
+          currentRevision: pane.revision,
+          paneId,
+          topologyRevision: message.payload?.topologyRevision,
+        };
+        if (renderStatus) {
+          responsePayload.render = {
+            bridgeAttached: renderStatus !== "pending_renderer",
+            contentId: pane.contentId,
+            contentType: pane.contentType,
+            revision: pane.revision,
+            status: renderStatus,
+          };
+        }
         socket.send(
           JSON.stringify(
-            this.response(message.id, "content.apply", {
-              contentId: pane.contentId,
-              contentType: pane.contentType,
-              currentContentId: pane.contentId,
-              currentRevision: pane.revision,
-              paneId,
-              topologyRevision: message.payload?.topologyRevision,
-            }),
+            this.response(message.id, "content.apply", responsePayload),
           ),
         );
         return;
@@ -2196,7 +2209,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             fingerprint: server.surfaceId,
             paneId: firstPaneId,
           },
-          { sessionKey: "agent:test:1" },
+          { sessionDisplayName: "Session One", sessionKey: "agent:test:1" },
         );
         const second = await runtime.push(
           {
@@ -2205,7 +2218,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             fingerprint: server.surfaceId,
             paneId: firstPaneId,
           },
-          { sessionKey: "agent:test:1" },
+          { sessionDisplayName: "Session One", sessionKey: "agent:test:1" },
         );
         const third = await runtime.push(
           {
@@ -2214,7 +2227,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             fingerprint: server.surfaceId,
             paneId: firstPaneId,
           },
-          { sessionKey: "agent:test:2" },
+          { sessionDisplayName: "Session Two", sessionKey: "agent:test:2" },
         );
 
         assert.equal(server.contentSetRequests.length, 3);
@@ -2240,7 +2253,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         );
         assert.deepEqual(
           server.contentSetRequests.map((request) => request.displayTitle),
-          ["1", "1", "2"],
+          ["Session One", "Session One", "Session Two"],
         );
         assert.equal(first.paneId, firstPaneId);
         assert.equal(second.paneId, firstPaneId);
@@ -2314,6 +2327,28 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       } finally {
         unsubscribe();
       }
+    });
+  });
+
+  await t.test("provider skips immediate html snapshot sync while renderer is pending", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const snapshotCountBefore = server.snapshotRequests.length;
+      server.nextContentApplyRenderStatus = "pending_renderer";
+
+      const result = await runtime.push(
+        {
+          content: "<p>pending</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionDisplayName: "Pending Renderer", sessionKey: "agent:test:pending-renderer" },
+      );
+
+      assert.equal(result.paneId, firstPaneId);
+      assert.equal(server.contentSetRequests.length, 1);
+      assert.equal(server.snapshotRequests.length, snapshotCountBefore);
     });
   });
 

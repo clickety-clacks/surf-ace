@@ -669,6 +669,21 @@ private final class SurfAceWeakScriptMessageHandler: NSObject, WKScriptMessageHa
 }
 
 @MainActor
+private final class SurfAceAnnotationCanvasView: PKCanvasView {
+    var annotationMode = false
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard super.point(inside: point, with: event) else {
+            return false
+        }
+        if annotationMode {
+            return true
+        }
+        return event?.allTouches?.contains { $0.type == .pencil } == true
+    }
+}
+
+@MainActor
 final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     var onInteractionBegan: (() -> Void)?
     var onSelectionChanged: ((String, CGRect?) -> Void)?
@@ -692,7 +707,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     private let webView: WKWebView
     private let pdfView = PDFView()
-    private let canvasView = PKCanvasView()
+    private let canvasView = SurfAceAnnotationCanvasView()
     private var currentEntry: SurfAcePaneEntry?
     private var pendingBrowserNavigation: CheckedContinuation<SurfAceBrowserNavigationResult, Never>?
     private var pendingBrowserNavigationLoad: WKNavigation?
@@ -1113,6 +1128,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         let entryScrollable = currentEntry?.scrollable ?? true
         let entryInteractive = currentEntry?.interactive ?? true
         canvasView.isUserInteractionEnabled = true
+        canvasView.annotationMode = annotationMode
         if annotationMode {
             webView.scrollView.isScrollEnabled = false
             webView.isUserInteractionEnabled = false
