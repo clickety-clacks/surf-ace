@@ -75,10 +75,14 @@ await fs.copyFile(
   path.join(distDir, "renderer", "styles.css"),
 );
 await fs.copyFile(
-  path.join(srcDir, "renderer", "fonts", "ShareTechMono-Regular.ttf"),
-  path.join(distDir, "renderer", "fonts", "ShareTechMono-Regular.ttf"),
+  path.join(srcDir, "renderer", "fonts", "Rajdhani-Regular.ttf"),
+  path.join(distDir, "renderer", "fonts", "Rajdhani-Regular.ttf"),
 );
 await fs.copyFile(
-  path.join(srcDir, "renderer", "fonts", "OFL-ShareTechMono.txt"),
-  path.join(distDir, "renderer", "fonts", "OFL-ShareTechMono.txt"),
+  path.join(srcDir, "renderer", "fonts", "Rajdhani-Bold.ttf"),
+  path.join(distDir, "renderer", "fonts", "Rajdhani-Bold.ttf"),
+);
+await fs.copyFile(
+  path.join(srcDir, "renderer", "fonts", "OFL-Rajdhani.txt"),
+  path.join(distDir, "renderer", "fonts", "OFL-Rajdhani.txt"),
 );

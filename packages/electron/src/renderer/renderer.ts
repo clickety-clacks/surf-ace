@@ -101,6 +101,7 @@ type RendererWindowState = {
 };
 
 type Bootstrap = {
+  compositorHosted?: boolean;
   overlayDebugBorders?: boolean;
   state: RendererWindowState;
   surfaceId: string;
@@ -576,7 +577,7 @@ function createButton(label: string, className: string, disabled = false): HTMLB
 
 function setPaneChromeMetrics(view: PaneView): void {
   const rect = view.rootEl.getBoundingClientRect();
-  const paneNumberSize = Math.max(1, Math.min(rect.width, rect.height) / 5);
+  const paneNumberSize = Math.max(1, Math.min(rect.width, rect.height) / 4);
   view.rootEl.style.setProperty("--pane-number-size", `${paneNumberSize}px`);
 }
 
@@ -1403,6 +1404,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
 
 function updatePane(view: PaneView, pane: RendererPaneState): void {
   setPaneChromeMetrics(view);
+  view.rootEl.classList.toggle("native-backed", pane.externalNative);
   view.rootEl.classList.toggle("keyboard-active", pane.activeKeyboardPane);
   view.rootEl.classList.toggle("annotating", pane.annotationBorderVisible);
   view.rootEl.classList.toggle("flush-in-flight", pane.flushInFlight);
@@ -1465,6 +1467,7 @@ function renderWindow(state: RendererWindowState): void {
 
 async function init(): Promise<void> {
   bootstrap = (await window.surfAce.getBootstrap()) as Bootstrap;
+  document.body.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
   document.body.classList.toggle("overlay-debug-borders", Boolean(bootstrap.overlayDebugBorders));
   latestState = bootstrap.state;
   renderWindow(bootstrap.state);

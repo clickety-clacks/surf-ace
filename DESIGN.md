@@ -2899,24 +2899,28 @@ This section is **normative**. Surface implementations MUST conform to the requi
 
 Surface implementations MUST always display the following identifiers. Labels MUST NOT be hidden based on pointer movement, touch interaction, hover state, content type, connection state, or annotation mode.
 
-Surf Ace chrome text, including identity overlays, button labels, toast labels, and navigation/control pill text, MUST use bundled Share Tech Mono assets on Electron and iOS. Implementations MUST NOT depend on network font loading at runtime. The bundled font is distributed under the SIL Open Font License 1.1 and the OFL text MUST be included with app/package assets.
+Surf Ace chrome text, including identity overlays, button labels, toast labels, and navigation/control pill text, MUST use bundled Rajdhani assets on Electron and iOS. Implementations MUST NOT depend on network font loading at runtime. The bundled font is distributed under the SIL Open Font License 1.1 and the OFL text MUST be included with app/package assets.
 
 #### Window and pane identity overlay
 
 Each window is assigned a short alphabetic identifier using an auto-incrementing sequence: `a`, `b`, `c` … `z`, `aa`, `ab`, … This label MUST be:
 - Displayed immediately before the pane label inside each pane identity overlay as uppercase text inside the outline box. Do not render literal square brackets; `[a]12` is only protocol shorthand for an outlined `A` box followed by `12`.
-- Rendered as a rounded-rectangle outline box with no filled background. The box height is 1/4 of the pane-number height.
+- Rendered in Rajdhani Regular.
+- Rendered as a rounded-rectangle outline box with no filled background. The box height is 1/2.5 (0.4x) of the pane-number height.
+- Text is sized large within that fixed outline box, approximately 0.28x the pane-number height; implementations MUST NOT increase the box height to enlarge the text.
+- The gap between the window box and pane number, and the window-box horizontal padding/tracking, must be tight so the two parts read as one compact identity mark.
 - Bottom-aligned with the pane-number text using font metrics or baseline alignment, not manual visual offsets, so the box bottom edge and pane-number baseline / bottom visual line read as one clean baseline.
-- Colored according to the window's connection state, with both outline and letters at 25% opacity.
+- Colored according to the window's connection state, with both outline and letters at 35% opacity.
 - Rendered in the overlay layer — it does not scroll with content.
 
 The window label is the primary addressing handle. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity.
 
 Each pane is assigned a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier. Optional pane names do not replace it. The pane label MUST be:
 - Displayed as plain overlay text with no pill, background, or border.
-- Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/5 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
-- Rendered with tight digit spacing; implementations SHOULD use negative Share Tech Mono tracking/letter-spacing of about `-0.04em`.
-- Colored 50% gray at 25% opacity.
+- Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/4 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
+- Rendered in Rajdhani Bold, with visually consistent heavy weight across Electron and iOS.
+- Rendered with tight digit spacing; implementations SHOULD use negative Rajdhani tracking/letter-spacing of about `-0.04em`.
+- Colored 50% gray at 30% opacity.
 - Rendered separately from the pane control cluster. The pane label MUST NOT appear as a toolbar/control-cluster button or label unless a future explicit control need is specified separately.
 
 The combined identity overlay is always visible and MUST be reported as an overlay region / hit-region where the platform reports chrome regions.
@@ -2933,7 +2937,7 @@ When annotation mode is active, the pane MUST render a 2px accent border as the 
 
 #### Keyboard focus visual state (all platforms)
 
-When keyboard focus is assigned to a pane, that pane MUST render a visible mid-gray focus outline or equivalent affordance. The outline MUST remain legible on both white and dark-ish content backgrounds; pale white, pale blue, or otherwise low-contrast outlines are not sufficient. This affordance is separate from the pane label and from annotation mode; it MUST NOT change the pane's visible `paneLabel` or add a pane-number control to the toolbar.
+When keyboard focus is assigned to a pane, that pane MUST render a visible mid-gray focus outline or equivalent affordance at 25% opacity. The outline MUST remain legible on both white and dark-ish content backgrounds; pale white, pale blue, or otherwise low-contrast outlines are not sufficient. This affordance is separate from the pane label and from annotation mode; it MUST NOT change the pane's visible `paneLabel` or add a pane-number control to the toolbar.
 
 #### Behavioral constraints while in annotation mode (all platforms)
 
@@ -2970,6 +2974,7 @@ Required defaults:
 - Back/Forward controls appear only when history exists in that direction; hidden otherwise.
 - The right annotation pill contains annotation controls only: 👆 and, while annotation mode is active, Done. It MUST NOT contain the pane label or window label.
 - 👆 (drawing input) button is always present in the annotation pill.
+- On iOS and iPadOS, the navigation and annotation pills MUST use native Liquid Glass-style capsule material/chrome for their background and border. Electron keeps its platform-specific pill styling.
 - Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. Keyboard focus may add the visible focus affordance from §15.1, but it does not create a default target for CLU routing and does not replace explicit `paneId` targeting.
 
 #### Icon assets

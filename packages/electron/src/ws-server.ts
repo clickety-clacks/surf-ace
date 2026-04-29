@@ -1,5 +1,8 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -90,6 +93,8 @@ type PendingBrowserUrlApply = {
 type SocketMeta = {
   cache: Map<string, SocketCacheEntry>;
   pairedSurfaceId: string | null;
+  remoteAddress: string;
+  socketId: string;
 };
 
 export type SurfaceWsServerOptions = {
@@ -120,6 +125,14 @@ const DEFAULT_LIMITS = {
   maxVisibleTextBytes: 4096,
 };
 const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
+const WS_DIAGNOSTIC_LOG_PATH = process.env.SURF_ACE_WS_DIAGNOSTIC_LOG ?? path.join(
+  os.homedir(),
+  "Library",
+  "Application Support",
+  "@surf-ace",
+  "electron",
+  "ws-diagnostics.log",
+);
 
 type ServerDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
 
@@ -136,6 +149,35 @@ function serverDiagnostic(event: string, fields: ServerDiagnosticFields = {}): s
   return suffix.length > 0
     ? `[surf-ace:server] event=${event} ${suffix}`
     : `[surf-ace:server] event=${event}`;
+}
+
+function errorDiagnosticFields(error: unknown): ServerDiagnosticFields {
+  if (error instanceof Error) {
+    return {
+      error_message: error.message,
+      error_name: error.name,
+    };
+  }
+  return { error_message: String(error) };
+}
+
+function appendServerDiagnostic(line: string): void {
+  try {
+    fs.mkdirSync(path.dirname(WS_DIAGNOSTIC_LOG_PATH), { recursive: true });
+    fs.appendFileSync(WS_DIAGNOSTIC_LOG_PATH, `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    // Diagnostics must never change WebSocket behavior.
+  }
+}
+
+function persistentServerDiagnostic(
+  level: "info" | "warn" | "error",
+  event: string,
+  fields: ServerDiagnosticFields = {},
+): void {
+  const line = serverDiagnostic(event, fields);
+  appendServerDiagnostic(line);
+  console[level](line);
 }
 
 export class SurfaceWsServer {
@@ -205,22 +247,55 @@ export class SurfaceWsServer {
     });
 
     this.wss.on("connection", (socket, request) => {
-      this.socketMeta.set(socket, { cache: new Map(), pairedSurfaceId: null });
-      console.info(
-        serverDiagnostic("socket_open", {
+      const remoteAddress = request.socket.remoteAddress ?? "<unknown>";
+      const socketId = `sock_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      this.socketMeta.set(socket, { cache: new Map(), pairedSurfaceId: null, remoteAddress, socketId });
+      persistentServerDiagnostic(
+        "info",
+        "socket_open",
+        {
           path: request.url ?? this.wsPath,
-        }),
+          remote_address: remoteAddress,
+          socket_id: socketId,
+        },
       );
       socket.on("message", (data) => {
-        void this.handleMessage(socket, data.toString("utf8")).catch(() => {});
+        void this.handleMessage(socket, data.toString("utf8")).catch((error) => {
+          persistentServerDiagnostic(
+            "error",
+            "socket_message_handler_failed",
+            {
+              paired_surface_id: this.socketMeta.get(socket)?.pairedSurfaceId,
+              socket_id: this.socketMeta.get(socket)?.socketId,
+              ...errorDiagnosticFields(error),
+            },
+          );
+        });
+      });
+      socket.on("error", (error) => {
+        const meta = this.socketMeta.get(socket);
+        persistentServerDiagnostic(
+          "warn",
+          "socket_error",
+          {
+            paired_surface_id: meta?.pairedSurfaceId,
+            socket_id: meta?.socketId,
+            ...errorDiagnosticFields(error),
+          },
+        );
       });
       socket.on("close", (code, reasonBuffer) => {
+        const meta = this.socketMeta.get(socket);
         const reason = reasonBuffer.toString() || "<none>";
-        console.info(
-          serverDiagnostic("socket_close", {
+        persistentServerDiagnostic(
+          "info",
+          "socket_close",
+          {
             code,
+            paired_surface_id: meta?.pairedSurfaceId,
             reason,
-          }),
+            socket_id: meta?.socketId,
+          },
         );
         this.handleSocketClosed(socket);
       });
@@ -561,11 +636,19 @@ export class SurfaceWsServer {
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
+    const initialMeta = this.socketMeta.get(socket);
     let request: Request;
     try {
       request = JSON.parse(raw) as Request;
     } catch {
-      console.warn(serverDiagnostic("socket_protocol_violation", { reason: "invalid_json" }));
+      persistentServerDiagnostic(
+        "warn",
+        "socket_protocol_violation",
+        {
+          reason: "invalid_json",
+          socket_id: initialMeta?.socketId,
+        },
+      );
       socket.close(4410, "protocol_violation");
       return;
     }
@@ -573,6 +656,23 @@ export class SurfaceWsServer {
     const meta = this.socketMeta.get(socket);
     if (!meta) {
       return;
+    }
+
+    if (request.op === "pair.request") {
+      persistentServerDiagnostic(
+        "info",
+        "pair_request_receive",
+        {
+          connection_id: request.payload.connectionId,
+          provider_id: request.payload.providerId,
+          raw_bytes: Buffer.byteLength(raw),
+          request_id: request.id,
+          resume_session_id: request.payload.resume?.sessionId ?? "nil",
+          socket_id: meta.socketId,
+          surface_id: request.payload.surfaceId,
+          takeover: request.payload.takeover ?? false,
+        },
+      );
     }
 
     const cache = meta.pairedSurfaceId
@@ -598,8 +698,45 @@ export class SurfaceWsServer {
 
     let response: Response;
     try {
+      if (request.op === "pair.request") {
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_dispatch_enter",
+          {
+            request_id: request.id,
+            socket_id: meta.socketId,
+            surface_id: request.payload.surfaceId,
+          },
+        );
+      }
       response = await this.dispatchRequest(socket, request);
+      if (request.op === "pair.request") {
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_dispatch_exit",
+          {
+            request_id: request.id,
+            socket_id: meta.socketId,
+            surface_id: response.ok && response.op === "pair.request" ? response.payload.surfaceId : request.payload.surfaceId,
+          },
+        );
+      }
     } catch (error) {
+      if (request.op === "pair.request") {
+        persistentServerDiagnostic(
+          "warn",
+          "pair_request_dispatch_throw",
+          {
+            provider_id: request.payload.providerId,
+            request_id: request.id,
+            resume_session_id: request.payload.resume?.sessionId ?? "nil",
+            socket_id: meta.socketId,
+            surface_id: request.payload.surfaceId,
+            takeover: request.payload.takeover ?? false,
+            ...errorDiagnosticFields(error),
+          },
+        );
+      }
       if (error instanceof SurfaceCoreError) {
         console.warn(
           serverDiagnostic("request_error", {
@@ -628,6 +765,22 @@ export class SurfaceWsServer {
     cache.set(request.id, { payloadHash, response });
     trimCache(cache);
     await this.reply(socket, response);
+    if (request.op === "pair.request") {
+      persistentServerDiagnostic(
+        response.ok ? "info" : "warn",
+        "pair_response_sent",
+        {
+          error_code: !response.ok ? response.error.code : undefined,
+          ok: response.ok,
+          request_id: request.id,
+          resume_session_id: request.payload.resume?.sessionId ?? "nil",
+          session_id: response.ok && response.op === "pair.request" ? response.payload.sessionId : undefined,
+          socket_id: meta.socketId,
+          surface_id: response.ok && response.op === "pair.request" ? response.payload.surfaceId : request.payload.surfaceId,
+          takeover: request.payload.takeover ?? false,
+        },
+      );
+    }
     if (
       response.type === "response" &&
       !response.ok &&
@@ -753,13 +906,35 @@ export class SurfaceWsServer {
   }
 
   private async handlePairRequest(socket: WebSocket, request: PairRequest): Promise<Response> {
+    const meta = this.socketMeta.get(socket);
     if (request.payload.protocolVersion !== 1) {
+      persistentServerDiagnostic(
+        "warn",
+        "pair_request_validation_failed",
+        {
+          code: "unsupported_protocol_version",
+          protocol_version: request.payload.protocolVersion,
+          request_id: request.id,
+          socket_id: meta?.socketId,
+          surface_id: request.payload.surfaceId,
+        },
+      );
       throw new SurfaceCoreError("unsupported_protocol_version", "Unsupported protocol version");
     }
     if (
       typeof request.payload.providerName !== "string" ||
       !request.payload.providerName.trim()
     ) {
+      persistentServerDiagnostic(
+        "warn",
+        "pair_request_validation_failed",
+        {
+          code: "missing_provider_name",
+          request_id: request.id,
+          socket_id: meta?.socketId,
+          surface_id: request.payload.surfaceId,
+        },
+      );
       throw new SurfaceCoreError("missing_provider_name", "providerName is required");
     }
     if (
@@ -767,6 +942,19 @@ export class SurfaceWsServer {
       request.payload.initialPaneId < 1 ||
       request.payload.initialPaneLabel < 1
     ) {
+      persistentServerDiagnostic(
+        "warn",
+        "pair_request_validation_failed",
+        {
+          code: "invalid_payload",
+          initial_pane_id: request.payload.initialPaneId,
+          initial_pane_label: request.payload.initialPaneLabel,
+          request_id: request.id,
+          socket_id: meta?.socketId,
+          surface_id: request.payload.surfaceId,
+          window_label: request.payload.windowLabel,
+        },
+      );
       throw new SurfaceCoreError(
         "invalid_payload",
         "pair.request requires windowLabel, initialPaneId, and initialPaneLabel",
@@ -782,60 +970,85 @@ export class SurfaceWsServer {
     const requestedProfile = request.payload.eventProfile ?? "minimum_deep";
     const drawingFlushConfig = request.payload.drawingFlushConfig ?? DEFAULT_DRAWING_FLUSH_CONFIG;
     const resumeSessionId = request.payload.resume?.sessionId ?? null;
-    console.info(
-      serverDiagnostic("pair_request_begin", {
-        provider_id: providerId,
-        resume_session_id: resumeSessionId ?? "nil",
-        surface_id: surfaceId,
-        takeover: request.payload.takeover ?? false,
-      }),
-    );
-
-    let resumed = false;
-    let sessionId: string;
     const existingOpenElsewhere =
       existing !== null &&
       existing.socket !== socket &&
       existing.socket.readyState === WebSocket.OPEN;
+    persistentServerDiagnostic(
+      "info",
+      "pair_request_begin",
+      {
+        existing_open_elsewhere: existingOpenElsewhere,
+        has_lock: Boolean(lock),
+        lock_provider_id: lock?.providerId,
+        lock_session_id: lock?.sessionId,
+        provider_id: providerId,
+        request_id: request.id,
+        resume_session_id: resumeSessionId ?? "nil",
+        socket_id: meta?.socketId,
+        surface_id: surfaceId,
+        takeover: request.payload.takeover ?? false,
+      },
+    );
+
+    let resumed = false;
+    let sessionId: string;
 
     if (!lock) {
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-      console.info(
-        serverDiagnostic("pair_request_new_session", {
+      persistentServerDiagnostic(
+        "info",
+        "pair_request_new_session",
+        {
           provider_id: providerId,
+          request_id: request.id,
+          session_id: sessionId,
+          socket_id: meta?.socketId,
           surface_id: surfaceId,
-        }),
+        },
       );
     } else if (lock.providerId === providerId) {
       if (existingOpenElsewhere) {
-        console.warn(
-          serverDiagnostic("pair_request_duplicate_active", {
+        persistentServerDiagnostic(
+          "warn",
+          "pair_request_duplicate_active",
+          {
             provider_id: providerId,
+            request_id: request.id,
             session_id: lock.sessionId,
+            socket_id: meta?.socketId,
             surface_id: surfaceId,
-          }),
+          },
         );
         throw new SurfaceCoreError("busy", "Provider already holds an active socket for this surface");
       }
       if (resumeSessionId !== lock.sessionId) {
-        console.warn(
-          serverDiagnostic("pair_request_invalid_resume", {
+        persistentServerDiagnostic(
+          "warn",
+          "pair_request_invalid_resume",
+          {
             expected_session_id: lock.sessionId,
             provider_id: providerId,
             received_session_id: resumeSessionId ?? "nil",
+            request_id: request.id,
+            socket_id: meta?.socketId,
             surface_id: surfaceId,
-          }),
+          },
         );
         throw new SurfaceCoreError("invalid_resume", "Resume session did not match active ownership lock");
       } else {
         resumed = true;
         sessionId = lock.sessionId;
-        console.info(
-          serverDiagnostic("pair_request_resumed", {
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_resumed",
+          {
             provider_id: providerId,
+            request_id: request.id,
             session_id: sessionId,
+            socket_id: meta?.socketId,
             surface_id: surfaceId,
-          }),
+          },
         );
         if (existing && existing.socket !== socket) {
           this.detachActiveSession(surfaceId, "superseded");
@@ -843,12 +1056,16 @@ export class SurfaceWsServer {
       }
     } else {
       if (!request.payload.takeover) {
-        console.warn(
-          serverDiagnostic("pair_request_busy", {
+        persistentServerDiagnostic(
+          "warn",
+          "pair_request_busy",
+          {
             lock_provider_id: lock.providerId,
             requested_provider_id: providerId,
+            request_id: request.id,
+            socket_id: meta?.socketId,
             surface_id: surfaceId,
-          }),
+          },
         );
         throw new SurfaceCoreError("busy", "Surface ownership lock is held by another provider");
       }
@@ -856,11 +1073,16 @@ export class SurfaceWsServer {
         this.detachActiveSession(surfaceId, "superseded");
       }
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-      console.info(
-        serverDiagnostic("pair_request_takeover", {
+      persistentServerDiagnostic(
+        "info",
+        "pair_request_takeover",
+        {
           provider_id: providerId,
+          request_id: request.id,
+          session_id: sessionId,
+          socket_id: meta?.socketId,
           surface_id: surfaceId,
-        }),
+        },
       );
     }
 
@@ -882,7 +1104,6 @@ export class SurfaceWsServer {
       providerId,
       sessionId,
     };
-    const meta = this.socketMeta.get(socket);
     if (meta) {
       meta.pairedSurfaceId = surfaceId;
     }
@@ -925,13 +1146,17 @@ export class SurfaceWsServer {
       v: 1,
     };
 
-    console.info(
-      serverDiagnostic("pair_response_ok", {
+    persistentServerDiagnostic(
+      "info",
+      "pair_response_ok",
+      {
         pane_count: response.payload.state.panes.length,
+        request_id: request.id,
         resumed,
         session_id: sessionId,
+        socket_id: meta?.socketId,
         surface_id: surfaceId,
-      }),
+      },
     );
 
     return response;

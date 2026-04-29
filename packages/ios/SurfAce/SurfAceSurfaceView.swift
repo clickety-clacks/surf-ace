@@ -9,12 +9,17 @@ import WebKit
 private let surfAceSurfaceCoordinateSpaceName = "SurfAce.surface.logical"
 
 private enum SurfAceChromeFont {
-    static let name = "ShareTechMono-Regular"
+    static let regularName = "Rajdhani-Regular"
+    static let boldName = "Rajdhani-Bold"
 }
 
-private enum SurfAceShareTechMonoMetrics {
+private enum SurfAceRajdhaniMetrics {
     static let paneNumberTrackingRatio: CGFloat = -0.04
-    static let windowBoxHeightRatio: CGFloat = 0.25
+    static let windowTextRatio: CGFloat = 0.28
+    static let windowBoxHeightRatio: CGFloat = 0.4
+    static let windowBoxPaddingRatio: CGFloat = 0.025
+    static let windowTrackingRatio: CGFloat = -0.02
+    static let identitySpacingRatio: CGFloat = 0.04
 }
 
 private enum SurfAceIdentityBaseline: AlignmentID {
@@ -160,7 +165,7 @@ private struct SurfAcePaneView: View {
                     VStack {
                         Spacer()
                         Text(toast)
-                            .font(.custom(SurfAceChromeFont.name, size: 13))
+                            .font(.custom(SurfAceChromeFont.regularName, size: 13))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -234,31 +239,28 @@ private struct SurfAcePaneIdentityOverlay: View {
     let connectionState: SurfAceConnectionBarState
 
     private var fontSize: CGFloat {
-        max(1, min(paneSize.width, paneSize.height) / 5)
+        max(1, min(paneSize.width, paneSize.height) / 4)
     }
 
     var body: some View {
-        HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * 0.08) {
+        HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
-                    .font(.custom(SurfAceChromeFont.name, size: fontSize * 0.14))
-                    .foregroundStyle(connectionColor.opacity(0.25))
+                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
+                    .foregroundStyle(connectionColor.opacity(0.35))
                     .lineLimit(1)
-                    .padding(.horizontal, fontSize * 0.04)
-                    .frame(minWidth: fontSize * SurfAceShareTechMonoMetrics.windowBoxHeightRatio)
-                    .frame(height: fontSize * SurfAceShareTechMonoMetrics.windowBoxHeightRatio)
+                    .tracking(fontSize * SurfAceRajdhaniMetrics.windowTextRatio * SurfAceRajdhaniMetrics.windowTrackingRatio)
+                    .padding(.horizontal, fontSize * SurfAceRajdhaniMetrics.windowBoxPaddingRatio)
+                    .frame(minWidth: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
+                    .frame(height: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
                     .overlay {
                         RoundedRectangle(cornerRadius: fontSize * 0.04, style: .continuous)
-                            .strokeBorder(connectionColor.opacity(0.25), lineWidth: max(1, fontSize * 0.008))
+                            .strokeBorder(connectionColor.opacity(0.35), lineWidth: max(1, fontSize * 0.008))
                     }
                     .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
             }
 
-            Text(paneLabel)
-                .font(.custom(SurfAceChromeFont.name, size: fontSize))
-                .monospacedDigit()
-                .tracking(fontSize * SurfAceShareTechMonoMetrics.paneNumberTrackingRatio)
-                .foregroundStyle(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.25))
+            SurfAcePaneNumberText(paneLabel: paneLabel, fontSize: fontSize)
                 .lineLimit(1)
                 .minimumScaleFactor(0.35)
                 .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
@@ -318,7 +320,7 @@ private struct SurfAcePaneControls: View {
 
                     if let ownerName {
                         Text(ownerName)
-                            .font(.custom(SurfAceChromeFont.name, size: 13))
+                            .font(.custom(SurfAceChromeFont.regularName, size: 13))
                             .foregroundStyle(.white.opacity(0.86))
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -326,8 +328,7 @@ private struct SurfAcePaneControls: View {
                             .padding(.trailing, 10)
                     }
                 }
-                .padding(6)
-                .background(.black.opacity(0.58), in: Capsule())
+                .surfAceControlPillChrome()
             }
 
             HStack(spacing: 6) {
@@ -355,8 +356,7 @@ private struct SurfAcePaneControls: View {
                     .buttonStyle(SurfAceGlassButtonStyle())
                 }
             }
-            .padding(6)
-            .background(.black.opacity(0.58), in: Capsule())
+            .surfAceControlPillChrome()
         }
     }
 
@@ -372,7 +372,7 @@ private struct SurfAcePaneControls: View {
 private struct SurfAceWarningIndicator: View {
     var body: some View {
         Image(systemName: "exclamationmark.triangle.fill")
-            .font(.custom(SurfAceChromeFont.name, size: 18))
+            .font(.custom(SurfAceChromeFont.regularName, size: 18))
             .foregroundStyle(Color.yellow)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
@@ -384,13 +384,35 @@ private struct SurfAceWarningIndicator: View {
 private struct SurfAceGlassButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.custom(SurfAceChromeFont.name, size: 18))
+            .font(.custom(SurfAceChromeFont.regularName, size: 18))
             .foregroundStyle(.white)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
-            .background(.black.opacity(configuration.isPressed ? 0.78 : 0.58), in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(.white.opacity(configuration.isPressed ? 0.32 : 0.18), lineWidth: 1)
+            }
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct SurfAceControlPillChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(6)
+            .glassEffect(.regular, in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+            }
+    }
+}
+
+private extension View {
+    func surfAceControlPillChrome() -> some View {
+        modifier(SurfAceControlPillChrome())
     }
 }
 
@@ -423,9 +445,26 @@ private struct SurfAceKeyboardActiveBorder: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 0, style: .continuous)
-            .strokeBorder(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(active ? 1 : 0), lineWidth: 10)
+            .strokeBorder(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(active ? 0.25 : 0), lineWidth: 10)
             .allowsHitTesting(false)
             .animation(.easeOut(duration: 0.12), value: active)
+    }
+}
+
+private struct SurfAcePaneNumberText: View {
+    let paneLabel: String
+    let fontSize: CGFloat
+
+    var body: some View {
+        paneNumberText
+    }
+
+    private var paneNumberText: some View {
+        Text(paneLabel)
+            .font(.custom(SurfAceChromeFont.boldName, size: fontSize))
+            .monospacedDigit()
+            .tracking(fontSize * SurfAceRajdhaniMetrics.paneNumberTrackingRatio)
+            .foregroundStyle(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.3))
     }
 }
 

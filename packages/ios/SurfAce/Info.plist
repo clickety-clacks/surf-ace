@@ -29,7 +29,8 @@
 	</dict>
 	<key>UIAppFonts</key>
 	<array>
-		<string>ShareTechMono-Regular.ttf</string>
+		<string>Rajdhani-Regular.ttf</string>
+		<string>Rajdhani-Bold.ttf</string>
 	</array>
 	<key>UIRequiresFullScreen</key>
 	<true/>
