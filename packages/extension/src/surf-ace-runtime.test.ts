@@ -131,6 +131,7 @@ class FakeSurfAceWsServer {
   }> = [];
   nextTopologyApplyError: { code: string; message: string } | null = null;
   nextTopologyApplyResponsePaneLabels: number[] | null = null;
+  nextContentApplyError: { code: string; details?: Record<string, unknown>; message: string } | null = null;
   nextContentApplyRenderStatus: string | null = null;
   snapshotDelayMs = 0;
   snapshotImage = "aGVsbG8=";
@@ -794,6 +795,22 @@ class FakeSurfAceWsServer {
         const paneId = Number(message.payload?.paneId ?? 0);
         const pane = targetSurface.panes.get(paneId);
         assert.ok(pane);
+        if (this.nextContentApplyError) {
+          const error = this.nextContentApplyError;
+          this.nextContentApplyError = null;
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "content.apply",
+                error.code,
+                error.message,
+                error.details,
+              ),
+            ),
+          );
+          return;
+        }
         if (message.payload && "clear" in message.payload) {
           pane.contentId = null;
           pane.contentType = null;
@@ -1296,10 +1313,12 @@ class FakeSurfAceWsServer {
     op: string,
     code: string,
     message: string,
+    details?: Record<string, unknown>,
   ) {
     return {
       error: {
         code,
+        ...(details ? { details } : {}),
         message,
       },
       id,
@@ -2703,6 +2722,63 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           paneId: firstPaneId,
         });
         assert.equal(server.contentSetRequests.at(-1)?.revision, secondPush.revision + 1);
+      },
+    });
+  });
+
+  await t.test("content.apply resyncs provider revision from client stale_revision and retries once", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.nextContentApplyError = {
+          code: "stale_revision",
+          details: { expectedRevision: 4 },
+          message: "Expected revision >= 4",
+        };
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        const pushed = await runtime.push({
+          content: "<p>resynced</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(pushed.revision, 5);
+        assert.deepEqual(
+          server.contentSetRequests.map((request) => request.revision),
+          [5],
+        );
+        const screens = await runtime.listScreens();
+        assert.equal(screens[0]?.panes[0]?.activeContent?.revision, 5);
+      },
+    });
+  });
+
+  await t.test("content.clear resyncs provider revision from client stale_revision and retries once", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.nextContentApplyError = {
+          code: "stale_revision",
+          details: { expectedRevision: 4 },
+          message: "Expected revision >= 4",
+        };
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const cleared = await runtime.clear({
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(cleared.revision, 5);
+        assert.deepEqual(
+          server.clearRequests.map((request) => request.revision),
+          [5],
+        );
+        const screens = await runtime.listScreens();
+        assert.equal(screens[0]?.panes[0]?.activeContent, null);
       },
     });
   });

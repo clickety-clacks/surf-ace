@@ -1342,6 +1342,21 @@ function isErrorResponse(response: Response): response is ErrorResponse {
   return (response as ErrorResponse).ok === false;
 }
 
+function staleRevisionExpectedRevision(response: Response): Revision | null {
+  if (!isErrorResponse(response) || response.error.code !== "stale_revision") {
+    return null;
+  }
+  const expectedRevision = response.error.details?.expectedRevision;
+  if (Number.isInteger(expectedRevision) && Number(expectedRevision) >= 0) {
+    return asRevision(Number(expectedRevision));
+  }
+  const match = /Expected revision >=\s*(\d+)/.exec(response.error.message);
+  if (!match) {
+    return null;
+  }
+  return asRevision(Number(match[1]));
+}
+
 function mutationRenderStatus(response: Response): string | null {
   if (isErrorResponse(response)) {
     return null;
@@ -6845,6 +6860,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     options: { diagnostic?: SurfAcePushInput["diagnostic"]; skipTargetRecord?: boolean } = {},
   ): Promise<SurfAcePushResult | SurfAceClearResult> {
     if (isErrorResponse(response)) {
+      const expectedRevision = staleRevisionExpectedRevision(response);
+      if (expectedRevision !== null && Number(expectedRevision) > Number(pane.currentRevision)) {
+        this.logger.warn?.(
+          `[surf-ace:runtime] event=mutation_revision_resync surface_id=${surface.surfaceId} window_label=${surface.windowLabel || "<none>"} pane_id=${pane.paneId} pane_label=${pane.paneLabel} remote_pane_id=${pane.remotePaneId} provider_revision=${pane.currentRevision} client_revision=${expectedRevision} op=${request.op}`,
+        );
+        pane.currentRevision = expectedRevision;
+        const retryRequest = {
+          ...request,
+          id: makeBrandedRequestId(),
+          payload: {
+            ...request.payload,
+            revision: asRevision(Number(expectedRevision) + 1),
+          },
+          sentAt: asEpochMs(this.now()),
+        } as ContentApplyRequest | ContentClearRequest | ContentSetRequest;
+        const retryResponse = await this.sendRequest(surface, retryRequest);
+        return await this.applyMutationResponse(surface, pane, retryResponse, retryRequest, sessionKey, options);
+      }
       pane.pendingOwnerSessionKey = null;
       throw new SurfAceToolError(
         mutationErrorCode(response.error.code),
