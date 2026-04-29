@@ -52,6 +52,27 @@ test("validateEnvelopeType rejects pair requests without providerName", () => {
   assert.equal(result.ok, false);
 });
 
+test("validateEnvelopeType accepts file reload source metadata on content.set", () => {
+  const result = validateEnvelopeType("content.set", {
+    id: "req_reload_source",
+    op: "content.set",
+    payload: {
+      content: { html: "<p>file</p>" },
+      contentId: "ct_11111111",
+      contentType: "html",
+      historyOwnerToken: "hot_test",
+      paneId: 1,
+      reloadSource: { kind: "file", path: "/tmp/source.html" },
+      revision: 1,
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+
+  assert.deepEqual(result, { ok: true });
+});
+
 test("manifest covers every spec-defined request, response, and event op", () => {
   const schemaNames = Object.keys(SURF_ACE_PROTOCOL_SCHEMAS).sort();
   const expectedNames = [...new Set([...REQUEST_MESSAGES, ...EVENT_MESSAGES])].sort();

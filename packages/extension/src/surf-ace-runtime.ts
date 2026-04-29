@@ -268,6 +268,7 @@ export type SurfAcePushInput = {
   };
   fingerprint: string;
   paneId: PaneId;
+  sourcePath?: string;
 };
 
 type SurfAceContentPushInput = SurfAcePushInput & { contentType: ContentType };
@@ -2731,6 +2732,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       revision: asRevision((pane.currentRevision as number) + 1),
       topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
     } as ContentSetPayload & { topologyRevision?: TopologyApplyRequest["payload"]["topologyRevision"] };
+    if (input.sourcePath) {
+      payload.reloadSource = { kind: "file", path: input.sourcePath };
+    }
     if (displayTitle) {
       payload.display = { title: displayTitle };
     }

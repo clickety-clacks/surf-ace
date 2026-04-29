@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { app, BrowserWindow, Menu, ipcMain, screen, type WebContents } from "electron";
 
-import type { NativePaneMaterialization, Stroke } from "../../protocol/src/index.js";
+import type { ContentSetRequest, NativePaneMaterialization, Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import {
@@ -24,6 +24,7 @@ import {
 import {
   SurfaceCore,
   type PersistentSurfaceState,
+  type ReloadEntryIdentity,
   type RendererWindowState,
 } from "./surface-core.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
@@ -494,6 +495,80 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
   return image.toPNG().toString("base64");
 }
 
+async function reloadPaneFromSource(surfaceId: string, paneId: number): Promise<void> {
+  const source = core.reloadSource(surfaceId, paneId);
+  if (!source || source.kind !== "file") {
+    return;
+  }
+  const pane = core.getRendererWindowState(surfaceId).panes.find((candidate) => candidate.paneId === paneId);
+  if (!pane?.content.contentType || pane.content.contentType === "browser_url") {
+    return;
+  }
+  const expected: ReloadEntryIdentity = {
+    contentId: pane.content.contentId,
+    contentType: pane.content.contentType,
+    reloadSource: source,
+    renderVersion: pane.content.renderVersion,
+    revision: pane.content.revision,
+  };
+  const content = await contentPayloadFromFile(source.path, pane.content);
+  if (!content) {
+    return;
+  }
+  const currentPane = core.getRendererWindowState(surfaceId).panes.find((candidate) => candidate.paneId === paneId);
+  const currentSource = currentPane?.content.reloadSource;
+  if (
+    !currentPane ||
+    currentPane.content.contentId !== expected.contentId ||
+    currentPane.content.contentType !== expected.contentType ||
+    currentPane.content.renderVersion !== expected.renderVersion ||
+    currentPane.content.revision !== expected.revision ||
+    !currentSource ||
+    currentSource.kind !== expected.reloadSource.kind ||
+    currentSource.path !== expected.reloadSource.path
+  ) {
+    return;
+  }
+  core.replaceCurrentContentFromReloadSource(surfaceId, paneId, content, expected);
+}
+
+async function contentPayloadFromFile(
+  filePath: string,
+  current: RendererWindowState["panes"][number]["content"],
+): Promise<ContentSetRequest["payload"]["content"] | null> {
+  switch (current.contentType) {
+    case "html":
+      return {
+        ...(current.content && "baseUrl" in current.content && current.content.baseUrl ? { baseUrl: current.content.baseUrl } : {}),
+        html: await fs.readFile(filePath, "utf8"),
+      };
+    case "markdown":
+      return { markdown: await fs.readFile(filePath, "utf8") };
+    case "terminal":
+      return {
+        lines: (await fs.readFile(filePath, "utf8")).split(/\r?\n/),
+        scrollback:
+          current.content && "scrollback" in current.content && typeof current.content.scrollback === "number"
+            ? current.content.scrollback
+            : 1000,
+      };
+    case "image": {
+      const existing = current.content && typeof current.content === "object" && "mediaType" in current.content
+        ? current.content as { mediaType?: string; alt?: string }
+        : {};
+      return {
+        data: (await fs.readFile(filePath)).toString("base64"),
+        mediaType: existing.mediaType ?? "application/octet-stream",
+        ...(existing.alt ? { alt: existing.alt } : {}),
+      };
+    }
+    case "pdf":
+      return { data: (await fs.readFile(filePath)).toString("base64") };
+    default:
+      return null;
+  }
+}
+
 async function createAdditionalWindow(): Promise<void> {
   const surface = core.createAdditionalSurface(endpointName(), displayViewport());
   await persistState();
@@ -616,6 +691,11 @@ function installIpc(): void {
         } catch {
           // Renderer commands can race a pane reset during reconnect.
         }
+        break;
+      case "reload":
+        void reloadPaneFromSource(surfaceId, paneId).catch((error) => {
+          console.warn(`[surf-ace] reload failed: ${error}`);
+        });
         break;
       case "tap":
         void server.emitTap(surfaceId, paneId, {

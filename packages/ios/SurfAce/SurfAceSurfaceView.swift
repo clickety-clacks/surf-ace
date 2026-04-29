@@ -534,8 +534,17 @@ private struct SurfAcePaneControls: View {
                 SurfAceWarningIndicator()
             }
 
-            if hasNavigationContext && (ownerName != nil || pane.canGoBack || pane.canGoForward) {
+            if hasNavigationContext && (ownerName != nil || pane.canGoBack || pane.canGoForward || pane.canReload) {
                 HStack(spacing: 6) {
+                    if pane.canReload {
+                        Button {
+                            runtime.reloadPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(SurfAceGlassButtonStyle())
+                    }
+
                     if pane.canGoBack {
                         Button {
                             runtime.navigateHistory(
@@ -609,7 +618,7 @@ private struct SurfAcePaneControls: View {
     }
 
     private var hasNavigationContext: Bool {
-        pane.currentEntry.contentId != nil || pane.canGoBack || pane.canGoForward
+        pane.currentEntry.contentId != nil || pane.canGoBack || pane.canGoForward || pane.canReload
     }
 }
 
@@ -810,6 +819,10 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
 
         func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
             hostView?.render(entry: entry, restoreViewport: restoreViewport)
+        }
+
+        func reloadBrowserURL() {
+            hostView?.reloadBrowserURL()
         }
 
         func renderBrowserURL(entry: SurfAcePaneEntry) async -> SurfAceBrowserNavigationResult {
@@ -1103,6 +1116,10 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 )
             }
         }
+    }
+
+    func reloadBrowserURL() {
+        webView.reload()
     }
 
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool) {

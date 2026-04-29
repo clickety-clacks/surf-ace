@@ -88,6 +88,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
                 revision: 1,
                 contentType: .html,
                 payload: .html(html: "<p>Annotate</p>", baseURL: nil),
+                reloadSource: nil,
                 title: nil,
                 scrollable: true,
                 interactive: true

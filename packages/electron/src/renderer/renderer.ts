@@ -51,9 +51,11 @@ type MarkdownContent = { markdown: string };
 type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
 type BrowserUrlContent = { url: string };
+type ContentReloadSource = { kind: "file"; path: string };
 type BrowserUrlWebViewElement = HTMLElement & {
   executeJavaScript?: (code: string) => Promise<unknown>;
   getWebContentsId?: () => number;
+  reload?: () => void;
   src: string;
 };
 type BrowserUrlWebViewErrorEvent = Event & {
@@ -106,6 +108,9 @@ type RendererPaneState = {
     contentId: string | null;
     contentType: "browser_url" | "canvas" | "html" | "image" | "markdown" | "pdf" | "terminal" | "video" | null;
     display?: { interactive?: boolean; scrollable?: boolean; title?: string };
+    reloadable: boolean;
+    reloadSource?: ContentReloadSource;
+    renderVersion: number;
     revision: number;
   };
   drawings: Stroke[];
@@ -202,10 +207,11 @@ type SurfAceOverlayKind =
   | "keyboard-focus-edge"
   | "history-forward"
   | "pane-label"
-  | "pane-handle";
+  | "pane-handle"
+  | "reload";
 
 function contentKey(pane: RendererPaneState): string {
-  return `${pane.externalNative ? "native" : "renderer"}:${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}`;
+  return `${pane.externalNative ? "native" : "renderer"}:${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}:${pane.content.renderVersion}`;
 }
 
 function drawingsKey(drawings: Stroke[]): string {
@@ -218,6 +224,10 @@ function paneStateById(paneId: number): RendererPaneState | null {
 
 function paneStateFor(view: PaneView): RendererPaneState | null {
   return paneStateById(view.paneId);
+}
+
+function isBrowserUrlPane(pane: RendererPaneState): boolean {
+  return pane.content.contentType === "browser_url";
 }
 
 function rememberPaneContext(paneId: number): void {
@@ -284,6 +294,8 @@ function overlayMetadataForMarker(
       return { captures: OVERLAY_CAPTURES, kind: "history_back", suffix: marker, zIndex: 20 };
     case "history-forward":
       return { captures: OVERLAY_CAPTURES, kind: "history_forward", suffix: marker, zIndex: 20 };
+    case "reload":
+      return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker, zIndex: 20 };
     case "keyboard-focus-edge":
       return { captures: ["pointer_hover"], kind: "other", suffix: marker, zIndex: 25 };
     case "pane-label":
@@ -504,7 +516,7 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   return button;
 }
 
-function createLucideIcon(name: "pen-line"): SVGSVGElement {
+function createLucideIcon(name: "pen-line" | "rotate-cw"): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("class", `lucide lucide-${name}`);
@@ -521,6 +533,10 @@ function createLucideIcon(name: "pen-line"): SVGSVGElement {
       "M12 20h9",
       "M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z",
     ],
+    "rotate-cw": [
+      "M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1.06 6.63 2.92",
+      "M21 3v6h-6",
+    ],
   };
   for (const pathData of pathsByIcon[name]) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -530,7 +546,7 @@ function createLucideIcon(name: "pen-line"): SVGSVGElement {
   return svg;
 }
 
-function createIconButton(iconName: "pen-line", accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
+function createIconButton(iconName: "pen-line" | "rotate-cw", accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
   const button = document.createElement("button");
   button.className = `control-button icon-button ${className}`;
   button.disabled = disabled;
@@ -759,9 +775,22 @@ function setToast(view: PaneView, message: string | null): void {
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
   const hasPushedContent = pane.content.contentId !== null;
-  if (hasPushedContent || pane.canGoBack || pane.canGoForward) {
+  if (hasPushedContent || pane.canGoBack || pane.canGoForward || pane.content.reloadable) {
     const navigationPill = document.createElement("div");
     navigationPill.className = "control-pill navigation-pill";
+    if (pane.content.reloadable && !pane.showDone) {
+      const reload = surfAceOverlay(createIconButton("rotate-cw", "Reload", "reload"), "reload");
+      reload.addEventListener("click", () => {
+        rememberPaneContext(pane.paneId);
+        if (isBrowserUrlPane(pane)) {
+          const browserView = currentPaneFrameElement(view) as BrowserUrlWebViewElement | null;
+          browserView?.reload?.();
+        } else {
+          window.surfAce.command({ paneId: pane.paneId, type: "reload" });
+        }
+      });
+      navigationPill.appendChild(reload);
+    }
     if (pane.canGoBack) {
       const back = surfAceOverlay(createButton("◀", "back"), "history-back");
       back.addEventListener("click", () => {

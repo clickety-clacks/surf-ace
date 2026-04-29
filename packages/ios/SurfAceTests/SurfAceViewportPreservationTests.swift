@@ -58,6 +58,7 @@ final class SurfAceViewportPreservationTests: XCTestCase {
             revision: 4,
             contentType: .html,
             payload: .html(html: "<p>after</p>", baseURL: nil),
+            reloadSource: nil,
             title: nil,
             scrollable: true,
             interactive: true
@@ -92,6 +93,7 @@ final class SurfAceViewportPreservationTests: XCTestCase {
             revision: 4,
             contentType: .html,
             payload: .html(html: "<p>after</p>", baseURL: nil),
+            reloadSource: nil,
             title: nil,
             scrollable: true,
             interactive: true
@@ -126,6 +128,7 @@ final class SurfAceViewportPreservationTests: XCTestCase {
             revision: 4,
             contentType: .markdown,
             payload: .markdown(markdown: "# after"),
+            reloadSource: nil,
             title: nil,
             scrollable: true,
             interactive: true

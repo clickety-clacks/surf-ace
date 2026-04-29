@@ -579,6 +579,18 @@ final class SurfAceRuntime {
         }
     }
 
+    func reloadPane(surfaceId: String, paneId: Int) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return
+        }
+        if case .browserURL = pane.currentEntry.payload {
+            pane.bridge?.reloadBrowserURL()
+        }
+    }
+
     func activateKeyboardPane(surfaceId: String, paneId: Int) {
         guard let surface = surfaceById[surfaceId],
               surface.panesById[paneId] != nil else { return }

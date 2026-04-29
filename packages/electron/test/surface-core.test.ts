@@ -239,6 +239,203 @@ test("surface core starts browser_url targets without reporting unverified navig
   assert.equal(snapshot.contentType, null);
 });
 
+test("surface core exposes reload only for browser_url and file-backed content", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>raw</p>" },
+    contentId: "ct_11111111" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.reloadable, false);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>file</p>" },
+    contentId: "ct_22222222" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    reloadSource: { kind: "file", path: "/tmp/source.html" },
+    revision: 2 as never,
+  });
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.reloadable, true);
+  assert.deepEqual(core.reloadSource(surface.surfaceId, paneId), { kind: "file", path: "/tmp/source.html" });
+
+  core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId,
+    requestId: "tr_browser",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 3,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://example.com/",
+    },
+    targetId: "target_browser",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://example.com/" },
+  });
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.reloadable, true);
+
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  core.markNativePaneMaterialized(surface.surfaceId, {
+    op: "native_pane.host",
+    panes: [
+      {
+        id: String(paneId),
+        binding_id: `${paneId}:target_top`,
+        content_id: "target_top",
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: listedPane.geometry.geometryRevision,
+          height: listedPane.geometry.contentViewport.height,
+          paneInstanceId: listedPane.geometry.paneInstanceId,
+          surfaceEpoch: listedPane.geometry.surfaceEpoch,
+          topologyEpoch: listedPane.geometry.topologyEpoch,
+          width: listedPane.geometry.contentViewport.width,
+          x: listedPane.geometry.contentViewport.x,
+          y: listedPane.geometry.contentViewport.y,
+        },
+        process: { args: ["top"], command: "top" },
+        revision: 4 as Revision,
+        target: "terminal",
+      },
+    ],
+  });
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.reloadable, false);
+});
+
+test("surface core reloads file-backed content without changing content identity or revision", () => {
+  const core = new SurfaceCore({
+    now: () => 2000,
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>before</p>" },
+    contentId: "ct_11111111" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    reloadSource: { kind: "file", path: "/tmp/source.html" },
+    revision: 1 as never,
+  });
+
+  core.replaceCurrentContentFromReloadSource(surface.surfaceId, paneId, { html: "<p>after</p>" });
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(pane.content.contentId, "ct_11111111");
+  assert.equal(pane.content.revision, 1);
+  assert.deepEqual(pane.content.content, { html: "<p>after</p>" });
+});
+
+test("surface core blocks file-backed reload while annotating", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>before</p>" },
+    contentId: "ct_11111111" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    reloadSource: { kind: "file", path: "/tmp/source.html" },
+    revision: 1 as never,
+  });
+  core.setAnnotating(surface.surfaceId, paneId, true);
+
+  assert.equal(core.reloadSource(surface.surfaceId, paneId), null);
+  core.replaceCurrentContentFromReloadSource(surface.surfaceId, paneId, { html: "<p>after</p>" });
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.deepEqual(pane.content.content, { html: "<p>before</p>" });
+  assert.equal(pane.toast, "Finish annotation (Done) to navigate");
+});
+
+test("surface core ignores file-backed reload when current entry changed", () => {
+  let now = 3000;
+  const core = new SurfaceCore({
+    now: () => now++,
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>before</p>" },
+    contentId: "ct_11111111" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    reloadSource: { kind: "file", path: "/tmp/source.html" },
+    revision: 1 as never,
+  });
+  const staleRenderVersion = core.getRendererWindowState(surface.surfaceId).panes[0]!.content.renderVersion;
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>newer</p>" },
+    contentId: "ct_22222222" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    reloadSource: { kind: "file", path: "/tmp/newer.html" },
+    revision: 2 as never,
+  });
+
+  core.replaceCurrentContentFromReloadSource(
+    surface.surfaceId,
+    paneId,
+    { html: "<p>stale</p>" },
+    {
+      contentId: "ct_11111111",
+      contentType: "html",
+      reloadSource: { kind: "file", path: "/tmp/source.html" },
+      renderVersion: staleRenderVersion,
+      revision: 1,
+    },
+  );
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(pane.content.contentId, "ct_22222222");
+  assert.equal(pane.content.revision, 2);
+  assert.deepEqual(pane.content.content, { html: "<p>newer</p>" });
+});
+
 test("surface core clears browser_url renderer content when native pane materializes", () => {
   const core = new SurfaceCore({
     persistentState: {

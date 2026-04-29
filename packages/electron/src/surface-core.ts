@@ -9,6 +9,7 @@ import type {
   ContentAppendRequest,
   ContentClearRequest,
   ContentPatchRequest,
+  ContentReloadSource,
   ContentSetRequest,
   ContentType,
   DrawingFlushConfig,
@@ -54,6 +55,7 @@ type HistoryEntry = {
   contentType: RenderableContentType | null;
   display?: ContentDisplay;
   ownerToken: string | null;
+  reloadSource?: ContentReloadSource;
   revision: number;
 };
 
@@ -138,6 +140,9 @@ export type RendererPaneState = {
     contentId: string | null;
     contentType: RenderableContentType | null;
     display?: ContentDisplay;
+    reloadable: boolean;
+    reloadSource?: ContentReloadSource;
+    renderVersion: number;
     revision: number;
   };
   drawings: Stroke[];
@@ -162,6 +167,14 @@ export type RendererWindowState = {
   topologyRevision: number;
   viewport: SurfaceViewport;
   windowLabel: string;
+};
+
+export type ReloadEntryIdentity = {
+  contentId: string | null;
+  contentType: RenderableContentType | null;
+  reloadSource: ContentReloadSource;
+  renderVersion: number;
+  revision: number;
 };
 
 export type CoreEvent =
@@ -334,6 +347,9 @@ export class SurfaceCore {
             contentId: current.contentId,
             contentType: current.contentType,
             display: current.display ? { ...current.display } : undefined,
+            reloadable: isReloadableEntry(current, pane.externalNative),
+            reloadSource: cloneReloadSource(current.reloadSource) ?? undefined,
+            renderVersion: pane.latestContentEventAt,
             revision: current.revision,
           },
           drawings: structuredClone(current.annotations),
@@ -764,6 +780,7 @@ export class SurfaceCore {
       contentType: payload.contentType,
       display: payload.display ? { ...payload.display } : undefined,
       ownerToken: payload.historyOwnerToken,
+      reloadSource: cloneReloadSource(payload.reloadSource) ?? undefined,
       revision: payload.revision,
     };
     if (shouldReplaceVisibleEntry(pane, payload.historyOwnerToken)) {
@@ -1028,6 +1045,7 @@ export class SurfaceCore {
       contentType: payload.contentType,
       display: payload.display ? { ...payload.display } : undefined,
       ownerToken: payload.historyOwnerToken,
+      reloadSource: cloneReloadSource(payload.reloadSource) ?? undefined,
       revision: payload.revision,
     };
     if (shouldReplaceVisibleEntry(pane, payload.historyOwnerToken)) {
@@ -1078,6 +1096,49 @@ export class SurfaceCore {
     bumpGeometryRevision(surface);
     this.emit({ surfaceId, type: "surface-changed" });
     return currentMutationAck(pane);
+  }
+
+  reloadSource(surfaceId: string, paneId: number): ContentReloadSource | null {
+    const pane = this.requirePane(surfaceId, paneId);
+    if (!pane || pane.externalNative || pane.annotating) {
+      return null;
+    }
+    return cloneReloadSource(currentEntry(pane).reloadSource);
+  }
+
+  replaceCurrentContentFromReloadSource(
+    surfaceId: string,
+    paneId: number,
+    content: ContentPayload,
+    expected?: ReloadEntryIdentity,
+  ): void {
+    const surface = this.getSurface(surfaceId);
+    const pane = this.expectPane(surfaceId, paneId);
+    const entry = currentEntry(pane);
+    if (!entry.reloadSource || !entry.contentType || entry.contentType === "browser_url" || pane.externalNative) {
+      return;
+    }
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      return;
+    }
+    if (
+      expected &&
+      (entry.contentId !== expected.contentId ||
+        entry.contentType !== expected.contentType ||
+        pane.latestContentEventAt !== expected.renderVersion ||
+        entry.revision !== expected.revision ||
+        entry.reloadSource.kind !== expected.reloadSource.kind ||
+        entry.reloadSource.path !== expected.reloadSource.path)
+    ) {
+      return;
+    }
+    entry.content = cloneContent(content);
+    pane.toast = null;
+    pane.latestContentEventAt = this.now();
+    bumpGeometryRevision(surface);
+    this.emit({ surfaceId, type: "surface-changed" });
   }
 
   contentAppend(surfaceId: string, payload: ContentAppendRequest["payload"]): MutationAckResponse["payload"] {
@@ -1669,6 +1730,20 @@ function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {
 
 function cloneContent(content: RenderablePayload | null): RenderablePayload | null {
   return content ? structuredClone(content) : null;
+}
+
+function cloneReloadSource(source: ContentReloadSource | undefined): ContentReloadSource | null {
+  if (!source) {
+    return null;
+  }
+  return { kind: source.kind, path: source.path };
+}
+
+function isReloadableEntry(entry: HistoryEntry, externalNative: boolean): boolean {
+  if (externalNative) {
+    return false;
+  }
+  return entry.contentType === "browser_url" || entry.reloadSource?.kind === "file";
 }
 
 function htmlVisibleText(content: HtmlContent): string | null {
