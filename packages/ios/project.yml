@@ -17,16 +17,16 @@ targets:
       - path: SurfAce
         excludes:
           - Info.plist
-    info:
-      path: SurfAce/Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAce
         PRODUCT_NAME: SurfAce
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: 16
         MARKETING_VERSION: 0.1.0
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Z7R59J7QV8
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_FILE: SurfAce/Info.plist
         GENERATE_INFOPLIST_FILE: NO
   SurfAceTests:
     type: bundle.unit-test

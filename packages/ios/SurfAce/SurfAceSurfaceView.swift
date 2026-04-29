@@ -151,6 +151,7 @@ private struct SurfAcePaneView: View {
                     surfaceId: surface.surfaceId,
                     paneId: pane.paneId
                 )
+                .id("\(surface.surfaceId):\(pane.paneId)")
                 .background(Color.black.opacity(0.92))
 
                 SurfAcePaneIdentityOverlay(
@@ -499,7 +500,9 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {}
+    func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {
+        context.coordinator.updateBinding(surfaceId: surfaceId, paneId: paneId, hostView: uiView)
+    }
 
     static func dismantleUIView(_ uiView: SurfAceSurfaceHostView, coordinator: Coordinator) {
         coordinator.detach()
@@ -509,8 +512,8 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
     final class Coordinator: NSObject, SurfAcePaneBridging {
         private weak var hostView: SurfAceSurfaceHostView?
         private let runtime: SurfAceRuntime
-        private let surfaceId: String
-        private let paneId: Int
+        private var surfaceId: String
+        private var paneId: Int
 
         init(runtime: SurfAceRuntime, surfaceId: String, paneId: Int) {
             self.runtime = runtime
@@ -559,6 +562,17 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
                     drawingData: drawingData
                 )
             }
+        }
+
+        func updateBinding(surfaceId: String, paneId: Int, hostView: SurfAceSurfaceHostView) {
+            guard self.surfaceId != surfaceId || self.paneId != paneId || self.hostView !== hostView else {
+                return
+            }
+            runtime.detachPaneBridge(surfaceId: self.surfaceId, paneId: self.paneId)
+            self.surfaceId = surfaceId
+            self.paneId = paneId
+            attach(hostView: hostView)
+            runtime.attachPaneBridge(surfaceId: surfaceId, paneId: paneId, bridge: self)
         }
 
         func detach() {
@@ -669,6 +683,21 @@ private final class SurfAceWeakScriptMessageHandler: NSObject, WKScriptMessageHa
 }
 
 @MainActor
+private final class SurfAceAnnotationCanvasView: PKCanvasView {
+    var annotationMode = false
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard super.point(inside: point, with: event) else {
+            return false
+        }
+        if annotationMode {
+            return true
+        }
+        return event?.allTouches?.contains { $0.type == .pencil } == true
+    }
+}
+
+@MainActor
 final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     var onInteractionBegan: (() -> Void)?
     var onSelectionChanged: ((String, CGRect?) -> Void)?
@@ -692,7 +721,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     private let webView: WKWebView
     private let pdfView = PDFView()
-    private let canvasView = PKCanvasView()
+    private let canvasView = SurfAceAnnotationCanvasView()
     private var currentEntry: SurfAcePaneEntry?
     private var pendingBrowserNavigation: CheckedContinuation<SurfAceBrowserNavigationResult, Never>?
     private var pendingBrowserNavigationLoad: WKNavigation?
@@ -1112,7 +1141,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private func applyCurrentInteractionState() {
         let entryScrollable = currentEntry?.scrollable ?? true
         let entryInteractive = currentEntry?.interactive ?? true
-        canvasView.isUserInteractionEnabled = annotationMode
+        canvasView.isUserInteractionEnabled = true
+        canvasView.annotationMode = annotationMode
         if annotationMode {
             webView.scrollView.isScrollEnabled = false
             webView.isUserInteractionEnabled = false

@@ -625,6 +625,15 @@ export type MutationAckResponse = ResponseBase<
   };
 };
 
+export type RenderDiagnostics = {
+  bridgeAttached: boolean;
+  revision: Revision;
+  status: "standby_rendered" | "render_requested" | "pending_renderer" | "failed";
+  contentId?: ContentId;
+  contentType?: ContentType;
+  message?: string;
+};
+
 export type AnnotationsRemoveResponse = ResponseBase<"annotations.remove"> & {
   payload: {
     paneId: PaneId;
@@ -698,6 +707,7 @@ export type TopologyApplyResponse = ResponseBase<"topology.apply"> & {
 
 export type ContentApplyResponse = ResponseBase<"content.apply"> & {
   payload: MutationAckResponse["payload"] & {
+    render?: RenderDiagnostics;
     topologyRevision?: TopologyRevision;
   };
 };

@@ -571,6 +571,33 @@ struct SurfAceBrowserNavigationResult {
     var url: String
 }
 
+struct SurfAceRenderDiagnostics: Equatable {
+    var bridgeAttached: Bool
+    var contentId: String?
+    var contentType: SurfAceContentType?
+    var revision: Int
+    var status: String
+    var message: String?
+
+    var payload: [String: Any] {
+        var payload: [String: Any] = [
+            "bridgeAttached": bridgeAttached,
+            "revision": revision,
+            "status": status,
+        ]
+        if let contentId {
+            payload["contentId"] = contentId
+        }
+        if let contentType {
+            payload["contentType"] = contentType.rawValue
+        }
+        if let message {
+            payload["message"] = message
+        }
+        return payload
+    }
+}
+
 let surfAcePaneSplitSpacing: CGFloat = 1
 
 struct SurfAcePaneGeometrySnapshot: Equatable {
@@ -640,6 +667,14 @@ final class SurfAcePaneModel {
     var lastSuccessfulFlushAt: Date?
     var pendingAnnotationCommit = false
     var currentTarget: SurfAcePaneTargetState?
+    var lastRenderDiagnostics = SurfAceRenderDiagnostics(
+        bridgeAttached: false,
+        contentId: nil,
+        contentType: nil,
+        revision: 0,
+        status: "idle",
+        message: nil
+    )
     @ObservationIgnored var pendingFlushTask: Task<Void, Never>?
     @ObservationIgnored weak var bridge: (any SurfAcePaneBridging)?
     let paneInstanceId: String

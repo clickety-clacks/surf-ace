@@ -501,21 +501,43 @@ final class SurfAceRuntime {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         pane.bridge = bridge
         bridge.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry, restoreViewport: nil)
+        noteRenderDiagnostics(
+            surfaceId: surfaceId,
+            pane: pane,
+            bridgeAttached: true,
+            status: pane.currentEntry.contentId == nil ? "standby_rendered" : "render_requested",
+            message: nil
+        )
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         bridge.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
+        if pane.currentEntry.contentType != .html,
+           let reason = pane.pendingSnapshotHintReason {
+            pane.pendingSnapshotHintReason = nil
+            sendSnapshotHint(surfaceId: surfaceId, reason: reason)
+        }
     }
 
     func detachPaneBridge(surfaceId: String, paneId: Int) {
         pane(surfaceId: surfaceId, paneId: paneId)?.bridge = nil
     }
 
-    func setAnnotationMode(surfaceId: String, paneId: Int, enabled: Bool, fingerDrawEnabled: Bool) {
+    func setAnnotationMode(
+        surfaceId: String,
+        paneId: Int,
+        enabled: Bool,
+        fingerDrawEnabled: Bool,
+        source: String? = nil
+    ) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
         let wasEnabled = pane.annotationMode
         pane.annotationMode = enabled
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
         pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
+        let transitionSource = source ?? (enabled ? (fingerDrawEnabled ? "finger_button" : "annotation_button") : "done_button")
+        surfAceLifecycleLog(
+            "event=annotation_mode_changed \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", paneId), ("enabled", pane.annotationMode), ("finger_draw_enabled", pane.fingerDrawEnabled), ("source", transitionSource)]))"
+        )
         if wasEnabled && !enabled {
             requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
         }
@@ -698,9 +720,13 @@ final class SurfAceRuntime {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId), !strokes.isEmpty else { return }
 
         if !pane.annotationMode {
-            pane.annotationMode = true
-            pane.fingerDrawEnabled = false
-            pane.bridge?.setInteraction(annotationMode: true, fingerDrawEnabled: false)
+            setAnnotationMode(
+                surfaceId: surfaceId,
+                paneId: paneId,
+                enabled: true,
+                fingerDrawEnabled: false,
+                source: "pencil_stroke"
+            )
         }
 
         pane.currentEntry.drawingData = drawingData
@@ -1472,8 +1498,14 @@ final class SurfAceRuntime {
     }
 
     private func handleContentApply(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID) else {
+            return makeErrorResponse(op: "content.apply", id: id, code: "not_paired", message: "pair.request required")
+        }
+        return await handleContentApply(id: id, payload: payload, surfaceId: surfaceId)
+    }
+
+    private func handleContentApply(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
+        guard let paneId = payload["paneId"] as? Int,
               let pane = pane(surfaceId: surfaceId, paneId: paneId),
               let revision = payload["revision"] as? Int else {
             return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "paneId and revision are required")
@@ -1592,10 +1624,27 @@ final class SurfAceRuntime {
         pane.lastSelection = nil
         pane.lastNavigationURL = nil
         pane.lastPage = nil
-        pane.pendingSnapshotHintReason = frame.contentType == .html ? "after_render" : nil
-        pane.bridge?.render(entry: pane.currentEntry, restoreViewport: restoreViewport)
+        pane.pendingSnapshotHintReason = pane.bridge == nil || frame.contentType == .html ? "after_render" : nil
+        if let bridge = pane.bridge {
+            bridge.render(entry: pane.currentEntry, restoreViewport: restoreViewport)
+            noteRenderDiagnostics(
+                surfaceId: surfaceId,
+                pane: pane,
+                bridgeAttached: true,
+                status: "render_requested",
+                message: nil
+            )
+        } else {
+            noteRenderDiagnostics(
+                surfaceId: surfaceId,
+                pane: pane,
+                bridgeAttached: false,
+                status: "pending_renderer",
+                message: "pane renderer not attached"
+            )
+        }
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
-        if frame.contentType != .html {
+        if frame.contentType != .html, pane.bridge != nil {
             sendSnapshotHint(surfaceId: surfaceId, reason: "after_render")
         }
 
@@ -1609,6 +1658,10 @@ final class SurfAceRuntime {
         if var payloadObject = response["payload"] as? [String: Any],
            let topologyRevision = payload["topologyRevision"] as? Int {
             payloadObject["topologyRevision"] = topologyRevision
+            payloadObject["render"] = pane.lastRenderDiagnostics.payload
+            response["payload"] = payloadObject
+        } else if var payloadObject = response["payload"] as? [String: Any] {
+            payloadObject["render"] = pane.lastRenderDiagnostics.payload
             response["payload"] = payloadObject
         }
         return response
@@ -2491,6 +2544,26 @@ final class SurfAceRuntime {
         sendEvent(surfaceId: surfaceId, op: "event.snapshot_hint", payload: ["reason": reason])
     }
 
+    private func noteRenderDiagnostics(
+        surfaceId: String,
+        pane: SurfAcePaneModel,
+        bridgeAttached: Bool,
+        status: String,
+        message: String?
+    ) {
+        pane.lastRenderDiagnostics = SurfAceRenderDiagnostics(
+            bridgeAttached: bridgeAttached,
+            contentId: pane.currentEntry.contentId,
+            contentType: pane.currentEntry.contentType,
+            revision: pane.currentEntry.revision,
+            status: status,
+            message: message
+        )
+        surfAceLifecycleLog(
+            "event=render_diagnostics \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", pane.paneId), ("content_id", pane.currentEntry.contentId), ("content_type", pane.currentEntry.contentType?.rawValue), ("revision", pane.currentEntry.revision), ("bridge_attached", bridgeAttached), ("status", status), ("message", message)]))"
+        )
+    }
+
     private func enqueuePostReconnectEvents(surfaceId: String) {
         Task { @MainActor in
             if self.eventIsEnabled(surfaceId: surfaceId, eventName: "event.snapshot_hint") {
@@ -3203,6 +3276,10 @@ extension SurfAceRuntime {
 
     func materializeTargetApplyForTesting(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
         await materializeTargetApply(id: id, payload: payload, surfaceId: surfaceId)
+    }
+
+    func contentApplyForTesting(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
+        await handleContentApply(id: id, payload: payload, surfaceId: surfaceId)
     }
 }
 #endif
