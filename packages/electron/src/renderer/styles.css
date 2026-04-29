@@ -57,6 +57,11 @@ body.compositor-hosted {
   background: transparent;
 }
 
+html.compositor-hosted body .pane-shell,
+body.compositor-hosted .pane-shell {
+  background: transparent;
+}
+
 .surface-window {
   position: relative;
   height: 100%;
@@ -91,10 +96,6 @@ body.compositor-hosted {
   min-height: 0;
   background: var(--pane);
   overflow: hidden;
-}
-
-body.compositor-hosted .pane-shell.native-backed {
-  background: transparent;
 }
 
 body.compositor-hosted .pane-shell.native-backed .pane-scroll,

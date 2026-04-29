@@ -67,4 +67,5 @@ test("renderer enters compositor transparent mode before stylesheet paint", asyn
   assert.notEqual(stylesheetLink, -1);
   assert.ok(bootstrapScript < stylesheetLink);
   assert.match(stylesCss, /html\.compositor-hosted body,\s*body\.compositor-hosted\s*{\s*background: transparent;/);
+  assert.match(stylesCss, /html\.compositor-hosted body \.pane-shell,\s*body\.compositor-hosted \.pane-shell\s*{\s*background: transparent;/);
 });
