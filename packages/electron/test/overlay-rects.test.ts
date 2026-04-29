@@ -1,9 +1,21 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import test from "node:test";
 
 import { parseHTML } from "linkedom";
 
 import { visibleOverlayRect } from "../src/renderer/overlay-rects.js";
+
+async function rendererStyles(): Promise<string> {
+  return fs.readFile(new URL("../renderer/styles.css", import.meta.url), "utf8");
+}
+
+function declarationBlock(css: string, selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = css.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`));
+  assert.ok(match, `missing ${selector} rule`);
+  return match[1]!;
+}
 
 function installDOM() {
   const { document, window } = parseHTML("<html><body></body></html>");
@@ -80,4 +92,13 @@ test("pane label overlay region ignores hidden identity children", () => {
     x: 1228,
     y: 416,
   });
+});
+
+test("keyboard focus outline stays visible over light and dark pane content", async () => {
+  const css = await rendererStyles();
+  const activeRule = declarationBlock(css, ".pane-shell.keyboard-active .keyboard-focus-overlay");
+  const edgeRule = declarationBlock(css, ".keyboard-focus-edge");
+
+  assert.match(activeRule, /opacity:\s*1\s*;/);
+  assert.match(edgeRule, /background:\s*rgb\(128,\s*128,\s*128\)\s*;/);
 });
