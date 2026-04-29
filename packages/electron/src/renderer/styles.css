@@ -52,6 +52,7 @@ body {
   overflow: hidden;
 }
 
+html.compositor-hosted body,
 body.compositor-hosted {
   background: transparent;
 }

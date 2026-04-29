@@ -28,7 +28,7 @@ import {
 } from "./surface-core.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
-import { surfaceWindowOptions } from "./window-options.js";
+import { surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
 
 const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
@@ -447,7 +447,10 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   });
 
   await window.loadFile(path.join(distDir, "renderer", "index.html"), {
-    query: { surfaceId },
+    query: surfaceWindowLoadQuery({
+      compositorSocketPath: resolveCompositorControlSocketPath(),
+      surfaceId,
+    }),
   });
   return window;
 }

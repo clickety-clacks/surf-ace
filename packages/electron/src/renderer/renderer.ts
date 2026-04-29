@@ -1434,6 +1434,7 @@ function renderWindow(state: RendererWindowState): void {
 
 async function init(): Promise<void> {
   bootstrap = (await window.surfAce.getBootstrap()) as Bootstrap;
+  document.documentElement.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
   document.body.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
   document.body.classList.toggle("overlay-debug-borders", Boolean(bootstrap.overlayDebugBorders));
   latestState = bootstrap.state;
