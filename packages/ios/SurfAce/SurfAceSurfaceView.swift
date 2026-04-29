@@ -1112,7 +1112,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private func applyCurrentInteractionState() {
         let entryScrollable = currentEntry?.scrollable ?? true
         let entryInteractive = currentEntry?.interactive ?? true
-        canvasView.isUserInteractionEnabled = annotationMode
+        canvasView.isUserInteractionEnabled = true
         if annotationMode {
             webView.scrollView.isScrollEnabled = false
             webView.isUserInteractionEnabled = false

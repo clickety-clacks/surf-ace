@@ -1279,6 +1279,14 @@ function historyOwnerTokenForSession(sessionKey?: string): string {
   return `hot_${hash.digest("hex").slice(0, 16)}`;
 }
 
+function displayNameForSession(sessionKey?: string): string {
+  if (!sessionKey) {
+    return "anonymous";
+  }
+  const parts = sessionKey.split(":").filter(Boolean);
+  return parts.findLast((part) => !/^s_[A-Za-z0-9]+$/.test(part)) ?? sessionKey;
+}
+
 function sameHistorySessionKey(left: string | null, right: string | null): boolean {
   return left === right;
 }
@@ -2572,6 +2580,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         content: normalizedContent,
         contentId: nextContentId,
         contentType: input.contentType,
+        display: {
+          title: displayNameForSession(sessionKey),
+        },
         historyOwnerToken: historyOwnerTokenForSession(sessionKey),
         paneId: pane.remotePaneId,
         revision: asRevision((pane.currentRevision as number) + 1),

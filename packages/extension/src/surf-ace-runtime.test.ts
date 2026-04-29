@@ -87,6 +87,7 @@ class FakeSurfAceWsServer {
     content: unknown;
     contentId: string;
     contentType: string;
+    displayTitle: string | null;
     historyOwnerToken: string;
     paneId: number;
     revision: number;
@@ -825,6 +826,7 @@ class FakeSurfAceWsServer {
           content: structuredClone(message.payload?.content),
           contentId: pane.contentId,
           contentType: pane.contentType,
+          displayTitle: typeof message.payload?.display?.title === "string" ? message.payload.display.title : null,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
           paneId,
           revision: pane.revision,
@@ -2235,6 +2237,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.notEqual(
           server.contentSetRequests[0]?.historyOwnerToken,
           server.contentSetRequests[2]?.historyOwnerToken,
+        );
+        assert.deepEqual(
+          server.contentSetRequests.map((request) => request.displayTitle),
+          ["1", "1", "2"],
         );
         assert.equal(first.paneId, firstPaneId);
         assert.equal(second.paneId, firstPaneId);
