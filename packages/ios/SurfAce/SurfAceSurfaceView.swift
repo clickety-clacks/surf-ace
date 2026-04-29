@@ -1018,7 +1018,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             let sentAt = parseInt64(body["sentAt"]) ?? Int64(Date().timeIntervalSince1970 * 1000)
             onNavigationEvent?(url, sentAt)
         case focusMessageName:
-            break
+            onInteractionBegan?()
         default:
             break
         }
