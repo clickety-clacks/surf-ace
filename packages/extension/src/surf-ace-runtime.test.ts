@@ -2079,7 +2079,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("endpoint reconciliation updates every known surface on a multi-window endpoint", async () => {
+  await t.test("endpoint reconciliation preserves every live surface on a multi-window endpoint", async () => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_surface-a" });
     server.addSurface({ initialRemotePaneId: 42, name: "Surface B", surfaceId: "sf_surface-b" });
@@ -2106,7 +2106,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       for (const surfaceId of ["sf_surface-a", "sf_surface-b", "sf_surface-c"]) {
         const surface = internalRuntime.surfaces.get(surfaceId);
         assert.ok(surface);
-        assert.equal(surface.endpointId, "endpoint-replacement");
+        assert.equal(surface.endpointId, `endpoint-${port}`);
       }
       assert.deepEqual(
         [...internalRuntime.surfaces.keys()].filter((surfaceId) => surfaceId.startsWith("sf_surface-")).sort(),
@@ -2538,6 +2538,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(pushed.contentId, null);
         assert.equal(pushed.targetKind, "browser_url");
         assert.equal(pushed.targetApplyEvidence?.status, "applied");
+        assert.equal(pushed.revision, 1);
         assert.equal(server.contentSetRequests.length, 0);
         assert.equal(server.targetApplyRequests.length, 1);
         const [applyRequest] = server.targetApplyRequests;
@@ -2560,6 +2561,14 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(target?.targetKind, "browser_url");
         assert.equal(target?.targetPolicy, "confirm");
         assert.deepEqual(target?.targetPayload, { url: "https://google.com" });
+
+        await runtime.push({
+          content: "<p>replacement</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(server.contentSetRequests.at(-1)?.revision, pushed.revision + 1);
       },
     });
   });
@@ -4620,6 +4629,49 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(canonicalSurface.stopRequested, true);
       assert.equal(canonicalSurface.autoRetryEnabled, false);
       await waitFor(() => canonicalSurface.client === null, 5_000);
+    });
+  });
+
+  await t.test("discovery reconciles duplicate managed surfaces for one endpoint before retrying stale identities", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const retainedSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(retainedSurface);
+      assert.ok(retainedSurface.client?.isOpen());
+
+      const staleSurface = {
+        ...retainedSurface,
+        autoRetryEnabled: true,
+        client: null,
+        connectedAt: null,
+        connectionState: "connecting",
+        hasPairedInGatewaySession: false,
+        lastSeenAt: retainedSurface.lastSeenAt - 1_000,
+        panes: new Map(),
+        recentEventIds: [],
+        recentEventIdsSet: new Set(),
+        retryDelayResolver: null,
+        sessionId: null,
+        stopRequested: false,
+        surfaceId: "sf_stale_same_endpoint" as any,
+        workPromise: null,
+        windowLabel: "z",
+      };
+      internalRuntime.surfaces.set(staleSurface.surfaceId, staleSurface);
+
+      await discovery.refreshNow();
+
+      assert.equal(internalRuntime.surfaces.get(server.surfaceId), retainedSurface);
+      assert.equal(internalRuntime.surfaces.has(staleSurface.surfaceId), false);
+      assert.equal(staleSurface.stopRequested, true);
+      assert.equal(staleSurface.autoRetryEnabled, false);
+      assert.equal(server.pairRequestSurfaceIds.includes(staleSurface.surfaceId), false);
+      assert.ok(
+        warnings.some((warning) =>
+          warning.includes("endpoint_duplicate_surface_retired") &&
+          warning.includes(staleSurface.surfaceId) &&
+          warning.includes(server.surfaceId)),
+      );
     });
   });
 
