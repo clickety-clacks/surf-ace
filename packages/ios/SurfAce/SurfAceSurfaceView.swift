@@ -151,6 +151,7 @@ private struct SurfAcePaneView: View {
                     surfaceId: surface.surfaceId,
                     paneId: pane.paneId
                 )
+                .id("\(surface.surfaceId):\(pane.paneId)")
                 .background(Color.black.opacity(0.92))
 
                 SurfAcePaneIdentityOverlay(
@@ -499,7 +500,9 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {}
+    func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {
+        context.coordinator.updateBinding(surfaceId: surfaceId, paneId: paneId, hostView: uiView)
+    }
 
     static func dismantleUIView(_ uiView: SurfAceSurfaceHostView, coordinator: Coordinator) {
         coordinator.detach()
@@ -509,8 +512,8 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
     final class Coordinator: NSObject, SurfAcePaneBridging {
         private weak var hostView: SurfAceSurfaceHostView?
         private let runtime: SurfAceRuntime
-        private let surfaceId: String
-        private let paneId: Int
+        private var surfaceId: String
+        private var paneId: Int
 
         init(runtime: SurfAceRuntime, surfaceId: String, paneId: Int) {
             self.runtime = runtime
@@ -559,6 +562,17 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
                     drawingData: drawingData
                 )
             }
+        }
+
+        func updateBinding(surfaceId: String, paneId: Int, hostView: SurfAceSurfaceHostView) {
+            guard self.surfaceId != surfaceId || self.paneId != paneId || self.hostView !== hostView else {
+                return
+            }
+            runtime.detachPaneBridge(surfaceId: self.surfaceId, paneId: self.paneId)
+            self.surfaceId = surfaceId
+            self.paneId = paneId
+            attach(hostView: hostView)
+            runtime.attachPaneBridge(surfaceId: surfaceId, paneId: paneId, bridge: self)
         }
 
         func detach() {
