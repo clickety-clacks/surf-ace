@@ -226,6 +226,13 @@ test("surface core starts browser_url targets without reporting unverified navig
     targetId: "tg_google",
     targetKind: "browser_url",
     targetPayload: { url: "https://google.com/" },
+    display: {
+      provenance: {
+        displayName: "Browser Pusher",
+        sessionKey: "agent:test:browser",
+      },
+      title: "Browser Pusher",
+    },
   });
 
   assert.equal(result.status, "failed");
@@ -234,6 +241,7 @@ test("surface core starts browser_url targets without reporting unverified navig
   const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
   assert.equal(pane.content.contentType, "browser_url");
   assert.deepEqual(pane.content.content, { url: "https://google.com/" });
+  assert.equal(pane.ownerName, "Browser Pusher");
   const snapshot = core.captureSnapshot(surface.surfaceId, 7);
   assert.equal(snapshot.contentId, null);
   assert.equal(snapshot.contentType, null);

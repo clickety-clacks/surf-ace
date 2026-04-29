@@ -823,6 +823,7 @@ export class SurfaceCore {
       content: { url: url.toString() },
       contentId: payload.targetId,
       contentType: "browser_url",
+      display: payload.display ? { ...payload.display } : undefined,
       ownerToken: null,
       revision: payload.targetEpoch,
     });

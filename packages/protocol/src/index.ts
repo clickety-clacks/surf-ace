@@ -268,6 +268,15 @@ export type ContentDisplay = {
   title?: string;
   scrollable?: boolean;
   interactive?: boolean;
+  provenance?: PusherProvenance;
+};
+
+export type PusherProvenance = {
+  agentId?: string;
+  displayName?: string;
+  sessionKey?: string;
+  source?: string;
+  streamLabel?: string;
 };
 
 export type ContentReloadSource = {
@@ -514,6 +523,7 @@ export type TargetApplyRequest = RequestBase<"target.apply"> & {
     targetHeader: TargetHeader;
     targetPayload: unknown;
     materialization?: NativePaneMaterialization;
+    display?: ContentDisplay;
     restoreReason: TargetApplyReason;
   };
 };

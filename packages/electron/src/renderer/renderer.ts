@@ -107,7 +107,18 @@ type RendererPaneState = {
     content: PaneContentValue;
     contentId: string | null;
     contentType: "browser_url" | "canvas" | "html" | "image" | "markdown" | "pdf" | "terminal" | "video" | null;
-    display?: { interactive?: boolean; scrollable?: boolean; title?: string };
+    display?: {
+      interactive?: boolean;
+      provenance?: {
+        agentId?: string;
+        displayName?: string;
+        sessionKey?: string;
+        source?: string;
+        streamLabel?: string;
+      };
+      scrollable?: boolean;
+      title?: string;
+    };
     reloadable: boolean;
     reloadSource?: ContentReloadSource;
     renderVersion: number;

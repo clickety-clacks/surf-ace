@@ -15,6 +15,7 @@ import type {
   ContentApplyResponse,
   ContentAppendRequest,
   ContentClearRequest,
+  ContentDisplay,
   ContentId,
   ContentPatchRequest,
   ContentSetPayload,
@@ -39,6 +40,7 @@ import type {
   PairResponse,
   Position,
   ProviderId,
+  PusherProvenance,
   Request,
   RequestId,
   Rect,
@@ -101,6 +103,7 @@ export type SurfAcePaneSummary = {
     | {
         contentId: string;
         contentType: ContentType;
+        display?: ContentDisplay;
         revision: number;
     }
     | null;
@@ -294,8 +297,15 @@ export type SurfAceClearResult = {
 };
 
 type SurfAceSessionContext = {
+  agentId?: string;
+  displayName?: string;
+  provenance?: PusherProvenance;
+  pushedBy?: PusherProvenance;
+  source?: string | PusherProvenance;
+  sourceProvenance?: PusherProvenance;
   sessionDisplayName?: string;
   sessionKey?: string;
+  streamLabel?: string;
 };
 
 export type ApplyEvidence = {
@@ -318,6 +328,7 @@ export type PaneTargetRecord = {
   targetKind: TargetKind;
   targetHeader: TargetHeader;
   targetPayload: unknown;
+  display?: ContentDisplay | null;
   restorePolicy: RestorePolicy;
   ownerProviderId: string;
   ownershipSessionId: string;
@@ -342,6 +353,7 @@ export type SurfAcePaneTargetDiagnostic = {
   blockedReason: TargetErrorCode | null;
   diagnosticContent: DiagnosticPaneContent | null;
   lastApplyEvidence: ApplyEvidence | null;
+  display?: ContentDisplay | null;
   paneLineageId: string;
   targetHeader: TargetHeader;
   targetId: string;
@@ -579,6 +591,7 @@ type ManagedHistoryEntry = {
   contentId: ContentId;
   contentType: ContentType;
   contentValue: ContentSetRequest["payload"]["content"];
+  display: ContentDisplay | null;
   historyOwnerToken: string | null;
   revision: Revision;
   sessionKey: string | null;
@@ -592,6 +605,7 @@ type ManagedPane = {
   currentTargetId: string | null;
   currentRevision: Revision;
   diagnosticContent: DiagnosticPaneContent | null;
+  display: ContentDisplay | null;
   externalNative: boolean;
   historyEntries: ManagedHistoryEntry[];
   historySummary: SurfAceHistorySummary;
@@ -669,6 +683,7 @@ type PersistedRestartContentEntry = {
   contentId: string;
   contentType: ContentType;
   contentValue: unknown;
+  display: ContentDisplay | null;
   historyOwnerToken: string | null;
   paneLabel: number;
   revision: number;
@@ -952,6 +967,7 @@ function createPane(
     currentTargetId: null,
     currentRevision: asRevision(0),
     diagnosticContent: null,
+    display: null,
     externalNative: false,
     historyEntries: [],
     historySummary: {
@@ -1334,9 +1350,69 @@ function historyOwnerTokenForSession(sessionKey?: string): string {
   return `hot_${hash.digest("hex").slice(0, 16)}`;
 }
 
-function trustedSessionDisplayName(context?: SurfAceSessionContext): string | null {
-  const name = context?.sessionDisplayName?.trim();
-  return name ? name : null;
+function cleanProvenanceString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function mergeProvenance(
+  base: Partial<PusherProvenance>,
+  next: unknown,
+): Partial<PusherProvenance> {
+  if (!next || typeof next !== "object") {
+    return base;
+  }
+  const record = next as Record<string, unknown>;
+  return {
+    agentId: cleanProvenanceString(record.agentId) ?? base.agentId,
+    displayName: cleanProvenanceString(record.displayName) ?? base.displayName,
+    sessionKey: cleanProvenanceString(record.sessionKey) ?? base.sessionKey,
+    source: cleanProvenanceString(record.source) ?? base.source,
+    streamLabel: cleanProvenanceString(record.streamLabel) ?? base.streamLabel,
+  };
+}
+
+function pusherProvenanceFromContext(context?: SurfAceSessionContext): PusherProvenance | null {
+  if (!context) {
+    return null;
+  }
+  let provenance: Partial<PusherProvenance> = {};
+  if (typeof context.source === "object") {
+    provenance = mergeProvenance(provenance, context.source);
+  } else {
+    provenance.source = cleanProvenanceString(context.source);
+  }
+  provenance = mergeProvenance(provenance, context.sourceProvenance);
+  provenance = mergeProvenance(provenance, context.provenance);
+  provenance = mergeProvenance(provenance, context.pushedBy);
+  provenance = mergeProvenance(provenance, context);
+  provenance.displayName ??= cleanProvenanceString(context.sessionDisplayName);
+
+  const cleaned = Object.fromEntries(
+    Object.entries(provenance).filter((entry): entry is [keyof PusherProvenance, string] =>
+      typeof entry[1] === "string" && entry[1].length > 0
+    ),
+  ) as PusherProvenance;
+  return Object.keys(cleaned).length > 0 ? cleaned : null;
+}
+
+function displayTitleFromProvenance(provenance: PusherProvenance | null): string | null {
+  return provenance?.displayName ?? provenance?.streamLabel ?? null;
+}
+
+function displayForPusherProvenance(context?: SurfAceSessionContext): ContentDisplay | undefined {
+  const provenance = pusherProvenanceFromContext(context);
+  const title = displayTitleFromProvenance(provenance);
+  if (!provenance && !title) {
+    return undefined;
+  }
+  return {
+    ...(title ? { title } : {}),
+    ...(provenance ? { provenance } : {}),
+  };
+}
+
+function pusherSessionKeyFromContext(context?: SurfAceSessionContext): string | undefined {
+  return pusherProvenanceFromContext(context)?.sessionKey;
 }
 
 function sameHistorySessionKey(left: string | null, right: string | null): boolean {
@@ -2017,7 +2093,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const surface = this.requireConnectedSurface(input.fingerprint);
     if (isBrowserUrlPushInput(input)) {
-      return await this.browserUrlTargetSet(surface, input);
+      return await this.browserUrlTargetSet(surface, input, context);
     }
     if (isContentPushInput(input)) {
       return await this.contentSet(surface, input, context);
@@ -2715,8 +2791,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       `[surf-ace:runtime] contentSet pane=${pane.paneId}(remote=${pane.remotePaneId}) type=${input.contentType} contentPreview=${contentPreview}`,
     );
 
-    const sessionKey = context?.sessionKey;
-    const displayTitle = trustedSessionDisplayName(context);
+    const sessionKey = pusherSessionKeyFromContext(context);
+    const display = displayForPusherProvenance(context);
     const nextContentId =
       sessionKey && pane.ownerSessionKey === sessionKey && pane.activeContentId
         ? pane.activeContentId
@@ -2735,8 +2811,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (input.sourcePath) {
       payload.reloadSource = { kind: "file", path: input.sourcePath };
     }
-    if (displayTitle) {
-      payload.display = { title: displayTitle };
+    if (display) {
+      payload.display = display;
     }
 
     const request: ContentApplyRequest = {
@@ -2766,6 +2842,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private async browserUrlTargetSet(
     surface: ManagedSurface,
     input: SurfAceBrowserUrlPushInput,
+    context?: SurfAceSessionContext,
   ): Promise<SurfAcePushResult> {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     const requiredCapability = requiredCapabilityForTargetKind("browser_url");
@@ -2786,7 +2863,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       safetyClass: "network",
       summary: input.content,
     };
+    const display = displayForPusherProvenance(context);
     const target = await this.createPaneTargetRecord(surface, pane, {
+      display,
       targetHeader,
       targetKind: "browser_url",
       targetPayload: { url: input.content },
@@ -3851,6 +3930,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       targetHeader: TargetHeader;
       targetKind: TargetKind;
       targetPayload: unknown;
+      display?: ContentDisplay | null;
     },
   ): Promise<PaneTargetRecord> {
     const previous = this.currentTargetRecord(surface, pane);
@@ -3877,6 +3957,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       targetId,
       targetKind: input.targetKind,
       targetPayload: structuredClone(input.targetPayload),
+      display: input.display ? structuredClone(input.display) : null,
     };
     surface.targetRecords.set(targetId, record);
     pane.currentTargetId = targetId;
@@ -3990,6 +4071,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return {
       blockedReason: pane.lastRestoreBlockedReason,
       diagnosticContent: pane.diagnosticContent ? structuredClone(pane.diagnosticContent) : null,
+      display: target.display ? structuredClone(target.display) : null,
       lastApplyEvidence: target.lastApplyEvidence ? structuredClone(target.lastApplyEvidence) : null,
       paneLineageId: pane.paneLineageId,
       targetHeader: structuredClone(target.targetHeader),
@@ -4008,6 +4090,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       contentId: pane.activeContentId,
       contentType: pane.contentType,
       contentValue: structuredClone(pane.contentValue),
+      display: pane.display ? structuredClone(pane.display) : null,
       historyOwnerToken: pane.historyOwnerToken,
       revision: pane.currentRevision,
       sessionKey: pane.ownerSessionKey,
@@ -4049,6 +4132,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.contentType = entry.contentType;
     pane.contentValue = structuredClone(entry.contentValue);
     pane.currentRevision = entry.revision;
+    pane.display = entry.display ? structuredClone(entry.display) : null;
     pane.historyOwnerToken = entry.historyOwnerToken;
     pane.ownerSessionKey = entry.sessionKey;
     this.selectVisiblePaneTarget(surface, pane, entry.targetId);
@@ -4081,6 +4165,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.contentType = null;
     pane.contentValue = null;
     pane.currentRevision = revision;
+    pane.display = null;
     pane.historyOwnerToken = null;
     pane.ownerSessionKey = null;
     pane.historySummary.visibleContentId = null;
@@ -4213,6 +4298,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           content: structuredClone(pane.contentValue),
           contentId: pane.activeContentId,
           contentType: pane.contentType,
+          ...(pane.display ? { display: structuredClone(pane.display) } : {}),
           historyOwnerToken:
             pane.historyOwnerToken ??
             historyOwnerTokenForSession(pane.ownerSessionKey ?? undefined),
@@ -4348,7 +4434,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane: ManagedPane,
     target: PaneTargetRecord,
     restoreReason: TargetApplyReason,
+    display?: ContentDisplay,
   ): Promise<ApplyEvidence> {
+    const targetDisplay = display ?? target.display ?? undefined;
     const contentTarget = contentPayloadForTarget(target.targetKind, target.targetPayload);
     if (contentTarget) {
       const overwritingDiagnosticContent = pane.diagnosticContent !== null;
@@ -4360,6 +4448,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           content: contentTarget.content,
           contentId: reuseExistingContentIdentity ? pane.activeContentId! : makeContentId(),
           contentType: contentTarget.contentType,
+          ...(targetDisplay ? { display: targetDisplay } : {}),
           historyOwnerToken: historyOwnerTokenForSession(pane.ownerSessionKey ?? undefined),
           paneId: pane.remotePaneId,
           revision: asRevision(
@@ -4464,6 +4553,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         targetId: target.targetId,
         targetKind: target.targetKind,
         targetPayload: structuredClone(target.targetPayload),
+        ...(targetDisplay ? { display: targetDisplay } : {}),
       },
       sentAt: asEpochMs(this.now()),
       type: "request",
@@ -4823,6 +4913,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               ? {
                   contentId: pane.activeContentId,
                   contentType: pane.contentType,
+                  ...(pane.display ? { display: structuredClone(pane.display) } : {}),
                   revision: pane.currentRevision,
                 }
               : null,
@@ -5080,6 +5171,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         contentId: entry.contentId as ContentId,
         contentType: entry.contentType,
         contentValue: normalizeContent(entry.contentType, entry.contentValue),
+        display: entry.display ? structuredClone(entry.display) : null,
         historyOwnerToken: entry.historyOwnerToken,
         revision: entry.revision as Revision,
         sessionKey: entry.sessionKey,
@@ -5133,6 +5225,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             contentId: entry.contentId,
             contentType: entry.contentType,
             contentValue: denormalizeContent(entry.contentType, entry.contentValue),
+            display: entry.display ? structuredClone(entry.display) : null,
             historyOwnerToken: entry.historyOwnerToken,
             paneLabel: pane.paneLabel,
             revision: entry.revision,
@@ -7033,6 +7126,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       pane.activeContentId = payload.currentContentId;
       pane.contentType = setPayload?.contentType ?? pane.contentType;
       pane.contentValue = setPayload ? structuredClone(setPayload.content) : pane.contentValue;
+      pane.display = setPayload?.display ? structuredClone(setPayload.display) : null;
       pane.historyOwnerToken = setPayload?.historyOwnerToken ?? pane.historyOwnerToken;
       pane.ownerSessionKey = nextOwner;
       pane.historySummary.visibleContentId = payload.currentContentId;
@@ -7050,6 +7144,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         const targetHeader = passiveContentTargetHeader(setPayload.contentType, setPayload.content);
         if (targetKind && targetHeader) {
           await this.createPaneTargetRecord(surface, pane, {
+            display: setPayload.display ? structuredClone(setPayload.display) : null,
             targetHeader,
             targetKind,
             targetPayload: setPayload.content,

@@ -1798,6 +1798,7 @@ final class SurfAceRuntime {
             targetId: targetId,
             targetEpoch: targetEpoch,
             url: url,
+            title: (payload["display"] as? [String: Any])?["title"] as? String,
             allowedSnapshotFallback: targetPayload["allowedSnapshotFallback"] as? Bool,
             fallbackSnapshotTargetId: targetPayload["fallbackSnapshotTargetId"] as? String
         )
