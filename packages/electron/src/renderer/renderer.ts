@@ -1,3 +1,8 @@
+import {
+  isMarkedOverlayVisible,
+  visibleOverlayRect,
+} from "./overlay-rects.js";
+
 type Selection =
   | null
   | {
@@ -247,64 +252,6 @@ function reportPaneSnapshot(view: PaneView): void {
   });
 }
 
-function elementRect(element: Element): OverlayRegionReport["rect"] | null {
-  const rect = element.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) {
-    return null;
-  }
-  return {
-    height: rect.height,
-    width: rect.width,
-    x: rect.x,
-    y: rect.y,
-  };
-}
-
-function outsetRect(
-  rect: OverlayRegionReport["rect"],
-  amount: number,
-): OverlayRegionReport["rect"] {
-  return {
-    height: rect.height + (amount * 2),
-    width: rect.width + (amount * 2),
-    x: rect.x - amount,
-    y: rect.y - amount,
-  };
-}
-
-function unionRects(rects: OverlayRegionReport["rect"][]): OverlayRegionReport["rect"] | null {
-  if (rects.length === 0) {
-    return null;
-  }
-  const left = Math.min(...rects.map((rect) => rect.x));
-  const top = Math.min(...rects.map((rect) => rect.y));
-  const right = Math.max(...rects.map((rect) => rect.x + rect.width));
-  const bottom = Math.max(...rects.map((rect) => rect.y + rect.height));
-  return {
-    height: bottom - top,
-    width: right - left,
-    x: left,
-    y: top,
-  };
-}
-
-function visibleOverlayRect(element: HTMLElement, marker: string | undefined): OverlayRegionReport["rect"] | null {
-  if (element.classList.contains("control-button")) {
-    const rect = elementRect(element);
-    return rect ? outsetRect(rect, 2) : null;
-  }
-  if (marker === "pane-handle") {
-    const childRects = [...element.querySelectorAll<HTMLElement>(".control-pill")]
-      .filter((child) => isMarkedOverlayVisible(child, element))
-      .flatMap((child) => {
-        const rect = elementRect(child);
-        return rect ? [outsetRect(rect, 2)] : [];
-      });
-    return unionRects(childRects);
-  }
-  return elementRect(element);
-}
-
 function overlayRegionForElement(
   pane: RendererPaneState,
   element: HTMLElement,
@@ -353,22 +300,6 @@ function overlayMetadataForMarker(
 function surfAceOverlay<T extends HTMLElement>(element: T, kind: SurfAceOverlayKind): T {
   element.setAttribute(OVERLAY_MARKER_ATTRIBUTE, kind);
   return element;
-}
-
-function isMarkedOverlayVisible(element: HTMLElement, rootEl: HTMLElement): boolean {
-  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
-    if (current.hidden) {
-      return false;
-    }
-    const style = window.getComputedStyle(current);
-    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
-      return false;
-    }
-    if (current === rootEl) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): OverlayRegionReport[] {

@@ -2923,7 +2923,7 @@ Each pane is assigned by the provider/extension a stable visible numeric `paneLa
 - Colored 50% gray at 30% opacity.
 - Rendered separately from the pane control cluster. The pane label MUST NOT appear as a toolbar/control-cluster button or label unless a future explicit control need is specified separately.
 
-The combined identity overlay is always visible and MUST be reported as an overlay region / hit-region where the platform reports chrome regions.
+The combined identity overlay is always visible and MUST be reported as an overlay region / hit-region where the platform reports chrome regions. That reported region MUST bound the visible identity glyphs/chrome (window-ID outline and pane-label text) rather than an invisible layout wrapper.
 
 #### All platforms
 
