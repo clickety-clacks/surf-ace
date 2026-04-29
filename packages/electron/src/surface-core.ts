@@ -547,11 +547,14 @@ export class SurfaceCore {
     for (const materializedPane of materialization.panes) {
       const paneId = Number(materializedPane.id);
       const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
-      if (!pane || pane.externalNative) {
+      if (!pane) {
         continue;
       }
-      pane.externalNative = true;
-      didChange = true;
+      didChange = replaceVisibleEntryForNativeMaterialization(pane, this.now()) || didChange;
+      if (!pane.externalNative) {
+        pane.externalNative = true;
+        didChange = true;
+      }
     }
     if (didChange) {
       this.emit({ surfaceId, type: "surface-changed" });
@@ -1623,6 +1626,30 @@ function trimHistory(pane: PaneState): void {
   const overflow = pane.history.length - MAX_HISTORY_DEPTH;
   pane.history.splice(0, overflow);
   pane.historyIndex = Math.max(0, pane.historyIndex - overflow);
+}
+
+function replaceVisibleEntryForNativeMaterialization(pane: PaneState, now: number): boolean {
+  const current = currentEntry(pane);
+  if (current.content === null && current.contentId === null && current.contentType === null) {
+    return false;
+  }
+  if (pane.historyIndex < pane.history.length - 1) {
+    pane.history = pane.history.slice(0, pane.historyIndex + 1);
+  }
+  pane.history.push({
+    annotations: [],
+    content: null,
+    contentId: null,
+    contentType: null,
+    ownerToken: null,
+    revision: current.revision,
+  });
+  pane.historyIndex = pane.history.length - 1;
+  trimHistory(pane);
+  pane.toast = null;
+  pane.latestContentEventAt = now;
+  clearDirtyState(pane);
+  return true;
 }
 
 function clearDirtyState(pane: PaneState): void {

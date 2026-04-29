@@ -239,6 +239,76 @@ test("surface core starts browser_url targets without reporting unverified navig
   assert.equal(snapshot.contentType, null);
 });
 
+test("surface core clears browser_url renderer content when native pane materializes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
+
+  core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId,
+    requestId: "tr_browser",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 6,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://example.com/",
+    },
+    targetId: "target_browser",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://example.com/" },
+  });
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.contentType, "browser_url");
+
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  core.markNativePaneMaterialized(surface.surfaceId, {
+    op: "native_pane.host",
+    panes: [
+      {
+        id: String(paneId),
+        binding_id: `${paneId}:target_top`,
+        content_id: "target_top",
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: listedPane.geometry.geometryRevision,
+          height: listedPane.geometry.contentViewport.height,
+          paneInstanceId: listedPane.geometry.paneInstanceId,
+          surfaceEpoch: listedPane.geometry.surfaceEpoch,
+          topologyEpoch: listedPane.geometry.topologyEpoch,
+          width: listedPane.geometry.contentViewport.width,
+          x: listedPane.geometry.contentViewport.x,
+          y: listedPane.geometry.contentViewport.y,
+        },
+        process: { args: ["top"], command: "top" },
+        revision: 2 as Revision,
+        target: "terminal",
+      },
+    ],
+  });
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(pane.externalNative, true);
+  assert.equal(pane.content.content, null);
+  assert.equal(pane.content.contentId, null);
+  assert.equal(pane.content.contentType, null);
+  assert.equal(pane.content.revision, 6);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]!.activeContentId, null);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]!.contentType, null);
+});
+
 test("surface core rejects browser_url targets while the pane is native-hosted", () => {
   const core = new SurfaceCore({
     persistentState: {
