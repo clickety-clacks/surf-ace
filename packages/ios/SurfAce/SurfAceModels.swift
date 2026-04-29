@@ -104,6 +104,7 @@ struct SurfAceFrame: Equatable {
     let revision: Int
     let contentType: SurfAceContentType
     let payload: SurfAceFramePayload
+    let reloadSource: SurfAceContentReloadSource?
     let title: String?
     let scrollable: Bool
     let interactive: Bool
@@ -185,10 +186,26 @@ struct SurfAceFrame: Equatable {
             revision: revision,
             contentType: contentType,
             payload: payload,
+            reloadSource: SurfAceContentReloadSource.from(jsonObject["reloadSource"] as? [String: Any]),
             title: display?["title"] as? String,
             scrollable: display?["scrollable"] as? Bool ?? true,
             interactive: display?["interactive"] as? Bool ?? true
         )
+    }
+}
+
+struct SurfAceContentReloadSource: Equatable {
+    let kind: String
+    let path: String
+
+    static func from(_ payload: [String: Any]?) -> SurfAceContentReloadSource? {
+        guard let payload,
+              payload["kind"] as? String == "file",
+              let path = payload["path"] as? String,
+              !path.isEmpty else {
+            return nil
+        }
+        return SurfAceContentReloadSource(kind: "file", path: path)
     }
 }
 
@@ -262,6 +279,7 @@ struct SurfAcePaneEntry {
     var historyOwnerToken: String?
     var contentType: SurfAceContentType?
     var payload: SurfAceFramePayload?
+    var reloadSource: SurfAceContentReloadSource?
     var title: String?
     var scrollable: Bool
     var interactive: Bool
@@ -276,6 +294,7 @@ struct SurfAcePaneEntry {
             historyOwnerToken: historyOwnerToken,
             contentType: nil,
             payload: nil,
+            reloadSource: nil,
             title: nil,
             scrollable: true,
             interactive: true,
@@ -292,6 +311,7 @@ struct SurfAcePaneEntry {
             historyOwnerToken: historyOwnerToken,
             contentType: frame.contentType,
             payload: frame.payload,
+            reloadSource: frame.reloadSource,
             title: frame.title,
             scrollable: frame.scrollable,
             interactive: frame.interactive,
@@ -318,6 +338,7 @@ struct SurfAcePaneEntry {
                 allowedSnapshotFallback: allowedSnapshotFallback,
                 fallbackSnapshotTargetId: fallbackSnapshotTargetId
             ),
+            reloadSource: nil,
             title: nil,
             scrollable: true,
             interactive: true,
@@ -555,6 +576,7 @@ struct SurfAcePersistedSurfaceTopology: Codable {
 @MainActor
 protocol SurfAcePaneBridging: AnyObject {
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?)
+    func reloadBrowserURL()
     func renderBrowserURL(entry: SurfAcePaneEntry) async -> SurfAceBrowserNavigationResult
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool)
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool
@@ -563,6 +585,10 @@ protocol SurfAcePaneBridging: AnyObject {
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult
     func removeDrawingStrokeIDs(_ strokeIDs: [String])
     func clearDrawings()
+}
+
+extension SurfAcePaneBridging {
+    func reloadBrowserURL() {}
 }
 
 struct SurfAceBrowserNavigationResult {
@@ -696,6 +722,13 @@ final class SurfAcePaneModel {
     var currentRevision: Int { currentEntry.revision }
     var canGoBack: Bool { !backStack.isEmpty }
     var canGoForward: Bool { !forwardStack.isEmpty }
+    var canReload: Bool {
+        guard !annotationMode else { return false }
+        if case .browserURL = currentEntry.payload {
+            return true
+        }
+        return false
+    }
     var activeStrokes: [SurfAceStroke] { currentEntry.strokesById.values.sorted { $0.strokeId < $1.strokeId } }
 
     func currentOwnerDisplayName() -> String? {

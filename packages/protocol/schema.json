@@ -1241,6 +1241,23 @@
                       "type": "boolean"
                     }
                   }
+                },
+                "reloadSource": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "path"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "file"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
                 }
               }
             },

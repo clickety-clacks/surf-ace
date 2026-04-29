@@ -194,6 +194,10 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
           },
           fingerprint: fingerprintParam,
           paneId: paneIdParam,
+          sourcePath: {
+            description: "Optional file path for file-backed content. When present, the surface reload control re-reads this path instead of repainting pushed bytes.",
+            type: "string",
+          },
         },
         required: ["fingerprint", "paneId", "contentType", "content"],
         type: "object",

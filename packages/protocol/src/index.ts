@@ -270,6 +270,11 @@ export type ContentDisplay = {
   interactive?: boolean;
 };
 
+export type ContentReloadSource = {
+  kind: "file";
+  path: string;
+};
+
 export type PairResume = {
   sessionId: SessionId;
 };
@@ -336,6 +341,7 @@ export type ContentSetPayload =
       contentType: "html";
       content: HtmlContent;
       display?: ContentDisplay;
+      reloadSource?: ContentReloadSource;
     }
   | {
       paneId: PaneId;
@@ -345,6 +351,7 @@ export type ContentSetPayload =
       contentType: "image";
       content: ImageContent;
       display?: ContentDisplay;
+      reloadSource?: ContentReloadSource;
     }
   | {
       paneId: PaneId;
@@ -354,6 +361,7 @@ export type ContentSetPayload =
       contentType: "pdf";
       content: PdfContent;
       display?: ContentDisplay;
+      reloadSource?: ContentReloadSource;
     }
   | {
       paneId: PaneId;
@@ -363,6 +371,7 @@ export type ContentSetPayload =
       contentType: "terminal";
       content: TerminalContent;
       display?: ContentDisplay;
+      reloadSource?: ContentReloadSource;
     }
   | {
       paneId: PaneId;
@@ -372,6 +381,7 @@ export type ContentSetPayload =
       contentType: "markdown";
       content: MarkdownContent;
       display?: ContentDisplay;
+      reloadSource?: ContentReloadSource;
     }
   | {
       paneId: PaneId;
@@ -381,6 +391,7 @@ export type ContentSetPayload =
       contentType: "video";
       content: VideoContent;
       display?: ContentDisplay;
+      reloadSource?: ContentReloadSource;
     }
   | {
       paneId: PaneId;
@@ -390,6 +401,7 @@ export type ContentSetPayload =
       contentType: "canvas";
       content: CanvasContent;
       display?: ContentDisplay;
+      reloadSource?: ContentReloadSource;
     };
 
 export type ContentSetRequest = RequestBase<"content.set"> & {
