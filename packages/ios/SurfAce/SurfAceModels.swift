@@ -305,6 +305,7 @@ struct SurfAcePaneEntry {
         targetId: String,
         targetEpoch: Int,
         url: String,
+        title: String? = nil,
         allowedSnapshotFallback: Bool? = nil,
         fallbackSnapshotTargetId: String? = nil
     ) -> SurfAcePaneEntry {
@@ -318,7 +319,7 @@ struct SurfAcePaneEntry {
                 allowedSnapshotFallback: allowedSnapshotFallback,
                 fallbackSnapshotTargetId: fallbackSnapshotTargetId
             ),
-            title: nil,
+            title: title,
             scrollable: true,
             interactive: true,
             url: url,

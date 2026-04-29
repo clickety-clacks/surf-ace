@@ -1,4 +1,5 @@
 import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
+import type { PusherProvenance } from "../../protocol/src/index.js";
 import {
   type SurfAceAnnotateRemoveInput,
   type PaneId,
@@ -27,8 +28,15 @@ export const surfAceToolNames = [
 export type SurfAceToolName = (typeof surfAceToolNames)[number];
 
 export type SurfAceToolContext = {
+  agentId?: string;
+  displayName?: string;
+  provenance?: PusherProvenance;
+  pushedBy?: PusherProvenance;
+  source?: string | PusherProvenance;
+  sourceProvenance?: PusherProvenance;
   sessionDisplayName?: string;
   sessionKey?: string;
+  streamLabel?: string;
 };
 
 export type SurfAceToolDefinition<TArgs = unknown, TResult = unknown> = {
@@ -168,8 +176,15 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       description: "Push content or a live browser URL target to a Surf Ace pane, replacing whatever is currently visible.",
       execute: async (args: SurfAcePushInput, context?: SurfAceToolContext) =>
         await runtime.push(args, {
+          agentId: context?.agentId,
+          displayName: context?.displayName,
+          provenance: context?.provenance,
+          pushedBy: context?.pushedBy,
+          source: context?.source,
+          sourceProvenance: context?.sourceProvenance,
           sessionDisplayName: context?.sessionDisplayName,
           sessionKey: context?.sessionKey,
+          streamLabel: context?.streamLabel,
         }),
       inputSchema: {
         additionalProperties: false,

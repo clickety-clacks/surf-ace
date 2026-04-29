@@ -31,6 +31,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(startedAt), 0.08)
         XCTAssertEqual(bridge.renderedBrowserURLEntries.map(\.url), ["https://google.com/"])
+        XCTAssertEqual(bridge.renderedBrowserURLEntries.map(\.title), [nil])
         XCTAssertEqual(response["op"] as? String, "target.apply.result")
         XCTAssertEqual(payload["status"] as? String, "applied")
         XCTAssertNil(payload["errorCode"])
@@ -39,6 +40,34 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         XCTAssertEqual(surface.panes.first?.currentEntry.contentId, nil)
         XCTAssertEqual(surface.panes.first?.currentEntry.contentType, nil)
         XCTAssertEqual(surface.panes.first?.currentTarget?.lastApplyEvidence?["status"] as? String, "applied")
+    }
+
+    func testBrowserURLTargetApplyPreservesDisplayTitleForChrome() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "browser-url-display")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let bridge = ControlledPaneBridge(
+            result: SurfAceBrowserNavigationResult(errorMessage: nil, status: "applied", url: "https://example.com/")
+        )
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        var payload = targetApplyPayload(surface: surface, pane: pane, targetId: "tg_display", url: "https://example.com/")
+        payload["display"] = [
+            "title": "Browser Pusher",
+            "provenance": [
+                "displayName": "Browser Pusher",
+                "sessionKey": "agent:test:browser",
+            ],
+        ]
+
+        _ = await runtime.materializeTargetApplyForTesting(
+            id: "rq_display",
+            payload: payload,
+            surfaceId: surface.surfaceId
+        )
+
+        XCTAssertEqual(bridge.renderedBrowserURLEntries.map(\.title), ["Browser Pusher"])
+        XCTAssertEqual(surface.panes.first?.currentOwnerDisplayName(), "Browser Pusher")
     }
 
     func testBrowserURLTargetApplyRecordsFailedNavigationEvidence() async throws {

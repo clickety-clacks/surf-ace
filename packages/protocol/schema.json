@@ -275,6 +275,50 @@
         }
       }
     },
+    "PusherProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "streamLabel": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "ContentDisplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "scrollable": {
+          "type": "boolean"
+        },
+        "interactive": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/PusherProvenance"
+        }
+      }
+    },
     "TargetApplyReason": {
       "type": "string",
       "enum": [
@@ -1239,6 +1283,9 @@
                     },
                     "interactive": {
                       "type": "boolean"
+                    },
+                    "provenance": {
+                      "$ref": "#/$defs/PusherProvenance"
                     }
                   }
                 }
@@ -2023,6 +2070,9 @@
             "targetPayload": {},
             "materialization": {
               "$ref": "#/$defs/NativePaneMaterialization"
+            },
+            "display": {
+              "$ref": "#/$defs/ContentDisplay"
             },
             "restoreReason": {
               "$ref": "#/$defs/TargetApplyReason"

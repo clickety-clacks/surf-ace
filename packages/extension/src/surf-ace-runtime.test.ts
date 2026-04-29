@@ -89,7 +89,8 @@ class FakeSurfAceWsServer {
     content: unknown;
     contentId: string;
     contentType: string;
-    displayTitle: string | null;
+    displayProvenance?: unknown;
+    displayTitle?: string | null;
     historyOwnerToken: string;
     paneId: number;
     revision: number;
@@ -99,6 +100,8 @@ class FakeSurfAceWsServer {
     ownershipEpoch: number;
     ownershipSessionId: string;
     paneLineageId: string;
+    displayProvenance?: unknown;
+    displayTitle?: string | null;
     restoreReason: string;
     targetHeader: unknown;
     targetId: string;
@@ -853,6 +856,7 @@ class FakeSurfAceWsServer {
           content: structuredClone(message.payload?.content),
           contentId: pane.contentId,
           contentType: pane.contentType,
+          displayProvenance: structuredClone(message.payload?.display?.provenance ?? null),
           displayTitle: typeof message.payload?.display?.title === "string" ? message.payload.display.title : null,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
           paneId,
@@ -890,6 +894,12 @@ class FakeSurfAceWsServer {
           ownershipEpoch: Number(message.payload?.ownershipEpoch ?? 0),
           ownershipSessionId: String(message.payload?.ownershipSessionId ?? ""),
           paneLineageId: String(message.payload?.paneLineageId ?? ""),
+          ...(message.payload?.display
+            ? {
+                displayProvenance: structuredClone(message.payload.display.provenance ?? null),
+                displayTitle: typeof message.payload.display.title === "string" ? message.payload.display.title : null,
+              }
+            : {}),
           restoreReason: String(message.payload?.restoreReason ?? ""),
           targetHeader: structuredClone(message.payload?.targetHeader),
           targetId: String(message.payload?.targetId ?? ""),
@@ -1010,6 +1020,8 @@ class FakeSurfAceWsServer {
           content: structuredClone(message.payload?.content),
           contentId: pane.contentId,
           contentType: pane.contentType,
+          displayProvenance: structuredClone(message.payload?.display?.provenance ?? null),
+          displayTitle: typeof message.payload?.display?.title === "string" ? message.payload.display.title : null,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
           paneId,
           revision: pane.revision,
@@ -2299,6 +2311,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           server.contentSetRequests.map((request) => request.displayTitle),
           ["Session One", "Session One", "Session Two"],
         );
+        assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
+          displayName: "Session One",
+          sessionKey: "agent:test:1",
+        });
         assert.equal(first.paneId, firstPaneId);
         assert.equal(second.paneId, firstPaneId);
         assert.equal(third.paneId, firstPaneId);
@@ -2371,6 +2387,58 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       } finally {
         unsubscribe();
       }
+    });
+  });
+
+  await t.test("provider uses explicit pusher provenance for display without raw id fallback", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push(
+        {
+          content: "# stream",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        {
+          agentId: "agent_raw_123",
+          provenance: {
+            agentId: "agent_nested",
+            displayName: "Nested Display",
+            sessionKey: "agent:test:nested",
+            source: "openclaw",
+            streamLabel: "Nested Stream",
+          },
+          sessionKey: "agent:test:raw-only",
+          streamLabel: "Surf Ace Stream",
+        },
+      );
+      await runtime.push(
+        {
+          content: "# raw",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        {
+          agentId: "agent_raw_456",
+          sessionKey: "agent:test:raw-only-2",
+        },
+      );
+
+      assert.equal(server.contentSetRequests[0]?.displayTitle, "Nested Display");
+      assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
+        agentId: "agent_raw_123",
+        displayName: "Nested Display",
+        sessionKey: "agent:test:raw-only",
+        source: "openclaw",
+        streamLabel: "Surf Ace Stream",
+      });
+      assert.equal(server.contentSetRequests[1]?.displayTitle, null);
+      assert.deepEqual(server.contentSetRequests[1]?.displayProvenance, {
+        agentId: "agent_raw_456",
+        sessionKey: "agent:test:raw-only-2",
+      });
     });
   });
 
@@ -2665,12 +2733,21 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       run: async ({ runtime, server }) => {
         const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
 
-        const pushed = await runtime.push({
-          content: "https://google.com",
-          contentType: "browser_url",
-          fingerprint: server.surfaceId,
-          paneId: firstPaneId,
-        });
+        const pushed = await runtime.push(
+          {
+            content: "https://google.com",
+            contentType: "browser_url",
+            fingerprint: server.surfaceId,
+            paneId: firstPaneId,
+          },
+          {
+            pushedBy: {
+              displayName: "Browser Pusher",
+              sessionKey: "agent:test:browser",
+              source: "openclaw",
+            },
+          },
+        );
 
         assert.equal(pushed.contentId, null);
         assert.equal(pushed.targetKind, "browser_url");
@@ -2681,6 +2758,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const [applyRequest] = server.targetApplyRequests;
         assert.ok(applyRequest);
         assert.equal(applyRequest.materialization, undefined);
+        assert.equal(applyRequest.displayTitle, "Browser Pusher");
+        assert.deepEqual(applyRequest.displayProvenance, {
+          displayName: "Browser Pusher",
+          sessionKey: "agent:test:browser",
+          source: "openclaw",
+        });
         assert.equal(applyRequest.restoreReason, "initial_apply");
         assert.equal(applyRequest.targetKind, "browser_url");
         assert.deepEqual(applyRequest.targetHeader, {
@@ -2697,6 +2780,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const target = screens[0]?.panes[0]?.target;
         assert.equal(target?.targetKind, "browser_url");
         assert.equal(target?.targetPolicy, "confirm");
+        assert.equal(target?.display?.title, "Browser Pusher");
         assert.deepEqual(target?.targetPayload, { url: "https://google.com" });
 
         await runtime.push({
@@ -4335,7 +4419,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           fingerprint: server.surfaceId,
           paneId: firstPaneId,
         },
-        { sessionKey: "agent:test:resume-continuity" },
+        { sessionDisplayName: "Resume Pusher", sessionKey: "agent:test:resume-continuity" },
       );
 
       const remotePane = server.panes.get(server.initialRemotePaneId);
@@ -4366,6 +4450,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const replayed = server.contentSetRequests.at(-1);
       assert.equal(replayed?.contentId, pushed.contentId);
       assert.equal(replayed?.contentType, "markdown");
+      assert.equal(replayed?.displayTitle, "Resume Pusher");
+      assert.deepEqual(replayed?.displayProvenance, {
+        displayName: "Resume Pusher",
+        sessionKey: "agent:test:resume-continuity",
+      });
 
       const screens = await runtime.listScreens();
       assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, pushed.contentId);

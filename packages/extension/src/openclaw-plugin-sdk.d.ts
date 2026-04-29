@@ -1,7 +1,38 @@
 declare module "openclaw/plugin-sdk" {
   export type ToolContext = {
+    agentId?: string;
+    displayName?: string;
+    provenance?: {
+      agentId?: string;
+      displayName?: string;
+      sessionKey?: string;
+      source?: string;
+      streamLabel?: string;
+    };
+    pushedBy?: {
+      agentId?: string;
+      displayName?: string;
+      sessionKey?: string;
+      source?: string;
+      streamLabel?: string;
+    };
+    source?: string | {
+      agentId?: string;
+      displayName?: string;
+      sessionKey?: string;
+      source?: string;
+      streamLabel?: string;
+    };
+    sourceProvenance?: {
+      agentId?: string;
+      displayName?: string;
+      sessionKey?: string;
+      source?: string;
+      streamLabel?: string;
+    };
     sessionDisplayName?: string;
     sessionKey?: string;
+    streamLabel?: string;
   };
 
   export type ToolDefinition = {

@@ -49,8 +49,15 @@ const plugin = {
                 type: "text" as const,
                 text: JSON.stringify(
                   await tool.execute(params as never, {
+                    agentId: ctx.agentId,
+                    displayName: ctx.displayName,
+                    provenance: ctx.provenance,
+                    pushedBy: ctx.pushedBy,
+                    source: ctx.source,
+                    sourceProvenance: ctx.sourceProvenance,
                     sessionDisplayName: ctx.sessionDisplayName,
                     sessionKey: ctx.sessionKey,
+                    streamLabel: ctx.streamLabel,
                   }),
                   null,
                   2,

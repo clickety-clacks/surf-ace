@@ -609,7 +609,7 @@ private struct SurfAcePaneControls: View {
     }
 
     private var hasNavigationContext: Bool {
-        pane.currentEntry.contentId != nil || pane.canGoBack || pane.canGoForward
+        pane.currentEntry.contentId != nil || pane.currentEntry.payload != nil || pane.canGoBack || pane.canGoForward
     }
 }
 
