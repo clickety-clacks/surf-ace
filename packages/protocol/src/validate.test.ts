@@ -239,6 +239,26 @@ test("validateEnvelopeType accepts target.apply.result responses", () => {
   assert.deepEqual(result, { ok: true });
 });
 
+test("validateEnvelopeType accepts markdown content set requests", () => {
+  const result = validateEnvelopeType("content.set", {
+    id: "req_markdown",
+    op: "content.set",
+    payload: {
+      content: { markdown: "# Heading\n\n- one" },
+      contentId: "ct_markdown",
+      contentType: "markdown",
+      historyOwnerToken: "hot_markdown",
+      paneId: 1,
+      revision: 1,
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+
+  assert.deepEqual(result, { ok: true });
+});
+
 test("validateEnvelopeType accepts target.register.rejected responses", () => {
   const result = validateEnvelopeType("target.register", {
     id: "req_register",

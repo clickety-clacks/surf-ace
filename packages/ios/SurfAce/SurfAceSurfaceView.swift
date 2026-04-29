@@ -12,6 +12,234 @@ private enum SurfAcePaneChromeLayout {
     static let bottomInset: CGFloat = 28
 }
 
+func surfAceEscapeHTML(_ string: String) -> String {
+    string
+        .replacingOccurrences(of: "&", with: "&amp;")
+        .replacingOccurrences(of: "<", with: "&lt;")
+        .replacingOccurrences(of: ">", with: "&gt;")
+        .replacingOccurrences(of: "\"", with: "&quot;")
+        .replacingOccurrences(of: "'", with: "&#39;")
+}
+
+func surfAceMarkdownToHTML(_ markdown: String) -> String {
+    let lines = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+        .components(separatedBy: "\n")
+    var blocks: [String] = []
+    var index = 0
+
+    while index < lines.count {
+        let line = lines[index]
+        if line.trimmingCharacters(in: .whitespaces).isEmpty {
+            index += 1
+            continue
+        }
+
+        if surfAceMarkdownIsFence(line) {
+            var codeLines: [String] = []
+            index += 1
+            while index < lines.count, !surfAceMarkdownIsFence(lines[index]) {
+                codeLines.append(lines[index])
+                index += 1
+            }
+            if index < lines.count {
+                index += 1
+            }
+            blocks.append("<pre><code>\(surfAceEscapeHTML(codeLines.joined(separator: "\n")))</code></pre>")
+            continue
+        }
+
+        let heading = surfAceMarkdownHeading(line)
+        if heading.level > 0 {
+            blocks.append("<h\(heading.level)>\(surfAceMarkdownInlineHTML(heading.text))</h\(heading.level)>")
+            index += 1
+            continue
+        }
+
+        if index + 1 < lines.count, line.contains("|"), surfAceMarkdownIsTableDivider(lines[index + 1]) {
+            let headers = surfAceMarkdownTableCells(line)
+            index += 2
+            var rows: [[String]] = []
+            while index < lines.count,
+                  lines[index].contains("|"),
+                  !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
+                rows.append(surfAceMarkdownTableCells(lines[index]))
+                index += 1
+            }
+            let headerHTML = headers.map { "<th>\(surfAceMarkdownInlineHTML($0))</th>" }.joined()
+            let rowsHTML = rows.map { row in
+                "<tr>\(row.map { "<td>\(surfAceMarkdownInlineHTML($0))</td>" }.joined())</tr>"
+            }.joined()
+            blocks.append("<table><thead><tr>\(headerHTML)</tr></thead><tbody>\(rowsHTML)</tbody></table>")
+            continue
+        }
+
+        if surfAceMarkdownIsUnorderedListItem(line) || surfAceMarkdownIsOrderedListItem(line) {
+            let ordered = surfAceMarkdownIsOrderedListItem(line)
+            let tag = ordered ? "ol" : "ul"
+            var items: [String] = []
+            while index < lines.count,
+                  ordered ? surfAceMarkdownIsOrderedListItem(lines[index]) : surfAceMarkdownIsUnorderedListItem(lines[index]) {
+                items.append("<li>\(surfAceMarkdownInlineHTML(surfAceMarkdownListItemText(lines[index])))</li>")
+                index += 1
+            }
+            blocks.append("<\(tag)>\(items.joined())</\(tag)>")
+            continue
+        }
+
+        if line.trimmingCharacters(in: .whitespaces).hasPrefix(">") {
+            var quoted: [String] = []
+            while index < lines.count, lines[index].trimmingCharacters(in: .whitespaces).hasPrefix(">") {
+                quoted.append(surfAceMarkdownStripBlockquote(lines[index]))
+                index += 1
+            }
+            blocks.append("<blockquote>\(surfAceMarkdownToHTML(quoted.joined(separator: "\n")))</blockquote>")
+            continue
+        }
+
+        var paragraph: [String] = []
+        while index < lines.count, !surfAceMarkdownStartsBlock(lines: lines, index: index) {
+            paragraph.append(lines[index].trimmingCharacters(in: .whitespaces))
+            index += 1
+        }
+        blocks.append("<p>\(surfAceMarkdownInlineHTML(paragraph.joined(separator: " ")))</p>")
+    }
+
+    return blocks.joined()
+}
+
+private func surfAceMarkdownInlineHTML(_ markdown: String) -> String {
+    var html = ""
+    var index = markdown.startIndex
+
+    while index < markdown.endIndex {
+        let rest = markdown[index...]
+        if rest.hasPrefix("`"),
+           let end = markdown[index...].dropFirst().firstIndex(of: "`") {
+            html += "<code>\(surfAceEscapeHTML(String(markdown[markdown.index(after: index)..<end])))</code>"
+            index = markdown.index(after: end)
+            continue
+        }
+
+        if rest.hasPrefix("**"),
+           let end = markdown[markdown.index(index, offsetBy: 2)...].range(of: "**")?.lowerBound {
+            html += "<strong>\(surfAceMarkdownInlineHTML(String(markdown[markdown.index(index, offsetBy: 2)..<end])))</strong>"
+            index = markdown.index(end, offsetBy: 2)
+            continue
+        }
+
+        if rest.hasPrefix("*"),
+           let end = markdown[index...].dropFirst().firstIndex(of: "*") {
+            html += "<em>\(surfAceMarkdownInlineHTML(String(markdown[markdown.index(after: index)..<end])))</em>"
+            index = markdown.index(after: end)
+            continue
+        }
+
+        if rest.hasPrefix("["),
+           let labelEnd = markdown[index...].firstIndex(of: "]"),
+           markdown.index(after: labelEnd) < markdown.endIndex,
+           markdown[markdown.index(after: labelEnd)] == "(",
+           let hrefEnd = markdown[markdown.index(labelEnd, offsetBy: 2)...].firstIndex(of: ")") {
+            let label = surfAceMarkdownInlineHTML(String(markdown[markdown.index(after: index)..<labelEnd]))
+            let hrefStart = markdown.index(labelEnd, offsetBy: 2)
+            let href = surfAceEscapeHTML(String(markdown[hrefStart..<hrefEnd]).trimmingCharacters(in: .whitespaces))
+            html += "<a data-href=\"\(href)\" title=\"\(href)\">\(label)</a>"
+            index = markdown.index(after: hrefEnd)
+            continue
+        }
+
+        html += surfAceEscapeHTML(String(markdown[index]))
+        index = markdown.index(after: index)
+    }
+
+    return html
+}
+
+private func surfAceMarkdownIsFence(_ line: String) -> Bool {
+    line.trimmingCharacters(in: .whitespaces).hasPrefix("```")
+}
+
+private func surfAceMarkdownHeading(_ line: String) -> (level: Int, text: String) {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    var level = 0
+    for character in trimmed {
+        if character == "#", level < 6 {
+            level += 1
+        } else {
+            break
+        }
+    }
+    guard level > 0,
+          trimmed.count > level,
+          trimmed[trimmed.index(trimmed.startIndex, offsetBy: level)] == " " else {
+        return (0, line)
+    }
+    return (level, String(trimmed.dropFirst(level + 1)))
+}
+
+private func surfAceMarkdownIsUnorderedListItem(_ line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    return ["- ", "* ", "+ "].contains { trimmed.hasPrefix($0) }
+}
+
+private func surfAceMarkdownIsOrderedListItem(_ line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    guard let dot = trimmed.firstIndex(of: ".") else { return false }
+    return trimmed[..<dot].allSatisfy(\.isNumber) && trimmed[trimmed.index(after: dot)...].hasPrefix(" ")
+}
+
+private func surfAceMarkdownListItemText(_ line: String) -> String {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    if surfAceMarkdownIsUnorderedListItem(trimmed) {
+        return String(trimmed.dropFirst(2))
+    }
+    guard let dot = trimmed.firstIndex(of: ".") else { return trimmed }
+    return String(trimmed[trimmed.index(dot, offsetBy: 2)...])
+}
+
+private func surfAceMarkdownStripBlockquote(_ line: String) -> String {
+    var trimmed = line.trimmingCharacters(in: .whitespaces)
+    if trimmed.hasPrefix(">") {
+        trimmed.removeFirst()
+    }
+    if trimmed.hasPrefix(" ") {
+        trimmed.removeFirst()
+    }
+    return trimmed
+}
+
+private func surfAceMarkdownIsTableDivider(_ line: String) -> Bool {
+    let cells = surfAceMarkdownTableCells(line)
+    return cells.count > 1 && cells.allSatisfy { cell in
+        let trimmed = cell.trimmingCharacters(in: .whitespaces)
+        let stripped = trimmed.replacingOccurrences(of: ":", with: "")
+        return stripped.count >= 3 && stripped.allSatisfy { $0 == "-" }
+    }
+}
+
+private func surfAceMarkdownTableCells(_ line: String) -> [String] {
+    var trimmed = line.trimmingCharacters(in: .whitespaces)
+    if trimmed.hasPrefix("|") {
+        trimmed.removeFirst()
+    }
+    if trimmed.hasSuffix("|") {
+        trimmed.removeLast()
+    }
+    return trimmed.split(separator: "|", omittingEmptySubsequences: false)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+}
+
+private func surfAceMarkdownStartsBlock(lines: [String], index: Int) -> Bool {
+    let line = lines[index]
+    return line.trimmingCharacters(in: .whitespaces).isEmpty ||
+        surfAceMarkdownIsFence(line) ||
+        surfAceMarkdownHeading(line).level > 0 ||
+        surfAceMarkdownIsUnorderedListItem(line) ||
+        surfAceMarkdownIsOrderedListItem(line) ||
+        line.trimmingCharacters(in: .whitespaces).hasPrefix(">") ||
+        (index + 1 < lines.count && line.contains("|") && surfAceMarkdownIsTableDivider(lines[index + 1]))
+}
+
 private enum SurfAceChromeFont {
     static let regularName = "Rajdhani-Regular"
     static let boldName = "Rajdhani-Bold"
@@ -1561,31 +1789,54 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     }
 
     private func markdownHTML(_ markdown: String) -> String {
-        if let attributed = try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full)),
-           let htmlData = try? NSAttributedString(attributed).data(
-               from: NSRange(location: 0, length: NSAttributedString(attributed).length),
-               documentAttributes: [.documentType: NSAttributedString.DocumentType.html]
-           ),
-           let htmlString = String(data: htmlData, encoding: .utf8) {
-            return """
-            <!doctype html>
-            <html><head>
-            <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=3.0,user-scalable=yes" />
-            <style>
-            html, body { margin: 0; padding: 0; background: #0d1218; color: #f3f5f8; font: -apple-system-body; }
-            body { padding: 24px; line-height: 1.45; }
-            pre { background: #121a22; padding: 14px; border-radius: 10px; overflow: auto; }
-            code { font-family: Menlo, monospace; }
-            </style></head><body>\(htmlString)</body></html>
-            """
-        }
-
         return """
         <!doctype html>
-        <html><head>
-        <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=3.0,user-scalable=yes" />
-        <style>body { margin: 0; padding: 24px; background: #0d1218; color: #f3f5f8; font-family: -apple-system; white-space: pre-wrap; }</style>
-        </head><body>\(escapeHTML(markdown))</body></html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=3.0,user-scalable=yes" />
+          <style>
+            html, body { margin: 0; min-height: 100%; background: #fbfcff; color: #172033; }
+            body {
+              padding: clamp(24px, 4vw, 56px);
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+              font-size: 17px;
+              line-height: 1.62;
+              overflow-wrap: anywhere;
+            }
+            h1, h2, h3, h4, h5, h6 { margin: 1.35em 0 0.55em; color: #0d1628; line-height: 1.2; }
+            h1:first-child, h2:first-child, h3:first-child, h4:first-child, h5:first-child, h6:first-child { margin-top: 0; }
+            h1 { font-size: 2rem; }
+            h2 { font-size: 1.55rem; }
+            h3 { font-size: 1.25rem; }
+            p, ul, ol, blockquote, pre, table { margin: 0 0 1em; }
+            ul, ol { padding-left: 1.5em; }
+            li + li { margin-top: 0.3em; }
+            code {
+              padding: 0.15em 0.3em;
+              border-radius: 5px;
+              background: #eef2f8;
+              color: #0d1628;
+              font-family: "SF Mono", Menlo, ui-monospace, monospace;
+              font-size: 0.92em;
+            }
+            pre {
+              overflow: auto;
+              padding: 14px 16px;
+              border: 1px solid #d8e0ec;
+              border-radius: 8px;
+              background: #101828;
+              color: #f5f7fb;
+            }
+            pre code { padding: 0; background: transparent; color: inherit; }
+            blockquote { padding: 0.1em 0 0.1em 1em; border-left: 4px solid #9aabc3; color: #46546a; }
+            a { color: #1d5fbf; }
+            table { width: 100%; border-collapse: collapse; font-size: 0.95em; }
+            th, td { padding: 8px 10px; border: 1px solid #d8e0ec; text-align: left; vertical-align: top; }
+            th { background: #eef2f8; color: #0d1628; }
+          </style>
+        </head>
+        <body>\(surfAceMarkdownToHTML(markdown))</body>
+        </html>
         """
     }
 
@@ -1645,12 +1896,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     }
 
     private func escapeHTML(_ string: String) -> String {
-        string
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&#39;")
+        surfAceEscapeHTML(string)
     }
 
     private func extractPDFText(_ base64Data: String) -> String {

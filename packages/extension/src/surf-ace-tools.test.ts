@@ -192,3 +192,36 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.deepEqual(relinquishTool.inputSchema.required, ["fingerprint"]);
   assert.equal(relinquishTool.inputSchema.additionalProperties, false);
 });
+
+test("surf_ace_push forwards markdown content through the first-class push path", async () => {
+  let captured: unknown;
+  const runtime = {
+    ...createStubRuntime(),
+    push: async (args: unknown) => {
+      captured = args;
+      return {
+        contentId: "ct_markdown",
+        fingerprint: "sf_1",
+        paneId: 1,
+        revision: 1,
+      };
+    },
+  } as SurfAceRuntime;
+  const pushTool = createSurfAceTools(runtime).find((tool) => tool.name === "surf_ace_push");
+
+  assert.ok(pushTool);
+  const result = await pushTool.execute({
+    content: "# Heading\n\n- one",
+    contentType: "markdown",
+    fingerprint: "sf_1",
+    paneId: 1,
+  });
+
+  assert.deepEqual(captured, {
+    content: "# Heading\n\n- one",
+    contentType: "markdown",
+    fingerprint: "sf_1",
+    paneId: 1,
+  });
+  assert.equal(result.contentId, "ct_markdown");
+});

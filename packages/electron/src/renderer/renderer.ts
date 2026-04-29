@@ -2,6 +2,7 @@ import {
   isMarkedOverlayVisible,
   visibleOverlayRect,
 } from "./overlay-rects.js";
+import { markdownToHtml } from "./markdown.js";
 
 type Selection =
   | null
@@ -202,38 +203,6 @@ type SurfAceOverlayKind =
   | "history-forward"
   | "pane-label"
   | "pane-handle";
-
-function escapeHtml(input: string): string {
-  return input
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function markdownToHtml(markdown: string): string {
-  const escaped = escapeHtml(markdown);
-  const rendered = escaped.split("\n").map((line) => {
-    if (!line.trim()) {
-      return "<p></p>";
-    }
-    if (line.startsWith("# ")) {
-      return `<h1>${line.slice(2)}</h1>`;
-    }
-    if (line.startsWith("## ")) {
-      return `<h2>${line.slice(3)}</h2>`;
-    }
-    if (line.startsWith("### ")) {
-      return `<h3>${line.slice(4)}</h3>`;
-    }
-    return `<p>${line
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.+?)\*/g, "<em>$1</em>")
-      .replace(/`(.+?)`/g, "<code>$1</code>")}</p>`;
-  });
-  return rendered.join("");
-}
 
 function contentKey(pane: RendererPaneState): string {
   return `${pane.externalNative ? "native" : "renderer"}:${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}`;
