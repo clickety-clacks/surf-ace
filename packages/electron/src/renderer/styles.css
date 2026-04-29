@@ -111,7 +111,7 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 }
 
 .pane-shell.keyboard-active .keyboard-focus-overlay {
-  opacity: 0.25;
+  opacity: 1;
 }
 
 .keyboard-focus-edge {
