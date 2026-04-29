@@ -2,6 +2,16 @@ import XCTest
 @testable import SurfAce
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
+    func testKeyboardFocusOutlineIsSuppressedForSinglePaneSurfaces() {
+        XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: 1, paneId: 1, paneCount: 1))
+        XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: nil, paneId: 1, paneCount: 1))
+    }
+
+    func testKeyboardFocusOutlineShowsOnlyForActivePaneWhenMultiplePanesExist() {
+        XCTAssertTrue(surfAceShowsKeyboardFocusOutline(activePaneId: 2, paneId: 2, paneCount: 2))
+        XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: 2, paneId: 1, paneCount: 2))
+    }
+
     @MainActor
     func testPaneLabelTextUsesVisiblePaneLabelNotOptionalName() {
         let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")

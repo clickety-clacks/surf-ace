@@ -2937,6 +2937,8 @@ When annotation mode is active, the pane MUST render a 2px accent border as the 
 
 #### Keyboard focus visual state (all platforms)
 
+
+On iOS and iPadOS, the keyboard focus outline MUST be suppressed when a surface has only one pane. It is shown only when the surface has multiple panes and focus disambiguation is needed. This iOS single-pane suppression does not change pane routing, `activeKeyboardPaneId`, or explicit `paneId` targeting.
 When keyboard focus is assigned to a pane, that pane MUST render a visible mid-gray focus outline or equivalent affordance at 25% opacity. The outline MUST remain legible on both white and dark-ish content backgrounds; pale white, pale blue, or otherwise low-contrast outlines are not sufficient. This affordance is separate from the pane label and from annotation mode; it MUST NOT change the pane's visible `paneLabel` or add a pane-number control to the toolbar.
 
 #### Behavioral constraints while in annotation mode (all platforms)
@@ -2968,6 +2970,7 @@ Pane controls float above content rather than occupying a fixed header bar. The 
 
 Required defaults:
 - Pane label is displayed as a large floating translucent overlay in the bottom-right of the pane (see §15.1 for visibility rules).
+- On iOS and iPadOS, the bottom-right identity mark's pane-number text baseline and window-ID box bottom MUST share the same calculated bottom inset reference line as the bottom edge of the navigation and annotation toolbar pills. The pane-number text moves to the fixed screen/window-ID box reference, not the reverse, and the toolbar Y position is not changed to compensate for identity placement.
 - Pane labels are not controls. The user-facing pane id is the floating pane label.
 - Bottom controls are two side-by-side floating pills at the bottom-center of each pane.
 - The left navigation pill appears only when pushed content/history exists. It contains Back, Forward, and the session/chat display name for the currently visible pane-history entry. Back/Forward navigation MUST update that name to the owner/name of the newly visible history entry.
@@ -3087,7 +3090,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Done Exit Control** — "While annotation mode is active, a Done button MUST be visible in the annotation pill." Source: §15.1 / §15.3
 - **Annotation Mode Visual State** — "When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator." Source: §15.1
 - **Two-Pill Control Rule** — "Navigation controls and current visible owner/name live in the left navigation pill; annotation controls live in the right annotation pill." Source: §15.3
-- **Keyboard Focus Affordance** — "Keyboard-focused panes MUST render a visible mid-gray focus outline or equivalent affordance, legible on both white and dark-ish content backgrounds." Source: §15.1
+- **Keyboard Focus Affordance** — "Keyboard-focused panes MUST render a visible mid-gray focus outline or equivalent affordance, legible on both white and dark-ish content backgrounds. iOS/iPadOS suppresses this outline for single-pane surfaces." Source: §15.1
 - **Explicit Pane Routing** — "Keyboard focus does not create a default target for CLU routing and does not replace explicit `paneId` targeting." Source: §15.3
 - **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
 - **Accessibility Contrast** — "All chrome labels and controls MUST meet WCAG AA contrast." Source: §15.2

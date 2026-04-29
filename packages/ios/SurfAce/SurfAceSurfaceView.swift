@@ -8,6 +8,10 @@ import WebKit
 
 private let surfAceSurfaceCoordinateSpaceName = "SurfAce.surface.logical"
 
+private enum SurfAcePaneChromeLayout {
+    static let bottomInset: CGFloat = 28
+}
+
 private enum SurfAceChromeFont {
     static let regularName = "Rajdhani-Regular"
     static let boldName = "Rajdhani-Bold"
@@ -157,7 +161,7 @@ private struct SurfAcePaneView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, 28)
-                .padding(.bottom, 28)
+                .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
 
@@ -182,7 +186,7 @@ private struct SurfAcePaneView: View {
                 VStack {
                     Spacer()
                     SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
-                        .padding(.bottom, 28)
+                        .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
                 }
             }
             .overlay {
@@ -192,7 +196,13 @@ private struct SurfAcePaneView: View {
                 )
             }
             .overlay {
-                SurfAceKeyboardActiveBorder(active: surface.activeKeyboardPaneId == pane.paneId)
+                SurfAceKeyboardActiveBorder(
+                    active: surfAceShowsKeyboardFocusOutline(
+                        activePaneId: surface.activeKeyboardPaneId,
+                        paneId: pane.paneId,
+                        paneCount: surface.panes.count
+                    )
+                )
                     .allowsHitTesting(false)
                     .zIndex(10_000)
             }
@@ -232,6 +242,10 @@ private struct SurfAcePaneView: View {
     }
 }
 
+func surfAceShowsKeyboardFocusOutline(activePaneId: Int?, paneId: Int, paneCount: Int) -> Bool {
+    paneCount > 1 && activePaneId == paneId
+}
+
 private struct SurfAcePaneIdentityOverlay: View {
     let windowLabel: String
     let paneLabel: String
@@ -265,6 +279,7 @@ private struct SurfAcePaneIdentityOverlay: View {
                 .minimumScaleFactor(0.35)
                 .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
         }
+        .alignmentGuide(.bottom) { dimensions in dimensions[.surfAceIdentityBaseline] }
     }
 
     private var connectionColor: Color {
