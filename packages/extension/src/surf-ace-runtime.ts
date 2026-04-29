@@ -1403,6 +1403,14 @@ function isOwnershipLockResponse(response: Response): response is ErrorResponse 
   );
 }
 
+function isForeignOwnershipLockResponse(response: Response): boolean {
+  return (
+    isErrorResponse(response) &&
+    response.error.code === "busy" &&
+    response.error.message.toLowerCase().includes("another provider")
+  );
+}
+
 function normalizeContent(
   contentType: ContentType,
   content: unknown,
@@ -5986,6 +5994,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (
       !isErrorResponse(response) ||
       (response.error.code !== "busy" && response.error.code !== "invalid_resume") ||
+      isForeignOwnershipLockResponse(response) ||
       !this.isKnownSelfOwnedSurface(surface)
     ) {
       return response;

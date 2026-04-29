@@ -147,6 +147,7 @@ class FakeSurfAceWsServer {
   ];
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
+  busyWithoutTakeoverMessage = "Surface is already paired";
   invalidResumeWithoutTakeoverResponsesRemaining = 0;
   lockedProviderId: string | null = null;
   lockedSessionId: string | null = null;
@@ -549,7 +550,7 @@ class FakeSurfAceWsServer {
                 message.id,
                 "pair.request",
                 "busy",
-                "Surface is already paired",
+                this.busyWithoutTakeoverMessage,
               ),
             ),
           );
@@ -5442,6 +5443,31 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.pairAttemptDetails[2]?.providerId, providerId);
       assert.ok(
         warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
+      );
+    });
+  });
+
+  await t.test("foreign-provider busy on a known surface does not self-reclaim with takeover", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      assert.equal(surface.hasPairedInGatewaySession, true);
+
+      server.busyWithoutTakeoverResponsesRemaining = 1;
+      server.busyWithoutTakeoverMessage = "Surface ownership lock is held by another provider";
+      await surface.client.close(1000, "test_foreign_busy_no_self_reclaim");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
+        [false, false],
+      );
+      assert.ok(
+        warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
       );
     });
   });
