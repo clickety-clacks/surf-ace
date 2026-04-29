@@ -773,6 +773,238 @@ test("ws server returns browser_url applied only after renderer load confirmatio
   });
 });
 
+test("ws server releases a native-hosted pane before browser_url replacement", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      if (message.type === "get_status") {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            logical_surface_height: 3840,
+            logical_surface_width: 2160,
+            pane_geometry_coordinate_space: "compositor_logical",
+          },
+        })}\n`);
+      } else {
+        socket.write(`${JSON.stringify({ ok: true })}\n`);
+      }
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ core, server, surfaceId, url }) => {
+      const owner = await connect(url);
+      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const nativeApplied = await request(owner, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+      assert.equal(nativeApplied.payload.status, "applied");
+      assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
+
+      const browserApply = browserUrlTargetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+        targetId: "target_replacement",
+        url: "https://example.com/replacement",
+      });
+      const responsePromise = request(owner, browserApply);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      assert.deepEqual(received.map((message) => (message as { type: string }).type), [
+        "get_status",
+        "native_pane.host",
+        "native_pane.release",
+      ]);
+      assert.deepEqual(received[2], {
+        pane_ids: [String(paired.payload.state.panes[0]!.paneId)],
+        type: "native_pane.release",
+      });
+      const pane = core.getRendererWindowState(surfaceId).panes[0]!;
+      assert.equal(pane.externalNative, false);
+      assert.equal(pane.content.contentType, "browser_url");
+
+      server.resolveBrowserUrlNavigation(surfaceId, Number(paired.payload.state.panes[0]!.paneId), {
+        status: "applied",
+        targetId: "target_replacement",
+        url: "https://example.com/replacement",
+      });
+
+      const response = await responsePromise;
+      assert.equal(response.payload.status, "applied");
+      assert.equal(response.payload.materializedState?.navigationStatus, "loaded");
+      await closeSocket(owner);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server preserves native-hosted pane when browser_url release fails", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      if (message.type === "get_status" || message.type === "native_pane.host") {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            logical_surface_height: 3840,
+            logical_surface_width: 2160,
+            pane_geometry_coordinate_space: "compositor_logical",
+          },
+        })}\n`);
+      } else {
+        socket.write(`${JSON.stringify({ error: "release denied", ok: false })}\n`);
+      }
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ core, surfaceId, url }) => {
+      const owner = await connect(url);
+      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const nativeApplied = await request(owner, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+      assert.equal(nativeApplied.payload.status, "applied");
+
+      const rejected = await request(owner, browserUrlTargetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(rejected.payload.status, "rejected");
+      assert.equal(rejected.payload.errorCode, "materialization_failed");
+      assert.equal(rejected.payload.message, "release denied");
+      assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
+      assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentType, null);
+      assert.deepEqual(received.map((message) => (message as { type: string }).type), [
+        "get_status",
+        "native_pane.host",
+        "native_pane.release",
+      ]);
+
+      await closeSocket(owner);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server does not release native-hosted pane for invalid browser_url payloads", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      if (message.type === "get_status") {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            logical_surface_height: 3840,
+            logical_surface_width: 2160,
+            pane_geometry_coordinate_space: "compositor_logical",
+          },
+        })}\n`);
+      } else {
+        socket.write(`${JSON.stringify({ ok: true })}\n`);
+      }
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ core, surfaceId, url }) => {
+      const owner = await connect(url);
+      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const nativeApplied = await request(owner, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+      assert.equal(nativeApplied.payload.status, "applied");
+
+      const rejected = await request(owner, browserUrlTargetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+        url: "file:///tmp/not-allowed.html",
+      }));
+
+      assert.equal(rejected.payload.status, "rejected");
+      assert.equal(rejected.payload.errorCode, "unsafe_payload");
+      assert.equal(rejected.payload.message, "browser_url targetPayload.url must be http or https");
+      assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
+      assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentType, null);
+      assert.deepEqual(received.map((message) => (message as { type: string }).type), [
+        "get_status",
+        "native_pane.host",
+      ]);
+
+      await closeSocket(owner);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
 test("ws server returns browser_url failed when renderer reports blocked navigation", async () => {
   await withServer(async ({ server, surfaceId, url }) => {
     const owner = await connect(url);

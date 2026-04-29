@@ -10,6 +10,7 @@ import {
   compositorFailureMessage,
   isOverlayNativePaneLivenessFailure,
   nativePaneInstanceIdsForCompositor,
+  nativePaneReleaseRequestForCompositor,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
   overlayRequestForCompositor,
@@ -343,6 +344,13 @@ test("native pane bridge serializes overlay region clears", () => {
   assert.deepEqual(overlayRegionsClearRequestForCompositor("sf_test"), {
     surfaceId: "sf_test",
     type: "overlay_regions.clear",
+  });
+});
+
+test("native pane bridge serializes native pane releases", () => {
+  assert.deepEqual(nativePaneReleaseRequestForCompositor([1, "2"]), {
+    pane_ids: ["1", "2"],
+    type: "native_pane.release",
   });
 });
 

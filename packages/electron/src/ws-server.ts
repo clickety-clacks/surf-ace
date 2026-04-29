@@ -39,6 +39,7 @@ import type {
 } from "../../protocol/src/index.js";
 import {
   compositorFailureMessage,
+  nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
   requestForCompositor,
   resolveCompositorControlSocketPath,
@@ -1261,6 +1262,22 @@ export class SurfaceWsServer {
     }
 
     if (request.payload.targetKind === "browser_url") {
+      const preflightFailure = this.core.browserUrlTargetPreflight(surfaceId, request.payload);
+      if (preflightFailure) {
+        return {
+          id: request.id,
+          ok: true,
+          op: "target.apply.result",
+          payload: preflightFailure,
+          sentAt: Date.now(),
+          type: "response",
+          v: 1,
+        };
+      }
+      const releaseFailure = await this.releaseNativePaneBeforeBrowserUrl(surfaceId, request.payload);
+      if (releaseFailure) {
+        return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", releaseFailure);
+      }
       const result = this.core.targetApply(surfaceId, request.payload);
       const paneId = this.core.pairState(surfaceId).panes.find((pane) =>
         pane.paneLineageId === request.payload.paneLineageId
@@ -1516,6 +1533,32 @@ export class SurfaceWsServer {
         timeout,
       });
     });
+  }
+
+  private async releaseNativePaneBeforeBrowserUrl(
+    surfaceId: string,
+    payload: TargetApplyRequest["payload"],
+  ): Promise<string | null> {
+    const paneId = this.core.nativeHostedPaneIdForLineage(surfaceId, payload.paneLineageId);
+    if (paneId === null) {
+      return null;
+    }
+    if (!this.compositorSocketPath) {
+      return "browser_url cannot replace a live native-hosted pane without native pane release support";
+    }
+    const releaseRequest = nativePaneReleaseRequestForCompositor([paneId]);
+    let releaseResponse: CompositorControlResponse;
+    try {
+      releaseResponse = await sendCompositorControl(this.compositorSocketPath, releaseRequest);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    const releaseFailure = compositorFailureMessage(releaseResponse);
+    if (releaseFailure) {
+      return releaseFailure;
+    }
+    this.core.markNativePaneReleased(surfaceId, [paneId]);
+    return null;
   }
 
   private targetApplyFailureResponse(

@@ -40,6 +40,10 @@ export type CompositorControlRequest =
     type: NativePaneMaterialization["op"];
   }
   | {
+    pane_ids: string[];
+    type: "native_pane.release";
+  }
+  | {
     type: "get_status";
   }
   | (NonNullable<NativePaneMaterialization["overlaySet"]> & {
@@ -207,6 +211,13 @@ export function overlayRegionsClearRequestForCompositor(
     surfaceId,
     type: "overlay_regions.clear",
     ...(windowId ? { windowId } : {}),
+  };
+}
+
+export function nativePaneReleaseRequestForCompositor(paneIds: Array<number | string>): CompositorControlRequest {
+  return {
+    pane_ids: paneIds.map((paneId) => String(paneId)),
+    type: "native_pane.release",
   };
 }
 
