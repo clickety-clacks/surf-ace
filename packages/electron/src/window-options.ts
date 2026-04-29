@@ -24,7 +24,7 @@ export function surfaceWindowOptions(params: {
     frame: !hostedByCompositor,
     hasShadow: !hostedByCompositor,
     height: Math.max(720, params.viewport.height),
-    show: false,
+    show: hostedByCompositor,
     title: params.windowLabel ? `${params.endpointName} · ${params.windowLabel}` : params.endpointName,
     transparent: hostedByCompositor,
     useContentSize: true,

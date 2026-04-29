@@ -14,6 +14,7 @@ type TestPane = {
   contentId: string | null;
   contentType: string | null;
   drawings: string[];
+  externalNative?: boolean;
   frame: {
     height: number;
     width: number;
@@ -795,6 +796,7 @@ class FakeSurfAceWsServer {
           pane.contentId = null;
           pane.contentType = null;
           pane.drawings = [];
+          pane.externalNative = false;
           pane.revision = Number(message.payload.revision ?? pane.revision);
           this.clearRequests.push({
             paneId,
@@ -863,6 +865,17 @@ class FakeSurfAceWsServer {
           );
           return;
         }
+        if (message.payload?.materialization?.op === "native_pane.host") {
+          const targetSurface = this.requirePairedSurface(socket);
+          for (const paneMaterialization of message.payload.materialization.panes ?? []) {
+            const pane = targetSurface.panes.get(Number(paneMaterialization.id));
+            if (pane) {
+              pane.contentId = null;
+              pane.contentType = null;
+              pane.externalNative = true;
+            }
+          }
+        }
         socket.send(
           JSON.stringify(
             this.response(message.id, "target.apply.result", {
@@ -886,6 +899,7 @@ class FakeSurfAceWsServer {
               panes: [...targetSurface.panes.entries()].map(([paneId, pane]) => ({
                 activeContentId: pane.contentId,
                 contentType: pane.contentType,
+                externalNative: pane.externalNative ?? false,
                 geometry: this.paneGeometry(targetSurface, paneId, pane),
                 name: pane.name,
                 paneId,
@@ -948,6 +962,7 @@ class FakeSurfAceWsServer {
         assert.ok(pane);
         pane.contentId = String(message.payload?.contentId);
         pane.contentType = String(message.payload?.contentType);
+        pane.externalNative = false;
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
         pane.drawings = [];
         this.contentSetRequests.push({
@@ -980,6 +995,7 @@ class FakeSurfAceWsServer {
         pane.contentId = null;
         pane.contentType = null;
         pane.drawings = [];
+        pane.externalNative = false;
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
         this.clearRequests.push({
           paneId,
@@ -2569,6 +2585,83 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           paneId: firstPaneId,
         });
         assert.equal(server.contentSetRequests.at(-1)?.revision, pushed.revision + 1);
+      },
+    });
+  });
+
+  await t.test("surf_ace_list clears browser_url target metadata when native hosting supersedes it", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        await runtime.push({
+          content: "https://google.com",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const remotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(remotePane);
+        remotePane.contentId = null;
+        remotePane.contentType = null;
+        remotePane.externalNative = true;
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        await internalRuntime.syncRemotePaneList(surface);
+
+        const screensAfterNative = await runtime.listScreens();
+        assert.equal(screensAfterNative[0]?.panes[0]?.activeContent, null);
+        assert.equal(screensAfterNative[0]?.panes[0]?.target, null);
+      },
+    });
+  });
+
+  await t.test("browser_url target apply keeps content revisions monotonic after prior pushes", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        await runtime.push({
+          content: "",
+          contentType: "canvas",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        const secondPush = await runtime.push({
+          content: "",
+          contentType: "canvas",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const browserPush = await runtime.push({
+          content: "https://google.com",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(browserPush.revision, secondPush.revision);
+
+        await runtime.push({
+          content: "<p>replacement</p>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(server.contentSetRequests.at(-1)?.revision, secondPush.revision + 1);
       },
     });
   });
@@ -4843,6 +4936,24 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(retainedSurface);
       assert.ok(retainedSurface.client?.isOpen());
 
+      const siblingSurface = {
+        ...retainedSurface,
+        autoRetryEnabled: true,
+        client: null,
+        connectedAt: null,
+        connectionState: "connecting",
+        hasPairedInGatewaySession: false,
+        lastSeenAt: retainedSurface.lastSeenAt - 500,
+        panes: new Map(),
+        recentEventIds: [],
+        recentEventIdsSet: new Set(),
+        retryDelayResolver: null,
+        sessionId: null,
+        stopRequested: false,
+        surfaceId: "sf_legitimate_sibling" as any,
+        workPromise: null,
+        windowLabel: "y",
+      };
       const staleSurface = {
         ...retainedSurface,
         autoRetryEnabled: true,
@@ -4857,15 +4968,18 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         retryDelayResolver: null,
         sessionId: null,
         stopRequested: false,
-        surfaceId: "sf_stale_same_endpoint" as any,
+        surfaceId: "sf_disc_stale_same_endpoint" as any,
         workPromise: null,
         windowLabel: "z",
       };
+      internalRuntime.surfaces.set(siblingSurface.surfaceId, siblingSurface);
       internalRuntime.surfaces.set(staleSurface.surfaceId, staleSurface);
 
       await discovery.refreshNow();
 
       assert.equal(internalRuntime.surfaces.get(server.surfaceId), retainedSurface);
+      assert.equal(internalRuntime.surfaces.get(siblingSurface.surfaceId), siblingSurface);
+      assert.equal(siblingSurface.stopRequested, false);
       assert.equal(internalRuntime.surfaces.has(staleSurface.surfaceId), false);
       assert.equal(staleSurface.stopRequested, true);
       assert.equal(staleSurface.autoRetryEnabled, false);

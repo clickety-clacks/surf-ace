@@ -50,10 +50,37 @@ type MarkdownContent = { markdown: string };
 type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
 type BrowserUrlContent = { url: string };
-type BrowserUrlWebViewElement = HTMLElement & { src: string };
+type BrowserUrlWebViewElement = HTMLElement & {
+  executeJavaScript?: (code: string) => Promise<unknown>;
+  getWebContentsId?: () => number;
+  src: string;
+};
 type BrowserUrlWebViewErrorEvent = Event & {
   errorDescription?: string;
   isMainFrame?: boolean;
+};
+type BrowserUrlDiagnosticReason =
+  | "did-attach"
+  | "did-fail-load"
+  | "did-finish-load"
+  | "did-finish-load:guest-viewport"
+  | "dom-ready"
+  | "dom-ready:guest-viewport"
+  | "guest-viewport-retry"
+  | "navigation-assigned"
+  | "pre-navigation"
+  | "resize";
+type BrowserUrlGuestMetrics = {
+  bodyRect: { height: number; width: number; x: number; y: number } | null;
+  devicePixelRatio: number;
+  innerHeight: number;
+  innerWidth: number;
+  location: string;
+  rootClientHeight: number | null;
+  rootClientWidth: number | null;
+  rootScrollHeight: number | null;
+  rootScrollWidth: number | null;
+  visualViewport: { height: number; scale: number; width: number } | null;
 };
 type PaneContentValue =
   | null
@@ -993,26 +1020,324 @@ function clearWebViewSizer(view: PaneView): void {
   view.currentWebViewResizeObserver = null;
 }
 
+function currentPaneFrameElement(view: PaneView): HTMLElement | null {
+  return view.contentEl.querySelector<HTMLElement>(".content-html-frame");
+}
+
+function paneFrameRect(view: PaneView): { height: number; width: number } | null {
+  if (!view.rootEl.isConnected) {
+    return null;
+  }
+  const rootRect = view.rootEl.getBoundingClientRect();
+  const scrollRect = view.scrollEl.getBoundingClientRect();
+  const width = scrollRect.width > 0 ? scrollRect.width : rootRect.width;
+  const height = scrollRect.height > 0 ? scrollRect.height : rootRect.height;
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+  return { height, width };
+}
+
+function applyPaneFrameSize(view: PaneView, element: HTMLElement): boolean {
+  const rect = paneFrameRect(view);
+  if (!rect) {
+    return false;
+  }
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  view.contentEl.style.height = `${height}px`;
+  view.contentEl.style.minHeight = `${height}px`;
+  element.style.width = `${width}px`;
+  element.style.height = `${height}px`;
+  if (element.matches("webview.content-browser-url-frame")) {
+    element.setAttribute("autosize", "on");
+    element.setAttribute("minwidth", String(width));
+    element.setAttribute("minheight", String(height));
+    element.setAttribute("maxwidth", String(width));
+    element.setAttribute("maxheight", String(height));
+  }
+  return true;
+}
+
+function schedulePaneFrameSizeRefresh(view: PaneView, element: HTMLElement): void {
+  const refresh = () => {
+    if (!element.isConnected || currentPaneFrameElement(view) !== element) {
+      return;
+    }
+    applyPaneFrameSize(view, element);
+  };
+  window.requestAnimationFrame(refresh);
+  window.setTimeout(refresh, 50);
+  window.setTimeout(refresh, 200);
+}
+
 function sizeWebViewToPane(view: PaneView, element: HTMLElement): void {
   clearWebViewSizer(view);
 
-  const applySize = () => {
-    const rect = view.scrollEl.getBoundingClientRect();
-    view.contentEl.style.height = `${Math.max(1, Math.floor(rect.height))}px`;
-    view.contentEl.style.minHeight = `${Math.max(1, Math.floor(rect.height))}px`;
-    element.style.width = `${Math.max(1, Math.floor(rect.width))}px`;
-    element.style.height = `${Math.max(1, Math.floor(rect.height))}px`;
-  };
-
-  applySize();
+  applyPaneFrameSize(view, element);
   const observer = new ResizeObserver(() => {
-    applySize();
+    applyPaneFrameSize(view, element);
+    if (element.matches("webview.content-browser-url-frame")) {
+      reportBrowserUrlDiagnostics(view, element as BrowserUrlWebViewElement, "resize");
+    }
   });
+  observer.observe(view.rootEl);
   observer.observe(view.scrollEl);
   view.currentWebViewResizeObserver = observer;
-  window.requestAnimationFrame(() => {
-    applySize();
-  });
+  schedulePaneFrameSizeRefresh(view, element);
+}
+
+function rectDiagnostics(rect: DOMRect): Record<string, number> {
+  return {
+    bottom: Math.round(rect.bottom),
+    height: Math.round(rect.height),
+    left: Math.round(rect.left),
+    right: Math.round(rect.right),
+    top: Math.round(rect.top),
+    width: Math.round(rect.width),
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+  };
+}
+
+function elementDiagnostics(element: HTMLElement): Record<string, unknown> {
+  const style = window.getComputedStyle(element);
+  return {
+    boundingRect: rectDiagnostics(element.getBoundingClientRect()),
+    client: { height: element.clientHeight, width: element.clientWidth },
+    computed: {
+      display: style.display,
+      height: style.height,
+      inset: style.inset,
+      maxHeight: style.maxHeight,
+      maxWidth: style.maxWidth,
+      minHeight: style.minHeight,
+      minWidth: style.minWidth,
+      overflow: style.overflow,
+      position: style.position,
+      transform: style.transform,
+      width: style.width,
+    },
+    offset: { height: element.offsetHeight, width: element.offsetWidth },
+    scroll: { height: element.scrollHeight, width: element.scrollWidth, x: element.scrollLeft, y: element.scrollTop },
+  };
+}
+
+async function browserUrlGuestDiagnostics(webview: BrowserUrlWebViewElement): Promise<unknown> {
+  if (!webview.executeJavaScript) {
+    return null;
+  }
+  try {
+    return await webview.executeJavaScript(`(() => {
+      const root = document.documentElement;
+      const body = document.body;
+      const bodyRect = body ? body.getBoundingClientRect() : null;
+      return {
+        bodyRect: bodyRect ? {
+          height: Math.round(bodyRect.height),
+          width: Math.round(bodyRect.width),
+          x: Math.round(bodyRect.x),
+          y: Math.round(bodyRect.y)
+        } : null,
+        devicePixelRatio: window.devicePixelRatio,
+        innerHeight: window.innerHeight,
+        innerWidth: window.innerWidth,
+        location: window.location.href,
+        rootClientHeight: root ? root.clientHeight : null,
+        rootClientWidth: root ? root.clientWidth : null,
+        rootScrollHeight: root ? root.scrollHeight : null,
+        rootScrollWidth: root ? root.scrollWidth : null,
+        visualViewport: window.visualViewport ? {
+          height: Math.round(window.visualViewport.height),
+          scale: window.visualViewport.scale,
+          width: Math.round(window.visualViewport.width)
+        } : null
+      };
+    })()`);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function isBrowserUrlGuestMetrics(value: unknown): value is BrowserUrlGuestMetrics {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const metrics = value as Partial<BrowserUrlGuestMetrics>;
+  return typeof metrics.innerHeight === "number" && typeof metrics.innerWidth === "number";
+}
+
+function browserUrlWebContentsId(webview: BrowserUrlWebViewElement): number | null {
+  try {
+    return webview.getWebContentsId?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function browserUrlViewportMismatch(
+  webview: BrowserUrlWebViewElement,
+  guest: unknown,
+): Record<string, number | string> | null {
+  if (!isBrowserUrlGuestMetrics(guest)) {
+    return null;
+  }
+  const hostHeight = webview.clientHeight || Math.round(webview.getBoundingClientRect().height);
+  const hostWidth = webview.clientWidth || Math.round(webview.getBoundingClientRect().width);
+  const tolerance = 2;
+  if (hostHeight <= 0 || hostWidth <= 0) {
+    return null;
+  }
+  const heightDelta = Math.abs(guest.innerHeight - hostHeight);
+  const widthDelta = Math.abs(guest.innerWidth - hostWidth);
+  if (heightDelta <= tolerance && widthDelta <= tolerance) {
+    return null;
+  }
+  return {
+    guestHeight: guest.innerHeight,
+    guestWidth: guest.innerWidth,
+    heightDelta,
+    hostHeight,
+    hostWidth,
+    tolerance,
+    widthDelta,
+  };
+}
+
+function nudgeBrowserUrlWebViewResize(view: PaneView, webview: BrowserUrlWebViewElement): void {
+  const rect = paneFrameRect(view);
+  if (!rect) {
+    return;
+  }
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  webview.style.display = "flex";
+  webview.style.width = `${Math.max(1, width - 1)}px`;
+  webview.style.height = `${Math.max(1, height - 1)}px`;
+  void webview.offsetHeight;
+  applyPaneFrameSize(view, webview);
+}
+
+async function verifyBrowserUrlGuestViewport(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+  reason: BrowserUrlDiagnosticReason,
+): Promise<{ guest: unknown; mismatch: Record<string, number | string> | null }> {
+  const delays = [0, 50, 150, 300, 600];
+  let guest: unknown = null;
+  let mismatch: Record<string, number | string> | null = null;
+  for (const delay of delays) {
+    if (delay > 0) {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, delay);
+      });
+    }
+    if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
+      return { guest, mismatch: null };
+    }
+    applyPaneFrameSize(view, webview);
+    guest = await browserUrlGuestDiagnostics(webview);
+    mismatch = browserUrlViewportMismatch(webview, guest);
+    reportBrowserUrlDiagnostics(view, webview, delay === 0 ? reason : "guest-viewport-retry", guest, mismatch);
+    if (!mismatch) {
+      return { guest, mismatch: null };
+    }
+    nudgeBrowserUrlWebViewResize(view, webview);
+  }
+  return { guest, mismatch };
+}
+
+function reportBrowserUrlDiagnostics(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+  reason: BrowserUrlDiagnosticReason,
+  guest?: unknown,
+  viewportMismatch?: Record<string, number | string> | null,
+): void {
+  if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
+    return;
+  }
+  const payload = {
+    attributes: {
+      autosize: webview.getAttribute("autosize"),
+      maxheight: webview.getAttribute("maxheight"),
+      maxwidth: webview.getAttribute("maxwidth"),
+      minheight: webview.getAttribute("minheight"),
+      minwidth: webview.getAttribute("minwidth"),
+    },
+    content: elementDiagnostics(view.contentEl),
+    devicePixelRatio: window.devicePixelRatio,
+    inner: { height: window.innerHeight, width: window.innerWidth },
+    pane: elementDiagnostics(view.rootEl),
+    paneId: view.paneId,
+    reason,
+    scroll: elementDiagnostics(view.scrollEl),
+    type: "browser-url-diagnostics",
+    visualViewport: window.visualViewport
+      ? {
+          height: Math.round(window.visualViewport.height),
+          scale: window.visualViewport.scale,
+          width: Math.round(window.visualViewport.width),
+        }
+      : null,
+    webContentsId: browserUrlWebContentsId(webview),
+    webview: elementDiagnostics(webview),
+    ...(guest === undefined ? {} : { guest }),
+    ...(viewportMismatch ? { viewportMismatch } : {}),
+  };
+  window.surfAce.command(payload);
+  if (reason === "dom-ready" || reason === "did-finish-load") {
+    void browserUrlGuestDiagnostics(webview).then((guest) => {
+      if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
+        return;
+      }
+      const mismatch = browserUrlViewportMismatch(webview, guest);
+      window.surfAce.command({
+        ...payload,
+        guest,
+        ...(mismatch ? { viewportMismatch: mismatch } : {}),
+        reason: `${reason}:guest`,
+      });
+    });
+  }
+}
+
+function refreshDynamicPaneFrames(): void {
+  if (!latestState) {
+    return;
+  }
+  for (const pane of latestState.panes) {
+    const view = paneViews.get(pane.paneId);
+    if (!view?.rootEl.isConnected) {
+      continue;
+    }
+    const frame = currentPaneFrameElement(view);
+    if (frame) {
+      applyPaneFrameSize(view, frame);
+      reportPaneSnapshot(view);
+    }
+  }
+}
+
+function deferUntilPaneFrameReady(
+  view: PaneView,
+  element: HTMLElement,
+  renderToken: number,
+  callback: () => void,
+): void {
+  let attempts = 0;
+  const tick = () => {
+    if (renderToken !== view.currentRenderToken || currentPaneFrameElement(view) !== element) {
+      return;
+    }
+    if (applyPaneFrameSize(view, element) || attempts >= 12) {
+      callback();
+      return;
+    }
+    attempts += 1;
+    window.requestAnimationFrame(tick);
+  };
+  window.requestAnimationFrame(tick);
 }
 
 function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement): void {
@@ -1284,6 +1609,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     browserView.setAttribute("allowpopups", "true");
     view.contentEl.appendChild(browserView);
     sizeWebViewToPane(view, browserView);
+    reportBrowserUrlDiagnostics(view, browserView, "pre-navigation");
     let reported = false;
     const reportNavigation = (status: "applied" | "failed", errorMessage?: string) => {
       if (reported || renderToken !== view.currentRenderToken) {
@@ -1300,12 +1626,38 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
       });
     };
     browserView.addEventListener(
+      "did-attach",
+      () => {
+        reportBrowserUrlDiagnostics(view, browserView, "did-attach");
+      },
+    );
+    browserView.addEventListener(
+      "dom-ready",
+      () => {
+        reportBrowserUrlDiagnostics(view, browserView, "dom-ready");
+        void verifyBrowserUrlGuestViewport(view, browserView, "dom-ready:guest-viewport");
+      },
+    );
+    browserView.addEventListener(
       "did-finish-load",
       () => {
-        reportNavigation("applied");
-        window.setTimeout(() => {
-          reportPaneSnapshot(view);
-        }, 0);
+        reportBrowserUrlDiagnostics(view, browserView, "did-finish-load");
+        void verifyBrowserUrlGuestViewport(view, browserView, "did-finish-load:guest-viewport").then(({ mismatch }) => {
+          if (renderToken !== view.currentRenderToken) {
+            return;
+          }
+          if (mismatch) {
+            reportNavigation(
+              "failed",
+              `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
+            );
+            return;
+          }
+          reportNavigation("applied");
+          window.setTimeout(() => {
+            reportPaneSnapshot(view);
+          }, 0);
+        });
       },
       { once: true },
     );
@@ -1316,12 +1668,16 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
         if (failure.isMainFrame === false) {
           return;
         }
+        reportBrowserUrlDiagnostics(view, browserView, "did-fail-load");
         const description = failure.errorDescription ? `: ${failure.errorDescription}` : "";
         reportNavigation("failed", `webview navigation failed${description}`);
       },
       { once: true },
     );
-    browserView.src = browserUrl.url;
+    deferUntilPaneFrameReady(view, browserView, renderToken, () => {
+      browserView.src = browserUrl.url;
+      reportBrowserUrlDiagnostics(view, browserView, "navigation-assigned");
+    });
     return;
   }
 
@@ -1428,7 +1784,11 @@ function renderWindow(state: RendererWindowState): void {
   wrapper.append(layoutRoot);
   appRoot.replaceChildren(wrapper);
   setAllPaneChromeMetrics();
-  window.requestAnimationFrame(setAllPaneChromeMetrics);
+  refreshDynamicPaneFrames();
+  window.requestAnimationFrame(() => {
+    setAllPaneChromeMetrics();
+    refreshDynamicPaneFrames();
+  });
   scheduleCompositorOverlayRegionReport("layout");
 }
 
@@ -1454,6 +1814,10 @@ async function init(): Promise<void> {
         redrawDrawings(view, pane.drawings);
         setPaneChromeMetrics(view);
         view.currentScrollHandler?.();
+        const frame = currentPaneFrameElement(view);
+        if (frame) {
+          applyPaneFrameSize(view, frame);
+        }
         reportPaneSnapshot(view);
       }
     }

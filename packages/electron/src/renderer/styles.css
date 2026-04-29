@@ -98,6 +98,25 @@ body.compositor-hosted .pane-shell {
   overflow: hidden;
 }
 
+.layout-split > .pane-shell,
+.layout-split > .layout-split {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 0;
+  min-width: 0;
+  width: auto;
+}
+
+.layout-split.direction-horizontal > .pane-shell,
+.layout-split.direction-horizontal > .layout-split {
+  width: 100%;
+}
+
+.layout-split.direction-vertical > .pane-shell,
+.layout-split.direction-vertical > .layout-split {
+  height: 100%;
+}
+
 body.compositor-hosted .pane-shell.native-backed .pane-scroll,
 body.compositor-hosted .pane-shell.native-backed .pane-content {
   background: transparent;
@@ -273,10 +292,14 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 .content-html-frame {
   position: absolute;
   inset: 0;
-  height: auto;
-  min-height: 0;
+  height: 100%;
+  min-height: 100%;
   border: 0;
   background: #fff;
+}
+
+.content-browser-url-frame {
+  display: flex;
 }
 
 .content-pdf-stack {

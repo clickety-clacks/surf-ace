@@ -3257,6 +3257,9 @@
                       }
                     ]
                   },
+                  "externalNative": {
+                    "type": "boolean"
+                  },
                   "viewport": { "$ref": "#/$defs/SurfaceViewport" },
                   "geometry": { "$ref": "#/$defs/PaneGeometryProjection" }
                 }

@@ -114,6 +114,15 @@ type SurfaceState = {
   windowLabel: string;
 };
 
+type BrowserUrlTargetValidation =
+  | {
+      pane: PaneState;
+      url: URL;
+    }
+  | {
+      result: TargetApplyResponse["payload"];
+    };
+
 export type PersistentSurfaceState = {
   primarySurfaceId: string | null;
   version: 1;
@@ -441,6 +450,7 @@ export class SurfaceCore {
         return {
           activeContentId: protocolContentId(current),
           contentType: protocolContentType(current),
+          externalNative: pane.externalNative,
           geometry,
           name: pane.name,
           paneId: pane.paneId as PaneId,
@@ -538,10 +548,36 @@ export class SurfaceCore {
     for (const materializedPane of materialization.panes) {
       const paneId = Number(materializedPane.id);
       const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
-      if (!pane || pane.externalNative) {
+      if (!pane) {
         continue;
       }
-      pane.externalNative = true;
+      didChange = replaceVisibleEntryForNativeMaterialization(pane, this.now()) || didChange;
+      if (!pane.externalNative) {
+        pane.externalNative = true;
+        didChange = true;
+      }
+    }
+    if (didChange) {
+      this.emit({ surfaceId, type: "surface-changed" });
+    }
+  }
+
+  nativeHostedPaneIdForLineage(surfaceId: string, paneLineageId: string): number | null {
+    const surface = this.getSurface(surfaceId);
+    const pane = paneForLineage(surface, paneLineageId);
+    return pane?.externalNative ? pane.paneId : null;
+  }
+
+  markNativePaneReleased(surfaceId: string, paneIds: Array<number | string>): void {
+    const surface = this.getSurface(surfaceId);
+    let didChange = false;
+    for (const candidate of paneIds) {
+      const paneId = Number(candidate);
+      const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
+      if (!pane?.externalNative) {
+        continue;
+      }
+      pane.externalNative = false;
       didChange = true;
     }
     if (didChange) {
@@ -752,40 +788,13 @@ export class SurfaceCore {
     surfaceId: string,
     payload: TargetApplyRequest["payload"],
   ): TargetApplyResponse["payload"] {
-    const surface = this.getSurface(surfaceId);
-    if (payload.surfaceId !== surface.surfaceId) {
-      return targetApplyResult(payload, "rejected", "materialization_failed", "target.apply surfaceId does not match this surface");
+    const validation = this.validateBrowserUrlTarget(surfaceId, payload);
+    if ("result" in validation) {
+      return validation.result;
     }
-    if (!payload.targetHeader.requiredCapabilities.every((capability) =>
-      (SUPPORTED_TARGET_CAPABILITIES as readonly string[]).includes(capability)
-    )) {
-      return targetApplyResult(payload, "rejected", "capability_missing", "required target capability is not advertised");
-    }
-    if (payload.targetKind !== "browser_url") {
-      return targetApplyResult(payload, "rejected", "unsupported_target_kind", `Unsupported target kind: ${payload.targetKind}`);
-    }
-    if (payload.targetHeader.replaySemantics !== "navigate") {
-      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url requires navigate replay semantics");
-    }
-    const targetPayload = payload.targetPayload as Partial<BrowserUrlPayload>;
-    if (typeof targetPayload.url !== "string" || targetPayload.url.trim() === "") {
-      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url is required");
-    }
-    const url = parseSafeBrowserUrl(targetPayload.url);
-    if (!url) {
-      return targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url must be http or https");
-    }
-    const pane = paneForLineage(surface, payload.paneLineageId);
-    if (!pane) {
-      return targetApplyResult(payload, "rejected", "pane_lineage_missing", "pane lineage is unknown");
-    }
+    const { pane, url } = validation;
     if (pane.externalNative) {
       return targetApplyResult(payload, "rejected", "materialization_failed", "browser_url cannot replace a live native-hosted pane without native pane detach support");
-    }
-    if (pane.annotating) {
-      pane.toast = "Finish annotation (Done) to navigate";
-      this.emit({ surfaceId, type: "surface-changed" });
-      return targetApplyResult(payload, "rejected", "policy_denied", "annotation mode is active");
     }
 
     if (pane.historyIndex < pane.history.length - 1) {
@@ -811,6 +820,53 @@ export class SurfaceCore {
       replaySemantics: "navigate",
       url: url.toString(),
     });
+  }
+
+  browserUrlTargetPreflight(
+    surfaceId: string,
+    payload: TargetApplyRequest["payload"],
+  ): TargetApplyResponse["payload"] | null {
+    const validation = this.validateBrowserUrlTarget(surfaceId, payload);
+    return "result" in validation ? validation.result : null;
+  }
+
+  private validateBrowserUrlTarget(
+    surfaceId: string,
+    payload: TargetApplyRequest["payload"],
+  ): BrowserUrlTargetValidation {
+    const surface = this.getSurface(surfaceId);
+    if (payload.surfaceId !== surface.surfaceId) {
+      return { result: targetApplyResult(payload, "rejected", "materialization_failed", "target.apply surfaceId does not match this surface") };
+    }
+    if (!payload.targetHeader.requiredCapabilities.every((capability) =>
+      (SUPPORTED_TARGET_CAPABILITIES as readonly string[]).includes(capability)
+    )) {
+      return { result: targetApplyResult(payload, "rejected", "capability_missing", "required target capability is not advertised") };
+    }
+    if (payload.targetKind !== "browser_url") {
+      return { result: targetApplyResult(payload, "rejected", "unsupported_target_kind", `Unsupported target kind: ${payload.targetKind}`) };
+    }
+    if (payload.targetHeader.replaySemantics !== "navigate") {
+      return { result: targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url requires navigate replay semantics") };
+    }
+    const targetPayload = payload.targetPayload as Partial<BrowserUrlPayload>;
+    if (typeof targetPayload.url !== "string" || targetPayload.url.trim() === "") {
+      return { result: targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url is required") };
+    }
+    const url = parseSafeBrowserUrl(targetPayload.url);
+    if (!url) {
+      return { result: targetApplyResult(payload, "rejected", "unsafe_payload", "browser_url targetPayload.url must be http or https") };
+    }
+    const pane = paneForLineage(surface, payload.paneLineageId);
+    if (!pane) {
+      return { result: targetApplyResult(payload, "rejected", "pane_lineage_missing", "pane lineage is unknown") };
+    }
+    if (pane.annotating) {
+      pane.toast = "Finish annotation (Done) to navigate";
+      this.emit({ surfaceId, type: "surface-changed" });
+      return { result: targetApplyResult(payload, "rejected", "policy_denied", "annotation mode is active") };
+    }
+    return { pane, url };
   }
 
   completeBrowserUrlNavigation(
@@ -1571,6 +1627,30 @@ function trimHistory(pane: PaneState): void {
   const overflow = pane.history.length - MAX_HISTORY_DEPTH;
   pane.history.splice(0, overflow);
   pane.historyIndex = Math.max(0, pane.historyIndex - overflow);
+}
+
+function replaceVisibleEntryForNativeMaterialization(pane: PaneState, now: number): boolean {
+  const current = currentEntry(pane);
+  if (current.content === null && current.contentId === null && current.contentType === null) {
+    return false;
+  }
+  if (pane.historyIndex < pane.history.length - 1) {
+    pane.history = pane.history.slice(0, pane.historyIndex + 1);
+  }
+  pane.history.push({
+    annotations: [],
+    content: null,
+    contentId: null,
+    contentType: null,
+    ownerToken: null,
+    revision: current.revision,
+  });
+  pane.historyIndex = pane.history.length - 1;
+  trimHistory(pane);
+  pane.toast = null;
+  pane.latestContentEventAt = now;
+  clearDirtyState(pane);
+  return true;
 }
 
 function clearDirtyState(pane: PaneState): void {

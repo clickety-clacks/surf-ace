@@ -99,6 +99,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
         {
           activeContentId: null,
           contentType: null,
+          externalNative: false,
           geometry: {
             contentViewport: { height: 384, width: 1024, x: 0, y: 384 },
             coordinateSpace: "surface_logical",
