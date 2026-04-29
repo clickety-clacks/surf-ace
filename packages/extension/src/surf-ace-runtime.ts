@@ -717,7 +717,7 @@ type RuntimeDiagnosticFields = Record<string, boolean | number | string | null |
 
 function formatRuntimeDiagnosticValue(value: string | number | boolean): string {
   const text = String(value);
-  return /^[A-Za-z0-9_./:@%-]+$/.test(text) ? text : JSON.stringify(text);
+  return /^[A-Za-z0-9_.,/:@%-]+$/.test(text) ? text : JSON.stringify(text);
 }
 
 function runtimeDiagnostic(event: string, fields: RuntimeDiagnosticFields = {}): string {
@@ -728,6 +728,14 @@ function runtimeDiagnostic(event: string, fields: RuntimeDiagnosticFields = {}):
   return suffix.length > 0
     ? `[surf-ace:runtime] event=${event} ${suffix}`
     : `[surf-ace:runtime] event=${event}`;
+}
+
+function diagnosticJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify(String(value));
+  }
 }
 
 const DEFAULT_DRAWING_FLUSH_CONFIG: DrawingFlushConfig = {
@@ -2524,6 +2532,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     const currentLayout = collapseManagedLayout(surface.layout);
+    const beforePaneIds = this.orderedPanes(surface).map((managedPane) => managedPane.paneId);
+    const beforeRemotePaneIds = this.orderedPanes(surface).map((managedPane) => Number(managedPane.remotePaneId));
     const direction = input.direction ?? this.defaultSplitDirection(surface, pane);
     const reservedPanes: ManagedPane[] = [];
     const additionalPaneCount = input.count - 1;
@@ -2544,7 +2554,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
 
     try {
-      await this.pushTopology(surface, { increment: true });
+      await this.pushTopology(surface, { beforePaneIds, beforeRemotePaneIds, increment: true });
     } catch (error) {
       surface.layout = currentLayout;
       for (const reservedPane of reservedPanes) {
@@ -2712,10 +2722,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const previousLayout = surface.layout;
     const previousPanes = surface.panes;
+    const beforePaneIds = this.orderedPanes(surface).map((pane) => pane.paneId);
+    const beforeRemotePaneIds = this.orderedPanes(surface).map((pane) => Number(pane.remotePaneId));
     surface.layout = collapseManagedLayout(nextLayout.layout);
     surface.panes = nextPanes;
     try {
-      await this.pushTopology(surface, { increment: true });
+      await this.pushTopology(surface, { beforePaneIds, beforeRemotePaneIds, increment: true });
     } catch (error) {
       surface.layout = previousLayout;
       surface.panes = previousPanes;
@@ -4198,8 +4210,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async pushTopology(
     surface: ManagedSurface,
-    options: { increment?: boolean } = {},
+    options: { beforePaneIds?: PaneId[]; beforeRemotePaneIds?: number[]; increment?: boolean } = {},
   ): Promise<void> {
+    const orderedBeforePanes = this.orderedPanes(surface);
+    const beforePaneIds = options.beforePaneIds ?? orderedBeforePanes.map((pane) => pane.paneId);
+    const beforeRemotePaneIds = options.beforeRemotePaneIds ?? orderedBeforePanes.map((pane) => Number(pane.remotePaneId));
     const layout = collapseManagedLayout(surface.layout);
     surface.layout = layout;
     this.repairLivePaneLabelInvariant("topology publish");
@@ -4221,11 +4236,35 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       type: "request",
       v: 1,
     };
+    this.logger.info?.(
+      runtimeDiagnostic("topology_apply_begin", {
+        before_pane_ids: beforePaneIds.join(","),
+        before_remote_pane_ids: beforeRemotePaneIds.join(","),
+        current_topology_revision: surface.topologyRevision,
+        expected_topology_revision: topologyRevision,
+        payload: diagnosticJson(request.payload),
+        session_id: surface.sessionId ?? "nil",
+        surface_id: surface.surfaceId,
+        window_label: surface.windowLabel || "nil",
+      }),
+    );
 
     const response = await this.sendRequest(surface, request);
     if (isErrorResponse(response)) {
       this.logger.warn?.(
-        `[surf-ace:runtime] event=topology_apply_error surface_id=${surface.surfaceId} window_label=${surface.windowLabel || "<none>"} session_id=${surface.sessionId ?? "<none>"} topology_revision=${topologyRevision} pane_count=${request.payload.panes.length} remote_pane_ids=${request.payload.panes.map((pane) => Number(pane.paneId)).join(",")} pane_labels=${request.payload.panes.map((pane) => pane.paneLabel).join(",")} error_code=${response.error.code} error_message=${JSON.stringify(response.error.message)}`,
+        runtimeDiagnostic("topology_apply_error", {
+          current_topology_revision: surface.topologyRevision,
+          error_code: response.error.code,
+          error_message: response.error.message,
+          expected_topology_revision: topologyRevision,
+          pane_count: request.payload.panes.length,
+          pane_labels: request.payload.panes.map((pane) => Number(pane.paneLabel)).join(","),
+          payload: diagnosticJson(request.payload),
+          remote_pane_ids: request.payload.panes.map((pane) => Number(pane.paneId)).join(","),
+          session_id: surface.sessionId ?? "nil",
+          surface_id: surface.surfaceId,
+          window_label: surface.windowLabel || "nil",
+        }),
       );
       throw new SurfAceToolError(
         mutationErrorCode(response.error.code),
@@ -4245,6 +4284,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
       }
     }
+    const afterPaneIds = this.orderedPanes(surface).map((pane) => pane.paneId);
+    const afterRemotePaneIds = this.orderedPanes(surface).map((pane) => Number(pane.remotePaneId));
+    const beforePaneSet = new Set(beforePaneIds);
+    const afterPaneSet = new Set(afterPaneIds);
+    this.logger.info?.(
+      runtimeDiagnostic("topology_apply_ok", {
+        after_pane_ids: afterPaneIds.join(","),
+        after_remote_pane_ids: afterRemotePaneIds.join(","),
+        created_pane_ids: afterPaneIds.filter((paneId) => !beforePaneSet.has(paneId)).join(","),
+        removed_pane_ids: beforePaneIds.filter((paneId) => !afterPaneSet.has(paneId)).join(","),
+        response_panes: diagnosticJson(payload.panes),
+        session_id: surface.sessionId ?? "nil",
+        surface_id: surface.surfaceId,
+        topology_revision: surface.topologyRevision,
+        window_label: surface.windowLabel || "nil",
+      }),
+    );
     this.repairLivePaneLabelInvariant("topology response");
     if (lineageChanged) {
       await this.persistSurfaceTargetState(surface, "topology lineage repair");
@@ -4257,62 +4313,107 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (!isBoundRemotePaneId(pane.remotePaneId)) {
         continue;
       }
-      const target = this.currentTargetRecord(surface, pane);
-      if (target) {
-        const blockedReason = this.restoreBlockedReason(surface, pane, target, false);
-        if (blockedReason) {
-          pane.lastRestoreBlockedReason = blockedReason;
-          await this.persistSurfaceTargetState(surface, "restore blocked");
+      try {
+        const target = this.currentTargetRecord(surface, pane);
+        if (target) {
+          const blockedReason = this.restoreBlockedReason(surface, pane, target, false);
+          if (blockedReason) {
+            pane.lastRestoreBlockedReason = blockedReason;
+            await this.persistSurfaceTargetState(surface, "restore blocked");
+            this.logReplayOutcome(surface, pane, "target", blockedReason);
+            continue;
+          }
+          const evidence = await this.materializeTargetRecord(surface, pane, target, "resume_restore");
+          this.logReplayOutcome(surface, pane, "target", evidence.status, evidence.errorCode);
           continue;
         }
-        await this.materializeTargetRecord(surface, pane, target, "resume_restore");
-        continue;
-      }
 
-      if (!pane.activeContentId || !pane.contentType || pane.contentValue === null) {
-        if (pane.currentRevision <= asRevision(0)) {
+        if (!pane.activeContentId || !pane.contentType || pane.contentValue === null) {
+          if (pane.currentRevision <= asRevision(0)) {
+            this.logReplayOutcome(surface, pane, "clear", "skipped_empty_revision");
+            continue;
+          }
+          const clearRequest: ContentApplyRequest = {
+            id: makeBrandedRequestId(),
+            op: "content.apply",
+            payload: {
+              clear: true,
+              paneId: pane.remotePaneId,
+              revision: pane.currentRevision,
+              topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
+            },
+            sentAt: asEpochMs(this.now()),
+            type: "request",
+            v: 1,
+          };
+          const clearResponse = await this.sendRequest(surface, clearRequest);
+          await this.applyMutationResponse(surface, pane, clearResponse, clearRequest);
+          this.logReplayOutcome(surface, pane, "clear", "applied");
           continue;
         }
-        const clearRequest: ContentApplyRequest = {
+
+        const contentRequest: ContentApplyRequest = {
           id: makeBrandedRequestId(),
           op: "content.apply",
           payload: {
-            clear: true,
+            content: structuredClone(pane.contentValue),
+            contentId: pane.activeContentId,
+            contentType: pane.contentType,
+            ...(pane.display ? { display: structuredClone(pane.display) } : {}),
+            historyOwnerToken:
+              pane.historyOwnerToken ??
+              historyOwnerTokenForSession(pane.ownerSessionKey ?? undefined),
             paneId: pane.remotePaneId,
             revision: pane.currentRevision,
             topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
-          },
+          } as ContentApplyRequest["payload"],
           sentAt: asEpochMs(this.now()),
           type: "request",
           v: 1,
         };
-        const clearResponse = await this.sendRequest(surface, clearRequest);
-        await this.applyMutationResponse(surface, pane, clearResponse, clearRequest);
-        continue;
+        const contentResponse = await this.sendRequest(surface, contentRequest);
+        await this.applyMutationResponse(surface, pane, contentResponse, contentRequest, pane.ownerSessionKey ?? undefined);
+        this.logReplayOutcome(surface, pane, "content", "applied");
+      } catch (error) {
+        if (
+          error instanceof SurfAceToolError &&
+          (error.code === "stale_revision" || error.code === "stale_content")
+        ) {
+          this.clearVisiblePaneContent(pane, pane.currentRevision);
+          await this.tombstonePaneTarget(surface, pane);
+          this.logReplayOutcome(surface, pane, "content", "skipped_stale", error.code, error.message);
+          continue;
+        }
+        throw error;
       }
-
-      const contentRequest: ContentApplyRequest = {
-        id: makeBrandedRequestId(),
-        op: "content.apply",
-        payload: {
-          content: structuredClone(pane.contentValue),
-          contentId: pane.activeContentId,
-          contentType: pane.contentType,
-          ...(pane.display ? { display: structuredClone(pane.display) } : {}),
-          historyOwnerToken:
-            pane.historyOwnerToken ??
-            historyOwnerTokenForSession(pane.ownerSessionKey ?? undefined),
-          paneId: pane.remotePaneId,
-          revision: pane.currentRevision,
-          topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
-        } as ContentApplyRequest["payload"],
-        sentAt: asEpochMs(this.now()),
-        type: "request",
-        v: 1,
-      };
-      const contentResponse = await this.sendRequest(surface, contentRequest);
-      await this.applyMutationResponse(surface, pane, contentResponse, contentRequest, pane.ownerSessionKey ?? undefined);
     }
+  }
+
+  private logReplayOutcome(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    replayKind: "clear" | "content" | "target",
+    outcome: string,
+    errorCode?: string,
+    message?: string,
+  ): void {
+    this.logger.info?.(
+      runtimeDiagnostic("resume_replay_outcome", {
+        content_id: pane.activeContentId ?? "nil",
+        error_code: errorCode,
+        message,
+        outcome,
+        pane_id: pane.paneId,
+        pane_label: pane.paneLabel,
+        remote_pane_id: Number(pane.remotePaneId),
+        replay_kind: replayKind,
+        revision: Number(pane.currentRevision),
+        session_id: surface.sessionId ?? "nil",
+        surface_id: surface.surfaceId,
+        topology_revision: surface.topologyRevision,
+        window_label: surface.windowLabel || "nil",
+      }),
+    );
   }
 
   private restoreBlockedReason(
@@ -4464,6 +4565,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       };
       const response = await this.sendRequest(surface, request);
       if (isErrorResponse(response)) {
+        if (
+          restoreReason === "resume_restore" &&
+          (response.error.code === "stale_content" || response.error.code === "stale_revision")
+        ) {
+          throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
+        }
         const evidence: ApplyEvidence = {
           appliedAt: new Date(this.now()).toISOString(),
           errorCode: "materialization_failed",
@@ -6128,6 +6235,25 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       isForeignOwnershipLockResponse(response) ||
       !this.isKnownSelfOwnedSurface(surface)
     ) {
+      if (
+        isErrorResponse(response) &&
+        (response.error.code === "busy" || response.error.code === "invalid_resume") &&
+        !isForeignOwnershipLockResponse(response) &&
+        this.hasPersistedSelfSignals(surface) &&
+        !this.hasValidResumeSession(surface)
+      ) {
+        this.logger.warn?.(
+          runtimeDiagnostic("ownership_self_reclaim_blocked", {
+            had_paired_session: surface.hasPairedInGatewaySession,
+            had_persisted_target_state: Boolean(this.persistentState.targetStateBySurfaceId?.[surface.surfaceId]),
+            had_resume_session: Boolean(resumeSessionId),
+            has_target_capabilities: surface.targetCapabilities.size > 0,
+            provider_id: this.persistentState.providerId,
+            reason: response.error.code,
+            surface_id: surface.surfaceId,
+          }),
+        );
+      }
       return response;
     }
     this.logger.warn?.(
@@ -6144,9 +6270,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private isKnownSelfOwnedSurface(surface: ManagedSurface): boolean {
-    if (surface.hasPairedInGatewaySession || surface.sessionId) {
-      return true;
-    }
+    return this.hasValidResumeSession(surface);
+  }
+
+  private hasValidResumeSession(surface: ManagedSurface): boolean {
+    return Boolean(surface.hasPairedInGatewaySession && surface.sessionId);
+  }
+
+  private hasPersistedSelfSignals(surface: ManagedSurface): boolean {
     if (this.persistentState.targetStateBySurfaceId?.[surface.surfaceId]) {
       return true;
     }

@@ -152,6 +152,14 @@ function serverDiagnostic(event: string, fields: ServerDiagnosticFields = {}): s
     : `[surf-ace:server] event=${event}`;
 }
 
+function diagnosticJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify(String(value));
+  }
+}
+
 function errorDiagnosticFields(error: unknown): ServerDiagnosticFields {
   if (error instanceof Error) {
     return {
@@ -1204,11 +1212,38 @@ export class SurfaceWsServer {
 
   private handleTopologyApply(socket: WebSocket, request: TopologyApplyRequest): Response {
     const surfaceId = this.requirePairedSurfaceId(socket);
+    persistentServerDiagnostic(
+      "info",
+      "topology_apply_receive",
+      {
+        pane_ids: request.payload.panes.map((pane) => Number(pane.paneId)).join(","),
+        pane_labels: request.payload.panes.map((pane) => pane.paneLabel).join(","),
+        payload: diagnosticJson(request.payload),
+        request_id: request.id,
+        surface_id: surfaceId,
+        topology_revision: Number(request.payload.topologyRevision),
+        window_label: request.payload.windowLabel,
+      },
+    );
+    const payload = this.core.topologyApply(surfaceId, request.payload);
+    persistentServerDiagnostic(
+      "info",
+      "topology_apply_applied",
+      {
+        pane_lineage_ids: payload.panes.map((pane) => pane.paneLineageId).join(","),
+        pane_ids: payload.panes.map((pane) => Number(pane.paneId)).join(","),
+        request_id: request.id,
+        response_panes: diagnosticJson(payload.panes),
+        surface_id: surfaceId,
+        topology_revision: Number(payload.topologyRevision),
+        window_label: request.payload.windowLabel,
+      },
+    );
     return {
       id: request.id,
       ok: true,
       op: "topology.apply",
-      payload: this.core.topologyApply(surfaceId, request.payload),
+      payload,
       sentAt: Date.now(),
       type: "response",
       v: 1,
@@ -1218,11 +1253,25 @@ export class SurfaceWsServer {
   private async handleContentApply(socket: WebSocket, request: ContentApplyRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
     if ("clear" in request.payload) {
+      const payload = this.core.contentApply(surfaceId, request.payload);
+      persistentServerDiagnostic(
+        "info",
+        "content_apply_result",
+        {
+          content_id: payload.currentContentId ?? "nil",
+          pane_id: request.payload.paneId,
+          request_id: request.id,
+          result: "applied",
+          revision: payload.currentRevision,
+          surface_id: surfaceId,
+          topology_revision: Number(payload.topologyRevision ?? 0),
+        },
+      );
       return {
         id: request.id,
         ok: true,
         op: "content.apply",
-        payload: this.core.contentApply(surfaceId, request.payload),
+        payload,
         sentAt: Date.now(),
         type: "response",
         v: 1,
@@ -1235,11 +1284,26 @@ export class SurfaceWsServer {
     if (!request.payload.historyOwnerToken) {
       throw new SurfaceCoreError("invalid_payload", "content.apply requires historyOwnerToken");
     }
+    const payload = this.core.contentApply(surfaceId, request.payload);
+    persistentServerDiagnostic(
+      "info",
+      "content_apply_result",
+      {
+        content_id: payload.currentContentId ?? "nil",
+        content_type: request.payload.contentType,
+        pane_id: request.payload.paneId,
+        request_id: request.id,
+        result: "applied",
+        revision: payload.currentRevision,
+        surface_id: surfaceId,
+        topology_revision: Number(payload.topologyRevision ?? 0),
+      },
+    );
     return {
       id: request.id,
       ok: true,
       op: "content.apply",
-      payload: this.core.contentApply(surfaceId, request.payload),
+      payload,
       sentAt: Date.now(),
       type: "response",
       v: 1,
