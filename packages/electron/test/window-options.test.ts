@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { surfaceWindowLoadQuery, surfaceWindowOptions } from "../src/window-options.js";
 
-test("surface window is frameless when hosted by the compositor", () => {
+test("surface window is frameless and visible when hosted by the compositor", () => {
   const options = surfaceWindowOptions({
     compositorSocketPath: "/tmp/surf-ace-compositor.sock",
     endpointName: "racter Surf Ace",
@@ -15,7 +15,7 @@ test("surface window is frameless when hosted by the compositor", () => {
   assert.equal(options.frame, false);
   assert.equal(options.backgroundColor, "#00000000");
   assert.equal(options.hasShadow, false);
-  assert.equal(options.show, false);
+  assert.equal(options.show, true);
   assert.equal(options.transparent, true);
   assert.equal(options.useContentSize, true);
   assert.equal(options.height, 3840);
@@ -68,4 +68,25 @@ test("renderer enters compositor transparent mode before stylesheet paint", asyn
   assert.ok(bootstrapScript < stylesheetLink);
   assert.match(stylesCss, /html\.compositor-hosted body,\s*body\.compositor-hosted\s*{\s*background: transparent;/);
   assert.match(stylesCss, /html\.compositor-hosted body \.pane-shell,\s*body\.compositor-hosted \.pane-shell\s*{\s*background: transparent;/);
+});
+
+test("compositor-hosted windows materialize with alpha bootstrap in one option path", async () => {
+  const options = surfaceWindowOptions({
+    compositorSocketPath: "/tmp/surf-ace-compositor.sock",
+    endpointName: "racter Surf Ace",
+    viewport: { height: 3840, scale: 1, width: 2160 },
+  });
+  const query = surfaceWindowLoadQuery({
+    compositorSocketPath: "/tmp/surf-ace-compositor.sock",
+    surfaceId: "sf_alpha",
+  });
+  const indexHtml = await fs.readFile(new URL("../renderer/index.html", import.meta.url), "utf8");
+  const stylesheetLink = indexHtml.indexOf("<link rel=\"stylesheet\"");
+  const bootstrapScript = indexHtml.indexOf("document.documentElement.classList.add(\"compositor-hosted\")");
+
+  assert.equal(options.show, true);
+  assert.equal(options.transparent, true);
+  assert.equal(options.backgroundColor, "#00000000");
+  assert.deepEqual(query, { compositorHosted: "1", surfaceId: "sf_alpha" });
+  assert.ok(bootstrapScript !== -1 && stylesheetLink !== -1 && bootstrapScript < stylesheetLink);
 });
