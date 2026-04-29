@@ -165,6 +165,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
         maxVisibleTextBytes: 1024,
         resumeGraceMs: 20_000,
       },
+      ownershipEpoch: 1,
       resumed: false,
       sessionId: "sa_pair_session",
       state: {
@@ -174,6 +175,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
             currentContentId: null,
             currentRevision: 0,
             paneId: 1,
+            paneLineageId: "pl_1",
             paneLabel: 1,
           },
         ],
@@ -214,6 +216,44 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
     v: 1,
   });
   assert.deepEqual(errorResponse, { ok: true });
+});
+
+test("validateEnvelopeType accepts target.apply.result responses", () => {
+  const result = validateEnvelopeType("target.apply", {
+    id: "req_target",
+    ok: true,
+    op: "target.apply.result",
+    payload: {
+      appliedAt: new Date().toISOString(),
+      paneLineageId: "pl_1",
+      requestId: "tr_1",
+      status: "applied",
+      targetEpoch: 1,
+      targetId: "tg_1",
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(result, { ok: true });
+});
+
+test("validateEnvelopeType accepts target.register.rejected responses", () => {
+  const result = validateEnvelopeType("target.register", {
+    id: "req_register",
+    ok: true,
+    op: "target.register.rejected",
+    payload: {
+      errorCode: "ownership_epoch_mismatch",
+      idempotencyKey: "idem_1",
+      message: "target.register ownershipEpoch does not match active ownership",
+      status: "rejected",
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(result, { ok: true });
 });
 
 test("validateEnvelopeType rejects op drift", () => {

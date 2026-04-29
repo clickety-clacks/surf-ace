@@ -865,7 +865,7 @@ class FakeSurfAceWsServer {
         }
         socket.send(
           JSON.stringify(
-            this.response(message.id, "target.apply", {
+            this.response(message.id, "target.apply.result", {
               appliedAt: new Date().toISOString(),
               materializedState: { paneLineageId: String(message.payload?.paneLineageId ?? "") },
               paneLineageId: String(message.payload?.paneLineageId ?? ""),
@@ -2575,6 +2575,38 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.equal(server.contentSetRequests.length, 0);
       assert.equal(server.targetApplyRequests.length, 0);
+    });
+  });
+
+  await t.test("surf_ace_push browser_url keeps failed materialization as target evidence", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+        server.targetApplyErrorCode = "materialization_failed";
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        const pushed = await runtime.push({
+          content: "https://blocked.invalid/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(pushed.contentId, null);
+        assert.equal(pushed.blockedReason, "materialization_failed");
+        assert.equal(pushed.targetApplyEvidence?.status, "failed");
+        assert.equal(pushed.targetApplyEvidence?.errorCode, "materialization_failed");
+        const screens = await runtime.listScreens();
+        const target = screens[0]?.panes[0]?.target;
+        assert.equal(target?.targetKind, "browser_url");
+        assert.equal(target?.blockedReason, "materialization_failed");
+        assert.equal(target?.lastApplyEvidence?.status, "failed");
+      },
     });
   });
 

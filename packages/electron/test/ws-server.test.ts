@@ -174,7 +174,7 @@ function relinquishRequest(): Request {
   };
 }
 
-function contentSetRequest(paneId: number): Request {
+function contentSetRequest(paneId: number, revision = 1): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "content.set",
@@ -184,7 +184,7 @@ function contentSetRequest(paneId: number): Request {
       contentType: "html",
       historyOwnerToken: "hot_snapshot" as never,
       paneId: paneId as never,
-      revision: 1 as never,
+      revision: revision as never,
     },
     sentAt: Date.now() as never,
     type: "request",
@@ -765,7 +765,7 @@ test("ws server returns browser_url applied only after renderer load confirmatio
 
     const response = await responsePromise;
     assert.equal(response.ok, true);
-    assert.equal(response.op, "target.apply");
+    assert.equal(response.op, "target.apply.result");
     assert.equal(response.payload.status, "applied");
     assert.equal(response.payload.materializedState?.navigationStatus, "loaded");
     assert.equal(core.captureSnapshot(surfaceId, Number(paired.payload.state.panes[0]!.paneId)).contentType, null);
@@ -797,10 +797,96 @@ test("ws server returns browser_url failed when renderer reports blocked navigat
 
     const response = await responsePromise;
     assert.equal(response.ok, true);
-    assert.equal(response.op, "target.apply");
+    assert.equal(response.op, "target.apply.result");
     assert.equal(response.payload.status, "failed");
     assert.equal(response.payload.errorCode, "materialization_failed");
     assert.equal(response.payload.materializedState?.navigationStatus, "failed");
+    await closeSocket(owner);
+  });
+});
+
+test("ws server fails an earlier browser_url apply when a later URL supersedes it", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    const pane = paired.payload.state.panes[0]!;
+
+    const firstResponsePromise = request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: pane.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_first",
+      url: "https://first.example/",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const secondResponsePromise = request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: pane.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_second",
+      url: "https://second.example/",
+    }));
+    const firstResponse = await firstResponsePromise;
+    assert.equal(firstResponse.ok, true);
+    assert.equal(firstResponse.op, "target.apply.result");
+    assert.equal(firstResponse.payload.status, "failed");
+    assert.equal(firstResponse.payload.errorCode, "materialization_failed");
+    assert.equal(firstResponse.payload.message, "browser_url navigation superseded before verification");
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(pane.paneId), {
+      status: "applied",
+      targetId: "target_first",
+      url: "https://first.example/",
+    });
+    assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentId, "target_second");
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(pane.paneId), {
+      status: "applied",
+      targetId: "target_second",
+      url: "https://second.example/",
+    });
+    const secondResponse = await secondResponsePromise;
+    assert.equal(secondResponse.ok, true);
+    assert.equal(secondResponse.op, "target.apply.result");
+    assert.equal(secondResponse.payload.status, "applied");
+    assert.equal(secondResponse.payload.materializedState?.navigationStatus, "loaded");
+    await closeSocket(owner);
+  });
+});
+
+test("ws server rejects stale browser_url load evidence after pane content changes", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    const pane = paired.payload.state.panes[0]!;
+
+    const responsePromise = request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: pane.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_stale",
+      url: "https://stale.example/",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const replaced = await request(owner, contentSetRequest(Number(pane.paneId), 4));
+    assert.equal(replaced.ok, true);
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(pane.paneId), {
+      status: "applied",
+      targetId: "target_stale",
+      url: "https://stale.example/",
+    });
+
+    const response = await responsePromise;
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "target.apply.result");
+    assert.equal(response.payload.status, "failed");
+    assert.equal(response.payload.errorCode, "materialization_failed");
+    assert.equal(response.payload.message, "browser_url navigation was superseded before verification");
+    assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentType, "html");
     await closeSocket(owner);
   });
 });
@@ -876,7 +962,7 @@ test("ws server forwards target.apply native pane host materialization to compos
       }));
 
       assert.equal(applied.ok, true);
-      assert.equal(applied.op, "target.apply");
+      assert.equal(applied.op, "target.apply.result");
       assert.equal(applied.payload.status, "applied");
       assert.deepEqual(received[0], { type: "get_status" });
       assert.equal((received[1] as { type: string }).type, "native_pane.host");
@@ -988,7 +1074,7 @@ test("ws server rejects provider native pane geometry that drifts from resolved 
       }));
 
       assert.equal(applied.ok, true);
-      assert.equal(applied.op, "target.apply");
+      assert.equal(applied.op, "target.apply.result");
       assert.equal(applied.payload.status, "rejected");
       assert.equal(applied.payload.errorCode, "materialization_failed");
       assert.match(applied.payload.message, /does not match resolved Surf Ace pane geometry/);
@@ -1047,7 +1133,7 @@ test("ws server rejects native pane materialization for a different pane lineage
       }));
 
       assert.equal(rejected.ok, true);
-      assert.equal(rejected.op, "target.apply");
+      assert.equal(rejected.op, "target.apply.result");
       assert.equal(rejected.payload.status, "rejected");
       assert.equal(rejected.payload.errorCode, "materialization_failed");
       assert.match(rejected.payload.message, /does not match target pane lineage/);
@@ -1074,7 +1160,7 @@ test("ws server rejects stale target.apply lineage before compositor materializa
     }));
 
     assert.equal(rejected.ok, true);
-    assert.equal(rejected.op, "target.apply");
+    assert.equal(rejected.op, "target.apply.result");
     assert.equal(rejected.payload.status, "rejected");
     assert.equal(rejected.payload.errorCode, "pane_lineage_missing");
 
@@ -1126,7 +1212,7 @@ test("ws server reports compositor target.apply rejection as materialization fai
       }));
 
       assert.equal(failed.ok, true);
-      assert.equal(failed.op, "target.apply");
+      assert.equal(failed.op, "target.apply.result");
       assert.equal(failed.payload.status, "failed");
       assert.equal(failed.payload.errorCode, "materialization_failed");
       assert.equal(failed.payload.message, "invalid pane 1");
@@ -1184,7 +1270,7 @@ test("ws server rejects target.apply geometry outside compositor logical status 
       }));
 
       assert.equal(failed.ok, true);
-      assert.equal(failed.op, "target.apply");
+      assert.equal(failed.op, "target.apply.result");
       assert.equal(failed.payload.status, "failed");
       assert.equal(failed.payload.errorCode, "materialization_failed");
       assert.match(failed.payload.message, /outside compositor logical surface 1100x700/);
@@ -1255,7 +1341,7 @@ test("ws server rejects provider native pane geometry without typed coordinate s
       const rejected = await request(socket, bareGeometryRequest);
 
       assert.equal(rejected.ok, true);
-      assert.equal(rejected.op, "target.apply");
+      assert.equal(rejected.op, "target.apply.result");
       assert.equal(rejected.payload.status, "rejected");
       assert.equal(rejected.payload.errorCode, "materialization_failed");
       assert.match(rejected.payload.message, /geometry identity does not match resolved Surf Ace pane geometry/);

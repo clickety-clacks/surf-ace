@@ -1276,7 +1276,7 @@ export class SurfaceWsServer {
       return {
         id: request.id,
         ok: true,
-        op: "target.apply",
+        op: "target.apply.result",
         payload,
         sentAt: Date.now(),
         type: "response",
@@ -1299,7 +1299,7 @@ export class SurfaceWsServer {
       return {
         id: request.id,
         ok: true,
-        op: "target.apply",
+        op: "target.apply.result",
         payload,
         sentAt: Date.now(),
         type: "response",
@@ -1331,7 +1331,7 @@ export class SurfaceWsServer {
       return {
         id: request.id,
         ok: true,
-        op: "target.apply",
+        op: "target.apply.result",
         payload,
         sentAt: Date.now(),
         type: "response",
@@ -1394,7 +1394,7 @@ export class SurfaceWsServer {
       return {
         id: request.id,
         ok: true,
-        op: "target.apply",
+        op: "target.apply.result",
         payload,
         sentAt: Date.now(),
         type: "response",
@@ -1421,7 +1421,7 @@ export class SurfaceWsServer {
       return {
         id: request.id,
         ok: true,
-        op: "target.apply",
+        op: "target.apply.result",
         payload,
         sentAt: Date.now(),
         type: "response",
@@ -1537,7 +1537,7 @@ export class SurfaceWsServer {
     return {
       id: request.id,
       ok: true,
-      op: "target.apply",
+      op: "target.apply.result",
       payload,
       sentAt: Date.now(),
       type: "response",

@@ -44,7 +44,23 @@ export type TargetHeader = {
   safeToLogFields: string[];
 };
 
+export type BrowserUrlTargetPayloadV1 = {
+  url: string;
+};
+
 export type RestorePolicy = "auto" | "confirm" | "manual" | "never";
+
+export type ApplyEvidence = {
+  requestId: string;
+  targetId: string;
+  paneLineageId: string;
+  targetEpoch: number;
+  status: "applied" | "rejected" | "failed";
+  errorCode?: TargetErrorCode;
+  message?: string;
+  materializedState?: Record<string, unknown>;
+  appliedAt: string;
+};
 
 export type TargetErrorCode =
   | "capability_missing"
@@ -490,6 +506,23 @@ export type TargetApplyRequest = RequestBase<"target.apply"> & {
   };
 };
 
+export type TargetRegisterRequest = RequestBase<"target.register"> & {
+  payload: {
+    idempotencyKey: string;
+    surfaceId: SurfaceId;
+    surfaceInstanceId: string | null;
+    ownershipSessionId: string;
+    ownershipEpoch: number;
+    paneLineageId: string;
+    expectedPreviousTargetEpoch: number | null;
+    targetKind: TargetKind;
+    targetHeader: TargetHeader;
+    targetPayload: unknown;
+    launchedAt: string;
+    registrationState: "before_attach" | "attached";
+  };
+};
+
 export type PaneSplitRequest = RequestBase<"pane.split"> & {
   payload: {
     paneId: PaneId;
@@ -529,6 +562,7 @@ export type SurfacesListResponse = ResponseBase<"surfaces.list"> & {
 export type PairResponse = ResponseBase<"pair.request"> & {
   payload: {
     sessionId: SessionId;
+    ownershipEpoch: number;
     resumed: boolean;
     surfaceId: SurfaceId;
     surfaceName: string;
@@ -667,17 +701,25 @@ export type ContentApplyResponse = ResponseBase<"content.apply"> & {
   };
 };
 
-export type TargetApplyResponse = ResponseBase<"target.apply"> & {
+export type TargetApplyResponse = ResponseBase<"target.apply.result"> & {
+  payload: ApplyEvidence;
+};
+
+export type TargetRegisteredResponse = ResponseBase<"target.registered"> & {
   payload: {
-    requestId: string;
+    idempotencyKey: string;
     targetId: string;
-    paneLineageId: string;
     targetEpoch: number;
-    status: "applied" | "rejected" | "failed";
-    errorCode?: TargetErrorCode;
-    message?: string;
-    materializedState?: Record<string, unknown>;
-    appliedAt: string;
+    status: "registered";
+  };
+};
+
+export type TargetRegisterRejectedResponse = ResponseBase<"target.register.rejected"> & {
+  payload: {
+    idempotencyKey: string;
+    status: "rejected";
+    errorCode: TargetErrorCode;
+    message: string;
   };
 };
 
@@ -896,6 +938,7 @@ export type Request =
   | TopologyApplyRequest
   | ContentApplyRequest
   | TargetApplyRequest
+  | TargetRegisterRequest
   | ContentSetRequest
   | ContentAppendRequest
   | ContentPatchRequest
@@ -915,6 +958,8 @@ export type Response =
   | TopologyApplyResponse
   | ContentApplyResponse
   | TargetApplyResponse
+  | TargetRegisteredResponse
+  | TargetRegisterRejectedResponse
   | MutationAckResponse
   | AnnotationsRemoveResponse
   | SnapshotResponse

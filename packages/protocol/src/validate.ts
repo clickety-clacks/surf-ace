@@ -76,9 +76,6 @@ export function validateEnvelopeType(
     return { ok: false, reason: "envelope_not_object" };
   }
   const actualOp = typeof envelope.op === "string" ? envelope.op : "";
-  if (actualOp !== schemaName) {
-    return { ok: false, reason: `op_mismatch:${actualOp || "missing"}` };
-  }
   const actualType = typeof envelope.type === "string" ? envelope.type : "";
   const selectedSchema = actualType === "request"
     ? "request" in manifestEntry
@@ -88,7 +85,9 @@ export function validateEnvelopeType(
       ? "response" in manifestEntry
         ? envelope.ok === false
           ? manifestEntry.errorResponse
-          : manifestEntry.response
+          : "rejectedResponse" in manifestEntry && actualOp === "target.register.rejected"
+            ? manifestEntry.rejectedResponse
+            : manifestEntry.response
         : null
       : actualType === "event"
         ? "event" in manifestEntry
@@ -97,6 +96,14 @@ export function validateEnvelopeType(
         : null;
   if (!selectedSchema) {
     return { ok: false, reason: `type_mismatch:${actualType || "missing"}` };
+  }
+  const selectedProperties = isObject((selectedSchema as Record<string, unknown>).properties)
+    ? (selectedSchema as Record<string, unknown>).properties as Record<string, unknown>
+    : null;
+  const opSchema = selectedProperties && isObject(selectedProperties.op) ? selectedProperties.op : null;
+  const expectedOp = typeof opSchema?.const === "string" ? opSchema.const : schemaName;
+  if (actualOp !== expectedOp) {
+    return { ok: false, reason: `op_mismatch:${actualOp || "missing"}` };
   }
   if (envelope.v !== 1) {
     return { ok: false, reason: `version_mismatch:${String(envelope.v ?? "missing")}` };

@@ -19,6 +19,9 @@ import {
   relinquishResponseSchema,
   targetApplyRequestSchema,
   targetApplyResponseSchema,
+  targetRegisterRejectedResponseSchema,
+  targetRegisteredResponseSchema,
+  targetRegisterRequestSchema,
   paneCloseRequestSchema,
   paneCloseResponseSchema,
   paneCreatedEventSchema,
@@ -62,6 +65,12 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "target.apply": {
     request: targetApplyRequestSchema,
     response: targetApplyResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "target.register": {
+    request: targetRegisterRequestSchema,
+    response: targetRegisteredResponseSchema,
+    rejectedResponse: targetRegisterRejectedResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "content.set": {

@@ -52,6 +52,7 @@ export function buildExamplePairResponse(): PairResponse {
         resumeGraceMs: 20_000,
       },
       resumed: false,
+      ownershipEpoch: 1,
       sessionId: "sa_example_session" as PairResponse["payload"]["sessionId"],
       state: {
         panes: [
@@ -60,6 +61,7 @@ export function buildExamplePairResponse(): PairResponse {
             currentContentId: null,
             currentRevision: 0 as PairResponse["payload"]["state"]["panes"][number]["currentRevision"],
             paneId: 1 as PairResponse["payload"]["state"]["panes"][number]["paneId"],
+            paneLineageId: "pl_example",
             paneLabel: 1,
           },
         ],

@@ -140,6 +140,87 @@ final class SurfAceViewportPreservationTests: XCTestCase {
         )
     }
 
+    func testBrowserURLPaneEntryIsDistinctFromStaticHTML() {
+        let entry = SurfAcePaneEntry.browserURL(
+            targetId: "tg_google",
+            targetEpoch: 1,
+            url: "https://google.com/",
+            allowedSnapshotFallback: true,
+            fallbackSnapshotTargetId: "tg_snapshot"
+        )
+
+        XCTAssertNil(entry.contentId)
+        XCTAssertEqual(entry.revision, 1)
+        XCTAssertNil(entry.contentType)
+        XCTAssertEqual(
+            entry.payload,
+            .browserURL(
+                url: "https://google.com/",
+                allowedSnapshotFallback: true,
+                fallbackSnapshotTargetId: "tg_snapshot"
+            )
+        )
+        XCTAssertEqual(entry.url, "https://google.com/")
+    }
+
+    func testContentApplyParserRejectsBrowserURLAsStaticContent() {
+        XCTAssertThrowsError(
+            try SurfAceFrame.from(
+                contentId: "ct_cafefeed",
+                revision: 1,
+                jsonObject: [
+                    "contentType": "browser_url",
+                    "content": ["url": "https://google.com/"],
+                ]
+            )
+        ) { error in
+            guard case SurfAceFrameParseError.unsupportedType = error else {
+                XCTFail("Unexpected error: \(error)")
+                return
+            }
+        }
+    }
+
+    func testBrowserURLNavigationSuccessEvidenceIsApplied() {
+        let payload = SurfAceRuntime.browserURLApplyResultPayload(
+            requestId: "tr_google",
+            targetId: "tg_google",
+            paneLineageId: "pl_1",
+            targetEpoch: 2,
+            url: "https://google.com/",
+            status: "applied",
+            errorMessage: nil,
+            appliedAt: "2026-04-26T00:00:00Z"
+        )
+        let materializedState = payload["materializedState"] as? [String: Any]
+
+        XCTAssertEqual(payload["status"] as? String, "applied")
+        XCTAssertNil(payload["errorCode"])
+        XCTAssertEqual(materializedState?["navigationStatus"] as? String, "loaded")
+        XCTAssertEqual(materializedState?["replaySemantics"] as? String, "navigate")
+        XCTAssertEqual(materializedState?["url"] as? String, "https://google.com/")
+    }
+
+    func testBrowserURLNavigationFailureEvidenceIsNotApplied() {
+        let payload = SurfAceRuntime.browserURLApplyResultPayload(
+            requestId: "tr_google",
+            targetId: "tg_google",
+            paneLineageId: "pl_1",
+            targetEpoch: 2,
+            url: "https://blocked.invalid/",
+            status: "failed",
+            errorMessage: "Blocked",
+            appliedAt: "2026-04-26T00:00:00Z"
+        )
+        let materializedState = payload["materializedState"] as? [String: Any]
+
+        XCTAssertEqual(payload["status"] as? String, "failed")
+        XCTAssertEqual(payload["errorCode"] as? String, "materialization_failed")
+        XCTAssertEqual(materializedState?["navigationStatus"] as? String, "failed")
+        XCTAssertEqual(materializedState?["replaySemantics"] as? String, "navigate")
+        XCTAssertEqual(materializedState?["url"] as? String, "https://blocked.invalid/")
+    }
+
     func testPaneOwnerDisplayNameTracksVisibleHistoryEntry() {
         let pane = SurfAcePaneModel(paneId: 7, paneLabel: 12)
         pane.currentEntry = SurfAcePaneEntry(
