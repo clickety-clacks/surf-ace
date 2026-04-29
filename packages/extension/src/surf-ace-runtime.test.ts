@@ -22,6 +22,7 @@ type TestPane = {
   };
   name: string | null;
   paneLabel: number;
+  paneLineageId: string;
   revision: number;
   viewport: {
     height: number;
@@ -152,6 +153,7 @@ class FakeSurfAceWsServer {
   rejectNextResumePairWithSessionMismatch = false;
   resumePairMismatchResponsesRemaining = 0;
   resumePairMismatchMessage = "Resume session did not match active ownership lock";
+  includePairPaneLineageIds = true;
 
   pairedSocket: import("ws").WebSocket | null = null;
   readonly surfaceId: string;
@@ -182,6 +184,7 @@ class FakeSurfAceWsServer {
           },
           name: null,
           paneLabel: this.initialRemotePaneId,
+          paneLineageId: `pl_${this.surfaceId}_${this.initialRemotePaneId}`,
           revision: 0,
           viewport: {
             height: 768,
@@ -282,6 +285,7 @@ class FakeSurfAceWsServer {
             },
             name: null,
             paneLabel: initialRemotePaneId,
+            paneLineageId: `pl_${options.surfaceId}_${initialRemotePaneId}`,
             revision: 0,
             viewport: { ...viewport },
           },
@@ -701,7 +705,7 @@ class FakeSurfAceWsServer {
                   currentRevision: pane.revision,
                   paneId,
                   paneLabel: pane.paneLabel,
-                  paneLineageId: `pl_${requestedSurface.surfaceId}_${paneId}`,
+                  ...(this.includePairPaneLineageIds ? { paneLineageId: pane.paneLineageId } : {}),
                 })),
               },
               surfaceId: requestedSurface.surfaceId,
@@ -765,6 +769,7 @@ class FakeSurfAceWsServer {
             },
             name: paneState.name,
             paneLabel: paneState.paneLabel,
+            paneLineageId: previousPane?.paneLineageId ?? `pl_${targetSurface.surfaceId}_${paneState.paneId}`,
             revision: previousPane?.revision ?? 0,
             viewport: previousPane?.viewport ?? { ...targetSurface.viewport },
           });
@@ -777,7 +782,7 @@ class FakeSurfAceWsServer {
                 name: pane.name,
                 paneId: pane.paneId,
                 paneLabel: this.nextTopologyApplyResponsePaneLabels?.[index] ?? pane.paneLabel,
-                paneLineageId: `pl_${targetSurface.surfaceId}_${pane.paneId}`,
+                paneLineageId: targetSurface.panes.get(pane.paneId)?.paneLineageId ?? `pl_${targetSurface.surfaceId}_${pane.paneId}`,
               })),
               topologyRevision: Number(message.payload?.topologyRevision ?? 0),
             }),
@@ -890,6 +895,7 @@ class FakeSurfAceWsServer {
                 name: pane.name,
                 paneId,
                 paneLabel: pane.paneLabel,
+                paneLineageId: pane.paneLineageId,
                 viewport: {
                   height: pane.frame.height,
                   scale: pane.viewport.scale,
@@ -2560,6 +2566,39 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(target?.targetKind, "browser_url");
         assert.equal(target?.targetPolicy, "confirm");
         assert.deepEqual(target?.targetPayload, { url: "https://google.com" });
+      },
+    });
+  });
+
+  await t.test("surf_ace_list repairs legacy provider pane lineage before browser_url target.apply", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.includePairPaneLineageIds = false;
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        const pushed = await runtime.push({
+          content: "https://arstechnica.com",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(pushed.targetApplyEvidence?.status, "applied");
+        const [applyRequest] = server.targetApplyRequests;
+        assert.ok(applyRequest);
+        assert.equal(applyRequest.paneLineageId, `pl_${server.surfaceId}_${server.initialRemotePaneId}`);
+        assert.doesNotMatch(applyRequest.paneLineageId, /^legacy_remote_pane_/);
+        const screens = await runtime.listScreens();
+        assert.equal(
+          screens[0]?.panes[0]?.target?.paneLineageId,
+          `pl_${server.surfaceId}_${server.initialRemotePaneId}`,
+        );
       },
     });
   });
