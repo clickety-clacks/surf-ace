@@ -15,6 +15,7 @@
 		5964DDDD0A9B7A881AECDA0C /* SurfAceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C230CE2F392C57A940FD796E /* SurfAceModels.swift */; };
 		6661F25504963451BE3CE25C /* SurfAceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */; };
 		68DC9BCC2BBCFA3ACA7A30AF /* SurfAceBrowserURLTargetApplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */; };
+		6C1D6C64A4F64DB79B5D85B5 /* SurfAceMarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20BB85B62CC04D418651F6BA /* SurfAceMarkdownRenderingTests.swift */; };
 		7440C200D139A9CDEB4071DA /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
 		78FE925CC623EE70BD36510C /* SurfAceSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */; };
 		980E850E03917BE3AF575829 /* SurfAceBonjourPublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79E9224F46725D6F9372F987 /* SurfAceBonjourPublisherTests.swift */; };
@@ -42,6 +43,7 @@
 		025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceRenderAndAnnotationDiagnosticsTests.swift; sourceTree = "<group>"; };
 		04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBrowserURLTargetApplyTests.swift; sourceTree = "<group>"; };
 		176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServerTests.swift; sourceTree = "<group>"; };
+		20BB85B62CC04D418651F6BA /* SurfAceMarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceMarkdownRenderingTests.swift; sourceTree = "<group>"; };
 		2A8249A9765412039C07EDD5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceViewportPreservationTests.swift; sourceTree = "<group>"; };
 		314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
@@ -96,6 +98,7 @@
 				79E9224F46725D6F9372F987 /* SurfAceBonjourPublisherTests.swift */,
 				04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */,
 				176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */,
+				20BB85B62CC04D418651F6BA /* SurfAceMarkdownRenderingTests.swift */,
 				025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */,
 				3ABD815F8B22D9C2095F8BCF /* SurfAceSurfaceTopologyPersistenceTests.swift */,
 				2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */,
@@ -222,6 +225,7 @@
 				980E850E03917BE3AF575829 /* SurfAceBonjourPublisherTests.swift in Sources */,
 				68DC9BCC2BBCFA3ACA7A30AF /* SurfAceBrowserURLTargetApplyTests.swift in Sources */,
 				B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */,
+				6C1D6C64A4F64DB79B5D85B5 /* SurfAceMarkdownRenderingTests.swift in Sources */,
 				FA0FE771EA157D8D3EB6DCF9 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift in Sources */,
 				C9FCE1B6A4992A0D0FD5FB68 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */,
 				193398127694B8E96D1688F5 /* SurfAceViewportPreservationTests.swift in Sources */,

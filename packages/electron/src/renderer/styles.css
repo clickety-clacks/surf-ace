@@ -328,20 +328,116 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 .content-markdown {
   min-height: 100%;
   margin: 0;
-  line-height: 1.65;
-  font-size: 18px;
+  padding: clamp(24px, 4vw, 56px);
+  background: #fbfcff;
+  color: #172033;
+  font-family: "Avenir Next", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.62;
+  font-size: 17px;
+  overflow-wrap: anywhere;
 }
 
 .content-markdown h1,
 .content-markdown h2,
-.content-markdown h3 {
+.content-markdown h3,
+.content-markdown h4,
+.content-markdown h5,
+.content-markdown h6 {
+  margin: 1.35em 0 0.55em;
+  color: #0d1628;
   line-height: 1.2;
+}
+
+.content-markdown h1:first-child,
+.content-markdown h2:first-child,
+.content-markdown h3:first-child,
+.content-markdown h4:first-child,
+.content-markdown h5:first-child,
+.content-markdown h6:first-child {
+  margin-top: 0;
+}
+
+.content-markdown h1 {
+  font-size: 2rem;
+}
+
+.content-markdown h2 {
+  font-size: 1.55rem;
+}
+
+.content-markdown h3 {
+  font-size: 1.25rem;
+}
+
+.content-markdown p,
+.content-markdown ul,
+.content-markdown ol,
+.content-markdown blockquote,
+.content-markdown pre,
+.content-markdown table {
+  margin: 0 0 1em;
+}
+
+.content-markdown ul,
+.content-markdown ol {
+  padding-left: 1.5em;
+}
+
+.content-markdown li + li {
+  margin-top: 0.3em;
 }
 
 .content-markdown code {
   padding: 0.15em 0.3em;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  background: #eef2f8;
+  color: #0d1628;
+  font-family: "SF Mono", "Menlo", ui-monospace, monospace;
+  font-size: 0.92em;
+}
+
+.content-markdown pre {
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid #d8e0ec;
+  border-radius: 8px;
+  background: #101828;
+  color: #f5f7fb;
+}
+
+.content-markdown pre code {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.content-markdown blockquote {
+  padding: 0.1em 0 0.1em 1em;
+  border-left: 4px solid #9aabc3;
+  color: #46546a;
+}
+
+.content-markdown a {
+  color: #1d5fbf;
+}
+
+.content-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.content-markdown th,
+.content-markdown td {
+  padding: 8px 10px;
+  border: 1px solid #d8e0ec;
+  text-align: left;
+  vertical-align: top;
+}
+
+.content-markdown th {
+  background: #eef2f8;
+  color: #0d1628;
 }
 
 .content-terminal {
