@@ -779,6 +779,9 @@ export class SurfaceCore {
     if (!pane) {
       return targetApplyResult(payload, "rejected", "pane_lineage_missing", "pane lineage is unknown");
     }
+    if (pane.externalNative) {
+      return targetApplyResult(payload, "rejected", "materialization_failed", "browser_url cannot replace a live native-hosted pane without native pane detach support");
+    }
     if (pane.annotating) {
       pane.toast = "Finish annotation (Done) to navigate";
       this.emit({ surfaceId, type: "surface-changed" });

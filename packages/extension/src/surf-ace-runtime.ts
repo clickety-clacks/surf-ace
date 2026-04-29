@@ -5859,6 +5859,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             asSurfaceId(pairResponse.payload.surfaceId),
             "pair.response",
           );
+          const hadPairedProviderTopology =
+            surface.hasPairedInGatewaySession &&
+            surface.panes.size > 0;
           this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId), pairResponse.payload.resumed);
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
@@ -5875,8 +5878,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           this.applyPairState(surface, pairResponse, {
             pruneStalePanes: !shouldRestoreProviderTopology,
           });
+          const shouldPublishProviderTopology =
+            shouldRestoreProviderTopology ||
+            (hadPairedProviderTopology &&
+              this.pairStatePaneLabelsDiffer(surface, pairResponse.payload.state.panes));
           this.restoreRestartContent(surface);
-          if (shouldRestoreProviderTopology) {
+          if (shouldPublishProviderTopology) {
             await this.pushTopology(surface);
           }
           await this.repushSurfaceContent(surface);
@@ -6346,6 +6353,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
     this.hydrateSurfaceTargetState(surface, response.payload.resumed === true);
     this.queuePersistScreenSnapshot("apply pair state");
+  }
+
+  private pairStatePaneLabelsDiffer(
+    surface: ManagedSurface,
+    paneStates: PairResponse["payload"]["state"]["panes"],
+  ): boolean {
+    for (const paneState of paneStates) {
+      const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+      if (pane && pane.paneLabel !== paneState.paneLabel) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private applyPairPaneState(
