@@ -35,6 +35,17 @@ test("renderer reapplies browser_url frame sizing after layout commits and windo
   assert.match(source, /window\.addEventListener\("resize"[\s\S]*const frame = currentPaneFrameElement\(view\);[\s\S]*applyPaneFrameSize\(view, frame\)/);
 });
 
+test("content replacement resets the pane scroll origin before browser_url mounts", async () => {
+  const source = await rendererSource();
+  const resetIndex = source.indexOf("function resetDynamicContent");
+  const renderIndex = source.indexOf("function renderPaneContent");
+
+  assert.ok(resetIndex > -1);
+  assert.ok(renderIndex > resetIndex);
+  assert.match(source.slice(resetIndex, renderIndex), /view\.scrollEl\.scrollLeft = 0;/);
+  assert.match(source.slice(resetIndex, renderIndex), /view\.scrollEl\.scrollTop = 0;/);
+});
+
 test("browser_url webviews constrain Electron guest bounds to the measured pane", async () => {
   const source = await rendererSource();
   const applyIndex = source.indexOf("function applyPaneFrameSize");

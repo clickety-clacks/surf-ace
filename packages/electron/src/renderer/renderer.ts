@@ -1535,6 +1535,8 @@ function resetDynamicContent(view: PaneView): number {
   view.currentHtmlFrameCleanup = null;
   clearWebViewSizer(view);
   view.currentScrollHandler = null;
+  view.scrollEl.scrollLeft = 0;
+  view.scrollEl.scrollTop = 0;
   view.rootEl.dataset.pdfReportKey = "";
   view.contentEl.style.height = "";
   view.contentEl.style.minHeight = "";
