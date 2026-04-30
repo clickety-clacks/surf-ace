@@ -43,7 +43,11 @@ declare module "openclaw/plugin-sdk" {
   };
 
   export type OpenClawPluginApi = {
-    runtime: unknown;
+    runtime: {
+      state?: {
+        resolveStateDir?: () => string;
+      };
+    } & Record<string, unknown>;
     logger: unknown;
     pluginConfig?: Record<string, unknown>;
     registerService: (service: {
