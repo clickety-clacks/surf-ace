@@ -19,6 +19,7 @@ function declarationBlock(css: string, selector: string): string {
 
 function installDOM() {
   const { document, window } = parseHTML("<html><body></body></html>");
+  const textRects = new WeakMap<Element, DOMRect[]>();
   Object.defineProperty(window, "getComputedStyle", {
     configurable: true,
     value: (element: HTMLElement) => ({
@@ -27,8 +28,35 @@ function installDOM() {
       visibility: element.style.visibility || "visible",
     }),
   });
+  Object.defineProperty(document, "createRange", {
+    configurable: true,
+    value: () => {
+      let selected: Element | null = null;
+      return {
+        detach: () => {},
+        getClientRects: () => selected ? textRects.get(selected) ?? [] : [],
+        selectNodeContents: (element: Element) => {
+          selected = element;
+        },
+      };
+    },
+  });
   Object.assign(globalThis, { document, window });
-  return { document };
+  return {
+    document,
+    setTextRect: (element: Element, rect: { height: number; width: number; x: number; y: number }) => {
+      textRects.set(element, [{
+        bottom: rect.y + rect.height,
+        height: rect.height,
+        left: rect.x,
+        right: rect.x + rect.width,
+        top: rect.y,
+        width: rect.width,
+        x: rect.x,
+        y: rect.y,
+      } as DOMRect]);
+    },
+  };
 }
 
 function setRect(element: Element, rect: { height: number; width: number; x: number; y: number }): void {
@@ -47,51 +75,83 @@ function setRect(element: Element, rect: { height: number; width: number; x: num
   });
 }
 
-test("pane label overlay region uses tight visible identity glyph bounds", () => {
-  const { document } = installDOM();
+test("pane label overlay region uses tight combined label affordance bounds", () => {
+  const { document, setTextRect } = installDOM();
   const wrapper = document.createElement("div");
   wrapper.className = "pane-label";
   const windowId = document.createElement("span");
   windowId.className = "pane-label__window";
+  windowId.textContent = "FK";
   const paneNumber = document.createElement("span");
   paneNumber.className = "pane-label__number";
+  paneNumber.textContent = "4";
   wrapper.append(windowId, paneNumber);
   document.body.appendChild(wrapper);
 
-  setRect(wrapper, { height: 612, width: 1530, x: 0, y: 0 });
-  setRect(windowId, { height: 96, width: 90, x: 1130, y: 500 });
-  setRect(paneNumber, { height: 180, width: 154, x: 1228, y: 416 });
+  setRect(wrapper, { height: 114, width: 124, x: 1032, y: 3688 });
+  setRect(windowId, { height: 630, width: 2090, x: 0, y: 3209 });
+  setRect(paneNumber, { height: 630, width: 2090, x: 0, y: 3209 });
+  setTextRect(windowId, { height: 18, width: 34, x: 1040, y: 3720 });
+  setTextRect(paneNumber, { height: 90, width: 60, x: 1088, y: 3690 });
 
   assert.deepEqual(visibleOverlayRect(wrapper, "pane-label"), {
-    height: 180,
-    width: 252,
-    x: 1130,
-    y: 416,
+    height: 94,
+    width: 124,
+    x: 1032,
+    y: 3688,
   });
 });
 
 test("pane label overlay region ignores hidden identity children", () => {
-  const { document } = installDOM();
+  const { document, setTextRect } = installDOM();
   const wrapper = document.createElement("div");
   wrapper.className = "pane-label";
   const windowId = document.createElement("span");
   windowId.className = "pane-label__window";
   windowId.hidden = true;
+  windowId.textContent = "FK";
   const paneNumber = document.createElement("span");
   paneNumber.className = "pane-label__number";
+  paneNumber.textContent = "4";
   wrapper.append(windowId, paneNumber);
   document.body.appendChild(wrapper);
 
-  setRect(wrapper, { height: 612, width: 1530, x: 0, y: 0 });
-  setRect(windowId, { height: 96, width: 90, x: 1130, y: 500 });
-  setRect(paneNumber, { height: 180, width: 154, x: 1228, y: 416 });
+  setRect(wrapper, { height: 114, width: 124, x: 1032, y: 3688 });
+  setRect(windowId, { height: 630, width: 2090, x: 0, y: 3209 });
+  setRect(paneNumber, { height: 630, width: 2090, x: 0, y: 3209 });
+  setTextRect(windowId, { height: 18, width: 34, x: 1040, y: 3720 });
+  setTextRect(paneNumber, { height: 90, width: 60, x: 1088, y: 3690 });
 
   assert.deepEqual(visibleOverlayRect(wrapper, "pane-label"), {
-    height: 180,
-    width: 154,
-    x: 1228,
-    y: 416,
+    height: 94,
+    width: 76,
+    x: 1080,
+    y: 3688,
   });
+});
+
+test("pane label overlay region is omitted when identity text is hidden", () => {
+  const { document, setTextRect } = installDOM();
+  const wrapper = document.createElement("div");
+  wrapper.className = "pane-label";
+  const windowId = document.createElement("span");
+  windowId.className = "pane-label__window";
+  windowId.hidden = true;
+  windowId.textContent = "FK";
+  const paneNumber = document.createElement("span");
+  paneNumber.className = "pane-label__number";
+  paneNumber.hidden = true;
+  paneNumber.textContent = "4";
+  wrapper.append(windowId, paneNumber);
+  document.body.appendChild(wrapper);
+
+  setRect(wrapper, { height: 114, width: 124, x: 1032, y: 3688 });
+  setRect(windowId, { height: 630, width: 2090, x: 0, y: 3209 });
+  setRect(paneNumber, { height: 630, width: 2090, x: 0, y: 3209 });
+  setTextRect(windowId, { height: 18, width: 34, x: 1040, y: 3720 });
+  setTextRect(paneNumber, { height: 90, width: 60, x: 1088, y: 3690 });
+
+  assert.equal(visibleOverlayRect(wrapper, "pane-label"), null);
 });
 
 test("keyboard focus outline stays visible over light and dark pane content", async () => {
