@@ -212,6 +212,47 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   });
   assert.deepEqual(pairResponse, { ok: true });
 
+  const emptyPairPanes = validateEnvelopeType("pair.request", {
+    id: "req_empty_pair_panes",
+    ok: true,
+    op: "pair.request",
+    payload: {
+      capabilities: {
+        contentTypes: ["html"],
+        eventTypes: ["event.drawing_flush"],
+      },
+      eventConfig: {
+        activeEvents: ["event.drawing_flush"],
+        drawingFlushConfig: {
+          idleWindowMs: 8000,
+          maxIntervalMs: 30000,
+        },
+        profile: "minimum_deep",
+      },
+      limits: {
+        maxDrawingFlushBytes: 1024,
+        maxFrameBytes: 1024,
+        maxMessageBytes: 1024,
+        maxStrokePointsPerFlush: 1024,
+        maxVisibleTextBytes: 1024,
+        resumeGraceMs: 20_000,
+      },
+      ownershipEpoch: 1,
+      resumed: false,
+      sessionId: "sa_pair_session",
+      state: {
+        panes: [],
+      },
+      surfaceId: "sf_1",
+      surfaceName: "Surface A",
+      viewport: { height: 768, scale: 2, width: 1024 },
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.equal(emptyPairPanes.ok, false);
+
   const relinquishResponse = validateEnvelopeType("ownership.relinquish", {
     id: "req_5",
     ok: true,

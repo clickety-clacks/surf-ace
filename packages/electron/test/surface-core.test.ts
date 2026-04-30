@@ -51,6 +51,42 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.equal(windowState.panes[0]?.activeKeyboardPane, true);
 });
 
+test("surface core removes closed windows from live topology immediately", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const primary = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const secondary = core.createAdditionalSurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const events: Array<string> = [];
+  const unsubscribe = core.subscribe((event) => {
+    events.push(`${event.type}:${event.surfaceId}`);
+  });
+
+  try {
+    assert.deepEqual(
+      core.listSurfaces().map((surface) => surface.surfaceId),
+      [primary.surfaceId, secondary.surfaceId],
+    );
+
+    core.removeSurface(secondary.surfaceId);
+
+    assert.deepEqual(
+      core.listSurfaces().map((surface) => surface.surfaceId),
+      [primary.surfaceId],
+    );
+    assert.throws(
+      () => core.getRendererWindowState(secondary.surfaceId),
+      (error) => error instanceof SurfaceCoreError && error.code === "invalid_payload",
+    );
+    assert.ok(events.includes(`surface-removed:${secondary.surfaceId}`));
+  } finally {
+    unsubscribe();
+  }
+});
+
 test("surface core tracks the active keyboard pane and falls back when it closes", () => {
   const core = new SurfaceCore({
     persistentState: {

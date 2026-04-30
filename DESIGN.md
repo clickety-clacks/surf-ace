@@ -69,7 +69,7 @@ Constraint: annotation semantics in §§13–14 are normative architecture and m
 2. Pane lifecycle exists: create/split, resize, rename, close.
 3. All screen-scoped tool operations can target `{surfaceId, paneId}` after resolving human references through `surf_ace_list`.
 4. **`paneId` is required** on all pane-scoped tool calls. CLU MUST always specify which pane it is targeting once it has resolved the intended pane from `windowLabel` / `paneLabel`. There is no default-pane fallback.
-5. `surfaces.list` (or equivalent pane-aware listing) can enumerate panes and active content per pane.
+5. `surfaces.list` enumerates active window surfaces for an endpoint; after pair/resume, `panes.list` and `surf_ace_list` expose pane topology and active content per pane.
 6. Content operations are isolated per pane (push/clear in pane A does not mutate pane B).
 7. Ownership lock semantics are defined at the window/surface level (`surfaceId`), with pane routing handled inside the lock owner's paired session.
 8. At least one iOS and one Electron implementation pass topology tests for pane isolation and routing.
@@ -159,6 +159,7 @@ Window rules:
 4. Provider maintains one paired WS session per active window/surface, even when multiple windows share the same device endpoint.
 5. Creating/removing a window does not require mDNS rebroadcast; only app endpoint lifecycle affects mDNS advertisement/goodbye.
 6. On iPadOS, each Surf Ace scene MUST occupy the full device extent in landscape and portrait. The app MUST opt out of iPad multitasking/Stage Manager compatibility sizing when needed so the system does not hand Surf Ace a narrow letterboxed or resized scene. Reported viewport, visible content, pane geometry, and chrome must all derive from the same full-size scene.
+7. Closing a window removes that surface from the live topology. The surface emits `event.surface_removed` and drops the window from subsequent `surfaces.list` responses. Providers MUST treat either signal as authoritative removal for that `surfaceId`: stop reconnect/retry, close the paired client, clear persisted target/restart state, remove it from CLU-facing screen lists, and avoid resurfacing it as a stale `connecting` / `unreachable` surface. An empty authoritative `surfaces.list` removes the cached surfaces for that endpoint from CLU-facing lists; later windows are live only after fresh discovery/pairing through `event.surface_appeared` or a new `surfaces.list` entry.
 
 Pane rules (Phase 1 committed work, see §2.3):
 1. Each window may contain one or more panes, each with a stable internal numeric `paneId` and a stable visible numeric `paneLabel`.
@@ -169,9 +170,9 @@ Pane rules (Phase 1 committed work, see §2.3):
 
 Naming system:
 1. **Window labels** (a, b, c … z, aa, ab …) are assigned by the **provider/extension**, not the surface.
-2. `windowLabel` allocation is monotonic and provider-owned. It is persisted by `surfaceId`, survives reconnect/remap, and MUST NOT be recycled while the provider's persisted Surf Ace state remains intact. It resets only when that persisted label state is explicitly reset.
+2. `windowLabel` allocation is provider-owned and scoped to the live/admitted topology. It is a visible coordinate for users and diagnostics, not durable target authority. Providers may preserve labels across ordinary reconnect for the same `surfaceId`, but closed/tombstoned surfaces and newly admitted windows must be treated as fresh topology and MUST NOT be targeted by a stale window label.
 3. **Pane IDs** are assigned by the **provider/extension** and sent to the surface in topology commands. They are stable internal routing identifiers. The surface never generates pane IDs independently.
-4. **Pane labels** are assigned globally by the **provider/extension** and are the user-visible secondary keys for the live Surf Ace topology. Across currently live/connected Surf Ace surfaces, no two live panes may publish the same `paneLabel`. Allocation is compact and provider-owned; it MUST NOT be seeded from internal `paneId`, remote/client pane ids, tool ids, or client-reported labels. Persisted duplicate or polluted labels MUST be repaired by the provider before they become observable in `surf_ace_list`, pair/bootstrap payloads, topology payloads, or persisted screen snapshots. Clients do not infer global uniqueness; they adopt the labels assigned by the provider.
+4. **Pane labels** are assigned by the **provider/extension** per surface/window and are the user-visible secondary keys for that window. `windowLabel + paneLabel` is the visible coordinate; `paneLabel` alone is not globally unique and MUST NOT be used as durable target authority. Allocation is compact within the surface/window and provider-owned; it MUST NOT be seeded from internal `paneId`, remote/client pane ids, tool ids, or client-reported labels. Persisted duplicate or polluted labels MUST be repaired by the provider before they become observable for that surface in `surf_ace_list`, pair/bootstrap payloads, topology payloads, or persisted screen snapshots. Clients adopt the labels assigned by the provider and MUST NOT infer cross-window uniqueness.
 5. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. Pane names are optional metadata and MUST NOT replace `paneLabel` as the visible identity or addressing token.
 6. The extension is the sole authority on topology and visible labeling. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
 7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each. Surfaces may reject malformed single-surface topology payloads that contain duplicate or invalid visible `paneLabel` values within that one payload as a secondary defensive check, but they MUST NOT attempt to enforce global pane-label uniqueness across windows/surfaces. The extension/provider MUST surface and log these rejections as topology/protocol errors with enough surface, window, session, remote pane, and pane-label context to diagnose the provider-side bug.
@@ -370,6 +371,8 @@ Flow:
 4. `eventConfig` (active event profile, active event list, and effective drawing flush config).
 5. Limits.
 6. Current pane state summary (`panes[]` with per-pane `paneId`, `paneLabel`, `currentContentId`, `currentRevision`, and `contentType`).
+
+A successful `pair.response` MUST include at least one topology pane. Providers MUST treat `state.panes.length < 1` as a protocol failure and MUST NOT mark that surface connected or targetable from that response. Fresh Surf Ace surfaces expose at least one targetable topology pane.
 
 ### 6.1.1 Ownership, Pane Lifecycle, and History Operations (Phase 1)
 
@@ -1472,6 +1475,7 @@ The schema below defines every v1 application message type over WS.
               "properties": {
                 "panes": {
                   "type": "array",
+                  "minItems": 1,
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -2964,9 +2968,9 @@ Each window is assigned a short alphabetic identifier using an auto-incrementing
 - Colored according to the window's connection state, with both outline and letters at 35% opacity.
 - Rendered in the overlay layer — it does not scroll with content.
 
-The window label is the primary addressing handle. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity.
+The window label is the primary visible addressing handle within the current `surf_ace_list` result. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity, but CLU/provider targeting authority still comes from the run-admitted `surfaceId`/`paneId` tuple rather than from the label alone.
 
-Each pane is assigned by the provider/extension a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier and live-topology secondary key; the provider/extension MUST keep it unique across live Surf Ace surfaces so references such as "pane 1" are not ambiguous between visible windows. Clients adopt the assigned label and do not derive it from local/internal pane identifiers. Optional pane names do not replace it. The pane label MUST be:
+Each pane is assigned by the provider/extension a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier and live-topology secondary key within its window; `paneLabel` alone is not globally unique and is not durable target authority. Clients adopt the assigned label and do not derive it from local/internal pane identifiers. Optional pane names do not replace it. The pane label MUST be:
 - Displayed as plain overlay text with no pill, background, or border.
 - Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/4 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
 - Rendered in Rajdhani Bold, with visually consistent heavy weight across Electron and iOS.
@@ -3211,6 +3215,8 @@ If a consumer needs a new rectangle, the geometry authority adds a named project
 ### 16.3 Electron requirement
 
 Electron surfaces have explicit geometry seams between renderer UI, Electron main, native/compositor hosting, overlay reporting, hit routing, and protocol reporting. Electron MUST treat the resolved pane snapshot as the only placement authority. Renderer DOM overlay measurements may provide semantic control presence, intrinsic size, and relative offsets, but they MUST NOT define the pane placement basis once native pane geometry exists. Compositor payloads consume `panes[].geometry` and `regions[].rect` as resolved rectangles; compositor MUST NOT infer pane layout from Surf Ace topology intent.
+
+Compositor status `panes` are native hosted/materialized pane records, not Surf Ace topology panes. Surf Ace topology panes are reported by `pair.response`, `panes.list`, and CLU-facing `surf_ace_list`. A compositor status with `panes=[]` or `overlay_regions=0` means no native materialized panes or overlay regions are currently installed; it does not imply that Surf Ace topology is empty.
 
 Racter tall-logical-surface remains a required fixture: Surf Ace receives a logical surface of `2160x3840` and must treat it exactly like any other `2160x3840` monitor/window. Native panes, Surf Ace controls, overlay regions, and hit regions must align in that logical coordinate space. Surf Ace must not reason from display rotation or physical scanout shape.
 

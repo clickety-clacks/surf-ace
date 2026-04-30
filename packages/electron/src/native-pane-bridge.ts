@@ -68,6 +68,12 @@ export type CompositorControlRequest =
 
 export type CompositorControlResponse = Record<string, unknown>;
 
+export type CompositorNativePaneStatusSummary = {
+  nativeMaterializedPaneCount: number | null;
+  topologyPaneCount: null;
+  topologyPaneSource: "surf_ace_pair_or_panes_list";
+};
+
 type PaneGeometry = {
   geometry?: {
     coordinateSpace?: string;
@@ -311,6 +317,20 @@ function statusString(response: CompositorControlResponse, field: string): strin
   }
   const nested = (status as Record<string, unknown>)[field];
   return typeof nested === "string" ? nested : null;
+}
+
+export function compositorNativePaneStatusSummary(
+  response: CompositorControlResponse,
+): CompositorNativePaneStatusSummary {
+  const status = response.status;
+  const panes = status && typeof status === "object"
+    ? (status as Record<string, unknown>).panes
+    : response.panes;
+  return {
+    nativeMaterializedPaneCount: Array.isArray(panes) ? panes.length : null,
+    topologyPaneCount: null,
+    topologyPaneSource: "surf_ace_pair_or_panes_list",
+  };
 }
 
 export function validateMaterializationAgainstCompositorStatus(

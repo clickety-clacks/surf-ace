@@ -7,6 +7,7 @@ import test from "node:test";
 
 import type { NativePaneMaterialization } from "../../protocol/src/index.js";
 import {
+  compositorNativePaneStatusSummary,
   compositorFailureMessage,
   isOverlayNativePaneLivenessFailure,
   nativePaneInstanceIdsForCompositor,
@@ -102,6 +103,36 @@ test("native pane bridge serializes host and overlay requests from protocol mate
   });
   assert.equal(overlayRequestForCompositor(materialization({ op: "native_pane.update" }))?.updateReason, "update");
   assert.equal(overlayRequestForCompositor(materialization({ overlaySet: undefined })), null);
+});
+
+test("native pane bridge names compositor panes as native materialized panes, not topology panes", () => {
+  assert.deepEqual(
+    compositorNativePaneStatusSummary({
+      ok: true,
+      status: {
+        overlay_regions: 0,
+        panes: [],
+      },
+    }),
+    {
+      nativeMaterializedPaneCount: 0,
+      topologyPaneCount: null,
+      topologyPaneSource: "surf_ace_pair_or_panes_list",
+    },
+  );
+  assert.deepEqual(
+    compositorNativePaneStatusSummary({
+      ok: true,
+      status: {
+        panes: [{ id: "native-1" }, { id: "native-2" }],
+      },
+    }),
+    {
+      nativeMaterializedPaneCount: 2,
+      topologyPaneCount: null,
+      topologyPaneSource: "surf_ace_pair_or_panes_list",
+    },
+  );
 });
 
 test("native pane bridge derives native overlay rectangles from pane geometry", () => {

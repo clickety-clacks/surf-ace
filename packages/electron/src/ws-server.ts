@@ -38,6 +38,7 @@ import type {
   Viewport,
 } from "../../protocol/src/index.js";
 import {
+  compositorNativePaneStatusSummary,
   compositorFailureMessage,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
@@ -1463,6 +1464,7 @@ export class SurfaceWsServer {
           overlayRequest,
           overlayResponse,
           preflightStatus,
+          preflightStatusSummary: compositorNativePaneStatusSummary(preflightStatus),
         },
         paneLineageId: request.payload.paneLineageId,
         requestId: request.payload.requestId,
@@ -1491,6 +1493,7 @@ export class SurfaceWsServer {
           overlayRequest,
           overlayResponse,
           preflightStatus,
+          preflightStatusSummary: preflightStatus ? compositorNativePaneStatusSummary(preflightStatus) : null,
         },
         message: error instanceof Error ? error.message : String(error),
         paneLineageId: request.payload.paneLineageId,
