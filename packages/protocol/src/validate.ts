@@ -54,6 +54,18 @@ function validateObjectAgainstSchema(
       if (nestedReason) {
         return nestedReason;
       }
+      continue;
+    }
+    if (propertyType === "array") {
+      if (!Array.isArray(propertyValue)) {
+        return `invalid_type:${key}`;
+      }
+      const minItems = typeof propertySchemaValue.minItems === "number"
+        ? propertySchemaValue.minItems
+        : null;
+      if (minItems !== null && propertyValue.length < minItems) {
+        return `min_items:${key}`;
+      }
     }
   }
 
@@ -116,16 +128,15 @@ export function validateEnvelopeType(
     return { ok: false, reason: "request_id_missing" };
   }
   if ("payload" in envelope) {
-    if (actualType === "request") {
-      const validationFailure = validateObjectAgainstSchema(
-        selectedSchema as Record<string, unknown>,
-        envelope,
-      );
-      if (validationFailure) {
-        return { ok: false, reason: validationFailure };
-      }
-    } else if (!isObject(envelope.payload)) {
+    if (actualType !== "request" && !isObject(envelope.payload)) {
       return { ok: false, reason: "payload_not_object" };
+    }
+    const validationFailure = validateObjectAgainstSchema(
+      selectedSchema as Record<string, unknown>,
+      envelope,
+    );
+    if (validationFailure) {
+      return { ok: false, reason: validationFailure };
     }
     return { ok: true };
   }

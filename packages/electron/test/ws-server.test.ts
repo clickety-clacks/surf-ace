@@ -1229,6 +1229,11 @@ test("ws server forwards target.apply native pane host materialization to compos
           physical_output_width: 3840,
         },
       });
+      assert.deepEqual(applied.payload.materializedState?.preflightStatusSummary, {
+        nativeMaterializedPaneCount: null,
+        topologyPaneCount: null,
+        topologyPaneSource: "surf_ace_pair_or_panes_list",
+      });
       assert.deepEqual(applied.payload.materializedState?.hostRequest, received[1]);
       assert.deepEqual(applied.payload.materializedState?.hostResponse, {
         ok: true,
