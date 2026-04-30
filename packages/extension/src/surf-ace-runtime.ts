@@ -745,10 +745,15 @@ function resolveHomePath(input: string): string {
   return input;
 }
 
+function resolveOpenClawHomeDir(): string {
+  const openClawHome = process.env.OPENCLAW_HOME?.trim();
+  return openClawHome ? path.resolve(resolveHomePath(openClawHome)) : os.homedir();
+}
+
 export function resolveDefaultSurfAceStateDir(openClawStateDir = process.env.OPENCLAW_STATE_DIR): string {
   const stateRoot = openClawStateDir?.trim()
-    ? resolveHomePath(openClawStateDir.trim())
-    : path.join(os.homedir(), ".openclaw");
+    ? path.resolve(resolveHomePath(openClawStateDir.trim()))
+    : path.join(resolveOpenClawHomeDir(), ".openclaw");
   return path.join(stateRoot, "extensions", "surf-ace");
 }
 

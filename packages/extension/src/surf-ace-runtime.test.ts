@@ -1596,11 +1596,19 @@ function targetRegistrationOwnership(
 
 test("surf ace runtime defaults to the OpenClaw extension state root", () => {
   const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+  const previousOpenClawHome = process.env.OPENCLAW_HOME;
   try {
     process.env.OPENCLAW_STATE_DIR = path.join(os.tmpdir(), "openclaw-state-root");
     assert.equal(
       resolveDefaultSurfAceStateDir(),
       path.join(process.env.OPENCLAW_STATE_DIR, "extensions", "surf-ace"),
+    );
+
+    delete process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_HOME = path.join(os.tmpdir(), "openclaw-home-root");
+    assert.equal(
+      resolveDefaultSurfAceStateDir(),
+      path.join(process.env.OPENCLAW_HOME, ".openclaw", "extensions", "surf-ace"),
     );
 
     const injectedRoot = path.join(os.tmpdir(), "openclaw-injected-state-root");
@@ -1611,6 +1619,11 @@ test("surf ace runtime defaults to the OpenClaw extension state root", () => {
       delete process.env.OPENCLAW_STATE_DIR;
     } else {
       process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    }
+    if (previousOpenClawHome === undefined) {
+      delete process.env.OPENCLAW_HOME;
+    } else {
+      process.env.OPENCLAW_HOME = previousOpenClawHome;
     }
   }
 });
