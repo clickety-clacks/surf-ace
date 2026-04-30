@@ -115,6 +115,27 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(pane.pendingFlushStrokes.first?.tool, "pencil")
     }
 
+    func testPencilContactTransitionsAnnotationModeBeforeStroke() {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "pencil-contact")
+        let pane = surface.panes.first!
+        let bridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        runtime.handlePencilContact(surfaceId: surface.surfaceId, paneId: pane.paneId)
+
+        XCTAssertTrue(pane.annotationMode)
+        XCTAssertFalse(pane.fingerDrawEnabled)
+        XCTAssertEqual(surface.activeKeyboardPaneId, pane.paneId)
+        XCTAssertEqual(bridge.interactionStates.last?.annotationMode, true)
+        XCTAssertEqual(bridge.interactionStates.last?.fingerDrawEnabled, false)
+    }
+
+    func testAnnotationBorderIsDrivenByAnnotationMode() {
+        XCTAssertTrue(surfAceShowsAnnotationBorder(annotationMode: true))
+        XCTAssertFalse(surfAceShowsAnnotationBorder(annotationMode: false))
+    }
+
     private func isolatedUserDefaults() -> UserDefaults {
         let suiteName = "SurfAceRenderAndAnnotationDiagnosticsTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

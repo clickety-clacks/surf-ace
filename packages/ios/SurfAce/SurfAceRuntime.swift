@@ -543,6 +543,21 @@ final class SurfAceRuntime {
         }
     }
 
+    func handlePencilContact(surfaceId: String, paneId: Int) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        guard !pane.annotationMode else {
+            activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
+            return
+        }
+        setAnnotationMode(
+            surfaceId: surfaceId,
+            paneId: paneId,
+            enabled: true,
+            fingerDrawEnabled: false,
+            source: "pencil_contact"
+        )
+    }
+
     func navigateHistory(surfaceId: String, paneId: Int, direction: HistoryDirection) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
