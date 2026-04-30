@@ -533,6 +533,7 @@ export type SurfAceRuntimeOptions = {
   eventProfile?: EventProfile;
   logger?: SurfAceLogger;
   now?: () => number;
+  openClawStateDir?: string;
   providerName?: string;
   stateDir?: string;
 };
@@ -718,6 +719,27 @@ type PersistedScreenSnapshotFile = {
 
 type RuntimeDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
 
+function resolveHomePath(input: string): string {
+  if (input === "~") {
+    return os.homedir();
+  }
+  if (input.startsWith(`~${path.sep}`) || input.startsWith("~/")) {
+    return path.join(os.homedir(), input.slice(2));
+  }
+  return input;
+}
+
+export function resolveDefaultSurfAceStateDir(openClawStateDir = process.env.OPENCLAW_STATE_DIR): string {
+  const stateRoot = openClawStateDir?.trim()
+    ? resolveHomePath(openClawStateDir.trim())
+    : path.join(os.homedir(), ".openclaw");
+  return path.join(stateRoot, "extensions", "surf-ace");
+}
+
+function legacySurfAceStateDir(): string {
+  return path.join(os.homedir(), ".surf-ace-openclaw-extension");
+}
+
 function formatRuntimeDiagnosticValue(value: string | number | boolean): string {
   const text = String(value);
   return /^[A-Za-z0-9_.,/:@%-]+$/.test(text) ? text : JSON.stringify(text);
@@ -770,6 +792,11 @@ const SCREEN_SNAPSHOT_FILE_NAME = "surf-ace-runtime-screens.json";
 const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
 const OWNER_CONTROL_PATH = "/surf-ace-runtime-owner";
 const OWNER_CONTROL_MAX_BODY_BYTES = 1024 * 1024;
+const LEGACY_STATE_FILE_NAMES = [
+  STATE_FILE_NAME,
+  SCREEN_SNAPSHOT_FILE_NAME,
+  RUNTIME_LEASE_FILE_NAME,
+] as const;
 
 export class SurfAceToolError extends Error {
   constructor(
@@ -1945,6 +1972,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly now: () => number;
   private readonly providerName: string;
   private readonly stateDir: string;
+  private readonly warnLegacyStateRoot: boolean;
   private readonly surfaces = new Map<string, ManagedSurface>();
   private readonly tombstonedEndpointIds = new Set<string>();
   private readonly tombstonedSurfaceIds = new Set<SurfaceId>();
@@ -1980,8 +2008,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.logger = options.logger ?? console;
     this.now = options.now ?? (() => Date.now());
     this.providerName = options.providerName ?? "CLU / Surf Ace";
-    this.stateDir =
-      options.stateDir ?? path.join(os.homedir(), ".surf-ace-openclaw-extension");
+    this.stateDir = options.stateDir ?? resolveDefaultSurfAceStateDir(options.openClawStateDir);
+    this.warnLegacyStateRoot = !options.stateDir;
   }
 
   async start(): Promise<void> {
@@ -1996,6 +2024,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.startPromise = (async () => {
       this.logger.info?.("[surf-ace:runtime] start() — loading state");
       await ensureDirectory(this.stateDir);
+      await this.warnIfLegacyStateRootExists();
       await this.loadState();
       this.ownsRuntimeLease = await this.acquireRuntimeLease();
       if (this.ownsRuntimeLease) {
@@ -5187,6 +5216,33 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.persistentState.providerId = `pv_${randomUUID().replaceAll("-", "")}`;
       await this.persistState();
     }
+  }
+
+  private async warnIfLegacyStateRootExists(): Promise<void> {
+    const legacyDir = legacySurfAceStateDir();
+    if (!this.warnLegacyStateRoot) {
+      return;
+    }
+    if (path.resolve(this.stateDir) === path.resolve(legacyDir)) {
+      return;
+    }
+
+    const legacyFiles: string[] = [];
+    for (const fileName of LEGACY_STATE_FILE_NAMES) {
+      try {
+        await fs.access(path.join(legacyDir, fileName));
+        legacyFiles.push(fileName);
+      } catch {
+        continue;
+      }
+    }
+    if (legacyFiles.length === 0) {
+      return;
+    }
+
+    this.logger.warn?.(
+      `[surf-ace:runtime] ignoring legacy Surf Ace state root ${legacyDir}; current OpenClaw extension state root is ${this.stateDir}. To migrate, stop OpenClaw, back up both directories, copy the legacy state files into the current root, then restart OpenClaw.`,
+    );
   }
 
   private pendingEventCount(surface: ManagedSurface): number {

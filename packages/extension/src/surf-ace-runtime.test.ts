@@ -8,7 +8,7 @@ import { WebSocketServer } from "ws";
 import type WebSocket from "ws";
 
 import type { SurfAceDiscoveryEndpoint, SurfAceDiscoveryService } from "./surf-ace-discovery.js";
-import { createSurfAceRuntime } from "./surf-ace-runtime.js";
+import { createSurfAceRuntime, resolveDefaultSurfAceStateDir } from "./surf-ace-runtime.js";
 
 type TestPane = {
   contentId: string | null;
@@ -1577,6 +1577,27 @@ function targetRegistrationOwnership(
     paneLineageId: pane.paneLineageId,
   };
 }
+
+test("surf ace runtime defaults to the OpenClaw extension state root", () => {
+  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+  try {
+    process.env.OPENCLAW_STATE_DIR = path.join(os.tmpdir(), "openclaw-state-root");
+    assert.equal(
+      resolveDefaultSurfAceStateDir(),
+      path.join(process.env.OPENCLAW_STATE_DIR, "extensions", "surf-ace"),
+    );
+
+    const injectedRoot = path.join(os.tmpdir(), "openclaw-injected-state-root");
+    const runtime = createSurfAceRuntime({ openClawStateDir: injectedRoot });
+    assert.equal((runtime as any).stateDir, path.join(injectedRoot, "extensions", "surf-ace"));
+  } finally {
+    if (previousStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    }
+  }
+});
 
 test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
   await t.test("passive processes read the active owner's shared screen snapshot", async () => {

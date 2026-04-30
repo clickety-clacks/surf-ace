@@ -11,11 +11,13 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     const logger = (api.logger ?? console) as never;
+    const openClawStateDir = api.runtime.state?.resolveStateDir?.();
     const runtime = createSurfAceRuntime({
       deliverSettledAnnotationTurn: async (turn) => {
         await deliverSettledAnnotationIntentTurn(api.runtime, turn);
       },
       logger,
+      openClawStateDir,
       providerName: "CLU / Surf Ace",
     });
 
@@ -95,6 +97,7 @@ export {
   type SurfAceSnapshotResult,
   SurfAceToolError,
   createSurfAceRuntime,
+  resolveDefaultSurfAceStateDir,
 } from "./surf-ace-runtime.js";
 export {
   surfAceToolNames,
