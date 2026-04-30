@@ -670,6 +670,11 @@ type ManagedSurface = {
   workPromise: Promise<void> | null;
 };
 
+type EndpointProbe = {
+  endpointId: string;
+  surface: ManagedSurface;
+};
+
 type RuntimeStateFile = {
   nextRemotePaneId: number;
   nextPaneLabel: number;
@@ -1974,6 +1979,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly stateDir: string;
   private readonly warnLegacyStateRoot: boolean;
   private readonly surfaces = new Map<string, ManagedSurface>();
+  private readonly endpointProbes = new Map<string, EndpointProbe>();
   private readonly tombstonedEndpointIds = new Set<string>();
   private readonly tombstonedSurfaceIds = new Set<SurfaceId>();
   private persistentState: RuntimeStateFile = {
@@ -2044,7 +2050,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       // stop() was called but start() fires before its await-all resolves).
       // Surfaces with a stale workPromise would cause ensureSurfaceWorker to
       // skip, so new workers would never start.
-      for (const surface of this.surfaces.values()) {
+      for (const surface of this.allManagedSurfaces()) {
         if (surface.workPromise) {
           this.logger.info?.(
             `[surf-ace:runtime] start() — clearing stale workPromise for ${surface.surfaceId}`,
@@ -2062,7 +2068,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const snapshot = this.discovery.getSnapshot();
       this.logger.info?.(`[surf-ace:runtime] start() — discovery started, snapshot has ${snapshot.length} endpoint(s), calling handleDiscoveryUpdate`);
       this.handleDiscoveryUpdate(snapshot);
-      this.logger.info?.(`[surf-ace:runtime] start() — complete, ${this.surfaces.size} surface(s) in map`);
+      this.logger.info?.(`[surf-ace:runtime] start() — complete, ${this.surfaces.size} canonical surface(s), ${this.endpointProbes.size} endpoint probe(s)`);
       this.started = true;
     })();
 
@@ -2086,7 +2092,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.unsubscribeDiscovery?.();
     this.unsubscribeDiscovery = null;
 
-    const stopPromises = [...this.surfaces.values()].map(async (surface) => {
+    const stopPromises = this.allManagedSurfaces().map(async (surface) => {
       surface.stopRequested = true;
       this.stopHeartbeat(surface);
       this.wakeSurfaceRetry(surface);
@@ -2098,6 +2104,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     await Promise.all(stopPromises);
     this.surfaces.clear();
+    this.endpointProbes.clear();
     await this.persistScreenSnapshot();
     await this.stateWrite;
     await this.screenSnapshotWrite;
@@ -2115,7 +2122,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.start();
     const discoverySnapshot = this.discovery.getSnapshot();
     this.logger.info?.(
-      `[surf-ace:runtime] listScreens: ${this.surfaces.size} surface(s) in map, ${discoverySnapshot.length} discovery endpoint(s): ${discoverySnapshot.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}`,
+      `[surf-ace:runtime] listScreens: ${this.surfaces.size} canonical surface(s), ${this.endpointProbes.size} endpoint probe(s), ${discoverySnapshot.length} discovery endpoint(s): ${discoverySnapshot.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}`,
     );
     if (this.ownsRuntimeLease) {
       return this.buildScreenSummaries();
@@ -3199,14 +3206,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private handleDiscoveryUpdate(endpoints: SurfAceDiscoveryEndpoint[]): void {
     this.logger.warn?.(
-      `[surf-ace:runtime] discoveryUpdate: ${endpoints.length} endpoint(s): ${endpoints.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}; surfaces in map: ${this.surfaces.size}`,
+      `[surf-ace:runtime] discoveryUpdate: ${endpoints.length} endpoint(s): ${endpoints.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}; canonical surfaces: ${this.surfaces.size}; endpoint probes: ${this.endpointProbes.size}`,
     );
     for (const endpoint of endpoints) {
       this.refreshEndpointTopology(endpoint);
     }
 
     const currentEndpointIds = new Set(endpoints.map((endpoint) => endpoint.endpointId));
-    for (const surface of this.surfaces.values()) {
+    for (const surface of this.allManagedSurfaces()) {
       if (!currentEndpointIds.has(surface.endpointId)) {
         const wsOpen = surface.client?.isOpen() ?? false;
         const preserveOwnedSurface =
@@ -3221,6 +3228,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           continue;
         }
         surface.stopRequested = true;
+        this.removeManagedSurfaceFromRegistries(surface);
         if (surface.client) {
           this.runBackgroundTask(
             `close removed surface ${surface.surfaceId}`,
@@ -3351,28 +3359,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     sourceSurface: ManagedSurface,
     event: SurfaceAppearedEvent,
   ): void {
-    this.tombstonedSurfaceIds.delete(event.payload.surfaceId);
-    const existing = this.surfaces.get(event.payload.surfaceId);
-    const windowLabel = existing?.windowLabel || this.ensureWindowLabel(event.payload.surfaceId);
-    const surface = existing ?? createManagedSurface(
-      event.payload.surfaceId,
-      sourceSurface.endpoint,
-      event.payload.name,
-      event.payload.viewport,
-      windowLabel,
-      this.now(),
-    );
-
-    surface.endpoint = sourceSurface.endpoint;
-    surface.endpointId = sourceSurface.endpointId;
-    surface.fingerprintPrefix = sourceSurface.fingerprintPrefix;
-    surface.discoveryProbe = false;
-    this.clearTombstonedEndpointId(surface.endpointId, "surface appeared");
-    surface.lastSeenAt = this.now();
-    surface.name = event.payload.name;
-    surface.viewport = cloneViewport(event.payload.viewport);
-    surface.windowLabel = windowLabel;
-    this.surfaces.set(surface.surfaceId, surface);
+    const surface = this.upsertCanonicalVisibleSurface({
+      name: event.payload.name,
+      source: "surface_appeared",
+      sourceSurface,
+      surfaceId: event.payload.surfaceId,
+      viewport: event.payload.viewport,
+    });
     this.ensureSurfaceWorker(surface);
   }
 
@@ -3414,7 +3407,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         },
       );
     }
-    this.surfaces.delete(surfaceId);
+    this.removeManagedSurfaceFromRegistries(surface);
     this.logger.info?.(
       runtimeDiagnostic("surface_removed", {
         reason,
@@ -3867,10 +3860,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     this.logger.info?.(`[surf-ace:runtime] ensureSurfaceWorker STARTING worker for ${surface.surfaceId}`);
     surface.stopRequested = false;
-    surface.workPromise = this.runSurfaceWorker(surface).finally(() => {
-      surface.workPromise = null;
+    let workPromise!: Promise<void>;
+    workPromise = this.runSurfaceWorker(surface).finally(() => {
+      for (const managedSurface of this.allManagedSurfaces()) {
+        if (managedSurface.workPromise === workPromise) {
+          managedSurface.workPromise = null;
+        }
+      }
       this.logger.info?.(`[surf-ace:runtime] worker exited for ${surface.surfaceId}`);
     });
+    surface.workPromise = workPromise;
   }
 
   private ensureWindowLabel(surfaceId: string): string {
@@ -3967,24 +3966,198 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
   }
 
+  private upsertCanonicalVisibleSurface(input: {
+    name: string;
+    source: "surface_appeared" | "surfaces.list";
+    sourceSurface: ManagedSurface;
+    surfaceId: SurfaceId;
+    viewport: SurfaceViewport;
+  }): ManagedSurface {
+    if (isProvisionalSurfaceId(input.surfaceId)) {
+      this.logger.warn?.(
+        runtimeDiagnostic("canonical_surface_quarantined", {
+          endpoint_id: input.sourceSurface.endpointId,
+          reason: "provisional_remote_surface_id",
+          source: input.source,
+          surface_id: input.surfaceId,
+        }),
+      );
+      return input.sourceSurface;
+    }
+
+    this.tombstonedSurfaceIds.delete(input.surfaceId);
+    const existing = this.surfaces.get(input.surfaceId);
+    const windowLabel = existing?.windowLabel || this.ensureWindowLabel(input.surfaceId);
+    const surface = existing ?? createManagedSurface(
+      input.surfaceId,
+      input.sourceSurface.endpoint,
+      input.name,
+      input.viewport,
+      windowLabel,
+      this.now(),
+    );
+
+    surface.endpoint = input.sourceSurface.endpoint;
+    surface.endpointId = input.sourceSurface.endpointId;
+    surface.fingerprintPrefix = input.sourceSurface.fingerprintPrefix;
+    surface.discoveryProbe = false;
+    surface.lastSeenAt = this.now();
+    surface.name = input.name;
+    surface.viewport = cloneViewport(input.viewport);
+    surface.windowLabel = windowLabel;
+    if (!existing) {
+      surface.stopRequested = false;
+    }
+    this.clearTombstonedEndpointId(surface.endpointId, input.source);
+    this.surfaces.set(surface.surfaceId, surface);
+    this.logger.info?.(
+      runtimeDiagnostic("canonical_surface_upsert", {
+        endpoint_id: surface.endpointId,
+        source: input.source,
+        surface_id: surface.surfaceId,
+        visible_surface_count: this.surfaces.size,
+      }),
+    );
+    return surface;
+  }
+
   private adoptCanonicalSurfaceId(
     surface: ManagedSurface,
     nextSurfaceId: SurfaceId,
     source: "pair.response" | "surfaces.list",
-  ): void {
+  ): ManagedSurface {
+    if (isProvisionalSurfaceId(nextSurfaceId)) {
+      this.logger.warn?.(
+        runtimeDiagnostic("canonical_surface_quarantined", {
+          endpoint_id: surface.endpointId,
+          reason: "provisional_canonical_admission",
+          source,
+          surface_id: nextSurfaceId,
+        }),
+      );
+      this.markEndpointProbeAfterEmptySurfaceList(surface);
+      return surface;
+    }
+
     if (nextSurfaceId === surface.surfaceId) {
       if (!surface.windowLabel) {
         surface.windowLabel = this.ensureWindowLabel(nextSurfaceId);
       }
+      surface.discoveryProbe = false;
+      this.endpointProbes.delete(surface.endpointId);
+      this.surfaces.set(surface.surfaceId, surface);
       this.restoreRestartOwnership(surface);
-      return;
+      return surface;
+    }
+
+    if (surface.discoveryProbe || isProvisionalSurfaceId(surface.surfaceId)) {
+      const existing = this.surfaces.get(nextSurfaceId);
+      const previousSurfaceId = surface.surfaceId;
+      if (existing && existing !== surface) {
+        this.removeManagedSurfaceFromRegistries(surface);
+        surface.client = null;
+        surface.retryDelayResolver = null;
+        surface.workPromise = null;
+        surface.stopRequested = true;
+        if (
+          source === "surfaces.list" &&
+          existing.endpointId !== surface.endpointId &&
+          buildWsUrl(existing.endpoint) === buildWsUrl(surface.endpoint)
+        ) {
+          this.assignEndpoint(existing, surface.endpoint, { preserveLiveAlias: false });
+        }
+        this.clearTombstonedEndpointId(existing.endpointId, source);
+        this.restoreRestartOwnership(existing);
+        this.logger.info?.(
+          runtimeDiagnostic("surface_adopt_remote_id", {
+            endpoint_id: surface.endpointId,
+            from_surface_id: previousSurfaceId,
+            panes: existing.panes.size,
+            source,
+            to_surface_id: nextSurfaceId,
+          }),
+        );
+        return existing;
+      }
+      const canonicalSurface = existing ?? createManagedSurface(
+        nextSurfaceId,
+        surface.endpoint,
+        surface.name,
+        surface.viewport,
+        this.ensureWindowLabel(nextSurfaceId),
+        this.now(),
+      );
+      this.removeManagedSurfaceFromRegistries(surface);
+      canonicalSurface.endpoint = surface.endpoint;
+      canonicalSurface.endpointId = surface.endpointId;
+      canonicalSurface.fingerprintPrefix = surface.fingerprintPrefix;
+      canonicalSurface.discoveryProbe = false;
+      canonicalSurface.lastSeenAt = this.now();
+      canonicalSurface.name = surface.name;
+      canonicalSurface.viewport = cloneViewport(surface.viewport);
+      canonicalSurface.windowLabel = this.reconcileWindowLabel(
+        previousSurfaceId,
+        nextSurfaceId,
+        canonicalSurface.windowLabel || surface.windowLabel,
+      );
+      canonicalSurface.autoRetryEnabled = surface.autoRetryEnabled;
+      canonicalSurface.stopRequested = false;
+      if (source === "pair.response") {
+        canonicalSurface.client = surface.client;
+        canonicalSurface.connectionState = surface.connectionState;
+        canonicalSurface.connectedAt = surface.connectedAt;
+        canonicalSurface.retryDelayResolver = surface.retryDelayResolver;
+        canonicalSurface.workPromise = surface.workPromise;
+      } else {
+        canonicalSurface.client = null;
+        canonicalSurface.connectionState = "connecting";
+        canonicalSurface.connectedAt = null;
+        canonicalSurface.retryDelayResolver = null;
+        canonicalSurface.workPromise = null;
+      }
+      canonicalSurface.unreachableFailures = surface.unreachableFailures;
+      canonicalSurface.reconnectAttempt = surface.reconnectAttempt;
+      if (!existing) {
+        canonicalSurface.panes = new Map(surface.panes);
+        canonicalSurface.layout = surface.layout ? structuredClone(surface.layout) : null;
+        canonicalSurface.targetRecords = new Map(surface.targetRecords);
+        canonicalSurface.registeredTargetIdsByIdempotencyKey = new Map(surface.registeredTargetIdsByIdempotencyKey);
+        canonicalSurface.paneIdsNeedingSnapshot = new Set(surface.paneIdsNeedingSnapshot);
+        canonicalSurface.hasPairedInGatewaySession = surface.hasPairedInGatewaySession;
+        canonicalSurface.sessionId = surface.sessionId;
+        canonicalSurface.ownershipEpoch = surface.ownershipEpoch;
+        canonicalSurface.topologyRevision = surface.topologyRevision;
+      }
+      surface.client = null;
+      surface.retryDelayResolver = null;
+      surface.workPromise = null;
+      surface.stopRequested = true;
+      this.renamePersistedSurfaceTargetState(previousSurfaceId, nextSurfaceId);
+      this.reconcilePaneLabelsBySurfaceId(previousSurfaceId, nextSurfaceId);
+      this.clearTombstonedEndpointId(canonicalSurface.endpointId, source);
+      this.surfaces.set(nextSurfaceId, canonicalSurface);
+      this.restoreRestartOwnership(canonicalSurface);
+      this.logger.info?.(
+        runtimeDiagnostic("surface_adopt_remote_id", {
+          endpoint_id: canonicalSurface.endpointId,
+          from_surface_id: previousSurfaceId,
+          panes: canonicalSurface.panes.size,
+          source,
+          to_surface_id: nextSurfaceId,
+        }),
+      );
+      this.runBackgroundTask(
+        `persist remapped surface id ${canonicalSurface.endpointId}`,
+        async () => {
+          await this.persistState();
+        },
+      );
+      return canonicalSurface;
     }
 
     const oldSurfaceId = surface.surfaceId;
     const preservedSurface = this.surfaces.get(nextSurfaceId);
-    if (this.surfaces.get(oldSurfaceId) === surface) {
-      this.surfaces.delete(oldSurfaceId);
-    }
+    this.removeManagedSurfaceFromRegistries(surface);
     if (preservedSurface && preservedSurface !== surface) {
       this.preserveSurfaceStateUntilPairResponse(surface, preservedSurface);
       this.quiesceSupersededSurface(preservedSurface, nextSurfaceId);
@@ -3999,6 +4172,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }),
     );
     surface.surfaceId = nextSurfaceId;
+    surface.discoveryProbe = false;
     surface.windowLabel = this.reconcileWindowLabel(
       oldSurfaceId,
       nextSurfaceId,
@@ -4007,6 +4181,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.renamePersistedSurfaceTargetState(oldSurfaceId, nextSurfaceId);
     this.reconcilePaneLabelsBySurfaceId(oldSurfaceId, nextSurfaceId);
     this.surfaces.set(nextSurfaceId, surface);
+    this.endpointProbes.delete(surface.endpointId);
     this.restoreRestartOwnership(surface);
     this.runBackgroundTask(
       `persist remapped surface id ${surface.endpointId}`,
@@ -4014,6 +4189,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         await this.persistState();
       },
     );
+    return surface;
   }
 
   private orderedPanes(surface: ManagedSurface): ManagedPane[] {
@@ -5259,10 +5435,50 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return total;
   }
 
+  private allManagedSurfaces(): ManagedSurface[] {
+    const surfaces: ManagedSurface[] = [...this.surfaces.values()];
+    for (const probe of this.endpointProbes.values()) {
+      if (!surfaces.includes(probe.surface)) {
+        surfaces.push(probe.surface);
+      }
+    }
+    return surfaces;
+  }
+
+  private canonicalVisibleSurfaces(): ManagedSurface[] {
+    const visible: ManagedSurface[] = [];
+    for (const [surfaceId, surface] of this.surfaces) {
+      if (surface.discoveryProbe || isProvisionalSurfaceId(surface.surfaceId) || surface.surfaceId !== surfaceId) {
+        this.logger.warn?.(
+          runtimeDiagnostic("canonical_surface_quarantined", {
+            map_key: surfaceId,
+            provisional: isProvisionalSurfaceId(surface.surfaceId),
+            reason: surface.discoveryProbe ? "endpoint_probe_in_canonical_registry" : "non_canonical_registry_entry",
+            surface_id: surface.surfaceId,
+          }),
+        );
+        this.surfaces.delete(surfaceId);
+        this.endpointProbes.set(surface.endpointId, {
+          endpointId: surface.endpointId,
+          surface,
+        });
+        surface.discoveryProbe = true;
+        continue;
+      }
+      visible.push(surface);
+    }
+    return visible;
+  }
+
+  private assertCanonicalSurfaceRegistry(reason: string): void {
+    void reason;
+    this.canonicalVisibleSurfaces();
+  }
+
   private buildScreenSummaries(): SurfAceScreenSummary[] {
+    this.canonicalVisibleSurfaces();
     this.repairLivePaneLabelInvariant("screen summary");
-    return [...this.surfaces.values()]
-      .filter((surface) => !surface.discoveryProbe)
+    return this.canonicalVisibleSurfaces()
       .sort((left, right) => left.windowLabel.localeCompare(right.windowLabel, "en"))
       .map((surface) => this.buildScreenSummary(surface));
   }
@@ -5984,8 +6200,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private requireConnectedSurface(fingerprint: string): ManagedSurface {
+    this.assertCanonicalSurfaceRegistry("tool surface resolution");
     const surface = this.surfaces.get(fingerprint);
-    if (!surface) {
+    if (!surface || surface.discoveryProbe || isProvisionalSurfaceId(surface.surfaceId)) {
       throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
     }
     if (surface.connectionState !== "connected" || !surface.client) {
@@ -5998,8 +6215,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private requirePane(fingerprint: string, paneId: PaneId): ManagedPane {
+    this.assertCanonicalSurfaceRegistry("tool pane resolution");
     const surface = this.surfaces.get(fingerprint);
-    if (!surface) {
+    if (!surface || surface.discoveryProbe || isProvisionalSurfaceId(surface.surfaceId)) {
       throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
     }
     const pane = surface.panes.get(paneId);
@@ -6046,25 +6264,28 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
       this.assignEndpoint(existing, endpoint);
       if (existing.discoveryProbe) {
+        this.endpointProbes.set(endpoint.endpointId, {
+          endpointId: endpoint.endpointId,
+          surface: existing,
+        });
         this.wakeSurfaceRetry(existing);
       }
       this.ensureSurfaceWorker(existing);
       return;
     }
 
-    const stoppedCandidate = [...this.surfaces.values()].find(
+    const stoppedCandidate = this.allManagedSurfaces().find(
       (surface) =>
         surface.stopRequested &&
         surface.endpointId === endpoint.endpointId,
     );
     if (stoppedCandidate) {
-      this.surfaces.delete(stoppedCandidate.surfaceId);
+      this.removeManagedSurfaceFromRegistries(stoppedCandidate);
     }
     const surfaceId = makeProvisionalSurfaceId(endpoint.endpointId);
-    const discoveryProbe = this.tombstonedEndpointIds.has(endpoint.endpointId);
     this.logger.info?.(
       runtimeDiagnostic("endpoint_adopt", {
-        action: discoveryProbe ? "create_discovery_probe" : "create_surface",
+        action: "create_discovery_probe",
         endpoint_id: endpoint.endpointId,
         surface_id: surfaceId,
         surface_name: endpoint.name,
@@ -6078,9 +6299,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       "",
       this.now(),
     );
-    surface.discoveryProbe = discoveryProbe;
+    surface.discoveryProbe = true;
 
-    this.surfaces.set(surfaceId, surface);
+    this.endpointProbes.set(endpoint.endpointId, {
+      endpointId: endpoint.endpointId,
+      surface,
+    });
     this.ensureSurfaceWorker(surface);
   }
 
@@ -6164,7 +6388,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.stopRequested = true;
     surface.autoRetryEnabled = false;
     surface.connectionState = "unreachable";
-    this.surfaces.delete(surface.surfaceId);
+    this.removeManagedSurfaceFromRegistries(surface);
     this.wakeSurfaceRetry(surface);
     this.logger.warn?.(
       runtimeDiagnostic("endpoint_duplicate_surface_retired", {
@@ -6200,7 +6424,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private reusableSurfacesMatching(predicate: (surface: ManagedSurface) => boolean): ManagedSurface[] {
     const surfaces: ManagedSurface[] = [];
-    for (const surface of [...this.surfaces.values()]) {
+    for (const surface of this.allManagedSurfaces()) {
       if (!predicate(surface)) {
         continue;
       }
@@ -6210,6 +6434,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
     return surfaces;
+  }
+
+  private removeManagedSurfaceFromRegistries(surface: ManagedSurface): void {
+    if (this.surfaces.get(surface.surfaceId) === surface) {
+      this.surfaces.delete(surface.surfaceId);
+    }
+    const probe = this.endpointProbes.get(surface.endpointId);
+    if (probe?.surface === surface) {
+      this.endpointProbes.delete(surface.endpointId);
+    }
+  }
+
+  private isManagedSurfaceRegistered(surface: ManagedSurface): boolean {
+    if (this.surfaces.get(surface.surfaceId) === surface) {
+      return true;
+    }
+    return this.endpointProbes.get(surface.endpointId)?.surface === surface;
   }
 
   private assignEndpoint(
@@ -6316,56 +6557,55 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return [];
     }
     this.clearTombstonedEndpointId(surface.endpointId, "surfaces.list nonempty");
-    surface.discoveryProbe = false;
     for (const remoteSurface of remoteSurfaces) {
       this.tombstonedSurfaceIds.delete(asSurfaceId(remoteSurface.surfaceId));
     }
 
+    const siblingsToStart: ManagedSurface[] = [];
+    let sourceCanonicalSurfaceId: SurfaceId | null = null;
+    let sourceWasProvisional = false;
     const matchedRemoteSurface = remoteSurfaces.find((remoteSurface) => remoteSurface.surfaceId === surface.surfaceId);
     if (matchedRemoteSurface) {
       const matchedRemoteSurfaceId = asSurfaceId(matchedRemoteSurface.surfaceId);
-      this.adoptCanonicalSurfaceId(surface, matchedRemoteSurfaceId, "surfaces.list");
+      const canonicalSurface = this.adoptCanonicalSurfaceId(surface, matchedRemoteSurfaceId, "surfaces.list");
+      sourceCanonicalSurfaceId = canonicalSurface.surfaceId;
 
-      surface.lastSeenAt = this.now();
-      surface.name = matchedRemoteSurface.name;
-      surface.viewport = cloneViewport(matchedRemoteSurface.viewport);
+      canonicalSurface.lastSeenAt = this.now();
+      canonicalSurface.name = matchedRemoteSurface.name;
+      canonicalSurface.viewport = cloneViewport(matchedRemoteSurface.viewport);
+      siblingsToStart.push(canonicalSurface);
     } else if (isProvisionalSurfaceId(surface.surfaceId)) {
+      sourceWasProvisional = true;
       const canonicalRemoteSurface = remoteSurfaces[0]!;
       const canonicalRemoteSurfaceId = asSurfaceId(canonicalRemoteSurface.surfaceId);
-      this.adoptCanonicalSurfaceId(surface, canonicalRemoteSurfaceId, "surfaces.list");
+      const canonicalSurface = this.adoptCanonicalSurfaceId(surface, canonicalRemoteSurfaceId, "surfaces.list");
+      sourceCanonicalSurfaceId = canonicalSurface.surfaceId;
 
-      surface.lastSeenAt = this.now();
-      surface.name = canonicalRemoteSurface.name;
-      surface.viewport = cloneViewport(canonicalRemoteSurface.viewport);
+      canonicalSurface.lastSeenAt = this.now();
+      canonicalSurface.name = canonicalRemoteSurface.name;
+      canonicalSurface.viewport = cloneViewport(canonicalRemoteSurface.viewport);
+      siblingsToStart.push(canonicalSurface);
     }
 
-    const siblingsToStart: ManagedSurface[] = [];
     for (const remoteSurface of remoteSurfaces) {
       const remoteSurfaceId = asSurfaceId(remoteSurface.surfaceId);
-      if (remoteSurfaceId === surface.surfaceId) {
+      if (remoteSurfaceId === sourceCanonicalSurfaceId) {
         continue;
       }
 
-      const existing = this.surfaces.get(remoteSurfaceId);
-      const discoveredSurface = existing ?? createManagedSurface(
-        remoteSurfaceId,
-        surface.endpoint,
-        remoteSurface.name,
-        remoteSurface.viewport,
-        this.ensureWindowLabel(remoteSurfaceId),
-        this.now(),
-      );
-
-      discoveredSurface.endpoint = surface.endpoint;
-      discoveredSurface.endpointId = surface.endpointId;
-      discoveredSurface.fingerprintPrefix = surface.fingerprintPrefix;
-      discoveredSurface.discoveryProbe = false;
-      discoveredSurface.lastSeenAt = this.now();
-      discoveredSurface.name = remoteSurface.name;
-      discoveredSurface.viewport = cloneViewport(remoteSurface.viewport);
-      discoveredSurface.stopRequested = false;
-      this.surfaces.set(remoteSurfaceId, discoveredSurface);
-      siblingsToStart.push(discoveredSurface);
+      const discoveredSurface = this.upsertCanonicalVisibleSurface({
+        name: remoteSurface.name,
+        source: "surfaces.list",
+        sourceSurface: surface,
+        surfaceId: remoteSurfaceId,
+        viewport: remoteSurface.viewport,
+      });
+      if (discoveredSurface === surface) {
+        continue;
+      }
+      if (!sourceWasProvisional) {
+        siblingsToStart.push(discoveredSurface);
+      }
     }
     this.removeEndpointSurfacesAbsentFromRemoteList(surface, remoteSurfaces);
     return siblingsToStart;
@@ -6400,9 +6640,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
       this.removeClosedSurface(candidate.surfaceId, "surfaces_list_absent");
     }
-    if (this.surfaces.get(previousSurfaceId) === surface) {
-      this.surfaces.delete(previousSurfaceId);
-    }
+    this.removeManagedSurfaceFromRegistries(surface);
     surface.surfaceId = probeSurfaceId;
     surface.windowLabel = "";
     surface.discoveryProbe = true;
@@ -6414,7 +6652,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.targetRecords.clear();
     surface.registeredTargetIdsByIdempotencyKey.clear();
     surface.paneIdsNeedingSnapshot.clear();
-    this.surfaces.set(probeSurfaceId, surface);
+    this.endpointProbes.set(surface.endpointId, {
+      endpointId: surface.endpointId,
+      surface,
+    });
+    this.logger.info?.(
+      runtimeDiagnostic("endpoint_probe_upsert", {
+        endpoint_id: surface.endpointId,
+        probe_surface_id: probeSurfaceId,
+      }),
+    );
     if (surface.client) {
       this.runBackgroundTask(
         `close empty surfaces.list probe ${probeSurfaceId}`,
@@ -6736,6 +6983,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           const siblingSurfaces = await this.discoverSurfaceId(surface);
           if (surface.discoveryProbe) {
             await this.closeSurfaceClient(surface, client, clampCloseReason("provider_shutdown"));
+            for (const siblingSurface of siblingSurfaces) {
+              this.ensureSurfaceWorker(siblingSurface);
+            }
             throw new SurfAceToolError("not_connected", "Surf Ace endpoint has no live surfaces");
           }
           if (surface.stopRequested || this.surfaces.get(surface.surfaceId) !== surface) {
@@ -6751,11 +7001,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             }),
           );
           const pairResponse = await this.requestPair(surface);
-          this.adoptCanonicalSurfaceId(
+          const canonicalSurface = this.adoptCanonicalSurfaceId(
             surface,
             asSurfaceId(pairResponse.payload.surfaceId),
             "pair.response",
           );
+          if (canonicalSurface !== surface && canonicalSurface.client !== client) {
+            await this.closeSurfaceClient(surface, client, clampCloseReason("provider_shutdown"));
+            return;
+          }
+          if (canonicalSurface !== surface) {
+            surface = canonicalSurface;
+          }
           this.assertPairResponseHasTopologyPanes(surface, pairResponse);
           const hadPairedProviderTopology =
             surface.hasPairedInGatewaySession &&
@@ -6919,7 +7176,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    if (this.surfaces.get(surface.surfaceId) !== surface) {
+    if (!this.isManagedSurfaceRegistered(surface)) {
       surface.stopRequested = true;
       return;
     }
