@@ -420,7 +420,7 @@ private struct SurfAcePaneView: View {
             }
             .overlay {
                 SurfAceAnnotationBorder(
-                    active: pane.annotationMode && surface.activeKeyboardPaneId != pane.paneId,
+                    active: surfAceShowsAnnotationBorder(annotationMode: pane.annotationMode),
                     pulsing: pane.isDrawingFlushSending
                 )
             }
@@ -473,6 +473,10 @@ private struct SurfAcePaneView: View {
 
 func surfAceShowsKeyboardFocusOutline(activePaneId: Int?, paneId: Int, paneCount: Int) -> Bool {
     paneCount > 1 && activePaneId == paneId
+}
+
+func surfAceShowsAnnotationBorder(annotationMode: Bool) -> Bool {
+    annotationMode
 }
 
 private struct SurfAcePaneIdentityOverlay: View {
@@ -764,6 +768,10 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
                 guard let self else { return }
                 self.runtime.activateKeyboardPane(surfaceId: self.surfaceId, paneId: self.paneId)
             }
+            hostView.onPencilContact = { [weak self] in
+                guard let self else { return }
+                self.runtime.handlePencilContact(surfaceId: self.surfaceId, paneId: self.paneId)
+            }
             hostView.onSelectionChanged = { [weak self] text, rect in
                 guard let self else { return }
                 self.runtime.handleSelectionChanged(surfaceId: self.surfaceId, paneId: self.paneId, text: text, rect: rect)
@@ -926,6 +934,7 @@ private final class SurfAceWeakScriptMessageHandler: NSObject, WKScriptMessageHa
 @MainActor
 private final class SurfAceAnnotationCanvasView: PKCanvasView {
     var annotationMode = false
+    var onPencilContact: (() -> Void)?
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard super.point(inside: point, with: event) else {
@@ -936,11 +945,39 @@ private final class SurfAceAnnotationCanvasView: PKCanvasView {
         }
         return event?.allTouches?.contains { $0.type == .pencil } == true
     }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if touches.contains(where: { $0.type == .pencil }) {
+            onPencilContact?()
+        }
+        super.touchesBegan(touches, with: event)
+    }
+}
+
+@MainActor
+private final class SurfAcePencilContactGestureRecognizer: UIGestureRecognizer {
+    var onPencilContact: (() -> Void)?
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if touches.contains(where: { $0.type == .pencil }) {
+            onPencilContact?()
+        }
+        state = .failed
+    }
 }
 
 @MainActor
 final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     var onInteractionBegan: (() -> Void)?
+    var onPencilContact: (() -> Void)?
     var onSelectionChanged: ((String, CGRect?) -> Void)?
     var onScrollSettled: ((SurfAceViewport, String) -> Void)?
     var onTapEvent: ((String, SurfAcePoint, String) -> Void)?
@@ -963,6 +1000,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private let webView: WKWebView
     private let pdfView = PDFView()
     private let canvasView = SurfAceAnnotationCanvasView()
+    private let pencilContactRecognizer = SurfAcePencilContactGestureRecognizer()
     private var currentEntry: SurfAcePaneEntry?
     private var pendingBrowserNavigation: CheckedContinuation<SurfAceBrowserNavigationResult, Never>?
     private var pendingBrowserNavigationLoad: WKNavigation?
@@ -1326,6 +1364,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         canvasView.backgroundColor = .clear
         canvasView.isOpaque = false
         canvasView.delegate = self
+        canvasView.onPencilContact = { [weak self] in
+            self?.onPencilContact?()
+        }
         canvasView.tool = PKInkingTool(.pen, color: .systemOrange, width: 4)
 
         addSubview(webView)
@@ -1365,6 +1406,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         recognizer.delaysTouchesBegan = false
         recognizer.delaysTouchesEnded = false
         addGestureRecognizer(recognizer)
+
+        pencilContactRecognizer.onPencilContact = { [weak self] in
+            self?.onPencilContact?()
+        }
+        addGestureRecognizer(pencilContactRecognizer)
     }
 
     @objc
