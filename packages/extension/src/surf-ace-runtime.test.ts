@@ -165,6 +165,8 @@ class FakeSurfAceWsServer {
   resumePairMismatchMessage = "Resume session did not match active ownership lock";
   includePairPaneLineageIds = true;
   forceEmptyPairResponsePanes = false;
+  surfacesListErrorCode: string | null = null;
+  surfacesListRequests = 0;
 
   pairedSocket: import("ws").WebSocket | null = null;
   readonly surfaceId: string;
@@ -503,6 +505,20 @@ class FakeSurfAceWsServer {
   ): Promise<void> {
     switch (message.op) {
       case "surfaces.list":
+        this.surfacesListRequests += 1;
+        if (this.surfacesListErrorCode) {
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(
+                message.id,
+                "surfaces.list",
+                this.surfacesListErrorCode,
+                "surfaces.list unavailable",
+              ),
+            ),
+          );
+          return;
+        }
         socket.send(
           JSON.stringify(
             this.response(message.id, "surfaces.list", {
@@ -1949,10 +1965,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(new Set(firstPaneIds).size, firstPaneIds.length);
       assert.equal(serverA.pairRequests[0]?.windowLabel, "a");
       assert.equal(serverB.pairRequests[0]?.windowLabel, "b");
-      assert.deepEqual(
-        [serverA.pairRequests[0]?.initialPaneId, serverB.pairRequests[0]?.initialPaneId].sort(),
-        [1, 2],
-      );
+      const initialRemotePaneIds = [
+        serverA.pairRequests[0]?.initialPaneId,
+        serverB.pairRequests[0]?.initialPaneId,
+      ].filter((paneId): paneId is number => typeof paneId === "number");
+      assert.equal(new Set(initialRemotePaneIds).size, 2);
+      assert.ok(initialRemotePaneIds.every((paneId) => paneId > 0));
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
         [1, 1],
@@ -2012,10 +2030,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(requestsBySurface.get("sf_surface-a")?.windowLabel, "a");
       assert.equal(requestsBySurface.get("sf_surface-b")?.windowLabel, "b");
       assert.equal(requestsBySurface.get("sf_surface-c")?.windowLabel, "c");
-      assert.deepEqual(
-        [...requestsBySurface.values()].map((request) => request?.initialPaneId).sort(),
-        [1, 42, 43],
-      );
+      const initialRemotePaneIds = [...requestsBySurface.values()]
+        .map((request) => request?.initialPaneId)
+        .filter((paneId): paneId is number => typeof paneId === "number");
+      assert.equal(new Set(initialRemotePaneIds).size, 3);
+      assert.ok(initialRemotePaneIds.every((paneId) => paneId > 0));
       assert.deepEqual(
         [...requestsBySurface.values()].map((request) => request?.initialPaneLabel).sort(),
         [1, 1, 1],
@@ -2025,7 +2044,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         [...internalRuntime.surfaces.keys()].sort(),
         ["sf_surface-a", "sf_surface-b", "sf_surface-c"],
       );
-      assert.equal(internalRuntime.endpointProbes.size, 0);
+      assert.equal(internalRuntime.endpointProbes.size, 1);
+      const endpointProbe = internalRuntime.endpointProbes.get(`endpoint-${port}`);
+      assert.ok(endpointProbe);
+      assert.equal("surfaceId" in endpointProbe, false);
+      assert.equal("panes" in endpointProbe, false);
       assert.equal(server.pairedSocketFor("sf_surface-a") === server.pairedSocketFor("sf_surface-b"), false);
       assert.equal(server.pairedSocketFor("sf_surface-b") === server.pairedSocketFor("sf_surface-c"), false);
     } finally {
@@ -2033,6 +2056,24 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await server.close();
       await fs.rm(stateDir, { force: true, recursive: true });
     }
+  });
+
+  await t.test("endpoint probe retries without visible leakage when surfaces.list is unavailable", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.surfacesListErrorCode = "unsupported";
+      },
+      waitForPair: false,
+      run: async ({ runtime, server }) => {
+        const internalRuntime = runtime as any;
+        await waitFor(() => server.surfacesListRequests >= 2, 12_000);
+        assert.deepEqual(await runtime.listScreens(), []);
+        assert.deepEqual([...internalRuntime.surfaces.keys()], []);
+        assert.equal(internalRuntime.endpointProbes.size, 1);
+        assert.equal([...internalRuntime.surfaces.keys()].some((surfaceId) => surfaceId.startsWith("sf_disc_")), false);
+        assert.deepEqual(server.pairRequestSurfaceIds, []);
+      },
+    });
   });
 
   await t.test("polluted duplicate pane labels are allowed across live surfaces before exposure", async () => {
@@ -2343,7 +2384,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         [...internalRuntime.surfaces.keys()].sort(),
         ["sf_surface-a", "sf_surface-b"],
       );
-      assert.equal(internalRuntime.endpointProbes.size, 0);
+      assert.equal(internalRuntime.endpointProbes.size, 1);
     } finally {
       await runtime.stop();
       await server.close();
@@ -2529,13 +2570,13 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await waitFor(async () => (await runtime.listScreens()).length === 0);
       assert.deepEqual([...internalRuntime.surfaces.keys()], []);
       assert.equal(internalRuntime.endpointProbes.size, 1);
-      const probeSurface = internalRuntime.endpointProbes.get(endpoint.endpointId)?.surface;
-      assert.ok(probeSurface);
-      assert.equal(probeSurface.discoveryProbe, true);
-      assert.match(probeSurface.surfaceId, /^sf_disc_/);
+      const probe = internalRuntime.endpointProbes.get(endpoint.endpointId);
+      assert.ok(probe);
+      assert.equal("surfaceId" in probe, false);
+      assert.equal("panes" in probe, false);
       await assert.rejects(
         runtime.read({
-          fingerprint: probeSurface.surfaceId,
+          fingerprint: endpoint.endpointId,
           paneId: "pn_probe" as any,
         }),
         /Unknown Surf Ace surface/,
@@ -5765,12 +5806,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       internalRuntime.refreshEndpointTopology(structuredClone(originalSurface.endpoint));
 
       assert.equal(internalRuntime.surfaces.has(server.surfaceId), false);
-      const replacementSurface = internalRuntime.endpointProbes.get(originalSurface.endpointId)?.surface;
-      assert.ok(replacementSurface);
-      assert.notEqual(replacementSurface, originalSurface);
-      assert.equal(replacementSurface.stopRequested, false);
-      assert.equal(replacementSurface.discoveryProbe, true);
-      assert.match(replacementSurface.surfaceId, /^sf_disc_/);
+      const replacementProbe = internalRuntime.endpointProbes.get(originalSurface.endpointId);
+      assert.ok(replacementProbe);
+      assert.notEqual(replacementProbe, originalSurface);
+      assert.equal(replacementProbe.stopRequested, false);
+      assert.equal("surfaceId" in replacementProbe, false);
+      assert.equal("panes" in replacementProbe, false);
     });
   });
 
@@ -5993,8 +6034,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const bootstrapPane = structuredClone(preservedSurface.panes.get(firstPaneId));
       assert.ok(bootstrapPane);
+      const restartEntry = {
+        contentId: "ct_restart_remap",
+        contentType: "markdown",
+        contentValue: "# restart remap",
+        historyOwnerToken: "hot_restart_remap",
+        paneLabel: bootstrapPane.paneLabel,
+        revision: 17,
+        sessionKey: "agent:test:restart-remap",
+      };
 
-      const provisionalSurface = {
+      const remappingSurface = {
         ...preservedSurface,
         client: {
           close: async () => {},
@@ -6034,27 +6084,41 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         sessionId: null,
         snapshotBufferedEvents: [...preservedSurface.snapshotBufferedEvents],
         stopRequested: false,
-        surfaceId: "sf_disc_reconnect" as any,
+        surfaceId: "sf_reconnect_previous" as any,
         workPromise: null,
       };
 
-      internalRuntime.surfaces.set(provisionalSurface.surfaceId, provisionalSurface);
-      const discoveredSurfaces = await internalRuntime.discoverSurfaceId(provisionalSurface);
+      internalRuntime.surfaces.set(remappingSurface.surfaceId, remappingSurface);
+      internalRuntime.restartContentBySurface = new Map([
+        [remappingSurface.surfaceId, [restartEntry]],
+      ]);
+      internalRuntime.restartSnapshots = new Map([
+        [remappingSurface.surfaceId, { snapshot: "restart-snapshot" }],
+      ]);
+      const discoveredSurfaces = await internalRuntime.discoverSurfaceId(remappingSurface);
       assert.deepEqual(discoveredSurfaces.map((surface: any) => surface.surfaceId), [server.surfaceId]);
 
       const screen = (await runtime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
       assert.ok(screen);
       assertPaneLabelsWithOpaqueIds(screen.panes, [1, 2, 3]);
       assert.equal(internalRuntime.surfaces.get(server.surfaceId), preservedSurface);
-      assert.equal(internalRuntime.surfaces.has("sf_disc_reconnect"), false);
-      assert.equal(provisionalSurface.stopRequested, true);
-      assert.equal(provisionalSurface.client, null);
+      assert.equal(internalRuntime.surfaces.has("sf_reconnect_previous"), false);
+      assert.equal(remappingSurface.stopRequested, true);
+      await waitFor(() => remappingSurface.client === null);
+      assert.equal(remappingSurface.client, null);
       assert.equal(preservedSurface.hasPairedInGatewaySession, true);
       assert.equal(preservedSurface.sessionId, "sa_test_session");
+      assert.equal(internalRuntime.restartContentBySurface.has("sf_reconnect_previous"), false);
+      assert.deepEqual(internalRuntime.restartContentBySurface.get(server.surfaceId), [restartEntry]);
+      assert.equal(internalRuntime.restartSnapshots.has("sf_reconnect_previous"), false);
+      assert.deepEqual(internalRuntime.restartSnapshots.get(server.surfaceId), {
+        fingerprint: server.surfaceId,
+        snapshot: "restart-snapshot",
+      });
     });
   });
 
-  await t.test("pair.response canonicalization collapses duplicate provisional surfaces onto the canonical surface id", async () => {
+  await t.test("pair.response canonicalization preserves an existing canonical surface on remap", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const split = await runtime.split({
@@ -6073,7 +6137,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const bootstrapPane = structuredClone(canonicalSurface.panes.get(firstPaneId));
       assert.ok(bootstrapPane);
 
-      const provisionalSurface = {
+      const remappingSurface = {
         ...canonicalSurface,
         client: {
           close: async () => {},
@@ -6098,15 +6162,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         sessionId: null,
         snapshotBufferedEvents: [...canonicalSurface.snapshotBufferedEvents],
         stopRequested: false,
-        surfaceId: "sf_disc_duplicate_hostname" as any,
+        surfaceId: "sf_duplicate_hostname_previous" as any,
         workPromise: null,
       };
 
-      internalRuntime.surfaces.set(provisionalSurface.surfaceId, provisionalSurface);
-      const provisionalClient = provisionalSurface.client;
-      const adoptedSurface = internalRuntime.adoptCanonicalSurfaceId(provisionalSurface, server.surfaceId, "pair.response");
+      internalRuntime.surfaces.set(remappingSurface.surfaceId, remappingSurface);
+      const provisionalClient = remappingSurface.client;
+      const adoptedSurface = internalRuntime.adoptCanonicalSurfaceId(remappingSurface, server.surfaceId, "pair.response");
 
-      assert.equal(internalRuntime.surfaces.has("sf_disc_duplicate_hostname"), false);
+      assert.equal(internalRuntime.surfaces.has("sf_duplicate_hostname_previous"), false);
       assert.equal(internalRuntime.surfaces.get(server.surfaceId), canonicalSurface);
       assert.equal(adoptedSurface, canonicalSurface);
       const screens = await runtime.listScreens();
@@ -6119,12 +6183,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(canonicalSurface.client, canonicalClient);
       assert.notEqual(canonicalSurface.client, provisionalClient);
       assert.notEqual(canonicalSurface.client, null);
-      assert.equal(provisionalSurface.stopRequested, true);
-      assert.equal(provisionalSurface.client, null);
+      assert.equal(remappingSurface.stopRequested, true);
+      assert.equal(remappingSurface.client, null);
     });
   });
 
-  await t.test("provisional entries accidentally placed in the canonical registry are quarantined before listing", async () => {
+  await t.test("provisional entries accidentally placed in the canonical registry trip the pre-exposure invariant", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const canonicalSurface = internalRuntime.surfaces.get(server.surfaceId);
@@ -6135,7 +6199,6 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         client: null,
         connectedAt: null,
         connectionState: "connecting",
-        discoveryProbe: false,
         endpoint: {
           ...canonicalSurface.endpoint,
           endpointId: "endpoint-leaked-probe",
@@ -6156,25 +6219,23 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       };
       internalRuntime.surfaces.set(leakedProbe.surfaceId, leakedProbe);
 
-      const screens = await runtime.listScreens();
-
-      assert.deepEqual(screens.map((screen) => screen.fingerprint), [server.surfaceId]);
-      assert.equal(internalRuntime.surfaces.has(leakedProbe.surfaceId), false);
-      assert.equal(internalRuntime.endpointProbes.get(leakedProbe.endpointId)?.surface, leakedProbe);
+      await assert.rejects(runtime.listScreens(), /canonical surface registry invariant failed/);
+      assert.equal(internalRuntime.surfaces.get(leakedProbe.surfaceId), leakedProbe);
       assert.ok(
         warnings.some((warning) =>
-          warning.includes("canonical_surface_quarantined") &&
+          warning.includes("canonical_surface_invariant_failed") &&
           warning.includes("sf_disc_leaked_probe")),
       );
     });
   });
 
-  await t.test("discovery reconciles duplicate managed surfaces for one endpoint before retrying stale identities", async () => {
-    await withRuntimeHarness(async ({ discovery, runtime, server, warnings }) => {
+  await t.test("discovery reconciles canonical endpoint surfaces through the remote registry", async () => {
+    await withRuntimeHarness(async ({ discovery, infos, runtime, server }) => {
       const internalRuntime = runtime as any;
       const retainedSurface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(retainedSurface);
       assert.ok(retainedSurface.client?.isOpen());
+      server.addSurface({ initialRemotePaneId: 42, name: "Legitimate Sibling", surfaceId: "sf_legitimate_sibling" });
 
       const siblingSurface = {
         ...retainedSurface,
@@ -6216,19 +6277,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       internalRuntime.surfaces.set(staleSurface.surfaceId, staleSurface);
 
       await discovery.refreshNow();
+      await waitFor(() => !internalRuntime.surfaces.has(staleSurface.surfaceId));
 
       assert.equal(internalRuntime.surfaces.get(server.surfaceId), retainedSurface);
       assert.equal(internalRuntime.surfaces.get(siblingSurface.surfaceId), siblingSurface);
       assert.equal(siblingSurface.stopRequested, false);
       assert.equal(internalRuntime.surfaces.has(staleSurface.surfaceId), false);
       assert.equal(staleSurface.stopRequested, true);
-      assert.equal(staleSurface.autoRetryEnabled, false);
       assert.equal(server.pairRequestSurfaceIds.includes(staleSurface.surfaceId), false);
       assert.ok(
-        warnings.some((warning) =>
-          warning.includes("endpoint_duplicate_surface_retired") &&
-          warning.includes(staleSurface.surfaceId) &&
-          warning.includes(server.surfaceId)),
+        infos.some((info) =>
+          info.includes("surface_removed") &&
+          info.includes("surfaces_list_absent") &&
+          info.includes(staleSurface.surfaceId)),
       );
     });
   });
