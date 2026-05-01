@@ -1032,7 +1032,21 @@ export class SurfaceWsServer {
         );
         throw new SurfaceCoreError("busy", "Provider already holds an active socket for this surface");
       }
-      if (resumeSessionId !== lock.sessionId) {
+      if (request.payload.takeover === true && resumeSessionId !== lock.sessionId) {
+        sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_self_takeover",
+          {
+            lock_session_id: lock.sessionId,
+            provider_id: providerId,
+            request_id: request.id,
+            session_id: sessionId,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+      } else if (resumeSessionId !== lock.sessionId) {
         persistentServerDiagnostic(
           "warn",
           "pair_request_invalid_resume",

@@ -576,6 +576,32 @@ test("ws server rejects same-provider reconnects without a resume token after di
   });
 });
 
+test("ws server allows explicit same-provider takeover of a disconnected stale lock", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+    const replacement = await connect(url);
+    const reclaimed = await request(
+      replacement,
+      pairRequest(surfaceId, "pv_alpha", { takeover: true }),
+    );
+
+    assert.equal(reclaimed.ok, true);
+    assert.equal(reclaimed.op, "pair.request");
+    assert.equal(reclaimed.payload.resumed, false);
+    assert.notEqual(reclaimed.payload.sessionId, first.payload.sessionId);
+
+    await closeSocket(replacement);
+  });
+});
+
 test("ws server rejects duplicate same-provider pair requests while the active socket is still open", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const owner = await connect(url);
@@ -588,6 +614,12 @@ test("ws server rejects duplicate same-provider pair requests while the active s
     assert.equal(rejected.ok, false);
     assert.equal(rejected.op, "pair.request");
     assert.equal(rejected.error.code, "busy");
+    assert.equal(owner.readyState, WebSocket.OPEN);
+
+    const takeoverRejected = await request(duplicate, pairRequest(surfaceId, "pv_alpha", { takeover: true }));
+    assert.equal(takeoverRejected.ok, false);
+    assert.equal(takeoverRejected.op, "pair.request");
+    assert.equal(takeoverRejected.error.code, "busy");
     assert.equal(owner.readyState, WebSocket.OPEN);
 
     const panes = await request(owner, {

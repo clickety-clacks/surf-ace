@@ -6834,6 +6834,54 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("cold-start invalid_resume with persisted self state reclaims stale same-provider lock", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      const providerId = server.pairAttemptDetails[0]?.providerId;
+      assert.equal(typeof providerId, "string");
+
+      surface.hasPairedInGatewaySession = false;
+      surface.sessionId = null;
+      internalRuntime.persistentState.targetStateBySurfaceId = {
+        [server.surfaceId]: {
+          paneTargets: {},
+          registeredTargetIdsByIdempotencyKey: {},
+          targetRecords: [],
+        },
+      };
+      server.lockUntilNewProviderIdCode = "invalid_resume";
+      server.lockUntilNewProviderIdProviderId = providerId ?? null;
+
+      await surface.client.close(1000, "test_cold_start_invalid_resume_self_reclaim");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.resumeSessionId),
+        [null, null, null],
+      );
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.takeover),
+        [false, false, true],
+      );
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.providerId),
+        [providerId, providerId, providerId],
+      );
+      assert.ok(
+        warnings.some((warning) =>
+          warning.includes("ownership_self_reclaim") &&
+          warning.includes("reason=invalid_resume") &&
+          warning.includes(server.surfaceId),
+        ),
+      );
+    });
+  });
+
   await t.test("busy with persisted target state but no resume session does not self-reclaim", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;

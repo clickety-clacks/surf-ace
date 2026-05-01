@@ -6729,6 +6729,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.hasPersistedSelfSignals(surface) &&
         !this.hasValidResumeSession(surface)
       ) {
+        if (response.error.code === "invalid_resume") {
+          return this.reclaimSelfOwnershipLock(surface, response, resumeSessionId, sendPairRequest);
+        }
         this.logger.warn?.(
           runtimeDiagnostic("ownership_self_reclaim_blocked", {
             had_paired_session: surface.hasPairedInGatewaySession,
@@ -6743,6 +6746,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
       return response;
     }
+    return this.reclaimSelfOwnershipLock(surface, response, resumeSessionId, sendPairRequest);
+  }
+
+  private isKnownSelfOwnedSurface(surface: ManagedSurface): boolean {
+    return this.hasValidResumeSession(surface);
+  }
+
+  private async reclaimSelfOwnershipLock(
+    surface: ManagedSurface,
+    response: ErrorResponse,
+    resumeSessionId: SessionId | null,
+    sendPairRequest: (
+      takeover: boolean,
+      requestedResumeSessionId: SessionId | null,
+    ) => Promise<Response>,
+  ): Promise<Response> {
     this.logger.warn?.(
       runtimeDiagnostic("ownership_self_reclaim", {
         had_paired_session: surface.hasPairedInGatewaySession,
@@ -6754,10 +6773,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
     this.clearSurfaceResumeState(surface);
     return sendPairRequest(true, null);
-  }
-
-  private isKnownSelfOwnedSurface(surface: ManagedSurface): boolean {
-    return this.hasValidResumeSession(surface);
   }
 
   private hasValidResumeSession(surface: ManagedSurface): boolean {
