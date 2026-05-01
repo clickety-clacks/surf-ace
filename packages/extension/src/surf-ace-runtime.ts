@@ -701,6 +701,7 @@ type ManagedSurface = {
 
 type EndpointProbe = {
   autoRetryEnabled: boolean;
+  canonicalKey: string;
   client: SurfAceWireClient | null;
   connectionState: SurfAceConnectionState;
   endpoint: SurfAceDiscoveryEndpoint;
@@ -838,6 +839,7 @@ const DEFAULT_ALERT_SESSION_KEY = "agent:main:main";
 const ALERT_ENDPOINT_URL = "http://localhost:18800/alert";
 const MAX_CONSECUTIVE_RESUME_FAILURES = 3;
 const MAX_CONSECUTIVE_OWNERSHIP_LOCK_FAILURES = 3;
+const DISCOVERY_UPDATE_LOG_MIN_INTERVAL_MS = 5_000;
 const STATE_FILE_NAME = "surf-ace-runtime-state.json";
 const SCREEN_SNAPSHOT_FILE_NAME = "surf-ace-runtime-screens.json";
 const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
@@ -1144,6 +1146,7 @@ function endpointProvenance(endpoint: SurfAceDiscoveryEndpoint): EndpointProvena
 function createEndpointProbe(endpoint: SurfAceDiscoveryEndpoint, now: number): EndpointProbe {
   return {
     autoRetryEnabled: true,
+    canonicalKey: endpointProbeKey(endpoint),
     client: null,
     connectionState: "connecting",
     endpoint,
@@ -1992,6 +1995,14 @@ function nextReconnectDelayMs(attempt: number): number {
   return Math.min(RECONNECT_BACKOFF_CAP_MS, RECONNECT_BACKOFF_BASE_MS * 2 ** attempt);
 }
 
+function endpointProbeKey(endpoint: SurfAceDiscoveryEndpoint): string {
+  const fingerprintPrefix = endpoint.fingerprintPrefix.trim();
+  if (fingerprintPrefix.length > 0) {
+    return `fp:${fingerprintPrefix}`;
+  }
+  return `ws:${buildWsUrl(endpoint)}`;
+}
+
 function isSocketClosedError(error: unknown): boolean {
   return error instanceof Error &&
     (error.message.includes("Surf Ace socket is not open") ||
@@ -2055,6 +2066,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly endpointProbes = new Map<string, EndpointProbe>();
   private readonly tombstonedEndpointIds = new Set<string>();
   private readonly tombstonedSurfaceIds = new Set<SurfaceId>();
+  private lastDiscoveryUpdateLogAt = 0;
+  private lastDiscoveryUpdateLogKey = "";
   private persistentState: RuntimeStateFile = {
     nextRemotePaneId: 1,
     nextPaneLabel: 1,
@@ -3300,16 +3313,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private handleDiscoveryUpdate(endpoints: SurfAceDiscoveryEndpoint[]): void {
-    this.logger.warn?.(
-      `[surf-ace:runtime] discoveryUpdate: ${endpoints.length} endpoint(s): ${endpoints.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}; canonical surfaces: ${this.surfaces.size}; endpoint probes: ${this.endpointProbes.size}`,
-    );
-    for (const endpoint of endpoints) {
+    const canonicalEndpoints = this.dedupeDiscoveryEndpoints(endpoints);
+    this.logDiscoveryUpdate(endpoints, canonicalEndpoints);
+    for (const endpoint of canonicalEndpoints) {
       this.refreshEndpointTopology(endpoint);
     }
 
-    const currentEndpointIds = new Set(endpoints.map((endpoint) => endpoint.endpointId));
+    const currentEndpointIds = new Set(canonicalEndpoints.map((endpoint) => endpoint.endpointId));
+    const currentEndpointKeys = new Set(canonicalEndpoints.map((endpoint) => endpointProbeKey(endpoint)));
     for (const surface of this.allManagedSurfaces()) {
-      if (!currentEndpointIds.has(surface.endpointId)) {
+      if (!currentEndpointIds.has(surface.endpointId) && !currentEndpointKeys.has(endpointProbeKey(surface.endpoint))) {
         const wsOpen = surface.client?.isOpen() ?? false;
         const preserveOwnedSurface =
           wsOpen ||
@@ -3326,7 +3339,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
     for (const probe of this.endpointProbes.values()) {
-      if (currentEndpointIds.has(probe.endpointId)) {
+      if (currentEndpointIds.has(probe.endpointId) || currentEndpointKeys.has(probe.canonicalKey)) {
         continue;
       }
       probe.stopRequested = true;
@@ -3342,6 +3355,90 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
     this.queuePersistScreenSnapshot("discovery update");
+  }
+
+  private dedupeDiscoveryEndpoints(endpoints: SurfAceDiscoveryEndpoint[]): SurfAceDiscoveryEndpoint[] {
+    const byKey = new Map<string, SurfAceDiscoveryEndpoint>();
+    for (const endpoint of endpoints) {
+      const key = endpointProbeKey(endpoint);
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, endpoint);
+        continue;
+      }
+      byKey.set(key, this.chooseDiscoveryEndpointAlias(existing, endpoint));
+    }
+    return [...byKey.values()];
+  }
+
+  private chooseDiscoveryEndpointAlias(
+    current: SurfAceDiscoveryEndpoint,
+    candidate: SurfAceDiscoveryEndpoint,
+  ): SurfAceDiscoveryEndpoint {
+    const canonicalKey = endpointProbeKey(current);
+    const currentProbe = this.findEndpointProbeByCanonicalKey(canonicalKey);
+    if (this.hasEndpointAliasFailures(canonicalKey)) {
+      const currentFailed = this.hasEndpointAliasFailure(current);
+      const candidateFailed = this.hasEndpointAliasFailure(candidate);
+      if (currentFailed !== candidateFailed) {
+        return currentFailed ? candidate : current;
+      }
+      return candidate.lastSeenAt >= current.lastSeenAt ? candidate : current;
+    }
+    if (currentProbe?.endpointId === candidate.endpointId) {
+      return candidate;
+    }
+    if (currentProbe?.endpointId === current.endpointId) {
+      return current;
+    }
+    return candidate.lastSeenAt >= current.lastSeenAt ? candidate : current;
+  }
+
+  private hasEndpointAliasFailures(canonicalKey: string): boolean {
+    const probe = this.findEndpointProbeByCanonicalKey(canonicalKey);
+    if (probe && probe.unreachableFailures > 0) {
+      return true;
+    }
+    return this.allManagedSurfaces().some((surface) =>
+      endpointProbeKey(surface.endpoint) === canonicalKey &&
+      surface.unreachableFailures > 0 &&
+      surface.connectionState !== "connected"
+    );
+  }
+
+  private hasEndpointAliasFailure(endpoint: SurfAceDiscoveryEndpoint): boolean {
+    const endpointUrl = buildWsUrl(endpoint);
+    const probe = this.endpointProbes.get(endpoint.endpointId);
+    if (probe && probe.unreachableFailures > 0) {
+      return true;
+    }
+    return this.allManagedSurfaces().some((surface) =>
+      surface.endpointId === endpoint.endpointId &&
+      buildWsUrl(surface.endpoint) === endpointUrl &&
+      surface.unreachableFailures > 0 &&
+      surface.connectionState !== "connected"
+    );
+  }
+
+  private logDiscoveryUpdate(
+    rawEndpoints: SurfAceDiscoveryEndpoint[],
+    canonicalEndpoints: SurfAceDiscoveryEndpoint[],
+  ): void {
+    const logKey = canonicalEndpoints
+      .map((endpoint) => `${endpointProbeKey(endpoint)}@${endpoint.endpointId}`)
+      .sort()
+      .join(",");
+    const now = this.now();
+    const shouldLog = logKey !== this.lastDiscoveryUpdateLogKey ||
+      now - this.lastDiscoveryUpdateLogAt >= DISCOVERY_UPDATE_LOG_MIN_INTERVAL_MS;
+    if (!shouldLog) {
+      return;
+    }
+    this.lastDiscoveryUpdateLogAt = now;
+    this.lastDiscoveryUpdateLogKey = logKey;
+    this.logger.warn?.(
+      `[surf-ace:runtime] discoveryUpdate: ${canonicalEndpoints.length}/${rawEndpoints.length} endpoint(s): ${canonicalEndpoints.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}; canonical surfaces: ${this.surfaces.size}; endpoint probes: ${this.endpointProbes.size}`,
+    );
   }
 
   private handleNavigationEvent(surface: ManagedSurface, event: NavigationEvent): void {
@@ -3485,8 +3582,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!surface) {
       return;
     }
+    const surfaceEndpointKey = endpointProbeKey(surface.endpoint);
     const lastSurfaceForEndpoint = ![...this.surfaces.values()].some(
-      (candidate) => candidate !== surface && candidate.endpointId === surface.endpointId,
+      (candidate) => candidate !== surface && endpointProbeKey(candidate.endpoint) === surfaceEndpointKey,
     );
     if (reason === "surface_removed_event" && lastSurfaceForEndpoint) {
       this.tombstoneEndpointId(surface.endpointId, "last surface removed");
@@ -4238,6 +4336,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       previousEndpoint &&
       previousEndpoint.endpointId !== input.endpoint.endpointId &&
       buildWsUrl(previousEndpoint) !== buildWsUrl(input.endpoint) &&
+      endpointProbeKey(previousEndpoint) !== endpointProbeKey(input.endpoint) &&
       !existing.stopRequested
     ) {
       this.logger.warn?.(
@@ -6610,6 +6709,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         surface_name: endpoint.name,
       }),
     );
+    const endpointKey = endpointProbeKey(endpoint);
     for (const candidate of [...this.surfaces.values()]) {
       if (candidate.stopRequested && candidate.endpointId === endpoint.endpointId) {
         this.removeManagedSurfaceFromRegistries(candidate);
@@ -6618,14 +6718,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     for (const candidate of [...this.surfaces.values()]) {
       if (
         candidate.endpointId === endpoint.endpointId ||
-        buildWsUrl(candidate.endpoint) === buildWsUrl(endpoint)
+        buildWsUrl(candidate.endpoint) === buildWsUrl(endpoint) ||
+        endpointProbeKey(candidate.endpoint) === endpointKey
       ) {
         this.assignEndpoint(candidate, endpoint);
         this.ensureSurfaceWorker(candidate);
       }
     }
     const probe = this.upsertEndpointProbe(endpoint);
-    this.logger.info?.(
+    this.logger.debug?.(
       runtimeDiagnostic("endpoint_adopt", {
         action: "upsert_endpoint_probe",
         endpoint_id: endpoint.endpointId,
@@ -6636,13 +6737,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private upsertEndpointProbe(endpoint: SurfAceDiscoveryEndpoint): EndpointProbe {
-    const existing = this.endpointProbes.get(endpoint.endpointId);
+    const canonicalKey = endpointProbeKey(endpoint);
+    const existing = this.endpointProbes.get(endpoint.endpointId) ??
+      this.findEndpointProbeByCanonicalKey(canonicalKey);
     if (!existing) {
       const probe = createEndpointProbe(endpoint, this.now());
       this.endpointProbes.set(endpoint.endpointId, probe);
       return probe;
     }
     const endpointChanged = buildWsUrl(existing.endpoint) !== buildWsUrl(endpoint);
+    if (existing.endpointId !== endpoint.endpointId) {
+      this.endpointProbes.delete(existing.endpointId);
+      this.endpointProbes.set(endpoint.endpointId, existing);
+    }
+    existing.canonicalKey = canonicalKey;
     existing.endpoint = endpoint;
     existing.endpointId = endpoint.endpointId;
     existing.fingerprintPrefix = endpoint.fingerprintPrefix;
@@ -6665,6 +6773,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.wakeEndpointProbeRetry(existing);
     }
     return existing;
+  }
+
+  private findEndpointProbeByCanonicalKey(canonicalKey: string): EndpointProbe | undefined {
+    return [...this.endpointProbes.values()].find((probe) => probe.canonicalKey === canonicalKey);
   }
 
   private removeManagedSurfaceFromRegistries(surface: ManagedSurface): void {
@@ -6772,10 +6884,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     startDiscoveredSiblings: boolean;
   }): ManagedSurface[] {
     const endpointId = input.endpoint.endpointId;
+    const endpointKey = endpointProbeKey(input.endpoint);
     if (input.remoteSurfaces.length === 0) {
       this.tombstoneEndpointId(endpointId, "empty surfaces.list");
       for (const candidate of [...this.surfaces.values()]) {
-        if (candidate.endpointId === endpointId) {
+        if (candidate.endpointId === endpointId || endpointProbeKey(candidate.endpoint) === endpointKey) {
           this.removeClosedSurface(candidate.surfaceId, "surfaces_list_absent");
         }
       }
@@ -6834,7 +6947,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     for (const candidate of [...this.surfaces.values()]) {
-      if (candidate.endpointId !== endpointId) {
+      if (candidate.endpointId !== endpointId && endpointProbeKey(candidate.endpoint) !== endpointKey) {
         continue;
       }
       if (remoteSurfaceIds.has(candidate.surfaceId)) {
@@ -6848,12 +6961,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private logEndpointCanonicalSurfaceCardinality(endpoint: SurfAceDiscoveryEndpoint, source: string): void {
+    const endpointKey = endpointProbeKey(endpoint);
     const surfaceIds = [...this.surfaces.values()]
-      .filter((surface) => surface.endpointId === endpoint.endpointId)
+      .filter((surface) => endpointProbeKey(surface.endpoint) === endpointKey)
       .map((surface) => surface.surfaceId)
       .sort();
     this.logger.info?.(
       runtimeDiagnostic("endpoint_canonical_surface_cardinality", {
+        endpoint_canonical_key: endpointKey,
         endpoint_id: endpoint.endpointId,
         source,
         surface_count: surfaceIds.length,

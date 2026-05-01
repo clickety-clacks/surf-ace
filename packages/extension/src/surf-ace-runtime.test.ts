@@ -2348,6 +2348,104 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("endpoint probe dedupes volatile discovery aliases by fingerprint", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port);
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-endpoint-alias-dedupe-"));
+    const endpointA = discoveryEndpoint(port, "aliasfp");
+    const endpointB = {
+      ...endpointA,
+      endpointId: "endpoint-alias-hostname",
+      host: "localhost",
+      lastSeenAt: endpointA.lastSeenAt + 1,
+    };
+    const discovery = new StaticDiscoveryService([endpointA, endpointB]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtime.start();
+      await waitFor(() => server.pairedSocket !== null, 12_000);
+
+      const internalRuntime = runtime as any;
+      assert.equal(internalRuntime.endpointProbes.size, 1);
+      const probe = [...internalRuntime.endpointProbes.values()][0];
+      assert.ok(probe);
+      assert.equal(probe.endpointId, endpointB.endpointId);
+      assert.equal(probe.canonicalKey, "fp:aliasfp");
+      assert.equal("surfaceId" in probe, false);
+      assert.equal("panes" in probe, false);
+
+      const endpointC = {
+        ...endpointA,
+        endpointId: "endpoint-alias-ipv4",
+        host: "127.0.0.1",
+        lastSeenAt: endpointA.lastSeenAt,
+      };
+      probe.unreachableFailures = 1;
+      discovery.setEndpoints([endpointB, endpointC]);
+      await discovery.refreshNow();
+
+      assert.equal(internalRuntime.endpointProbes.size, 1);
+      assert.equal([...internalRuntime.endpointProbes.values()][0], probe);
+      assert.equal(probe.endpointId, endpointC.endpointId);
+      assert.equal(internalRuntime.surfaces.get(server.surfaceId)?.endpointId, endpointB.endpointId);
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("surfaces.list alias reconciliation removes closed sibling windows by endpoint fingerprint", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_surface-a" });
+    server.addSurface({ initialRemotePaneId: 42, name: "Surface B", surfaceId: "sf_surface-b" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-endpoint-alias-remove-"));
+    const endpointA = discoveryEndpoint(port, "aliasremove");
+    const endpointB = {
+      ...endpointA,
+      endpointId: "endpoint-alias-remove-hostname",
+      host: "localhost",
+      lastSeenAt: endpointA.lastSeenAt + 1,
+    };
+    const endpointC = {
+      ...endpointA,
+      endpointId: "endpoint-alias-remove-ipv4",
+      host: "127.0.0.1",
+      lastSeenAt: endpointA.lastSeenAt + 2,
+    };
+    const discovery = new StaticDiscoveryService([endpointA, endpointB]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtime.start();
+      await waitFor(() => server.pairedSocketFor("sf_surface-a") !== null && server.pairedSocketFor("sf_surface-b") !== null, 12_000);
+
+      const internalRuntime = runtime as any;
+      assert.equal(internalRuntime.surfaces.get("sf_surface-b")?.endpointId, endpointB.endpointId);
+      internalRuntime.reconcileCanonicalSurfacesFromRemoteList({
+        endpoint: endpointC,
+        remoteSurfaces: [
+          {
+            name: "Surface A",
+            paired: true,
+            surfaceId: "sf_surface-a",
+            viewport: endpointC.viewport,
+          },
+        ],
+        source: "surfaces.list",
+        startDiscoveredSiblings: true,
+      });
+
+      assert.equal(internalRuntime.surfaces.has("sf_surface-b"), false);
+      assert.equal((await runtime.listScreens()).some((screen) => screen.fingerprint === "sf_surface-b"), false);
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("persisted pane labels stay scoped per surface before exposure", async () => {
     const portA = nextPort++;
     const portB = nextPort++;
