@@ -140,6 +140,8 @@ export type SurfAceScreenSummary = {
     hasPairedInGatewaySession: boolean;
     ownershipRecovery: "active" | "foreign_or_unknown" | "known_self";
     reconnectAttempt: number;
+    remoteListedAt?: number | null;
+    remotePaired?: boolean;
     sessionId: string | null;
     unreachableFailures: number;
     wsOpen: boolean;
@@ -653,6 +655,8 @@ type ManagedSurface = {
   recentEventIdsSet: Set<string>;
   registeredTargetIdsByIdempotencyKey: Map<string, string>;
   reconnectAttempt: number;
+  remoteListedAt: number | null;
+  remotePaired: boolean;
   retryDelayResolver: (() => void) | null;
   sessionId: SessionId | null;
   ownershipEpoch: number;
@@ -1080,6 +1084,8 @@ function createManagedSurface(
     recentEventIdsSet: new Set<string>(),
     registeredTargetIdsByIdempotencyKey: new Map<string, string>(),
     reconnectAttempt: 0,
+    remoteListedAt: null,
+    remotePaired: false,
     retryDelayResolver: null,
     sessionId: null,
     ownershipEpoch: 0,
@@ -2318,6 +2324,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.autoRetryEnabled = false;
     surface.connectionState = "unreachable";
     surface.hasPairedInGatewaySession = false;
+    surface.remotePaired = false;
     surface.sessionId = null;
     surface.stopRequested = true;
     this.stopHeartbeat(surface);
@@ -3428,7 +3435,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private removeClosedSurface(
     surfaceId: SurfaceId,
-    reason: "surface_removed_event" | "surfaces_list_absent" | "discovery_endpoint_absent",
+    reason: "surface_removed_event" | "surfaces_list_absent" | "discovery_endpoint_absent" | "unowned_unreachable",
   ): void {
     this.tombstonedSurfaceIds.add(surfaceId);
     this.clearClosedSurfacePersistentState(surfaceId, reason);
@@ -3496,7 +3503,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private clearClosedSurfacePersistentState(
     surfaceId: SurfaceId,
-    reason: "surface_removed_event" | "surfaces_list_absent" | "discovery_endpoint_absent",
+    reason: "surface_removed_event" | "surfaces_list_absent" | "discovery_endpoint_absent" | "unowned_unreachable",
   ): void {
     this.restartSnapshots.delete(surfaceId);
     this.restartContentBySurface.delete(surfaceId);
@@ -4085,6 +4092,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     remappedSurface.ownershipEpoch = preservedSurface.ownershipEpoch;
     remappedSurface.topologyRevision = preservedSurface.topologyRevision;
     remappedSurface.hasPairedInGatewaySession = preservedSurface.hasPairedInGatewaySession;
+    remappedSurface.remotePaired = preservedSurface.remotePaired;
     remappedSurface.sessionId = preservedSurface.sessionId;
     remappedSurface.consecutiveResumeFailures = preservedSurface.consecutiveResumeFailures;
     remappedSurface.consecutiveOwnershipLockFailures = preservedSurface.consecutiveOwnershipLockFailures;
@@ -4116,6 +4124,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private upsertCanonicalVisibleSurface(input: {
     endpoint: SurfAceDiscoveryEndpoint;
     name: string;
+    remotePaired?: boolean;
     remapFrom?: ManagedSurface;
     source: "pair.response" | "surface_appeared" | "surfaces.list";
     surfaceId: SurfaceId;
@@ -4197,6 +4206,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         },
       );
       if (existing && existing !== remapFrom) {
+        if (typeof input.remotePaired === "boolean") {
+          surface.remotePaired = input.remotePaired;
+        }
+        if (input.source === "surfaces.list") {
+          surface.remoteListedAt = this.now();
+        }
         this.clearTombstonedEndpointId(surface.endpointId, input.source);
         this.surfaces.set(surface.surfaceId, surface);
         this.restoreRestartOwnership(surface);
@@ -4218,6 +4233,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.fingerprintPrefix = input.endpoint.fingerprintPrefix;
     surface.lastSeenAt = this.now();
     surface.name = input.name;
+    if (typeof input.remotePaired === "boolean") {
+      surface.remotePaired = input.remotePaired;
+    }
+    if (input.source === "surfaces.list") {
+      surface.remoteListedAt = surface.lastSeenAt;
+    }
     surface.viewport = cloneViewport(input.viewport);
     surface.windowLabel = windowLabel;
     if (!existing && !remapFrom) {
@@ -5540,6 +5561,41 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return [...this.surfaces.values()];
   }
 
+  private isUnownedDisconnectedGhostSurface(surface: ManagedSurface): boolean {
+    return (
+      surface.connectionState !== "connected" &&
+      surface.autoRetryEnabled &&
+      !(surface.client?.isOpen() ?? false) &&
+      !surface.hasPairedInGatewaySession &&
+      surface.remoteListedAt === null &&
+      !surface.remotePaired &&
+      surface.sessionId === null &&
+      (
+        surface.connectionState === "unreachable" ||
+        surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES ||
+        surface.reconnectAttempt >= UNREACHABLE_AFTER_FAILURES
+      )
+    );
+  }
+
+  private pruneUnownedDisconnectedGhostSurfaces(reason: string): void {
+    for (const surface of [...this.surfaces.values()]) {
+      if (!this.isUnownedDisconnectedGhostSurface(surface)) {
+        continue;
+      }
+      this.logger.info?.(
+        runtimeDiagnostic("unowned_disconnected_surface_pruned", {
+          connection_state: surface.connectionState,
+          reason,
+          reconnect_attempt: surface.reconnectAttempt,
+          surface_id: surface.surfaceId,
+          unreachable_failures: surface.unreachableFailures,
+        }),
+      );
+      this.removeClosedSurface(surface.surfaceId, "unowned_unreachable");
+    }
+  }
+
   private assertCanonicalSurfaceRegistry(reason: string): void {
     for (const [surfaceId, surface] of this.surfaces) {
       if (isProvisionalSurfaceId(surface.surfaceId) || surface.surfaceId !== surfaceId) {
@@ -5557,6 +5613,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private buildScreenSummaries(): SurfAceScreenSummary[] {
     this.assertCanonicalSurfaceRegistry("screen summary");
+    this.pruneUnownedDisconnectedGhostSurfaces("screen summary");
     this.repairLiveWindowLabelInvariant("screen summary");
     this.repairLivePaneLabelInvariant("screen summary");
     return this.canonicalVisibleSurfaces()
@@ -5610,6 +5667,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           ? "active"
           : this.isKnownSelfOwnedSurface(surface) ? "known_self" : "foreign_or_unknown",
         reconnectAttempt: surface.reconnectAttempt,
+        remoteListedAt: surface.remoteListedAt,
+        remotePaired: surface.remotePaired,
         sessionId: surface.sessionId,
         unreachableFailures: surface.unreachableFailures,
         wsOpen: surface.client?.isOpen() ?? false,
@@ -5820,8 +5879,25 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async loadPersistedScreenSnapshot(): Promise<SurfAceScreenSummary[]> {
     return this.repairPersistedScreenSummaryLabels(
-      (await this.loadPersistedScreenSnapshotFile())?.screens ?? [],
+      this.filterPersistedVisibleScreens((await this.loadPersistedScreenSnapshotFile())?.screens ?? []),
     );
+  }
+
+  private filterPersistedVisibleScreens(screens: SurfAceScreenSummary[]): SurfAceScreenSummary[] {
+    return screens.filter((screen) => {
+      if (screen.connectionState === "connected") {
+        return true;
+      }
+      if (screen._debug?.autoRetryEnabled === false) {
+        return true;
+      }
+      return Boolean(
+        screen._debug?.hasPairedInGatewaySession === true ||
+        typeof screen._debug?.remoteListedAt === "number" ||
+        screen._debug?.remotePaired === true ||
+        (typeof screen._debug?.sessionId === "string" && screen._debug.sessionId.length > 0),
+      );
+    });
   }
 
   private repairPersistedScreenSummaryLabels(screens: SurfAceScreenSummary[]): SurfAceScreenSummary[] {
@@ -5986,9 +6062,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
     const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
+    const screens = this.buildScreenSummaries();
     const payload: PersistedScreenSnapshotFile = {
       contentContinuity: this.buildContentContinuitySnapshot(),
-      screens: this.buildScreenSummaries(),
+      screens,
       updatedAt: this.now(),
       version: 1,
     };
@@ -6577,6 +6654,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const canonicalSurface = this.upsertCanonicalVisibleSurface({
         endpoint: input.endpoint,
         name: remoteSurface.name,
+        remotePaired: remoteSurface.paired,
         remapFrom: shouldRemapSource ? input.sourceSurface : undefined,
         source: input.source,
         surfaceId: asSurfaceId(remoteSurface.surfaceId),
@@ -7225,6 +7303,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               surface_id: surface.surfaceId,
             }),
           );
+          if (this.isUnownedDisconnectedGhostSurface(surface)) {
+            this.removeClosedSurface(surface.surfaceId, "unowned_unreachable");
+          }
         } finally {
           this.stopHeartbeat(surface);
           if (client) {
@@ -7743,6 +7824,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.connectedAt = this.now();
     surface.autoRetryEnabled = true;
     surface.hasPairedInGatewaySession = true;
+    surface.remotePaired = true;
     const ownershipChanged = !resumed || surface.sessionId !== sessionId;
     if (ownershipChanged) {
       surface.ownershipEpoch += 1;

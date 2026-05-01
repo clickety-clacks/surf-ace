@@ -1444,6 +1444,7 @@ async function withRuntimeHarness(
           warnings: string[];
           runtime: ReturnType<typeof createSurfAceRuntime>;
           server: FakeSurfAceWsServer;
+          stateDir: string;
         },
       ) => Promise<void>)
     | {
@@ -1459,6 +1460,7 @@ async function withRuntimeHarness(
           warnings: string[];
           runtime: ReturnType<typeof createSurfAceRuntime>;
           server: FakeSurfAceWsServer;
+          stateDir: string;
         }) => Promise<void>;
       },
 ): Promise<void> {
@@ -1504,7 +1506,7 @@ async function withRuntimeHarness(
     if (options.waitForPair !== false) {
       await waitFor(() => server.pairedSocket !== null);
     }
-    await options.run({ alertBodies, annotationTurns, discovery, infos, runtime, server, warnings });
+    await options.run({ alertBodies, annotationTurns, discovery, infos, runtime, server, stateDir, warnings });
   } finally {
     globalThis.fetch = originalFetch;
     await runtime.stop();
@@ -1788,6 +1790,65 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(visibleCoordinates, ["a:1", "b:1"]);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
+    } finally {
+      await runtimeB.stop();
+      await runtimeA.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("passive processes omit stale unowned unreachable snapshot rows", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port);
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-passive-snapshot-"));
+    const discoveryA = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const discoveryB = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtimeA = createSurfAceRuntime({ discovery: discoveryA, stateDir });
+    const runtimeB = createSurfAceRuntime({ discovery: discoveryB, stateDir });
+
+    try {
+      await runtimeA.start();
+      await waitFor(() => server.pairedSocket !== null);
+      const activeScreen = (await runtimeA.listScreens())[0];
+      assert.ok(activeScreen);
+
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify(
+          {
+            screens: [
+              activeScreen,
+              {
+                ...activeScreen,
+                connectionState: "unreachable",
+                fingerprint: "sf_stale_unowned_snapshot",
+                _debug: {
+                  ...activeScreen._debug,
+                  hasPairedInGatewaySession: false,
+                  reconnectAttempt: 1000,
+                  remoteListedAt: null,
+                  remotePaired: false,
+                  sessionId: null,
+                  unreachableFailures: 1000,
+                  wsOpen: false,
+                },
+              },
+            ],
+            updatedAt: Date.now(),
+            version: 1,
+          },
+          null,
+          2,
+        ),
+      );
+
+      await runtimeB.start();
+      const passiveScreens = await runtimeB.listScreens();
+      assert.deepEqual(
+        passiveScreens.map((screen) => screen.fingerprint),
+        [activeScreen.fingerprint],
+      );
     } finally {
       await runtimeB.stop();
       await runtimeA.stop();
@@ -5794,6 +5855,176 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), false);
       assert.equal(internalRuntime.restartSnapshots.has(server.surfaceId), false);
+    });
+  });
+
+  await t.test("still-discovered unowned unreachable pane ghosts are pruned before listing", async () => {
+    await withRuntimeHarness(async ({ runtime, server, stateDir }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.panes.size > 0);
+      const screen = (await runtime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
+      const paneId = screen?.panes[0]?.paneId;
+      assert.ok(paneId);
+      await runtime.push(
+        {
+          content: "# stale ghost",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId,
+        },
+        { sessionDisplayName: "Ghost Test", sessionKey: "agent:test:ghost-content" },
+      );
+
+      surface.stopRequested = true;
+      await surface.client?.close(1000, "test_stale_unreachable_ghost").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      surface.stopRequested = false;
+      surface.autoRetryEnabled = true;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "unreachable";
+      surface.hasPairedInGatewaySession = false;
+      surface.reconnectAttempt = 1000;
+      surface.remoteListedAt = null;
+      surface.remotePaired = false;
+      surface.sessionId = null;
+      surface.unreachableFailures = 1000;
+      internalRuntime.persistentState.targetStateBySurfaceId[surface.surfaceId] = {
+        ownershipEpoch: 1,
+        paneTargets: {},
+        registeredTargetIdsByIdempotencyKey: {},
+        targetRecords: [],
+      };
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.some((entry) => entry.fingerprint === server.surfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), false);
+      assert.equal(internalRuntime.persistentState.targetStateBySurfaceId[server.surfaceId], undefined);
+      await internalRuntime.persistScreenSnapshot();
+      const persistedSnapshot = JSON.parse(
+        await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8"),
+      );
+      assert.equal(persistedSnapshot.contentContinuity?.[server.surfaceId], undefined);
+    });
+  });
+
+  await t.test("still-discovered unowned connecting ghosts with high retry counts are pruned before listing", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.panes.size > 0);
+
+      surface.stopRequested = true;
+      await surface.client?.close(1000, "test_stale_connecting_ghost").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      surface.stopRequested = false;
+      surface.autoRetryEnabled = true;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "connecting";
+      surface.hasPairedInGatewaySession = false;
+      surface.reconnectAttempt = 1000;
+      surface.remoteListedAt = null;
+      surface.remotePaired = false;
+      surface.sessionId = null;
+      surface.unreachableFailures = 0;
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.some((entry) => entry.fingerprint === server.surfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), false);
+    });
+  });
+
+  await t.test("remote paired disconnected surfaces are preserved from ghost pruning", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const endpoint = discovery.getSnapshot()[0]!;
+      internalRuntime.reconcileCanonicalSurfacesFromRemoteList({
+        endpoint,
+        remoteSurfaces: [
+          {
+            name: "Surface A",
+            paired: true,
+            surfaceId: server.surfaceId,
+            viewport: endpoint.viewport,
+          },
+        ],
+        source: "surfaces.list",
+        startDiscoveredSiblings: false,
+      });
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.equal(surface.remotePaired, true);
+      surface.remoteListedAt = null;
+
+      surface.stopRequested = true;
+      await surface.client?.close(1000, "test_remote_paired_preserved").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      surface.stopRequested = false;
+      surface.autoRetryEnabled = true;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "connecting";
+      surface.hasPairedInGatewaySession = false;
+      surface.reconnectAttempt = 1000;
+      surface.sessionId = null;
+      surface.unreachableFailures = 1000;
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.some((entry) => entry.fingerprint === server.surfaceId), true);
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), true);
+    });
+  });
+
+  await t.test("surfaces.list-active unlocked surfaces are preserved from ghost pruning", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const endpoint = discovery.getSnapshot()[0]!;
+      internalRuntime.reconcileCanonicalSurfacesFromRemoteList({
+        endpoint,
+        remoteSurfaces: [
+          {
+            name: "Surface A",
+            paired: false,
+            surfaceId: server.surfaceId,
+            viewport: endpoint.viewport,
+          },
+        ],
+        source: "surfaces.list",
+        startDiscoveredSiblings: false,
+      });
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.equal(typeof surface.remoteListedAt, "number");
+      assert.equal(surface.remotePaired, false);
+
+      surface.stopRequested = true;
+      await surface.client?.close(1000, "test_unpaired_listed_preserved").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      surface.stopRequested = false;
+      surface.autoRetryEnabled = true;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "unreachable";
+      surface.hasPairedInGatewaySession = false;
+      surface.reconnectAttempt = 1000;
+      surface.sessionId = null;
+      surface.unreachableFailures = 1000;
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.some((entry) => entry.fingerprint === server.surfaceId), true);
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), true);
     });
   });
 
