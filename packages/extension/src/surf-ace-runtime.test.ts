@@ -5732,6 +5732,71 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("discovery loss removes unowned disconnected pane-only ghost rows", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.panes.size > 0);
+      const firstPane = internalRuntime.firstPane(surface);
+      assert.ok(firstPane);
+      const remotePaneId = firstPane.remotePaneId;
+      assert.ok(remotePaneId);
+
+      surface.autoRetryEnabled = false;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "unreachable";
+      surface.hasPairedInGatewaySession = false;
+      surface.sessionId = null;
+      internalRuntime.persistentState.targetStateBySurfaceId[surface.surfaceId] = {
+        ownershipEpoch: 1,
+        paneTargets: {},
+        registeredTargetIdsByIdempotencyKey: {},
+        targetRecords: [],
+      };
+      internalRuntime.persistentState.windowLabels[surface.surfaceId] = "z";
+      internalRuntime.persistentState.paneLabelsByPaneId[`${surface.surfaceId}::${Number(remotePaneId)}`] = 7;
+      internalRuntime.restartContentBySurface = new Map([
+        [
+          surface.surfaceId,
+          [
+            {
+              contentId: "ct_ghost_restart",
+              contentType: "markdown",
+              contentValue: "# ghost",
+              historyOwnerToken: "hot_ghost",
+              paneLabel: firstPane.paneLabel,
+              revision: 1,
+              sessionKey: "agent:test:ghost-cleanup",
+            },
+          ],
+        ],
+      ]);
+      internalRuntime.restartSnapshots = new Map([
+        [surface.surfaceId, { fingerprint: surface.surfaceId }],
+      ]);
+
+      discovery.setEndpoints([]);
+      await discovery.refreshNow();
+
+      await waitFor(async () => {
+        const screens = await runtime.listScreens();
+        return !screens.some((entry) => entry.fingerprint === server.surfaceId);
+      });
+
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), false);
+      assert.equal(internalRuntime.persistentState.targetStateBySurfaceId[server.surfaceId], undefined);
+      assert.equal(internalRuntime.persistentState.windowLabels[server.surfaceId], undefined);
+      assert.equal(
+        internalRuntime.persistentState.paneLabelsByPaneId[`${server.surfaceId}::${Number(remotePaneId)}`],
+        undefined,
+      );
+      assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), false);
+      assert.equal(internalRuntime.restartSnapshots.has(server.surfaceId), false);
+    });
+  });
+
   await t.test("discovery churn does not cull a previously paired disconnected surface", async () => {
     await withRuntimeHarness(async ({ discovery, runtime, server }) => {
       const internalRuntime = runtime as any;

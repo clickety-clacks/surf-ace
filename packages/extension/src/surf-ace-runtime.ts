@@ -3266,23 +3266,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           wsOpen ||
           surface.connectionState === "connected" ||
           surface.hasPairedInGatewaySession ||
-          surface.panes.size > 0;
+          surface.sessionId !== null;
         this.logger.info?.(
           `[surf-ace:runtime] surface ${surface.surfaceId} (${surface.name}) missing from discovery; preserve=${preserveOwnedSurface} wsOpen=${wsOpen} state=${surface.connectionState} paired=${surface.hasPairedInGatewaySession} panes=${surface.panes.size}`,
         );
         if (preserveOwnedSurface) {
           continue;
         }
-        surface.stopRequested = true;
-        this.removeManagedSurfaceFromRegistries(surface);
-        if (surface.client) {
-          this.runBackgroundTask(
-            `close removed surface ${surface.surfaceId}`,
-            async () => {
-              await surface.client?.close(1000, clampCloseReason("provider_shutdown"));
-            },
-          );
-        }
+        this.removeClosedSurface(surface.surfaceId, "discovery_endpoint_absent");
       }
     }
     for (const probe of this.endpointProbes.values()) {
@@ -3435,7 +3426,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.removeClosedSurface(event.payload.surfaceId, "surface_removed_event");
   }
 
-  private removeClosedSurface(surfaceId: SurfaceId, reason: "surface_removed_event" | "surfaces_list_absent"): void {
+  private removeClosedSurface(
+    surfaceId: SurfaceId,
+    reason: "surface_removed_event" | "surfaces_list_absent" | "discovery_endpoint_absent",
+  ): void {
     this.tombstonedSurfaceIds.add(surfaceId);
     this.clearClosedSurfacePersistentState(surfaceId, reason);
     const surface = this.surfaces.get(surfaceId);
@@ -3502,7 +3496,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private clearClosedSurfacePersistentState(
     surfaceId: SurfaceId,
-    reason: "surface_removed_event" | "surfaces_list_absent",
+    reason: "surface_removed_event" | "surfaces_list_absent" | "discovery_endpoint_absent",
   ): void {
     this.restartSnapshots.delete(surfaceId);
     this.restartContentBySurface.delete(surfaceId);
