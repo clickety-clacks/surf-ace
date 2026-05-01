@@ -5606,9 +5606,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private hasAcceptedSurfaceTopology(surface: ManagedSurface): boolean {
     return (
-      surface.connectionState === "connected" ||
-      (surface.hasPairedInGatewaySession && !surface.restartOwnershipPendingPair) ||
-      (surface.sessionId !== null && !surface.restartOwnershipPendingPair)
+      surface.hasPairedInGatewaySession &&
+      surface.sessionId !== null &&
+      !surface.restartOwnershipPendingPair
     );
   }
 
@@ -5946,12 +5946,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private filterPersistedVisibleScreens(screens: SurfAceScreenSummary[]): SurfAceScreenSummary[] {
     return screens.filter((screen) => {
-      if (screen.connectionState === "connected") {
-        return true;
-      }
-      return Boolean(
-        screen._debug?.hasPairedInGatewaySession === true ||
-        (typeof screen._debug?.sessionId === "string" && screen._debug.sessionId.length > 0),
+      return (
+        screen._debug?.hasPairedInGatewaySession === true &&
+        typeof screen._debug?.sessionId === "string" &&
+        screen._debug.sessionId.length > 0
       );
     });
   }
@@ -6033,16 +6031,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private async loadRestartSnapshots(): Promise<void> {
     const snapshotFile = await this.loadPersistedScreenSnapshotFile();
     const screens = snapshotFile?.screens ?? [];
-    this.restartSnapshots = new Map(
-      screens
-        .filter((screen) =>
-          screen._debug?.hasPairedInGatewaySession === true &&
-          typeof screen._debug.sessionId === "string" &&
-          screen._debug.sessionId.length > 0
-        )
-        .map((screen) => [screen.fingerprint, screen]),
+    const trustedRestartScreens = screens.filter((screen) =>
+      screen._debug?.hasPairedInGatewaySession === true &&
+      typeof screen._debug.sessionId === "string" &&
+      screen._debug.sessionId.length > 0
     );
-    this.restartContentBySurface = new Map(Object.entries(snapshotFile?.contentContinuity ?? {}));
+    const trustedSurfaceIds = new Set(trustedRestartScreens.map((screen) => screen.fingerprint));
+    this.restartSnapshots = new Map(trustedRestartScreens.map((screen) => [screen.fingerprint, screen]));
+    this.restartContentBySurface = new Map(
+      Object.entries(snapshotFile?.contentContinuity ?? {}).filter(([surfaceId]) => trustedSurfaceIds.has(surfaceId)),
+    );
   }
 
   private restoreRestartOwnership(surface: ManagedSurface): void {
@@ -6137,7 +6135,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private buildContentContinuitySnapshot(): Record<string, PersistedRestartContentEntry[]> {
     const contentContinuity: Record<string, PersistedRestartContentEntry[]> = {};
-    for (const surface of this.surfaces.values()) {
+    for (const surface of this.canonicalVisibleSurfaces()) {
       const entries = this.orderedPanes(surface)
         .map((pane): PersistedRestartContentEntry | null => {
           const entry = this.visibleHistoryEntry(pane);
@@ -6511,6 +6509,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!surface || isProvisionalSurfaceId(surface.surfaceId)) {
       throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
     }
+    if (!this.hasAcceptedSurfaceTopology(surface)) {
+      throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
+    }
     const pane = surface.panes.get(paneId);
     if (!pane) {
       throw new SurfAceToolError(
@@ -6814,6 +6815,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         `Surf Ace surface is not connected: ${surface.surfaceId}`,
       );
     }
+    const hasRestartOwnershipPendingPair =
+      surface.restartOwnershipPendingPair &&
+      surface.hasPairedInGatewaySession &&
+      surface.sessionId !== null;
+    if (
+      !this.hasAcceptedSurfaceTopology(surface) &&
+      surface.panes.size > 0
+    ) {
+      this.clearSurfaceLocalTopologyState(surface, {
+        preserveRestartContent: hasRestartOwnershipPendingPair,
+        preserveTargetState: true,
+      });
+    }
     const initialPaneId = this.ensureInitialPairPane(surface);
     const initialPane = this.firstPane(surface);
     if (!initialPane) {
@@ -6921,6 +6935,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (isOwnershipLockResponse(response)) {
         const ownershipLockCode = response.error.code === "busy" ? "busy" : "invalid_resume";
         this.noteOwnershipLockFailure(surface, ownershipLockCode);
+        if (isForeignOwnershipLockResponse(response)) {
+          this.logger.warn?.(
+            runtimeDiagnostic("foreign_ownership_lock_cleared", {
+              reason: response.error.code,
+              surface_id: surface.surfaceId,
+            }),
+          );
+          this.clearForeignOwnershipLocalState(surface);
+          this.queuePersistScreenSnapshot("foreign ownership lock");
+        }
       } else {
         surface.consecutiveOwnershipLockFailures = 0;
       }
@@ -7297,11 +7321,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           if (canonicalSurface !== surface) {
             surface = canonicalSurface;
           }
-          this.assertPairResponseHasTopologyPanes(surface, pairResponse);
-          const hadPairedProviderTopology =
-            surface.hasPairedInGatewaySession &&
-            surface.panes.size > 0;
-          this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId), pairResponse.payload.resumed);
+	          this.assertPairResponseHasTopologyPanes(surface, pairResponse);
+	          const hadAcceptedLocalTopology =
+	            this.hasAcceptedSurfaceTopology(surface) &&
+	            surface.panes.size > 0;
+	          const hadRestartOwnershipPendingPair =
+	            surface.restartOwnershipPendingPair &&
+	            surface.hasPairedInGatewaySession &&
+	            surface.sessionId !== null;
+	          this.markPairConnected(surface, asSessionId(pairResponse.payload.sessionId), pairResponse.payload.resumed);
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
               panes: pairResponse.payload.state.panes.length,
@@ -7309,18 +7337,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               session_id: pairResponse.payload.sessionId,
               surface_id: surface.surfaceId,
             }),
-          );
-          surface.unreachableFailures = 0;
-          const shouldRestoreProviderTopology =
-            surface.topologyRevision > 0 ||
-            surface.panes.size > pairResponse.payload.state.panes.length;
+	          );
+	          surface.unreachableFailures = 0;
+	          if (!hadAcceptedLocalTopology) {
+	            this.clearSurfaceLocalTopologyState(surface, {
+	              preserveRestartContent: hadRestartOwnershipPendingPair,
+	            });
+	          }
+	          const shouldRestoreProviderTopology =
+	            hadAcceptedLocalTopology &&
+	            (surface.topologyRevision > 0 ||
+	              surface.panes.size > pairResponse.payload.state.panes.length);
           this.applyPairState(surface, pairResponse, {
             pruneStalePanes: !shouldRestoreProviderTopology,
           });
-          const shouldPublishProviderTopology =
-            shouldRestoreProviderTopology ||
-            (hadPairedProviderTopology &&
-              this.pairStatePaneLabelsDiffer(surface, pairResponse.payload.state.panes));
+	          const shouldPublishProviderTopology =
+	            shouldRestoreProviderTopology ||
+	            (hadAcceptedLocalTopology &&
+	              this.pairStatePaneLabelsDiffer(surface, pairResponse.payload.state.panes));
           this.restoreRestartContent(surface);
           if (shouldPublishProviderTopology) {
             await this.pushTopology(surface);
@@ -7971,10 +8005,46 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private clearSurfaceResumeState(surface: ManagedSurface): void {
-	    surface.sessionId = null;
-	    surface.hasPairedInGatewaySession = false;
-	    surface.restartOwnershipPendingPair = false;
-	    surface.consecutiveResumeFailures = 0;
+    surface.sessionId = null;
+    surface.hasPairedInGatewaySession = false;
+    surface.restartOwnershipPendingPair = false;
+    surface.consecutiveResumeFailures = 0;
+  }
+
+  private clearSurfaceLocalTopologyState(
+    surface: ManagedSurface,
+    options: { preserveRestartContent?: boolean; preserveTargetState?: boolean } = {},
+  ): void {
+    this.restartSnapshots.delete(surface.surfaceId);
+    if (options.preserveRestartContent !== true) {
+      this.restartContentBySurface.delete(surface.surfaceId);
+    }
+    for (const pane of surface.panes.values()) {
+      this.clearVisiblePaneContent(pane, asRevision(0));
+      pane.currentTargetId = null;
+      pane.staleTargetId = null;
+      pane.lastRestoreBlockedReason = null;
+      pane.nonDurableTargetDiagnostic = null;
+    }
+    surface.panes = new Map<PaneId, ManagedPane>();
+    surface.layout = null;
+    surface.topologyRevision = 0;
+    surface.paneIdsNeedingSnapshot.clear();
+    surface.snapshotBufferedEvents = [];
+    if (options.preserveTargetState !== true) {
+      surface.targetRecords.clear();
+    }
+    if (options.preserveTargetState !== true && this.persistentState.targetStateBySurfaceId) {
+      delete this.persistentState.targetStateBySurfaceId[surface.surfaceId];
+    }
+  }
+
+  private clearForeignOwnershipLocalState(surface: ManagedSurface): void {
+    this.clearSurfaceResumeState(surface);
+    this.clearSurfaceLocalTopologyState(surface);
+    this.runBackgroundTask("persist foreign ownership state clear", async () => {
+      await this.persistState();
+    });
   }
 
   private shouldAttemptResume(surface: ManagedSurface): boolean {

@@ -245,6 +245,30 @@ class FakeSurfAceWsServer {
     });
   }
 
+  resetToSinglePane(paneId = this.initialRemotePaneId): void {
+    this.panes.clear();
+    this.panes.set(paneId, {
+      contentId: null,
+      contentType: null,
+      drawings: [],
+      frame: {
+        height: 768,
+        width: 1024,
+        x: 0,
+        y: 0,
+      },
+      name: null,
+      paneLabel: paneId,
+      paneLineageId: `pl_${this.surfaceId}_${paneId}`,
+      revision: 0,
+      viewport: {
+        height: 768,
+        scale: 2,
+        width: 1024,
+      },
+    });
+  }
+
   async close(): Promise<void> {
     if (this.closed) {
       return;
@@ -1701,8 +1725,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await fs.writeFile(
         path.join(stateDir, "surf-ace-runtime-screens.json"),
         JSON.stringify(
-          {
-            screens: [
+	          {
+	            screens: [
               {
                 ...activeScreen,
                 panes: activeScreen.panes.map((pane) => ({
@@ -1747,12 +1771,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const activeScreen = (await runtimeA.listScreens())[0];
       assert.ok(activeScreen);
 
-      await fs.writeFile(
-        path.join(stateDir, "surf-ace-runtime-screens.json"),
-        JSON.stringify(
-          {
-            screens: [
-              {
+	      await fs.writeFile(
+	        path.join(stateDir, "surf-ace-runtime-screens.json"),
+	        JSON.stringify(
+		          {
+		            screens: [
+	              {
                 ...activeScreen,
                 fingerprint: "sf_snapshot-a",
                 panes: activeScreen.panes.map((pane) => ({
@@ -1834,7 +1858,47 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
                   wsOpen: false,
                 },
               },
+              {
+                ...activeScreen,
+                connectionState: "connected",
+                fingerprint: "sf_remote_paired_connected_without_local_session",
+                _debug: {
+                  ...activeScreen._debug,
+                  hasPairedInGatewaySession: false,
+                  reconnectAttempt: 5,
+                  remoteListedAt: Date.now(),
+                  remotePaired: true,
+                  sessionId: null,
+                  unreachableFailures: 0,
+                  wsOpen: false,
+                },
+              },
             ],
+            contentContinuity: {
+              [activeScreen.fingerprint]: [],
+              sf_remote_paired_connected_without_local_session: [
+                {
+                  contentId: "ct_hidden_restart",
+                  contentType: "markdown",
+                  contentValue: "# hidden restart content",
+                  historyOwnerToken: "hot_hidden_restart",
+                  paneLabel: 1,
+                  revision: 1,
+                  sessionKey: "agent:test:hidden-restart-content",
+                },
+              ],
+              sf_stale_unowned_snapshot: [
+                {
+                  contentId: "ct_stale_restart",
+                  contentType: "markdown",
+                  contentValue: "# stale restart content",
+                  historyOwnerToken: "hot_stale_restart",
+                  paneLabel: 1,
+                  revision: 1,
+                  sessionKey: "agent:test:stale-restart-content",
+                },
+              ],
+            },
             updatedAt: Date.now(),
             version: 1,
           },
@@ -1845,10 +1909,13 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       await runtimeB.start();
       const passiveScreens = await runtimeB.listScreens();
+      const internalRuntimeB = runtimeB as any;
       assert.deepEqual(
         passiveScreens.map((screen) => screen.fingerprint),
         [activeScreen.fingerprint],
       );
+      assert.equal(internalRuntimeB.restartContentBySurface.has("sf_remote_paired_connected_without_local_session"), false);
+      assert.equal(internalRuntimeB.restartContentBySurface.has("sf_stale_unowned_snapshot"), false);
     } finally {
       await runtimeB.stop();
       await runtimeA.stop();
@@ -5655,9 +5722,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(pane);
 
       internalRuntime.clearVisiblePaneContent(pane, 0);
-      internalRuntime.restartContentBySurface = new Map([
-        [
-          server.surfaceId,
+	      internalRuntime.restartContentBySurface = new Map([
+	        [
+	          server.surfaceId,
           [
             {
               contentId: pushed.contentId,
@@ -5993,6 +6060,225 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("remote-paired foreign rows with cached panes stay hidden without local ownership", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server, stateDir }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.split({
+        count: 3,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      await runtime.push(
+        {
+          content: "# foreign ghost content",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:foreign-ghost-content" },
+      );
+
+      const internalRuntime = runtime as any;
+      const endpoint = discovery.getSnapshot()[0]!;
+      const ownedSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(ownedSurface);
+      const ownedPanes = new Map(ownedSurface.panes);
+      const ownedLayout = structuredClone(ownedSurface.layout);
+      const ownedTopologyRevision = ownedSurface.topologyRevision;
+      internalRuntime.reconcileCanonicalSurfacesFromRemoteList({
+        endpoint,
+        remoteSurfaces: [
+          {
+            name: "Foreign Surface",
+            paired: true,
+            surfaceId: "sf_foreign_remote_paired",
+            viewport: endpoint.viewport,
+          },
+        ],
+        source: "surfaces.list",
+        startDiscoveredSiblings: false,
+      });
+
+      const surface = internalRuntime.surfaces.get("sf_foreign_remote_paired");
+      assert.ok(surface);
+      assert.equal(typeof surface.remoteListedAt, "number");
+      assert.equal(surface.remotePaired, true);
+      surface.connectionState = "unreachable";
+      surface.hasPairedInGatewaySession = false;
+      surface.layout = ownedLayout;
+      surface.panes = ownedPanes;
+      surface.reconnectAttempt = 5;
+      surface.sessionId = null;
+      surface.topologyRevision = ownedTopologyRevision;
+      surface.unreachableFailures = 5;
+
+      const screens = await runtime.listScreens();
+      assert.equal(screens.some((entry) => entry.fingerprint === surface.surfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(surface.surfaceId), true);
+
+      const hiddenPane = [...surface.panes.values()][0];
+      assert.ok(hiddenPane);
+      await assert.rejects(
+        async () => await runtime.read({ fingerprint: surface.surfaceId, paneId: hiddenPane.paneId }),
+        /Unknown Surf Ace surface/,
+      );
+      await assert.rejects(
+        async () => await runtime.snapshot({ fingerprint: surface.surfaceId, paneId: hiddenPane.paneId }),
+        /Unknown Surf Ace surface/,
+      );
+
+      await internalRuntime.persistScreenSnapshot();
+      let persistedSnapshot: any = null;
+      await waitFor(async () => {
+        const rawSnapshot = await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8");
+        if (rawSnapshot.length === 0) {
+          return false;
+        }
+        try {
+          persistedSnapshot = JSON.parse(rawSnapshot);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      assert.equal(persistedSnapshot.contentContinuity?.[surface.surfaceId], undefined);
+
+      const staleRemotePaneIds = [...surface.panes.values()].map((pane: any) => Number(pane.remotePaneId));
+      assert.ok(staleRemotePaneIds.length > 0);
+      const contentRequestsBeforeFreshPair = server.contentSetRequests.length;
+      const clearRequestsBeforeFreshPair = server.clearRequests.length;
+      const topologyRequestsBeforeFreshPair = server.topologyApplyRequests.length;
+      server.addSurface({
+        initialRemotePaneId: 77,
+        name: "Foreign Surface",
+        surfaceId: surface.surfaceId,
+      });
+      surface.connectionState = "connecting";
+      surface.remotePaired = false;
+      surface.unreachableFailures = 0;
+      internalRuntime.ensureSurfaceWorker(surface);
+
+      await waitFor(async () => {
+        const freshScreens = await runtime.listScreens();
+        return freshScreens.some((entry) => entry.fingerprint === surface.surfaceId && entry.connectionState === "connected");
+      }, 12_000);
+
+      const freshSurfaceScreen = (await runtime.listScreens()).find((entry) => entry.fingerprint === surface.surfaceId);
+      assert.ok(freshSurfaceScreen);
+      const freshPairRequestIndex = server.pairRequestSurfaceIds.lastIndexOf(surface.surfaceId);
+      assert.notEqual(freshPairRequestIndex, -1);
+      const freshPairRequest = server.pairRequests[freshPairRequestIndex];
+      assert.ok(freshPairRequest);
+      assert.equal(staleRemotePaneIds.includes(freshPairRequest.initialPaneId), false);
+      assert.equal(freshPairRequest.initialPaneLabel, 1);
+      assertPaneLabelsWithOpaqueIds(freshSurfaceScreen.panes, [1]);
+      assert.equal(freshSurfaceScreen.panes[0]?.activeContent, null);
+      assert.equal(surface.panes.size, 1);
+      assert.equal(surface.topologyRevision, 0);
+      assert.equal(server.topologyApplyRequests.length, topologyRequestsBeforeFreshPair);
+      assert.equal(server.contentSetRequests.length, contentRequestsBeforeFreshPair);
+      assert.equal(server.clearRequests.length, clearRequestsBeforeFreshPair);
+    });
+  });
+
+  await t.test("single idle remote-paired cached pane does not seed fresh pair bootstrap", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      const stalePane = [...surface.panes.values()][0];
+      assert.ok(stalePane);
+      const staleRemotePaneId = Number(stalePane.remotePaneId);
+      surface.stopRequested = true;
+      await surface.client.close(1000, "test_idle_remote_paired_cached_pane_bootstrap").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      surface.stopRequested = false;
+      surface.autoRetryEnabled = true;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "connecting";
+      surface.hasPairedInGatewaySession = false;
+      surface.reconnectAttempt = 5;
+      surface.remotePaired = true;
+      surface.sessionId = null;
+      surface.unreachableFailures = 5;
+
+      assert.equal((await runtime.listScreens()).some((entry) => entry.fingerprint === server.surfaceId), false);
+
+      const pairRequestsBeforeFreshPair = server.pairRequests.length;
+      server.resetToSinglePane(77);
+      surface.remotePaired = false;
+      surface.unreachableFailures = 0;
+      internalRuntime.ensureSurfaceWorker(surface);
+
+      await waitFor(() => server.pairRequests.length > pairRequestsBeforeFreshPair, 12_000);
+      const freshPairRequest = server.pairRequests.at(-1);
+      assert.ok(freshPairRequest);
+      assert.notEqual(freshPairRequest.initialPaneId, staleRemotePaneId);
+      assert.equal(freshPairRequest.initialPaneLabel, 1);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+    });
+  });
+
+	  await t.test("session id without paired ownership does not expose stale cached panes", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.panes.size > 0);
+      surface.stopRequested = true;
+      await surface.client?.close(1000, "test_stale_session_without_paired_flag_hidden").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      surface.stopRequested = false;
+      surface.autoRetryEnabled = true;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "connecting";
+      surface.hasPairedInGatewaySession = false;
+      surface.reconnectAttempt = 5;
+      surface.remotePaired = true;
+      surface.sessionId = "sa_stale_resume_only";
+      surface.unreachableFailures = 5;
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.some((entry) => entry.fingerprint === server.surfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), true);
+    });
+  });
+
+  await t.test("paired flag without local session does not expose stale cached panes", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.panes.size > 0);
+      surface.stopRequested = true;
+      await surface.client?.close(1000, "test_no_session_paired_flag_hidden").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      surface.stopRequested = false;
+      surface.autoRetryEnabled = true;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "connecting";
+      surface.hasPairedInGatewaySession = true;
+      surface.reconnectAttempt = 5;
+      surface.remotePaired = true;
+      surface.sessionId = null;
+      surface.unreachableFailures = 5;
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.some((entry) => entry.fingerprint === server.surfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), true);
+    });
+  });
+
   await t.test("surfaces.list-active unlocked surfaces are preserved internally but hidden until paired", async () => {
     await withRuntimeHarness(async ({ discovery, runtime, server }) => {
       const internalRuntime = runtime as any;
@@ -6202,12 +6488,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           2,
         ),
       );
-      await fs.writeFile(
-        path.join(stateDir, "surf-ace-runtime-screens.json"),
-        JSON.stringify(
-          {
-            screens: [
-              {
+	      await fs.writeFile(
+	        path.join(stateDir, "surf-ace-runtime-screens.json"),
+	        JSON.stringify(
+		          {
+		            screens: [
+	              {
                 _debug: {
                   autoRetryEnabled: true,
                   endpointId: "stale-endpoint",
@@ -7330,17 +7616,30 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
                 lastSeenAt: Date.now(),
                 name: "Restart Owner",
                 panes: [],
-                pendingEvents: 0,
-                viewport: {
-                  height: 768,
-                  scale: 2,
-                  width: 1024,
-                },
-                windowLabel: "a",
-              },
-            ],
-            updatedAt: Date.now() - 10 * 60_000,
-            version: 1,
+	                pendingEvents: 0,
+	                viewport: {
+	                  height: 768,
+	                  scale: 2,
+	                  width: 1024,
+	                },
+	                windowLabel: "a",
+	              },
+	            ],
+	            contentContinuity: {
+	              [server.surfaceId]: [
+	                {
+	                  contentId: "ct_restart_persisted",
+	                  contentType: "markdown",
+	                  contentValue: "# restart persisted content",
+	                  historyOwnerToken: "hot_restart_persisted",
+	                  paneLabel: 1,
+	                  revision: 7,
+	                  sessionKey: "agent:test:restart-owner-content",
+	                },
+	              ],
+	            },
+	            updatedAt: Date.now() - 10 * 60_000,
+	            version: 1,
           },
           null,
           2,
@@ -7352,9 +7651,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.equal(server.pairAttemptDetails.length, 1);
       assert.equal(server.pairAttemptDetails[0]?.providerId, providerId);
-      assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
-      assert.equal(server.pairAttemptDetails[0]?.takeover, false);
-      assert.equal(server.pairedSocket !== null, true);
+	      assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
+	      assert.equal(server.pairAttemptDetails[0]?.takeover, false);
+	      assert.equal(server.pairedSocket !== null, true);
+	      await waitFor(() => server.contentSetRequests.length > 0, 12_000);
+	      const replayed = server.contentSetRequests.at(-1);
+	      assert.equal(replayed?.contentId, "ct_restart_persisted");
+	      assert.equal(replayed?.contentType, "markdown");
+	      assert.equal(replayed?.revision, 7);
+	      const screen = (await runtime.listScreens())[0];
+	      assert.equal(screen?.panes[0]?.activeContent?.contentId, "ct_restart_persisted");
+	      assert.equal(screen?.panes[0]?.activeContent?.revision, 7);
     } finally {
       await runtime.stop();
       await server.close();
@@ -7481,8 +7788,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 	      await fs.writeFile(
 	        path.join(stateDir, "surf-ace-runtime-screens.json"),
 	        JSON.stringify(
-	          {
-	            screens: [
+		          {
+		            screens: [
 	              {
 	                _debug: {
 	                  autoRetryEnabled: true,
@@ -7691,6 +7998,154 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(
         warnings.some((warning) => warning.includes("backing off") && warning.includes("takeover requires explicit user action")),
       );
+    });
+  });
+
+  await t.test("foreign-provider busy clears stale content before later fresh pair", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push(
+        {
+          content: "# stale before foreign busy",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:foreign-busy-clear-content" },
+	      );
+	      const contentRequestsBeforeReconnect = server.contentSetRequests.length;
+	      const clearRequestsBeforeReconnect = server.clearRequests.length;
+	      const internalRuntime = runtime as any;
+	      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const firstPane = surface.panes.get(firstPaneId);
+      assert.ok(firstPane);
+      internalRuntime.restartContentBySurface = new Map([
+        [
+          server.surfaceId,
+          [
+            {
+              contentId: "ct_stale_foreign_busy_restart",
+              contentType: "markdown",
+              contentValue: "# stale restart before foreign busy",
+              historyOwnerToken: "hot_stale_foreign_busy_restart",
+              paneLabel: firstPane.paneLabel,
+              revision: 999,
+              sessionKey: "agent:test:foreign-busy-stale-restart",
+            },
+          ],
+	        ],
+	      ]);
+
+	      server.resetToSinglePane();
+	      server.busyWithoutTakeoverResponsesRemaining = 1;
+	      server.busyWithoutTakeoverMessage = "Surface ownership lock is held by another provider";
+	      await surface.client.close(1000, "test_foreign_busy_clears_content_before_fresh_pair");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      const screens = await runtime.listScreens();
+      const pane = screens[0]?.panes[0];
+      assert.ok(pane);
+	      assert.equal(pane.activeContent, null);
+	      assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), false);
+	      assert.equal(server.contentSetRequests.length, contentRequestsBeforeReconnect);
+	      assert.equal(server.clearRequests.length, clearRequestsBeforeReconnect);
+	      assert.ok(warnings.some((warning) => warning.includes("foreign_ownership_lock_cleared")));
+	    });
+	  });
+
+	  await t.test("foreign-provider busy drops stale provider topology before later fresh pair", async () => {
+	    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+	      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+	      const split = await runtime.split({
+	        count: 3,
+	        direction: "horizontal",
+	        fingerprint: server.surfaceId,
+	        paneId: firstPaneId,
+	      });
+	      assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
+	      const topologyRequestsBeforeReconnect = server.topologyApplyRequests.length;
+	      const internalRuntime = runtime as any;
+	      const surface = internalRuntime.surfaces.get(server.surfaceId);
+	      assert.ok(surface);
+	      assert.equal(surface.panes.size, 3);
+	      assert.ok(surface.topologyRevision > 0);
+
+	      server.resetToSinglePane();
+	      server.busyWithoutTakeoverResponsesRemaining = 1;
+	      server.busyWithoutTakeoverMessage = "Surface ownership lock is held by another provider";
+	      await surface.client.close(1000, "test_foreign_busy_drops_stale_provider_topology");
+
+	      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+	      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+	      const screens = await runtime.listScreens();
+	      assert.equal(screens[0]?.panes.length, 1);
+	      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1]);
+	      assert.equal(server.topologyApplyRequests.length, topologyRequestsBeforeReconnect);
+	      assert.equal(surface.panes.size, 1);
+	      assert.equal(surface.topologyRevision, 0);
+	      assert.ok(warnings.some((warning) => warning.includes("foreign_ownership_lock_cleared")));
+	    });
+	  });
+
+	  await t.test("foreign-provider busy clears stale local ownership before exposure", async () => {
+    await withRuntimeHarness(async ({ runtime, server, stateDir, warnings }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push(
+        {
+          content: "# stale foreign busy",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:foreign-busy-stale" },
+      );
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      assert.equal(surface.hasPairedInGatewaySession, true);
+      assert.notEqual(surface.sessionId, null);
+
+      server.busyWithoutTakeoverResponsesRemaining = 100;
+      server.busyWithoutTakeoverMessage = "Surface ownership lock is held by another provider";
+      await surface.client.close(1000, "test_foreign_busy_clears_local_ownership");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      await waitFor(() => surface.sessionId === null && surface.hasPairedInGatewaySession === false, 12_000);
+
+      const screens = await runtime.listScreens();
+      assert.equal(screens.some((entry) => entry.fingerprint === server.surfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), true);
+      await assert.rejects(
+        async () => await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId }),
+        /Unknown Surf Ace surface/,
+      );
+      await assert.rejects(
+        async () => await runtime.snapshot({ fingerprint: server.surfaceId, paneId: firstPaneId }),
+        /Unknown Surf Ace surface/,
+      );
+
+      await internalRuntime.persistScreenSnapshot();
+      let persistedSnapshot: any = null;
+      await waitFor(async () => {
+        const rawSnapshot = await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8");
+        if (rawSnapshot.length === 0) {
+          return false;
+        }
+        try {
+          persistedSnapshot = JSON.parse(rawSnapshot);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      assert.equal(persistedSnapshot.screens.some((entry: any) => entry.fingerprint === server.surfaceId), false);
+      assert.equal(persistedSnapshot.contentContinuity?.[server.surfaceId], undefined);
+      assert.ok(warnings.some((warning) => warning.includes("foreign_ownership_lock_cleared")));
     });
   });
 
