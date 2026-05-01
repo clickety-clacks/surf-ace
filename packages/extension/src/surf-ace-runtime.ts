@@ -4024,6 +4024,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private quiesceSupersededSurface(
     supersededSurface: ManagedSurface,
     replacementSurfaceId: SurfaceId,
+    options: { closeClient?: boolean } = {},
   ): void {
     supersededSurface.stopRequested = true;
     supersededSurface.autoRetryEnabled = false;
@@ -4032,7 +4033,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.wakeSurfaceRetry(supersededSurface);
     const client = supersededSurface.client;
     supersededSurface.client = null;
-    if (!client) {
+    if (!client || options.closeClient === false) {
       return;
     }
     this.runBackgroundTask(
@@ -4101,7 +4102,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.removeManagedSurfaceFromRegistries(remapFrom);
       if (existing && existing !== remapFrom) {
         this.preserveSurfaceStateUntilPairResponse(remapFrom, existing);
-        this.quiesceSupersededSurface(remapFrom, input.surfaceId);
+        if (!existing.client?.isOpen() && remapFrom.client?.isOpen()) {
+          existing.client = remapFrom.client;
+          this.quiesceSupersededSurface(remapFrom, input.surfaceId, { closeClient: false });
+        } else {
+          this.quiesceSupersededSurface(remapFrom, input.surfaceId);
+        }
         surface = existing;
       } else {
         remapFrom.surfaceId = input.surfaceId;

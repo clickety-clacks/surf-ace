@@ -6201,6 +6201,61 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("pair.response remap transfers a live paired client when existing canonical has no client", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const canonicalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(canonicalSurface);
+      const previousCanonicalClient = canonicalSurface.client;
+      canonicalSurface.client = null;
+
+      let incomingCloseCalls = 0;
+      const incomingClient = {
+        close: async () => {
+          incomingCloseCalls += 1;
+        },
+        isOpen: () => true,
+        request: async () => {
+          throw new Error("not used in client transfer test");
+        },
+      };
+      const remappingSurface = {
+        ...canonicalSurface,
+        client: incomingClient,
+        connectedAt: null,
+        endpoint: {
+          ...canonicalSurface.endpoint,
+          endpointId: "endpoint-stale-wrapper",
+          fingerprintPrefix: "",
+        },
+        endpointId: "endpoint-stale-wrapper",
+        fingerprintPrefix: "",
+        hasPairedInGatewaySession: false,
+        panes: new Map(canonicalSurface.panes),
+        recentEventIds: [...canonicalSurface.recentEventIds],
+        recentEventIdsSet: new Set(canonicalSurface.recentEventIdsSet),
+        retryDelayResolver: null,
+        sessionId: null,
+        snapshotBufferedEvents: [...canonicalSurface.snapshotBufferedEvents],
+        stopRequested: false,
+        surfaceId: "sf_stale_wrapper_previous" as any,
+        workPromise: null,
+      };
+
+      internalRuntime.surfaces.set(remappingSurface.surfaceId, remappingSurface);
+      const adoptedSurface = internalRuntime.adoptCanonicalSurfaceId(remappingSurface, server.surfaceId, "pair.response");
+
+      assert.equal(adoptedSurface, canonicalSurface);
+      assert.equal(internalRuntime.surfaces.has("sf_stale_wrapper_previous"), false);
+      assert.equal(canonicalSurface.client, incomingClient);
+      assert.equal(remappingSurface.client, null);
+      assert.equal(remappingSurface.stopRequested, true);
+      assert.equal(incomingCloseCalls, 0);
+
+      canonicalSurface.client = previousCanonicalClient;
+    });
+  });
+
   await t.test("provisional entries accidentally placed in the canonical registry trip the pre-exposure invariant", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
