@@ -4000,6 +4000,81 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return this.ensureWindowLabel(nextSurfaceId);
   }
 
+  private repairLiveWindowLabelInvariant(reason: string): void {
+    const orderedSurfaces = [...this.surfaces.values()]
+      .map((surface, index) => ({ index, surface }))
+      .sort((left, right) => (
+        this.windowLabelStabilityRank(right.surface) - this.windowLabelStabilityRank(left.surface) ||
+        ((left.surface.connectedAt ?? Number.MAX_SAFE_INTEGER) - (right.surface.connectedAt ?? Number.MAX_SAFE_INTEGER)) ||
+        left.index - right.index
+      ))
+      .map((entry) => entry.surface);
+    const usedWindowLabels = new Set<string>();
+    let nextWindowLabelIndex = 0;
+    let changed = false;
+    const nextAvailable = (): string => {
+      let windowLabel = windowLabelForIndex(nextWindowLabelIndex);
+      while (usedWindowLabels.has(windowLabel)) {
+        nextWindowLabelIndex += 1;
+        windowLabel = windowLabelForIndex(nextWindowLabelIndex);
+      }
+      return windowLabel;
+    };
+
+    for (const surface of orderedSurfaces) {
+      let windowLabel = surface.windowLabel || this.persistentState.windowLabels[surface.surfaceId] || "";
+      if (!windowLabel || usedWindowLabels.has(windowLabel)) {
+        windowLabel = nextAvailable();
+      }
+      usedWindowLabels.add(windowLabel);
+      while (usedWindowLabels.has(windowLabelForIndex(nextWindowLabelIndex))) {
+        nextWindowLabelIndex += 1;
+      }
+      if (surface.windowLabel !== windowLabel) {
+        surface.windowLabel = windowLabel;
+        changed = true;
+      }
+      if (this.persistentState.windowLabels[surface.surfaceId] !== windowLabel) {
+        this.persistentState.windowLabels[surface.surfaceId] = windowLabel;
+        changed = true;
+      }
+    }
+
+    const liveSurfaceIds = new Set<string>(orderedSurfaces.map((surface) => surface.surfaceId));
+    for (const surfaceId of Object.keys(this.persistentState.windowLabels)) {
+      if (!liveSurfaceIds.has(surfaceId) && this.tombstonedSurfaceIds.has(asSurfaceId(surfaceId))) {
+        delete this.persistentState.windowLabels[surfaceId];
+        changed = true;
+      }
+    }
+
+    if (this.persistentState.nextWindowLabelIndex < nextWindowLabelIndex) {
+      this.persistentState.nextWindowLabelIndex = nextWindowLabelIndex;
+      changed = true;
+    }
+    if (changed) {
+      this.runBackgroundTask(
+        `persist window labels ${reason}`,
+        async () => {
+          await this.persistState();
+        },
+      );
+    }
+  }
+
+  private windowLabelStabilityRank(surface: ManagedSurface): number {
+    if (surface.hasPairedInGatewaySession || surface.sessionId) {
+      return 3;
+    }
+    if (surface.connectionState === "connected" || surface.client?.isOpen()) {
+      return 2;
+    }
+    if (surface.connectionState === "connecting") {
+      return 1;
+    }
+    return 0;
+  }
+
   private preserveSurfaceStateUntilPairResponse(
     remappedSurface: ManagedSurface,
     preservedSurface: ManagedSurface,
@@ -4139,6 +4214,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             visible_surface_count: this.surfaces.size,
           }),
         );
+        this.repairLiveWindowLabelInvariant(`canonical surface upsert ${input.source}`);
         return surface;
       }
     }
@@ -4186,6 +4262,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         visible_surface_count: this.surfaces.size,
       }),
     );
+    this.repairLiveWindowLabelInvariant(`canonical surface upsert ${input.source}`);
     return surface;
   }
 
@@ -4574,6 +4651,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const beforeRemotePaneIds = options.beforeRemotePaneIds ?? orderedBeforePanes.map((pane) => Number(pane.remotePaneId));
     const layout = collapseManagedLayout(surface.layout);
     surface.layout = layout;
+    this.repairLiveWindowLabelInvariant("topology publish");
     this.repairLivePaneLabelInvariant("topology publish");
     const topologyRevision = this.nextTopologyRevision(surface, options.increment ?? false);
     const request: TopologyApplyRequest = {
@@ -5485,6 +5563,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private buildScreenSummaries(): SurfAceScreenSummary[] {
     this.assertCanonicalSurfaceRegistry("screen summary");
+    this.repairLiveWindowLabelInvariant("screen summary");
     this.repairLivePaneLabelInvariant("screen summary");
     return this.canonicalVisibleSurfaces()
       .sort((left, right) => left.windowLabel.localeCompare(right.windowLabel, "en"))
@@ -5746,7 +5825,55 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async loadPersistedScreenSnapshot(): Promise<SurfAceScreenSummary[]> {
-    return (await this.loadPersistedScreenSnapshotFile())?.screens ?? [];
+    return this.repairPersistedScreenSummaryLabels(
+      (await this.loadPersistedScreenSnapshotFile())?.screens ?? [],
+    );
+  }
+
+  private repairPersistedScreenSummaryLabels(screens: SurfAceScreenSummary[]): SurfAceScreenSummary[] {
+    const usedWindowLabels = new Set<string>();
+    let nextWindowLabelIndex = 0;
+    const nextAvailableWindowLabel = (): string => {
+      let windowLabel = windowLabelForIndex(nextWindowLabelIndex);
+      while (usedWindowLabels.has(windowLabel)) {
+        nextWindowLabelIndex += 1;
+        windowLabel = windowLabelForIndex(nextWindowLabelIndex);
+      }
+      return windowLabel;
+    };
+
+    return screens.map((screen) => {
+      let windowLabel = screen.windowLabel;
+      if (!windowLabel || usedWindowLabels.has(windowLabel)) {
+        windowLabel = nextAvailableWindowLabel();
+      }
+      usedWindowLabels.add(windowLabel);
+      while (usedWindowLabels.has(windowLabelForIndex(nextWindowLabelIndex))) {
+        nextWindowLabelIndex += 1;
+      }
+
+      const persistedPaneLabels = screen.panes.map((pane) => pane.paneLabel);
+      const compactPaneLabels = new Set(persistedPaneLabels);
+      const labelsAreCompact =
+        compactPaneLabels.size === persistedPaneLabels.length &&
+        persistedPaneLabels.every((paneLabel) => (
+          Number.isInteger(paneLabel) &&
+          paneLabel > 0 &&
+          paneLabel <= persistedPaneLabels.length
+        ));
+      const panes = screen.panes.map((pane, index) => {
+        return {
+          ...pane,
+          paneLabel: labelsAreCompact ? pane.paneLabel : index + 1,
+        };
+      });
+
+      return {
+        ...screen,
+        panes,
+        windowLabel,
+      };
+    });
   }
 
   private async loadPersistedScreenSnapshotFile(): Promise<PersistedScreenSnapshotFile | null> {
@@ -6559,8 +6686,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!initialPane) {
       throw new SurfAceToolError("internal_error", `Surface ${surface.surfaceId} has no initial pane`);
     }
-    const windowLabel = surface.windowLabel || this.ensureWindowLabel(surface.surfaceId);
-    surface.windowLabel = windowLabel;
+    surface.windowLabel = surface.windowLabel || this.ensureWindowLabel(surface.surfaceId);
+    this.repairLiveWindowLabelInvariant("pair request");
+    const windowLabel = surface.windowLabel;
     this.repairLivePaneLabelInvariant("pair request");
     const resumeSessionId = this.shouldAttemptResume(surface) ? surface.sessionId : null;
     const providerName = this.providerNameForSurface(surface);
