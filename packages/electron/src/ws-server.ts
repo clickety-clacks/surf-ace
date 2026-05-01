@@ -1380,8 +1380,7 @@ export class SurfaceWsServer {
       };
     }
 
-    const requestedMaterialization = request.payload.materialization;
-    if (!requestedMaterialization) {
+    if (!isNativeHostTargetKind(request.payload.targetKind)) {
       const payload: TargetApplyResponse["payload"] = {
         appliedAt,
         errorCode: "unsupported_target_kind",
@@ -1406,11 +1405,10 @@ export class SurfaceWsServer {
     try {
       materialization = this.core.projectNativePaneMaterialization(
         surfaceId,
-        requestedMaterialization,
-        request.payload.paneLineageId,
+        request.payload,
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "native pane materialization identity is invalid";
+      const message = error instanceof Error ? error.message : "native pane host plan projection failed";
       return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", message);
     }
     if (!this.compositorSocketPath) {
@@ -2247,6 +2245,10 @@ function isEventEnabled(profile: EventProfile, eventName: Event["op"]): boolean 
 
 function browserUrlApplyKey(surfaceId: string, paneId: number): string {
   return `${surfaceId}::${paneId}`;
+}
+
+function isNativeHostTargetKind(targetKind: TargetApplyRequest["payload"]["targetKind"]): boolean {
+  return targetKind === "terminal_app" || targetKind === "native_app" || targetKind === "compositor_app";
 }
 
 function browserUrlApplyResult(

@@ -127,11 +127,8 @@ try {
   const panesById = new Map(topology.payload.panes.map((pane) => [Number(pane.paneId), pane]));
   const btopPane = requirePane(panesById, btopPaneId);
   const topPane = requirePane(panesById, topPaneId);
-  const paneGeometry = await client.request("panes.list", {});
-  const geometriesById = new Map(paneGeometry.payload.panes.map((pane) => [Number(pane.paneId), pane.geometry]));
 
   const btopApply = await client.request("target.apply", targetApplyPayload({
-    geometry: requireNativeGeometry(geometriesById, btopPaneId),
     ownershipSessionId: pair.payload.sessionId,
     pane: btopPane,
     process: btopProcess,
@@ -139,12 +136,8 @@ try {
     surfaceId: pair.payload.surfaceId,
     targetEpoch: 1,
     targetId: targetIdWithSuffix("target_racter_btop"),
-    topologyEpoch: topology.payload.topologyRevision,
-    windowLabel,
-    zIndex: 0,
   }), 15000);
   const topApply = await client.request("target.apply", targetApplyPayload({
-    geometry: requireNativeGeometry(geometriesById, topPaneId),
     ownershipSessionId: pair.payload.sessionId,
     pane: topPane,
     process: topProcess,
@@ -152,9 +145,6 @@ try {
     surfaceId: pair.payload.surfaceId,
     targetEpoch: 1,
     targetId: targetIdWithSuffix("target_racter_top"),
-    topologyEpoch: topology.payload.topologyRevision,
-    windowLabel,
-    zIndex: 1,
   }), 15000);
 
   await waitForRendererOverlayRegions({
@@ -196,27 +186,8 @@ try {
 }
 
 function targetApplyPayload(options) {
-  const paneId = Number(options.pane.paneId);
-  const compositorPaneId = String(paneId);
   const targetSummary = options.targetId.includes("btop") ? "btop" : "top";
   return {
-    materialization: {
-      op: "native_pane.host",
-      panes: [
-        {
-          binding_id: `${compositorPaneId}:${options.targetId}`,
-          content_id: options.targetId,
-          geometry: options.geometry,
-          id: compositorPaneId,
-          process: {
-            args: options.process.args,
-            command: options.process.command,
-          },
-          revision: options.targetEpoch,
-          target: "terminal",
-        },
-      ],
-    },
     ownershipEpoch: 1,
     ownershipSessionId: options.ownershipSessionId,
     paneLineageId: options.pane.paneLineageId,
@@ -237,6 +208,9 @@ function targetApplyPayload(options) {
     targetPayload: {
       args: options.process.args,
       command: options.process.command,
+      envPolicy: "surface_default",
+      pty: true,
+      restartPolicy: "restore_new_process",
     },
   };
 }
@@ -326,24 +300,6 @@ function requirePane(panesById, paneId) {
     throw new Error(`topology.apply did not return paneLineageId for pane ${paneId}`);
   }
   return pane;
-}
-
-function requireNativeGeometry(geometriesById, paneId) {
-  const geometry = geometriesById.get(paneId);
-  if (!geometry?.contentViewport) {
-    throw new Error(`panes.list did not return canonical geometry for pane ${paneId}`);
-  }
-  return {
-    coordinateSpace: "compositor_logical",
-    geometryRevision: geometry.geometryRevision,
-    height: geometry.contentViewport.height,
-    paneInstanceId: geometry.paneInstanceId,
-    surfaceEpoch: geometry.surfaceEpoch,
-    topologyEpoch: geometry.topologyEpoch,
-    width: geometry.contentViewport.width,
-    x: geometry.contentViewport.x,
-    y: geometry.contentViewport.y,
-  };
 }
 
 function connectWebSocket(targetUrl) {

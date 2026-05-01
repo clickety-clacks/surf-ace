@@ -71,7 +71,6 @@ import type {
   TopologyApplyResponse,
   Viewport,
   MutationAckResponse,
-  NativePaneMaterialization,
   PaneGeometryProjection,
   RestorePolicy,
   PageEvent,
@@ -1296,29 +1295,6 @@ function managedPaneRects(surface: ManagedSurface): Map<PaneId, Rect> {
     result,
   );
   return result;
-}
-
-function getCompositorLogicalPaneGeometry(
-  pane: ManagedPane,
-): NativePaneMaterialization["panes"][number]["geometry"] {
-  if (!pane.geometry) {
-    throw new SurfAceToolError(
-      "internal_error",
-      `No canonical pane geometry for pane ${pane.paneId}`,
-    );
-  }
-  const { contentViewport } = pane.geometry;
-  return {
-    coordinateSpace: "compositor_logical",
-    geometryRevision: pane.geometry.geometryRevision,
-    height: contentViewport.height,
-    paneInstanceId: pane.geometry.paneInstanceId,
-    surfaceEpoch: pane.geometry.surfaceEpoch,
-    topologyEpoch: pane.geometry.topologyEpoch,
-    width: contentViewport.width,
-    x: contentViewport.x,
-    y: contentViewport.y,
-  };
 }
 
 function remoteLayoutToTopologyLayout(
@@ -5100,68 +5076,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return null;
   }
 
-  private nativePaneMaterializationForTarget(
-    surface: ManagedSurface,
-    pane: ManagedPane,
-    target: PaneTargetRecord,
-  ): NativePaneMaterialization | undefined {
-    if (!isProcessBackedTargetKind(target.targetKind)) {
-      return undefined;
-    }
-
-    const geometry = getCompositorLogicalPaneGeometry(pane);
-    const revision = asRevision(target.targetEpoch);
-    const paneEntry: NativePaneMaterialization["panes"][number] = {
-      binding_id: `${pane.paneId}:${target.targetId}`,
-      content_id: target.targetId,
-      geometry,
-      id: pane.paneId,
-      revision,
-    };
-
-    if (target.targetKind === "terminal_app" && isPlainRecord(target.targetPayload)) {
-      const { args, command, cwd, env } = target.targetPayload;
-      if (typeof command === "string" && isStringArray(args)) {
-        paneEntry.target = "terminal";
-        paneEntry.process = {
-          args: [...args],
-          command,
-          ...(typeof cwd === "string" ? { cwd } : {}),
-          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
-        };
-      }
-    }
-    const overlayRect = {
-      height: geometry.height,
-      width: geometry.width,
-      x: geometry.x,
-      y: geometry.y,
-    };
-
-    return {
-      op: "native_pane.host",
-      overlaySet: {
-        coordinateSpace: "surface_logical",
-        regions: [
-          {
-            captures: [],
-            kind: "native_pane",
-            paneId: pane.paneId,
-            paneInstanceId: pane.paneLineageId,
-            rect: overlayRect,
-            regionId: `${pane.paneId}:${target.targetId}`,
-            zIndex: Math.max(0, flattenManagedLayout(surface.layout).indexOf(pane.paneId)),
-          },
-        ],
-        revision,
-        surfaceId: surface.surfaceId,
-        topologyEpoch: this.nextTopologyRevision(surface, true) as TopologyApplyRequest["payload"]["topologyRevision"],
-        windowId: surface.windowLabel,
-      },
-      panes: [paneEntry],
-    };
-  }
-
   private async ensureNativePaneGeometry(
     surface: ManagedSurface,
     pane: ManagedPane,
@@ -5294,7 +5208,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         requestId,
         restoreReason,
         surfaceId: surface.surfaceId,
-        materialization: this.nativePaneMaterializationForTarget(surface, pane, target),
         targetEpoch: target.targetEpoch,
         targetHeader: structuredClone(target.targetHeader),
         targetId: target.targetId,

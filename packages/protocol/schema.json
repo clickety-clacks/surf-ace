@@ -2086,9 +2086,6 @@
               "$ref": "#/$defs/TargetHeader"
             },
             "targetPayload": {},
-            "materialization": {
-              "$ref": "#/$defs/NativePaneMaterialization"
-            },
             "display": {
               "$ref": "#/$defs/ContentDisplay"
             },

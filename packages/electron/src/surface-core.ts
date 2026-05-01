@@ -480,57 +480,72 @@ export class SurfaceCore {
 
   projectNativePaneMaterialization(
     surfaceId: string,
-    materialization: NativePaneMaterialization,
-    paneLineageId: string,
+    payload: TargetApplyRequest["payload"],
   ): NativePaneMaterialization {
     const surface = this.getSurface(surfaceId);
     const paneGeometry = resolvePaneGeometrySnapshots(surface);
-    const lineagePane = paneForLineage(surface, paneLineageId);
+    const lineagePane = paneForLineage(surface, payload.paneLineageId);
     if (!lineagePane) {
       throw new SurfaceCoreError("invalid_payload", "target.apply pane lineage is not present on this surface");
     }
-    return {
-      ...materialization,
-      panes: materialization.panes.map((pane) => {
-        const paneId = Number(pane.id);
-        if (paneId !== lineagePane.paneId) {
-          throw new SurfaceCoreError("invalid_payload", `native pane ${pane.id} does not match target pane lineage`);
-        }
-        const geometry = Number.isInteger(paneId) ? paneGeometry.get(paneId) : undefined;
-        if (!geometry) {
-          throw new SurfaceCoreError("invalid_payload", `native pane ${pane.id} is not present in the resolved Surf Ace layout`);
-        }
-        if (
-          pane.geometry.coordinateSpace !== "compositor_logical" ||
-          pane.geometry.paneInstanceId !== geometry.paneInstanceId ||
-          pane.geometry.topologyEpoch !== geometry.topologyEpoch ||
-          pane.geometry.surfaceEpoch !== geometry.surfaceEpoch ||
-          pane.geometry.geometryRevision !== geometry.geometryRevision
-        ) {
-          throw new SurfaceCoreError("invalid_payload", `native pane ${pane.id} geometry identity does not match resolved Surf Ace pane geometry`);
-        }
-        if (!sameRect(pane.geometry, geometry.contentViewport)) {
-          throw new SurfaceCoreError(
-            "invalid_payload",
-            `native pane ${pane.id} geometry ${formatRect(pane.geometry)} does not match resolved Surf Ace pane geometry ${formatRect(geometry.contentViewport)}`,
-          );
-        }
-        return {
-          ...pane,
-          binding_id: pane.binding_id ?? geometry.paneInstanceId,
-          geometry: {
-            coordinateSpace: "compositor_logical",
-            geometryRevision: geometry.geometryRevision,
-            height: geometry.contentViewport.height,
-            paneInstanceId: geometry.paneInstanceId,
-            surfaceEpoch: geometry.surfaceEpoch,
-            topologyEpoch: geometry.topologyEpoch,
-            width: geometry.contentViewport.width,
-            x: geometry.contentViewport.x,
-            y: geometry.contentViewport.y,
-          },
+    const geometry = paneGeometry.get(lineagePane.paneId);
+    if (!geometry) {
+      throw new SurfaceCoreError("invalid_payload", `native pane ${lineagePane.paneId} is not present in the resolved Surf Ace layout`);
+    }
+    const paneEntry: NativePaneMaterialization["panes"][number] = {
+      binding_id: `${lineagePane.paneId}:${payload.targetId}`,
+      content_id: payload.targetId,
+      geometry: {
+        coordinateSpace: "compositor_logical",
+        geometryRevision: geometry.geometryRevision,
+        height: geometry.contentViewport.height,
+        paneInstanceId: geometry.paneInstanceId,
+        surfaceEpoch: geometry.surfaceEpoch,
+        topologyEpoch: geometry.topologyEpoch,
+        width: geometry.contentViewport.width,
+        x: geometry.contentViewport.x,
+        y: geometry.contentViewport.y,
+      },
+      id: String(lineagePane.paneId),
+      revision: payload.targetEpoch as Revision,
+    };
+    if (payload.targetKind === "terminal_app" && isPlainRecord(payload.targetPayload)) {
+      const { args, command, cwd, env } = payload.targetPayload;
+      if (typeof command === "string") {
+        paneEntry.target = "terminal";
+        paneEntry.process = {
+          args: Array.isArray(args) && args.every((arg) => typeof arg === "string") ? [...args] : [],
+          command,
+          ...(typeof cwd === "string" ? { cwd } : {}),
+          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
         };
-      }),
+      }
+    }
+    const overlayRect = {
+      height: geometry.contentViewport.height,
+      width: geometry.contentViewport.width,
+      x: geometry.contentViewport.x,
+      y: geometry.contentViewport.y,
+    };
+    return {
+      op: "native_pane.host",
+      overlaySet: {
+        coordinateSpace: "surface_logical",
+        regions: [{
+          captures: [],
+          kind: "native_pane",
+          paneId: String(lineagePane.paneId),
+          paneInstanceId: lineagePane.paneLineageId,
+          rect: overlayRect,
+          regionId: `${lineagePane.paneId}:${payload.targetId}`,
+          zIndex: Math.max(0, flattenLayout(surface.layout).indexOf(lineagePane.paneId)),
+        }],
+        revision: payload.targetEpoch as Revision,
+        surfaceId: surface.surfaceId as SurfaceId,
+        topologyEpoch: surface.topologyRevision as TopologyRevision,
+        windowId: surface.windowLabel,
+      },
+      panes: [paneEntry],
     };
   }
 
@@ -2037,6 +2052,14 @@ function sameRect(left: Rect, right: Rect): boolean {
 
 function formatRect(rect: Rect): string {
   return `{x:${rect.x},y:${rect.y},width:${rect.width},height:${rect.height}}`;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringRecord(value: Record<string, unknown>): value is Record<string, string> {
+  return Object.values(value).every((entry) => typeof entry === "string");
 }
 
 function patchHtml(

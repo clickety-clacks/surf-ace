@@ -4,7 +4,7 @@ import {
 } from "./schemas-manifest.js";
 
 function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function validateObjectAgainstSchema(
@@ -27,6 +27,14 @@ function validateObjectAgainstSchema(
   const properties = isObject(schema.properties) ? schema.properties : null;
   if (!properties) {
     return null;
+  }
+
+  if (schema.additionalProperties === false) {
+    for (const key of Object.keys(value)) {
+      if (!(key in properties)) {
+        return `unknown_property:${key}`;
+      }
+    }
   }
 
   for (const [key, propertySchemaValue] of Object.entries(properties)) {

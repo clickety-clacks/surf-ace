@@ -301,6 +301,56 @@ test("validateEnvelopeType accepts target.apply.result responses", () => {
   assert.deepEqual(result, { ok: true });
 });
 
+test("validateEnvelopeType rejects legacy target.apply native materialization payloads", () => {
+  const result = validateEnvelopeType("target.apply", {
+    id: "req_target_apply",
+    op: "target.apply",
+    payload: {
+      materialization: {
+        op: "native_pane.host",
+        panes: [{
+          geometry: {
+            coordinateSpace: "compositor_logical",
+            geometryRevision: 1,
+            height: 1,
+            paneInstanceId: "pl_1",
+            surfaceEpoch: "sf_1:1",
+            topologyEpoch: 1,
+            width: 1,
+            x: 0,
+            y: 0,
+          },
+          id: "1",
+          revision: 1,
+        }],
+      },
+      ownershipEpoch: 1,
+      ownershipSessionId: "sa_1",
+      paneLineageId: "pl_1",
+      requestId: "tr_1",
+      restoreReason: "initial_apply",
+      surfaceId: "sf_1",
+      targetEpoch: 1,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.terminal_app.v1"],
+        safeToLogFields: [],
+        safetyClass: "process",
+        summary: "top",
+      },
+      targetId: "tg_1",
+      targetKind: "terminal_app",
+      targetPayload: { args: [], command: "top" },
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "unknown_property:materialization" });
+});
+
 test("validateEnvelopeType accepts markdown content set requests", () => {
   const result = validateEnvelopeType("content.set", {
     id: "req_markdown",

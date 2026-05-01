@@ -96,7 +96,6 @@ class FakeSurfAceWsServer {
     revision: number;
   }> = [];
   readonly targetApplyRequests: Array<{
-    materialization: unknown;
     ownershipEpoch: number;
     ownershipSessionId: string;
     paneLineageId: string;
@@ -944,7 +943,6 @@ class FakeSurfAceWsServer {
       }
       case "target.apply": {
         this.targetApplyRequests.push({
-          materialization: structuredClone(message.payload?.materialization),
           ownershipEpoch: Number(message.payload?.ownershipEpoch ?? 0),
           ownershipSessionId: String(message.payload?.ownershipSessionId ?? ""),
           paneLineageId: String(message.payload?.paneLineageId ?? ""),
@@ -985,15 +983,15 @@ class FakeSurfAceWsServer {
           );
           return;
         }
-        if (message.payload?.materialization?.op === "native_pane.host") {
+        if (isNativeHostTargetKind(String(message.payload?.targetKind ?? ""))) {
           const targetSurface = this.requirePairedSurface(socket);
-          for (const paneMaterialization of message.payload.materialization.panes ?? []) {
-            const pane = targetSurface.panes.get(Number(paneMaterialization.id));
-            if (pane) {
-              pane.contentId = null;
-              pane.contentType = null;
-              pane.externalNative = true;
-            }
+          const pane = [...targetSurface.panes.values()].find((candidate) =>
+            candidate.paneLineageId === message.payload?.paneLineageId
+          );
+          if (pane) {
+            pane.contentId = null;
+            pane.contentType = null;
+            pane.externalNative = true;
           }
         }
         socket.send(
@@ -1623,6 +1621,10 @@ function assertPaneLabelsWithOpaqueIds(
   assert.deepEqual(panes.map((pane) => pane.paneLabel), expectedPaneLabels);
   assert.equal(new Set(paneIds).size, paneIds.length);
   return paneIds;
+}
+
+function isNativeHostTargetKind(targetKind: string): boolean {
+  return targetKind === "terminal_app" || targetKind === "native_app" || targetKind === "compositor_app";
 }
 
 function targetRegistrationOwnership(
@@ -3549,53 +3551,6 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(confirmed.evidence?.status, "applied");
       assert.deepEqual(server.targetApplyRequests, [
         {
-          materialization: {
-            op: "native_pane.host",
-            overlaySet: {
-              coordinateSpace: "surface_logical",
-              regions: [
-                {
-                  captures: [],
-                  kind: "native_pane",
-                  paneId: firstPaneId,
-                  paneInstanceId: targetAfterPlaceholder?.paneLineageId,
-                  rect: { height: 768, width: 1024, x: 0, y: 0 },
-                  regionId: `${firstPaneId}:${target?.targetId}`,
-                  zIndex: 0,
-                },
-              ],
-              revision: registered.targetEpoch,
-              surfaceId: server.surfaceId,
-              topologyEpoch: 1,
-              windowId: "a",
-            },
-            panes: [
-              {
-                binding_id: `${firstPaneId}:${target?.targetId}`,
-                content_id: target?.targetId,
-                geometry: {
-                  coordinateSpace: "compositor_logical",
-                  geometryRevision: 2,
-                  height: 768,
-                  paneInstanceId: targetAfterPlaceholder?.paneLineageId,
-                  surfaceEpoch: `${server.surfaceId}:1`,
-                  topologyEpoch: 0,
-                  width: 1024,
-                  x: 0,
-                  y: 0,
-                },
-                id: firstPaneId,
-                process: {
-                  args: [],
-                  command: "btop",
-                  cwd: "/tmp",
-                  env: { TERM: "xterm-256color" },
-                },
-                revision: registered.targetEpoch,
-                target: "terminal",
-              },
-            ],
-          },
           ownershipEpoch: targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId).ownershipEpoch,
           ownershipSessionId: targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId).ownershipSessionId,
           paneLineageId: targetAfterPlaceholder?.paneLineageId,
@@ -3719,7 +3674,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(server.targetApplyRequests.length, 1);
         const [applyRequest] = server.targetApplyRequests;
         assert.ok(applyRequest);
-        assert.equal(applyRequest.materialization, undefined);
+        assert.equal("materialization" in applyRequest, false);
         assert.equal(applyRequest.displayTitle, "Browser Pusher");
         assert.deepEqual(applyRequest.displayProvenance, {
           displayName: "Browser Pusher",
@@ -4268,7 +4223,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("provider sends current split pane geometry in native pane materialization", async () => {
+  await t.test("provider sends split pane target.apply without native pane geometry", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const split = await runtime.split({
@@ -4316,52 +4271,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const [applyRequest] = server.targetApplyRequests;
       assert.ok(applyRequest);
-      assert.deepEqual(applyRequest.materialization, {
-        op: "native_pane.host",
-        overlaySet: {
-          coordinateSpace: "surface_logical",
-          regions: [
-            {
-              captures: [],
-              kind: "native_pane",
-              paneId: secondPane.paneId,
-              paneInstanceId: applyRequest.paneLineageId,
-              rect: { height: 384, width: 1024, x: 0, y: 384 },
-              regionId: `${secondPane.paneId}:${registered.targetId}`,
-              zIndex: 1,
-            },
-          ],
-          revision: registered.targetEpoch,
-          surfaceId: server.surfaceId,
-          topologyEpoch: 2,
-          windowId: "a",
-        },
-        panes: [
-          {
-            binding_id: `${secondPane.paneId}:${registered.targetId}`,
-            content_id: registered.targetId,
-            geometry: {
-              coordinateSpace: "compositor_logical",
-              geometryRevision: 3,
-              height: 384,
-              paneInstanceId: applyRequest.paneLineageId,
-              surfaceEpoch: `${server.surfaceId}:1`,
-              topologyEpoch: 1,
-              width: 1024,
-              x: 0,
-              y: 384,
-            },
-            id: secondPane.paneId,
-            process: { args: ["--utf-force"], command: "btop" },
-            revision: registered.targetEpoch,
-            target: "terminal",
-          },
-        ],
+      assert.equal("materialization" in applyRequest, false);
+      assert.equal(applyRequest.paneLineageId, targetRegistrationOwnership(runtime, server.surfaceId, secondPane.paneId).paneLineageId);
+      assert.deepEqual(applyRequest.targetPayload, {
+        args: ["--utf-force"],
+        command: "btop",
+        envPolicy: "surface_default",
+        pty: true,
+        restartPolicy: "restore_new_process",
       });
     });
   });
 
-  await t.test("provider uses rotated logical surface dimensions for native pane geometry", async () => {
+  await t.test("provider keeps rotated logical surface target.apply geometry-opaque", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
         server.addSurface({
@@ -4408,53 +4330,20 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
         const [applyRequest] = server.targetApplyRequests;
         assert.ok(applyRequest);
-        assert.deepEqual(applyRequest.materialization, {
-          op: "native_pane.host",
-          overlaySet: {
-            coordinateSpace: "surface_logical",
-            regions: [
-              {
-                captures: [],
-                kind: "native_pane",
-                paneId: firstPaneId,
-                paneInstanceId: applyRequest.paneLineageId,
-                rect: { height: 3840, width: 2160, x: 0, y: 0 },
-                regionId: `${firstPaneId}:${registered.targetId}`,
-                zIndex: 0,
-              },
-            ],
-            revision: registered.targetEpoch,
-            surfaceId: server.surfaceId,
-            topologyEpoch: 1,
-            windowId: "a",
-          },
-          panes: [
-            {
-              binding_id: `${firstPaneId}:${registered.targetId}`,
-              content_id: registered.targetId,
-              geometry: {
-                coordinateSpace: "compositor_logical",
-                geometryRevision: 2,
-                height: 3840,
-                paneInstanceId: applyRequest.paneLineageId,
-                surfaceEpoch: `${server.surfaceId}:1`,
-                topologyEpoch: 0,
-                width: 2160,
-                x: 0,
-                y: 0,
-              },
-              id: firstPaneId,
-              process: { args: [], command: "top" },
-              revision: registered.targetEpoch,
-              target: "terminal",
-            },
-          ],
+        assert.equal("materialization" in applyRequest, false);
+        assert.equal(applyRequest.paneLineageId, targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId).paneLineageId);
+        assert.deepEqual(applyRequest.targetPayload, {
+          args: [],
+          command: "top",
+          envPolicy: "surface_default",
+          pty: true,
+          restartPolicy: "restore_new_process",
         });
       },
     });
   });
 
-  await t.test("provider includes pane geometry for native app target materialization", async () => {
+  await t.test("provider sends native app target.apply without native pane geometry", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const registered = await runtime.registerTarget({
@@ -4491,45 +4380,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const [applyRequest] = server.targetApplyRequests;
       assert.ok(applyRequest);
-      assert.deepEqual(applyRequest.materialization, {
-        op: "native_pane.host",
-        overlaySet: {
-          coordinateSpace: "surface_logical",
-          regions: [
-            {
-              captures: [],
-              kind: "native_pane",
-              paneId: firstPaneId,
-              paneInstanceId: applyRequest.paneLineageId,
-              rect: { height: 768, width: 1024, x: 0, y: 0 },
-              regionId: `${firstPaneId}:${registered.targetId}`,
-              zIndex: 0,
-            },
-          ],
-          revision: registered.targetEpoch,
-          surfaceId: server.surfaceId,
-          topologyEpoch: 1,
-          windowId: "a",
-        },
-        panes: [
-          {
-            binding_id: `${firstPaneId}:${registered.targetId}`,
-            content_id: registered.targetId,
-            geometry: {
-              coordinateSpace: "compositor_logical",
-              geometryRevision: 2,
-              height: 768,
-              paneInstanceId: applyRequest.paneLineageId,
-              surfaceEpoch: `${server.surfaceId}:1`,
-              topologyEpoch: 0,
-              width: 1024,
-              x: 0,
-              y: 0,
-            },
-            id: firstPaneId,
-            revision: registered.targetEpoch,
-          },
-        ],
+      assert.equal("materialization" in applyRequest, false);
+      assert.equal(applyRequest.targetKind, "native_app");
+      assert.deepEqual(applyRequest.targetPayload, {
+        appId: "com.example.NativeDemo",
+        launchMode: "new_instance",
       });
     });
   });

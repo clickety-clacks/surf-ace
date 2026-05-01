@@ -522,7 +522,6 @@ export type TargetApplyRequest = RequestBase<"target.apply"> & {
     targetKind: TargetKind;
     targetHeader: TargetHeader;
     targetPayload: unknown;
-    materialization?: NativePaneMaterialization;
     display?: ContentDisplay;
     restoreReason: TargetApplyReason;
   };
