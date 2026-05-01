@@ -657,6 +657,7 @@ type ManagedSurface = {
   reconnectAttempt: number;
   remoteListedAt: number | null;
   remotePaired: boolean;
+  restartOwnershipPendingPair: boolean;
   retryDelayResolver: (() => void) | null;
   sessionId: SessionId | null;
   ownershipEpoch: number;
@@ -1086,6 +1087,7 @@ function createManagedSurface(
     reconnectAttempt: 0,
     remoteListedAt: null,
     remotePaired: false,
+    restartOwnershipPendingPair: false,
     retryDelayResolver: null,
     sessionId: null,
     ownershipEpoch: 0,
@@ -2033,6 +2035,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private stateWrite: Promise<void> = Promise.resolve();
   private unsubscribeDiscovery: (() => void) | null = null;
   private runtimeLease: FileHandle | null = null;
+  private runtimeLeaseStartedAt: number | null = null;
   private leaseHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private ownsRuntimeLease = false;
   private ownerControlPort: number | null = null;
@@ -2324,8 +2327,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.autoRetryEnabled = false;
     surface.connectionState = "unreachable";
     surface.hasPairedInGatewaySession = false;
-    surface.remotePaired = false;
-    surface.sessionId = null;
+	    surface.remotePaired = false;
+	    surface.restartOwnershipPendingPair = false;
+	    surface.sessionId = null;
     surface.stopRequested = true;
     this.stopHeartbeat(surface);
     await surface.client?.close(1000, clampCloseReason("provider_shutdown")).catch(() => {});
@@ -3961,8 +3965,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (existing) {
       return existing;
     }
-    const label = windowLabelForIndex(this.persistentState.nextWindowLabelIndex);
-    this.persistentState.nextWindowLabelIndex += 1;
+    const usedWindowLabels = new Set<string>();
+    for (const surface of this.surfaces.values()) {
+      if (
+        surface.surfaceId === surfaceId ||
+        !surface.windowLabel ||
+        !this.shouldReserveWindowLabel(surface)
+      ) {
+        continue;
+      }
+      usedWindowLabels.add(surface.windowLabel);
+    }
+    let nextWindowLabelIndex = 0;
+    let label = windowLabelForIndex(nextWindowLabelIndex);
+    while (usedWindowLabels.has(label)) {
+      nextWindowLabelIndex += 1;
+      label = windowLabelForIndex(nextWindowLabelIndex);
+    }
+    this.persistentState.nextWindowLabelIndex = Math.max(
+      this.persistentState.nextWindowLabelIndex,
+      nextWindowLabelIndex + 1,
+    );
     this.persistentState.windowLabels[surfaceId] = label;
     this.runBackgroundTask(
       `persist window label for ${surfaceId}`,
@@ -4001,8 +4024,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return this.ensureWindowLabel(nextSurfaceId);
   }
 
-  private repairLiveWindowLabelInvariant(reason: string): void {
+  private repairLiveWindowLabelInvariant(
+    reason: string,
+    options: { includePairingSurface?: ManagedSurface; includePairingSurfaces?: boolean } = {},
+  ): void {
     const orderedSurfaces = [...this.surfaces.values()]
+      .filter((surface) =>
+        this.hasAcceptedSurfaceTopology(surface) ||
+        surface === options.includePairingSurface ||
+        (options.includePairingSurfaces === true && this.shouldReserveWindowLabel(surface))
+      )
       .map((surface, index) => ({ index, surface }))
       .sort((left, right) => (
         this.windowLabelStabilityRank(right.surface) - this.windowLabelStabilityRank(left.surface) ||
@@ -4076,6 +4107,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return 0;
   }
 
+  private shouldReserveWindowLabel(surface: ManagedSurface): boolean {
+    return this.hasAcceptedSurfaceTopology(surface) ||
+      (
+        (surface.client?.isOpen() ?? false) &&
+        surface.unreachableFailures === 0 &&
+        !surface.restartOwnershipPendingPair
+      );
+  }
+
   private preserveSurfaceStateUntilPairResponse(
     remappedSurface: ManagedSurface,
     preservedSurface: ManagedSurface,
@@ -4093,6 +4133,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     remappedSurface.topologyRevision = preservedSurface.topologyRevision;
     remappedSurface.hasPairedInGatewaySession = preservedSurface.hasPairedInGatewaySession;
     remappedSurface.remotePaired = preservedSurface.remotePaired;
+    remappedSurface.restartOwnershipPendingPair = preservedSurface.restartOwnershipPendingPair;
     remappedSurface.sessionId = preservedSurface.sessionId;
     remappedSurface.consecutiveResumeFailures = preservedSurface.consecutiveResumeFailures;
     remappedSurface.consecutiveOwnershipLockFailures = preservedSurface.consecutiveOwnershipLockFailures;
@@ -4166,7 +4207,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
       return existing;
     }
-    const windowLabel = existing?.windowLabel || this.ensureWindowLabel(input.surfaceId);
+    const windowLabel = existing?.windowLabel ||
+      (input.source === "surfaces.list" ? "" : this.persistentState.windowLabels[input.surfaceId]) ||
+      (input.source === "surfaces.list" ? "" : this.ensureWindowLabel(input.surfaceId));
     let surface = existing ?? remapFrom ?? createManagedSurface(
       input.surfaceId,
       input.endpoint,
@@ -5558,7 +5601,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private canonicalVisibleSurfaces(): ManagedSurface[] {
-    return [...this.surfaces.values()];
+    return [...this.surfaces.values()].filter((surface) => this.hasAcceptedSurfaceTopology(surface));
+  }
+
+  private hasAcceptedSurfaceTopology(surface: ManagedSurface): boolean {
+    return (
+      surface.connectionState === "connected" ||
+      (surface.hasPairedInGatewaySession && !surface.restartOwnershipPendingPair) ||
+      (surface.sessionId !== null && !surface.restartOwnershipPendingPair)
+    );
   }
 
   private isUnownedDisconnectedGhostSurface(surface: ManagedSurface): boolean {
@@ -5878,8 +5929,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async loadPersistedScreenSnapshot(): Promise<SurfAceScreenSummary[]> {
+    const snapshotFile = await this.loadPersistedScreenSnapshotFile();
+    const ownerLease = this.ownsRuntimeLease ? {} : await this.readRuntimeLease();
+    if (
+      snapshotFile &&
+      typeof ownerLease.startedAt === "number" &&
+      typeof snapshotFile.updatedAt === "number" &&
+      snapshotFile.updatedAt < ownerLease.startedAt
+    ) {
+      return [];
+    }
     return this.repairPersistedScreenSummaryLabels(
-      this.filterPersistedVisibleScreens((await this.loadPersistedScreenSnapshotFile())?.screens ?? []),
+      this.filterPersistedVisibleScreens(snapshotFile?.screens ?? []),
     );
   }
 
@@ -5888,13 +5949,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (screen.connectionState === "connected") {
         return true;
       }
-      if (screen._debug?.autoRetryEnabled === false) {
-        return true;
-      }
       return Boolean(
         screen._debug?.hasPairedInGatewaySession === true ||
-        typeof screen._debug?.remoteListedAt === "number" ||
-        screen._debug?.remotePaired === true ||
         (typeof screen._debug?.sessionId === "string" && screen._debug.sessionId.length > 0),
       );
     });
@@ -6004,11 +6060,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
     surface.hasPairedInGatewaySession = true;
+    surface.restartOwnershipPendingPair = true;
     surface.sessionId = asSessionId(sessionId);
     if (!surface.windowLabel && snapshot.windowLabel) {
       surface.windowLabel = snapshot.windowLabel;
     }
     this.restartSnapshots.delete(surface.surfaceId);
+    this.queuePersistScreenSnapshot("restart ownership pending pair");
     this.logger.info?.(
       runtimeDiagnostic("restart_ownership_restored", {
         session_id: sessionId,
@@ -6295,12 +6353,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async writeLeaseContent(handle: FileHandle): Promise<void> {
+    this.runtimeLeaseStartedAt = this.runtimeLeaseStartedAt ?? this.now();
+    const lastActiveAt = this.now();
     const content = JSON.stringify(
       {
         controlPort: this.ownerControlPort,
         pid: process.pid,
-        startedAt: this.now(),
-        lastActiveAt: this.now(),
+        startedAt: this.runtimeLeaseStartedAt,
+        lastActiveAt,
       },
       null,
       2,
@@ -6403,6 +6463,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.stopOwnerControlServer();
     const lease = this.runtimeLease;
     this.runtimeLease = null;
+    this.runtimeLeaseStartedAt = null;
     this.ownsRuntimeLease = false;
     if (!lease) {
       return;
@@ -6758,8 +6819,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!initialPane) {
       throw new SurfAceToolError("internal_error", `Surface ${surface.surfaceId} has no initial pane`);
     }
+    if (surface.restartOwnershipPendingPair) {
+      delete this.persistentState.windowLabels[surface.surfaceId];
+      surface.windowLabel = "";
+    }
     surface.windowLabel = surface.windowLabel || this.ensureWindowLabel(surface.surfaceId);
-    this.repairLiveWindowLabelInvariant("pair request");
+    this.repairLiveWindowLabelInvariant("pair request", {
+      includePairingSurface: surface,
+      includePairingSurfaces: true,
+    });
     const windowLabel = surface.windowLabel;
     this.repairLivePaneLabelInvariant("pair request");
     const resumeSessionId = this.shouldAttemptResume(surface) ? surface.sessionId : null;
@@ -7274,10 +7342,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           // stale sessionId so the next attempt goes in fresh with no resume.
           // Without this, the worker loops forever re-sending the same rejected
           // sessionId every retry interval.
-          if (
-            error instanceof SurfAceToolError &&
-            (error.code === "busy" || error.message.toLowerCase().includes("ownership lock") || error.message.toLowerCase().includes("resume"))
-          ) {
+	          if (
+	            error instanceof SurfAceToolError &&
+	            (error.code === "busy" || error.message.toLowerCase().includes("ownership lock") || error.message.toLowerCase().includes("resume"))
+	          ) {
             if (surface.sessionId !== null && !surface.hasPairedInGatewaySession) {
               this.logger.warn?.(
                 runtimeDiagnostic("resume_state_cleared", {
@@ -7286,10 +7354,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 }),
               );
               surface.sessionId = null;
-              surface.hasPairedInGatewaySession = false;
-            }
-          }
-          await this.refreshEndpointAfterConnectFailure(surface, error);
+	              surface.hasPairedInGatewaySession = false;
+	            }
+	          }
+		          if (!this.hasAcceptedSurfaceTopology(surface)) {
+		            const hadPersistedWindowLabel = this.persistentState.windowLabels[surface.surfaceId] !== undefined;
+		            delete this.persistentState.windowLabels[surface.surfaceId];
+		            surface.windowLabel = "";
+		            if (hadPersistedWindowLabel) {
+		              this.runBackgroundTask("persist cleared pre-pair window label", async () => {
+		                await this.persistState();
+		              });
+		            }
+		          }
+	          await this.refreshEndpointAfterConnectFailure(surface, error);
           if (surface.connectionState !== "connected") {
             surface.connectionState =
               surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
@@ -7822,10 +7900,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.consecutiveResumeFailures = 0;
     surface.consecutiveOwnershipLockFailures = 0;
     surface.connectedAt = this.now();
-    surface.autoRetryEnabled = true;
-    surface.hasPairedInGatewaySession = true;
-    surface.remotePaired = true;
-    const ownershipChanged = !resumed || surface.sessionId !== sessionId;
+	    surface.autoRetryEnabled = true;
+	    surface.hasPairedInGatewaySession = true;
+	    surface.remotePaired = true;
+	    surface.restartOwnershipPendingPair = false;
+	    const ownershipChanged = !resumed || surface.sessionId !== sessionId;
     if (ownershipChanged) {
       surface.ownershipEpoch += 1;
       let staleTargetStateChanged = false;
@@ -7848,10 +7927,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           await this.persistSurfaceTargetState(surface, "stale target ownership change");
         });
       }
-    }
-    surface.sessionId = sessionId;
-    this.queuePersistScreenSnapshot("pair connected");
-  }
+	    }
+	    surface.sessionId = sessionId;
+	    this.repairLiveWindowLabelInvariant("pair connected");
+	    this.queuePersistScreenSnapshot("pair connected");
+	  }
 
   private noteConnectionEnded(surface: ManagedSurface): void {
     const hadLiveSession = surface.connectedAt !== null;
@@ -7891,9 +7971,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private clearSurfaceResumeState(surface: ManagedSurface): void {
-    surface.sessionId = null;
-    surface.hasPairedInGatewaySession = false;
-    surface.consecutiveResumeFailures = 0;
+	    surface.sessionId = null;
+	    surface.hasPairedInGatewaySession = false;
+	    surface.restartOwnershipPendingPair = false;
+	    surface.consecutiveResumeFailures = 0;
   }
 
   private shouldAttemptResume(surface: ManagedSurface): boolean {
