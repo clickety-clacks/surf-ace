@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import net from "node:net";
+import { fileURLToPath } from "node:url";
 
 import WebSocket from "ws";
 
@@ -57,24 +58,11 @@ const compositorSocket = String(
 const providerId = String(args.providerId ?? args["provider-id"] ?? "pv_racter_overlay_verify");
 const providerName = String(args.providerName ?? args["provider-name"] ?? "Surf Ace Racter Overlay Verify");
 const windowLabel = String(args.windowLabel ?? args["window-label"] ?? "RACTER Overlay Verify");
-const splitDirection = String(args.splitDirection ?? args["split-direction"] ?? "horizontal");
+const mode = String(args.mode ?? "native-pane-demo");
+const splitDirection = String(args.splitDirection ?? args["split-direction"] ?? "vertical");
 const targetSuffix = String(args.targetSuffix ?? args["target-suffix"] ?? "");
 const btopPaneId = Number(args.btopPaneId ?? args["btop-pane-id"] ?? 1);
 const topPaneId = Number(args.topPaneId ?? args["top-pane-id"] ?? 2);
-const btopProcess = resolveNativeProcess(args, {
-  appId: "surf-ace-pane-btop",
-  argsKey: "btop-args",
-  commandKey: "btop-command",
-  commandName: "btop",
-  fallbackName: "top",
-});
-const topProcess = resolveNativeProcess(args, {
-  appId: "surf-ace-pane-top",
-  argsKey: "top-args",
-  commandKey: "top-command",
-  commandName: "top",
-  fallbackName: "top",
-});
 
 const initialStatus = await getCompositorStatus(compositorSocket);
 const socket = await connectWebSocket(url);
@@ -107,21 +95,67 @@ try {
 
   await client.request("heartbeat.ping", { nonce: `racter_${randomId()}` });
 
-  const topology = await client.request("topology.apply", {
-    layout: {
-      children: [
-        { paneId: btopPaneId, type: "pane" },
-        { paneId: topPaneId, type: "pane" },
-      ],
-      direction: splitDirection,
-      type: "split",
-    },
-    panes: [
-      { name: "btop", paneId: btopPaneId, paneLabel: btopPaneId },
-      { name: "top", paneId: topPaneId, paneLabel: topPaneId },
-    ],
-    topologyRevision: Number(args.topologyRevision ?? args["topology-revision"] ?? 1),
-    windowLabel,
+  const scenario = mode === "pointer-proof"
+    ? await runPointerProofScenario({ client, pair })
+    : await runNativePaneScenario({ client, pair });
+
+  await waitForRendererOverlayRegions({
+    client,
+    minRegionCount: Number(args.minOverlayRegionCount ?? args["min-overlay-region-count"] ?? 1),
+    socketPath: compositorSocket,
+    timeoutMs: Number(args.overlayWaitMs ?? args["overlay-wait-ms"] ?? 5000),
+  });
+
+  const finalStatus = await getCompositorStatus(compositorSocket);
+  const panes = await client.request("panes.list", {});
+  const holdMs = Number(args.holdMs ?? args["hold-ms"] ?? 0);
+
+  console.log(JSON.stringify({
+    applies: scenario.applies.map(summarizeApply),
+    compositorSocket,
+    finalCompositorStatus: summarizeCompositorStatus(finalStatus, pair.payload.surfaceId),
+    initialCompositorStatus: summarizeCompositorStatus(initialStatus, pair.payload.surfaceId),
+    mode,
+    panes: panes.payload.panes.map((pane) => ({
+      activeContentId: pane.activeContentId,
+      contentType: pane.contentType,
+      externalNative: pane.externalNative,
+      paneId: pane.paneId,
+      viewport: pane.viewport,
+    })),
+    providerId,
+    surfaceId: pair.payload.surfaceId,
+    topology: scenario.topology.payload,
+    url,
+  }, null, 2));
+  if (Number.isFinite(holdMs) && holdMs > 0) {
+    await sleep(holdMs);
+  }
+} finally {
+  socket.close(1000, "racter_overlay_verify_done");
+}
+
+async function runNativePaneScenario({ client, pair }) {
+  const btopProcess = resolveNativeProcess(args, {
+    appId: "surf-ace-pane-btop",
+    argsKey: "btop-args",
+    commandKey: "btop-command",
+    commandName: "btop",
+    fallbackName: "top",
+  });
+  const topProcess = resolveNativeProcess(args, {
+    appId: "surf-ace-pane-top",
+    argsKey: "top-args",
+    commandKey: "top-command",
+    commandName: "top",
+    fallbackName: "top",
+  });
+
+  const topologyRevision = Number(args.topologyRevision ?? args["topology-revision"] ?? 1);
+  const topology = await applyTwoPaneTopology(client, {
+    leftName: "btop",
+    rightName: "top",
+    topologyRevision,
   });
 
   const panesById = new Map(topology.payload.panes.map((pane) => [Number(pane.paneId), pane]));
@@ -147,46 +181,74 @@ try {
     targetId: targetIdWithSuffix("target_racter_top"),
   }), 15000);
 
-  await waitForRendererOverlayRegions({
-    client,
-    minRegionCount: Number(args.minOverlayRegionCount ?? args["min-overlay-region-count"] ?? 1),
-    socketPath: compositorSocket,
-    timeoutMs: Number(args.overlayWaitMs ?? args["overlay-wait-ms"] ?? 5000),
+  return { applies: [btopApply, topApply], topology };
+}
+
+async function runPointerProofScenario({ client, pair }) {
+  const topologyRevision = Number(args.topologyRevision ?? args["topology-revision"] ?? 1);
+  const topology = await applyTwoPaneTopology(client, {
+    leftName: "web pointer",
+    rightName: "native pointer",
+    topologyRevision,
   });
 
-  const finalStatus = await getCompositorStatus(compositorSocket);
-  const panes = await client.request("panes.list", {});
-  const holdMs = Number(args.holdMs ?? args["hold-ms"] ?? 0);
+  const panesById = new Map(topology.payload.panes.map((pane) => [Number(pane.paneId), pane]));
+  const webPane = requirePane(panesById, btopPaneId);
+  const nativePane = requirePane(panesById, topPaneId);
+  const nativePointerProcess = resolveNativeProcess(args, {
+    appId: "surf-ace-native-pointer-proof",
+    argsKey: "native-pointer-args",
+    commandArgs: [nativePointerTesterPath()],
+    commandKey: "native-pointer-command",
+    commandName: process.execPath,
+    fallbackName: "node",
+  });
 
-  console.log(JSON.stringify({
-    applies: [
-      summarizeApply(btopApply),
-      summarizeApply(topApply),
-    ],
-    compositorSocket,
-    finalCompositorStatus: summarizeCompositorStatus(finalStatus, pair.payload.surfaceId),
-    initialCompositorStatus: summarizeCompositorStatus(initialStatus, pair.payload.surfaceId),
-    panes: panes.payload.panes.map((pane) => ({
-      activeContentId: pane.activeContentId,
-      contentType: pane.contentType,
-      externalNative: pane.externalNative,
-      paneId: pane.paneId,
-      viewport: pane.viewport,
-    })),
-    providerId,
+  const webApply = await client.request("content.apply", {
+    content: { html: pointerProofHtml() },
+    contentId: `ct_pointer_web_${randomId()}`,
+    contentType: "html",
+    historyOwnerToken: `hot_pointer_web_${randomId()}`,
+    paneId: webPane.paneId,
+    revision: 1,
+    topologyRevision,
+  });
+  const nativeApply = await client.request("target.apply", targetApplyPayload({
+    ownershipSessionId: pair.payload.sessionId,
+    pane: nativePane,
+    process: nativePointerProcess,
+    restoreReason: "initial_apply",
     surfaceId: pair.payload.surfaceId,
-    topology: topology.payload,
-    url,
-  }, null, 2));
-  if (Number.isFinite(holdMs) && holdMs > 0) {
-    await sleep(holdMs);
-  }
-} finally {
-  socket.close(1000, "racter_overlay_verify_done");
+    targetEpoch: 1,
+    targetId: targetIdWithSuffix("target_racter_native_pointer"),
+  }), 15000);
+
+  return { applies: [contentApplyAsTargetEvidence(webApply, webPane), nativeApply], topology };
+}
+
+function applyTwoPaneTopology(client, { leftName, rightName, topologyRevision }) {
+  return client.request("topology.apply", {
+    layout: {
+      children: [
+        { paneId: btopPaneId, type: "pane" },
+        { paneId: topPaneId, type: "pane" },
+      ],
+      direction: splitDirection,
+      type: "split",
+    },
+    panes: [
+      { name: leftName, paneId: btopPaneId, paneLabel: btopPaneId },
+      { name: rightName, paneId: topPaneId, paneLabel: topPaneId },
+    ],
+    topologyRevision,
+    windowLabel,
+  });
 }
 
 function targetApplyPayload(options) {
-  const targetSummary = options.targetId.includes("btop") ? "btop" : "top";
+  const targetSummary = options.targetId.includes("native_pointer")
+    ? "native pointer"
+    : options.targetId.includes("btop") ? "btop" : "top";
   return {
     ownershipEpoch: 1,
     ownershipSessionId: options.ownershipSessionId,
@@ -215,8 +277,70 @@ function targetApplyPayload(options) {
   };
 }
 
+function contentApplyAsTargetEvidence(response, pane) {
+  return {
+    payload: {
+      materializedState: {
+        contentType: "html",
+        paneId: pane.paneId,
+      },
+      paneLineageId: pane.paneLineageId,
+      status: response.ok ? "applied" : "rejected",
+      targetId: response.payload?.currentContentId ?? null,
+    },
+  };
+}
+
 function targetIdWithSuffix(base) {
   return targetSuffix.length > 0 ? `${base}_${targetSuffix}` : base;
+}
+
+function nativePointerTesterPath() {
+  return fileURLToPath(new URL("./surf-ace-native-pointer-tester.mjs", import.meta.url));
+}
+
+function pointerProofHtml() {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WEB POINTER</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #07121f; color: #eff6ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    #stage { position: fixed; inset: 0; touch-action: none; cursor: crosshair; }
+    #title { position: absolute; left: 24px; top: 22px; font-size: 28px; letter-spacing: 0.16em; font-weight: 800; }
+    #status { position: absolute; left: 24px; bottom: 22px; font-size: 18px; color: #b7d0ff; }
+    .dot { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border: 3px solid #49f0b0; border-radius: 50%; box-shadow: 0 0 20px rgba(73, 240, 176, 0.75); pointer-events: none; }
+    .dot.click { border-color: #ffcd5c; box-shadow: 0 0 22px rgba(255, 205, 92, 0.85); }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <div id="title">WEB POINTER</div>
+    <div id="status">move or click in this pane</div>
+  </div>
+  <script>
+    const stage = document.getElementById("stage");
+    const status = document.getElementById("status");
+    const dots = [];
+    function addDot(event, click) {
+      const dot = document.createElement("div");
+      dot.className = click ? "dot click" : "dot";
+      dot.style.left = event.clientX + "px";
+      dot.style.top = event.clientY + "px";
+      stage.appendChild(dot);
+      dots.push(dot);
+      while (dots.length > 40) dots.shift().remove();
+      status.textContent = (click ? "click" : "move") + " x=" + Math.round(event.clientX) + " y=" + Math.round(event.clientY);
+    }
+    stage.addEventListener("pointermove", (event) => addDot(event, false), { passive: true });
+    stage.addEventListener("pointerdown", (event) => {
+      stage.setPointerCapture(event.pointerId);
+      addDot(event, true);
+    });
+  </script>
+</body>
+</html>`;
 }
 
 async function waitForRendererOverlayRegions({ client, minRegionCount, socketPath, timeoutMs }) {
@@ -378,21 +502,22 @@ function resolveNativeProcess(parsedArgs, options) {
   const commandName = commandExists(options.commandName)
     ? options.commandName
     : options.fallbackName;
+  const commandArgs = options.commandArgs ?? [];
   for (const terminal of ["foot", "ghostty", "kitty", "wezterm", "alacritty"]) {
     if (!commandExists(terminal)) {
       continue;
     }
     switch (terminal) {
       case "foot":
-        return { args: ["--app-id", options.appId, commandName], command: terminal };
+        return { args: ["--app-id", options.appId, commandName, ...commandArgs], command: terminal };
       case "ghostty":
-        return { args: [`--class=${options.appId}`, "-e", commandName], command: terminal };
+        return { args: [`--class=${options.appId}`, "-e", commandName, ...commandArgs], command: terminal };
       case "kitty":
-        return { args: ["--class", options.appId, commandName], command: terminal };
+        return { args: ["--class", options.appId, commandName, ...commandArgs], command: terminal };
       case "wezterm":
-        return { args: ["start", "--class", options.appId, "--", commandName], command: terminal };
+        return { args: ["start", "--class", options.appId, "--", commandName, ...commandArgs], command: terminal };
       case "alacritty":
-        return { args: ["--class", `${options.appId},${options.appId}`, "-e", commandName], command: terminal };
+        return { args: ["--class", `${options.appId},${options.appId}`, "-e", commandName, ...commandArgs], command: terminal };
       default:
         break;
     }
