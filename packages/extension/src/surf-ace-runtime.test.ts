@@ -2168,7 +2168,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         passiveScreens.map((screen) => screen.windowLabel),
         ["a", "b"],
       );
-      assert.deepEqual(visibleCoordinates, ["a:1", "b:1"]);
+      assert.deepEqual(visibleCoordinates, ["a:6242", "b:6243"]);
+      const paneLabels = passiveScreens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
+      assert.equal(new Set(paneLabels).size, paneLabels.length);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
     } finally {
       await runtimeB.stop();
@@ -2501,7 +2503,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("multiple surfaces expose unique window labels and per-window first pane labels", async () => {
+  await t.test("multiple surfaces expose unique window labels and globally unique pane labels", async () => {
     const portA = nextPort++;
     const portB = nextPort++;
     const serverA = new FakeSurfAceWsServer(portA, { surfaceId: "sf_surface-a" });
@@ -2525,18 +2527,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
       assert.deepEqual(
         screens.map((screen) => ({
-          panes: screen.panes.map((pane) => pane.paneLabel),
           windowLabel: screen.windowLabel,
         })),
         [
-          { panes: [1], windowLabel: "a" },
-          { panes: [1], windowLabel: "b" },
+          { windowLabel: "a" },
+          { windowLabel: "b" },
         ],
       );
       const visibleCoordinates = screens.flatMap((screen) =>
         screen.panes.map((pane) => `${screen.windowLabel}:${pane.paneLabel}`)
       );
-      assert.deepEqual(visibleCoordinates.sort(), ["a:1", "b:1"]);
+      const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
+      assert.equal(paneLabels.every((paneLabel) => Number.isInteger(paneLabel) && paneLabel > 0), true);
+      assert.equal(new Set(paneLabels).size, paneLabels.length);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
       assert.equal(new Set(firstPaneIds).size, firstPaneIds.length);
         assert.deepEqual(
@@ -2559,8 +2562,61 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(initialRemotePaneIds.every((paneId) => paneId > 0));
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [1, 1],
+        [1, 2],
       );
+    } finally {
+      await runtime.stop();
+      await serverB.close();
+      await serverA.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("pane label repair publishes changed labels back to accepted surfaces", async () => {
+    const portA = nextPort++;
+    const portB = nextPort++;
+    const serverA = new FakeSurfAceWsServer(portA, { surfaceId: "sf_surface-a" });
+    const serverB = new FakeSurfAceWsServer(portB, { surfaceId: "sf_surface-b" });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-pane-label-repair-publish-"));
+    const discovery = new StaticDiscoveryService([
+      discoveryEndpoint(portA, "aaaabbbb"),
+      discoveryEndpoint(portB, "ccccdddd"),
+    ]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await runtime.start();
+      await waitFor(() => serverA.pairedSocket !== null && serverB.pairedSocket !== null);
+
+      const internalRuntime = runtime as any;
+      const surfaceA = internalRuntime.surfaces.get(serverA.surfaceId);
+      const surfaceB = internalRuntime.surfaces.get(serverB.surfaceId);
+      assert.ok(surfaceA);
+      assert.ok(surfaceB);
+      const paneA = [...surfaceA.panes.values()][0];
+      const paneB = [...surfaceB.panes.values()][0];
+      assert.ok(paneA);
+      assert.ok(paneB);
+      paneA.paneLabel = 1;
+      paneB.paneLabel = 1;
+      internalRuntime.persistentState.paneLabelsByPaneId[`${serverA.surfaceId}::${Number(paneA.remotePaneId)}`] = 1;
+      internalRuntime.persistentState.paneLabelsByPaneId[`${serverB.surfaceId}::${Number(paneB.remotePaneId)}`] = 1;
+      serverA.topologyApplyRequests.length = 0;
+      serverB.topologyApplyRequests.length = 0;
+
+      const screens = await runtime.listScreens();
+      const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
+      assert.equal(new Set(paneLabels).size, paneLabels.length);
+
+      await waitFor(() =>
+        serverA.topologyApplyRequests.length > 0 ||
+        serverB.topologyApplyRequests.length > 0,
+      );
+      const publishedPaneLabels = [
+        ...serverA.topologyApplyRequests,
+        ...serverB.topologyApplyRequests,
+      ].flatMap((request) => request.paneLabels);
+      assert.ok(publishedPaneLabels.includes(2));
     } finally {
       await runtime.stop();
       await serverB.close();
@@ -2595,19 +2651,20 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(
         screens.map((screen) => ({
           fingerprint: screen.fingerprint,
-          panes: screen.panes.map((pane) => pane.paneLabel),
           windowLabel: screen.windowLabel,
         })),
         [
-          { fingerprint: "sf_surface-a", panes: [1], windowLabel: "a" },
-          { fingerprint: "sf_surface-b", panes: [1], windowLabel: "b" },
-          { fingerprint: "sf_surface-c", panes: [1], windowLabel: "c" },
+          { fingerprint: "sf_surface-a", windowLabel: "a" },
+          { fingerprint: "sf_surface-b", windowLabel: "b" },
+          { fingerprint: "sf_surface-c", windowLabel: "c" },
         ],
       );
       const visibleCoordinates = screens.flatMap((screen) =>
         screen.panes.map((pane) => `${screen.windowLabel}:${pane.paneLabel}`)
       );
-      assert.deepEqual(visibleCoordinates.sort(), ["a:1", "b:1", "c:1"]);
+      const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
+      assert.equal(paneLabels.every((paneLabel) => Number.isInteger(paneLabel) && paneLabel > 0), true);
+      assert.equal(new Set(paneLabels).size, paneLabels.length);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
 
       const requestsBySurface = new Map(
@@ -2628,7 +2685,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(initialRemotePaneIds.every((paneId) => paneId > 0));
       assert.deepEqual(
         [...requestsBySurface.values()].map((request) => request?.initialPaneLabel).sort(),
-        [1, 1, 1],
+        [1, 2, 3],
       );
       const internalRuntime = runtime as any;
       assert.deepEqual(
@@ -2765,7 +2822,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("persisted pane labels stay scoped per surface before exposure", async () => {
+  await t.test("persisted pane labels stay globally unique before exposure", async () => {
     const portA = nextPort++;
     const portB = nextPort++;
     const serverA = new FakeSurfAceWsServer(portA, {
@@ -2813,29 +2870,27 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const screens = await runtime.listScreens();
       assert.deepEqual(
         screens.map((screen) => ({
-          panes: screen.panes.map((pane) => pane.paneLabel),
           windowLabel: screen.windowLabel,
         })),
           [
-            { panes: [1], windowLabel: "fw" },
-            { panes: [1], windowLabel: "fx" },
+            { windowLabel: "fw" },
+            { windowLabel: "fx" },
           ],
         );
       const visibleCoordinates = screens.flatMap((screen) =>
         screen.panes.map((pane) => `${screen.windowLabel}:${pane.paneLabel}`)
       );
-        assert.deepEqual(visibleCoordinates.sort(), ["fw:1", "fx:1"]);
+      const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
+      assert.equal(paneLabels.every((paneLabel) => Number.isInteger(paneLabel) && paneLabel > 0), true);
+      assert.equal(new Set(paneLabels).size, paneLabels.length);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [1, 1],
+        [1, 2],
       );
       const repairedState = JSON.parse(await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"));
-      assert.deepEqual(
-        Object.values(repairedState.paneLabelsByPaneId).sort(),
-        [1, 1],
-      );
-      assert.equal(repairedState.nextPaneLabel, 2);
+      assert.equal(new Set(Object.values(repairedState.paneLabelsByPaneId)).size, 2);
+      assert.equal(repairedState.nextPaneLabel, 6244);
     } finally {
       await runtime.stop();
       await serverB.close();
@@ -2892,18 +2947,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const screens = await runtime.listScreens();
       assert.deepEqual(
         screens.map((screen) => ({
-          panes: screen.panes.map((pane) => pane.paneLabel),
           windowLabel: screen.windowLabel,
         })),
         [
-          { panes: [1], windowLabel: "a" },
-          { panes: [1], windowLabel: "b" },
+          { windowLabel: "a" },
+          { windowLabel: "b" },
         ],
       );
       const visibleCoordinates = screens.flatMap((screen) =>
         screen.panes.map((pane) => `${screen.windowLabel}:${pane.paneLabel}`)
       );
-      assert.deepEqual(visibleCoordinates.sort(), ["a:1", "b:1"]);
+      const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
+      assert.deepEqual(paneLabels.sort((left, right) => left - right), [1, 2]);
+      assert.equal(new Set(paneLabels).size, paneLabels.length);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
       assert.deepEqual(
         [serverA.pairRequests[0]?.windowLabel, serverB.pairRequests[0]?.windowLabel].sort(),
@@ -2911,7 +2967,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [1, 1],
+        [1, 2],
       );
       const screenA = screens.find((screen) => screen.fingerprint === serverA.surfaceId);
       const screenB = screens.find((screen) => screen.fingerprint === serverB.surfaceId);
@@ -4991,13 +5047,13 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           type: "split",
         },
         paneIds: [server.initialRemotePaneId, 43],
-        paneLabels: [1, 2],
+        paneLabels: [1, 3],
         topologyRevision: server.topologyApplyRequests.at(-1)?.topologyRevision,
         windowLabel: "a",
       });
 
       const afterCloseScreens = await runtime.listScreens();
-      assertPaneLabelsWithOpaqueIds(afterCloseScreens[0]?.panes ?? [], [1, 2]);
+      assertPaneLabelsWithOpaqueIds(afterCloseScreens[0]?.panes ?? [], [1, 3]);
     });
   });
 
