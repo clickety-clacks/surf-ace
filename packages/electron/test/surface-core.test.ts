@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { NativePaneMaterialization, Revision } from "../../protocol/src/index.js";
+import type { Revision } from "../../protocol/src/index.js";
+import type { NativePaneMaterialization } from "../src/native-pane-bridge.js";
 import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
 
 function applyProviderBootstrap(core: SurfaceCore, surfaceId: string, initialPaneId: number): number {
@@ -617,6 +618,57 @@ test("surface core rejects browser_url targets while the pane is native-hosted",
   assert.equal(pane.content.contentType, null);
 });
 
+test("surface core rejects stale native materialization identity after geometry revision changes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  const materialization: NativePaneMaterialization = {
+    op: "native_pane.host",
+    panes: [
+      {
+        id: String(paneId),
+        binding_id: `${paneId}:target_top`,
+        content_id: "target_top",
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: listedPane.geometry.geometryRevision,
+          height: listedPane.geometry.contentViewport.height,
+          paneInstanceId: listedPane.geometry.paneInstanceId,
+          surfaceEpoch: listedPane.geometry.surfaceEpoch,
+          topologyEpoch: listedPane.geometry.topologyEpoch,
+          width: listedPane.geometry.contentViewport.width,
+          x: listedPane.geometry.contentViewport.x,
+          y: listedPane.geometry.contentViewport.y,
+        },
+        process: { args: ["top"], command: "top" },
+        revision: 1 as Revision,
+        target: "terminal",
+      },
+    ],
+  };
+
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# replacement" },
+    contentId: "ct_replacement" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_replacement",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  assert.equal(
+    core.validateNativePaneMaterializationLayout(surface.surfaceId, materialization),
+    `native pane ${paneId} geometry identity does not match resolved Surf Ace pane geometry`,
+  );
+});
+
 test("surface core records confirmed browser_url navigation success evidence", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -1071,6 +1123,30 @@ test("surface core emits history navigation after back/forward", () => {
       type: "history-navigated",
     },
   ]);
+  assert.equal(core.canNavigateHistory(surface.surfaceId, paneId, "back"), false);
+  assert.equal(core.canNavigateHistory(surface.surfaceId, paneId, "forward"), true);
+});
+
+test("surface core reports history no-op before native release planning", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 5);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Only" },
+    contentId: "ct_only" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_only",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  assert.equal(core.canNavigateHistory(surface.surfaceId, paneId, "back"), false);
+  assert.equal(core.canNavigateHistory(surface.surfaceId, paneId, "forward"), false);
 });
 
 test("surface core reports pane-scoped viewport data in panes.list", () => {

@@ -18,7 +18,6 @@ import type {
   EventProfile,
   HeartbeatPingRequest,
   HistoryNavigatedEvent,
-  NativePaneMaterialization,
   RelinquishRequest,
   PaneCloseRequest,
   PaneRenameRequest,
@@ -34,12 +33,13 @@ import type {
   SurfacesListRequest,
   TargetApplyRequest,
   TargetApplyResponse,
+  TargetMaterializedState,
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
 import {
-  compositorNativePaneStatusSummary,
   compositorFailureMessage,
+  type NativePaneMaterialization,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
   requestForCompositor,
@@ -87,8 +87,10 @@ type SurfaceTransportState = {
 };
 
 type PendingBrowserUrlApply = {
-  payload: TargetApplyRequest["payload"];
+  appliedAt: string;
+  request: TargetApplyRequest;
   resolve: (payload: TargetApplyResponse["payload"]) => void;
+  socket: WebSocket;
   timeout: NodeJS.Timeout;
 };
 
@@ -109,6 +111,7 @@ export type SurfaceWsServerOptions = {
   getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   onBusyChanged?: () => void;
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
+  onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -199,6 +202,7 @@ export class SurfaceWsServer {
   private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   private readonly onBusyChanged?: () => void;
   private readonly onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
+  private readonly onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   private readonly port: number;
   private readonly protocolVersion: number;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
@@ -210,6 +214,7 @@ export class SurfaceWsServer {
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly transports = new Map<string, SurfaceTransportState>();
+  private readonly mutationQueues = new Map<string, Promise<void>>();
   private ignoreInitialSurfaceEvents = true;
 
   constructor(options: SurfaceWsServerOptions) {
@@ -224,6 +229,7 @@ export class SurfaceWsServer {
     this.hostName = options.hostName;
     this.onBusyChanged = options.onBusyChanged;
     this.onNativeMaterialized = options.onNativeMaterialized;
+    this.onNativeReleased = options.onNativeReleased;
     this.port = options.port;
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
@@ -850,7 +856,7 @@ export class SurfaceWsServer {
       case "ownership.relinquish":
         return this.handleRelinquish(socket, request);
       case "topology.apply":
-        return this.handleTopologyApply(socket, request);
+        return await this.handleTopologyApply(socket, request);
       case "content.apply":
         return await this.handleContentApply(socket, request);
       case "target.apply":
@@ -862,17 +868,17 @@ export class SurfaceWsServer {
       case "pane.rename":
         return this.handlePaneRename(socket, request);
       case "pane.close":
-        return this.handlePaneClose(socket, request);
+        return await this.handlePaneClose(socket, request);
       case "content.set":
         return await this.handleContentSet(socket, request);
       case "content.clear":
-        return this.handleContentClear(socket, request);
+        return await this.handleContentClear(socket, request);
       case "content.append":
-        return this.handleContentAppend(socket, request);
+        return await this.handleContentAppend(socket, request);
       case "content.patch":
-        return this.handleContentPatch(socket, request);
+        return await this.handleContentPatch(socket, request);
       case "annotations.remove":
-        return this.handleAnnotationsRemove(socket, request);
+        return await this.handleAnnotationsRemove(socket, request);
       case "snapshot.get":
         return await this.handleSnapshotGet(socket, request);
       case "heartbeat.ping":
@@ -1018,7 +1024,27 @@ export class SurfaceWsServer {
         },
       );
     } else if (lock.providerId === providerId) {
-      if (existingOpenElsewhere) {
+      if (request.payload.takeover === true) {
+        if (existing && existing.socket !== socket) {
+          this.detachActiveSession(surfaceId, "superseded");
+        }
+        sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_explicit_takeover",
+          {
+            existing_open_elsewhere: existingOpenElsewhere,
+            previous_provider_id: lock.providerId,
+            previous_session_id: lock.sessionId,
+            provider_id: providerId,
+            request_id: request.id,
+            same_provider: true,
+            session_id: sessionId,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+      } else if (existingOpenElsewhere) {
         persistentServerDiagnostic(
           "warn",
           "pair_request_duplicate_active",
@@ -1031,21 +1057,6 @@ export class SurfaceWsServer {
           },
         );
         throw new SurfaceCoreError("busy", "Provider already holds an active socket for this surface");
-      }
-      if (request.payload.takeover === true && resumeSessionId !== lock.sessionId) {
-        sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-        persistentServerDiagnostic(
-          "info",
-          "pair_request_self_takeover",
-          {
-            lock_session_id: lock.sessionId,
-            provider_id: providerId,
-            request_id: request.id,
-            session_id: sessionId,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
       } else if (resumeSessionId !== lock.sessionId) {
         persistentServerDiagnostic(
           "warn",
@@ -1099,10 +1110,14 @@ export class SurfaceWsServer {
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
       persistentServerDiagnostic(
         "info",
-        "pair_request_takeover",
+        "pair_request_explicit_takeover",
         {
+          existing_open_elsewhere: existingOpenElsewhere,
+          previous_provider_id: lock.providerId,
+          previous_session_id: lock.sessionId,
           provider_id: providerId,
           request_id: request.id,
+          same_provider: false,
           session_id: sessionId,
           socket_id: meta?.socketId,
           surface_id: surfaceId,
@@ -1225,7 +1240,73 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleTopologyApply(socket: WebSocket, request: TopologyApplyRequest): Response {
+  private async runSurfaceMutation<T>(surfaceId: string, operation: () => Promise<T> | T): Promise<T> {
+    const previous = this.mutationQueues.get(surfaceId) ?? Promise.resolve();
+    let releaseQueue = (): void => {};
+    const current = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
+    const queued = previous.catch(() => undefined).then(() => current);
+    this.mutationQueues.set(surfaceId, queued);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      releaseQueue();
+      if (this.mutationQueues.get(surfaceId) === queued) {
+        this.mutationQueues.delete(surfaceId);
+      }
+    }
+  }
+
+  async setViewport(surfaceId: string, viewport: SurfaceViewport): Promise<boolean> {
+    return await this.runSurfaceMutation(surfaceId, async () => {
+      const nativePaneIds = this.core.panesList(surfaceId).panes
+        .filter((pane) => pane.externalNative)
+        .map((pane) => Number(pane.paneId));
+      if (nativePaneIds.length === 0) {
+        this.core.setViewport(surfaceId, viewport);
+        return true;
+      }
+      const rollbackMaterialization = this.core.projectNativePaneGeometryUpdate(surfaceId, nativePaneIds);
+      const materialization = this.core.projectNativePaneGeometryUpdateForViewport(surfaceId, nativePaneIds, viewport);
+      const updateResult = await this.applyNativePaneGeometryToCompositor(materialization);
+      if (updateResult.failure) {
+        if (updateResult.updated) {
+          await this.rollbackNativePaneGeometry(surfaceId, rollbackMaterialization, "viewport", updateResult.failure);
+        }
+        return false;
+      }
+      this.core.setViewport(surfaceId, viewport);
+      this.markUpdatedNativePaneGeometry(surfaceId, materialization);
+      return true;
+    });
+  }
+
+  async navigateHistoryAfterNativeRelease(
+    surfaceId: string,
+    paneId: number,
+    direction: "back" | "forward",
+  ): Promise<boolean> {
+    return await this.runSurfaceMutation(surfaceId, async () => {
+      if (!this.core.canNavigateHistory(surfaceId, paneId, direction)) {
+        this.core.navigateHistory(surfaceId, paneId, direction);
+        return true;
+      }
+      const nativeHostedPaneId = this.core.nativeHostedPaneIdForPaneId(surfaceId, paneId);
+      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(surfaceId, [nativeHostedPaneId], "history");
+      if (releaseFailure) {
+        return false;
+      }
+      if (!this.core.canNavigateHistory(surfaceId, paneId, direction)) {
+        return false;
+      }
+      this.core.navigateHistory(surfaceId, paneId, direction);
+      return true;
+    });
+  }
+
+  private async handleTopologyApply(socket: WebSocket, request: TopologyApplyRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
     persistentServerDiagnostic(
       "info",
@@ -1240,7 +1321,27 @@ export class SurfaceWsServer {
         window_label: request.payload.windowLabel,
       },
     );
-    const payload = this.core.topologyApply(surfaceId, request.payload);
+    const payload = await this.runSurfaceMutation(surfaceId, async () => {
+      const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
+      const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForTopologyApply(surfaceId, request.payload);
+      const rollbackNativeGeometry = nativeGeometryUpdate
+        ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+        : null;
+      this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
+      await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "topology.apply", rollbackNativeGeometry);
+      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
+        surfaceId,
+        nativeHostedPaneIds,
+        "topology.apply",
+      );
+      if (releaseFailure) {
+        await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "topology.apply", releaseFailure);
+        throw new SurfaceCoreError("render_failed", releaseFailure);
+      }
+      const result = this.core.topologyApply(surfaceId, request.payload);
+      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      return result;
+    });
     persistentServerDiagnostic(
       "info",
       "topology_apply_applied",
@@ -1268,7 +1369,15 @@ export class SurfaceWsServer {
   private async handleContentApply(socket: WebSocket, request: ContentApplyRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
     if ("clear" in request.payload) {
-      const payload = this.core.contentApply(surfaceId, request.payload);
+      const payload = await this.runSurfaceMutation(surfaceId, async () => {
+        const nativeHostedPaneId = this.core.nativeHostedPaneIdForContentApply(surfaceId, request.payload);
+        const releaseFailure = await this.releaseNativePanesBeforeRendererContent(surfaceId, [nativeHostedPaneId], "content.apply");
+        if (releaseFailure) {
+          throw new SurfaceCoreError("render_failed", releaseFailure);
+        }
+        this.core.nativeHostedPaneIdForContentApply(surfaceId, request.payload);
+        return this.core.contentApply(surfaceId, request.payload);
+      });
       persistentServerDiagnostic(
         "info",
         "content_apply_result",
@@ -1299,7 +1408,15 @@ export class SurfaceWsServer {
     if (!request.payload.historyOwnerToken) {
       throw new SurfaceCoreError("invalid_payload", "content.apply requires historyOwnerToken");
     }
-    const payload = this.core.contentApply(surfaceId, request.payload);
+    const payload = await this.runSurfaceMutation(surfaceId, async () => {
+      const nativeHostedPaneId = this.core.nativeHostedPaneIdForContentApply(surfaceId, request.payload);
+      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(surfaceId, [nativeHostedPaneId], "content.apply");
+      if (releaseFailure) {
+        throw new SurfaceCoreError("render_failed", releaseFailure);
+      }
+      this.core.nativeHostedPaneIdForContentApply(surfaceId, request.payload);
+      return this.core.contentApply(surfaceId, request.payload);
+    });
     persistentServerDiagnostic(
       "info",
       "content_apply_result",
@@ -1352,12 +1469,56 @@ export class SurfaceWsServer {
           type: "response",
           v: 1,
         };
-      }
-      const releaseFailure = await this.releaseNativePaneBeforeBrowserUrl(surfaceId, request.payload);
-      if (releaseFailure) {
-        return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", releaseFailure);
-      }
-      const result = this.core.targetApply(surfaceId, request.payload);
+	      }
+	      const releaseResult = await this.runSurfaceMutation(surfaceId, async () => {
+	        const activeNow = this.transport(surfaceId).active;
+	        if (!activeNow || activeNow.socket !== socket || request.payload.ownershipSessionId !== activeNow.sessionId) {
+	          return {
+	            response: this.targetApplyFailureResponse(
+	              request,
+	              appliedAt,
+	              "ownership_session_mismatch",
+	              "target.apply ownership session does not match active session",
+	            ),
+	          };
+	        }
+	        const currentPaneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
+	        if (!currentPaneLineages.has(request.payload.paneLineageId)) {
+	          return {
+	            response: this.targetApplyFailureResponse(
+	              request,
+	              appliedAt,
+	              "pane_lineage_missing",
+	              "target.apply pane lineage is not present on this surface",
+	            ),
+	          };
+	        }
+	        const nativeHostedPaneId = this.core.nativeHostedPaneIdForLineage(surfaceId, request.payload.paneLineageId);
+	        const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
+	          surfaceId,
+          [nativeHostedPaneId],
+          "browser_url",
+        );
+        if (releaseFailure) {
+          return { failure: releaseFailure as string };
+        }
+        const postReleasePreflightFailure = this.core.browserUrlTargetPreflight(surfaceId, request.payload);
+		        if (postReleasePreflightFailure) {
+		          return { payload: postReleasePreflightFailure };
+		        }
+		        const postReleaseSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+		        if (postReleaseSessionFailure) {
+		          return { response: postReleaseSessionFailure };
+		        }
+		        return { payload: this.core.targetApply(surfaceId, request.payload) };
+		      });
+	      if ("response" in releaseResult) {
+	        return releaseResult.response;
+	      }
+	      if ("failure" in releaseResult) {
+	        return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", releaseResult.failure);
+	      }
+      const result = releaseResult.payload;
       const paneId = this.core.pairState(surfaceId).panes.find((pane) =>
         pane.paneLineageId === request.payload.paneLineageId
       )?.paneId;
@@ -1367,7 +1528,7 @@ export class SurfaceWsServer {
         result.errorCode === "materialization_failed" &&
         result.materializedState?.navigationStatus === "started_unverified";
       const payload = shouldWaitForBrowserUrl
-        ? await this.waitForBrowserUrlNavigation(surfaceId, Number(paneId), request.payload)
+        ? await this.waitForBrowserUrlNavigation(surfaceId, Number(paneId), request, socket, appliedAt)
         : result;
       return {
         id: request.id,
@@ -1401,129 +1562,171 @@ export class SurfaceWsServer {
         v: 1,
       };
     }
-    let materialization: NativePaneMaterialization;
-    try {
-      materialization = this.core.projectNativePaneMaterialization(
-        surfaceId,
-        request.payload,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "native pane host plan projection failed";
-      return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", message);
-    }
-    if (!this.compositorSocketPath) {
-      const payload: TargetApplyResponse["payload"] = {
-        appliedAt,
-        errorCode: "materialization_failed",
-        message: "SURF_ACE_COMPOSITOR_SOCKET is not configured",
-        paneLineageId: request.payload.paneLineageId,
-        requestId: request.payload.requestId,
-        status: "failed",
-        targetEpoch: request.payload.targetEpoch,
-        targetId: request.payload.targetId,
-      };
-      return {
-        id: request.id,
-        ok: true,
-        op: "target.apply.result",
-        payload,
-        sentAt: Date.now(),
-        type: "response",
-        v: 1,
-      };
-    }
+    return await this.runSurfaceMutation(surfaceId, async () => {
+      const activeNow = this.transport(surfaceId).active;
+      if (!activeNow || activeNow.socket !== socket || request.payload.ownershipSessionId !== activeNow.sessionId) {
+        return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply ownership session does not match active session");
+      }
+      const currentPaneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
+      if (!currentPaneLineages.has(request.payload.paneLineageId)) {
+        return this.targetApplyFailureResponse(request, appliedAt, "pane_lineage_missing", "target.apply pane lineage is not present on this surface");
+      }
 
-    let hostRequest: CompositorControlRequest | null = null;
-    let preflightStatus: CompositorControlResponse | null = null;
-    let hostResponse: CompositorControlResponse | null = null;
-    let overlayRequest: CompositorControlRequest | null = null;
-    let overlayResponse: CompositorControlResponse | null = null;
-    try {
-      hostRequest = requestForCompositor(materialization);
-      preflightStatus = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
-      const statusFailure = compositorFailureMessage(preflightStatus);
-      if (statusFailure) {
-        throw new Error(statusFailure);
+      let materialization: NativePaneMaterialization;
+      try {
+        materialization = this.core.projectNativePaneMaterialization(
+          surfaceId,
+          request.payload,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "native pane host plan projection failed";
+        return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", message);
       }
-      const geometryFailure = validateMaterializationAgainstCompositorStatus(hostRequest, preflightStatus);
-      if (geometryFailure) {
-        throw new Error(geometryFailure);
+      if (!this.compositorSocketPath) {
+        const payload: TargetApplyResponse["payload"] = {
+          appliedAt,
+          errorCode: "materialization_failed",
+          message: publicTargetApplyMessage("materialization_failed"),
+          paneLineageId: request.payload.paneLineageId,
+          requestId: request.payload.requestId,
+          status: "failed",
+          targetEpoch: request.payload.targetEpoch,
+          targetId: request.payload.targetId,
+        };
+        return {
+          id: request.id,
+          ok: true,
+          op: "target.apply.result",
+          payload,
+          sentAt: Date.now(),
+          type: "response",
+          v: 1,
+        };
       }
-      const layoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
-      if (layoutFailure) {
-        throw new Error(layoutFailure);
-      }
-      hostResponse = await sendCompositorControl(this.compositorSocketPath, hostRequest);
-      const hostFailure = compositorFailureMessage(hostResponse);
-      if (hostFailure) {
-        throw new Error(hostFailure);
-      }
-      overlayRequest = overlayRequestForCompositor(materialization);
-      overlayResponse = overlayRequest
-        ? await sendCompositorControl(this.compositorSocketPath, overlayRequest)
-        : null;
-      if (overlayResponse) {
-        const overlayFailure = compositorFailureMessage(overlayResponse);
-        if (overlayFailure) {
-          throw new Error(overlayFailure);
+
+      let hostRequest: CompositorControlRequest | null = null;
+      let preflightStatus: CompositorControlResponse | null = null;
+      let hostApplied = false;
+      let overlayRequest: CompositorControlRequest | null = null;
+      let overlayApplied = false;
+      try {
+        hostRequest = requestForCompositor(materialization);
+        preflightStatus = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+        const statusFailure = compositorFailureMessage(preflightStatus);
+        if (statusFailure) {
+          throw new Error(statusFailure);
         }
+        const geometryFailure = validateMaterializationAgainstCompositorStatus(hostRequest, preflightStatus);
+        if (geometryFailure) {
+          throw new Error(geometryFailure);
+        }
+        const layoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+        if (layoutFailure) {
+          throw new Error(layoutFailure);
+        }
+        const hostResponse = await sendCompositorControl(this.compositorSocketPath, hostRequest);
+        const hostFailure = compositorFailureMessage(hostResponse);
+        if (hostFailure) {
+          throw new Error(hostFailure);
+        }
+	        hostApplied = true;
+	        const postHostLayoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+	        if (postHostLayoutFailure) {
+	          throw new Error(postHostLayoutFailure);
+	        }
+	        const postHostSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+	        if (postHostSessionFailure) {
+	          const releasedAfterFailure = await this.releaseNativePaneAfterFailedHost(surfaceId, materialization);
+	          if (!releasedAfterFailure) {
+	            this.core.markNativePaneMaterialized(surfaceId, materialization);
+	            this.onNativeMaterialized?.(surfaceId, materialization);
+	          }
+	          return postHostSessionFailure;
+	        }
+	        overlayRequest = overlayRequestForCompositor(materialization);
+        const overlayResponse = overlayRequest
+          ? await sendCompositorControl(this.compositorSocketPath, overlayRequest)
+          : null;
+        if (overlayResponse) {
+          const overlayFailure = compositorFailureMessage(overlayResponse);
+          if (overlayFailure) {
+            throw new Error(overlayFailure);
+          }
+          overlayApplied = true;
+        }
+	        const postOverlayLayoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+	        if (postOverlayLayoutFailure) {
+	          throw new Error(postOverlayLayoutFailure);
+	        }
+	        const postOverlaySessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+	        if (postOverlaySessionFailure) {
+	          const releasedAfterFailure = await this.releaseNativePaneAfterFailedHost(surfaceId, materialization);
+	          if (!releasedAfterFailure) {
+	            this.core.markNativePaneMaterialized(surfaceId, materialization);
+	            this.onNativeMaterialized?.(surfaceId, materialization);
+	          }
+	          return postOverlaySessionFailure;
+	        }
+	        const payload: TargetApplyResponse["payload"] = {
+          appliedAt,
+          materializedState: {
+            nativeHost: "applied",
+            overlayRegions: overlayRequest ? "applied" : "not_requested",
+          },
+          paneLineageId: request.payload.paneLineageId,
+          requestId: request.payload.requestId,
+          status: "applied",
+          targetEpoch: request.payload.targetEpoch,
+          targetId: request.payload.targetId,
+        };
+        this.core.markNativePaneMaterialized(surfaceId, materialization);
+        this.onNativeMaterialized?.(surfaceId, materialization);
+        return {
+          id: request.id,
+          ok: true,
+          op: "target.apply.result",
+          payload,
+          sentAt: Date.now(),
+          type: "response",
+          v: 1,
+        };
+      } catch (error) {
+        const releasedAfterFailure = hostApplied
+          ? await this.releaseNativePaneAfterFailedHost(surfaceId, materialization)
+          : false;
+        if (hostApplied && !releasedAfterFailure) {
+          this.core.markNativePaneMaterialized(surfaceId, materialization);
+          this.onNativeMaterialized?.(surfaceId, materialization);
+        }
+        const payload: TargetApplyResponse["payload"] = {
+          appliedAt,
+          errorCode: "materialization_failed",
+          materializedState: {
+            nativeHost: releasedAfterFailure ? "released_after_failure" : hostApplied ? "applied" : "not_applied",
+            overlayRegions: overlayRequest
+              ? overlayApplied
+                ? "applied"
+                : "not_applied"
+              : "not_requested",
+          },
+          message: publicTargetApplyMessage("materialization_failed"),
+          paneLineageId: request.payload.paneLineageId,
+          requestId: request.payload.requestId,
+          status: "failed",
+          targetEpoch: request.payload.targetEpoch,
+          targetId: request.payload.targetId,
+        };
+        return {
+          id: request.id,
+          ok: true,
+          op: "target.apply.result",
+          payload,
+          sentAt: Date.now(),
+          type: "response",
+          v: 1,
+        };
       }
-      const payload: TargetApplyResponse["payload"] = {
-        appliedAt,
-        materializedState: {
-          hostRequest,
-          hostResponse,
-          overlayRequest,
-          overlayResponse,
-          preflightStatus,
-          preflightStatusSummary: compositorNativePaneStatusSummary(preflightStatus),
-        },
-        paneLineageId: request.payload.paneLineageId,
-        requestId: request.payload.requestId,
-        status: "applied",
-        targetEpoch: request.payload.targetEpoch,
-        targetId: request.payload.targetId,
-      };
-      this.core.markNativePaneMaterialized(surfaceId, materialization);
-      this.onNativeMaterialized?.(surfaceId, materialization);
-      return {
-        id: request.id,
-        ok: true,
-        op: "target.apply.result",
-        payload,
-        sentAt: Date.now(),
-        type: "response",
-        v: 1,
-      };
-    } catch (error) {
-      const payload: TargetApplyResponse["payload"] = {
-        appliedAt,
-        errorCode: "materialization_failed",
-        materializedState: {
-          hostRequest,
-          hostResponse,
-          overlayRequest,
-          overlayResponse,
-          preflightStatus,
-          preflightStatusSummary: preflightStatus ? compositorNativePaneStatusSummary(preflightStatus) : null,
-        },
-        message: error instanceof Error ? error.message : String(error),
-        paneLineageId: request.payload.paneLineageId,
-        requestId: request.payload.requestId,
-        status: "failed",
-        targetEpoch: request.payload.targetEpoch,
-        targetId: request.payload.targetId,
-      };
-      return {
-        id: request.id,
-        ok: true,
-        op: "target.apply.result",
-        payload,
-        sentAt: Date.now(),
-        type: "response",
-        v: 1,
-      };
-    }
+    });
   }
 
   resolveBrowserUrlNavigation(
@@ -1533,13 +1736,23 @@ export class SurfaceWsServer {
   ): void {
     const key = browserUrlApplyKey(surfaceId, paneId);
     const pending = this.pendingBrowserUrlApplies.get(key);
-    if (!pending || pending.payload.targetId !== evidence.targetId) {
+    if (!pending || pending.request.payload.targetId !== evidence.targetId) {
       return;
     }
     this.pendingBrowserUrlApplies.delete(key);
     clearTimeout(pending.timeout);
+    const sessionFailure = this.targetApplySessionFailurePayload(
+      surfaceId,
+      pending.socket,
+      pending.request,
+      pending.appliedAt,
+    );
+    if (sessionFailure) {
+      pending.resolve(sessionFailure);
+      return;
+    }
     let payload = browserUrlApplyResult(
-      pending.payload,
+      pending.request.payload,
       evidence.status,
       evidence.status === "failed" ? "materialization_failed" : undefined,
       evidence.status === "applied" ? "browser_url navigation loaded" : evidence.errorMessage ?? "browser_url navigation failed",
@@ -1552,7 +1765,7 @@ export class SurfaceWsServer {
     const completed = this.core.completeBrowserUrlNavigation(surfaceId, paneId, evidence, payload);
     if (!completed) {
       payload = browserUrlApplyResult(
-        pending.payload,
+        pending.request.payload,
         "failed",
         "materialization_failed",
         "browser_url navigation was superseded before verification",
@@ -1565,7 +1778,9 @@ export class SurfaceWsServer {
   private async waitForBrowserUrlNavigation(
     surfaceId: string,
     paneId: number,
-    payload: TargetApplyRequest["payload"],
+    request: TargetApplyRequest,
+    socket: WebSocket,
+    appliedAt: string,
   ): Promise<TargetApplyResponse["payload"]> {
     return await new Promise((resolve) => {
       const key = browserUrlApplyKey(surfaceId, paneId);
@@ -1574,23 +1789,33 @@ export class SurfaceWsServer {
         this.pendingBrowserUrlApplies.delete(key);
         clearTimeout(previous.timeout);
         const superseded = browserUrlApplyResult(
-          previous.payload,
+          previous.request.payload,
           "failed",
           "materialization_failed",
           "browser_url navigation superseded before verification",
-          { navigationStatus: "failed", replaySemantics: "navigate" },
+          {
+            navigationStatus: "failed",
+            replaySemantics: "navigate",
+            url: String((previous.request.payload.targetPayload as { url?: unknown }).url ?? ""),
+          },
         );
         this.core.completeBrowserUrlNavigation(surfaceId, paneId, {
           errorMessage: "browser_url navigation superseded before verification",
           status: "failed",
-          targetId: previous.payload.targetId,
-          url: String((previous.payload.targetPayload as { url?: unknown }).url ?? ""),
+          targetId: previous.request.payload.targetId,
+          url: String((previous.request.payload.targetPayload as { url?: unknown }).url ?? ""),
         }, superseded);
         previous.resolve(superseded);
       }
+      const payload = request.payload;
       const targetUrl = String((payload.targetPayload as { url?: unknown }).url ?? "");
       const timeout = setTimeout(() => {
         this.pendingBrowserUrlApplies.delete(key);
+        const sessionFailure = this.targetApplySessionFailurePayload(surfaceId, socket, request, appliedAt);
+        if (sessionFailure) {
+          resolve(sessionFailure);
+          return;
+        }
         const timedOut = browserUrlApplyResult(
           payload,
           "failed",
@@ -1607,25 +1832,28 @@ export class SurfaceWsServer {
         resolve(timedOut);
       }, BROWSER_URL_NAVIGATION_TIMEOUT_MS);
       this.pendingBrowserUrlApplies.set(key, {
-        payload,
+        appliedAt,
+        request,
         resolve,
+        socket,
         timeout,
       });
     });
   }
 
-  private async releaseNativePaneBeforeBrowserUrl(
+  private async releaseNativePanesBeforeRendererContent(
     surfaceId: string,
-    payload: TargetApplyRequest["payload"],
+    paneIds: Array<number | null>,
+    operation: string,
   ): Promise<string | null> {
-    const paneId = this.core.nativeHostedPaneIdForLineage(surfaceId, payload.paneLineageId);
-    if (paneId === null) {
+    const releasePaneIds = paneIds.filter((paneId): paneId is number => paneId !== null);
+    if (releasePaneIds.length === 0) {
       return null;
     }
     if (!this.compositorSocketPath) {
-      return "browser_url cannot replace a live native-hosted pane without native pane release support";
+      return `${operation} cannot replace a live native-hosted pane without native pane release support`;
     }
-    const releaseRequest = nativePaneReleaseRequestForCompositor([paneId]);
+    const releaseRequest = nativePaneReleaseRequestForCompositor(releasePaneIds);
     let releaseResponse: CompositorControlResponse;
     try {
       releaseResponse = await sendCompositorControl(this.compositorSocketPath, releaseRequest);
@@ -1636,8 +1864,168 @@ export class SurfaceWsServer {
     if (releaseFailure) {
       return releaseFailure;
     }
-    this.core.markNativePaneReleased(surfaceId, [paneId]);
+    this.core.markNativePaneReleased(surfaceId, releasePaneIds);
+    try {
+      await this.onNativeReleased?.(surfaceId, releasePaneIds.map((paneId) => String(paneId)));
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
     return null;
+  }
+
+	  private async updateNativePaneGeometryBeforeLayout(
+    surfaceId: string,
+    materialization: NativePaneMaterialization | null,
+    operation: string,
+    rollbackMaterialization: NativePaneMaterialization | null = null,
+  ): Promise<void> {
+    if (!materialization) {
+      return;
+    }
+    if (!this.compositorSocketPath) {
+      throw new SurfaceCoreError("render_failed", `${operation} cannot update live native-hosted pane geometry without native pane update support`);
+    }
+    const updateResult = await this.applyNativePaneGeometryToCompositor(materialization);
+	    if (updateResult.failure) {
+	      if (updateResult.updated) {
+	        await this.rollbackNativePaneGeometry(surfaceId, rollbackMaterialization, operation, updateResult.failure);
+	      }
+	      throw new SurfaceCoreError("render_failed", updateResult.failure);
+	    }
+    const staleSourceFailure = rollbackMaterialization
+      ? this.core.validateNativePaneMaterializationLayout(surfaceId, rollbackMaterialization)
+      : null;
+    if (staleSourceFailure) {
+      const currentMaterialization = rollbackMaterialization
+        ? this.core.projectNativePaneGeometryUpdate(surfaceId, rollbackMaterialization.panes.map((pane) => Number(pane.id)))
+        : null;
+      await this.rollbackNativePaneGeometry(surfaceId, currentMaterialization, operation, staleSourceFailure);
+      throw new SurfaceCoreError("render_failed", staleSourceFailure);
+    }
+	  }
+
+  private async applyNativePaneGeometryToCompositor(
+    materialization: NativePaneMaterialization,
+  ): Promise<{ failure: string | null; updated: boolean }> {
+    if (!this.compositorSocketPath) {
+      return { failure: "native pane update support is unavailable", updated: false };
+    }
+    const updateRequest = requestForCompositor(materialization);
+    let preflightStatus: CompositorControlResponse;
+    try {
+      preflightStatus = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+    } catch (error) {
+      return { failure: error instanceof Error ? error.message : String(error), updated: false };
+    }
+    const statusFailure = compositorFailureMessage(preflightStatus);
+    if (statusFailure) {
+      return { failure: statusFailure, updated: false };
+    }
+    const geometryFailure = validateMaterializationAgainstCompositorStatus(updateRequest, preflightStatus);
+    if (geometryFailure) {
+      return { failure: geometryFailure, updated: false };
+    }
+    let updateResponse: CompositorControlResponse;
+    try {
+      updateResponse = await sendCompositorControl(this.compositorSocketPath, updateRequest);
+    } catch (error) {
+      return { failure: error instanceof Error ? error.message : String(error), updated: false };
+    }
+    const updateFailure = compositorFailureMessage(updateResponse);
+    if (updateFailure) {
+      return { failure: updateFailure, updated: false };
+    }
+    const overlayRequest = overlayRequestForCompositor(materialization);
+    if (!overlayRequest) {
+      return { failure: null, updated: true };
+    }
+    let overlayResponse: CompositorControlResponse;
+    try {
+      overlayResponse = await sendCompositorControl(this.compositorSocketPath, overlayRequest);
+    } catch (error) {
+      return { failure: error instanceof Error ? error.message : String(error), updated: true };
+    }
+    const overlayFailure = compositorFailureMessage(overlayResponse);
+    if (overlayFailure) {
+      return { failure: overlayFailure, updated: true };
+    }
+    return { failure: null, updated: true };
+  }
+
+  private async rollbackNativePaneGeometry(
+    surfaceId: string,
+    rollbackMaterialization: NativePaneMaterialization | null,
+    operation: string,
+    reason: string,
+  ): Promise<void> {
+    if (!rollbackMaterialization || !this.compositorSocketPath) {
+      return;
+    }
+    try {
+      const rollbackResult = await this.applyNativePaneGeometryToCompositor(rollbackMaterialization);
+      if (rollbackResult.failure) {
+        persistentServerDiagnostic("warn", "native_pane_geometry_rollback_failed", {
+          failure: rollbackResult.failure,
+          operation,
+          reason,
+          surface_id: surfaceId,
+        });
+      }
+    } catch (error) {
+      persistentServerDiagnostic("warn", "native_pane_geometry_rollback_failed", {
+        operation,
+        reason,
+        surface_id: surfaceId,
+        ...errorDiagnosticFields(error),
+      });
+    }
+  }
+
+  private markUpdatedNativePaneGeometry(
+    surfaceId: string,
+    materialization: NativePaneMaterialization | null,
+  ): void {
+    if (!materialization) {
+      return;
+    }
+    const layoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+    if (layoutFailure) {
+      throw new SurfaceCoreError("render_failed", layoutFailure);
+    }
+    this.core.markNativePaneMaterialized(surfaceId, materialization);
+    this.onNativeMaterialized?.(surfaceId, materialization);
+  }
+
+  private async releaseNativePaneAfterFailedHost(
+    surfaceId: string,
+    materialization: NativePaneMaterialization,
+  ): Promise<boolean> {
+    if (!this.compositorSocketPath) {
+      return false;
+    }
+    const paneIds = materialization.panes.map((pane) => pane.id);
+    let releaseResponse: CompositorControlResponse;
+    try {
+      releaseResponse = await sendCompositorControl(
+        this.compositorSocketPath,
+        nativePaneReleaseRequestForCompositor(paneIds),
+      );
+    } catch {
+      return false;
+    }
+    if (compositorFailureMessage(releaseResponse)) {
+      return false;
+    }
+    this.core.markNativePaneReleased(surfaceId, paneIds);
+    try {
+      await this.onNativeReleased?.(surfaceId, paneIds.map((paneId) => String(paneId)));
+    } catch (error) {
+      persistentServerDiagnostic("warn", "native_pane_post_failure_release_cleanup_failed", {
+        surface_id: surfaceId,
+        ...errorDiagnosticFields(error),
+      });
+    }
+    return true;
   }
 
   private targetApplyFailureResponse(
@@ -1649,7 +2037,7 @@ export class SurfaceWsServer {
     const payload: TargetApplyResponse["payload"] = {
       appliedAt,
       errorCode,
-      message,
+      message: publicTargetApplyMessage(errorCode, message),
       paneLineageId: request.payload.paneLineageId,
       requestId: request.payload.requestId,
       status: "rejected",
@@ -1667,14 +2055,82 @@ export class SurfaceWsServer {
     };
   }
 
+  private targetApplySessionFailure(
+    surfaceId: string,
+    socket: WebSocket,
+    request: TargetApplyRequest,
+    appliedAt: string,
+  ): Response | null {
+    const payload = this.targetApplySessionFailurePayload(surfaceId, socket, request, appliedAt);
+    if (!payload) {
+      return null;
+    }
+    return {
+      id: request.id,
+      ok: true,
+      op: "target.apply.result",
+      payload,
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private targetApplySessionFailurePayload(
+    surfaceId: string,
+    socket: WebSocket,
+    request: TargetApplyRequest,
+    appliedAt: string,
+  ): TargetApplyResponse["payload"] | null {
+    const active = this.transport(surfaceId).active;
+    if (!active || active.socket !== socket || request.payload.ownershipSessionId !== active.sessionId) {
+      return (this.targetApplyFailureResponse(
+        request,
+        appliedAt,
+        "ownership_session_mismatch",
+        "target.apply ownership session does not match active session",
+      ) as TargetApplyResponse).payload;
+    }
+    const paneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
+    if (!paneLineages.has(request.payload.paneLineageId)) {
+      return (this.targetApplyFailureResponse(
+        request,
+        appliedAt,
+        "pane_lineage_missing",
+        "target.apply pane lineage is not present on this surface",
+      ) as TargetApplyResponse).payload;
+    }
+    return null;
+  }
+
   private async handlePaneSplit(socket: WebSocket, request: PaneSplitRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const payload = this.core.paneSplit(surfaceId, {
+    const splitPayload = {
       count: request.payload.count,
       direction: request.payload.direction,
       newPaneIds: request.payload.newPaneIds.map(Number),
       newPaneLabels: request.payload.newPaneLabels.map(Number),
       paneId: Number(request.payload.paneId),
+    };
+    const payload = await this.runSurfaceMutation(surfaceId, async () => {
+      const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForPaneSplit(surfaceId, splitPayload);
+      const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForPaneSplit(surfaceId, splitPayload);
+      const rollbackNativeGeometry = nativeGeometryUpdate
+        ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+        : null;
+      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
+        surfaceId,
+        nativeHostedPaneIds,
+        "pane.split",
+      );
+      if (releaseFailure) {
+        throw new SurfaceCoreError("render_failed", releaseFailure);
+      }
+      this.core.nativeHostedPaneIdsForPaneSplit(surfaceId, splitPayload);
+      await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.split", rollbackNativeGeometry);
+      const result = this.core.paneSplit(surfaceId, splitPayload);
+      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      return result;
     });
     return {
       id: request.id,
@@ -1704,9 +2160,29 @@ export class SurfaceWsServer {
     };
   }
 
-  private handlePaneClose(socket: WebSocket, request: PaneCloseRequest): Response {
+  private async handlePaneClose(socket: WebSocket, request: PaneCloseRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const payload = this.core.paneClose(surfaceId, Number(request.payload.paneId));
+    const payload = await this.runSurfaceMutation(surfaceId, async () => {
+      const paneId = Number(request.payload.paneId);
+      const nativeHostedPaneId = this.core.nativeHostedPaneIdForPaneClose(surfaceId, paneId);
+      const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForPaneClose(surfaceId, paneId);
+      const rollbackNativeGeometry = nativeGeometryUpdate
+        ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+        : null;
+      await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.close", rollbackNativeGeometry);
+      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
+        surfaceId,
+        [nativeHostedPaneId],
+        "pane.close",
+      );
+      if (releaseFailure) {
+        await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "pane.close", releaseFailure);
+        throw new SurfaceCoreError("render_failed", releaseFailure);
+      }
+      const result = this.core.paneClose(surfaceId, paneId);
+      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      return result;
+    });
     return {
       id: request.id,
       ok: true,
@@ -1730,7 +2206,15 @@ export class SurfaceWsServer {
         "content.set requires historyOwnerToken",
       );
     }
-    const payload = this.core.contentSet(surfaceId, request.payload);
+    const payload = await this.runSurfaceMutation(surfaceId, async () => {
+      const nativeHostedPaneId = this.core.nativeHostedPaneIdForContentSet(surfaceId, request.payload);
+      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(surfaceId, [nativeHostedPaneId], "content.set");
+      if (releaseFailure) {
+        throw new SurfaceCoreError("render_failed", releaseFailure);
+      }
+      this.core.nativeHostedPaneIdForContentSet(surfaceId, request.payload);
+      return this.core.contentSet(surfaceId, request.payload);
+    });
     return {
       id: request.id,
       ok: true,
@@ -1742,9 +2226,17 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleContentClear(socket: WebSocket, request: ContentClearRequest): Response {
+  private async handleContentClear(socket: WebSocket, request: ContentClearRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const payload = this.core.contentClear(surfaceId, request.payload);
+    const payload = await this.runSurfaceMutation(surfaceId, async () => {
+      const nativeHostedPaneId = this.core.nativeHostedPaneIdForContentClear(surfaceId, request.payload);
+      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(surfaceId, [nativeHostedPaneId], "content.clear");
+      if (releaseFailure) {
+        throw new SurfaceCoreError("render_failed", releaseFailure);
+      }
+      this.core.nativeHostedPaneIdForContentClear(surfaceId, request.payload);
+      return this.core.contentClear(surfaceId, request.payload);
+    });
     return {
       id: request.id,
       ok: true,
@@ -1756,9 +2248,9 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleContentAppend(socket: WebSocket, request: ContentAppendRequest): Response {
+  private async handleContentAppend(socket: WebSocket, request: ContentAppendRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const payload = this.core.contentAppend(surfaceId, request.payload);
+    const payload = await this.runSurfaceMutation(surfaceId, () => this.core.contentAppend(surfaceId, request.payload));
     return {
       id: request.id,
       ok: true,
@@ -1770,9 +2262,9 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleContentPatch(socket: WebSocket, request: ContentPatchRequest): Response {
+  private async handleContentPatch(socket: WebSocket, request: ContentPatchRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const payload = this.core.contentPatch(surfaceId, request.payload);
+    const payload = await this.runSurfaceMutation(surfaceId, () => this.core.contentPatch(surfaceId, request.payload));
     return {
       id: request.id,
       ok: true,
@@ -1784,13 +2276,13 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleAnnotationsRemove(socket: WebSocket, request: AnnotationsRemoveRequest): Response {
+  private async handleAnnotationsRemove(socket: WebSocket, request: AnnotationsRemoveRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const payload = this.core.annotationsRemove(surfaceId, {
+    const payload = await this.runSurfaceMutation(surfaceId, () => this.core.annotationsRemove(surfaceId, {
       contentId: request.payload.contentId,
       paneId: Number(request.payload.paneId),
       strokeIds: request.payload.strokeIds.map(String),
-    });
+    }));
     return {
       id: request.id,
       ok: true,
@@ -2251,12 +2743,22 @@ function isNativeHostTargetKind(targetKind: TargetApplyRequest["payload"]["targe
   return targetKind === "terminal_app" || targetKind === "native_app" || targetKind === "compositor_app";
 }
 
+function publicTargetApplyMessage(
+  errorCode: TargetApplyResponse["payload"]["errorCode"],
+  fallback = "Target apply failed",
+): string {
+  if (errorCode === "materialization_failed") {
+    return "Target materialization failed";
+  }
+  return fallback;
+}
+
 function browserUrlApplyResult(
   payload: TargetApplyRequest["payload"],
   status: TargetApplyResponse["payload"]["status"],
   errorCode: TargetApplyResponse["payload"]["errorCode"] | undefined,
   message: string,
-  materializedState: Record<string, unknown>,
+  materializedState: TargetMaterializedState,
 ): TargetApplyResponse["payload"] {
   return {
     appliedAt: new Date().toISOString(),

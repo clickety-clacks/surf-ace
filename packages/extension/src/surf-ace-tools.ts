@@ -5,6 +5,7 @@ import {
   type PaneId,
   type SurfAceRealizeTopologyInput,
   type SurfAceRealizeTopologiesInput,
+  type SurfAceReattemptConnectionsInput,
   type SurfAceSplitInput,
   type SurfAcePushInput,
   type SurfAceRuntime,
@@ -17,6 +18,7 @@ export const surfAceToolNames = [
   "surf_ace_push",
   "surf_ace_clear",
   "surf_ace_relinquish",
+  "surf_ace_reattempt_connections",
   "surf_ace_split",
   "surf_ace_realize_topology",
   "surf_ace_realize_topologies",
@@ -245,6 +247,21 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_relinquish",
+    },
+    {
+      description: "Operator tool to reset Surf Ace connection circuits and reattempt stopped reconnect/probe workers.",
+      execute: async (args: SurfAceReattemptConnectionsInput = {}) => await runtime.reattemptConnections(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          fingerprint: {
+            ...fingerprintParam,
+            description: "Optional window-scoped surface identity. Omit to reattempt all surfaces and endpoint probes.",
+          },
+        },
+        type: "object",
+      },
+      name: "surf_ace_reattempt_connections",
     },
     {
       description: "Split an existing Surf Ace pane into a larger pane layout.",

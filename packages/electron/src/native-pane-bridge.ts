@@ -1,6 +1,52 @@
 import net from "node:net";
 
-import type { NativePaneMaterialization } from "../../protocol/src/index.js";
+import type { Rect, Revision, SurfaceId, TopologyRevision } from "../../protocol/src/index.js";
+
+export type NativePaneGeometry = Rect & {
+  coordinateSpace: "compositor_logical";
+  paneInstanceId: string;
+  topologyEpoch: TopologyRevision;
+  surfaceEpoch: string;
+  geometryRevision: Revision;
+};
+
+export type NativePaneMaterializationPane = {
+  id: string;
+  content_id?: string;
+  binding_id?: string;
+  revision: Revision;
+  geometry: NativePaneGeometry;
+  target?: "terminal";
+  process?: {
+    command: string;
+    args: string[];
+    cwd?: string;
+    env?: Record<string, string>;
+  };
+};
+
+export type NativePaneOverlaySet = {
+  surfaceId: SurfaceId;
+  windowId: string;
+  revision: Revision;
+  topologyEpoch: TopologyRevision;
+  coordinateSpace: "surface_logical";
+  regions: Array<{
+    regionId: string;
+    paneId: string;
+    paneInstanceId: string;
+    kind: "native_pane";
+    rect: Rect;
+    zIndex: number;
+    captures: string[];
+  }>;
+};
+
+export type NativePaneMaterialization = {
+  op: "native_pane.host" | "native_pane.update";
+  panes: NativePaneMaterializationPane[];
+  overlaySet?: NativePaneOverlaySet;
+};
 
 export type CompositorOverlayCapture = "pointer_axis" | "pointer_button" | "pointer_hover";
 

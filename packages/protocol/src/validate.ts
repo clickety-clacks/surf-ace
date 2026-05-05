@@ -7,12 +7,38 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function validateForbiddenRequiredKeys(
+  schema: Record<string, unknown>,
+  value: unknown,
+): string | null {
+  if (!isObject(value) || !isObject(schema.not)) {
+    return null;
+  }
+  const anyOf = Array.isArray(schema.not.anyOf) ? schema.not.anyOf : [];
+  for (const entry of anyOf) {
+    if (!isObject(entry) || !Array.isArray(entry.required)) {
+      continue;
+    }
+    for (const requiredKey of entry.required) {
+      if (typeof requiredKey === "string" && requiredKey in value) {
+        return `forbidden_property:${requiredKey}`;
+      }
+    }
+  }
+  return null;
+}
+
 function validateObjectAgainstSchema(
   schema: Record<string, unknown>,
   value: unknown,
 ): string | null {
   if (!isObject(value)) {
     return "payload_not_object";
+  }
+
+  const forbiddenFailure = validateForbiddenRequiredKeys(schema, value);
+  if (forbiddenFailure) {
+    return forbiddenFailure;
   }
 
   const required = Array.isArray(schema.required)
@@ -42,6 +68,10 @@ function validateObjectAgainstSchema(
       continue;
     }
     const propertyValue = value[key];
+    const propertyForbiddenFailure = validateForbiddenRequiredKeys(propertySchemaValue, propertyValue);
+    if (propertyForbiddenFailure) {
+      return propertyForbiddenFailure;
+    }
     const propertyType = typeof propertySchemaValue.type === "string"
       ? propertySchemaValue.type
       : null;
