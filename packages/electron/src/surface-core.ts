@@ -60,6 +60,20 @@ type HistoryEntry = {
   revision: number;
 };
 
+function persistedHistoryEntry(entry: HistoryEntry): HistoryEntry {
+  if (entry.contentType === "browser_url") {
+    return {
+      annotations: [],
+      content: null,
+      contentId: null,
+      contentType: null,
+      ownerToken: null,
+      revision: entry.revision,
+    };
+  }
+  return structuredClone(entry);
+}
+
 type PaneSnapshot = {
   bounds: { height: number; width: number; x: number; y: number } | null;
   selection: Selection;
@@ -133,7 +147,44 @@ type BrowserUrlTargetValidation =
 
 export type PersistentSurfaceState = {
   primarySurfaceId: string | null;
+  surfaces?: PersistentSurfaceRecord[];
   version: 1;
+};
+
+type PersistentSurfaceRecord = {
+  activeKeyboardPaneId: number | null;
+  geometryRevision: number;
+  layout: LayoutNode | null;
+  name: string;
+  paneOrder: number[];
+  panes: PersistentPaneRecord[];
+  surfaceEpochRevision: number;
+  surfaceId: string;
+  topologyRevision: number;
+  viewport: SurfaceViewport;
+  windowLabel: string;
+};
+
+type PersistentPaneRecord = {
+  annotating: boolean;
+  annotationFrameOpen: boolean;
+  deliveredClosedFrameCount: number;
+  dirtyStrokeIds: string[];
+  externalNative: boolean;
+  firstDirtyStrokeAt: number | null;
+  flushInFlight: boolean;
+  history: HistoryEntry[];
+  historyIndex: number;
+  lastDirtyStrokeAt: number | null;
+  lastSuccessfulFlushAt: number | null;
+  latestContentEventAt: number;
+  name: string | null;
+  paneId: number;
+  paneLabel: number;
+  paneLineageId: string;
+  pendingAnnotationCommit: boolean;
+  snapshot: PaneSnapshot;
+  toast: string | null;
 };
 
 export type RendererPaneState = {
@@ -261,7 +312,10 @@ export class SurfaceCore {
   }
 
   getPersistentState(): PersistentSurfaceState {
-    return structuredClone(this.persistentState);
+    return {
+      ...structuredClone(this.persistentState),
+      surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
+    };
   }
 
   ensurePrimarySurface(name: string, viewport: SurfaceViewport): SurfaceState {
@@ -288,6 +342,37 @@ export class SurfaceCore {
       name,
       viewport,
     );
+  }
+
+  restorePersistedSurfaces(name: string, viewport: SurfaceViewport): SurfaceState[] {
+    const records = Array.isArray(this.persistentState.surfaces)
+      ? this.persistentState.surfaces
+      : [];
+    const restored: SurfaceState[] = [];
+    for (const record of records) {
+      if (!record || typeof record.surfaceId !== "string" || this.surfaces.has(record.surfaceId)) {
+        continue;
+      }
+      const surface = deserializeSurface(record, this.now());
+      if (!surface) {
+        continue;
+      }
+      if (surface.surfaceId === this.persistentState.primarySurfaceId) {
+        surface.name = name;
+        surface.viewport = cloneViewport(viewport);
+      }
+      this.surfaces.set(surface.surfaceId, surface);
+      restored.push(surface);
+      this.emit({ surfaceId: surface.surfaceId, type: "surface-created" });
+      this.emit({ surfaceId: surface.surfaceId, type: "surface-changed" });
+    }
+    if (
+      restored.length > 0 &&
+      !restored.some((surface) => surface.surfaceId === this.persistentState.primarySurfaceId)
+    ) {
+      this.persistentState.primarySurfaceId = restored[0]!.surfaceId;
+    }
+    return restored;
   }
 
   removeSurface(surfaceId: string): void {
@@ -2028,6 +2113,121 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
       visibleText: "",
     },
     toast: null,
+  };
+}
+
+function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
+  return {
+    activeKeyboardPaneId: surface.activeKeyboardPaneId,
+    geometryRevision: surface.geometryRevision,
+    layout: surface.layout ? structuredClone(surface.layout) : null,
+    name: surface.name,
+    paneOrder: [...surface.paneOrder],
+    panes: surface.paneOrder
+      .map((paneId) => surface.panes.get(paneId))
+      .filter((pane): pane is PaneState => Boolean(pane))
+      .map((pane) => ({
+        annotating: pane.annotating,
+        annotationFrameOpen: pane.annotationFrameOpen,
+        deliveredClosedFrameCount: pane.deliveredClosedFrameCount,
+        dirtyStrokeIds: [...pane.dirtyStrokeIds],
+        externalNative: false,
+        firstDirtyStrokeAt: pane.firstDirtyStrokeAt,
+        flushInFlight: false,
+        history: pane.history.map(persistedHistoryEntry),
+        historyIndex: pane.historyIndex,
+        lastDirtyStrokeAt: pane.lastDirtyStrokeAt,
+        lastSuccessfulFlushAt: pane.lastSuccessfulFlushAt,
+        latestContentEventAt: pane.latestContentEventAt,
+        name: pane.name,
+        paneId: pane.paneId,
+        paneLabel: pane.paneLabel,
+        paneLineageId: pane.paneLineageId,
+        pendingAnnotationCommit: pane.pendingAnnotationCommit,
+        snapshot: structuredClone(pane.snapshot),
+        toast: pane.toast,
+      })),
+    surfaceEpochRevision: surface.surfaceEpochRevision,
+    surfaceId: surface.surfaceId,
+    topologyRevision: surface.topologyRevision,
+    viewport: cloneViewport(surface.viewport),
+    windowLabel: surface.windowLabel,
+  };
+}
+
+function deserializeSurface(record: PersistentSurfaceRecord, now: number): SurfaceState | null {
+  if (!Array.isArray(record.panes) || record.panes.length === 0) {
+    return null;
+  }
+  const panes = new Map<number, PaneState>();
+  const paneOrder: number[] = [];
+  for (const paneRecord of record.panes) {
+    if (!Number.isInteger(paneRecord.paneId)) {
+      continue;
+    }
+    const pane = createPaneState(
+      paneRecord.paneId,
+      Number.isInteger(paneRecord.paneLabel) ? paneRecord.paneLabel : paneRecord.paneId,
+      now,
+    );
+    pane.annotating = Boolean(paneRecord.annotating);
+    pane.annotationFrameOpen = Boolean(paneRecord.annotationFrameOpen);
+    pane.deliveredClosedFrameCount = Number(paneRecord.deliveredClosedFrameCount ?? 0);
+    pane.dirtyStrokeIds = Array.isArray(paneRecord.dirtyStrokeIds) ? [...paneRecord.dirtyStrokeIds] : [];
+    pane.externalNative = false;
+    pane.firstDirtyStrokeAt = typeof paneRecord.firstDirtyStrokeAt === "number" ? paneRecord.firstDirtyStrokeAt : null;
+    pane.flushInFlight = false;
+    pane.history = Array.isArray(paneRecord.history) && paneRecord.history.length > 0
+      ? structuredClone(paneRecord.history)
+      : pane.history;
+    pane.historyIndex = Math.min(
+      Math.max(0, Math.trunc(Number(paneRecord.historyIndex ?? 0))),
+      pane.history.length - 1,
+    );
+    pane.lastDirtyStrokeAt = typeof paneRecord.lastDirtyStrokeAt === "number" ? paneRecord.lastDirtyStrokeAt : null;
+    pane.lastSuccessfulFlushAt = typeof paneRecord.lastSuccessfulFlushAt === "number" ? paneRecord.lastSuccessfulFlushAt : now;
+    pane.latestContentEventAt = typeof paneRecord.latestContentEventAt === "number" ? paneRecord.latestContentEventAt : now;
+    pane.name = typeof paneRecord.name === "string" ? paneRecord.name : null;
+    pane.nativeHost = null;
+    pane.paneLineageId = typeof paneRecord.paneLineageId === "string" && paneRecord.paneLineageId.length > 0
+      ? paneRecord.paneLineageId
+      : pane.paneLineageId;
+    pane.pendingAnnotationCommit = Boolean(paneRecord.pendingAnnotationCommit);
+    pane.snapshot = paneRecord.snapshot ? structuredClone(paneRecord.snapshot) : pane.snapshot;
+    pane.toast = typeof paneRecord.toast === "string" ? paneRecord.toast : null;
+    panes.set(pane.paneId, pane);
+    paneOrder.push(pane.paneId);
+  }
+  if (panes.size === 0) {
+    return null;
+  }
+  const orderedPaneIds = Array.isArray(record.paneOrder)
+    ? record.paneOrder.filter((paneId) => panes.has(paneId))
+    : [];
+  const finalPaneOrder = orderedPaneIds.length > 0 ? orderedPaneIds : paneOrder;
+  const knownPaneIds = new Set(finalPaneOrder);
+  const sanitizedLayout = record.layout ? sanitizeLayoutNode(record.layout, knownPaneIds) : null;
+  const layout = collapseLayout(sanitizedLayout ?? { paneId: finalPaneOrder[0]!, type: "pane" });
+  const surfaceEpochRevision = Math.max(1, Math.trunc(Number(record.surfaceEpochRevision ?? 1)));
+  return {
+    activeKeyboardPaneId: panes.has(Number(record.activeKeyboardPaneId)) ? Number(record.activeKeyboardPaneId) : finalPaneOrder[0]!,
+    connectionBar: "disconnected",
+    geometryRevision: Math.max(1, Math.trunc(Number(record.geometryRevision ?? 1))),
+    layout,
+    name: typeof record.name === "string" && record.name.length > 0 ? record.name : "Surf Ace",
+    paneOrder: finalPaneOrder,
+    panes,
+    providerName: null,
+    surfaceEpoch: `${record.surfaceId}:${surfaceEpochRevision}`,
+    surfaceEpochRevision,
+    surfaceId: record.surfaceId,
+    topologyRevision: Math.max(0, Math.trunc(Number(record.topologyRevision ?? 0))),
+    viewport: record.viewport ? cloneViewport(record.viewport) : {
+      height: DEFAULT_VISIBLE_RECT.height,
+      scale: 1,
+      width: DEFAULT_VISIBLE_RECT.width,
+    },
+    windowLabel: typeof record.windowLabel === "string" ? record.windowLabel : "",
   };
 }
 

@@ -88,6 +88,74 @@ test("surface core removes closed windows from live topology immediately", () =>
   }
 });
 
+test("surface core persists and restores multiple live windows with pane content", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const primary = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const secondary = core.createAdditionalSurface("Surf Ace", { height: 700, scale: 1, width: 1000 });
+  applyProviderBootstrap(core, primary.surfaceId, 3);
+  core.applyProviderBootstrapTopology(secondary.surfaceId, {
+    initialPaneId: 5,
+    initialPaneLabel: 17,
+    windowLabel: "d",
+  });
+  core.contentSet(secondary.surfaceId, {
+    content: { markdown: "# recovered" },
+    contentId: "ct_recovered" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_recovered" as never,
+    paneId: 5 as never,
+    revision: 1 as Revision,
+  });
+
+  const persistentState = core.getPersistentState();
+  const restoredCore = new SurfaceCore({ persistentState });
+  const restoredSurfaces = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  assert.deepEqual(
+    restoredSurfaces.map((surface) => restoredCore.getRendererWindowState(surface.surfaceId).panes.length),
+    [1, 1],
+  );
+  const restoredSecondary = restoredCore.getRendererWindowState(secondary.surfaceId);
+  assert.equal(restoredSecondary.panes[0]?.paneId, 5);
+  assert.equal(restoredSecondary.panes[0]?.label, "17");
+  assert.equal(restoredSecondary.panes[0]?.content.contentId, "ct_recovered");
+  assert.equal(restoredSecondary.panes[0]?.content.contentType, "markdown");
+});
+
+test("surface core does not restore a closed stale primary over remaining windows", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const primary = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const secondary = core.createAdditionalSurface("Surf Ace", { height: 700, scale: 1, width: 1000 });
+  applyProviderBootstrap(core, primary.surfaceId, 3);
+  core.applyProviderBootstrapTopology(secondary.surfaceId, {
+    initialPaneId: 5,
+    initialPaneLabel: 17,
+    windowLabel: "d",
+  });
+  core.removeSurface(primary.surfaceId);
+
+  const persistentState = core.getPersistentState();
+  assert.equal(persistentState.primarySurfaceId, primary.surfaceId);
+  assert.deepEqual(persistentState.surfaces?.map((record) => record.surfaceId), [secondary.surfaceId]);
+
+  const restoredCore = new SurfaceCore({ persistentState });
+  const restoredSurfaces = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  assert.deepEqual(restoredSurfaces.map((surface) => surface.surfaceId), [secondary.surfaceId]);
+  assert.deepEqual(restoredCore.listSurfaces().map((surface) => surface.surfaceId), [secondary.surfaceId]);
+  assert.equal(restoredCore.getPersistentState().primarySurfaceId, secondary.surfaceId);
+});
+
 test("surface core tracks the active keyboard pane and falls back when it closes", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -282,6 +350,48 @@ test("surface core starts browser_url targets without reporting unverified navig
   const snapshot = core.captureSnapshot(surface.surfaceId, 7);
   assert.equal(snapshot.contentId, null);
   assert.equal(snapshot.contentType, null);
+});
+
+test("surface core does not persist browser_url renderer history across restart", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
+
+  core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId,
+    requestId: "tr_test",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://google.com/",
+    },
+    targetId: "tg_google",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://google.com/" },
+  });
+
+  const restoredCore = new SurfaceCore({ persistentState: core.getPersistentState() });
+  restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  const restoredPane = restoredCore.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(restoredPane.content.contentType, null);
+  assert.equal(restoredPane.content.contentId, null);
+  assert.equal(restoredPane.content.content, null);
 });
 
 test("surface core exposes reload only for browser_url and file-backed content", () => {

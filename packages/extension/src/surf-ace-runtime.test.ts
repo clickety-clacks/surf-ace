@@ -3814,6 +3814,52 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const markdownRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
       assert.equal(markdownRead.lastNavigation, null);
+      const markdownSnapshot = await runtime.snapshot({ fingerprint: server.surfaceId, paneId: firstPaneId });
+      assert.equal(markdownSnapshot.snapshot?.contentId, markdownPush.contentId);
+      assert.equal(markdownSnapshot.snapshot?.contentType, "markdown");
+      assert.equal(markdownSnapshot.snapshot?.visibleText, "# notes");
+      const internalRuntime = runtime as any;
+      const internalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      const internalPane = internalSurface?.panes.get(firstPaneId);
+      assert.ok(internalPane?.snapshot);
+      internalPane.snapshot.drawings = [{
+        points: [],
+        strokeId: "stale_stroke",
+        tool: "pen",
+      }];
+      internalPane.snapshot.image = "stale-image";
+      internalPane.snapshot.selection = {
+        anchorEnd: 7,
+        anchorStart: 1,
+        selectedText: "stale",
+      };
+      const secondMarkdownPush = await runtime.push(
+        {
+          content: "# newer",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:1" },
+      );
+      const secondMarkdownSnapshot = await runtime.snapshot({ fingerprint: server.surfaceId, paneId: firstPaneId });
+      assert.equal(secondMarkdownSnapshot.snapshot?.contentId, secondMarkdownPush.contentId);
+      assert.equal(secondMarkdownSnapshot.snapshot?.visibleText, "# newer");
+      assert.deepEqual(secondMarkdownSnapshot.snapshot?.drawings, []);
+      assert.equal(secondMarkdownSnapshot.snapshot?.image, undefined);
+      assert.equal(secondMarkdownSnapshot.snapshot?.selection, null);
+      const largeMarkdownPush = await runtime.push(
+        {
+          content: "#".repeat(5_000),
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:1" },
+      );
+      const largeMarkdownSnapshot = await runtime.snapshot({ fingerprint: server.surfaceId, paneId: firstPaneId });
+      assert.equal(largeMarkdownSnapshot.snapshot?.contentId, largeMarkdownPush.contentId);
+      assert.equal(largeMarkdownSnapshot.snapshot?.visibleText?.length, 4096);
 
       const htmlPush = await runtime.push(
         {
@@ -9287,6 +9333,93 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(server.contentSetRequests.length, contentRequestsBeforeReconnect);
         assert.equal(server.clearRequests.length, clearRequestsBeforeReconnect);
         assert.ok(warnings.some((warning) => warning.includes("foreign_ownership_lock_cleared")));
+      });
+    });
+
+    await t.test("fresh pair clears legacy partial target state instead of preserving it", async () => {
+      await withRuntimeHarness(async ({ runtime, server }) => {
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        assert.ok(surface.client);
+        surface.hasPairedInGatewaySession = false;
+        surface.sessionId = null;
+        surface.localOwnership = null;
+        internalRuntime.persistentState.targetStateBySurfaceId = {
+          [server.surfaceId]: {
+            ownershipEpoch: 1,
+            paneTargets: {},
+          },
+        };
+
+        server.resetToSinglePane();
+        await surface.client.close(1000, "test_legacy_partial_target_state_fresh_pair");
+
+        await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+        const persisted = internalRuntime.persistentState.targetStateBySurfaceId[server.surfaceId];
+        assert.ok(persisted);
+        assert.deepEqual(persisted.targetRecords, []);
+        assert.deepEqual(persisted.registeredTargetIdsByIdempotencyKey, {});
+        assert.equal(Object.values(persisted.paneTargets).some((paneTarget: any) => paneTarget.currentTargetId !== null), false);
+      });
+    });
+
+    await t.test("foreign-provider busy preserves target state evidence without replaying it", async () => {
+      await withRuntimeHarness({
+        configureServer: (server) => {
+          server.targetCapabilities = [
+            ...server.targetCapabilities,
+            "target.browser_url.v1",
+          ];
+        },
+        run: async ({ runtime, server, warnings }) => {
+          const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+          await runtime.push(
+            {
+              content: "https://example.com",
+              contentType: "browser_url",
+              fingerprint: server.surfaceId,
+              paneId: firstPaneId,
+            },
+            { sessionKey: "agent:test:foreign-busy-preserve-target-state" },
+          );
+
+          const targetApplyRequestsBeforeReconnect = server.targetApplyRequests.length;
+          const internalRuntime = runtime as any;
+          const surface = internalRuntime.surfaces.get(server.surfaceId);
+          assert.ok(surface);
+          const target = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "browser_url");
+          assert.ok(target);
+          target.ownershipSessionId = "sa_previous_foreign_session";
+          surface.targetRecords.set(target.targetId, target);
+          internalRuntime.captureSurfaceTargetState(surface);
+          removeDurableSelfAuthority(runtime, surface, server.surfaceId);
+
+          server.resetToSinglePane();
+          server.busyWithoutTakeoverResponsesRemaining = 1;
+          server.busyWithoutTakeoverMessage = "Surface ownership lock is held by another provider";
+          await surface.client.close(1000, "test_foreign_busy_preserves_target_state_evidence");
+
+          await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+          await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+          const targetState = internalRuntime.persistentState.targetStateBySurfaceId[server.surfaceId];
+          assert.ok(targetState);
+          assert.equal(
+            targetState.targetRecords.some(
+              (record: any) => record.targetId === target.targetId && record.currentState === "stale",
+            ),
+            true,
+          );
+          const reconnectedPane = (await runtime.listScreens())[0]?.panes[0];
+          assert.equal(reconnectedPane?.target?.targetId, target.targetId);
+          assert.equal(reconnectedPane?.target?.targetKind, "browser_url");
+          assert.equal(reconnectedPane?.target?.blockedReason, "ownership_epoch_mismatch");
+          assert.equal(server.targetApplyRequests.length, targetApplyRequestsBeforeReconnect);
+          assert.ok(warnings.some((warning) => warning.includes("foreign_ownership_lock_cleared")));
+        },
       });
     });
 

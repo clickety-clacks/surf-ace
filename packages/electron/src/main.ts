@@ -898,7 +898,10 @@ async function boot(): Promise<void> {
   identityFingerprint = identity.fingerprintPrefix;
 
   core = new SurfaceCore({ persistentState });
-  const primarySurface = core.ensurePrimarySurface(endpointName(), displayViewport());
+  const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
+  const primarySurface = restoredSurfaces.find((surface) => surface.surfaceId === persistentState?.primarySurfaceId)
+    ?? restoredSurfaces[0]
+    ?? core.ensurePrimarySurface(endpointName(), displayViewport());
 
   const serverStart = await createAndStartServer(core);
   server = serverStart.server;
@@ -922,7 +925,13 @@ async function boot(): Promise<void> {
     advertiser.start();
   }
 
-  await createWindowForSurface(primarySurface.surfaceId);
+  const surfacesToOpen = core.listSurfaces();
+  for (const surface of surfacesToOpen) {
+    await createWindowForSurface(surface.surfaceId);
+  }
+  if (surfacesToOpen.length === 0) {
+    await createWindowForSurface(primarySurface.surfaceId);
+  }
 }
 
 if (!singleInstanceLock) {
@@ -949,7 +958,6 @@ if (!singleInstanceLock) {
     await Promise.allSettled(
       [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
     );
-    advertiser?.refresh();
     await advertiser?.stop();
     await server.stop();
   });

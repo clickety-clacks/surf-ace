@@ -1750,6 +1750,58 @@ function denormalizeContent(
   return structuredClone(content);
 }
 
+const MAX_SYNTHETIC_VISIBLE_TEXT_BYTES = 4096;
+
+function clampSyntheticVisibleText(text: string): string {
+  return text.slice(0, MAX_SYNTHETIC_VISIBLE_TEXT_BYTES);
+}
+
+function viewportSnapshotFromSurfaceViewport(viewport: SurfaceViewport): Viewport {
+  const width = Math.max(0, Math.floor(viewport.width));
+  const height = Math.max(0, Math.floor(viewport.height));
+  return {
+    contentSize: { height, width },
+    scrollOffset: { x: 0, y: 0 },
+    visibleRect: { height, width, x: 0, y: 0 },
+    zoomLevel: 1,
+  };
+}
+
+function visibleTextFromContent(
+  contentType: ContentType,
+  content: ContentSetRequest["payload"]["content"],
+  fallback: string | undefined,
+): string {
+  if (
+    contentType === "markdown" &&
+    typeof content === "object" &&
+    content !== null &&
+    "markdown" in content &&
+    typeof (content as { markdown?: unknown }).markdown === "string"
+  ) {
+    return clampSyntheticVisibleText((content as { markdown: string }).markdown);
+  }
+  if (
+    contentType === "terminal" &&
+    typeof content === "object" &&
+    content !== null &&
+    "lines" in content &&
+    Array.isArray((content as { lines?: unknown }).lines)
+  ) {
+    return clampSyntheticVisibleText(((content as { lines: unknown[] }).lines).map((line) => String(line)).join("\n"));
+  }
+  if (
+    contentType === "html" &&
+    typeof content === "object" &&
+    content !== null &&
+    "html" in content &&
+    typeof (content as { html?: unknown }).html === "string"
+  ) {
+    return fallback ?? "";
+  }
+  return fallback ?? "";
+}
+
 function isBrowserUrlPushInput(input: SurfAcePushInput): input is SurfAceBrowserUrlPushInput {
   return input.contentType === "browser_url";
 }
@@ -3159,6 +3211,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const result = await this.applyMutationResponse(surface, pane, response, request, sessionKey, {
       diagnostic: input.diagnostic,
     }) as SurfAcePushResult;
+    this.ensureContentSnapshot(surface, pane);
     if (input.contentType === "html" && renderStatus !== "pending_renderer") {
       await this.syncPaneSnapshot(surface, pane, {
         waitForVisibleText: true,
@@ -4942,6 +4995,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.ownerSessionKey = entry.sessionKey;
     this.selectVisiblePaneTarget(surface, pane, entry.targetId);
     pane.historySummary.visibleContentId = entry.contentId;
+    this.ensureContentSnapshot(surface, pane);
+  }
+
+  private ensureContentSnapshot(surface: ManagedSurface, pane: ManagedPane): void {
+    if (!pane.activeContentId || !pane.contentType || pane.contentValue === null) {
+      return;
+    }
+    const matchingSnapshot = pane.snapshot?.contentId === pane.activeContentId ? pane.snapshot : null;
+    const viewport = matchingSnapshot?.viewport ?? viewportSnapshotFromSurfaceViewport(pane.viewport);
+    pane.snapshot = {
+      cachedAt: this.now(),
+      contentId: pane.activeContentId,
+      contentType: pane.contentType,
+      drawings: matchingSnapshot?.drawings ? structuredClone(matchingSnapshot.drawings) : [],
+      image: matchingSnapshot?.image,
+      revision: pane.currentRevision,
+      selection: matchingSnapshot?.selection ?? null,
+      viewport,
+      visibleText: visibleTextFromContent(pane.contentType, pane.contentValue, matchingSnapshot?.visibleText),
+    };
+    pane.buffer.scrollPosition ??= {
+      visibleRect: { ...viewport.visibleRect },
+      x: viewport.scrollOffset.x,
+      y: viewport.scrollOffset.y,
+    };
+    this.queuePersistScreenSnapshot(`content snapshot ${surface.surfaceId}/${pane.paneId}`);
   }
 
   private selectVisiblePaneTarget(surface: ManagedSurface, pane: ManagedPane, targetId: string | null): void {
@@ -8095,6 +8174,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               this.clearSurfaceLocalTopologyState(surface, {
                 preservePaneLabels: hadRestartOwnershipPendingPair,
                 preserveRestartContent: hadRestartOwnershipPendingPair,
+                preserveTargetState: this.hasSurfaceTargetState(surface),
               });
             }
             const shouldRestoreProviderTopology =
@@ -8909,11 +8989,29 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private clearForeignOwnershipLocalState(surface: ManagedSurface): void {
+    const preserveTargetState = this.hasSurfaceTargetState(surface);
     this.clearSurfaceResumeState(surface);
-    this.clearSurfaceLocalTopologyState(surface);
+    this.clearSurfaceLocalTopologyState(surface, { preserveTargetState });
     this.runBackgroundTask("persist foreign ownership state clear", async () => {
       await this.persistState();
     });
+  }
+
+  private hasSurfaceTargetState(surface: ManagedSurface): boolean {
+    if (surface.targetRecords.size > 0) {
+      return true;
+    }
+    return this.isHydratablePersistedTargetState(
+      this.persistentState.targetStateBySurfaceId?.[surface.surfaceId],
+    );
+  }
+
+  private isHydratablePersistedTargetState(persisted: PersistedSurfaceTargetState | undefined): boolean {
+    return Boolean(
+      persisted &&
+        isPlainRecord(persisted.paneTargets) &&
+        Array.isArray(persisted.targetRecords),
+    );
   }
 
   private shouldAttemptResume(surface: ManagedSurface): boolean {
@@ -9253,7 +9351,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         pane.snapshot.contentId = payload.currentContentId;
         pane.snapshot.contentType = setPayload.contentType;
         pane.snapshot.drawings = [];
+        pane.snapshot.image = undefined;
         pane.snapshot.revision = payload.currentRevision;
+        pane.snapshot.selection = null;
+        pane.snapshot.visibleText = undefined;
       }
       pane.buffer.currentUrl = null;
       if (options.diagnostic) {
