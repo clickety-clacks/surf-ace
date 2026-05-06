@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { deliverSettledAnnotationIntentTurn } from "./annotation-intent-delivery.js";
+import { assertProviderHostAllowed } from "./provider-host-guard.js";
 import { createSurfAceRuntime } from "./surf-ace-runtime.js";
 import { createSurfAceTools } from "./surf-ace-tools.js";
 
@@ -10,7 +11,8 @@ const plugin = {
   description: "Surf Ace discovery, persistent surface connections, and pane tools for OpenClaw.",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
-    const logger = (api.logger ?? console) as never;
+    const logger = (api.logger ?? console) as Console;
+    assertProviderHostAllowed(logger);
     const openClawStateDir = api.runtime.state?.resolveStateDir?.();
     const runtime = createSurfAceRuntime({
       deliverSettledAnnotationTurn: async (turn) => {

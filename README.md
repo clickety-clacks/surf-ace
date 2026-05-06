@@ -23,9 +23,11 @@ UI flows reference: [docs/design/surf-ace-ui-flows.html](./docs/design/surf-ace-
 
 ## Development Workflow
 
-Extension changes: after committing, always rsync `packages/extension/src/` to `/Users/mike/.openclaw/extensions/surf-ace/extension/src/` on TARS and restart the gateway (`launchctl stop ai.openclaw.gateway` / `launchctl start ai.openclaw.gateway`).
+Extension/provider installs are TARS-only. Do not copy, rsync, package-install, or run the Surf Ace OpenClaw extension/provider under `~/.openclaw/extensions/surf-ace/` on eezo or any other non-TARS host; that creates phantom ownership/discovery state. Eezo may run the Surf Ace Electron client for display/testing.
 
-Provider runtime state must use the same standard OpenClaw extension state root: `/Users/mike/.openclaw/extensions/surf-ace/`. The legacy standalone state root `~/.surf-ace-openclaw-extension` is non-standard and must not be used for durable installs, gateway runtime, or soak harnesses.
+Use `make -C packages/extension deploy-tars` for provider deploys. The deploy target defaults to TARS and refuses non-TARS deploy hosts unless `SURF_ACE_ALLOW_NON_TARS_PROVIDER=1` is set for an explicit approved override. Manual provider syncs must also target TARS only.
+
+Provider runtime state must use the same standard OpenClaw extension state root on TARS: `/Users/mike/.openclaw/extensions/surf-ace/`. The legacy standalone state root `~/.surf-ace-openclaw-extension` is non-standard and must not be used for durable installs, gateway runtime, or soak harnesses.
 
 ## Status
 

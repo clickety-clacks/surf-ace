@@ -2,6 +2,8 @@
 
 This folder is being rebuilt for the WebSocket protocol in `DESIGN.md`.
 
+Do not install or run this scaffold as an OpenClaw provider. The canonical provider package is `packages/extension`, and Surf Ace provider installs/state belong on TARS only. Eezo may run the Electron client for display/testing, but must not create `~/.openclaw/extensions/surf-ace` provider state.
+
 ## Current state
 
 - Legacy provider implementation moved to `legacy/provider-extension/`

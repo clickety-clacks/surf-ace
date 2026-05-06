@@ -136,7 +136,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 11. **Annotation reads are pane-scoped at the CLU boundary.** `surf_ace_read` and related CLU-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but CLU does not pass or track history identifiers.
 12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. They fire regardless of `eventProfile` setting and do not appear in `pair.response.eventConfig.activeEvents`. `event.content_superseded` is provider-generated (not a surface wire event).
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
-14. **Portable extension packaging.** Surf Ace MUST remain installable as a standalone OpenClaw extension bundle that can be dropped into any compatible OpenClaw installation (without requiring Clawline as a dependency and without requiring core patches). Any needed wake/routing behavior must be implemented through extension-local code and published SDK surfaces.
+14. **Portable extension packaging.** Surf Ace MUST remain buildable as a standalone OpenClaw extension bundle without requiring Clawline as a dependency or core patches. Current product topology restricts actual Surf Ace provider install/run state to TARS only unless an explicit approved override is used; non-TARS hosts such as eezo may run Surf Ace surface clients, but must not create Surf Ace provider state.
 
 ## 3. Transport and Discovery
 
@@ -351,7 +351,7 @@ Flow:
 5. If success, connection enters active mode and event streaming starts immediately.
 
 `pair.request` fields include:
-1. `providerId` (stable ownership identity). Provider identity is product state, not runtime-instance state: a Surf Ace/OpenClaw provider MUST create one random stable provider UUID on first startup, store it in a well-known trusted local OpenClaw/Surf Ace state path for that gateway install, and reuse it on normal gateway restart, branch overlay, extension packaging move, or redeploy. Lineage-based recovery is a fallback for already-rotated identities; it is not the primary identity model.
+1. `providerId` (stable ownership identity). Provider identity is product state, not runtime-instance state: a Surf Ace/OpenClaw provider MUST create one random stable provider UUID on first startup, store it in a well-known trusted local OpenClaw/Surf Ace state path for that gateway install, and reuse it on normal gateway restart, branch overlay, extension packaging move, or redeploy. In the current deployment topology, that trusted provider state path is on TARS only; provider state on eezo or any other non-TARS host is rogue/stale and causes phantom ownership/discovery failures. Lineage-based recovery is a fallback for already-rotated identities; it is not the primary identity model.
 2. `connectionId` (unique per socket attempt).
 3. `surfaceId` (target window surface on multi-window endpoints).
 4. `resume` (optional prior `sessionId`, owner-only reconnect path).

@@ -8,6 +8,7 @@ import {
   type SurfAceAnnotationIntentTurn,
   __test,
 } from "./annotation-intent-delivery.js";
+import { evaluateProviderHostGuard } from "./provider-host-guard.js";
 
 test("Surf Ace extension does not inject static instructions through prompt-build hooks", () => {
   const indexSource = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
@@ -16,6 +17,52 @@ test("Surf Ace extension does not inject static instructions through prompt-buil
   assert.equal(indexSource.includes("before_prompt_build"), false);
   assert.equal(instructionSource.includes("prependContext"), false);
   assert.equal(instructionSource.includes("prependSystemContext"), false);
+});
+
+test("Surf Ace provider host guard allows TARS aliases", () => {
+  assert.deepEqual(evaluateProviderHostGuard(["tars"], {}), {
+    allowed: true,
+    hostNames: ["tars"],
+    reason: "tars_host",
+  });
+  assert.deepEqual(evaluateProviderHostGuard(["TARS.tail4105e8.ts.net."], {}), {
+    allowed: true,
+    hostNames: ["tars.tail4105e8.ts.net"],
+    reason: "tars_host",
+  });
+  assert.deepEqual(evaluateProviderHostGuard(["tars.local"], {}), {
+    allowed: true,
+    hostNames: ["tars"],
+    reason: "tars_host",
+  });
+  assert.deepEqual(evaluateProviderHostGuard(["TARS-2.local"], {}), {
+    allowed: true,
+    hostNames: ["tars-2"],
+    reason: "tars_host",
+  });
+});
+
+test("Surf Ace provider host guard rejects non-TARS hosts without override", () => {
+  const result = evaluateProviderHostGuard(["eezo.local"], {});
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "non_tars_host");
+  assert.deepEqual(result.hostNames, ["eezo"]);
+  assert.match(result.message ?? "", /TARS-only/);
+  assert.match(result.message ?? "", /SURF_ACE_ALLOW_NON_TARS_PROVIDER=1/);
+});
+
+test("Surf Ace provider host guard allows explicit non-TARS override", () => {
+  assert.deepEqual(
+    evaluateProviderHostGuard(["eezo.local"], {
+      SURF_ACE_ALLOW_NON_TARS_PROVIDER: "1",
+    }),
+    {
+      allowed: true,
+      hostNames: ["eezo"],
+      reason: "override",
+    },
+  );
 });
 
 test("settled annotation delivery connects to the gateway and sends the image attachment via agent", async () => {
