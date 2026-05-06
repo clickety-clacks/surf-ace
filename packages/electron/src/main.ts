@@ -57,6 +57,8 @@ const windows = new Map<string, BrowserWindow>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const readyWindows = new Set<string>();
 const overlayDiagnostics = new Map<string, Record<string, unknown>>();
+const overlayForwardState = new Map<string, { revision: number; topologyEpoch: string | null }>();
+const latestRendererOverlayPayloads = new Map<string, Record<string, unknown>>();
 const nativePaneInstances = new Map<string, Map<string, ResolvedNativePaneGeometry>>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
@@ -250,28 +252,56 @@ function recordNativePaneInstances(surfaceId: string, materialization: NativePan
     });
   }
   nativePaneInstances.set(surfaceId, current);
+  const latestOverlayPayload = latestRendererOverlayPayloads.get(surfaceId);
+  if (latestOverlayPayload) {
+    void forwardRendererOverlayRegions(surfaceId, latestOverlayPayload).catch((error) => {
+      console.warn(`[surf-ace] overlay region replay after native pane materialization failed: ${error}`);
+    });
+  }
 }
 
-function compositorOverlayRegions(surfaceId: string, regions: unknown[]): CompositorOverlayRegion[] {
+function compositorOverlayRegions(
+  surfaceId: string,
+  regions: unknown[],
+): { resolved: CompositorOverlayRegion[]; unresolvedPaneIds: string[] } {
+  const typedRegions = regions as CompositorOverlayRegion[];
   const instances = nativePaneInstances.get(surfaceId);
-  return resolvedOverlayRegionsForCompositor(
-    regions as CompositorOverlayRegion[],
+  const nativeResolved = resolvedOverlayRegionsForCompositor(
+    typedRegions,
     instances?.values() ?? [],
   );
+  const nativeByRegionId = new Map(nativeResolved.map((region) => [String(region.regionId), region]));
+  const livePaneIds = new Set([...(instances?.keys() ?? [])].map((paneId) => String(paneId)));
+  const resolved = typedRegions
+    .filter((region) => livePaneIds.size > 0
+      ? livePaneIds.has(String(region.paneId))
+      : String(region.paneInstanceId ?? "").endsWith(":none"))
+    .map((region) => nativeByRegionId.get(String(region.regionId)) ?? region);
+  const unresolvedPaneIds = [...new Set(
+    typedRegions
+      .map((region) => String(region?.paneId ?? ""))
+      .filter((paneId) => paneId.length > 0 && !livePaneIds.has(paneId)),
+  )];
+  return { resolved, unresolvedPaneIds };
 }
 
 async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<string, unknown>): Promise<void> {
+  latestRendererOverlayPayloads.set(surfaceId, payload);
   const regions = Array.isArray(payload.regions) ? payload.regions : [];
   const socketPath = resolveCompositorControlSocketPath();
   const rendererTopologyEpoch = payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch);
+  const requestedRevision = Number(payload.revision ?? 0);
+  const previousForward = overlayForwardState.get(surfaceId);
   const currentDiagnostic = overlayDiagnostics.get(surfaceId) ?? {};
   const diagnostic: Record<string, unknown> = {
     ...(currentDiagnostic.browserUrlDiagnostics ? { browserUrlDiagnostics: currentDiagnostic.browserUrlDiagnostics } : {}),
     compositorSocketConfigured: Boolean(socketPath),
     lastRendererReportAt: new Date().toISOString(),
     regionCount: regions.length,
-    revision: Number(payload.revision ?? 0),
-    topologyEpoch: rendererTopologyEpoch,
+    rendererRevision: requestedRevision,
+    rendererTopologyEpoch,
+    revision: requestedRevision,
+    topologyEpoch: previousForward?.topologyEpoch ?? rendererTopologyEpoch,
     updateReason: typeof payload.updateReason === "string" ? payload.updateReason : null,
   };
   overlayDiagnostics.set(surfaceId, diagnostic);
@@ -279,34 +309,90 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
     diagnostic.forwardStatus = "skipped_no_socket";
     return;
   }
-  const requestForEpoch = (topologyEpoch: string) => overlayRegionsSetRequestForCompositor({
-    regions: compositorOverlayRegions(surfaceId, regions),
-    revision: Number(payload.revision ?? 0),
+
+  let activeTopologyEpoch = previousForward?.topologyEpoch ?? rendererTopologyEpoch;
+  let activeRevision = Math.max(requestedRevision, (previousForward?.revision ?? 0) + 1);
+  const overlayResolution = compositorOverlayRegions(surfaceId, regions);
+  diagnostic.rendererPaneIds = [...new Set(
+    regions
+      .map((region) => (region && typeof region === "object" && "paneId" in region) ? String((region as { paneId?: unknown }).paneId ?? "") : "")
+      .filter((paneId) => paneId.length > 0),
+  )];
+  diagnostic.nativePaneIds = [...(nativePaneInstances.get(surfaceId)?.keys() ?? [])];
+  diagnostic.resolvedRegionCount = overlayResolution.resolved.length;
+  diagnostic.unresolvedPaneIds = overlayResolution.unresolvedPaneIds;
+  const requestFor = (topologyEpoch: string, revision: number) => overlayRegionsSetRequestForCompositor({
+    regions: overlayResolution.resolved,
+    revision,
     surfaceId,
     topologyEpoch,
     updateReason: typeof payload.updateReason === "string" ? payload.updateReason as never : undefined,
     windowId: surfaceId,
   });
-  const request = requestForEpoch(rendererTopologyEpoch);
-  diagnostic.forwardRequest = request;
+  let activeRequest = requestFor(activeTopologyEpoch, activeRevision);
+  diagnostic.forwardRequest = activeRequest;
   try {
-    let activeRequest = request;
     let response: CompositorControlResponse = { ok: false, error: "overlay forwarding was not attempted" };
     for (let attempt = 0; attempt < 12; attempt += 1) {
       response = await sendCompositorControl(socketPath, activeRequest);
       const retryTopologyEpoch = staleOverlayTopologyEpoch(response);
       if (retryTopologyEpoch) {
-        const retryRequest = requestForEpoch(retryTopologyEpoch);
+        activeTopologyEpoch = retryTopologyEpoch;
+        activeRevision += 1;
+        const retryRequest = requestFor(activeTopologyEpoch, activeRevision);
         diagnostic.retryReason = compositorFailureMessage(response);
         diagnostic.retryRequest = retryRequest;
         diagnostic.retryResponse = response;
-        diagnostic.topologyEpoch = retryTopologyEpoch;
+        diagnostic.topologyEpoch = activeTopologyEpoch;
+        diagnostic.revision = activeRevision;
         activeRequest = retryRequest;
+        continue;
+      }
+      const retryRevisionFloor = staleOverlayRevisionFloor(response);
+      if (retryRevisionFloor !== null) {
+        activeRevision = Math.max(activeRevision + 1, retryRevisionFloor + 1);
+        const retryRequest = requestFor(activeTopologyEpoch, activeRevision);
+        diagnostic.retryReason = compositorFailureMessage(response);
+        diagnostic.retryRequest = retryRequest;
+        diagnostic.retryResponse = response;
+        diagnostic.revision = activeRevision;
+        activeRequest = retryRequest;
+        continue;
+      }
+      const mismatchedLivePaneInstanceId = liveOverlayPaneInstanceId(response);
+      if (mismatchedLivePaneInstanceId) {
+        activeRevision += 1;
+        activeRequest = {
+          ...activeRequest,
+          revision: activeRevision,
+          regions: activeRequest.regions.map((region) => ({
+            ...region,
+            paneInstanceId: mismatchedLivePaneInstanceId,
+          })),
+        };
+        diagnostic.lifecycleRetryReason = compositorFailureMessage(response);
+        diagnostic.lifecycleRetryRequest = activeRequest;
+        diagnostic.revision = activeRevision;
         continue;
       }
       if (isOverlayNativePaneLivenessFailure(response)) {
         diagnostic.lifecycleRetryReason = compositorFailureMessage(response);
         diagnostic.lifecycleRetryAttempts = attempt + 1;
+        const livePaneInstanceId = liveOverlayPaneInstanceId(response);
+        if (livePaneInstanceId) {
+          activeRevision += 1;
+          activeRequest = {
+            ...activeRequest,
+            revision: activeRevision,
+            regions: activeRequest.regions.map((region) => ({
+              ...region,
+              paneInstanceId: livePaneInstanceId,
+            })),
+          };
+          diagnostic.lifecycleRetryRequest = activeRequest;
+          diagnostic.revision = activeRevision;
+          continue;
+        }
         await sleep(50);
         continue;
       }
@@ -316,9 +402,12 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
     if (failure) {
       throw new Error(failure);
     }
+    overlayForwardState.set(surfaceId, { revision: activeRevision, topologyEpoch: activeTopologyEpoch });
     diagnostic.forwardedAt = new Date().toISOString();
     diagnostic.forwardResponse = response;
     diagnostic.forwardStatus = "ok";
+    diagnostic.revision = activeRevision;
+    diagnostic.topologyEpoch = activeTopologyEpoch;
   } catch (error) {
     diagnostic.forwardError = error instanceof Error ? error.message : String(error);
     diagnostic.forwardStatus = "error";
@@ -358,6 +447,26 @@ function staleOverlayTopologyEpoch(response: CompositorControlResponse): string 
   }
   const match = /stale overlay topology epoch:\s*\S+\s*!=\s*(\S+)/.exec(message);
   return match?.[1] ?? null;
+}
+
+
+function liveOverlayPaneInstanceId(response: CompositorControlResponse): string | null {
+  const message = compositorFailureMessage(response);
+  if (!message) {
+    return null;
+  }
+  const match = /does not match live pane instance '([^']+)'/.exec(message);
+  return match?.[1] ?? null;
+}
+
+function staleOverlayRevisionFloor(response: CompositorControlResponse): number | null {
+  const message = compositorFailureMessage(response);
+  if (!message) {
+    return null;
+  }
+  const match = /stale overlay region revision:\s*(\d+)\s*<=\s*(\d+)/.exec(message);
+  const floor = Number(match?.[2] ?? NaN);
+  return Number.isFinite(floor) ? floor : null;
 }
 
 function focusExistingWindow(): void {
