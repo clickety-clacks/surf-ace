@@ -47,7 +47,8 @@
           ],
           "target": "dir"
         }
-      ]
+      ],
+      "icon": "build/icon.png"
     },
     "productName": "Surf Ace"
   }
