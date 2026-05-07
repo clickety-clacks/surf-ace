@@ -174,13 +174,13 @@ test("surface core tracks the active keyboard pane and falls back when it closes
     paneId: initialPaneId,
   });
 
-  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), 7);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), initialPaneId);
   core.setActiveKeyboardPane(surface.surfaceId, 11);
   let windowState = core.getRendererWindowState(surface.surfaceId);
   assert.deepEqual(
     windowState.panes.map((pane) => [pane.paneId, pane.activeKeyboardPane]),
     [
-      [7, false],
+      [initialPaneId, false],
       [9, false],
       [11, true],
     ],
@@ -188,11 +188,11 @@ test("surface core tracks the active keyboard pane and falls back when it closes
 
   core.paneClose(surface.surfaceId, 11);
   windowState = core.getRendererWindowState(surface.surfaceId);
-  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), 7);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), initialPaneId);
   assert.deepEqual(
     windowState.panes.map((pane) => [pane.paneId, pane.activeKeyboardPane]),
     [
-      [7, true],
+      [initialPaneId, true],
       [9, false],
     ],
   );
@@ -263,7 +263,7 @@ test("surface core ignores snapshot updates for stale pane ids", () => {
   });
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
 
   assert.doesNotThrow(() => {
     core.updatePaneSnapshot(surface.surfaceId, 819, {
@@ -309,7 +309,7 @@ test("surface core starts browser_url targets without reporting unverified navig
   });
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
@@ -347,7 +347,7 @@ test("surface core starts browser_url targets without reporting unverified navig
   assert.equal(pane.content.contentType, "browser_url");
   assert.deepEqual(pane.content.content, { url: "https://google.com/" });
   assert.equal(pane.ownerName, "Browser Pusher");
-  const snapshot = core.captureSnapshot(surface.surfaceId, 7);
+  const snapshot = core.captureSnapshot(surface.surfaceId, paneId);
   assert.equal(snapshot.contentId, null);
   assert.equal(snapshot.contentType, null);
 });
@@ -361,7 +361,7 @@ test("surface core does not persist browser_url renderer history across restart"
   });
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   core.targetApply(surface.surfaceId, {
@@ -779,6 +779,62 @@ test("surface core rejects stale native materialization identity after geometry 
   );
 });
 
+test("surface core projects native topology overlay identity from resolved surface state", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  core.markNativePaneMaterialized(surface.surfaceId, {
+    op: "native_pane.host",
+    panes: [
+      {
+        id: String(paneId),
+        binding_id: `${paneId}:target_top`,
+        content_id: "target_top",
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: listedPane.geometry.geometryRevision,
+          height: listedPane.geometry.contentViewport.height,
+          paneInstanceId: listedPane.geometry.paneInstanceId,
+          surfaceEpoch: listedPane.geometry.surfaceEpoch,
+          topologyEpoch: listedPane.geometry.topologyEpoch,
+          width: listedPane.geometry.contentViewport.width,
+          x: listedPane.geometry.contentViewport.x,
+          y: listedPane.geometry.contentViewport.y,
+        },
+        process: { args: ["top"], command: "top" },
+        revision: 1 as Revision,
+        target: "terminal",
+      },
+    ],
+  });
+
+  const projected = core.projectNativePaneGeometryUpdateForTopologyApply(surface.surfaceId, {
+    layout: {
+      children: [
+        { paneId: paneId as never, type: "pane" },
+        { paneId: 9 as never, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    },
+    panes: [
+      { name: "Docs", paneId: paneId as never, paneLabel: 7 },
+      { name: "Other", paneId: 9 as never, paneLabel: 8 },
+    ],
+    topologyRevision: 2 as never,
+    windowLabel: "docs",
+  });
+
+  assert.equal(projected?.overlaySet.windowId, "a");
+});
+
 test("surface core records confirmed browser_url navigation success evidence", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -788,7 +844,7 @@ test("surface core records confirmed browser_url navigation success evidence", (
   });
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
   core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
@@ -811,7 +867,7 @@ test("surface core records confirmed browser_url navigation success evidence", (
     targetPayload: { url: "https://google.com/" },
   });
 
-  const result = core.completeBrowserUrlNavigation(surface.surfaceId, 7, {
+  const result = core.completeBrowserUrlNavigation(surface.surfaceId, paneId, {
     status: "applied",
     targetId: "tg_google",
     url: "https://google.com/",
@@ -830,7 +886,7 @@ test("surface core records confirmed browser_url navigation failure evidence", (
   });
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
   core.targetApply(surface.surfaceId, {
     ownershipEpoch: 0,
@@ -853,7 +909,7 @@ test("surface core records confirmed browser_url navigation failure evidence", (
     targetPayload: { url: "https://blocked.invalid/" },
   });
 
-  const result = core.completeBrowserUrlNavigation(surface.surfaceId, 7, {
+  const result = core.completeBrowserUrlNavigation(surface.surfaceId, paneId, {
     errorMessage: "Blocked",
     status: "failed",
     targetId: "tg_blocked",
@@ -1087,38 +1143,38 @@ test("surface core topology.apply reuses existing pane content and replaces prov
   const applied = core.topologyApply(surface.surfaceId, {
     layout: {
       children: [
-        { paneId: 7 as never, type: "pane" },
+        { paneId: initialPaneId as never, type: "pane" },
         { paneId: 9 as never, type: "pane" },
       ],
       direction: "horizontal",
       type: "split",
     },
     panes: [
-      { name: "Left", paneId: 7 as never, paneLabel: 41 },
+      { name: "Left", paneId: initialPaneId as never, paneLabel: 41 },
       { name: "Right", paneId: 9 as never, paneLabel: 42 },
     ],
     topologyRevision: 3 as never,
-    windowLabel: "b",
+    windowLabel: "a",
   });
 
   assert.equal(applied.topologyRevision, 3);
   assert.deepEqual(applied.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.name]), [
-    [7, 41, "Left"],
+    [initialPaneId, 41, "Left"],
     [9, 42, "Right"],
   ]);
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
-  assert.equal(windowState.windowLabel, "b");
+  assert.equal(windowState.windowLabel, "a");
   assert.deepEqual(windowState.layout, {
     children: [
-      { paneId: 7, type: "pane" },
+      { paneId: initialPaneId, type: "pane" },
       { paneId: 9, type: "pane" },
     ],
     direction: "horizontal",
     type: "split",
   });
-  assert.equal(windowState.panes.find((pane) => pane.paneId === 7)?.content.contentId, "ct_preserved");
-  assert.equal(windowState.panes.find((pane) => pane.paneId === 7)?.label, "41");
+  assert.equal(windowState.panes.find((pane) => pane.paneId === initialPaneId)?.content.contentId, "ct_preserved");
+  assert.equal(windowState.panes.find((pane) => pane.paneId === initialPaneId)?.label, "41");
   assert.equal(windowState.panes.find((pane) => pane.paneId === 9)?.label, "42");
 });
 
@@ -1130,29 +1186,105 @@ test("surface core rejects topology.apply with duplicate pane labels inside one 
     },
   });
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
 
   assert.throws(
     () => core.topologyApply(surface.surfaceId, {
       layout: {
         children: [
-          { paneId: 7 as never, type: "pane" },
+          { paneId: paneId as never, type: "pane" },
           { paneId: 9 as never, type: "pane" },
         ],
         direction: "horizontal",
         type: "split",
       },
       panes: [
-        { name: "Left", paneId: 7 as never, paneLabel: 41 },
+        { name: "Left", paneId: paneId as never, paneLabel: 41 },
         { name: "Right", paneId: 9 as never, paneLabel: 41 },
       ],
       topologyRevision: 3 as never,
-      windowLabel: "b",
+      windowLabel: "a",
     }),
     /Duplicate paneLabel in surface payload: 41/,
   );
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
+});
+
+test("surface core rejects caller-controlled human strings as window labels", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  assert.throws(
+    () => core.applyProviderBootstrapTopology(surface.surfaceId, {
+      initialPaneId: 7,
+      initialPaneLabel: 7,
+      windowLabel: "DOCS",
+    }),
+    /windowLabel must be a lowercase alphabetic provider identity label/,
+  );
+  assert.throws(
+    () => core.applyProviderBootstrapTopology(surface.surfaceId, {
+      initialPaneId: 7,
+      initialPaneLabel: 7,
+      windowLabel: "RACTER GRAPHICAL NATIVE",
+    }),
+    /windowLabel must be a lowercase alphabetic provider identity label/,
+  );
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(windowState.windowLabel, "");
+});
+
+test("surface core accepts provider window labels beyond zz", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  assert.doesNotThrow(() => core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 7,
+    initialPaneLabel: 7,
+    windowLabel: "aaa",
+  }));
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(windowState.windowLabel, "aaa");
+});
+
+test("surface core rejects topology.apply window label overrides after bootstrap", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  assert.throws(
+    () => core.topologyApply(surface.surfaceId, {
+      layout: { paneId: paneId as never, type: "pane" },
+      panes: [
+        { name: "Docs", paneId: paneId as never, paneLabel: 41 },
+      ],
+      topologyRevision: 3 as never,
+      windowLabel: "docs",
+    }),
+    /topology.apply windowLabel must match the paired surface identity/,
+  );
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(windowState.windowLabel, "a");
   assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
 });
 

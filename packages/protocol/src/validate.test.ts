@@ -102,6 +102,26 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   });
   assert.deepEqual(surfacesListRequest, { ok: true });
 
+  const surfacesListResponse = validateEnvelopeType("surfaces.list", {
+    id: "req_1",
+    ok: true,
+    op: "surfaces.list",
+    payload: {
+      surfaces: [
+        {
+          name: "Surface A",
+          paired: false,
+          surfaceId: "sf_1",
+          viewport: { height: 768, scale: 2, width: 1024 },
+        },
+      ],
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(surfacesListResponse, { ok: true });
+
   const panesListRequest = validateEnvelopeType("panes.list", {
     id: "req_2",
     op: "panes.list",

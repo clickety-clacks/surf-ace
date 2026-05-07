@@ -9,7 +9,7 @@ test("surface window is frameless and visible when hosted by the compositor", ()
     compositorSocketPath: "/tmp/surf-ace-compositor.sock",
     endpointName: "racter Surf Ace",
     viewport: { height: 3840, scale: 1, width: 2160 },
-    windowLabel: "RACTER Overlay Verify",
+    windowLabel: "a",
   });
 
   assert.equal(options.frame, false);
@@ -20,7 +20,7 @@ test("surface window is frameless and visible when hosted by the compositor", ()
   assert.equal(options.useContentSize, true);
   assert.equal(options.height, 3840);
   assert.equal(options.width, 2160);
-  assert.equal(options.title, "racter Surf Ace · RACTER Overlay Verify");
+  assert.equal(options.title, "racter Surf Ace · a");
 });
 
 test("surface window keeps the platform frame outside compositor hosting", () => {

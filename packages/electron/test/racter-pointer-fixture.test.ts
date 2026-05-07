@@ -11,27 +11,29 @@ async function nativePointerSource(): Promise<string> {
   return fs.readFile(path.join(process.cwd(), "scripts", "surf-ace-native-pointer-tester.mjs"), "utf8");
 }
 
-test("Racter pointer proof fixture uses real web and native pointer targets", async () => {
+test("Racter native pane demo cannot register production-trusted Surf Ace surfaces", async () => {
   const source = await demoSource();
-  const modeIndex = source.indexOf("mode === \"pointer-proof\"");
-  const scenarioIndex = source.indexOf("async function runPointerProofScenario");
 
-  assert.ok(modeIndex > -1);
-  assert.ok(scenarioIndex > modeIndex);
-  assert.match(source.slice(scenarioIndex), /client\.request\("content\.apply"/);
-  assert.match(source.slice(scenarioIndex), /contentType: "html"/);
-  assert.match(source.slice(scenarioIndex), /target_racter_native_pointer/);
-  assert.match(source.slice(scenarioIndex), /surf-ace-native-pointer-tester\.mjs/);
+  assert.match(source, /racter-native-pane-demo is disabled/);
+  assert.match(source, /must not pair with production-trusted Surf Ace surfaces/);
+  assert.doesNotMatch(source, /new WebSocket|connectWebSocket|pair\.request|topology\.apply|target\.apply|content\.apply/);
 });
 
-test("web pointer proof draws at event-local coordinates", async () => {
+test("Racter native pane demo cannot smuggle caller-controlled visible IDs", async () => {
   const source = await demoSource();
-  const htmlIndex = source.indexOf("function pointerProofHtml");
 
-  assert.ok(htmlIndex > -1);
-  assert.match(source.slice(htmlIndex), /dot\.style\.left = event\.clientX \+ "px"/);
-  assert.match(source.slice(htmlIndex), /dot\.style\.top = event\.clientY \+ "px"/);
-  assert.match(source.slice(htmlIndex), /WEB POINTER/);
+  assert.doesNotMatch(source, /windowLabel|initialPaneId|initialPaneLabel|paneLabel|paneId/);
+  assert.doesNotMatch(source, /RACTER Graphical Native/);
+  assert.doesNotMatch(source, /DOCS/);
+  assert.doesNotMatch(source, /RACTER Overlay Verify/);
+});
+
+test("Racter native pane demo no longer contains executable pointer proof behavior", async () => {
+  const source = await demoSource();
+
+  assert.doesNotMatch(source, /function pointerProofHtml/);
+  assert.doesNotMatch(source, /dot\.style\.left|dot\.style\.top/);
+  assert.doesNotMatch(source, /WEB POINTER|NATIVE POINTER/);
 });
 
 test("native pointer proof enables SGR mouse tracking and preserves the full title", async () => {

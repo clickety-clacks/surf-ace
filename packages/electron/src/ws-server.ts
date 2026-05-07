@@ -49,7 +49,7 @@ import {
   type CompositorControlRequest,
   type CompositorControlResponse,
 } from "./native-pane-bridge.js";
-import { SurfaceCore, SurfaceCoreError, type CoreEvent } from "./surface-core.js";
+import { isValidWindowLabel, SurfaceCore, SurfaceCoreError, type CoreEvent } from "./surface-core.js";
 
 type SocketCacheEntry = {
   payloadHash: string;
@@ -976,6 +976,23 @@ export class SurfaceWsServer {
         "pair.request requires windowLabel, initialPaneId, and initialPaneLabel",
       );
     }
+    if (!isValidWindowLabel(request.payload.windowLabel)) {
+      persistentServerDiagnostic(
+        "warn",
+        "pair_request_validation_failed",
+        {
+          code: "invalid_window_label",
+          request_id: request.id,
+          socket_id: meta?.socketId,
+          surface_id: request.payload.surfaceId,
+          window_label: request.payload.windowLabel,
+        },
+      );
+      throw new SurfaceCoreError(
+        "invalid_payload",
+        "pair.request windowLabel must be a lowercase alphabetic provider identity label",
+      );
+    }
 
     const surfaceId = request.payload.surfaceId;
     this.core.getSurface(surfaceId);
@@ -1125,6 +1142,14 @@ export class SurfaceWsServer {
       );
     }
 
+    if (!resumed) {
+      this.core.applyProviderBootstrapTopology(surfaceId, {
+        initialPaneId: Number(request.payload.initialPaneId),
+        initialPaneLabel: Number(request.payload.initialPaneLabel),
+        windowLabel: request.payload.windowLabel,
+      });
+    }
+
     const session: ActiveSession = {
       connectionId: request.payload.connectionId,
       drawingFlushConfig,
@@ -1147,13 +1172,6 @@ export class SurfaceWsServer {
       meta.pairedSurfaceId = surfaceId;
     }
 
-    if (!resumed) {
-      this.core.applyProviderBootstrapTopology(surfaceId, {
-        initialPaneId: Number(request.payload.initialPaneId),
-        initialPaneLabel: Number(request.payload.initialPaneLabel),
-        windowLabel: request.payload.windowLabel,
-      });
-    }
     this.core.setConnectionBar(surfaceId, "connecting");
     this.core.setProviderName(surfaceId, request.payload.providerName);
     this.onBusyChanged?.();
@@ -1321,6 +1339,40 @@ export class SurfaceWsServer {
         window_label: request.payload.windowLabel,
       },
     );
+    const currentWindowLabel = this.core.surfaceWindowLabel(surfaceId);
+    if (!isValidWindowLabel(request.payload.windowLabel)) {
+      persistentServerDiagnostic(
+        "warn",
+        "topology_apply_validation_failed",
+        {
+          code: "invalid_window_label",
+          request_id: request.id,
+          surface_id: surfaceId,
+          window_label: request.payload.windowLabel,
+        },
+      );
+      throw new SurfaceCoreError(
+        "invalid_payload",
+        "topology.apply windowLabel must be a lowercase alphabetic provider identity label",
+      );
+    }
+    if (request.payload.windowLabel !== currentWindowLabel) {
+      persistentServerDiagnostic(
+        "warn",
+        "topology_apply_validation_failed",
+        {
+          code: "window_label_mismatch",
+          current_window_label: currentWindowLabel,
+          request_id: request.id,
+          surface_id: surfaceId,
+          window_label: request.payload.windowLabel,
+        },
+      );
+      throw new SurfaceCoreError(
+        "invalid_payload",
+        "topology.apply windowLabel must match the paired surface identity",
+      );
+    }
     const payload = await this.runSurfaceMutation(surfaceId, async () => {
       const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
       const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForTopologyApply(surfaceId, request.payload);

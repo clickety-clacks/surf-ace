@@ -341,7 +341,7 @@ async function syncNativeOverlayRegionsAfterRelease(surfaceId: string, operation
       surfaceId,
       topologyEpoch: latestOverlay.topologyEpoch,
       updateReason: "native_detach",
-      windowId: surfaceId,
+      windowId: core.surfaceWindowLabel(surfaceId),
     })
     : overlayRegionsClearRequestForCompositor(surfaceId);
   await sendCompositorOverlayRequest(request);
@@ -456,7 +456,7 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
     surfaceId,
     topologyEpoch,
     updateReason: typeof payload.updateReason === "string" ? payload.updateReason as never : undefined,
-    windowId: surfaceId,
+    windowId: core.surfaceWindowLabel(surfaceId),
   });
   let activeRequest = requestFor(activeTopologyEpoch, activeRevision);
   diagnostic.forwardRequest = activeRequest;

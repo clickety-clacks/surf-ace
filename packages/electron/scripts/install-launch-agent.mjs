@@ -5,6 +5,7 @@ import process from "node:process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { assertAutostartInstallAllowed } from "./tars-autostart-guard.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageDir = path.resolve(__dirname, "..");
@@ -88,16 +89,16 @@ async function install() {
   console.log(plistPath);
 }
 
-// Only require the dev binary if no packaged .app exists
-const hasApp = await fs.access(appBundle).then(() => true).catch(() => false);
-if (!hasApp) {
-  await fs.access(electronBin).catch(() => {
-    throw new Error(`Electron binary not found at ${electronBin}. Run pnpm install or build the .app first.`);
-  });
-}
-
 if (shouldUninstall) {
   await uninstall();
 } else {
+  assertAutostartInstallAllowed();
+  // Only require the dev binary if no packaged .app exists.
+  const hasApp = await fs.access(appBundle).then(() => true).catch(() => false);
+  if (!hasApp) {
+    await fs.access(electronBin).catch(() => {
+      throw new Error(`Electron binary not found at ${electronBin}. Run pnpm install or build the .app first.`);
+    });
+  }
   await install();
 }

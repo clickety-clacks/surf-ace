@@ -131,15 +131,18 @@ function pairRequest(
   surfaceId: string,
   providerId: string,
   options: {
+    initialPaneId?: number;
+    initialPaneLabel?: number;
     providerName?: string | null;
     resumeSessionId?: string;
     takeover?: boolean;
+    windowLabel?: string;
   } = {},
 ): PairRequest {
   const payload: PairRequest["payload"] = {
     connectionId: `conn_${Math.random().toString(16).slice(2)}` as never,
-    initialPaneId: 1 as never,
-    initialPaneLabel: 1,
+    initialPaneId: (options.initialPaneId ?? 1) as never,
+    initialPaneLabel: options.initialPaneLabel ?? 1,
     protocolVersion: 1,
     providerId: providerId as never,
     providerName: options.providerName ?? "test-harness",
@@ -148,7 +151,7 @@ function pairRequest(
       : undefined,
     surfaceId: surfaceId as never,
     takeover: options.takeover ?? false,
-    windowLabel: "a",
+    windowLabel: options.windowLabel ?? "a",
   };
   if (options.providerName === null) {
     delete (payload as { providerName?: string }).providerName;
@@ -224,7 +227,7 @@ function topologyApplyRequest(): Request {
         { name: "Right", paneId: 2 as never, paneLabel: 42 },
       ],
       topologyRevision: 7 as never,
-      windowLabel: "b",
+      windowLabel: "a",
     },
     sentAt: Date.now() as never,
     type: "request",
@@ -483,6 +486,25 @@ test("ws server keeps ownership lock after owner socket closes", async () => {
   });
 });
 
+test("ws server surfaces.list remains discovery-only before pairing", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const probe = await connect(url);
+    try {
+      const listed = await request(probe, surfacesListRequest());
+      assert.equal(listed.ok, true);
+      assert.equal(listed.op, "surfaces.list");
+
+      const surface = listed.payload.surfaces.find((entry) => entry.surfaceId === surfaceId);
+      assert.ok(surface);
+      assert.equal("windowLabel" in surface, false);
+      assert.equal("initialPaneId" in surface, false);
+      assert.equal("initialPaneLabel" in surface, false);
+    } finally {
+      await closeSocket(probe);
+    }
+  });
+});
+
 test("ws server diagnostics format concise structured fields", () => {
   assert.equal(
     __test.serverDiagnostic("pair_request_begin", {
@@ -492,6 +514,92 @@ test("ws server diagnostics format concise structured fields", () => {
     }),
     "[surf-ace:server] event=pair_request_begin provider_id=pv_alpha surface_id=sf_main takeover=false",
   );
+});
+
+test("ws server rejects human strings as provider-supplied visible window IDs", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    try {
+      for (const label of ["DOCS", "RACTER GRAPHICAL NATIVE"]) {
+        const invalid = pairRequest(surfaceId, "pv_alpha");
+        invalid.payload.windowLabel = label as never;
+
+        const rejected = await request(socket, invalid);
+
+        assert.equal(rejected.ok, false);
+        assert.equal(rejected.op, "pair.request");
+        assert.equal(rejected.error.code, "invalid_payload");
+        assert.match(rejected.error.message, /windowLabel must be a lowercase alphabetic provider identity label/);
+      }
+    } finally {
+      await closeSocket(socket);
+    }
+  });
+});
+
+test("ws server accepts provider window labels beyond zz", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const socket = await connect(url);
+    try {
+      const accepted = await request(socket, pairRequest(surfaceId, "pv_alpha", {
+        windowLabel: "aaa",
+      }));
+
+      assert.equal(accepted.ok, true);
+      assert.equal(accepted.op, "pair.request");
+      assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "aaa");
+    } finally {
+      await closeSocket(socket);
+    }
+  });
+});
+
+test("ws server rejects invalid provider bootstrap without leaving an ownership lock", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const socket = await connect(url);
+    try {
+      const invalid = pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 0,
+        initialPaneLabel: 1,
+        windowLabel: "a",
+      });
+
+      const rejected = await request(socket, invalid);
+
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.op, "pair.request");
+      assert.equal(rejected.error.code, "invalid_payload");
+
+      const listed = await request(socket, surfacesListRequest());
+      assert.equal(listed.ok, true);
+      assert.equal(listed.payload.surfaces.find((entry) => entry.surfaceId === surfaceId)?.paired, false);
+    } finally {
+      await closeSocket(socket);
+    }
+  });
+});
+
+test("ws server rejects topology.apply attempts to override the paired window ID", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    try {
+      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const invalid = topologyApplyRequest();
+      invalid.payload.windowLabel = "docs" as never;
+
+      const rejected = await request(owner, invalid);
+
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.op, "topology.apply");
+      assert.equal(rejected.error.code, "invalid_payload");
+      assert.match(rejected.error.message, /windowLabel must match the paired surface identity/);
+      assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "a");
+    } finally {
+      await closeSocket(owner);
+    }
+  });
 });
 
 test("ws server allows the lock owner to resume after disconnect", async () => {
@@ -708,7 +816,12 @@ test("ws server scopes explicit takeover to the requested surface only", async (
     const firstA = await request(ownerA, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(firstA.ok, true);
     const ownerB = await connect(url);
-    const firstB = await request(ownerB, pairRequest(otherSurface.surfaceId, "pv_alpha"));
+    const firstB = await request(
+      ownerB,
+      pairRequest(otherSurface.surfaceId, "pv_alpha", {
+        windowLabel: "b",
+      }),
+    );
     assert.equal(firstB.ok, true);
 
     const takeoverA = await connect(url);
@@ -1395,7 +1508,7 @@ test("ws server does not release native-hosted pane before invalid topology.appl
             { name: "Three", paneId: 3 as never, paneLabel: 7 },
           ],
           topologyRevision: 8 as never,
-          windowLabel: "b",
+          windowLabel: "a",
         },
         sentAt: Date.now() as never,
         type: "request",

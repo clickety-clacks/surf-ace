@@ -270,6 +270,16 @@ export class SurfaceCoreError extends Error {
   }
 }
 
+export function isValidWindowLabel(windowLabel: unknown): windowLabel is string {
+  return typeof windowLabel === "string" && /^[a-z]+$/.test(windowLabel);
+}
+
+export function assertValidWindowLabel(windowLabel: unknown): asserts windowLabel is string {
+  if (!isValidWindowLabel(windowLabel)) {
+    throw new SurfaceCoreError("invalid_payload", "windowLabel must be a lowercase alphabetic provider identity label");
+  }
+}
+
 const DEFAULT_VISIBLE_RECT = { height: 768, width: 1024, x: 0, y: 0 };
 const MAX_HISTORY_DEPTH = 20;
 const BOOTSTRAP_PANE_ID = 0;
@@ -692,7 +702,7 @@ export class SurfaceCore {
     return this.projectNativePaneGeometryUpdateForLayout(surface, paneIds, nextLayout, {
       geometryRevision: surface.geometryRevision + 1,
       topologyRevision: Number(payload.topologyRevision),
-      windowLabel: payload.windowLabel,
+      windowLabel: surface.windowLabel,
     });
   }
 
@@ -1080,6 +1090,7 @@ export class SurfaceCore {
   }
 
   applyWindowLabelOnly(surfaceId: string, windowLabel: string): void {
+    assertValidWindowLabel(windowLabel);
     const surface = this.getSurface(surfaceId);
     if (surface.windowLabel !== windowLabel) {
       surface.windowLabel = windowLabel;
@@ -1091,9 +1102,13 @@ export class SurfaceCore {
     surfaceId: string,
     payload: { initialPaneId: number; initialPaneLabel: number; windowLabel: string },
   ): void {
+    assertValidWindowLabel(payload.windowLabel);
     const surface = this.getSurface(surfaceId);
     let didChange = false;
 
+    if (surface.windowLabel && surface.windowLabel !== payload.windowLabel) {
+      throw new SurfaceCoreError("invalid_payload", "pair.request windowLabel must match the extension-assigned surface identity");
+    }
     if (surface.windowLabel !== payload.windowLabel) {
       surface.windowLabel = payload.windowLabel;
       didChange = true;
@@ -1114,6 +1129,10 @@ export class SurfaceCore {
     payload: TopologyApplyRequest["payload"],
   ): TopologyApplyResponse["payload"] {
     const surface = this.getSurface(surfaceId);
+    assertValidWindowLabel(payload.windowLabel);
+    if (surface.windowLabel !== payload.windowLabel) {
+      throw new SurfaceCoreError("invalid_payload", "topology.apply windowLabel must match the paired surface identity");
+    }
     assertSingleSurfacePaneLabelPayload(payload.panes);
     const paneStateById = new Map<number, TopologyApplyRequest["payload"]["panes"][number]>();
     for (const pane of payload.panes) {
@@ -1144,7 +1163,6 @@ export class SurfaceCore {
     surface.paneOrder = orderedPanes;
     surface.panes = nextPanes;
     surface.topologyRevision = Number(payload.topologyRevision);
-    surface.windowLabel = payload.windowLabel;
     if (geometryChanged) {
       bumpGeometryRevision(surface);
     }
@@ -2227,7 +2245,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
       scale: 1,
       width: DEFAULT_VISIBLE_RECT.width,
     },
-    windowLabel: typeof record.windowLabel === "string" ? record.windowLabel : "",
+    windowLabel: isValidWindowLabel(record.windowLabel) ? record.windowLabel : "",
   };
 }
 
