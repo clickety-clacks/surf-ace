@@ -32,6 +32,36 @@ private func surfAceLifecycleLog(_ message: String) {
     print("[SurfAce-Lifecycle] \(message)")
 }
 
+func surfAceValidatedProviderWindowLabel(from value: Any?) -> String? {
+    guard let label = value as? String else { return nil }
+    guard label.range(of: #"^[a-z]+$"#, options: .regularExpression) != nil else { return nil }
+    return label
+}
+
+func surfAceValidatedPositiveProviderIdentifier(from value: Any?) -> Int? {
+    guard let identifier = value as? Int, identifier > 0 else { return nil }
+    return identifier
+}
+
+struct SurfAceProviderBootstrapIdentity {
+    let windowLabel: String
+    let initialPaneId: Int
+    let initialPaneLabel: Int
+}
+
+func surfAceValidatedProviderBootstrapIdentity(from payload: [String: Any]) -> SurfAceProviderBootstrapIdentity? {
+    guard let windowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
+          let initialPaneId = surfAceValidatedPositiveProviderIdentifier(from: payload["initialPaneId"]),
+          let initialPaneLabel = surfAceValidatedPositiveProviderIdentifier(from: payload["initialPaneLabel"]) else {
+        return nil
+    }
+    return SurfAceProviderBootstrapIdentity(
+        windowLabel: windowLabel,
+        initialPaneId: initialPaneId,
+        initialPaneLabel: initialPaneLabel
+    )
+}
+
 actor SurfAceOutboundSender {
     enum Priority: Int {
         case event = 0
@@ -1191,31 +1221,20 @@ final class SurfAceRuntime {
             requestedIdleWindowMs: drawingConfigPayload?["idleWindowMs"] as? Int,
             requestedMaxIntervalMs: drawingConfigPayload?["maxIntervalMs"] as? Int
         )
-        guard let providerWindowLabel = normalizedWindowLabel(from: payload["windowLabel"]),
-              let providerInitialPaneId = payload["initialPaneId"] as? Int,
-              providerInitialPaneId > 0 else {
+        guard let bootstrapIdentity = surfAceValidatedProviderBootstrapIdentity(from: payload) else {
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(
                     op: "pair.request",
                     id: id,
                     code: "invalid_payload",
-                    message: "windowLabel and initialPaneId are required"
+                    message: "windowLabel, initialPaneId, and initialPaneLabel are required; windowLabel must be a lowercase alphabetic provider identity label"
                 ),
                 postSendPairCommit: nil
             )
         }
-        let providerInitialPaneLabel = (payload["initialPaneLabel"] as? Int) ?? providerInitialPaneId
-        guard providerInitialPaneLabel > 0 else {
-            return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(
-                    op: "pair.request",
-                    id: id,
-                    code: "invalid_payload",
-                    message: "initialPaneLabel must be greater than zero"
-                ),
-                postSendPairCommit: nil
-            )
-        }
+        let providerWindowLabel = bootstrapIdentity.windowLabel
+        let providerInitialPaneId = bootstrapIdentity.initialPaneId
+        let providerInitialPaneLabel = bootstrapIdentity.initialPaneLabel
         guard let rawProviderName = payload["providerName"] as? String else {
             surfAceGatewayLog(
                 "event=pair_request_missing_provider_name \(surfAceDiagnosticFields([("connection_uuid", connectionUUID)]))"
@@ -1466,10 +1485,18 @@ final class SurfAceRuntime {
     private func handleTopologyApply(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
         guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
               let topologyRevision = payload["topologyRevision"] as? Int,
-              let windowLabel = payload["windowLabel"] as? String,
+              let windowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
               let panesPayload = payload["panes"] as? [[String: Any]],
               let layoutPayload = payload["layout"] as? [String: Any] else {
             return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply payload")
+        }
+        guard surface.windowLabel == windowLabel else {
+            return makeErrorResponse(
+                op: "topology.apply",
+                id: id,
+                code: "invalid_payload",
+                message: "topology.apply windowLabel must match the paired surface identity"
+            )
         }
 
         var panesById: [Int: SurfAcePaneModel] = [:]
@@ -3234,12 +3261,6 @@ final class SurfAceRuntime {
     private func persistSurfaceTopologies() {
         guard let data = try? JSONEncoder().encode(persistedSurfaceTopologies) else { return }
         userDefaults.set(data, forKey: surfaceTopologyStoreKey)
-    }
-
-    private func normalizedWindowLabel(from value: Any?) -> String? {
-        guard let value = value as? String else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func normalizedHistoryOwnerToken(from value: Any?) -> String? {

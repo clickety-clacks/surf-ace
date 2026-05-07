@@ -4768,7 +4768,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const registered = await runtime.registerTarget({
         expectedPreviousTargetEpoch: null,
         fingerprint: server.surfaceId,
-        idempotencyKey: "native:demo:geometry",
+        idempotencyKey: "native:app:geometry",
         ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
         paneId: firstPaneId,
         registrationState: "attached",
@@ -4779,11 +4779,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           requiredCapabilities: ["target.native_app.v1"],
           safeToLogFields: ["appId"],
           safetyClass: "process",
-          summary: "Native Demo",
+          summary: "Native App",
         },
         targetKind: "native_app",
         targetPayload: {
-          appId: "com.example.NativeDemo",
+          appId: "com.example.NativeApp",
           launchMode: "new_instance",
         },
       });
@@ -4802,7 +4802,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal("materialization" in applyRequest, false);
       assert.equal(applyRequest.targetKind, "native_app");
       assert.deepEqual(applyRequest.targetPayload, {
-        appId: "com.example.NativeDemo",
+        appId: "com.example.NativeApp",
         launchMode: "new_instance",
       });
     });

@@ -2,6 +2,44 @@ import XCTest
 @testable import SurfAce
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
+    func testProviderBootstrapIdentityRejectsCallerControlledWindowLabels() {
+        XCTAssertEqual(surfAceValidatedProviderWindowLabel(from: "a"), "a")
+        XCTAssertEqual(surfAceValidatedProviderWindowLabel(from: "aa"), "aa")
+
+        XCTAssertNil(surfAceValidatedProviderWindowLabel(from: "DOCS"))
+        XCTAssertNil(surfAceValidatedProviderWindowLabel(from: "RACTER GRAPHICAL NATIVE"))
+        XCTAssertNil(surfAceValidatedProviderWindowLabel(from: " a"))
+        XCTAssertNil(surfAceValidatedProviderWindowLabel(from: "a1"))
+        XCTAssertNil(surfAceValidatedProviderWindowLabel(from: ""))
+        XCTAssertNil(surfAceValidatedProviderWindowLabel(from: 1))
+    }
+
+    func testProviderBootstrapIdentityRequiresExplicitPaneIdsAndLabels() {
+        let valid = surfAceValidatedProviderBootstrapIdentity(from: [
+            "windowLabel": "b",
+            "initialPaneId": 42,
+            "initialPaneLabel": 7,
+        ])
+        XCTAssertEqual(valid?.windowLabel, "b")
+        XCTAssertEqual(valid?.initialPaneId, 42)
+        XCTAssertEqual(valid?.initialPaneLabel, 7)
+
+        XCTAssertNil(surfAceValidatedProviderBootstrapIdentity(from: [
+            "windowLabel": "b",
+            "initialPaneId": 42,
+        ]))
+        XCTAssertNil(surfAceValidatedProviderBootstrapIdentity(from: [
+            "windowLabel": "b",
+            "initialPaneId": 42,
+            "initialPaneLabel": 0,
+        ]))
+        XCTAssertNil(surfAceValidatedProviderBootstrapIdentity(from: [
+            "windowLabel": "DOCS",
+            "initialPaneId": 42,
+            "initialPaneLabel": 7,
+        ]))
+    }
+
     func testKeyboardFocusOutlineIsSuppressedForSinglePaneSurfaces() {
         XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: 1, paneId: 1, paneCount: 1))
         XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: nil, paneId: 1, paneCount: 1))
