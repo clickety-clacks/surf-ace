@@ -38,6 +38,8 @@ type BonjourBinding = {
 };
 
 type BonjourDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
+type IsolatedPublisherProcessList = () => Promise<string>;
+type IsolatedPublisherKill = (pid: number) => void;
 
 function formatBonjourDiagnosticValue(value: string | number | boolean): string {
   const text = String(value);
@@ -56,6 +58,18 @@ function bonjourDiagnostic(event: string, fields: BonjourDiagnosticFields = {}):
 
 function txtSignature(txt: Record<string, string>): string {
   return JSON.stringify(Object.entries(txt).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+async function defaultIsolatedPublisherProcessList(): Promise<string> {
+  return await new Promise<string>((resolve) => {
+    try {
+      execFile("ps", ["-axo", "pid=,ppid=,command="], (error, stdout) => {
+        resolve(error ? "" : stdout);
+      });
+    } catch {
+      resolve("");
+    }
+  });
 }
 
 function isIpv4Family(family: string | number): boolean {
@@ -98,13 +112,40 @@ function bonjourInterfaceAddresses(): string[] {
   return bonjourBindingAddressesForPlatform(process.platform, os.networkInterfaces());
 }
 
+function isolatedPublisherCommandMatches(command: string, params: {
+  name: string;
+  port: number;
+  publicKeyFingerprint: string;
+}): boolean {
+  const dnsSdIndex = command.indexOf("dns-sd -R ");
+  if (dnsSdIndex < 0) {
+    return false;
+  }
+  const commandAfterRegister = command.slice(dnsSdIndex + "dns-sd -R ".length);
+  const serviceMarker = ` _surf-ace._tcp local. ${params.port}`;
+  const serviceMarkerIndex = commandAfterRegister.indexOf(serviceMarker);
+  if (serviceMarkerIndex < 0) {
+    return false;
+  }
+  const advertisedName = commandAfterRegister.slice(0, serviceMarkerIndex).trim();
+  if (advertisedName !== params.name) {
+    return false;
+  }
+  const txtArgs = commandAfterRegister.slice(serviceMarkerIndex + serviceMarker.length).trim().split(/\s+/);
+  const expectedPkArg = `pk=${params.publicKeyFingerprint.trim().toLowerCase()}`;
+  return txtArgs.some((arg) => arg.trim().toLowerCase() === expectedPkArg);
+}
+
 export class BonjourAdvertiser {
   private static readonly VISIBILITY_CHECK_DELAY_MS = 7_500;
   private static readonly VISIBILITY_CHECK_INTERVAL_MS = 15_000;
   private static readonly VISIBILITY_FAILURES_BEFORE_ISOLATION = 3;
   private readonly baseName: string;
   private readonly bonjourBindings: BonjourBinding[];
+  private readonly isolatedPublisherKill: IsolatedPublisherKill;
+  private readonly isolatedPublisherProcessList: IsolatedPublisherProcessList;
   private readonly isolatedPublisherSpawn: typeof spawn;
+  private readonly platform: NodeJS.Platform;
   private readonly port: number;
   private readonly txtProvider: () => Record<string, string>;
   private readonly useIsolatedPublisherByDefault: boolean;
@@ -123,8 +164,11 @@ export class BonjourAdvertiser {
 
   constructor(options: {
     bonjour?: BonjourClient;
+    isolatedPublisherKill?: IsolatedPublisherKill;
+    isolatedPublisherProcessList?: IsolatedPublisherProcessList;
     isolatedPublisherSpawn?: typeof spawn;
     name: string;
+    platform?: NodeJS.Platform;
     port: number;
     txtProvider: () => Record<string, string>;
   }) {
@@ -132,11 +176,14 @@ export class BonjourAdvertiser {
     this.bonjourBindings = options.bonjour
       ? [{ client: options.bonjour, destroyed: false, disabled: false, interfaceAddress: null }]
       : this.createBonjourBindings();
+    this.isolatedPublisherKill = options.isolatedPublisherKill ?? ((pid) => process.kill(pid, "TERM"));
+    this.isolatedPublisherProcessList = options.isolatedPublisherProcessList ?? defaultIsolatedPublisherProcessList;
     this.isolatedPublisherSpawn = options.isolatedPublisherSpawn ?? spawn;
+    this.platform = options.platform ?? process.platform;
     this.port = options.port;
     this.serviceName = options.name;
     this.txtProvider = options.txtProvider;
-    this.useIsolatedPublisherByDefault = !options.bonjour && useIsolatedBonjourPublisherByDefault(process.platform);
+    this.useIsolatedPublisherByDefault = !options.bonjour && useIsolatedBonjourPublisherByDefault(this.platform);
   }
 
   start(): void {
@@ -609,20 +656,15 @@ export class BonjourAdvertiser {
   }
 
   private async cleanupOrphanedIsolatedPublishers(name: string): Promise<void> {
-    if (process.platform !== "darwin") {
+    if (this.platform !== "darwin") {
       return;
     }
-    const commandPrefix = `dns-sd -R ${name} _surf-ace._tcp local. ${this.port}`;
+    const publicKeyFingerprint = this.txtProvider().pk?.trim().toLowerCase();
+    if (!publicKeyFingerprint) {
+      return;
+    }
     const currentPid = this.isolatedPublisher?.pid ?? null;
-    const rows = await new Promise<string>((resolve) => {
-      try {
-        execFile("ps", ["-axo", "pid=,ppid=,command="], (error, stdout) => {
-          resolve(error ? "" : stdout);
-        });
-      } catch {
-        resolve("");
-      }
-    });
+    const rows = await this.isolatedPublisherProcessList();
     for (const row of rows.split(/\r?\n/)) {
       const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(row);
       if (!match) {
@@ -631,11 +673,19 @@ export class BonjourAdvertiser {
       const pid = Number(match[1]);
       const parentPid = Number(match[2]);
       const command = match[3] ?? "";
-      if (pid === currentPid || parentPid !== 1 || !command.includes(commandPrefix)) {
+      if (
+        pid === currentPid ||
+        parentPid !== 1 ||
+        !isolatedPublisherCommandMatches(command, {
+          name,
+          port: this.port,
+          publicKeyFingerprint,
+        })
+      ) {
         continue;
       }
       try {
-        process.kill(pid, "TERM");
+        this.isolatedPublisherKill(pid);
         console.warn(
           bonjourDiagnostic("publish_isolated_orphan_killed", {
             name,
@@ -652,5 +702,6 @@ export class BonjourAdvertiser {
 export const __test = {
   bonjourDiagnostic,
   bonjourBindingAddressesForPlatform,
+  isolatedPublisherCommandMatches,
   useIsolatedBonjourPublisherByDefault,
 };

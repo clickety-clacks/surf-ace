@@ -317,3 +317,71 @@ test("bonjour advertiser handles missing dns-sd isolated publisher without crash
 
   assert.match(warnings.join("\n"), /\[surf-ace:bonjour\] event=publish_isolated_error .*error=ENOENT/);
 });
+
+test("bonjour advertiser reaps only stale orphaned isolated publishers with the same identity", async () => {
+  const killedPids: number[] = [];
+  const advertiser = new BonjourAdvertiser({
+    bonjour: new FakeBonjour(),
+    isolatedPublisherKill: (pid) => {
+      killedPids.push(pid);
+    },
+    isolatedPublisherProcessList: async () => [
+      "101 1 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+      "102 1 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=ffffffff ws=/ws",
+      "103 1 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19002 busy=1 pk=b0ddd36d ws=/ws",
+      "104 999 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+      "105 1 dns-sd -R Other Surf Ace _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+      "106 1 dns-sd -R eezo Surf Ace (eezo) _other._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+    ].join("\n"),
+    name: "eezo Surf Ace (eezo)",
+    platform: "darwin",
+    port: 19001,
+    txtProvider: () => ({ pk: "b0ddd36d" }),
+  });
+
+  await (advertiser as unknown as {
+    cleanupOrphanedIsolatedPublishers(name: string): Promise<void>;
+  }).cleanupOrphanedIsolatedPublishers("eezo Surf Ace (eezo)");
+
+  assert.deepEqual(killedPids, [101]);
+});
+
+test("bonjour advertiser does not reap the current isolated publisher child", async () => {
+  const killedPids: number[] = [];
+  const advertiser = new BonjourAdvertiser({
+    bonjour: new FakeBonjour(),
+    isolatedPublisherKill: (pid) => {
+      killedPids.push(pid);
+    },
+    isolatedPublisherProcessList: async () =>
+      "201 98793 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+    name: "eezo Surf Ace (eezo)",
+    platform: "darwin",
+    port: 19001,
+    txtProvider: () => ({ pk: "b0ddd36d" }),
+  });
+
+  (advertiser as unknown as { isolatedPublisher: { pid: number } }).isolatedPublisher = { pid: 201 };
+  await (advertiser as unknown as {
+    cleanupOrphanedIsolatedPublishers(name: string): Promise<void>;
+  }).cleanupOrphanedIsolatedPublishers("eezo Surf Ace (eezo)");
+
+  assert.deepEqual(killedPids, []);
+});
+
+test("bonjour advertiser isolated publisher matcher requires same service name port and fingerprint", () => {
+  assert.equal(
+    __test.isolatedPublisherCommandMatches(
+      "dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+      { name: "eezo Surf Ace (eezo)", port: 19001, publicKeyFingerprint: "b0ddd36d" },
+    ),
+    true,
+  );
+  assert.equal(
+    __test.isolatedPublisherCommandMatches(
+      "dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36e ws=/ws",
+      { name: "eezo Surf Ace (eezo)", port: 19001, publicKeyFingerprint: "b0ddd36d" },
+    ),
+    false,
+  );
+});
