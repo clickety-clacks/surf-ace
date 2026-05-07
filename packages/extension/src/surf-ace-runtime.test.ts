@@ -6321,6 +6321,77 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("discovery refresh does not open endpoint probe when owned surface worker is active", async () => {
+    await withRuntimeHarness(async ({ discovery, infos, runtime, server }) => {
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+      const probeAttemptsBeforeRefresh = infos.filter((message) => message.includes("endpoint_probe_attempt")).length;
+      server.maxConcurrentSocketCount = server.activeSocketCount;
+
+      await discovery.refreshNow();
+      await new Promise((resolve) => {
+        setTimeout(resolve, 100);
+      });
+
+      const probeAttemptsAfterRefresh = infos.filter((message) => message.includes("endpoint_probe_attempt")).length;
+      assert.equal(probeAttemptsAfterRefresh, probeAttemptsBeforeRefresh);
+      assert.equal(server.maxConcurrentSocketCount, 1);
+      assert.equal((await runtime.listScreens())[0]?.connectionState, "connected");
+    });
+  });
+
+  await t.test("accepted topology missing from discovery is removed and not targetable after transport becomes unreachable", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.equal((await runtime.listScreens()).some((entry) => entry.fingerprint === server.surfaceId), true);
+      const staleSurfaceId = "surface-stale-accepted";
+      const staleEndpointId = "endpoint-stale-accepted";
+      const stalePaneId = [...surface.panes.values()][0]?.paneId;
+      assert.ok(stalePaneId);
+      const staleSurface = {
+        ...surface,
+        surfaceId: staleSurfaceId,
+        endpointId: staleEndpointId,
+        endpoint: {
+          ...surface.endpoint,
+          endpointId: staleEndpointId,
+          name: "stale accepted",
+          port: surface.endpoint.port + 1,
+        },
+        client: null,
+        connectionCircuitOpenedAt: Date.now(),
+        connectionCircuitReason: "test missing discovery unreachable",
+        connectionState: "unreachable",
+        localOwnership: {
+          ...surface.localOwnership,
+          surfaceId: staleSurfaceId,
+        },
+        panes: new Map(surface.panes),
+        stopRequested: false,
+        unreachableFailures: 5,
+        workPromise: null,
+      };
+
+      discovery.setEndpoints([]);
+      await discovery.refreshNow();
+      internalRuntime.surfaces.set(staleSurfaceId, staleSurface);
+
+      await assert.rejects(
+        async () => await runtime.read({ fingerprint: staleSurfaceId, paneId: stalePaneId }),
+        /Unknown Surf Ace surface/,
+      );
+      await assert.rejects(
+        async () => await runtime.snapshot({ fingerprint: staleSurfaceId, paneId: stalePaneId }),
+        /Unknown Surf Ace surface/,
+      );
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.some((entry) => entry.fingerprint === staleSurfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(staleSurfaceId), false);
+    });
+  });
+
   await t.test("discovery loss removes unowned disconnected pane-only ghost rows", async () => {
     await withRuntimeHarness(async ({ discovery, runtime, server }) => {
       const internalRuntime = runtime as any;
@@ -7430,6 +7501,71 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(surface.reconnectAttempt, 0);
       assert.equal(surface.unreachableFailures, 0);
       assert.equal(surface.connectionCircuitOpenedAt, null);
+    });
+  });
+
+  await t.test("operator reattempt-all suppresses endpoint probes covered by owned workers", async () => {
+    await withRuntimeHarness(async ({ infos, runtime, server }) => {
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+      const internalRuntime = runtime as any;
+      const probe = [...internalRuntime.endpointProbes.values()][0];
+      assert.ok(probe);
+      const probeAttemptsBeforeReattempt = infos.filter((message) => message.includes("endpoint_probe_attempt")).length;
+      server.maxConcurrentSocketCount = server.activeSocketCount;
+
+      const result = await runtime.reattemptConnections();
+      await new Promise((resolve) => {
+        setTimeout(resolve, 100);
+      });
+
+      const probeAttemptsAfterReattempt = infos.filter((message) => message.includes("endpoint_probe_attempt")).length;
+      assert.equal(result.surfaces.some((entry) => entry.fingerprint === server.surfaceId), true);
+      assert.deepEqual(result.endpointProbes, []);
+      assert.equal(probeAttemptsAfterReattempt, probeAttemptsBeforeReattempt);
+      assert.equal(server.maxConcurrentSocketCount, 1);
+      assert.equal(probe.stopRequested, true);
+    });
+  });
+
+  await t.test("operator reattempt-all removes stale accepted surfaces before waking workers", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const staleSurfaceId = "surface-stale-reattempt";
+      const staleEndpointId = "endpoint-stale-reattempt";
+      const staleSurface = {
+        ...surface,
+        surfaceId: staleSurfaceId,
+        endpointId: staleEndpointId,
+        endpoint: {
+          ...surface.endpoint,
+          endpointId: staleEndpointId,
+          name: "stale reattempt",
+          port: surface.endpoint.port + 1,
+        },
+        client: null,
+        connectionCircuitOpenedAt: Date.now(),
+        connectionCircuitReason: "test missing discovery reattempt",
+        connectionState: "unreachable",
+        localOwnership: {
+          ...surface.localOwnership,
+          surfaceId: staleSurfaceId,
+        },
+        panes: new Map(surface.panes),
+        stopRequested: false,
+        unreachableFailures: 5,
+        workPromise: null,
+      };
+
+      discovery.setEndpoints([]);
+      await discovery.refreshNow();
+      internalRuntime.surfaces.set(staleSurfaceId, staleSurface);
+
+      const result = await runtime.reattemptConnections();
+
+      assert.equal(result.surfaces.some((entry) => entry.fingerprint === staleSurfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(staleSurfaceId), false);
     });
   });
 

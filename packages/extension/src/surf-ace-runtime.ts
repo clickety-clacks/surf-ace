@@ -749,6 +749,7 @@ type EndpointProbe = {
   lastSeenAt: number;
   name: string;
   reconnectAttempt: number;
+  reconcileWorkPromise: Promise<void> | null;
   retryDelayResolver: (() => void) | null;
   stopRequested: boolean;
   unreachableFailures: number;
@@ -1238,6 +1239,7 @@ function createEndpointProbe(endpoint: SurfAceDiscoveryEndpoint, now: number): E
     lastSeenAt: now,
     name: endpoint.name,
     reconnectAttempt: 0,
+    reconcileWorkPromise: null,
     retryDelayResolver: null,
     stopRequested: false,
     unreachableFailures: 0,
@@ -2332,6 +2334,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         }
       }
       for (const probe of this.endpointProbes.values()) {
+        if (probe.reconcileWorkPromise) {
+          this.logger.info?.(
+            `[surf-ace:runtime] start() — clearing stale probe reconcileWorkPromise for ${probe.endpointId}`,
+          );
+          probe.reconcileWorkPromise = null;
+        }
         if (probe.workPromise) {
           this.logger.info?.(
             `[surf-ace:runtime] start() — clearing stale probe workPromise for ${probe.endpointId}`,
@@ -2388,6 +2396,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (typeof probe.client?.close === "function") {
         await probe.client.close(1000, clampCloseReason("provider_shutdown"));
       }
+      await probe.reconcileWorkPromise;
       await probe.workPromise;
     }));
 
@@ -2585,6 +2594,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         op: "reattemptConnections",
       });
     }
+    this.pruneStaleAcceptedSurfaces("operator reattempt connections");
 
     const surface = input.fingerprint ? this.surfaces.get(input.fingerprint as SurfaceId) : null;
     const surfaces = input.fingerprint
@@ -2607,6 +2617,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const reattemptedEndpointProbes: SurfAceReattemptConnectionsResult["endpointProbes"] = [];
     if (!input.fingerprint) {
       for (const probe of this.endpointProbes.values()) {
+        const ownedSurfaces = this.ownedSurfacesForEndpoint(probe.endpoint);
+        const openOwnedSurface = this.openAcceptedOwnedSurface(ownedSurfaces);
+        if (ownedSurfaces.length > 0) {
+          this.suppressEndpointProbeWorker(probe, "owned surface worker active");
+          if (openOwnedSurface) {
+            this.ensureOwnedEndpointSurfacesListReconcile(probe, openOwnedSurface);
+          }
+          continue;
+        }
         const diagnostics = this.endpointProbeConnectionDiagnostics(probe);
         this.resetEndpointProbeConnectionCircuit(probe, "operator reattempt", { enableRetry: true });
         this.ensureEndpointProbeWorker(probe);
@@ -4406,7 +4425,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   ): void {
     const orderedSurfaces = [...this.surfaces.values()]
       .filter((surface) =>
-        this.hasAcceptedSurfaceTopology(surface) ||
+        this.hasVisibleAcceptedSurfaceTopology(surface) ||
         surface === options.includePairingSurface ||
         (options.includePairingSurfaces === true && this.shouldReserveWindowLabel(surface))
       )
@@ -4484,7 +4503,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private shouldReserveWindowLabel(surface: ManagedSurface): boolean {
-    return this.hasAcceptedSurfaceTopology(surface) ||
+    return this.hasVisibleAcceptedSurfaceTopology(surface) ||
       (
         (surface.client?.isOpen() ?? false) &&
         surface.unreachableFailures === 0 &&
@@ -6223,22 +6242,50 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private canonicalVisibleSurfaces(): ManagedSurface[] {
-    return [...this.surfaces.values()].filter((surface) => this.hasAcceptedSurfaceTopology(surface));
+    return [...this.surfaces.values()].filter((surface) => this.hasVisibleAcceptedSurfaceTopology(surface));
   }
 
   private listVisibleSurfaces(): ManagedSurface[] {
     return [...this.surfaces.values()].filter((surface) => (
-      this.hasAcceptedSurfaceTopology(surface) ||
+      this.hasVisibleAcceptedSurfaceTopology(surface) ||
       this.hasVisibleConnectionDiagnostic(surface)
     ));
   }
 
   private hasVisibleConnectionDiagnostic(surface: ManagedSurface): boolean {
+    if (!this.hasCurrentDiscoveryEndpoint(surface) && !(surface.client?.isOpen() ?? false)) {
+      return false;
+    }
     if (surface.remotePaired && !this.isKnownSelfOwnedSurface(surface)) {
       return false;
     }
     const diagnostics = this.surfaceConnectionDiagnostics(surface);
     return diagnostics.circuitOpen || diagnostics.givenUp;
+  }
+
+  private hasVisibleAcceptedSurfaceTopology(surface: ManagedSurface): boolean {
+    if (!this.hasAcceptedSurfaceTopology(surface)) {
+      return false;
+    }
+    if (surface.client?.isOpen() ?? false) {
+      return true;
+    }
+    if (this.hasCurrentDiscoveryEndpoint(surface)) {
+      return true;
+    }
+    const diagnostics = this.surfaceConnectionDiagnostics(surface);
+    return !diagnostics.circuitOpen &&
+      !diagnostics.givenUp &&
+      surface.connectionState !== "unreachable";
+  }
+
+  private hasCurrentDiscoveryEndpoint(surface: ManagedSurface): boolean {
+    const endpointKey = endpointProbeKey(surface.endpoint);
+    return this.dedupeDiscoveryEndpoints(this.discovery.getSnapshot()).some((endpoint) =>
+      endpoint.endpointId === surface.endpointId ||
+      buildWsUrl(endpoint) === buildWsUrl(surface.endpoint) ||
+      endpointProbeKey(endpoint) === endpointKey
+    );
   }
 
   private hasAcceptedSurfaceTopology(surface: ManagedSurface): boolean {
@@ -6289,6 +6336,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
+  private pruneStaleAcceptedSurfaces(reason: string): void {
+    for (const surface of [...this.surfaces.values()]) {
+      if (!this.hasAcceptedSurfaceTopology(surface) || this.hasVisibleAcceptedSurfaceTopology(surface)) {
+        continue;
+      }
+      this.logger.info?.(
+        runtimeDiagnostic("stale_accepted_surface_removed", {
+          reason,
+          surface_id: surface.surfaceId,
+        }),
+      );
+      this.removeClosedSurface(surface.surfaceId, "discovery_endpoint_absent");
+    }
+  }
+
   private assertCanonicalSurfaceRegistry(reason: string): void {
     for (const [surfaceId, surface] of this.surfaces) {
       if (isProvisionalSurfaceId(surface.surfaceId) || surface.surfaceId !== surfaceId) {
@@ -6307,6 +6369,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private buildScreenSummaries(): SurfAceScreenSummary[] {
     this.assertCanonicalSurfaceRegistry("screen summary");
     this.pruneUnownedDisconnectedGhostSurfaces("screen summary");
+    this.pruneStaleAcceptedSurfaces("screen summary");
     this.repairLiveWindowLabelInvariant("screen summary");
     this.repairLivePaneLabelInvariant("screen summary");
     return this.listVisibleSurfaces()
@@ -7282,7 +7345,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!surface || isProvisionalSurfaceId(surface.surfaceId)) {
       throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
     }
-    if (!this.hasAcceptedSurfaceTopology(surface)) {
+    if (this.hasAcceptedSurfaceTopology(surface) && !this.hasVisibleAcceptedSurfaceTopology(surface)) {
+      this.pruneStaleAcceptedSurfaces("tool pane resolution");
+      throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
+    }
+    if (!this.hasVisibleAcceptedSurfaceTopology(surface)) {
       throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
     }
     const pane = this.visiblePanes(surface).find((candidate) => candidate.paneId === paneId);
@@ -7314,6 +7381,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.removeManagedSurfaceFromRegistries(candidate);
       }
     }
+    const matchingSurfaces = [...this.surfaces.values()].filter((candidate) =>
+      candidate.endpointId === endpoint.endpointId ||
+      buildWsUrl(candidate.endpoint) === buildWsUrl(endpoint) ||
+      endpointProbeKey(candidate.endpoint) === endpointKey
+    );
     for (const candidate of [...this.surfaces.values()]) {
       if (
         candidate.endpointId === endpoint.endpointId ||
@@ -7324,6 +7396,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.ensureSurfaceWorker(candidate);
       }
     }
+    const ownedSurfaces = matchingSurfaces.filter((surface) => this.hasOwnedEndpointWorker(surface));
+    const openOwnedSurface = this.openAcceptedOwnedSurface(ownedSurfaces);
+    if (ownedSurfaces.length > 0) {
+      const probe = this.upsertEndpointProbe(endpoint);
+      this.suppressEndpointProbeWorker(probe, "owned surface worker active");
+      if (openOwnedSurface) {
+        this.ensureOwnedEndpointSurfacesListReconcile(probe, openOwnedSurface);
+      }
+      return;
+    }
     const probe = this.upsertEndpointProbe(endpoint);
     this.logger.debug?.(
       runtimeDiagnostic("endpoint_adopt", {
@@ -7333,6 +7415,81 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }),
     );
     this.ensureEndpointProbeWorker(probe);
+  }
+
+  private hasOwnedEndpointWorker(surface: ManagedSurface): boolean {
+    return !surface.stopRequested &&
+      surface.autoRetryEnabled &&
+      (
+        this.hasAcceptedSurfaceTopology(surface) ||
+        (surface.client?.isOpen() ?? false) ||
+        surface.workPromise !== null
+      );
+  }
+
+  private ownedSurfacesForEndpoint(endpoint: SurfAceDiscoveryEndpoint): ManagedSurface[] {
+    const endpointKey = endpointProbeKey(endpoint);
+    return [...this.surfaces.values()].filter((surface) =>
+      this.hasOwnedEndpointWorker(surface) &&
+      (
+        surface.endpointId === endpoint.endpointId ||
+        buildWsUrl(surface.endpoint) === buildWsUrl(endpoint) ||
+        endpointProbeKey(surface.endpoint) === endpointKey
+      )
+    );
+  }
+
+  private openAcceptedOwnedSurface(surfaces: ManagedSurface[]): ManagedSurface | undefined {
+    return surfaces.find((surface) =>
+      (surface.client?.isOpen() ?? false) &&
+      this.hasAcceptedSurfaceTopology(surface)
+    );
+  }
+
+  private suppressEndpointProbeWorker(probe: EndpointProbe, reason: string): void {
+    probe.stopRequested = true;
+    this.wakeEndpointProbeRetry(probe);
+    this.logger.info?.(
+      runtimeDiagnostic("endpoint_probe_suppressed", {
+        endpoint_id: probe.endpointId,
+        reason,
+      }),
+    );
+    if (probe.client) {
+      this.runBackgroundTask(
+        `close suppressed endpoint probe ${probe.endpointId}`,
+        async () => {
+          await probe.client?.close(1000, clampCloseReason("provider_shutdown"));
+        },
+      );
+    }
+  }
+
+  private ensureOwnedEndpointSurfacesListReconcile(probe: EndpointProbe, surface: ManagedSurface): void {
+    if (probe.reconcileWorkPromise) {
+      return;
+    }
+    const workPromise = this.discoverSurfaceId(surface)
+      .then((surfacesToStart) => {
+        for (const candidate of surfacesToStart) {
+          this.ensureSurfaceWorker(candidate);
+        }
+      })
+      .catch((error) => {
+        this.logger.warn?.(
+          runtimeDiagnostic("owned_endpoint_surfaces_list_unavailable", {
+            endpoint_id: surface.endpointId,
+            error: String(error),
+            surface_id: surface.surfaceId,
+          }),
+        );
+      })
+      .finally(() => {
+        if (probe.reconcileWorkPromise === workPromise) {
+          probe.reconcileWorkPromise = null;
+        }
+      });
+    probe.reconcileWorkPromise = workPromise;
   }
 
   private upsertEndpointProbe(endpoint: SurfAceDiscoveryEndpoint): EndpointProbe {
