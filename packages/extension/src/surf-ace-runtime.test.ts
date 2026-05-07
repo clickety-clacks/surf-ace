@@ -2218,6 +2218,30 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
               },
               {
                 ...activeScreen,
+                connectionDiagnostics: {
+                  circuitOpen: true,
+                  circuitState: "open",
+                  failureCount: 5,
+                  givenUp: false,
+                  openedAt: Date.now(),
+                  reason: "foreign remote-paired stale publisher",
+                  reconnectAttempt: 5,
+                },
+                connectionState: "unreachable",
+                fingerprint: "sf_foreign_remote_paired_circuit_snapshot",
+                _debug: {
+                  ...activeScreen._debug,
+                  hasPairedInGatewaySession: false,
+                  reconnectAttempt: 5,
+                  remoteListedAt: Date.now(),
+                  remotePaired: true,
+                  sessionId: null,
+                  unreachableFailures: 5,
+                  wsOpen: false,
+                },
+              },
+              {
+                ...activeScreen,
                 connectionState: "connected",
                 fingerprint: "sf_remote_paired_connected_without_local_session",
                 _debug: {
@@ -2243,6 +2267,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
                   paneLabel: 1,
                   revision: 1,
                   sessionKey: "agent:test:hidden-restart-content",
+                },
+              ],
+              sf_foreign_remote_paired_circuit_snapshot: [
+                {
+                  contentId: "ct_foreign_circuit_restart",
+                  contentType: "markdown",
+                  contentValue: "# foreign circuit restart content",
+                  historyOwnerToken: "hot_foreign_circuit_restart",
+                  paneLabel: 1,
+                  revision: 1,
+                  sessionKey: "agent:test:foreign-circuit-restart-content",
                 },
               ],
               sf_stale_unowned_snapshot: [
@@ -2273,6 +2308,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         [activeScreen.fingerprint],
       );
       assert.equal(internalRuntimeB.restartContentBySurface.has("sf_remote_paired_connected_without_local_session"), false);
+      assert.equal(internalRuntimeB.restartContentBySurface.has("sf_foreign_remote_paired_circuit_snapshot"), false);
       assert.equal(internalRuntimeB.restartContentBySurface.has("sf_stale_unowned_snapshot"), false);
     } finally {
       await runtimeB.stop();
@@ -6762,6 +6798,39 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       } finally {
         await passiveRuntime.stop();
       }
+    });
+  });
+
+  await t.test("remote-paired foreign circuit-open rows stay hidden from list exposure", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.panes.size > 0);
+
+      surface.stopRequested = true;
+      await surface.client?.close(1000, "test_foreign_preadmission_diagnostic_hidden").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      surface.stopRequested = false;
+      surface.autoRetryEnabled = true;
+      surface.client = null;
+      surface.connectedAt = null;
+      surface.connectionState = "connecting";
+      surface.hasPairedInGatewaySession = false;
+      surface.localOwnership = null;
+      surface.remotePaired = true;
+      surface.sessionId = null;
+      surface.unreachableFailures = 3;
+      surface.windowLabel = "";
+      delete internalRuntime.persistentState.selfOwnedSurfaceIds[server.surfaceId];
+      delete internalRuntime.persistentState.windowLabels[server.surfaceId];
+      internalRuntime.noteSurfaceConnectionFailure(surface, "test foreign pre-admission circuit open");
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.some((entry) => entry.fingerprint === server.surfaceId), false);
+      assert.equal(internalRuntime.surfaces.has(server.surfaceId), true);
     });
   });
 

@@ -57,7 +57,7 @@ declare module "openclaw/plugin-sdk" {
     }) => void;
     registerTool: (
       tool: ToolDefinition | ((ctx: ToolContext) => ToolDefinition),
-      opts?: { optional?: boolean },
+      opts?: { name?: string; names?: string[]; optional?: boolean },
     ) => void;
     on: (event: string, handler: (...args: unknown[]) => unknown) => void;
   };

@@ -8,6 +8,7 @@ import {
   type SurfAceAnnotationIntentTurn,
   __test,
 } from "./annotation-intent-delivery.js";
+import { surfAceToolContextFromOpenClawContext } from "./openclaw-tool-context.js";
 import { evaluateProviderHostGuard } from "./provider-host-guard.js";
 
 test("Surf Ace extension does not inject static instructions through prompt-build hooks", () => {
@@ -17,6 +18,36 @@ test("Surf Ace extension does not inject static instructions through prompt-buil
   assert.equal(indexSource.includes("before_prompt_build"), false);
   assert.equal(instructionSource.includes("prependContext"), false);
   assert.equal(instructionSource.includes("prependSystemContext"), false);
+});
+
+test("Surf Ace plugin tool registration preserves OpenClaw session provenance", () => {
+  assert.deepEqual(
+    surfAceToolContextFromOpenClawContext({
+      agentId: "agent-1",
+      displayName: "Session One",
+      pushedBy: {
+        displayName: "Nested Agent",
+        sessionKey: "agent:test:nested",
+      },
+      sessionDisplayName: "Session Display",
+      sessionKey: "agent:test:session",
+      streamLabel: "soak",
+    }),
+    {
+      agentId: "agent-1",
+      displayName: "Session One",
+      provenance: undefined,
+      pushedBy: {
+        displayName: "Nested Agent",
+        sessionKey: "agent:test:nested",
+      },
+      source: "openclaw-plugin",
+      sourceProvenance: undefined,
+      sessionDisplayName: "Session Display",
+      sessionKey: "agent:test:session",
+      streamLabel: "soak",
+    },
+  );
 });
 
 test("Surf Ace provider host guard allows TARS aliases", () => {

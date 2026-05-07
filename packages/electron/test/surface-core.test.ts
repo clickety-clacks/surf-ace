@@ -1261,6 +1261,31 @@ test("surface core accepts provider window labels beyond zz", () => {
   assert.equal(windowState.windowLabel, "aaa");
 });
 
+test("surface core lets fresh provider bootstrap replace stale local window labels", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 7,
+    initialPaneLabel: 7,
+    windowLabel: "a",
+  });
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 7,
+    initialPaneLabel: 7,
+    windowLabel: "b",
+  });
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(windowState.windowLabel, "b");
+  assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
+});
+
 test("surface core rejects topology.apply window label overrides after bootstrap", () => {
   const core = new SurfaceCore({
     persistentState: {

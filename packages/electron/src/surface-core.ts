@@ -1106,9 +1106,6 @@ export class SurfaceCore {
     const surface = this.getSurface(surfaceId);
     let didChange = false;
 
-    if (surface.windowLabel && surface.windowLabel !== payload.windowLabel) {
-      throw new SurfaceCoreError("invalid_payload", "pair.request windowLabel must match the extension-assigned surface identity");
-    }
     if (surface.windowLabel !== payload.windowLabel) {
       surface.windowLabel = payload.windowLabel;
       didChange = true;

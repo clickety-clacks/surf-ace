@@ -6234,6 +6234,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private hasVisibleConnectionDiagnostic(surface: ManagedSurface): boolean {
+    if (surface.remotePaired && !this.isKnownSelfOwnedSurface(surface)) {
+      return false;
+    }
     const diagnostics = this.surfaceConnectionDiagnostics(surface);
     return diagnostics.circuitOpen || diagnostics.givenUp;
   }
@@ -6647,11 +6650,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private filterPersistedVisibleScreens(screens: SurfAceScreenSummary[]): SurfAceScreenSummary[] {
     return screens.filter((screen) => {
-      return (
-        this.hasTrustedLocalOwnershipProvenanceForProvider(screen, this.persistentState.providerId) ||
-        screen.connectionDiagnostics?.circuitOpen === true ||
-        screen.connectionDiagnostics?.givenUp === true
-      );
+      const trustedSelfOwned = this.hasTrustedPersistedSelfOwnership(screen);
+      const diagnosticVisible = screen.connectionDiagnostics?.circuitOpen === true ||
+        screen.connectionDiagnostics?.givenUp === true;
+      const foreignRemotePaired = screen._debug?.remotePaired === true && !trustedSelfOwned;
+      return trustedSelfOwned || (diagnosticVisible && !foreignRemotePaired);
     });
   }
 
@@ -6768,6 +6771,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private isTrustedRestartScreen(screen: SurfAceScreenSummary): boolean {
     return this.hasTrustedLocalOwnershipProvenanceForProvider(screen, this.persistentState.providerId);
+  }
+
+  private hasTrustedPersistedSelfOwnership(screen: SurfAceScreenSummary): boolean {
+    if (this.hasTrustedLocalOwnershipProvenanceForProvider(screen, this.persistentState.providerId)) {
+      return true;
+    }
+    const ownership = this.persistentState.selfOwnedSurfaceIds?.[screen.fingerprint];
+    return Boolean(
+      ownership &&
+        !ownership.relinquishedAt &&
+        ownership.source !== "current_target_state" &&
+        this.isTrustedProviderLineageId(ownership.providerId),
+    );
   }
 
   private hasTrustedLocalOwnershipProvenanceForProvider(screen: SurfAceScreenSummary, providerId: string): boolean {

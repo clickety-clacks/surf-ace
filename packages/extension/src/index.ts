@@ -1,9 +1,10 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { deliverSettledAnnotationIntentTurn } from "./annotation-intent-delivery.js";
+import { surfAceToolContextFromOpenClawContext } from "./openclaw-tool-context.js";
 import { assertProviderHostAllowed } from "./provider-host-guard.js";
 import { createSurfAceRuntime } from "./surf-ace-runtime.js";
-import { createSurfAceTools } from "./surf-ace-tools.js";
+import { createSurfAceTools, type SurfAceToolContext } from "./surf-ace-tools.js";
 
 const plugin = {
   id: "surf-ace",
@@ -42,35 +43,31 @@ const plugin = {
     });
 
     for (const tool of createSurfAceTools(runtime)) {
-      api.registerTool((ctx) => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema,
-        execute: async (_id: string, params: unknown) => {
+      api.registerTool(
+        (context) => {
+          const toolContext = surfAceToolContextFromOpenClawContext(context);
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  await tool.execute(params as never, {
-                    agentId: ctx.agentId,
-                    displayName: ctx.displayName,
-                    provenance: ctx.provenance,
-                    pushedBy: ctx.pushedBy,
-                    source: ctx.source,
-                    sourceProvenance: ctx.sourceProvenance,
-                    sessionDisplayName: ctx.sessionDisplayName,
-                    sessionKey: ctx.sessionKey,
-                    streamLabel: ctx.streamLabel,
-                  }),
-                  null,
-                  2,
-                ),
-              },
-            ],
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.inputSchema,
+            execute: async (_id: string, params: unknown) => {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      await tool.execute(params as never, toolContext),
+                      null,
+                      2,
+                    ),
+                  },
+                ],
+              };
+            },
           };
         },
-      }));
+        { names: [tool.name] },
+      );
     }
   },
 };
@@ -103,6 +100,7 @@ export {
 } from "./surf-ace-runtime.js";
 export {
   surfAceToolNames,
+  type SurfAceToolContext,
   type SurfAceToolDefinition,
   type SurfAceToolName,
 } from "./surf-ace-tools.js";
