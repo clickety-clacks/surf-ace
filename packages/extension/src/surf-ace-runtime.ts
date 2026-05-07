@@ -1313,6 +1313,29 @@ function collapseManagedLayout(node: ManagedLayoutNode | null): ManagedLayoutNod
   };
 }
 
+function managedLayoutFromPanes(
+  panes: ManagedPane[],
+  direction: "horizontal" | "vertical" = "horizontal",
+): ManagedLayoutNode {
+  if (panes.length === 0) {
+    throw new SurfAceToolError("internal_error", "Surface layout cannot be built without panes");
+  }
+  if (panes.length === 1) {
+    return {
+      paneId: panes[0]!.paneId,
+      type: "pane",
+    };
+  }
+  return {
+    children: panes.map((pane) => ({
+      paneId: pane.paneId,
+      type: "pane",
+    })),
+    direction,
+    type: "split",
+  };
+}
+
 function integerPaneRect(rect: Rect): Rect {
   return {
     height: Math.max(0, Math.round(rect.height)),
@@ -2900,9 +2923,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     const pane = this.requirePane(surface.surfaceId, input.paneId);
-    const currentLayout = collapseManagedLayout(surface.layout);
-    const beforePaneIds = this.orderedPanes(surface).map((managedPane) => managedPane.paneId);
-    const beforeRemotePaneIds = this.orderedPanes(surface).map((managedPane) => Number(managedPane.remotePaneId));
+    const previousLayout = surface.layout;
+    const currentLayout = this.topologySeedLayout(surface);
+    const beforePaneIds = this.visiblePanes(surface).map((managedPane) => managedPane.paneId);
+    const beforeRemotePaneIds = this.visiblePanes(surface).map((managedPane) => Number(managedPane.remotePaneId));
     const direction = input.direction ?? this.defaultSplitDirection(surface, pane);
     const reservedPanes: ManagedPane[] = [];
     const additionalPaneCount = input.count - 1;
@@ -2925,14 +2949,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     try {
       await this.pushTopology(surface, { beforePaneIds, beforeRemotePaneIds, increment: true });
     } catch (error) {
-      surface.layout = currentLayout;
+      surface.layout = previousLayout;
       for (const reservedPane of reservedPanes) {
         surface.panes.delete(reservedPane.paneId);
       }
       throw error;
     }
     this.queuePersistScreenSnapshot("pane split");
-    return this.orderedPanes(surface)
+    return this.visiblePanes(surface)
       .sort((left, right) => left.paneLabel - right.paneLabel || left.paneId.localeCompare(right.paneId))
       .map((managedPane) => ({
         paneId: managedPane.paneId,
@@ -3091,8 +3115,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const previousLayout = surface.layout;
     const previousPanes = surface.panes;
-    const beforePaneIds = this.orderedPanes(surface).map((pane) => pane.paneId);
-    const beforeRemotePaneIds = this.orderedPanes(surface).map((pane) => Number(pane.remotePaneId));
+    const beforePaneIds = this.visiblePanes(surface).map((pane) => pane.paneId);
+    const beforeRemotePaneIds = this.visiblePanes(surface).map((pane) => Number(pane.remotePaneId));
     surface.layout = collapseManagedLayout(nextLayout.layout);
     surface.panes = nextPanes;
     try {
@@ -3109,7 +3133,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       createdPaneIds,
       destroyedPaneIds,
       ok: true,
-      panes: this.orderedPanes(surface).map((pane) => ({
+      panes: this.visiblePanes(surface).map((pane) => ({
         activeContentId: pane.activeContentId,
         contentType: pane.contentType,
         name: pane.name,
@@ -4734,6 +4758,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     ];
   }
 
+  private visiblePanes(surface: ManagedSurface): ManagedPane[] {
+    return surface.topologyRevision > 0 ? this.layoutPanes(surface) : this.orderedPanes(surface);
+  }
+
+  private topologySeedLayout(surface: ManagedSurface): ManagedLayoutNode {
+    if (surface.topologyRevision > 0) {
+      return collapseManagedLayout(surface.layout);
+    }
+    return managedLayoutFromPanes(this.orderedPanes(surface));
+  }
+
   private currentTargetRecord(surface: ManagedSurface, pane: ManagedPane): PaneTargetRecord | null {
     if (!pane.currentTargetId) {
       return null;
@@ -5095,7 +5130,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     surface.topologyApplyInFlight = true;
     try {
-    const orderedBeforePanes = this.orderedPanes(surface);
+    const orderedBeforePanes = this.visiblePanes(surface);
     const beforePaneIds = options.beforePaneIds ?? orderedBeforePanes.map((pane) => pane.paneId);
     const beforeRemotePaneIds = options.beforeRemotePaneIds ?? orderedBeforePanes.map((pane) => Number(pane.remotePaneId));
     const layout = collapseManagedLayout(surface.layout);
@@ -5108,7 +5143,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       op: "topology.apply",
       payload: {
         layout: remoteLayoutToTopologyLayout(surface, layout),
-        panes: this.orderedPanes(surface).map((pane) => ({
+        panes: this.visiblePanes(surface).map((pane) => ({
           name: pane.name,
           paneId: pane.remotePaneId,
           paneLabel: pane.paneLabel,
@@ -5168,8 +5203,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
       }
     }
-    const afterPaneIds = this.orderedPanes(surface).map((pane) => pane.paneId);
-    const afterRemotePaneIds = this.orderedPanes(surface).map((pane) => Number(pane.remotePaneId));
+    const afterPaneIds = this.visiblePanes(surface).map((pane) => pane.paneId);
+    const afterRemotePaneIds = this.visiblePanes(surface).map((pane) => Number(pane.remotePaneId));
     const beforePaneSet = new Set(beforePaneIds);
     const afterPaneSet = new Set(afterPaneIds);
     this.logger.info?.(
@@ -5196,7 +5231,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async repushSurfaceContent(surface: ManagedSurface): Promise<void> {
-    for (const pane of this.orderedPanes(surface)) {
+    for (const pane of this.visiblePanes(surface)) {
       if (!isBoundRemotePaneId(pane.remotePaneId)) {
         continue;
       }
@@ -5761,7 +5796,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     };
 
     for (const surface of orderedSurfaces) {
-      const orderedPanes = this.orderedPanes(surface);
+      const orderedPanes = this.visiblePanes(surface);
       for (const pane of orderedPanes) {
         const storageKey = this.livePaneLabelStorageKey(surface, pane);
         if (storageKey) {
@@ -6298,7 +6333,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       fingerprint: surface.surfaceId,
       lastSeenAt: surface.lastSeenAt,
       name: surface.name,
-      panes: exposeTopology ? this.orderedPanes(surface)
+      panes: exposeTopology ? this.visiblePanes(surface)
         .map((pane) => {
           const rect = paneRects.get(pane.paneId);
           return {
@@ -6788,7 +6823,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    const panes = this.orderedPanes(surface);
+    const panes = this.visiblePanes(surface);
     for (const entry of entries) {
       const pane =
         panes.find((candidate) => candidate.paneLabel === entry.paneLabel) ??
@@ -6845,7 +6880,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private buildContentContinuitySnapshot(): Record<string, PersistedRestartContentEntry[]> {
     const contentContinuity: Record<string, PersistedRestartContentEntry[]> = {};
     for (const surface of this.canonicalVisibleSurfaces()) {
-      const entries = this.orderedPanes(surface)
+      const entries = this.visiblePanes(surface)
         .map((pane): PersistedRestartContentEntry | null => {
           const entry = this.visibleHistoryEntry(pane);
           if (!entry) {
@@ -7234,7 +7269,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!this.hasAcceptedSurfaceTopology(surface)) {
       throw new SurfAceToolError("screen_not_found", `Unknown Surf Ace surface: ${fingerprint}`);
     }
-    const pane = surface.panes.get(paneId);
+    const pane = this.visiblePanes(surface).find((candidate) => candidate.paneId === paneId);
     if (!pane) {
       throw new SurfAceToolError(
         "invalid_operation",

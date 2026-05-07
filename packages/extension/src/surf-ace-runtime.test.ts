@@ -7811,6 +7811,55 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("orphaned non-layout panes are not exposed or targetable after split", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const visiblePaneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const sourcePane = surface.panes.get(visiblePaneIds[0]);
+      assert.ok(sourcePane);
+      const orphanPane = structuredClone(sourcePane);
+      orphanPane.paneId = internalRuntime.allocatePaneId();
+      orphanPane.remotePaneId = 9999;
+      orphanPane.paneLabel = 99;
+      orphanPane.paneLineageId = "pl_orphan_non_layout";
+      surface.panes.set(orphanPane.paneId, orphanPane);
+
+      const screens = await runtime.listScreens();
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 2]);
+      assert.equal(screens[0]?.panes.some((pane) => pane.paneId === orphanPane.paneId), false);
+
+      const contentSetCount = server.contentSetRequests.length;
+      await assert.rejects(
+        runtime.push({
+          content: "# stale pane",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: orphanPane.paneId,
+        }),
+        /Unknown Surf Ace pane/,
+      );
+      assert.equal(server.contentSetRequests.length, contentSetCount);
+
+      await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: visiblePaneIds[0],
+      });
+      assert.equal(server.topologyApplyRequests.at(-1)?.paneIds.includes(9999), false);
+    });
+  });
+
   await t.test("pair.request includes configured providerName", async () => {
     await withRuntimeHarness({
       providerName: "CLU / Surf Ace",
