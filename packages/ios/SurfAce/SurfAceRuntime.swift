@@ -1255,7 +1255,7 @@ final class SurfAceRuntime {
         if let ownershipLock {
             if takeover {
                 surfAceGatewayLog(
-                    "event=pair_request_takeover \(surfAceDiagnosticFields([("provider_id", providerId), ("surface_id", surfaceId)]))"
+                    "event=pair_request_explicit_takeover \(surfAceDiagnosticFields([("active_session", activeSession != nil), ("previous_provider_id", ownershipLock.providerId), ("previous_session_id", ownershipLock.sessionId), ("provider_id", providerId), ("same_provider", ownershipLock.providerId == providerId), ("surface_id", surfaceId)]))"
                 )
                 resumed = false
                 sessionId = randomHex(prefix: "sa", byteCount: 12)

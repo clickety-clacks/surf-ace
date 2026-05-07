@@ -301,6 +301,33 @@ test("validateEnvelopeType accepts target.apply.result responses", () => {
   assert.deepEqual(result, { ok: true });
 });
 
+test("validateEnvelopeType rejects compositor fields in target.apply result materializedState", () => {
+  const result = validateEnvelopeType("target.apply", {
+    id: "req_target",
+    ok: true,
+    op: "target.apply.result",
+    payload: {
+      appliedAt: new Date().toISOString(),
+      materializedState: {
+        nativeHost: "applied",
+        overlayRegions: "applied",
+        preflightStatusSummary: {
+          topologyPaneCount: 1,
+        },
+      },
+      paneLineageId: "pl_1",
+      requestId: "tr_1",
+      status: "applied",
+      targetEpoch: 1,
+      targetId: "tg_1",
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(result, { ok: false, reason: "unknown_property:preflightStatusSummary" });
+});
+
 test("validateEnvelopeType rejects legacy target.apply native materialization payloads", () => {
   const result = validateEnvelopeType("target.apply", {
     id: "req_target_apply",
@@ -349,6 +376,38 @@ test("validateEnvelopeType rejects legacy target.apply native materialization pa
   });
 
   assert.deepEqual(result, { ok: false, reason: "unknown_property:materialization" });
+});
+
+test("validateEnvelopeType rejects compositor fields in target.apply targetPayload", () => {
+  const result = validateEnvelopeType("target.apply", {
+    id: "req_target_apply",
+    op: "target.apply",
+    payload: {
+      ownershipEpoch: 1,
+      ownershipSessionId: "sa_1",
+      paneLineageId: "pl_1",
+      requestId: "tr_1",
+      restoreReason: "initial_apply",
+      surfaceId: "sf_1",
+      targetEpoch: 1,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.terminal_app.v1"],
+        safeToLogFields: [],
+        safetyClass: "process",
+        summary: "top",
+      },
+      targetId: "tg_1",
+      targetKind: "terminal_app",
+      targetPayload: { args: [], command: "top", geometryRevision: 1 },
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "forbidden_property:geometryRevision" });
 });
 
 test("validateEnvelopeType accepts markdown content set requests", () => {

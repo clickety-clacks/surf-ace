@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import type { NativePaneMaterialization } from "../../protocol/src/index.js";
 import {
   compositorNativePaneStatusSummary,
   compositorFailureMessage,
@@ -19,6 +18,7 @@ import {
   resolveCompositorControlSocketPath,
   resolvedOverlayRegionsForCompositor,
   sendCompositorControl,
+  type NativePaneMaterialization,
   validatePaneHandleOverlayAlignment,
   validateMaterializationAgainstCompositorStatus,
 } from "../src/native-pane-bridge.js";

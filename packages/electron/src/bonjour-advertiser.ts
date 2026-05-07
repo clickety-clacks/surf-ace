@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import os from "node:os";
 
 import { Bonjour, type Service } from "bonjour-service";
@@ -106,6 +106,7 @@ export class BonjourAdvertiser {
   private readonly useIsolatedPublisherByDefault: boolean;
   private destroyed = false;
   private isolatedPublisher: ChildProcess | null = null;
+  private isolatedPublisherGeneration = 0;
   private republishAttempts = 0;
   private publishing = false;
   private restarting = false;
@@ -175,6 +176,7 @@ export class BonjourAdvertiser {
       }),
     );
     this.clearVisibilityTimer();
+    this.isolatedPublisherGeneration += 1;
     this.stopIsolatedPublisher();
     await Promise.all(this.bonjourBindings.map((binding) => this.shutdownBonjourBinding(binding)));
     this.services = [];
@@ -519,7 +521,12 @@ export class BonjourAdvertiser {
   }
 
   private async publishWithIsolatedPublisher(name: string): Promise<void> {
+    const generation = ++this.isolatedPublisherGeneration;
     this.stopIsolatedPublisher();
+    await this.cleanupOrphanedIsolatedPublishers(name);
+    if (this.destroyed || generation !== this.isolatedPublisherGeneration) {
+      return;
+    }
     this.serviceName = name;
     const txt = this.txtProvider();
     const txtArgs = Object.entries(txt).map(([k, v]) => `${k}=${v}`);
@@ -574,6 +581,46 @@ export class BonjourAdvertiser {
       }),
     );
     child.kill();
+  }
+
+  private async cleanupOrphanedIsolatedPublishers(name: string): Promise<void> {
+    if (process.platform !== "darwin") {
+      return;
+    }
+    const commandPrefix = `dns-sd -R ${name} _surf-ace._tcp local. ${this.port}`;
+    const currentPid = this.isolatedPublisher?.pid ?? null;
+    const rows = await new Promise<string>((resolve) => {
+      try {
+        execFile("ps", ["-axo", "pid=,ppid=,command="], (error, stdout) => {
+          resolve(error ? "" : stdout);
+        });
+      } catch {
+        resolve("");
+      }
+    });
+    for (const row of rows.split(/\r?\n/)) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(row);
+      if (!match) {
+        continue;
+      }
+      const pid = Number(match[1]);
+      const parentPid = Number(match[2]);
+      const command = match[3] ?? "";
+      if (pid === currentPid || parentPid !== 1 || !command.includes(commandPrefix)) {
+        continue;
+      }
+      try {
+        process.kill(pid, "TERM");
+        console.warn(
+          bonjourDiagnostic("publish_isolated_orphan_killed", {
+            name,
+            pid,
+          }),
+        );
+      } catch {
+        // The orphan may exit between ps and kill.
+      }
+    }
   }
 }
 

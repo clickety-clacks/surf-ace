@@ -48,6 +48,27 @@ export type BrowserUrlTargetPayloadV1 = {
   url: string;
 };
 
+export type BrowserUrlMaterializedState = {
+  navigationStatus: "started_unverified" | "loaded" | "failed";
+  replaySemantics: "navigate";
+  url: string;
+};
+
+export type NativeHostMaterializedState = {
+  nativeHost: "applied" | "not_applied" | "released_after_failure";
+  overlayRegions: "applied" | "not_applied" | "not_requested";
+};
+
+export type ContentMaterializedState = {
+  contentType: ContentType;
+  paneId: PaneId;
+};
+
+export type TargetMaterializedState =
+  | BrowserUrlMaterializedState
+  | NativeHostMaterializedState
+  | ContentMaterializedState;
+
 export type RestorePolicy = "auto" | "confirm" | "manual" | "never";
 
 export type ApplyEvidence = {
@@ -58,7 +79,7 @@ export type ApplyEvidence = {
   status: "applied" | "rejected" | "failed";
   errorCode?: TargetErrorCode;
   message?: string;
-  materializedState?: Record<string, unknown>;
+  materializedState?: TargetMaterializedState;
   appliedAt: string;
 };
 
@@ -88,44 +109,6 @@ export type TargetApplyReason =
   | "manual_restore"
   | "confirmed_restore";
 
-export type NativePaneMaterializationPane = {
-  id: string;
-  content_id?: string;
-  binding_id?: string;
-  revision: Revision;
-  geometry: NativePaneGeometry;
-  target?: "terminal";
-  process?: {
-    command: string;
-    args: string[];
-    cwd?: string;
-    env?: Record<string, string>;
-  };
-};
-
-export type NativePaneOverlaySet = {
-  surfaceId: SurfaceId;
-  windowId: string;
-  revision: Revision;
-  topologyEpoch: TopologyRevision;
-  coordinateSpace: "surface_logical";
-  regions: Array<{
-    regionId: string;
-    paneId: string;
-    paneInstanceId: string;
-    kind: "native_pane";
-    rect: Rect;
-    zIndex: number;
-    captures: string[];
-  }>;
-};
-
-export type NativePaneMaterialization = {
-  op: "native_pane.host" | "native_pane.update";
-  panes: NativePaneMaterializationPane[];
-  overlaySet?: NativePaneOverlaySet;
-};
-
 // `surf_ace_list` exposes provider-side connectivity with this enum in DESIGN.md.
 //
 // KNOWN BUG (iOS client): The connection status indicator (green bar) on
@@ -149,14 +132,6 @@ export type Rect = {
   y: number;
   width: number;
   height: number;
-};
-
-export type NativePaneGeometry = Rect & {
-  coordinateSpace: "compositor_logical";
-  paneInstanceId: string;
-  topologyEpoch: TopologyRevision;
-  surfaceEpoch: string;
-  geometryRevision: Revision;
 };
 
 export type Viewport = {

@@ -4,18 +4,21 @@ import path from "node:path";
 
 import { app, BrowserWindow, Menu, ipcMain, screen, type WebContents } from "electron";
 
-import type { ContentSetRequest, NativePaneMaterialization, Stroke } from "../../protocol/src/index.js";
+import type { ContentSetRequest, Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import {
   type CompositorControlRequest,
   type CompositorControlResponse,
+  type NativePaneMaterialization,
   type CompositorOverlayRegion,
   type ResolvedNativePaneGeometry,
   compositorFailureMessage,
   isOverlayNativePaneLivenessFailure,
   nativePaneInstanceIdsForCompositor,
+  nativePaneReleaseRequestForCompositor,
   overlayRegionsClearRequestForCompositor,
+  overlayRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
   resolveCompositorControlSocketPath,
   resolvedOverlayRegionsForCompositor,
@@ -60,6 +63,17 @@ const overlayDiagnostics = new Map<string, Record<string, unknown>>();
 const overlayForwardState = new Map<string, { revision: number; topologyEpoch: string | null }>();
 const latestRendererOverlayPayloads = new Map<string, Record<string, unknown>>();
 const nativePaneInstances = new Map<string, Map<string, ResolvedNativePaneGeometry>>();
+const rendererOverlaySnapshots = new Map<string, {
+  regions: CompositorOverlayRegion[];
+  revision: number;
+  topologyEpoch: string;
+  updateReason?: string;
+}>();
+const nativeOverlaySnapshots = new Map<string, {
+  regions: CompositorOverlayRegion[];
+  revision: number;
+  topologyEpoch: string;
+}>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let core: SurfaceCore;
@@ -104,6 +118,11 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
         recordNativePaneInstances(surfaceId, materialization);
         broadcastSurfaceState(surfaceId);
       },
+	      onNativeReleased: async (surfaceId, paneIds) => {
+	        forgetNativePaneInstances(surfaceId, paneIds);
+	        await syncNativeOverlayRegionsAfterRelease(surfaceId, "native release");
+	        broadcastSurfaceState(surfaceId);
+	      },
       port,
       viewport: () => displayViewport(),
     });
@@ -158,10 +177,17 @@ function syncWindowViewport(surfaceId: string, window: BrowserWindow): void {
   }
   const bounds = window.getContentBounds();
   const display = screen.getDisplayMatching(bounds);
-  core.setViewport(surfaceId, {
+  const viewport = {
     height: Math.max(1, Math.floor(bounds.height)),
     scale: display.scaleFactor || 1,
     width: Math.max(1, Math.floor(bounds.width)),
+  };
+  void server.setViewport(surfaceId, viewport).then((applied) => {
+    if (!applied) {
+      console.warn("[surf-ace] viewport resize native pane geometry update failed; preserving prior viewport");
+    }
+  }).catch((error) => {
+    console.warn(`[surf-ace] viewport resize failed: ${error}`);
   });
 }
 
@@ -227,7 +253,11 @@ async function sendCompositorOverlayRequest(request: CompositorControlRequest): 
   if (!socketPath) {
     return;
   }
-  await sendCompositorControl(socketPath, request);
+  const response = await sendCompositorControl(socketPath, request);
+  const failure = compositorFailureMessage(response);
+  if (failure) {
+    throw new Error(failure);
+  }
 }
 
 function recordNativePaneInstances(surfaceId: string, materialization: NativePaneMaterialization): void {
@@ -257,6 +287,99 @@ function recordNativePaneInstances(surfaceId: string, materialization: NativePan
     void forwardRendererOverlayRegions(surfaceId, latestOverlayPayload).catch((error) => {
       console.warn(`[surf-ace] overlay region replay after native pane materialization failed: ${error}`);
     });
+  }
+  const overlayRequest = overlayRequestForCompositor(materialization);
+  if (overlayRequest?.type === "overlay_regions.set") {
+    const nativePaneIds = new Set(materialization.panes.map((pane) => String(pane.id)));
+    const previous = nativeOverlaySnapshots.get(surfaceId)?.regions ?? [];
+    nativeOverlaySnapshots.set(surfaceId, {
+      regions: [
+        ...previous.filter((region) => !nativePaneIds.has(String(region.paneId))),
+        ...structuredClone(overlayRequest.regions) as CompositorOverlayRegion[],
+      ],
+      revision: Number(overlayRequest.revision ?? 0),
+      topologyEpoch: String(overlayRequest.topologyEpoch ?? "0"),
+    });
+  }
+}
+
+function forgetNativePaneInstances(surfaceId: string, paneIds: string[]): void {
+  const current = nativePaneInstances.get(surfaceId);
+  if (!current) {
+    return;
+  }
+  const releasedPaneIds = new Set(paneIds.map(String));
+  for (const paneId of paneIds) {
+    current.delete(String(paneId));
+  }
+  for (const snapshots of [rendererOverlaySnapshots, nativeOverlaySnapshots]) {
+    const snapshot = snapshots.get(surfaceId);
+    if (!snapshot) {
+      continue;
+    }
+    snapshots.set(surfaceId, {
+      ...snapshot,
+      regions: snapshot.regions.filter((region) => !releasedPaneIds.has(String(region.paneId))),
+    });
+  }
+  if (current.size === 0) {
+    nativePaneInstances.delete(surfaceId);
+    nativeOverlaySnapshots.delete(surfaceId);
+    return;
+  }
+  nativePaneInstances.set(surfaceId, current);
+}
+
+async function syncNativeOverlayRegionsAfterRelease(surfaceId: string, operation: string): Promise<void> {
+  const current = nativePaneInstances.get(surfaceId);
+  const latestOverlay = rendererOverlaySnapshots.get(surfaceId) ?? nativeOverlaySnapshots.get(surfaceId);
+  const overlayResolution = latestOverlay ? compositorOverlayRegions(surfaceId, latestOverlay.regions) : null;
+  const request = current && current.size > 0 && latestOverlay
+    ? overlayRegionsSetRequestForCompositor({
+      regions: overlayResolution?.resolved ?? [],
+      revision: latestOverlay.revision,
+      surfaceId,
+      topologyEpoch: latestOverlay.topologyEpoch,
+      updateReason: "native_detach",
+      windowId: surfaceId,
+    })
+    : overlayRegionsClearRequestForCompositor(surfaceId);
+  await sendCompositorOverlayRequest(request);
+}
+
+async function releaseNativePaneInstancesForSurface(surfaceId: string, operation: string): Promise<void> {
+  const instances = nativePaneInstances.get(surfaceId);
+  const paneIds = [...(instances?.keys() ?? [])];
+  if (paneIds.length === 0) {
+    await sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId));
+    nativeOverlaySnapshots.delete(surfaceId);
+    rendererOverlaySnapshots.delete(surfaceId);
+    return;
+  }
+  const socketPath = resolveCompositorControlSocketPath();
+  if (!socketPath) {
+    throw new Error(`${operation} cannot release live native-hosted panes without compositor control`);
+  }
+  const releaseResponse = await sendCompositorControl(socketPath, nativePaneReleaseRequestForCompositor(paneIds));
+  const releaseFailure = compositorFailureMessage(releaseResponse);
+  if (releaseFailure) {
+    throw new Error(releaseFailure);
+  }
+  core.markNativePaneReleased(surfaceId, paneIds.map((paneId) => Number(paneId)));
+  forgetNativePaneInstances(surfaceId, paneIds);
+  await sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId));
+  nativeOverlaySnapshots.delete(surfaceId);
+  rendererOverlaySnapshots.delete(surfaceId);
+}
+
+async function navigateHistoryAfterNativeRelease(
+  surfaceId: string,
+  paneId: number,
+  direction: "back" | "forward",
+): Promise<void> {
+  const applied = await server.navigateHistoryAfterNativeRelease(surfaceId, paneId, direction);
+  if (!applied) {
+    throw new Error("native pane release failed before history navigation");
   }
 }
 
@@ -292,6 +415,12 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
   const rendererTopologyEpoch = payload.topologyEpoch == null ? "0" : String(payload.topologyEpoch);
   const requestedRevision = Number(payload.revision ?? 0);
   const previousForward = overlayForwardState.get(surfaceId);
+  rendererOverlaySnapshots.set(surfaceId, {
+    regions: structuredClone(regions) as CompositorOverlayRegion[],
+    revision: requestedRevision,
+    topologyEpoch: rendererTopologyEpoch,
+    ...(typeof payload.updateReason === "string" ? { updateReason: payload.updateReason } : {}),
+  });
   const currentDiagnostic = overlayDiagnostics.get(surfaceId) ?? {};
   const diagnostic: Record<string, unknown> = {
     ...(currentDiagnostic.browserUrlDiagnostics ? { browserUrlDiagnostics: currentDiagnostic.browserUrlDiagnostics } : {}),
@@ -504,11 +633,15 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
       return;
     }
     if (input.meta && input.key === "[") {
-      core.navigateHistory(surfaceId, activePaneId, "back");
+      void navigateHistoryAfterNativeRelease(surfaceId, activePaneId, "back").catch((error) => {
+        console.warn(`[surf-ace] history navigation failed: ${error}`);
+      });
       return;
     }
     if (input.meta && input.key === "]") {
-      core.navigateHistory(surfaceId, activePaneId, "forward");
+      void navigateHistoryAfterNativeRelease(surfaceId, activePaneId, "forward").catch((error) => {
+        console.warn(`[surf-ace] history navigation failed: ${error}`);
+      });
     }
   });
 }
@@ -566,14 +699,21 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     windows.delete(surfaceId);
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
-    void sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId)).catch((error) => {
-      console.warn(`[surf-ace] compositor overlay region clear failed: ${error}`);
-    });
     if (!isQuitting) {
-      void server.broadcastSurfaceRemoved(surfaceId);
-      server.disconnectSurface(surfaceId, "provider_shutdown");
-      core.removeSurface(surfaceId);
-      void persistState();
+      void (async () => {
+        try {
+          await releaseNativePaneInstancesForSurface(surfaceId, "window close");
+        } catch (error) {
+          console.warn(`[surf-ace] compositor native pane release failed on window close: ${error}`);
+          await sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId)).catch((overlayError) => {
+            console.warn(`[surf-ace] compositor overlay region clear failed: ${overlayError}`);
+          });
+        }
+        void server.broadcastSurfaceRemoved(surfaceId);
+        server.disconnectSurface(surfaceId, "provider_shutdown");
+        core.removeSurface(surfaceId);
+        void persistState();
+      })();
     }
   });
 
@@ -795,11 +935,14 @@ function installIpc(): void {
         }
         break;
       case "history":
-        try {
-          core.navigateHistory(surfaceId, paneId, payload.direction === "forward" ? "forward" : "back");
-        } catch {
-          // Renderer commands can race a pane reset during reconnect.
-        }
+        void (async () => {
+          try {
+            const direction = payload.direction === "forward" ? "forward" : "back";
+            await navigateHistoryAfterNativeRelease(surfaceId, paneId, direction);
+          } catch {
+            // Renderer commands can race a pane reset during reconnect.
+          }
+        })();
         break;
       case "reload":
         void reloadPaneFromSource(surfaceId, paneId).catch((error) => {
@@ -865,7 +1008,10 @@ async function boot(): Promise<void> {
   identityFingerprint = identity.fingerprintPrefix;
 
   core = new SurfaceCore({ persistentState });
-  const primarySurface = core.ensurePrimarySurface(endpointName(), displayViewport());
+  const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
+  const primarySurface = restoredSurfaces.find((surface) => surface.surfaceId === persistentState?.primarySurfaceId)
+    ?? restoredSurfaces[0]
+    ?? core.ensurePrimarySurface(endpointName(), displayViewport());
 
   const serverStart = await createAndStartServer(core);
   server = serverStart.server;
@@ -889,7 +1035,13 @@ async function boot(): Promise<void> {
     advertiser.start();
   }
 
-  await createWindowForSurface(primarySurface.surfaceId);
+  const surfacesToOpen = core.listSurfaces();
+  for (const surface of surfacesToOpen) {
+    await createWindowForSurface(surface.surfaceId);
+  }
+  if (surfacesToOpen.length === 0) {
+    await createWindowForSurface(primarySurface.surfaceId);
+  }
 }
 
 if (!singleInstanceLock) {
@@ -914,10 +1066,8 @@ if (!singleInstanceLock) {
   app.on("before-quit", async () => {
     isQuitting = true;
     await Promise.allSettled(
-      [...windows.keys()].map((surfaceId) =>
-        sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId))),
+      [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
     );
-    advertiser?.refresh();
     await advertiser?.stop();
     await server.stop();
   });

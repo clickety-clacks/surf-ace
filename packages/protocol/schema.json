@@ -275,6 +275,66 @@
         }
       }
     },
+    "TargetPayload": {
+      "not": {
+        "anyOf": [
+          { "required": ["materialization"] },
+          { "required": ["hostRequest"] },
+          { "required": ["hostResponse"] },
+          { "required": ["preflightStatus"] },
+          { "required": ["preflightStatusSummary"] },
+          { "required": ["overlayRequest"] },
+          { "required": ["overlayResponse"] },
+          { "required": ["coordinateSpace"] },
+          { "required": ["paneInstanceId"] },
+          { "required": ["topologyEpoch"] },
+          { "required": ["surfaceEpoch"] },
+          { "required": ["geometryRevision"] },
+          { "required": ["x"] },
+          { "required": ["y"] },
+          { "required": ["w"] },
+          { "required": ["h"] },
+          { "required": ["width"] },
+          { "required": ["height"] }
+        ]
+      }
+    },
+    "TargetMaterializedState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["navigationStatus", "replaySemantics", "url"],
+          "properties": {
+            "navigationStatus": {
+              "type": "string",
+              "enum": ["started_unverified", "loaded", "failed"]
+            },
+            "replaySemantics": {
+              "const": "navigate"
+            },
+            "url": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nativeHost", "overlayRegions"],
+          "properties": {
+            "nativeHost": {
+              "type": "string",
+              "enum": ["applied", "not_applied", "released_after_failure"]
+            },
+            "overlayRegions": {
+              "type": "string",
+              "enum": ["applied", "not_applied", "not_requested"]
+            }
+          }
+        }
+      ]
+    },
     "PusherProvenance": {
       "type": "object",
       "additionalProperties": false,
@@ -454,32 +514,6 @@
         }
       }
     },
-    "NativePaneGeometry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "x",
-        "y",
-        "width",
-        "height",
-        "coordinateSpace",
-        "paneInstanceId",
-        "topologyEpoch",
-        "surfaceEpoch",
-        "geometryRevision"
-      ],
-      "properties": {
-        "x": { "type": "number" },
-        "y": { "type": "number" },
-        "width": { "type": "number", "minimum": 0 },
-        "height": { "type": "number", "minimum": 0 },
-        "coordinateSpace": { "const": "compositor_logical" },
-        "paneInstanceId": { "type": "string", "minLength": 1 },
-        "topologyEpoch": { "$ref": "#/$defs/TopologyRevision" },
-        "surfaceEpoch": { "type": "string", "minLength": 1 },
-        "geometryRevision": { "$ref": "#/$defs/Revision" }
-      }
-    },
     "Insets": {
       "type": "object",
       "additionalProperties": false,
@@ -532,168 +566,6 @@
         "splitSpacingInsets": { "$ref": "#/$defs/Insets" },
         "safeAreaInsets": { "$ref": "#/$defs/Insets" },
         "scale": { "type": "number" }
-      }
-    },
-    "NativePaneMaterializationPane": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "revision",
-        "geometry"
-      ],
-      "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "content_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "binding_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "revision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "geometry": {
-          "$ref": "#/$defs/NativePaneGeometry"
-        },
-        "target": {
-          "const": "terminal"
-        },
-        "process": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "command",
-            "args"
-          ],
-          "properties": {
-            "command": {
-              "type": "string"
-            },
-            "args": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "cwd": {
-              "type": "string"
-            },
-            "env": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              }
-            }
-          }
-        }
-      }
-    },
-    "NativePaneOverlaySet": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "surfaceId",
-        "windowId",
-        "revision",
-        "topologyEpoch",
-        "coordinateSpace",
-        "regions"
-      ],
-      "properties": {
-        "surfaceId": {
-          "$ref": "#/$defs/SurfaceId"
-        },
-        "windowId": {
-          "type": "string"
-        },
-        "revision": {
-          "$ref": "#/$defs/Revision"
-        },
-        "topologyEpoch": {
-          "$ref": "#/$defs/TopologyRevision"
-        },
-        "coordinateSpace": {
-          "const": "surface_logical"
-        },
-        "regions": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "regionId",
-              "paneId",
-              "paneInstanceId",
-              "kind",
-              "rect",
-              "zIndex",
-              "captures"
-            ],
-            "properties": {
-              "regionId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "paneId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "paneInstanceId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "kind": {
-                "const": "native_pane"
-              },
-              "rect": {
-                "$ref": "#/$defs/Rect"
-              },
-              "zIndex": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "captures": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "NativePaneMaterialization": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "op",
-        "panes"
-      ],
-      "properties": {
-        "op": {
-          "type": "string",
-          "enum": [
-            "native_pane.host",
-            "native_pane.update"
-          ]
-        },
-        "panes": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/NativePaneMaterializationPane"
-          }
-        },
-        "overlaySet": {
-          "$ref": "#/$defs/NativePaneOverlaySet"
-        }
       }
     },
     "Viewport": {
@@ -2085,7 +1957,30 @@
             "targetHeader": {
               "$ref": "#/$defs/TargetHeader"
             },
-            "targetPayload": {},
+            "targetPayload": {
+              "not": {
+                "anyOf": [
+                  { "required": ["materialization"] },
+                  { "required": ["hostRequest"] },
+                  { "required": ["hostResponse"] },
+                  { "required": ["preflightStatus"] },
+                  { "required": ["preflightStatusSummary"] },
+                  { "required": ["overlayRequest"] },
+                  { "required": ["overlayResponse"] },
+                  { "required": ["coordinateSpace"] },
+                  { "required": ["paneInstanceId"] },
+                  { "required": ["topologyEpoch"] },
+                  { "required": ["surfaceEpoch"] },
+                  { "required": ["geometryRevision"] },
+                  { "required": ["x"] },
+                  { "required": ["y"] },
+                  { "required": ["w"] },
+                  { "required": ["h"] },
+                  { "required": ["width"] },
+                  { "required": ["height"] }
+                ]
+              }
+            },
             "display": {
               "$ref": "#/$defs/ContentDisplay"
             },
@@ -2169,7 +2064,31 @@
               "type": "string"
             },
             "materializedState": {
-              "type": "object"
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "navigationStatus": {
+                  "type": "string"
+                },
+                "replaySemantics": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "nativeHost": {
+                  "type": "string"
+                },
+                "overlayRegions": {
+                  "type": "string"
+                },
+                "contentType": {
+                  "type": "string"
+                },
+                "paneId": {
+                  "type": "integer"
+                }
+              }
             },
             "appliedAt": {
               "type": "string",
@@ -3932,7 +3851,30 @@
             "targetHeader": {
               "$ref": "#/$defs/TargetHeader"
             },
-            "targetPayload": {},
+            "targetPayload": {
+              "not": {
+                "anyOf": [
+                  { "required": ["materialization"] },
+                  { "required": ["hostRequest"] },
+                  { "required": ["hostResponse"] },
+                  { "required": ["preflightStatus"] },
+                  { "required": ["preflightStatusSummary"] },
+                  { "required": ["overlayRequest"] },
+                  { "required": ["overlayResponse"] },
+                  { "required": ["coordinateSpace"] },
+                  { "required": ["paneInstanceId"] },
+                  { "required": ["topologyEpoch"] },
+                  { "required": ["surfaceEpoch"] },
+                  { "required": ["geometryRevision"] },
+                  { "required": ["x"] },
+                  { "required": ["y"] },
+                  { "required": ["w"] },
+                  { "required": ["h"] },
+                  { "required": ["width"] },
+                  { "required": ["height"] }
+                ]
+              }
+            },
             "launchedAt": {
               "type": "string"
             },

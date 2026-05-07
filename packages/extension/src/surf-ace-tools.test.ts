@@ -45,6 +45,10 @@ function createStubRuntime(): SurfAceRuntime {
       selection: null,
       taps: [],
     }),
+    reattemptConnections: async () => ({
+      endpointProbes: [],
+      surfaces: [],
+    }),
     relinquish: async () => ({
       relinquished: true,
     }),
@@ -82,6 +86,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_push",
     "surf_ace_clear",
     "surf_ace_relinquish",
+    "surf_ace_reattempt_connections",
     "surf_ace_split",
     "surf_ace_realize_topology",
     "surf_ace_realize_topologies",
@@ -98,7 +103,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.ok(pushTool);
   assert.deepEqual(
     Object.keys(pushTool.inputSchema.properties as Record<string, unknown>).sort(),
-    ["content", "contentType", "diagnostic", "fingerprint", "paneId"].sort(),
+    ["content", "contentType", "diagnostic", "fingerprint", "paneId", "sourcePath"].sort(),
   );
   assert.deepEqual(pushTool.inputSchema.required, ["fingerprint", "paneId", "contentType", "content"]);
   assert.equal(pushTool.inputSchema.additionalProperties, false);
@@ -191,6 +196,15 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(relinquishTool.inputSchema.required, ["fingerprint"]);
   assert.equal(relinquishTool.inputSchema.additionalProperties, false);
+
+  const reattemptTool = tools.find((tool) => tool.name === "surf_ace_reattempt_connections");
+  assert.ok(reattemptTool);
+  assert.deepEqual(
+    Object.keys(reattemptTool.inputSchema.properties as Record<string, unknown>).sort(),
+    ["fingerprint"].sort(),
+  );
+  assert.deepEqual(reattemptTool.inputSchema.required, undefined);
+  assert.equal(reattemptTool.inputSchema.additionalProperties, false);
 });
 
 test("surf_ace_push forwards markdown content through the first-class push path", async () => {

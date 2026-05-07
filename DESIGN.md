@@ -101,7 +101,7 @@ Before the protocol details, these terms are used consistently throughout this s
 
 **Pane** — a rendering scope nested inside a surface window. Each pane has a stable internal identity (`paneId`) and a separate stable visible identity (`paneLabel`).
 
-**Pane label** — the provider-assigned user-visible identifier for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from `paneId` and is a secondary key for the live Surf Ace topology.
+**Pane label** — the provider-assigned user-visible identifier for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from `paneId` and is a secondary key for the live Surf Ace topology. Pane labels are unique across the provider's live/admitted topology so multiple visible windows do not all reset to pane `1`.
 
 **Endpoint** — the app/device WS host:port advertised via mDNS. One endpoint may host multiple surfaces (windows).
 
@@ -172,10 +172,10 @@ Naming system:
 1. **Window labels** (a, b, c … z, aa, ab …) are assigned by the **provider/extension**, not the surface.
 2. `windowLabel` allocation is provider-owned and scoped to the live/admitted topology. It is a visible coordinate for users and diagnostics, not durable target authority. Providers may preserve labels across ordinary reconnect for the same `surfaceId`, but closed/tombstoned surfaces and newly admitted windows must be treated as fresh topology and MUST NOT be targeted by a stale window label.
 3. **Pane IDs** are assigned by the **provider/extension** and sent to the surface in topology commands. They are stable internal routing identifiers. The surface never generates pane IDs independently.
-4. **Pane labels** are assigned by the **provider/extension** per surface/window and are the user-visible secondary keys for that window. `windowLabel + paneLabel` is the visible coordinate; `paneLabel` alone is not globally unique and MUST NOT be used as durable target authority. Allocation is compact within the surface/window and provider-owned; it MUST NOT be seeded from internal `paneId`, remote/client pane ids, tool ids, or client-reported labels. Persisted duplicate or polluted labels MUST be repaired by the provider before they become observable for that surface in `surf_ace_list`, pair/bootstrap payloads, topology payloads, or persisted screen snapshots. Clients adopt the labels assigned by the provider and MUST NOT infer cross-window uniqueness.
+4. **Pane labels** are assigned by the **provider/extension** and are the user-visible secondary keys for the live/admitted topology. `windowLabel + paneLabel` is the visible coordinate; `paneLabel` alone is not durable target authority. Allocation is provider-owned and globally unique across live visible windows/surfaces; it MUST NOT be seeded from internal `paneId`, remote/client pane ids, tool ids, or client-reported labels. Persisted duplicate or polluted labels MUST be repaired by the provider before they become observable in `surf_ace_list`, pair/bootstrap payloads, topology payloads, or persisted screen snapshots. Clients adopt the labels assigned by the provider and MUST NOT reset or compact them per window.
 5. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. Pane names are optional metadata and MUST NOT replace `paneLabel` as the visible identity or addressing token.
 6. The extension is the sole authority on topology and visible labeling. It creates and splits panes by issuing commands over the wire; the surface executes and emits lifecycle events to confirm.
-7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each. Surfaces may reject malformed single-surface topology payloads that contain duplicate or invalid visible `paneLabel` values within that one payload as a secondary defensive check, but they MUST NOT attempt to enforce global pane-label uniqueness across windows/surfaces. The extension/provider MUST surface and log these rejections as topology/protocol errors with enough surface, window, session, remote pane, and pane-label context to diagnose the provider-side bug.
+7. When a pane is split, the extension specifies the new pane identities in the request: internal `paneId` plus visible `paneLabel` for each created pane. The surface creates the panes as directed and emits `event.pane_created` for each. Surfaces may reject malformed single-surface topology payloads that contain duplicate or invalid visible `paneLabel` values within that one payload as a secondary defensive check. The extension/provider enforces global pane-label uniqueness across windows/surfaces and MUST surface and log rejections as topology/protocol errors with enough surface, window, session, remote pane, and pane-label context to diagnose the provider-side bug.
 8. **Initial surface state:** A freshly launched surface starts with one window and one pane. The extension assigns the `windowLabel`, initial internal `paneId`, and initial visible `paneLabel`. CLU MUST call `surf_ace_list` before any pane-scoped operation. CLU MUST NOT assume pane topology without reading it first.
 9. Labels are displayed on the surface — window identity immediately precedes the pane label as a bottom-right floating overlay within each pane. The window identity is uppercase text inside a rounded-rectangle outline, followed by the plain pane number, e.g. an outlined `A` box next to `12`. See §15.1 for visibility rules.
 
@@ -351,7 +351,7 @@ Flow:
 5. If success, connection enters active mode and event streaming starts immediately.
 
 `pair.request` fields include:
-1. `providerId` (stable ownership identity).
+1. `providerId` (stable ownership identity). Provider identity is product state, not runtime-instance state: a Surf Ace/OpenClaw provider MUST create one random stable provider UUID on first startup, store it in a well-known trusted local OpenClaw/Surf Ace state path for that gateway install, and reuse it on normal gateway restart, branch overlay, extension packaging move, or redeploy. Lineage-based recovery is a fallback for already-rotated identities; it is not the primary identity model.
 2. `connectionId` (unique per socket attempt).
 3. `surfaceId` (target window surface on multi-window endpoints).
 4. `resume` (optional prior `sessionId`, owner-only reconnect path).
@@ -2639,12 +2639,14 @@ Push content to a screen, replacing whatever is currently displayed. Write.
 ```
 fingerprint    string   Target screen
 paneId         integer  Required.
-contentType    enum     "html" | "image" | "pdf" | "terminal" | "markdown" | "video" | "canvas"
+contentType    enum     "html" | "image" | "pdf" | "terminal" | "markdown" | "video" | "canvas" | "browser_url"
 content        string   Content payload. Encoding by type:
                           html/terminal/markdown: UTF-8 text
                           image/pdf: base64
                           video: URL string pointing to video source
                           canvas: optional JSON background spec { color?, grid? }, or empty string for plain white
+                          browser_url: live URL to navigate; not static HTML
+sourcePath     string   Optional file path for file-backed content. When present, the surface reload control re-reads this path instead of repainting pushed bytes.
 ```
 
 **Returns:**
@@ -2679,6 +2681,25 @@ revision       int      Revision after clear
 ```
 
 **Errors:** `not_connected`, `screen_not_found`
+
+---
+
+#### `surf_ace_reattempt_connections`
+
+Operator-scoped control tool that resets open Surf Ace connection circuits and reattempts stopped reconnect/probe workers. This does not authorize ownership takeover; it only wakes routine connection work that is already allowed by provider ownership state. Write.
+
+**Params:**
+```
+fingerprint    string   Optional target screen. Omit to reattempt all known surfaces and endpoint probes.
+```
+
+**Returns:**
+```
+surfaces        array    Per-surface reattempt result, including prior circuit state
+endpointProbes  array    Per-endpoint-probe reattempt result, including prior circuit state
+```
+
+**Errors:** none
 
 ---
 
@@ -2970,7 +2991,7 @@ Each window is assigned a short alphabetic identifier using an auto-incrementing
 
 The window label is the primary visible addressing handle within the current `surf_ace_list` result. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity, but CLU/provider targeting authority still comes from the run-admitted `surfaceId`/`paneId` tuple rather than from the label alone.
 
-Each pane is assigned by the provider/extension a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier and live-topology secondary key within its window; `paneLabel` alone is not globally unique and is not durable target authority. Clients adopt the assigned label and do not derive it from local/internal pane identifiers. Optional pane names do not replace it. The pane label MUST be:
+Each pane is assigned by the provider/extension a stable visible numeric `paneLabel` that is distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier and live-topology secondary key across the provider's live/admitted windows/surfaces; it is not durable target authority. Clients adopt the assigned label and do not derive it from local/internal pane identifiers or reset it per window. Optional pane names do not replace it. The pane label MUST be:
 - Displayed as plain overlay text with no pill, background, or border.
 - Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/4 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
 - Rendered in Rajdhani Bold, with visually consistent heavy weight across Electron and iOS.
@@ -3220,11 +3241,26 @@ Compositor status `panes` are native hosted/materialized pane records, not Surf 
 
 Racter tall-logical-surface remains a required fixture: Surf Ace receives a logical surface of `2160x3840` and must treat it exactly like any other `2160x3840` monitor/window. Native panes, Surf Ace controls, overlay regions, and hit regions must align in that logical coordinate space. Surf Ace must not reason from display rotation or physical scanout shape.
 
-### 16.4 iOS requirement
+### 16.4 Native Host Special Cases
+
+Native hosted targets may be special-cased only inside Surf Ace's Electron-to-compositor implementation seam. The external/provider `target.apply` contract remains pane-targeted for every target kind: callers provide target identity, ownership/session authority, and pane lineage, but never native pane rectangles, coordinate spaces, pane instance ids, topology epochs, surface epochs, or geometry revisions.
+
+Allowed internal native-host special cases are:
+
+- Host projection: `terminal_app`, `native_app`, and `compositor_app` may require a compositor `native_pane.host` plan containing `x`, `y`, `width`, `height`, `coordinateSpace`, `paneInstanceId`, `topologyEpoch`, `surfaceEpoch`, and `geometryRevision`. Surf Ace must derive that plan from the resolved pane snapshot before calling the compositor. This is necessary because the compositor hosts out-of-process/native content against an already resolved host rectangle and must reject stale geometry identities. It remains internal because external providers and callers still submit only pane-targeted `target.apply` payloads: target identity, ownership/session authority, and pane lineage. They do not submit host rectangles, compositor coordinate spaces, pane instance ids, topology epochs, surface epochs, geometry revisions, or materialization plans. Web/content parity is preserved because web, browser, native, and terminal targets all use the same visible pane lineage as the target coordinate; only the internal renderer/compositor realization differs.
+- Host geometry update: a topology mutation or split that preserves an existing native-hosted pane but changes its resolved rectangle may require a compositor `native_pane.update` plan containing the same internal geometry/provenance fields as host projection. This is necessary because native content cannot be repositioned by renderer layout alone. It remains internal because callers still submit ordinary pane-targeted topology/split operations and never provide native rectangles or compositor revision fields. Web/content parity is preserved because retained native panes keep their content across layout-only changes just as renderer/web panes do; only the internal host rectangle is updated.
+- Compositor status/preflight: Electron may read compositor status fields such as logical surface size, pane-geometry coordinate space, and native materialized pane count before sending a host plan. This is necessary to verify that the internally projected rectangle is in the compositor's current logical space before native process I/O. It remains internal because `target.apply.result` may expose only opaque materialization status such as applied/not_applied/released_after_failure, never the host request, host response, raw preflight status, preflight summaries, or native geometry. Web/content parity is preserved because callers observe the same pane-targeted apply success/failure contract for native and renderer targets.
+- Overlay and live-instance projection: Electron may keep `nativePaneInstances` and send compositor `overlay_regions.set`/`overlay_regions.clear` requests with live compositor pane instance ids and renderer-measured chrome rectangles. This is necessary because native-hosted content cannot be clipped or hit-routed by renderer DOM alone, while Surf Ace controls still need authoritative overlay exclusion and hit regions. It remains internal because providers/callers cannot name native pane instances or overlay regions through `target.apply`; renderer measurements are converted inside Electron after the pane has already been admitted. Web/content parity is preserved because Surf Ace labels, controls, and targetability remain attached to the same visible pane identity, and non-native panes ignore native overlay instance data.
+- Release before renderer replacement or pane removal: replacing a native-hosted pane with renderer-owned content, navigating renderer history, clearing content, closing a pane, or applying topology that removes a native-hosted pane may require a compositor `native_pane.release` first. This is necessary to prevent stale native surfaces from covering renderer panes or surviving removed topology. It remains internal because callers still send the normal pane-targeted `browser_url`, `content.apply`, `content.set`, `content.clear`, history, pane-close, or topology operation; they do not manage native detach. Web/content parity is preserved because the requested pane operation becomes observable only after the native host is cleared, and release failure rejects or blocks the mutation rather than exposing native controls to provider code. Layout-only topology changes that retain the native pane must update host geometry rather than release native content.
+- Hosting state: Electron may track whether the current visible entry is externally native-hosted so reload, history, snapshot, and release paths do not treat a compositor-hosted process as renderer HTML. This is necessary to avoid applying renderer-only operations to native content. It remains internal state or diagnostic status, not a provider geometry contract. Targetability remains the Surf Ace pane coordinate.
+
+Any additional native special case must defend the same three properties: why native behavior is necessary, why the behavior stays behind the Surf Ace/compositor seam, and why pane-targeted API parity with web/content targets is preserved.
+
+### 16.5 iOS requirement
 
 iOS should preserve its cleaner visual seam: pane content and controls live in one SwiftUI pane layout context. That SwiftUI-resolved pane frame is the iOS geometry authority. Protocol reporting MUST consume the resolved pane geometry from that authority; it MUST NOT independently recompute pane rectangles from topology in a way that can drift from visible layout. Split spacing, safe area, scale, and scene/window changes must be represented consistently in the resolved snapshot and protocol viewport projection.
 
-### 16.5 Failure modes forbidden by this architecture
+### 16.6 Failure modes forbidden by this architecture
 
 The architecture forbids these classes of bugs:
 
