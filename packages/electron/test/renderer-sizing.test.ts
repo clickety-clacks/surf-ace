@@ -131,6 +131,17 @@ test("html and browser_url frames have a non-auto CSS height fallback", async ()
   assert.doesNotMatch(frameRule, /height:\s*auto;/);
 });
 
+test("html frames relay host pointer events into iframe content", async () => {
+  const source = await rendererSource();
+  const styles = await rendererStyles();
+
+  assert.match(source, /function relayHtmlFramePointerEvents/);
+  assert.match(source, /channel: "surf-ace-host-relay"/);
+  assert.match(source, /new PointerEvent\(payload\.eventType/);
+  assert.match(source, /frame\.className = "content-html-frame content-html-frame--host-relay"/);
+  assert.match(styles, /\.content-html-frame--host-relay\s*\{[\s\S]*pointer-events:\s*none;/);
+});
+
 test("browser_url webviews preserve Electron's flex display for the OOPIF child", async () => {
   const styles = await rendererStyles();
   const browserUrlRule = styles.match(/\.content-browser-url-frame\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body ?? "";

@@ -1011,6 +1011,44 @@ function htmlFrameBridgeScript(): string {
   window.addEventListener("DOMContentLoaded", () => {
     emit({ type: "ready", viewport: currentViewport(), visibleText: visibleText() });
   });
+
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data || typeof data !== "object" || data.channel !== "surf-ace-host-relay") {
+      return;
+    }
+    const payload = data.payload;
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+    if (payload.type === "pointer") {
+      const target = document.elementFromPoint(payload.clientX, payload.clientY) ?? document.body ?? document.documentElement;
+      target?.dispatchEvent(new PointerEvent(payload.eventType, {
+        bubbles: true,
+        button: payload.button ?? 0,
+        buttons: payload.buttons ?? 0,
+        cancelable: true,
+        clientX: payload.clientX,
+        clientY: payload.clientY,
+        composed: true,
+        pointerId: payload.pointerId ?? 1,
+        pointerType: payload.pointerType ?? "mouse",
+        pressure: payload.pressure ?? 0,
+      }));
+    } else if (payload.type === "wheel") {
+      const target = document.elementFromPoint(payload.clientX, payload.clientY) ?? document.body ?? document.documentElement;
+      target?.dispatchEvent(new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        clientX: payload.clientX,
+        clientY: payload.clientY,
+        deltaMode: payload.deltaMode ?? 0,
+        deltaX: payload.deltaX ?? 0,
+        deltaY: payload.deltaY ?? 0,
+        deltaZ: payload.deltaZ ?? 0,
+      }));
+    }
+  });
 })();
 </script>`;
 }
@@ -1432,6 +1470,61 @@ function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement)
   };
 }
 
+function relayHtmlFramePointerEvents(view: PaneView, frame: HTMLIFrameElement): void {
+  const framePoint = (event: MouseEvent) => {
+    const rect = frame.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
+      y: Math.max(0, Math.min(rect.height, event.clientY - rect.top)),
+    };
+  };
+  const post = (payload: Record<string, unknown>) => {
+    frame.contentWindow?.postMessage({ channel: "surf-ace-host-relay", payload }, "*");
+  };
+  const onPointer = (event: PointerEvent) => {
+    const point = framePoint(event);
+    if (event.type === "pointerdown") {
+      rememberPaneContext(view.paneId);
+    }
+    post({
+      button: event.button,
+      buttons: event.buttons,
+      clientX: point.x,
+      clientY: point.y,
+      eventType: event.type,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      pressure: event.pressure,
+      type: "pointer",
+    });
+  };
+  const onWheel = (event: WheelEvent) => {
+    const point = framePoint(event);
+    post({
+      clientX: point.x,
+      clientY: point.y,
+      deltaMode: event.deltaMode,
+      deltaX: event.deltaX,
+      deltaY: event.deltaY,
+      deltaZ: event.deltaZ,
+      type: "wheel",
+    });
+  };
+
+  for (const eventType of ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const) {
+    view.scrollEl.addEventListener(eventType, onPointer, { passive: true });
+  }
+  view.scrollEl.addEventListener("wheel", onWheel, { passive: true });
+  const previousCleanup = view.currentHtmlFrameCleanup;
+  view.currentHtmlFrameCleanup = () => {
+    previousCleanup?.();
+    for (const eventType of ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const) {
+      view.scrollEl.removeEventListener(eventType, onPointer);
+    }
+    view.scrollEl.removeEventListener("wheel", onWheel);
+  };
+}
+
 function scheduleHtmlSnapshotRefresh(view: PaneView, renderToken: number): void {
   const delays = [0, 50, 200, 500];
   for (const delay of delays) {
@@ -1598,7 +1691,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   if (pane.content.contentType === "html") {
     const html = pane.content.content as HtmlContent;
     const frame = document.createElement("iframe");
-    frame.className = "content-html-frame";
+    frame.className = "content-html-frame content-html-frame--host-relay";
     frame.setAttribute("sandbox", "allow-forms allow-popups-to-escape-sandbox allow-same-origin allow-scripts");
     const isFullDocument = /^\s*<!doctype\s+html/i.test(html.html) || /^\s*<html[\s>]/i.test(html.html);
     const finalHtml = isFullDocument
@@ -1607,6 +1700,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
           html.baseUrl ? `<base href="${html.baseUrl}">` : ""
         }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${html.html}</body></html>`;
     wireHtmlFrame(view, pane.paneId, frame);
+    relayHtmlFramePointerEvents(view, frame);
     view.contentEl.appendChild(frame);
     sizeWebViewToPane(view, frame);
     frame.addEventListener(
