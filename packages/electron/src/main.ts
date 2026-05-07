@@ -39,6 +39,7 @@ const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const EXPLICIT_WS_PORT = process.env.SURF_ACE_PORT != null;
 const STATE_FILE_NAME = "surface-core-state.json";
 const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
+const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 
 function advertisingDisabled(): boolean {
   const value = process.env.SURF_ACE_DISABLE_ADVERTISING?.trim().toLowerCase();
@@ -76,6 +77,7 @@ const nativeOverlaySnapshots = new Map<string, {
 }>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
+let advertiserTxtRefreshTimer: NodeJS.Timeout | null = null;
 let core: SurfaceCore;
 let distDir = "";
 let identityFingerprint = "";
@@ -112,7 +114,7 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
       core: coreValue,
       endpointName: endpointName(),
       hostName: shortHostName(),
-      onBusyChanged: () => advertiser?.refresh(),
+      onBusyChanged: scheduleAdvertiserTxtRefresh,
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       onNativeMaterialized: (surfaceId, materialization) => {
         recordNativePaneInstances(surfaceId, materialization);
@@ -142,6 +144,28 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
     }
   }
   throw lastError;
+}
+
+function scheduleAdvertiserTxtRefresh(): void {
+  if (!advertiser) {
+    return;
+  }
+  if (advertiserTxtRefreshTimer) {
+    clearTimeout(advertiserTxtRefreshTimer);
+  }
+  advertiserTxtRefreshTimer = setTimeout(() => {
+    advertiserTxtRefreshTimer = null;
+    advertiser?.refreshTxt();
+  }, ADVERTISER_TXT_REFRESH_DEBOUNCE_MS);
+  advertiserTxtRefreshTimer.unref?.();
+}
+
+function clearAdvertiserTxtRefreshTimer(): void {
+  if (!advertiserTxtRefreshTimer) {
+    return;
+  }
+  clearTimeout(advertiserTxtRefreshTimer);
+  advertiserTxtRefreshTimer = null;
 }
 
 app.on("child-process-gone", (_event, details) => {
@@ -1065,6 +1089,7 @@ if (!singleInstanceLock) {
 
   app.on("before-quit", async () => {
     isQuitting = true;
+    clearAdvertiserTxtRefreshTimer();
     await Promise.allSettled(
       [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
     );

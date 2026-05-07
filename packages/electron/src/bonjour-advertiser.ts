@@ -54,6 +54,10 @@ function bonjourDiagnostic(event: string, fields: BonjourDiagnosticFields = {}):
     : `[surf-ace:bonjour] event=${event}`;
 }
 
+function txtSignature(txt: Record<string, string>): string {
+  return JSON.stringify(Object.entries(txt).sort(([left], [right]) => left.localeCompare(right)));
+}
+
 function isIpv4Family(family: string | number): boolean {
   return family === 4 || family === "IPv4";
 }
@@ -109,6 +113,7 @@ export class BonjourAdvertiser {
   private isolatedPublisherGeneration = 0;
   private republishAttempts = 0;
   private publishing = false;
+  private publishedTxtSignature: string | null = null;
   private restarting = false;
   private services: Service[] = [];
   private serviceName: string;
@@ -164,6 +169,23 @@ export class BonjourAdvertiser {
       }),
     );
     void this.restart();
+  }
+
+  refreshTxt(): void {
+    if (!this.started) {
+      return;
+    }
+    const nextTxtSignature = txtSignature(this.txtProvider());
+    if (this.publishedTxtSignature === nextTxtSignature) {
+      console.info(
+        bonjourDiagnostic("publish_refresh_skipped", {
+          current_name: this.serviceName,
+          reason: "txt_unchanged",
+        }),
+      );
+      return;
+    }
+    this.refresh();
   }
 
   async stop(): Promise<void> {
@@ -224,6 +246,7 @@ export class BonjourAdvertiser {
         port: this.port,
       }),
     );
+    const txt = this.txtProvider();
     const services: Service[] = [];
     for (const binding of this.activeBonjourBindings()) {
       let service: Service;
@@ -232,7 +255,7 @@ export class BonjourAdvertiser {
           name,
           port: this.port,
           protocol: "tcp",
-          txt: this.txtProvider(),
+          txt,
           type: "surf-ace",
         });
       } catch (error) {
@@ -247,6 +270,7 @@ export class BonjourAdvertiser {
       return;
     }
     this.serviceName = name;
+    this.publishedTxtSignature = txtSignature(txt);
     this.services = services;
     console.info(
       bonjourDiagnostic("publish_issued", {
@@ -530,6 +554,7 @@ export class BonjourAdvertiser {
     this.serviceName = name;
     const txt = this.txtProvider();
     const txtArgs = Object.entries(txt).map(([k, v]) => `${k}=${v}`);
+    this.publishedTxtSignature = txtSignature(txt);
     console.info(
       bonjourDiagnostic("publish_attempt", {
         isolated: true,

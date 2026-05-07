@@ -190,6 +190,39 @@ test("bonjour advertiser keeps incrementing the suffix across repeated conflicts
   await advertiser.stop();
 });
 
+test("bonjour advertiser only republishes TXT when the advertised payload changes", async () => {
+  const bonjour = new FakeBonjour();
+  let busy = "0";
+  const advertiser = new BonjourAdvertiser({
+    bonjour,
+    name: "TARS Surf Ace",
+    port: 18791,
+    txtProvider: () => ({ busy, pk: "sf_test" }),
+  });
+
+  advertiser.start();
+  await new Promise((resolve) => {
+    setTimeout(resolve, 800);
+  });
+
+  advertiser.refreshTxt();
+  await new Promise((resolve) => {
+    setTimeout(resolve, 50);
+  });
+  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace"]);
+  assert.equal(bonjour.unpublishCalls, 0);
+
+  busy = "1";
+  advertiser.refreshTxt();
+  await new Promise((resolve) => {
+    setTimeout(resolve, 800);
+  });
+
+  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace", "TARS Surf Ace"]);
+  assert.equal(bonjour.unpublishCalls, 1);
+  await advertiser.stop();
+});
+
 test("bonjour advertiser disables mDNS when publish throws EADDRNOTAVAIL", async () => {
   const bonjour = new FakeBonjour();
   const publishError = new Error("send EADDRNOTAVAIL 224.0.0.251:5353") as Error & { code?: string };
