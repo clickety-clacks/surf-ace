@@ -76,6 +76,22 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(render["contentId"] as? String, "ct_1234abcd")
     }
 
+    func testStalePaneBridgeDetachDoesNotClearReplacementBridge() throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "stale-bridge-detach")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let staleBridge = RecordingPaneBridge()
+        let replacementBridge = RecordingPaneBridge()
+
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: staleBridge)
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: replacementBridge)
+        runtime.detachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: staleBridge)
+
+        XCTAssertTrue(pane.bridge === replacementBridge)
+        runtime.detachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: replacementBridge)
+        XCTAssertNil(pane.bridge)
+    }
+
     func testPencilStrokeTransitionsAnnotationModeAndRecordsTool() {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "pencil-annotation")

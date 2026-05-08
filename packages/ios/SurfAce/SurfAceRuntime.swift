@@ -547,8 +547,12 @@ final class SurfAceRuntime {
         }
     }
 
-    func detachPaneBridge(surfaceId: String, paneId: Int) {
-        pane(surfaceId: surfaceId, paneId: paneId)?.bridge = nil
+    func detachPaneBridge(surfaceId: String, paneId: Int, bridge: (any SurfAcePaneBridging)? = nil) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        if let bridge, pane.bridge !== bridge {
+            return
+        }
+        pane.bridge = nil
     }
 
     func setAnnotationMode(

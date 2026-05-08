@@ -813,7 +813,7 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             guard self.surfaceId != surfaceId || self.paneId != paneId || self.hostView !== hostView else {
                 return
             }
-            runtime.detachPaneBridge(surfaceId: self.surfaceId, paneId: self.paneId)
+            runtime.detachPaneBridge(surfaceId: self.surfaceId, paneId: self.paneId, bridge: self)
             self.surfaceId = surfaceId
             self.paneId = paneId
             attach(hostView: hostView)
@@ -821,7 +821,7 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
         }
 
         func detach() {
-            runtime.detachPaneBridge(surfaceId: surfaceId, paneId: paneId)
+            runtime.detachPaneBridge(surfaceId: surfaceId, paneId: paneId, bridge: self)
             hostView = nil
         }
 
