@@ -3850,6 +3850,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const markdownRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
       assert.equal(markdownRead.lastNavigation, null);
+      assert.equal(markdownRead.contentSnapshot?.contentId, markdownPush.contentId);
+      assert.equal(markdownRead.contentSnapshot?.contentType, "markdown");
+      assert.deepEqual(markdownRead.contentSnapshot?.content, { markdown: "# notes" });
+      assert.equal(markdownRead.contentSnapshot?.visibleText, "# notes");
+      assert.equal(markdownRead.contentSnapshot?.image, undefined);
+      assert.deepEqual(markdownRead.contentSnapshot?.drawings, []);
       const markdownSnapshot = await runtime.snapshot({ fingerprint: server.surfaceId, paneId: firstPaneId });
       assert.equal(markdownSnapshot.snapshot?.contentId, markdownPush.contentId);
       assert.equal(markdownSnapshot.snapshot?.contentType, "markdown");
@@ -3858,6 +3864,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const internalSurface = internalRuntime.surfaces.get(server.surfaceId);
       const internalPane = internalSurface?.panes.get(firstPaneId);
       assert.ok(internalPane?.snapshot);
+      internalPane.contentValue = null;
+      const snapshotOnlyRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+      assert.equal(snapshotOnlyRead.contentSnapshot?.contentId, markdownPush.contentId);
+      assert.equal(snapshotOnlyRead.contentSnapshot?.contentType, "markdown");
+      assert.equal(snapshotOnlyRead.contentSnapshot?.content, undefined);
+      assert.equal(snapshotOnlyRead.contentSnapshot?.visibleText, "# notes");
       internalPane.snapshot.drawings = [{
         points: [],
         strokeId: "stale_stroke",
@@ -3921,6 +3933,39 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         navigatedAt,
         url: "https://example.com/live",
       });
+      assert.equal(htmlRead.contentSnapshot?.contentId, htmlPush.contentId);
+      assert.equal(htmlRead.contentSnapshot?.contentType, "html");
+      assert.deepEqual(htmlRead.contentSnapshot?.content, { html: "<p>html</p>" });
+      assert.equal(htmlRead.contentSnapshot?.visibleText, "Visible text");
+
+      const imagePush = await runtime.push(
+        {
+          content: { data: "aW1hZ2UtZGF0YQ==", mediaType: "image/png" },
+          contentType: "image",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:1" },
+      );
+      const imageRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+      assert.equal(imageRead.contentSnapshot?.contentId, imagePush.contentId);
+      assert.equal(imageRead.contentSnapshot?.contentType, "image");
+      assert.deepEqual(imageRead.contentSnapshot?.content, { data: "aW1hZ2UtZGF0YQ==", mediaType: "image/png" });
+      assert.equal(imageRead.contentSnapshot?.image, "aW1hZ2UtZGF0YQ==");
+
+      const canvasPush = await runtime.push(
+        {
+          content: { color: "#ffffff", grid: true },
+          contentType: "canvas",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:1" },
+      );
+      const canvasRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+      assert.equal(canvasRead.contentSnapshot?.contentId, canvasPush.contentId);
+      assert.equal(canvasRead.contentSnapshot?.contentType, "canvas");
+      assert.deepEqual(canvasRead.contentSnapshot?.content, { color: "#ffffff", grid: true });
 
       const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: firstPaneId });
       assert.deepEqual(clear, {
@@ -6116,6 +6161,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const screens = await runtime.listScreens();
       assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, pushed.contentId);
       assert.equal(screens[0]?.panes[0]?.activeContent?.revision, pushed.revision);
+      const read = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+      assert.equal(read.contentSnapshot?.contentId, pushed.contentId);
+      assert.equal(read.contentSnapshot?.contentType, "markdown");
+      assert.deepEqual(read.contentSnapshot?.content, { markdown: "# restart continuity" });
     });
   });
 
@@ -6197,6 +6246,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const screens = await runtime.listScreens();
       assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, pushed.contentId);
       assert.equal(screens[0]?.panes[0]?.activeContent?.revision, pushed.revision);
+      const read = await runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
+      assert.equal(read.contentSnapshot?.contentId, pushed.contentId);
+      assert.equal(read.contentSnapshot?.contentType, "markdown");
+      assert.deepEqual(read.contentSnapshot?.content, { markdown: "# restored restart continuity" });
+      assert.equal(read.contentSnapshot?.visibleText, "# restored restart continuity");
     });
   });
 

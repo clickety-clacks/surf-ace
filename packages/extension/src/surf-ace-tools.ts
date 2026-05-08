@@ -352,7 +352,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_close_pane",
     },
     {
-      description: "Read the local dual-channel Surf Ace buffer for a pane. No live network call is made.",
+      description: "Read the local Surf Ace buffer for a pane, including the current cached content snapshot and locally known pushed content. No live network call is made.",
       execute: async (args: { fingerprint: string; paneId: PaneId }) => await runtime.read(args),
       inputSchema: {
         additionalProperties: false,

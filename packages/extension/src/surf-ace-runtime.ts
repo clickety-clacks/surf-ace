@@ -218,6 +218,18 @@ export type SurfAceFrame = {
 };
 
 export type SurfAceReadResult = {
+  contentSnapshot: {
+    cachedAt: number;
+    content?: ContentSetRequest["payload"]["content"];
+    contentId: string | null;
+    contentType: ContentType | null;
+    drawings?: Stroke[];
+    image?: string;
+    revision: number;
+    selection: Selection;
+    viewport: Viewport;
+    visibleText?: string;
+  } | null;
   fingerprint: string;
   frames: SurfAceFrame[];
   lastNavigation: {
@@ -1497,6 +1509,35 @@ function cloneFrame(frame: SurfAceFrame | null): SurfAceFrame | null {
   return structuredClone(frame);
 }
 
+function cloneCurrentContentSnapshot(
+  snapshot: CachedSnapshot | null,
+  activeContentId: ContentId | null,
+  contentValue: ContentSetRequest["payload"]["content"] | null,
+): SurfAceReadResult["contentSnapshot"] {
+  if (!snapshot || !activeContentId || snapshot.contentId !== activeContentId) {
+    return null;
+  }
+  const content = contentValue === null ? undefined : structuredClone(contentValue);
+  const cloned = content === undefined
+    ? structuredClone(snapshot)
+    : {
+        ...structuredClone(snapshot),
+        content,
+      };
+  if (
+    cloned.contentType === "image" &&
+    !cloned.image &&
+    content !== undefined &&
+    typeof content === "object" &&
+    content !== null &&
+    "data" in content &&
+    typeof (content as { data?: unknown }).data === "string"
+  ) {
+    cloned.image = (content as { data: string }).data;
+  }
+  return cloned;
+}
+
 function computeStrokeBBox(points: Stroke["points"]): SurfAceFrameStroke["bbox"] {
   if (points.length === 0) {
     return {
@@ -2673,6 +2714,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     const result: SurfAceReadResult = {
+      contentSnapshot: cloneCurrentContentSnapshot(pane.snapshot, pane.activeContentId, pane.contentValue),
       fingerprint: input.fingerprint,
       frames: returnedFrames,
       lastNavigation: pane.buffer.lastNavigation ? { ...pane.buffer.lastNavigation } : null,

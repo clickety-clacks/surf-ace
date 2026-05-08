@@ -13,7 +13,7 @@ export function buildSurfAceAgentInstructions(): string {
     "Treat `event.page` as the authoritative page register for paged content.",
     "Treat `event.selection` as text-only in v1. Ignore point/region selections unless a future protocol explicitly negotiates them.",
     "Pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are always-on and update pane topology independently of the current content.",
-    "`surf_ace_read` is local-only. It returns the live dirty channel first, then finalized frame backlog, then consumed registers.",
+    "`surf_ace_read` is local-only. It returns the current cached content snapshot, including locally known pushed content, then live dirty channel, finalized frame backlog, and consumed registers.",
     "If a different CLU session replaces visible content in a pane, the provider emits a local `event.content_superseded` for the displaced owner.",
     "Use `surf_ace_annotations_remove` only for live overlay stroke removal on the currently visible pane content.",
   ].join("\n");

@@ -29,6 +29,7 @@ function createStubRuntime(): SurfAceRuntime {
       revision: 1,
     }),
     read: async () => ({
+      contentSnapshot: null,
       fingerprint: "sf_1",
       frames: [],
       lastNavigation: null,

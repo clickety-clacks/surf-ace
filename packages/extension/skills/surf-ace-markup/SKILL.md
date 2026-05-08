@@ -5,10 +5,11 @@ Surf Ace sends raw user annotation geometry. The provider does not classify or c
 ## Interpretation rules
 
 1. Start with `surf_ace_read`.
-2. Process `liveFrame` first when present for near-real-time reaction.
-3. Process `frames[]` oldest-first for finalized context-preserved backlog.
-4. Deduplicate by `strokeId` within a `frameId` or `contextKey`.
-5. Treat `event.navigation` and content replacement as context changes. Old annotation context should not be merged into the new content state.
+2. Use `contentSnapshot` for current pane content readback. Prefer its `content` payload when present; use rendered fields such as `visibleText`, `image`, and `drawings` as renderer/snapshot evidence.
+3. Process `liveFrame` first when present for near-real-time reaction.
+4. Process `frames[]` oldest-first for finalized context-preserved backlog.
+5. Deduplicate by `strokeId` within a `frameId` or `contextKey`.
+6. Treat `event.navigation` and content replacement as context changes. Old annotation context should not be merged into the new content state.
 
 ## Removal rules
 

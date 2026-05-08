@@ -2376,10 +2376,11 @@ This section specifies how surface events reach CLU. It is intentionally separat
 3. **Alerts are expensive.** Each alert fires a CLU agent turn. The provider MUST minimize alerts while still ensuring CLU can observe surface activity in a timely way.
 4. **No live network I/O in dispatch path.** The provider MUST NOT issue live `snapshot.get` calls (or any network calls to surfaces) as part of processing an inbound CLU message.
 
-### 13.2 Per-Screen Local Buffer (Dual Channel: Live Dirty + Closed Frames + Registers)
+### 13.2 Per-Screen Local Buffer (Current Content + Dual Channel: Live Dirty + Closed Frames + Registers)
 
-The provider maintains a structured local buffer for each surface. The buffer has **two annotation channels** plus typed **non-annotation registers**.
+The provider maintains a structured local buffer for each surface. The buffer has a current content snapshot, **two annotation channels**, plus typed **non-annotation registers**.
 
+- **Current content snapshot:** local cached readback for the currently visible pane content, populated by content pushes, pair/snapshot sync, and reconnect snapshot state. It includes the normalized pushed content payload when that payload is locally known, so readback remains useful before a renderer snapshot arrives.
 - **Channel A — Live dirty channel (mutable):** near-real-time stroke deltas for the currently active context frame while the user is annotating.
 - **Channel B — Closed frame queue (immutable):** finalized context frames that must remain deliverable until CLU consumes them.
 
@@ -2403,6 +2404,8 @@ A context key is:
 2. Navigation/content change alone does **not** create a frame.
 3. A new frame is created only when annotation actually occurs in that context.
 4. Re-entering annotation mode in the same context appends to the same mutable context frame.
+
+Current content readback is separate from annotation frames. A content push updates the local current content snapshot, but does not create a live annotation frame or a closed annotation frame by itself.
 
 **Lifecycle (dual-channel semantics):**
 1. On first stroke in a context with no open frame, provider creates/opens a mutable context frame.
@@ -2526,18 +2529,19 @@ This gives one alert per unread activity burst while still allowing live reads d
 
 CLU uses one read tool:
 
-**`surf_ace_read(fingerprint, paneId)`** — reads live annotation state first, then closed frames (bounded), plus registers, for one pane. `paneId` is required.
+**`surf_ace_read(fingerprint, paneId)`** — reads the current local content snapshot, live annotation state, closed frames (bounded), plus registers, for one pane. `paneId` is required.
 
 Read order and behavior:
-1. Return **live channel first** (`liveFrame` + `liveDirtyStrokeIds` + `liveSeq`) if present.
-2. Return closed frames from FIFO queue (up to 5 and within ~4 MB image budget).
-3. Include `pendingFrames` when queue remains.
-4. Clear consumed register values (`taps[]` to `[]`; latest-wins to `null`).
-5. Mark current live dirty set as read (`liveDirtyStrokeIds` reset).
-6. Dequeue returned closed frames.
-7. Reset `alertFired=false`.
+1. Return the local `contentSnapshot` for the pane's currently visible content when available, including the normalized pushed content payload when locally known.
+2. Return **live channel first** (`liveFrame` + `liveDirtyStrokeIds` + `liveSeq`) if present.
+3. Return closed frames from FIFO queue (up to 5 and within ~4 MB image budget).
+4. Include `pendingFrames` when queue remains.
+5. Clear consumed register values (`taps[]` to `[]`; latest-wins to `null`).
+6. Mark current live dirty set as read (`liveDirtyStrokeIds` reset).
+7. Dequeue returned closed frames.
+8. Reset `alertFired=false`.
 
-CLU should prioritize interpreting `liveFrame` first when present, then process closed frames for guaranteed context-preserved completion.
+CLU should use `contentSnapshot` for current pane content readback, prioritize interpreting `liveFrame` first when present, then process closed frames for guaranteed context-preserved completion.
 
 **Model processing order policy (dirty vs backlog):**
 1. **Live preempts backlog.** If `liveFrame` + `liveDirtyStrokeIds` is present, model should process that first for real-time responsiveness.
@@ -2807,12 +2811,13 @@ paneLabel      integer  Closed pane's visible label at the moment it was closed.
 
 #### `surf_ace_read`
 
-Read dual-channel annotation state plus register values from the local buffer for a pane. Read-only, local — no network call to the surface. `surf_ace_read` is pane-scoped at the CLU boundary: CLU targets a pane only, and the surface/provider decides internally which pane-history state is currently visible. If the pane is idle, `surf_ace_read` returns empty channels for that pane.
+Read current cached content, dual-channel annotation state, plus register values from the local buffer for a pane. Read-only, local — no network call to the surface. `surf_ace_read` is pane-scoped at the CLU boundary: CLU targets a pane only, and the surface/provider decides internally which pane-history state is currently visible. If the pane is idle, `surf_ace_read` returns empty annotation channels for that pane while still returning `contentSnapshot` when current pane content is locally cached.
 
 Response includes:
-1. **Live dirty channel first** (if a frame is currently open/active),
-2. **Closed frame queue batch** (up to 5 and within ~4 MB image budget),
-3. **Structured non-annotation registers** (consumed on read).
+1. **Current content snapshot** (when locally cached),
+2. **Live dirty channel** (if a frame is currently open/active),
+3. **Closed frame queue batch** (up to 5 and within ~4 MB image budget),
+4. **Structured non-annotation registers** (consumed on read).
 
 Closed frames are dequeued on read. Register values are cleared. Live dirty markers are advanced. Alert gate is reset.
 
@@ -2827,6 +2832,21 @@ paneId         integer  Required.
 fingerprint       string
 paneId            integer  Effective pane read by the provider
 paneLabel         integer  Visible label for the pane returned by the provider
+
+// Local current content readback
+contentSnapshot   object?  Current cached pane content, or null if none is locally cached.
+	                           {
+	                             cachedAt      epochMs
+	                             content?      object|string
+	                             contentId     string?
+	                             contentType   string?
+                             revision      int
+                             viewport      object
+                             visibleText?  string
+                             image?        string
+                             drawings?     array
+                             selection     object?
+                           }
 
 // Channel A: live dirty (newest / active context)
 liveFrame         object?  Current mutable context frame, or null if no active frame.
@@ -2880,6 +2900,7 @@ readAt            epochMs
 ```
 
 **Read priority + dedupe contract:**
+- CLU should use `contentSnapshot` for current content readback after pushes.
 - CLU should interpret `liveFrame` first when present (newest/live).
 - CLU should process `frames[]` oldest-first for guaranteed context-preserved delivery.
 - If new live dirty data appears while processing backlog, CLU should pause backlog and return to live.
