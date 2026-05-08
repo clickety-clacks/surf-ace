@@ -1010,8 +1010,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private var trackedStrokes: [TrackedStroke] = []
     private var isApplyingProgrammaticDrawingChange = false
     private var pendingViewportRestore: SurfAceViewport?
-    private var pendingHTMLRenderTask: Task<Void, Never>?
-    private var pendingHTMLRenderContinuation: CheckedContinuation<Void, Never>?
+    private var pendingHTMLRenderActive = false
+    private var pendingHTMLRenderContinuations: [CheckedContinuation<Void, Never>] = []
     private var lastViewport = SurfAceViewport(
         scrollOffset: SurfAcePoint(x: 0, y: 0),
         visibleRect: SurfAceRect(x: 0, y: 0, width: 1, height: 1),
@@ -1065,7 +1065,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 beginPendingHTMLRender()
                 showWebView()
             case .image(let data, let mediaType, let alt):
-                finishPendingHTMLRender()
+                beginPendingHTMLRender()
                 html = imageHTML(data: data, mediaType: mediaType, alt: alt)
                 baseURL = nil
                 showWebView()
@@ -1075,22 +1075,22 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 applyCurrentInteractionState()
                 return
             case .terminal(let lines, _):
-                finishPendingHTMLRender()
+                beginPendingHTMLRender()
                 html = terminalHTML(lines: lines)
                 baseURL = nil
                 showWebView()
             case .markdown(let markdown):
-                finishPendingHTMLRender()
+                beginPendingHTMLRender()
                 html = markdownHTML(markdown)
                 baseURL = nil
                 showWebView()
             case .video(let url):
-                finishPendingHTMLRender()
+                beginPendingHTMLRender()
                 html = videoHTML(url: url)
                 baseURL = nil
                 showWebView()
             case .some(.canvas):
-                finishPendingHTMLRender()
+                beginPendingHTMLRender()
                 html = placeholderHTML(title: "Canvas", detail: "No preview is available for this pane.")
                 baseURL = nil
                 showWebView()
@@ -1107,13 +1107,13 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 applyCurrentInteractionState()
                 return
             case nil:
-                finishPendingHTMLRender()
+                beginPendingHTMLRender()
                 html = standbyHTML()
                 baseURL = nil
                 showWebView()
             }
         } else {
-            finishPendingHTMLRender()
+            beginPendingHTMLRender()
             html = standbyHTML()
             baseURL = nil
             showWebView()
@@ -1193,9 +1193,10 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     }
 
     func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot? {
+        await waitForPendingHTMLRenderIfNeeded()
+
         switch currentEntry?.payload {
         case .html:
-            await waitForPendingHTMLRenderIfNeeded()
             if let payload = await evaluateSnapshotPayload() {
                 lastViewport = payload.viewport
                 lastVisibleText = payload.visibleText
@@ -1221,7 +1222,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             break
         }
 
-        let imageBase64 = includeImage ? captureFullScreenshotBase64() : nil
+        let imageBase64 = includeImage ? await captureRenderedImageBase64() : nil
 
         return SurfAceSurfaceSnapshot(
             viewport: lastViewport,
@@ -1229,6 +1230,10 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             selection: lastSelection,
             imageBase64: imageBase64
         )
+    }
+
+    var hasPendingWebContentRenderForTesting: Bool {
+        pendingHTMLRenderActive
     }
 
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult {
@@ -1454,6 +1459,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             guard let self else { return }
             await self.restorePendingViewportIfNeeded()
             await self.publishCurrentWebViewportIfNeeded()
+            await self.waitForWebContentPaint()
             self.finishPendingHTMLRender()
             self.finishPendingBrowserNavigation(status: "applied", errorMessage: nil, navigation: navigation, url: self.pendingBrowserNavigationURL)
         }
@@ -1669,21 +1675,29 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     private func beginPendingHTMLRender() {
         finishPendingHTMLRender()
-        pendingHTMLRenderTask = Task { @MainActor [weak self] in
-            await withCheckedContinuation { continuation in
-                self?.pendingHTMLRenderContinuation = continuation
+        pendingHTMLRenderActive = true
+    }
+
+    private func waitForPendingHTMLRenderIfNeeded() async {
+        guard pendingHTMLRenderActive else { return }
+        await withCheckedContinuation { continuation in
+            if pendingHTMLRenderActive {
+                pendingHTMLRenderContinuations.append(continuation)
+            } else {
+                continuation.resume()
             }
         }
     }
 
-    private func waitForPendingHTMLRenderIfNeeded() async {
-        await pendingHTMLRenderTask?.value
+    private func waitForWebContentPaint() async {
+        try? await Task.sleep(nanoseconds: 50_000_000)
     }
 
     private func finishPendingHTMLRender() {
-        pendingHTMLRenderContinuation?.resume()
-        pendingHTMLRenderContinuation = nil
-        pendingHTMLRenderTask = nil
+        pendingHTMLRenderActive = false
+        let continuations = pendingHTMLRenderContinuations
+        pendingHTMLRenderContinuations.removeAll()
+        continuations.forEach { $0.resume() }
     }
 
     private func restorePendingViewportIfNeeded() async {
@@ -1781,6 +1795,39 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         if let value = value as? NSNumber { return value.int64Value }
         if let value = value as? String { return Int64(value) }
         return nil
+    }
+
+    private func captureRenderedImageBase64() async -> String? {
+        guard bounds.width > 1, bounds.height > 1 else { return nil }
+        if !webView.isHidden, let webImage = await captureWebViewSnapshot() {
+            return renderCompositeImageBase64(webImage: webImage)
+        }
+        return captureFullScreenshotBase64()
+    }
+
+    private func captureWebViewSnapshot() async -> UIImage? {
+        guard webView.bounds.width > 1, webView.bounds.height > 1 else { return nil }
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = webView.bounds
+        configuration.afterScreenUpdates = true
+        return await withCheckedContinuation { continuation in
+            webView.takeSnapshot(with: configuration) { image, _ in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
+    private func renderCompositeImageBase64(webImage: UIImage) -> String? {
+        let renderer = UIGraphicsImageRenderer(bounds: bounds)
+        let image = renderer.image { _ in
+            UIColor.black.setFill()
+            UIRectFill(bounds)
+            webImage.draw(in: webView.convert(webView.bounds, to: self))
+            if !canvasView.drawing.strokes.isEmpty {
+                canvasView.drawHierarchy(in: canvasView.convert(canvasView.bounds, to: self), afterScreenUpdates: true)
+            }
+        }
+        return image.pngData()?.base64EncodedString()
     }
 
     private func captureFullScreenshotBase64() -> String? {
