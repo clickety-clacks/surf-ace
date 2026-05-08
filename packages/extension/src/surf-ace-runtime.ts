@@ -776,6 +776,7 @@ type RuntimeStateFile = {
       | "current_local_ownership"
       | "current_snapshot_local_ownership"
       | "current_target_state"
+      | "current_target_ownership"
       | "legacy_local_ownership"
       | "legacy_target_state";
   }>;
@@ -6059,6 +6060,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     for (const surfaceId of Object.keys(this.persistentState.targetStateBySurfaceId ?? {})) {
       this.noteSelfOwnedSurface(surfaceId, this.persistentState.providerId, "current_target_state");
     }
+    this.importCurrentTargetOwnership();
 
     let importedCurrentSnapshotOwnership = false;
     const currentSnapshot = await this.readScreenSnapshotFile(path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME));
@@ -6129,6 +6131,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       | "current_local_ownership"
       | "current_snapshot_local_ownership"
       | "current_target_state"
+      | "current_target_ownership"
       | "legacy_local_ownership"
       | "legacy_target_state",
   ): void {
@@ -6147,6 +6150,34 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       source,
       ...(relinquishedAt ? { relinquishedAt } : {}),
     };
+  }
+
+  private importCurrentTargetOwnership(): void {
+    for (const [surfaceId, targetState] of Object.entries(this.persistentState.targetStateBySurfaceId ?? {})) {
+      const currentTargetIds = new Set(
+        Object.values(targetState.paneTargets ?? {})
+          .map((paneTarget) => paneTarget.currentTargetId)
+          .filter((targetId): targetId is string => typeof targetId === "string" && targetId.length > 0),
+      );
+      if (currentTargetIds.size === 0) {
+        continue;
+      }
+      const targetRecords = Array.isArray(targetState.targetRecords) ? targetState.targetRecords : [];
+      for (const target of [...targetRecords].reverse()) {
+        if (
+          target.surfaceId === surfaceId &&
+          target.currentState === "current" &&
+          currentTargetIds.has(target.targetId) &&
+          typeof target.ownerProviderId === "string" &&
+          typeof target.ownershipSessionId === "string" &&
+          target.ownershipSessionId.length > 0 &&
+          this.isTrustedProviderLineageId(target.ownerProviderId)
+        ) {
+          this.noteSelfOwnedSurface(surfaceId, target.ownerProviderId, "current_target_ownership");
+          break;
+        }
+      }
+    }
   }
 
   private markSelfOwnedSurfaceRelinquished(surfaceId: string): void {

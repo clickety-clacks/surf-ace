@@ -9534,6 +9534,207 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("current target ownership record authorizes post-restart invalid_resume self-reclaim", async () => {
+    const port = nextPort++;
+    const surfaceId = "sf_current_target_invalid_resume";
+    const providerId = "pv_current_target_invalid_resume";
+    const ownershipSessionId = "sa_current_target_invalid_resume";
+    const paneLineageId = `pl_${surfaceId}_durable`;
+    const server = new FakeSurfAceWsServer(port, { surfaceId });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-current-target-invalid-resume-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const warnings: string[] = [];
+    const runtime = createSurfAceRuntime({
+      discovery,
+      logger: {
+        error: () => {},
+        info: () => {},
+        warn: (message: string) => warnings.push(message),
+      },
+      stateDir,
+    });
+    server.lockedProviderId = providerId;
+    server.lockedSessionId = ownershipSessionId;
+    server.takeoverRequiresResumeSessionId = ownershipSessionId;
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 1,
+          nextRemotePaneId: 1,
+          nextWindowLabelIndex: 0,
+          paneLabelsByPaneId: {},
+          providerId,
+          targetStateBySurfaceId: {
+            [surfaceId]: {
+              ownershipEpoch: 1,
+              paneTargets: {
+                [paneLineageId]: {
+                  currentTargetId: "tg_current_target_invalid_resume",
+                  diagnosticContent: null,
+                  lastRestoreBlockedReason: null,
+                  nonDurableTargetDiagnostic: null,
+                  paneLineageId,
+                  targetEpoch: 1,
+                },
+              },
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [
+                {
+                  appliedAt: new Date().toISOString(),
+                  currentState: "current",
+                  ownerProviderId: providerId,
+                  ownershipEpoch: 1,
+                  ownershipSessionId,
+                  paneIdAtApply: "pn_previous_current_target",
+                  paneLabelAtApply: 1,
+                  paneLineageId,
+                  restorePolicy: "auto",
+                  surfaceId,
+                  surfaceInstanceId: null,
+                  targetEpoch: 1,
+                  targetHeader: {
+                    payloadSchemaVersion: 1,
+                    replaySemantics: "bytes",
+                    requiredCapabilities: ["target.markdown.v1"],
+                    safeToLogFields: [],
+                    safetyClass: "passive",
+                    summary: "current target durable reclaim",
+                  },
+                  targetId: "tg_current_target_invalid_resume",
+                  targetKind: "markdown",
+                  targetPayload: { markdown: "# current target durable reclaim" },
+                },
+              ],
+            },
+          },
+          version: 1,
+          windowLabels: {},
+        }),
+      );
+
+      await runtime.start();
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.takeover),
+        [false, true],
+      );
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.resumeSessionId),
+        [null, ownershipSessionId],
+      );
+      assert.ok(warnings.some((warning) => warning.includes("ownership_self_reclaim")));
+      assert.ok(!warnings.some((warning) => warning.includes("ownership_self_reclaim_blocked")));
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("stale target ownership record does not authorize post-restart invalid_resume self-reclaim", async () => {
+    const port = nextPort++;
+    const surfaceId = "sf_stale_target_invalid_resume";
+    const providerId = "pv_stale_target_invalid_resume";
+    const ownershipSessionId = "sa_stale_target_invalid_resume";
+    const paneLineageId = `pl_${surfaceId}_durable`;
+    const server = new FakeSurfAceWsServer(port, { surfaceId });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-target-invalid-resume-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const warnings: string[] = [];
+    const runtime = createSurfAceRuntime({
+      discovery,
+      logger: {
+        error: () => {},
+        info: () => {},
+        warn: (message: string) => warnings.push(message),
+      },
+      stateDir,
+    });
+    server.invalidResumeWithoutTakeoverResponsesRemaining = 1;
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 1,
+          nextRemotePaneId: 1,
+          nextWindowLabelIndex: 0,
+          paneLabelsByPaneId: {},
+          providerId,
+          targetStateBySurfaceId: {
+            [surfaceId]: {
+              ownershipEpoch: 1,
+              paneTargets: {
+                [paneLineageId]: {
+                  currentTargetId: null,
+                  diagnosticContent: null,
+                  lastRestoreBlockedReason: "ownership_epoch_mismatch",
+                  nonDurableTargetDiagnostic: null,
+                  paneLineageId,
+                  staleTargetId: "tg_stale_target_invalid_resume",
+                  targetEpoch: 1,
+                },
+              },
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [
+                {
+                  appliedAt: new Date().toISOString(),
+                  currentState: "stale",
+                  ownerProviderId: providerId,
+                  ownershipEpoch: 1,
+                  ownershipSessionId,
+                  paneIdAtApply: "pn_previous_stale_target",
+                  paneLabelAtApply: 1,
+                  paneLineageId,
+                  restorePolicy: "auto",
+                  surfaceId,
+                  surfaceInstanceId: null,
+                  targetEpoch: 1,
+                  targetHeader: {
+                    payloadSchemaVersion: 1,
+                    replaySemantics: "bytes",
+                    requiredCapabilities: ["target.markdown.v1"],
+                    safeToLogFields: [],
+                    safetyClass: "passive",
+                    summary: "stale target durable reclaim",
+                  },
+                  targetId: "tg_stale_target_invalid_resume",
+                  targetKind: "markdown",
+                  targetPayload: { markdown: "# stale target durable reclaim" },
+                },
+              ],
+            },
+          },
+          version: 1,
+          windowLabels: {},
+        }),
+      );
+
+      await runtime.start();
+      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.takeover),
+        [false, false],
+      );
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.resumeSessionId),
+        [null, null],
+      );
+      assert.ok(warnings.some((warning) => warning.includes("ownership_self_reclaim_blocked")));
+      assert.ok(!warnings.some((warning) => warning.includes("ownership_self_reclaim ")));
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("foreign-provider busy clears stale content before later fresh pair", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
