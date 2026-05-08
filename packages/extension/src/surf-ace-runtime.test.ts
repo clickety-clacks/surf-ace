@@ -5245,6 +5245,54 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
     });
 
+    await t.test("provider realizes weighted topology so list reflects resized panes", async () => {
+      await withRuntimeHarness(async ({ runtime, server }) => {
+        const before = (await runtime.listScreens())[0]!;
+        const firstPaneId = paneByLabel(before, 1).paneId;
+
+        const realized = await runtime.realizeTopology({
+          allowDestroyPaneIds: [],
+          desired: {
+            children: [
+              { paneId: firstPaneId, type: "pane", weight: 1 },
+              { type: "pane", weight: 3 },
+            ],
+            direction: "vertical",
+            type: "split",
+          },
+          expectedTopologyRevision: before.topologyRevision,
+          fingerprint: server.surfaceId,
+          target: { root: true },
+        });
+
+        assert.deepEqual(server.topologyApplyRequests.at(-1)?.layout, {
+          children: [
+            { paneId: server.initialRemotePaneId, type: "pane", weight: 1 },
+            { paneId: 42, type: "pane", weight: 3 },
+          ],
+          direction: "vertical",
+          type: "split",
+        });
+        assert.deepEqual(realized.topology, {
+          children: [
+            { paneId: firstPaneId, type: "pane", weight: 1 },
+            { paneId: realized.createdPaneIds[0], type: "pane", weight: 3 },
+          ],
+          direction: "vertical",
+          type: "split",
+        });
+
+        const after = (await runtime.listScreens())[0]!;
+        assert.deepEqual(
+          after.panes.map((pane) => pane.viewport),
+          [
+            { height: 768, scale: 2, width: 256 },
+            { height: 768, scale: 2, width: 768 },
+          ],
+        );
+      });
+    });
+
     await t.test("provider preserves compact pane labels when topology reorders surviving panes", async () => {
       await withRuntimeHarness(async ({ runtime, server }) => {
         const before = (await runtime.listScreens())[0]!;

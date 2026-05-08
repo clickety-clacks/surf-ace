@@ -41,6 +41,7 @@ import {
   surfaceAppearedEventSchema,
   surfaceRemovedEventSchema,
   surfaceResumedEventSchema,
+  topologyChangedEventSchema,
   surfacesListRequestSchema,
   surfacesListResponseSchema,
   tapEventSchema,
@@ -157,6 +158,9 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   },
   "event.surface_resumed": {
     event: surfaceResumedEventSchema,
+  },
+  "event.topology_changed": {
+    event: topologyChangedEventSchema,
   },
   "event.snapshot_hint": {
     event: snapshotHintEventSchema,

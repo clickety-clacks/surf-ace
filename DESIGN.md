@@ -2746,9 +2746,11 @@ desired                   object   Recursive desired subtree
 
 **Desired subtree shape:**
 ```
-split node: { "type": "split", "direction": "horizontal" | "vertical", "children": [...] }
-pane node:  { "type": "pane", "paneId"?: paneId, "name"?: string | null }
+split node: { "type": "split", "direction": "horizontal" | "vertical", "children": [...], "weight"?: number }
+pane node:  { "type": "pane", "paneId"?: paneId, "name"?: string | null, "weight"?: number }
 ```
+
+`weight` is an optional positive relative size within the parent split. User-driven client resizing emits `event.topology_changed` with the current weighted layout and bumped `topologyRevision`; providers adopt that visible layout so subsequent `surf_ace_list` output reports the reconciled pane geometry.
 
 **Behavior:** The provider verifies `expectedTopologyRevision`, allocates any new internal pane ids and visible `paneLabel` values, verifies that omitted existing panes are explicitly listed in `allowDestroyPaneIds`, then sends one `topology.apply` to the surface. Existing pane identity is preserved only for desired leaves that keep an existing `paneId`, plus the non-root shorthand where `{ target: { paneId }, desired: { type: "pane" } }` preserves that target pane.
 

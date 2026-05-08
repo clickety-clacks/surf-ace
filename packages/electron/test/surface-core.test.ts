@@ -198,6 +198,100 @@ test("surface core tracks the active keyboard pane and falls back when it closes
   );
 });
 
+test("surface core preserves resize weights in topology and renderer geometry", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  const events: string[] = [];
+  const unsubscribe = core.subscribe((event) => events.push(event.type));
+  try {
+    core.topologyApply(surface.surfaceId, {
+      layout: {
+        children: [
+          { paneId: 7 as never, type: "pane", weight: 3 },
+          { paneId: 9 as never, type: "pane", weight: 1 },
+        ],
+        direction: "vertical",
+        type: "split",
+      },
+      panes: [
+        { name: null, paneId: 7 as never, paneLabel: 1 },
+        { name: null, paneId: 9 as never, paneLabel: 2 },
+      ],
+      topologyRevision: 1 as never,
+      windowLabel: "a",
+    });
+
+    const state = core.getRendererWindowState(surface.surfaceId);
+    assert.deepEqual(state.layout, {
+      children: [
+        { paneId: 7, type: "pane", weight: 3 },
+        { paneId: 9, type: "pane", weight: 1 },
+      ],
+      direction: "vertical",
+      type: "split",
+    });
+    assert.deepEqual(
+      core.panesList(surface.surfaceId).panes.map((pane) => pane.viewport),
+      [
+        { height: 800, scale: 2, width: 900 },
+        { height: 800, scale: 2, width: 300 },
+      ],
+    );
+
+    core.resizeSplit(surface.surfaceId, [], [1, 3]);
+    assert.equal(core.topologyState(surface.surfaceId).topologyRevision, 2);
+    assert.deepEqual(core.topologyState(surface.surfaceId).layout, {
+      children: [
+        { paneId: 7, type: "pane", weight: 1 },
+        { paneId: 9, type: "pane", weight: 3 },
+      ],
+      direction: "vertical",
+      type: "split",
+    });
+    assert.ok(events.includes("topology-changed"));
+
+    const nativePane = core.panesList(surface.surfaceId).panes.find((pane) => Number(pane.paneId) === 7)!;
+    core.markNativePaneMaterialized(surface.surfaceId, {
+      op: "native_pane.host",
+      panes: [
+        {
+          id: "7",
+          binding_id: "7:target_top",
+          content_id: "target_top",
+          geometry: {
+            coordinateSpace: "compositor_logical",
+            geometryRevision: nativePane.geometry.geometryRevision,
+            height: nativePane.geometry.contentViewport.height,
+            paneInstanceId: nativePane.geometry.paneInstanceId,
+            surfaceEpoch: nativePane.geometry.surfaceEpoch,
+            topologyEpoch: nativePane.geometry.topologyEpoch,
+            width: nativePane.geometry.contentViewport.width,
+            x: nativePane.geometry.contentViewport.x,
+            y: nativePane.geometry.contentViewport.y,
+          },
+          process: { args: ["top"], command: "top" },
+          revision: 1 as Revision,
+          target: "terminal",
+        },
+      ],
+    });
+
+    const projectedResize = core.projectNativePaneGeometryUpdateForResizeSplit(surface.surfaceId, [], [2, 2]);
+    assert.equal(projectedResize?.panes[0]?.id, "7");
+    assert.equal(projectedResize?.panes[0]?.geometry.width, 600);
+    assert.equal(projectedResize?.overlaySet.topologyEpoch, 3);
+  } finally {
+    unsubscribe();
+  }
+});
+
 test("surface core renders the visible pane label separately from paneId", () => {
   const core = new SurfaceCore({
     persistentState: {

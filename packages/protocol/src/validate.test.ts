@@ -31,6 +31,34 @@ test("validateEnvelopeType accepts current request envelopes", () => {
   assert.deepEqual(result, { ok: true });
 });
 
+test("validateEnvelopeType accepts weighted topology change events", () => {
+  const result = validateEnvelopeType("event.topology_changed", {
+    eventId: "ev_topology_resize",
+    op: "event.topology_changed",
+    payload: {
+      surfaceId: "sf_1",
+      topologyRevision: 2,
+      layout: {
+        children: [
+          { paneId: 1, type: "pane", weight: 1 },
+          { paneId: 2, type: "pane", weight: 3 },
+        ],
+        direction: "vertical",
+        type: "split",
+      },
+      panes: [
+        { name: null, paneId: 1, paneLabel: 1 },
+        { name: null, paneId: 2, paneLabel: 2 },
+      ],
+    },
+    sentAt: Date.now(),
+    type: "event",
+    v: 1,
+  });
+
+  assert.deepEqual(result, { ok: true });
+});
+
 test("validateEnvelopeType rejects pair requests without providerName", () => {
   const result = validateEnvelopeType("pair.request", {
     id: "req_missing_provider_name",

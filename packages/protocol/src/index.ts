@@ -450,10 +450,12 @@ export type TopologyLayoutNode =
   | {
       type: "pane";
       paneId: PaneId;
+      weight?: number;
     }
   | {
       type: "split";
       direction: "horizontal" | "vertical";
+      weight?: number;
       children: TopologyLayoutNode[];
     };
 
@@ -908,6 +910,15 @@ export type SurfaceResumedEvent = EventBase<"event.surface_resumed"> & {
   };
 };
 
+export type TopologyChangedEvent = EventBase<"event.topology_changed"> & {
+  payload: {
+    surfaceId: SurfaceId;
+    topologyRevision: TopologyRevision;
+    layout: TopologyLayoutNode;
+    panes: TopologyPaneState[];
+  };
+};
+
 export type SnapshotHintEvent = EventBase<"event.snapshot_hint"> & {
   payload: {
     reason: "after_render" | "after_reconnect" | "backpressure_drop";
@@ -990,6 +1001,7 @@ export type Event =
   | SurfaceAppearedEvent
   | SurfaceRemovedEvent
   | SurfaceResumedEvent
+  | TopologyChangedEvent
   | SnapshotHintEvent
   | PaneCreatedEvent
   | PaneRemovedEvent

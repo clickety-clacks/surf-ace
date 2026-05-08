@@ -44,6 +44,7 @@ type ProtocolSchemaDefName =
   | "SurfaceAppearedEvent"
   | "SurfaceRemovedEvent"
   | "SurfaceResumedEvent"
+  | "TopologyChangedEvent"
   | "SnapshotHintEvent"
   | "PaneCreatedEvent"
   | "PaneRemovedEvent"
@@ -104,6 +105,7 @@ export const navigationEventSchema = getSchemaDef("NavigationEvent");
 export const surfaceAppearedEventSchema = getSchemaDef("SurfaceAppearedEvent");
 export const surfaceRemovedEventSchema = getSchemaDef("SurfaceRemovedEvent");
 export const surfaceResumedEventSchema = getSchemaDef("SurfaceResumedEvent");
+export const topologyChangedEventSchema = getSchemaDef("TopologyChangedEvent");
 export const snapshotHintEventSchema = getSchemaDef("SnapshotHintEvent");
 export const paneCreatedEventSchema = getSchemaDef("PaneCreatedEvent");
 export const paneRemovedEventSchema = getSchemaDef("PaneRemovedEvent");

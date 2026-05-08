@@ -104,6 +104,9 @@
       "$ref": "#/$defs/SurfaceResumedEvent"
     },
     {
+      "$ref": "#/$defs/TopologyChangedEvent"
+    },
+    {
       "$ref": "#/$defs/SnapshotHintEvent"
     },
     {
@@ -424,6 +427,7 @@
         "event.surface_appeared",
         "event.surface_removed",
         "event.surface_resumed",
+        "event.topology_changed",
         "event.snapshot_hint",
         "event.pane_created",
         "event.pane_removed",
@@ -3601,6 +3605,91 @@
         }
       }
     },
+    "TopologyPaneState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paneId",
+        "paneLabel",
+        "name"
+      ],
+      "properties": {
+        "paneId": {
+          "$ref": "#/$defs/PaneId"
+        },
+        "paneLabel": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "name": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "TopologyLayoutNode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "paneId"
+          ],
+          "properties": {
+            "type": {
+              "const": "pane"
+            },
+            "paneId": {
+              "$ref": "#/$defs/PaneId"
+            },
+            "weight": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "direction",
+            "children"
+          ],
+          "properties": {
+            "type": {
+              "const": "split"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "horizontal",
+                "vertical"
+              ]
+            },
+            "weight": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "children": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/TopologyLayoutNode"
+              }
+            }
+          }
+        }
+      ]
+    },
     "PaneCreatedEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -3707,6 +3796,62 @@
             },
             "paneId": {
               "$ref": "#/$defs/PaneId"
+            }
+          }
+        }
+      }
+    },
+    "TopologyChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "op",
+        "eventId",
+        "sentAt",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "event"
+        },
+        "op": {
+          "const": "event.topology_changed"
+        },
+        "eventId": {
+          "$ref": "#/$defs/EventId"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/EpochMs"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "surfaceId",
+            "topologyRevision",
+            "layout",
+            "panes"
+          ],
+          "properties": {
+            "surfaceId": {
+              "$ref": "#/$defs/SurfaceId"
+            },
+            "topologyRevision": {
+              "$ref": "#/$defs/TopologyRevision"
+            },
+            "layout": {
+              "$ref": "#/$defs/TopologyLayoutNode"
+            },
+            "panes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TopologyPaneState"
+              }
             }
           }
         }

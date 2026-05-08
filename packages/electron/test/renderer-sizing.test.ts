@@ -159,3 +159,15 @@ test("split flex children do not force every pane to full window height", async 
   assert.match(splitChildRule, /height:\s*auto;/);
   assert.match(splitChildRule, /min-height:\s*0;/);
 });
+
+test("renderer exposes split resize handles and reports resize-split commands", async () => {
+  const source = await rendererSource();
+  const styles = await rendererStyles();
+
+  assert.match(source, /type:\s*"resize-split"/);
+  assert.match(source, /weights:\s*nextWeights/);
+  assert.match(source, /style\.flexGrow = String\(layoutWeight/);
+  assert.match(styles, /\.split-resize-handle\s*\{/);
+  assert.match(styles, /cursor:\s*col-resize;/);
+  assert.match(styles, /cursor:\s*row-resize;/);
+});
