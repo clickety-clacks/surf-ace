@@ -14,6 +14,7 @@ class FakeService extends EventEmitter {
 }
 
 type FakeDiscoveredService = {
+  event?: "txt-update" | "up";
   name: string;
   port?: number;
   txt?: Record<string, unknown>;
@@ -22,6 +23,14 @@ type FakeDiscoveredService = {
 class FakeBonjour {
   private readonly discoveredServices: Array<Array<string | FakeDiscoveredService>>;
   readonly publishNames: string[] = [];
+  readonly publishOptions: Array<{
+    name: string;
+    port: number;
+    probe?: boolean;
+    protocol: "tcp";
+    txt: Record<string, string>;
+    type: "surf-ace";
+  }> = [];
   readonly services: FakeService[] = [];
   findCalls = 0;
   unpublishCalls = 0;
@@ -46,8 +55,12 @@ class FakeBonjour {
     queueMicrotask(() => {
       for (const service of services) {
         const discoveredService = typeof service === "string" ? { name: service } : service;
-        listener?.(discoveredService);
-        browser.emit("up", discoveredService);
+        if (discoveredService.event === "txt-update") {
+          browser.emit("txt-update", discoveredService);
+        } else {
+          listener?.(discoveredService);
+          browser.emit("up", discoveredService);
+        }
       }
     });
     browser.stop = () => {};
@@ -62,13 +75,10 @@ class FakeBonjour {
     txt: Record<string, string>;
     type: "surf-ace";
   }): Service {
-    void options.port;
-    void options.protocol;
-    void options.txt;
-    void options.type;
     if (this.publishError) {
       throw this.publishError;
     }
+    this.publishOptions.push(options);
     this.publishNames.push(options.name);
     const service = new FakeService();
     this.services.push(service);
@@ -115,6 +125,32 @@ test("bonjour advertiser republishes with a suffixed name after a name conflict"
 
   assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace", "TARS Surf Ace (2)"]);
   assert.equal(bonjour.findCalls, 1);
+  await advertiser.stop();
+});
+
+test("bonjour advertiser republishes when our prompt publish creates a duplicate name", async () => {
+  const bonjour = new FakeBonjour([
+    [
+      { name: "shrdlu Surf Ace", port: 19001, txt: { pk: "sf_test" } },
+      { event: "txt-update", name: "shrdlu Surf Ace", port: 19001, txt: { pk: "other" } },
+    ],
+  ]);
+  const advertiser = new BonjourAdvertiser({
+    bonjour,
+    name: "shrdlu Surf Ace",
+    port: 19001,
+    txtProvider: () => ({ pk: "sf_test" }),
+  });
+
+  advertiser.start();
+  await new Promise((resolve) => {
+    setTimeout(resolve, 50);
+  });
+  await (advertiser as unknown as {
+    verifyPublishedService(): Promise<void>;
+  }).verifyPublishedService();
+
+  assert.deepEqual(bonjour.publishNames, ["shrdlu Surf Ace", "shrdlu Surf Ace (2)"]);
   await advertiser.stop();
 });
 
@@ -250,6 +286,25 @@ test("bonjour advertiser publishes promptly without name preflight", async () =>
 
   assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace"]);
   assert.equal(bonjour.findCalls, 0);
+  await advertiser.stop();
+});
+
+test("bonjour advertiser disables native library preflight probe", async () => {
+  const bonjour = new FakeBonjour();
+  const advertiser = new BonjourAdvertiser({
+    bonjour,
+    name: "shrdlu Surf Ace",
+    port: 19001,
+    txtProvider: () => ({ pk: "sf_test" }),
+  });
+
+  advertiser.start();
+  await new Promise((resolve) => {
+    setTimeout(resolve, 50);
+  });
+
+  assert.equal(bonjour.publishOptions.length, 1);
+  assert.equal(bonjour.publishOptions[0]?.probe, false);
   await advertiser.stop();
 });
 

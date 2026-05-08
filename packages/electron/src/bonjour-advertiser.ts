@@ -291,6 +291,7 @@ export class BonjourAdvertiser {
         service = binding.client.publish({
           name,
           port: this.port,
+          probe: false,
           protocol: "tcp",
           txt,
           type: "surf-ace",
@@ -347,8 +348,23 @@ export class BonjourAdvertiser {
       return;
     }
     const txt = this.txtProvider();
-    const matchingOwnService = activeServices.some((service) => this.matchesAdvertisedIdentity(service, publishedName, txt));
+    const matchingOwnServices = activeServices.filter((service) => this.matchesAdvertisedIdentity(service, publishedName, txt));
+    const matchingOwnService = matchingOwnServices.length > 0;
     const sameNameServices = activeServices.filter((service) => service.name === publishedName);
+    if (!this.isolatedPublisher && matchingOwnService && sameNameServices.length > matchingOwnServices.length) {
+      this.visibilityFailures += 1;
+      console.warn(
+        bonjourDiagnostic("publish_name_conflict", {
+          discovered_count: activeServices.length,
+          failure_count: this.visibilityFailures,
+          name: publishedName,
+          own_name_count: matchingOwnServices.length,
+          same_name_count: sameNameServices.length,
+        }),
+      );
+      await this.republishWithFallbackName();
+      return;
+    }
     if (!matchingOwnService) {
       this.visibilityFailures += 1;
       console.warn(
@@ -427,17 +443,19 @@ export class BonjourAdvertiser {
     );
     for (const binding of this.activeBonjourBindings()) {
       try {
-        browsers.push(
-          binding.client.find(
-            {
-              protocol: "tcp",
-              type: "surf-ace",
-            },
-            (service) => {
-              services.push(service);
-            },
-          ),
+        const browser = binding.client.find(
+          {
+            protocol: "tcp",
+            type: "surf-ace",
+          },
+          (service) => {
+            services.push(service);
+          },
         );
+        browser.on("txt-update", (service: BonjourDiscoveredService) => {
+          services.push(service);
+        });
+        browsers.push(browser);
       } catch (error) {
         console.warn(
           bonjourDiagnostic("publish_discover_error", {
@@ -457,7 +475,7 @@ export class BonjourAdvertiser {
       return services;
     }
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 750).unref?.();
+      setTimeout(resolve, 750);
     });
     for (const browser of browsers) {
       browser.stop();
