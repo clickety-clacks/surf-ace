@@ -10,12 +10,30 @@ function createStubRuntime(): SurfAceRuntime {
       fingerprint: "sf_1",
       notFoundStrokeIds: [],
       paneId: 1,
+      paneLabel: 1,
       remainingStrokeCount: 0,
       removedStrokeIds: [],
+    }),
+    capturePane: async () => ({
+      capture: {
+        bytesBase64: "iVBORw0KGgo=",
+        capturedAt: Date.now(),
+        contentType: "html",
+        dimensions: { height: 768, width: 1024 },
+        failureReason: null,
+        fingerprint: "sf_1",
+        paneId: 1,
+        paneLabel: 1,
+        scale: 2,
+        topologyRevision: 1,
+        visibleContentId: "ct_1" as never,
+        windowLabel: "a",
+      },
     }),
     clear: async () => ({
       fingerprint: "sf_1",
       paneId: 1,
+      paneLabel: 1,
       revision: 1,
     }),
     closePane: async () => ({
@@ -93,6 +111,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_realize_topologies",
     "surf_ace_close_pane",
     "surf_ace_read",
+    "surf_ace_capture_pane",
     "surf_ace_annotations_remove",
   ]);
   assert.deepEqual(
@@ -112,6 +131,15 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     (pushTool.inputSchema.properties as { contentType: { enum: string[] } }).contentType.enum,
     ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "browser_url"],
   );
+
+  const captureTool = tools.find((tool) => tool.name === "surf_ace_capture_pane");
+  assert.ok(captureTool);
+  assert.deepEqual(
+    Object.keys(captureTool.inputSchema.properties as Record<string, unknown>).sort(),
+    ["fingerprint", "paneId"].sort(),
+  );
+  assert.deepEqual(captureTool.inputSchema.required, ["fingerprint", "paneId"]);
+  assert.equal(captureTool.inputSchema.additionalProperties, false);
 
   const splitTool = tools.find((tool) => tool.name === "surf_ace_split");
   assert.ok(splitTool);

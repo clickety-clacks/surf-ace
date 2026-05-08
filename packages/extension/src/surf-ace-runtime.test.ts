@@ -1591,6 +1591,67 @@ function removeDurableSelfAuthority(runtime: unknown, surface: any, surfaceId: s
   surface.localOwnership = null;
 }
 
+test("pane capture requests fresh rendered image and returns visual oracle metadata", async () => {
+  await withRuntimeHarness({
+    now: () => 1_777_000,
+    run: async ({ runtime, server }) => {
+      const screen = (await runtime.listScreens())[0];
+      const paneId = screen?.panes[0]?.paneId;
+      assert.ok(paneId);
+
+      const pushed = await runtime.push({
+        content: "<main>capture-marker-t272</main>",
+        contentType: "html",
+        fingerprint: server.surfaceId,
+        paneId,
+      });
+
+      server.snapshotImage = "cG5nLWJ5dGVz";
+      const result = await runtime.capturePane({ fingerprint: server.surfaceId, paneId });
+
+      assert.deepEqual(server.snapshotRequests.at(-1), {
+        includeImage: true,
+        includeVisibleText: true,
+        paneId: server.initialRemotePaneId,
+      });
+      assert.equal(result.capture.bytesBase64, "cG5nLWJ5dGVz");
+      assert.equal(result.capture.failureReason, null);
+      assert.equal(result.capture.fingerprint, server.surfaceId);
+      assert.equal(result.capture.windowLabel, "a");
+      assert.equal(result.capture.paneId, paneId);
+      assert.equal(result.capture.paneLabel, 1);
+      assert.equal(result.capture.topologyRevision, 0);
+      assert.equal(result.capture.visibleContentId, pushed.contentId);
+      assert.equal(result.capture.contentType, "html");
+      assert.deepEqual(result.capture.dimensions, { height: 768, width: 1024 });
+      assert.equal(result.capture.scale, 2);
+      assert.equal(result.capture.capturedAt, 1_777_000);
+    },
+  });
+});
+
+test("pane capture returns failure metadata when client cannot provide image bytes", async () => {
+  await withRuntimeHarness({
+    configureServer: (server) => {
+      server.snapshotImage = "";
+    },
+    run: async ({ runtime, server }) => {
+      const screen = (await runtime.listScreens())[0];
+      const paneId = screen?.panes[0]?.paneId;
+      assert.ok(paneId);
+
+      const result = await runtime.capturePane({ fingerprint: server.surfaceId, paneId });
+
+      assert.equal(result.capture.bytesBase64, null);
+      assert.equal(result.capture.failureReason, "client returned no rendered image for pane capture");
+      assert.equal(result.capture.fingerprint, server.surfaceId);
+      assert.equal(result.capture.windowLabel, "a");
+      assert.equal(result.capture.paneId, paneId);
+      assert.equal(result.capture.paneLabel, 1);
+    },
+  });
+});
+
 function assertAnnotationAlertBody(
   body: Record<string, unknown>,
   params: {

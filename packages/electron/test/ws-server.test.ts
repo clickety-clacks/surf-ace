@@ -428,6 +428,7 @@ function overlayDiagnosticsRequest(): Request {
 async function withServer(
   run: (ctx: { core: SurfaceCore; surfaceId: string; url: string; server: SurfaceWsServer }) => Promise<void>,
   options: {
+    capturePaneImage?: (surfaceId: string, paneId: number) => Promise<string | null>;
     compositorSocketPath?: string | null;
     getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
     onNativeMaterialized?: (surfaceId: string) => void;
@@ -443,7 +444,7 @@ async function withServer(
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const port = nextPort++;
   const server = new SurfaceWsServer({
-    capturePaneImage: async () => null,
+    capturePaneImage: options.capturePaneImage ?? (async () => null),
     core,
     endpointName: "Surf Ace",
     getOverlayDiagnostics: options.getOverlayDiagnostics,
@@ -467,6 +468,38 @@ async function withServer(
     await server.stop();
   }
 }
+
+test("ws server snapshot.get captures explicit rendered pane image", async () => {
+  const captureRequests: Array<{ paneId: number; surfaceId: string }> = [];
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const response = await request(owner, {
+      ...snapshotGetRequest(1),
+      payload: {
+        includeDrawings: true,
+        includeImage: true,
+        includeVisibleText: true,
+        paneId: 1 as never,
+      },
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "snapshot.get");
+    assert.equal(response.payload.paneId, 1);
+    assert.equal(response.payload.image, "cG5nLWJ5dGVz");
+    assert.deepEqual(captureRequests, [{ paneId: 1, surfaceId }]);
+
+    await closeSocket(owner);
+  }, {
+    capturePaneImage: async (surfaceId, paneId) => {
+      captureRequests.push({ paneId, surfaceId });
+      return "cG5nLWJ5dGVz";
+    },
+  });
+});
 
 test("ws server keeps ownership lock after owner socket closes", async () => {
   await withServer(async ({ surfaceId, url }) => {

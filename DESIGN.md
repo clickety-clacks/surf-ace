@@ -2919,6 +2919,42 @@ readAt            epochMs
 
 ---
 
+#### `surf_ace_capture_pane`
+
+Capture the actual rendered contents of one explicit Surf Ace pane. Read.
+
+This tool is the visual topology oracle for soaks and operator checks: push a unique marker, capture the exact `fingerprint` + `paneId`, and compare the returned image and metadata against provider topology. The tool must not infer a pane from a surface-wide request or from visible labels alone.
+
+**Params:**
+```
+fingerprint    string   Window-scoped Surf Ace surface identity
+paneId         string   Required opaque pane id from `surf_ace_list`
+```
+
+**Returns:**
+```
+capture: {
+  bytesBase64       string?  Base64 PNG bytes, null when blocked/unavailable
+  fingerprint       string
+  windowLabel       string
+  paneId            string
+  paneLabel         integer
+  topologyRevision  integer
+  visibleContentId  string?
+  contentType       string?
+  dimensions        { width, height }
+  scale             number
+  capturedAt        epochMs
+  failureReason     string?
+}
+```
+
+The image must come from the client-side rendered pane capture path, not from cached provider content state.
+
+**Errors:** `screen_not_found`, `not_connected`
+
+---
+
 #### `surf_ace_read_buffer` (Deprecated)
 
 This tool is deprecated and removed in the capture frame model. Frame images are now included directly in each capture frame returned by `surf_ace_read`. Do not use this tool in new code. It is documented here only for historical reference.

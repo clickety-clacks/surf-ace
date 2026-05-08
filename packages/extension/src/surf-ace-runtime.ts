@@ -300,6 +300,26 @@ export type SurfAceAnnotateRemoveInput = {
   strokeIds: string[];
 };
 
+export type SurfAcePaneCaptureResult = {
+  capture: {
+    bytesBase64: string | null;
+    capturedAt: number;
+    contentType: ContentType | null;
+    dimensions: {
+      height: number;
+      width: number;
+    };
+    failureReason: string | null;
+    fingerprint: string;
+    paneId: PaneId;
+    paneLabel: number;
+    scale: number;
+    topologyRevision: number;
+    visibleContentId: ContentId | null;
+    windowLabel: string;
+  };
+};
+
 export type SurfAceAnnotateRemoveResult = {
   fingerprint: string;
   notFoundStrokeIds: string[];
@@ -609,6 +629,7 @@ export type SurfAceRuntimeOptions = {
 
 export interface SurfAceRuntime {
   annotateRemove(input: SurfAceAnnotateRemoveInput): Promise<SurfAceAnnotateRemoveResult>;
+  capturePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAcePaneCaptureResult>;
   clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult>;
   closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult>;
   listScreens(): Promise<SurfAceScreenSummary[]>;
@@ -967,7 +988,7 @@ type OwnerControlCommand =
     }
   | {
       input: { fingerprint: string; paneId: PaneId };
-      op: "clear" | "closePane" | "read" | "snapshot";
+      op: "capturePane" | "clear" | "closePane" | "read" | "snapshot";
     }
   | {
       input: SurfAceSplitInput;
@@ -2755,6 +2776,71 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.buffer.taps = [];
 
     return result;
+  }
+
+  async capturePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAcePaneCaptureResult> {
+    await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAcePaneCaptureResult>({ input, op: "capturePane" });
+    }
+
+    const surface = this.requireConnectedSurface(input.fingerprint);
+    const pane = this.requirePane(input.fingerprint, input.paneId);
+    const capturedAt = this.now();
+    let payload: SnapshotResponse["payload"] | null = null;
+    let failureReason: string | null = null;
+
+    try {
+      const response = await this.sendRequest(
+        surface,
+        this.requestEnvelope("snapshot.get", {
+          includeImage: true,
+          includeVisibleText: true,
+          paneId: pane.remotePaneId,
+        }),
+      );
+
+      if (isErrorResponse(response)) {
+        if (mutationErrorCode(response.error.code) === "not_connected") {
+          throw new SurfAceToolError("not_connected", response.error.message);
+        }
+        failureReason = response.error.message;
+      } else {
+        payload = (response as SnapshotResponse).payload;
+        this.applySnapshot(surface, pane, response as SnapshotResponse);
+        if (!payload.image) {
+          failureReason = "client returned no rendered image for pane capture";
+        }
+      }
+    } catch (error) {
+      if (error instanceof SurfAceToolError && error.code === "not_connected") {
+        throw error;
+      }
+      failureReason = error instanceof Error ? error.message : String(error);
+    }
+
+    const viewport = payload?.viewport ?? pane.snapshot?.viewport;
+    const visibleRect = viewport?.visibleRect;
+    const imageBytes = payload?.image && payload.image.length > 0 ? payload.image : null;
+    return {
+      capture: {
+        bytesBase64: imageBytes,
+        capturedAt,
+        contentType: payload?.contentType ?? pane.contentType,
+        dimensions: {
+          height: visibleRect?.height ?? pane.viewport.height,
+          width: visibleRect?.width ?? pane.viewport.width,
+        },
+        failureReason,
+        fingerprint: input.fingerprint,
+        paneId: pane.paneId,
+        paneLabel: pane.paneLabel,
+        scale: pane.viewport.scale,
+        topologyRevision: surface.topologyRevision,
+        visibleContentId: payload?.contentId ?? pane.activeContentId,
+        windowLabel: surface.windowLabel,
+      },
+    };
   }
 
   async registerTarget(input: SurfAceTargetRegisterInput): Promise<SurfAceTargetRegisterResult> {
@@ -7287,6 +7373,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     switch (command.op) {
       case "annotateRemove":
         return await this.annotateRemove(command.input);
+      case "capturePane":
+        return await this.capturePane(command.input);
       case "clear":
         return await this.clear(command.input);
       case "closePane":
