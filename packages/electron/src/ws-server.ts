@@ -60,6 +60,7 @@ type ActiveSession = {
   connectionId: string;
   drawingFlushConfig: DrawingFlushConfig;
   eventProfile: EventProfile;
+  ownershipEpoch: number;
   paneFlushTimers: Map<number, PaneFlushTimers>;
   pairConfirmed: boolean;
   providerId: string;
@@ -71,6 +72,7 @@ type ActiveSession = {
 type OwnershipLock = {
   drawingFlushConfig: DrawingFlushConfig;
   eventProfile: EventProfile;
+  ownershipEpoch: number;
   providerId: string;
   sessionId: string;
 };
@@ -1026,9 +1028,11 @@ export class SurfaceWsServer {
 
     let resumed = false;
     let sessionId: string;
+    let ownershipEpoch: number;
 
     if (!lock) {
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+      ownershipEpoch = 1;
       persistentServerDiagnostic(
         "info",
         "pair_request_new_session",
@@ -1046,6 +1050,7 @@ export class SurfaceWsServer {
           this.detachActiveSession(surfaceId, "superseded");
         }
         sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+        ownershipEpoch = lock.ownershipEpoch + 1;
         persistentServerDiagnostic(
           "info",
           "pair_request_explicit_takeover",
@@ -1091,6 +1096,7 @@ export class SurfaceWsServer {
       } else {
         resumed = true;
         sessionId = lock.sessionId;
+        ownershipEpoch = lock.ownershipEpoch;
         persistentServerDiagnostic(
           "info",
           "pair_request_resumed",
@@ -1125,6 +1131,7 @@ export class SurfaceWsServer {
         this.detachActiveSession(surfaceId, "superseded");
       }
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+      ownershipEpoch = lock.ownershipEpoch + 1;
       persistentServerDiagnostic(
         "info",
         "pair_request_explicit_takeover",
@@ -1154,6 +1161,7 @@ export class SurfaceWsServer {
       connectionId: request.payload.connectionId,
       drawingFlushConfig,
       eventProfile: requestedProfile,
+      ownershipEpoch,
       paneFlushTimers: new Map(),
       pairConfirmed: false,
       providerId,
@@ -1165,6 +1173,7 @@ export class SurfaceWsServer {
     transport.lock = {
       drawingFlushConfig,
       eventProfile: requestedProfile,
+      ownershipEpoch,
       providerId,
       sessionId,
     };
@@ -1191,6 +1200,7 @@ export class SurfaceWsServer {
           ...DEFAULT_LIMITS,
           resumeGraceMs: 20_000,
         },
+        ownershipEpoch,
         resumed,
         sessionId: sessionId as PairRequest["payload"]["resume"]["sessionId"],
         state: this.core.pairState(surfaceId),
@@ -1497,16 +1507,12 @@ export class SurfaceWsServer {
   private async handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
     const appliedAt = new Date().toISOString();
-    const active = this.transport(surfaceId).active;
     if (request.payload.surfaceId !== surfaceId) {
       return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply surfaceId does not match paired surface");
     }
-    if (!active || active.socket !== socket || request.payload.ownershipSessionId !== active.sessionId) {
-      return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply ownership session does not match active session");
-    }
-    const paneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
-    if (!paneLineages.has(request.payload.paneLineageId)) {
-      return this.targetApplyFailureResponse(request, appliedAt, "pane_lineage_missing", "target.apply pane lineage is not present on this surface");
+    const sessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+    if (sessionFailure) {
+      return sessionFailure;
     }
 
     if (request.payload.targetKind === "browser_url") {
@@ -1521,33 +1527,17 @@ export class SurfaceWsServer {
           type: "response",
           v: 1,
         };
-	      }
-	      const releaseResult = await this.runSurfaceMutation(surfaceId, async () => {
-	        const activeNow = this.transport(surfaceId).active;
-	        if (!activeNow || activeNow.socket !== socket || request.payload.ownershipSessionId !== activeNow.sessionId) {
-	          return {
-	            response: this.targetApplyFailureResponse(
-	              request,
-	              appliedAt,
-	              "ownership_session_mismatch",
-	              "target.apply ownership session does not match active session",
-	            ),
-	          };
-	        }
-	        const currentPaneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
-	        if (!currentPaneLineages.has(request.payload.paneLineageId)) {
-	          return {
-	            response: this.targetApplyFailureResponse(
-	              request,
-	              appliedAt,
-	              "pane_lineage_missing",
-	              "target.apply pane lineage is not present on this surface",
-	            ),
-	          };
-	        }
-	        const nativeHostedPaneId = this.core.nativeHostedPaneIdForLineage(surfaceId, request.payload.paneLineageId);
-	        const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
-	          surfaceId,
+      }
+      const releaseResult = await this.runSurfaceMutation(surfaceId, async () => {
+        const currentSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+        if (currentSessionFailure) {
+          return {
+            response: currentSessionFailure,
+          };
+        }
+        const nativeHostedPaneId = this.core.nativeHostedPaneIdForLineage(surfaceId, request.payload.paneLineageId);
+        const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
+          surfaceId,
           [nativeHostedPaneId],
           "browser_url",
         );
@@ -1555,21 +1545,21 @@ export class SurfaceWsServer {
           return { failure: releaseFailure as string };
         }
         const postReleasePreflightFailure = this.core.browserUrlTargetPreflight(surfaceId, request.payload);
-		        if (postReleasePreflightFailure) {
-		          return { payload: postReleasePreflightFailure };
-		        }
-		        const postReleaseSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
-		        if (postReleaseSessionFailure) {
-		          return { response: postReleaseSessionFailure };
-		        }
-		        return { payload: this.core.targetApply(surfaceId, request.payload) };
-		      });
-	      if ("response" in releaseResult) {
-	        return releaseResult.response;
-	      }
-	      if ("failure" in releaseResult) {
-	        return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", releaseResult.failure);
-	      }
+        if (postReleasePreflightFailure) {
+          return { payload: postReleasePreflightFailure };
+        }
+        const postReleaseSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+        if (postReleaseSessionFailure) {
+          return { response: postReleaseSessionFailure };
+        }
+        return { payload: this.core.targetApply(surfaceId, request.payload) };
+      });
+      if ("response" in releaseResult) {
+        return releaseResult.response;
+      }
+      if ("failure" in releaseResult) {
+        return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", releaseResult.failure);
+      }
       const result = releaseResult.payload;
       const paneId = this.core.pairState(surfaceId).panes.find((pane) =>
         pane.paneLineageId === request.payload.paneLineageId
@@ -1615,13 +1605,9 @@ export class SurfaceWsServer {
       };
     }
     return await this.runSurfaceMutation(surfaceId, async () => {
-      const activeNow = this.transport(surfaceId).active;
-      if (!activeNow || activeNow.socket !== socket || request.payload.ownershipSessionId !== activeNow.sessionId) {
-        return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply ownership session does not match active session");
-      }
-      const currentPaneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
-      if (!currentPaneLineages.has(request.payload.paneLineageId)) {
-        return this.targetApplyFailureResponse(request, appliedAt, "pane_lineage_missing", "target.apply pane lineage is not present on this surface");
+      const currentSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+      if (currentSessionFailure) {
+        return currentSessionFailure;
       }
 
       let materialization: NativePaneMaterialization;
@@ -1681,21 +1667,21 @@ export class SurfaceWsServer {
         if (hostFailure) {
           throw new Error(hostFailure);
         }
-	        hostApplied = true;
-	        const postHostLayoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
-	        if (postHostLayoutFailure) {
-	          throw new Error(postHostLayoutFailure);
-	        }
-	        const postHostSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
-	        if (postHostSessionFailure) {
-	          const releasedAfterFailure = await this.releaseNativePaneAfterFailedHost(surfaceId, materialization);
-	          if (!releasedAfterFailure) {
-	            this.core.markNativePaneMaterialized(surfaceId, materialization);
-	            this.onNativeMaterialized?.(surfaceId, materialization);
-	          }
-	          return postHostSessionFailure;
-	        }
-	        overlayRequest = overlayRequestForCompositor(materialization);
+        hostApplied = true;
+        const postHostLayoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+        if (postHostLayoutFailure) {
+          throw new Error(postHostLayoutFailure);
+        }
+        const postHostSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+        if (postHostSessionFailure) {
+          const releasedAfterFailure = await this.releaseNativePaneAfterFailedHost(surfaceId, materialization);
+          if (!releasedAfterFailure) {
+            this.core.markNativePaneMaterialized(surfaceId, materialization);
+            this.onNativeMaterialized?.(surfaceId, materialization);
+          }
+          return postHostSessionFailure;
+        }
+        overlayRequest = overlayRequestForCompositor(materialization);
         const overlayResponse = overlayRequest
           ? await sendCompositorControl(this.compositorSocketPath, overlayRequest)
           : null;
@@ -1706,20 +1692,20 @@ export class SurfaceWsServer {
           }
           overlayApplied = true;
         }
-	        const postOverlayLayoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
-	        if (postOverlayLayoutFailure) {
-	          throw new Error(postOverlayLayoutFailure);
-	        }
-	        const postOverlaySessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
-	        if (postOverlaySessionFailure) {
-	          const releasedAfterFailure = await this.releaseNativePaneAfterFailedHost(surfaceId, materialization);
-	          if (!releasedAfterFailure) {
-	            this.core.markNativePaneMaterialized(surfaceId, materialization);
-	            this.onNativeMaterialized?.(surfaceId, materialization);
-	          }
-	          return postOverlaySessionFailure;
-	        }
-	        const payload: TargetApplyResponse["payload"] = {
+        const postOverlayLayoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+        if (postOverlayLayoutFailure) {
+          throw new Error(postOverlayLayoutFailure);
+        }
+        const postOverlaySessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+        if (postOverlaySessionFailure) {
+          const releasedAfterFailure = await this.releaseNativePaneAfterFailedHost(surfaceId, materialization);
+          if (!releasedAfterFailure) {
+            this.core.markNativePaneMaterialized(surfaceId, materialization);
+            this.onNativeMaterialized?.(surfaceId, materialization);
+          }
+          return postOverlaySessionFailure;
+        }
+        const payload: TargetApplyResponse["payload"] = {
           appliedAt,
           materializedState: {
             nativeHost: "applied",
@@ -2141,6 +2127,14 @@ export class SurfaceWsServer {
         appliedAt,
         "ownership_session_mismatch",
         "target.apply ownership session does not match active session",
+      ) as TargetApplyResponse).payload;
+    }
+    if (request.payload.ownershipEpoch !== active.ownershipEpoch) {
+      return (this.targetApplyFailureResponse(
+        request,
+        appliedAt,
+        "ownership_epoch_mismatch",
+        "target.apply ownershipEpoch does not match the active session",
       ) as TargetApplyResponse).payload;
     }
     const paneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));

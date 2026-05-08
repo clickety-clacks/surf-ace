@@ -272,6 +272,7 @@ function contentApplyClearRequest(paneId: number, revision: number): Request {
 
 function targetApplyRequest(
   overrides: Partial<{
+    ownershipEpoch: number;
     ownershipSessionId: string;
     paneLineageId: string;
     surfaceId: string;
@@ -283,7 +284,7 @@ function targetApplyRequest(
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "target.apply",
     payload: {
-      ownershipEpoch: 1,
+      ownershipEpoch: overrides.ownershipEpoch ?? 1,
       ownershipSessionId: overrides.ownershipSessionId ?? "sa_test",
       paneLineageId,
       restoreReason: "resume_restore",
@@ -311,6 +312,7 @@ function targetApplyRequest(
 function browserUrlTargetApplyRequest(
   options: {
     ownershipSessionId: string;
+    ownershipEpoch?: number;
     paneLineageId: string;
     surfaceId: string;
     targetId?: string;
@@ -322,7 +324,7 @@ function browserUrlTargetApplyRequest(
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "target.apply",
     payload: {
-      ownershipEpoch: 1,
+      ownershipEpoch: options.ownershipEpoch ?? 1,
       ownershipSessionId: options.ownershipSessionId as never,
       paneLineageId: options.paneLineageId as never,
       restoreReason: "initial_apply",
@@ -471,6 +473,7 @@ test("ws server keeps ownership lock after owner socket closes", async () => {
     const owner = await connect(url);
     const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(first.ok, true);
+    assert.equal(first.payload.ownershipEpoch, 1);
     await closeSocket(owner, 1000, "provider_shutdown");
 
     await new Promise((resolve) => {
@@ -623,6 +626,7 @@ test("ws server allows the lock owner to resume after disconnect", async () => {
     assert.equal(resumed.op, "pair.request");
     assert.equal(resumed.payload.resumed, true);
     assert.equal(resumed.payload.sessionId, first.payload.sessionId);
+    assert.equal(resumed.payload.ownershipEpoch, first.payload.ownershipEpoch);
 
     await closeSocket(resumedSocket);
   });
@@ -699,6 +703,7 @@ test("ws server allows explicit same-provider takeover of a disconnected stale l
     assert.equal(reclaimed.op, "pair.request");
     assert.equal(reclaimed.payload.resumed, false);
     assert.notEqual(reclaimed.payload.sessionId, first.payload.sessionId);
+    assert.equal(reclaimed.payload.ownershipEpoch, first.payload.ownershipEpoch + 1);
 
     await closeSocket(replacement);
   });
@@ -725,6 +730,7 @@ test("ws server allows explicit same-provider takeover without the old resume se
     assert.equal(second.op, "pair.request");
     assert.equal(second.payload.resumed, false);
     assert.notEqual(second.payload.sessionId, first.payload.sessionId);
+    assert.equal(second.payload.ownershipEpoch, first.payload.ownershipEpoch + 1);
     assert.deepEqual(await superseded, { code: 1000, reason: "superseded" });
 
     await closeSocket(takeover);
@@ -939,6 +945,32 @@ test("ws server advertises terminal targets when compositor bridge is configured
 
     await closeSocket(socket);
   }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
+});
+
+test("ws server rejects target.apply with stale ownership epoch", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+
+    const takeover = await connect(url);
+    const second = await request(takeover, pairRequest(surfaceId, "pv_alpha", { takeover: true }));
+    assert.equal(second.ok, true);
+
+    const rejected = await request(takeover, targetApplyRequest({
+      ownershipEpoch: first.payload.ownershipEpoch,
+      ownershipSessionId: second.payload.sessionId,
+      paneLineageId: second.payload.state.panes[0]!.paneLineageId,
+      surfaceId: second.payload.surfaceId,
+    }));
+
+    assert.equal(rejected.ok, true);
+    assert.equal(rejected.op, "target.apply.result");
+    assert.equal(rejected.payload.status, "rejected");
+    assert.equal(rejected.payload.errorCode, "ownership_epoch_mismatch");
+
+    await closeSocket(takeover);
+  });
 });
 
 test("ws server returns browser_url applied only after renderer load confirmation", async () => {
