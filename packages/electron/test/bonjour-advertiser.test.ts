@@ -13,8 +13,14 @@ class FakeService extends EventEmitter {
   }
 }
 
+type FakeDiscoveredService = {
+  name: string;
+  port?: number;
+  txt?: Record<string, unknown>;
+};
+
 class FakeBonjour {
-  private readonly discoveredNames: string[][];
+  private readonly discoveredServices: Array<Array<string | FakeDiscoveredService>>;
   readonly publishNames: string[] = [];
   readonly services: FakeService[] = [];
   findCalls = 0;
@@ -23,8 +29,8 @@ class FakeBonjour {
   findError: Error | null = null;
   publishError: Error | null = null;
 
-  constructor(discoveredNames: string[][] = []) {
-    this.discoveredNames = discoveredNames;
+  constructor(discoveredServices: Array<Array<string | FakeDiscoveredService>> = []) {
+    this.discoveredServices = discoveredServices;
   }
 
   find(
@@ -35,12 +41,13 @@ class FakeBonjour {
       throw this.findError;
     }
     const browser = new EventEmitter() as EventEmitter & { stop(): void };
-    const names = this.discoveredNames[this.findCalls] ?? [];
+    const services = this.discoveredServices[this.findCalls] ?? [];
     this.findCalls += 1;
     queueMicrotask(() => {
-      for (const name of names) {
-        listener?.({ name });
-        browser.emit("up", { name });
+      for (const service of services) {
+        const discoveredService = typeof service === "string" ? { name: service } : service;
+        listener?.(discoveredService);
+        browser.emit("up", discoveredService);
       }
     });
     browser.stop = () => {};
@@ -89,8 +96,7 @@ class FakeChildProcess extends EventEmitter {
 
 test("bonjour advertiser republishes with a suffixed name after a name conflict", async () => {
   const bonjour = new FakeBonjour([
-    ["TARS Surf Ace"],
-    ["TARS Surf Ace (2)"],
+    [{ name: "TARS Surf Ace", port: 18791, txt: { pk: "other" } }],
   ]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
@@ -101,10 +107,13 @@ test("bonjour advertiser republishes with a suffixed name after a name conflict"
 
   advertiser.start();
   await new Promise((resolve) => {
-    setTimeout(resolve, 800);
+    setTimeout(resolve, 50);
   });
+  await (advertiser as unknown as {
+    verifyPublishedService(): Promise<void>;
+  }).verifyPublishedService();
 
-  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace (2)"]);
+  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace", "TARS Surf Ace (2)"]);
   assert.equal(bonjour.findCalls, 1);
   await advertiser.stop();
 });
@@ -142,7 +151,7 @@ test("bonjour advertiser uses the isolated publisher on macOS", () => {
   assert.equal(__test.useIsolatedBonjourPublisherByDefault("linux"), false);
 });
 
-test("bonjour advertiser ignores loopback/internal IPv4 bindings on non-macOS hosts", () => {
+test("bonjour advertiser uses the default binding on non-macOS hosts", () => {
   const addresses = __test.bonjourBindingAddressesForPlatform("linux", {
     en0: [
       { address: "192.168.50.240", family: "IPv4", internal: false },
@@ -156,15 +165,13 @@ test("bonjour advertiser ignores loopback/internal IPv4 bindings on non-macOS ho
     ] as never,
   });
 
-  assert.deepEqual(addresses, ["192.168.50.240", "100.71.19.27"]);
+  assert.deepEqual(addresses, []);
 });
 
 test("bonjour advertiser keeps incrementing the suffix across repeated conflicts", async () => {
   const bonjour = new FakeBonjour([
-    ["TARS Surf Ace"],
-    ["TARS Surf Ace (2)"],
-    ["TARS Surf Ace", "TARS Surf Ace (2)"],
-    ["TARS Surf Ace (3)"],
+    [{ name: "TARS Surf Ace", port: 18791, txt: { pk: "other" } }],
+    [{ name: "TARS Surf Ace (2)", port: 18791, txt: { pk: "other" } }],
   ]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
@@ -175,18 +182,21 @@ test("bonjour advertiser keeps incrementing the suffix across repeated conflicts
 
   advertiser.start();
   await new Promise((resolve) => {
-    setTimeout(resolve, 800);
+    setTimeout(resolve, 50);
   });
-  advertiser.refresh();
-  await new Promise((resolve) => {
-    setTimeout(resolve, 800);
-  });
+  await (advertiser as unknown as {
+    verifyPublishedService(): Promise<void>;
+  }).verifyPublishedService();
+  await (advertiser as unknown as {
+    verifyPublishedService(): Promise<void>;
+  }).verifyPublishedService();
 
   assert.deepEqual(bonjour.publishNames, [
+    "TARS Surf Ace",
     "TARS Surf Ace (2)",
     "TARS Surf Ace (3)",
   ]);
-  assert.equal(bonjour.unpublishCalls, 1);
+  assert.equal(bonjour.unpublishCalls, 2);
   await advertiser.stop();
 });
 
@@ -220,6 +230,26 @@ test("bonjour advertiser only republishes TXT when the advertised payload change
 
   assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace", "TARS Surf Ace"]);
   assert.equal(bonjour.unpublishCalls, 1);
+  await advertiser.stop();
+});
+
+test("bonjour advertiser publishes promptly without name preflight", async () => {
+  const bonjour = new FakeBonjour();
+  bonjour.findError = new Error("preflight failed");
+  const advertiser = new BonjourAdvertiser({
+    bonjour,
+    name: "TARS Surf Ace",
+    port: 18791,
+    txtProvider: () => ({ pk: "sf_test" }),
+  });
+
+  advertiser.start();
+  await new Promise((resolve) => {
+    setTimeout(resolve, 50);
+  });
+
+  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace"]);
+  assert.equal(bonjour.findCalls, 0);
   await advertiser.stop();
 });
 
@@ -279,8 +309,11 @@ test("bonjour advertiser disables mDNS when discovery throws ENETUNREACH", async
     await new Promise((resolve) => {
       setTimeout(resolve, 50);
     });
+    await (advertiser as unknown as {
+      verifyPublishedService(): Promise<void>;
+    }).verifyPublishedService();
 
-    assert.equal(bonjour.publishNames.length, 0);
+    assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace"]);
     assert.equal(bonjour.destroyed, true);
     assert.match(warnings.join("\n"), /\[surf-ace:bonjour\] event=binding_disabled .*interface=default .*reason=multicast_unavailable/);
     await advertiser.stop();

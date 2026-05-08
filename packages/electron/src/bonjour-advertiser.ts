@@ -8,15 +8,21 @@ type BonjourError = Error & {
 };
 
 type BonjourBrowser = {
-  on(event: "up", listener: (service: { name: string }) => void): void;
+  on(event: "up", listener: (service: BonjourDiscoveredService) => void): void;
   stop(): void;
+};
+
+type BonjourDiscoveredService = {
+  name: string;
+  port?: number;
+  txt?: Record<string, unknown>;
 };
 
 type BonjourClient = {
   destroy(): void;
   find(
     options: { protocol: "tcp"; type: "surf-ace" },
-    listener?: (service: { name: string }) => void,
+    listener?: (service: BonjourDiscoveredService) => void,
   ): BonjourBrowser;
   publish(options: {
     name: string;
@@ -72,36 +78,21 @@ async function defaultIsolatedPublisherProcessList(): Promise<string> {
   });
 }
 
-function isIpv4Family(family: string | number): boolean {
-  return family === 4 || family === "IPv4";
-}
-
-function isLoopbackIpv4Address(address: string): boolean {
-  return address === "127.0.0.1" || address.startsWith("127.");
-}
-
 function bonjourBindingAddressesForPlatform(
-  platform: NodeJS.Platform,
-  networks: ReturnType<typeof os.networkInterfaces>,
+  _platform: NodeJS.Platform,
+  _networks: ReturnType<typeof os.networkInterfaces>,
 ): string[] {
-  // On macOS, mDNSResponder already owns 5353 on each interface. Creating
-  // per-interface Bonjour clients causes live EADDRINUSE crashes in the main
-  // process, so use a single default client and rely on visibility fallback.
-  if (platform === "darwin") {
-    return [];
+  // multicast-dns already joins every IPv4 interface from one default socket.
+  // Per-interface sockets can let one bad/non-LAN binding block the first
+  // publish path before any service registration is attempted.
+  return [];
+}
+
+function bonjourErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return (error as BonjourError).code ?? error.message;
   }
-  const names = Object.keys(networks);
-  const addresses = new Set<string>();
-  for (const name of names) {
-    const entries = networks[name] ?? [];
-    const entry = entries.find(
-      (candidate) => isIpv4Family(candidate.family) && !candidate.internal && !isLoopbackIpv4Address(candidate.address),
-    );
-    if (entry?.address) {
-      addresses.add(entry.address);
-    }
-  }
-  return [...addresses];
+  return String(error);
 }
 
 function useIsolatedBonjourPublisherByDefault(platform: NodeJS.Platform): boolean {
@@ -274,8 +265,7 @@ export class BonjourAdvertiser {
     }
     this.publishing = true;
     try {
-      const name = await this.resolveAvailableName(preferredName);
-      this.publish(name);
+      this.publish(preferredName);
     } finally {
       this.publishing = false;
     }
@@ -352,18 +342,27 @@ export class BonjourAdvertiser {
       return;
     }
     const publishedName = this.serviceName;
-    const activeNames = await this.discoverPublishedNames();
+    const activeServices = await this.discoverPublishedServices();
     if (this.destroyed || (this.services.length === 0 && !this.isolatedPublisher) || this.restarting || this.serviceName !== publishedName) {
       return;
     }
-    if (!activeNames.has(publishedName)) {
+    const txt = this.txtProvider();
+    const matchingOwnService = activeServices.some((service) => this.matchesAdvertisedIdentity(service, publishedName, txt));
+    const sameNameServices = activeServices.filter((service) => service.name === publishedName);
+    if (!matchingOwnService) {
       this.visibilityFailures += 1;
       console.warn(
         bonjourDiagnostic("publish_not_visible", {
+          discovered_count: activeServices.length,
           failure_count: this.visibilityFailures,
           name: publishedName,
+          same_name_count: sameNameServices.length,
         }),
       );
+      if (!this.isolatedPublisher && sameNameServices.length > 0) {
+        await this.republishWithFallbackName();
+        return;
+      }
       if (
         !this.isolatedPublisher &&
         this.visibilityFailures >= BonjourAdvertiser.VISIBILITY_FAILURES_BEFORE_ISOLATION
@@ -377,11 +376,21 @@ export class BonjourAdvertiser {
     this.visibilityFailures = 0;
     console.info(
       bonjourDiagnostic("publish_visible", {
-        discovered_count: activeNames.size,
+        discovered_count: activeServices.length,
         name: publishedName,
       }),
     );
     this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
+  }
+
+  private matchesAdvertisedIdentity(
+    service: BonjourDiscoveredService,
+    publishedName: string,
+    txt: Record<string, string>,
+  ): boolean {
+    return service.name === publishedName &&
+      service.port === this.port &&
+      String(service.txt?.pk ?? "").trim().toLowerCase() === String(txt.pk ?? "").trim().toLowerCase();
   }
 
   private isNameConflict(error: Error): boolean {
@@ -408,34 +417,14 @@ export class BonjourAdvertiser {
     }
   }
 
-  private async resolveAvailableName(preferredName: string): Promise<string> {
-    const activeNames = await this.discoverPublishedNames();
-    if (!activeNames.has(preferredName)) {
-      return preferredName;
-    }
-    let suffix = 2;
-    let candidate = `${this.baseName} (${suffix})`;
-    while (activeNames.has(candidate)) {
-      suffix += 1;
-      candidate = `${this.baseName} (${suffix})`;
-    }
-    if (candidate !== preferredName) {
-      this.republishAttempts = suffix - 1;
-      this.serviceName = candidate;
-      console.warn(
-        bonjourDiagnostic("publish_republish", {
-          candidate,
-          preferred_name: preferredName,
-          reason: "name_conflict",
-        }),
-      );
-    }
-    return candidate;
-  }
-
-  private async discoverPublishedNames(): Promise<Set<string>> {
-    const names = new Set<string>();
+  private async discoverPublishedServices(): Promise<BonjourDiscoveredService[]> {
+    const services: BonjourDiscoveredService[] = [];
     const browsers: BonjourBrowser[] = [];
+    console.info(
+      bonjourDiagnostic("publish_discover_begin", {
+        binding_count: this.activeBonjourBindings().length,
+      }),
+    );
     for (const binding of this.activeBonjourBindings()) {
       try {
         browsers.push(
@@ -445,16 +434,27 @@ export class BonjourAdvertiser {
               type: "surf-ace",
             },
             (service) => {
-              names.add(service.name);
+              services.push(service);
             },
           ),
         );
       } catch (error) {
+        console.warn(
+          bonjourDiagnostic("publish_discover_error", {
+            error: bonjourErrorMessage(error),
+            interface: binding.interfaceAddress ?? "default",
+          }),
+        );
         this.handleBonjourError(error, binding);
       }
     }
     if (browsers.length === 0) {
-      return names;
+      console.info(
+        bonjourDiagnostic("publish_discover_end", {
+          discovered_count: services.length,
+        }),
+      );
+      return services;
     }
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 750).unref?.();
@@ -462,7 +462,12 @@ export class BonjourAdvertiser {
     for (const browser of browsers) {
       browser.stop();
     }
-    return names;
+    console.info(
+      bonjourDiagnostic("publish_discover_end", {
+        discovered_count: services.length,
+      }),
+    );
+    return services;
   }
 
   private handleBonjourError(error: unknown, binding?: BonjourBinding): void {
@@ -535,7 +540,7 @@ export class BonjourAdvertiser {
     if (!binding || binding.disabled || binding.destroyed) {
       return;
     }
-    const code = error instanceof Error ? ((error as BonjourError).code ?? error.message) : String(error);
+    const code = bonjourErrorMessage(error);
     const interfaceLabel = binding.interfaceAddress ?? "default";
     console.warn(
       bonjourDiagnostic("binding_disabled", {
