@@ -137,6 +137,7 @@ class FakeSurfAceWsServer {
   }> = [];
   nextTopologyApplyError: { code: string; message: string } | null = null;
   nextTopologyApplyResponsePaneLabels: number[] | null = null;
+  topologyApplyDelayMs = 0;
   nextContentApplyError: { code: string; details?: Record<string, unknown>; message: string } | null = null;
   nextContentApplyRenderStatus: string | null = null;
   snapshotDelayMs = 0;
@@ -341,6 +342,10 @@ class FakeSurfAceWsServer {
 
   pairedSocketFor(surfaceId: string): import("ws").WebSocket | null {
     return this.pairedSocketsBySurfaceId.get(surfaceId) ?? null;
+  }
+
+  setSurfaceViewport(viewport: { height: number; scale: number; width: number }): void {
+    this.requireSurface(this.surfaceId).viewport = { ...viewport };
   }
 
   sendSurfaceAppeared(options: {
@@ -846,6 +851,11 @@ class FakeSurfAceWsServer {
           );
           this.nextTopologyApplyError = null;
           return;
+        }
+        if (this.topologyApplyDelayMs > 0) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, this.topologyApplyDelayMs);
+          });
         }
         const previousPanes = new Map(targetSurface.panes);
         targetSurface.panes.clear();
@@ -9136,6 +9146,305 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         /Cannot close the last remaining pane/,
       );
       assert.equal(server.topologyApplyRequests.length, topologyApplyCount);
+    });
+  });
+
+  await t.test("pre-revision panes.list panes are reconciled into layout before close", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.equal(surface.topologyRevision, 0);
+      assert.deepEqual(surface.layout, { paneId: firstPaneId, type: "pane" });
+
+      const firstRemotePane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(firstRemotePane);
+      firstRemotePane.frame = { height: 384, width: 1024, x: 0, y: 0 };
+      firstRemotePane.viewport = { height: 384, scale: 2, width: 1024 };
+      server.panes.set(9999, {
+        contentId: null,
+        contentType: null,
+        drawings: [],
+        frame: { height: 384, width: 1024, x: 0, y: 384 },
+        name: null,
+        paneLabel: 99,
+        paneLineageId: "pl_orphan_pre_revision",
+        revision: 0,
+        viewport: {
+          height: 384,
+          scale: 2,
+          width: 1024,
+        },
+      });
+      await internalRuntime.syncRemotePaneList(surface);
+
+      const screens = await runtime.listScreens();
+      const paneIds = assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 99]);
+      assert.deepEqual(surface.layout, {
+        children: [
+          { paneId: paneIds[0], type: "pane" },
+          { paneId: paneIds[1], type: "pane" },
+        ],
+        direction: "horizontal",
+        type: "split",
+      });
+
+      const closed = await runtime.closePane({
+        fingerprint: server.surfaceId,
+        paneId: paneIds[1]!,
+      });
+      assert.equal(closed.ok, true);
+      assert.equal(closed.paneLabel, 99);
+      assert.equal(server.topologyApplyRequests.at(-1)?.paneIds.includes(9999), false);
+
+      const after = (await runtime.listScreens())[0]!;
+      assert.equal(after.topologyRevision, 1);
+      assertPaneLabelsWithOpaqueIds(after.panes, [1]);
+    });
+  });
+
+  await t.test("pre-revision pair response panes adopt provider geometry from panes.list", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        const firstRemotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(firstRemotePane);
+        firstRemotePane.frame = { height: 768, width: 512, x: 0, y: 0 };
+        firstRemotePane.viewport = { height: 768, scale: 2, width: 512 };
+        server.panes.set(9999, {
+          contentId: null,
+          contentType: null,
+          drawings: [],
+          frame: { height: 768, width: 512, x: 512, y: 0 },
+          name: null,
+          paneLabel: 99,
+          paneLineageId: "pl_pair_response_pre_revision",
+          revision: 0,
+          viewport: {
+            height: 768,
+            scale: 2,
+            width: 512,
+          },
+        });
+      },
+      run: async ({ runtime, server }) => {
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+
+        await waitFor(async () => {
+          await internalRuntime.syncRemotePaneList(surface);
+          return surface.layout?.type === "split" && surface.layout.direction === "vertical";
+        });
+
+        const screens = await runtime.listScreens();
+        const paneIds = assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 99]);
+        assert.deepEqual(surface.layout, {
+          children: [
+            { paneId: paneIds[0], type: "pane" },
+            { paneId: paneIds[1], type: "pane" },
+          ],
+          direction: "vertical",
+          type: "split",
+        });
+      },
+    });
+  });
+
+  await t.test("pre-revision pane-list reconciliation uses provider surface bounds", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.setSurfaceViewport({ height: 800, scale: 2, width: 1200 });
+        const firstRemotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(firstRemotePane);
+        firstRemotePane.frame = { height: 800, width: 600, x: 0, y: 0 };
+        firstRemotePane.viewport = { height: 800, scale: 2, width: 600 };
+        server.panes.set(9999, {
+          contentId: null,
+          contentType: null,
+          drawings: [],
+          frame: { height: 800, width: 600, x: 600, y: 0 },
+          name: null,
+          paneLabel: 99,
+          paneLineageId: "pl_provider_bounds_pre_revision",
+          revision: 0,
+          viewport: {
+            height: 800,
+            scale: 2,
+            width: 600,
+          },
+        });
+      },
+      run: async ({ runtime, server }) => {
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        surface.viewport = { height: 768, scale: 2, width: 1024 };
+
+        await internalRuntime.syncRemotePaneList(surface);
+
+        const paneIds = assertPaneLabelsWithOpaqueIds((await runtime.listScreens())[0]?.panes ?? [], [1, 99]);
+        assert.deepEqual(surface.layout, {
+          children: [
+            { paneId: paneIds[0], type: "pane" },
+            { paneId: paneIds[1], type: "pane" },
+          ],
+          direction: "vertical",
+          type: "split",
+        });
+      },
+    });
+  });
+
+  await t.test("pre-revision split preserves reconciled provider geometry", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        const firstRemotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(firstRemotePane);
+        firstRemotePane.frame = { height: 768, width: 512, x: 0, y: 0 };
+        firstRemotePane.viewport = { height: 768, scale: 2, width: 512 };
+        server.panes.set(9999, {
+          contentId: null,
+          contentType: null,
+          drawings: [],
+          frame: { height: 768, width: 512, x: 512, y: 0 },
+          name: null,
+          paneLabel: 99,
+          paneLineageId: "pl_split_provider_geometry",
+          revision: 0,
+          viewport: {
+            height: 768,
+            scale: 2,
+            width: 512,
+          },
+        });
+      },
+      run: async ({ runtime, server }) => {
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        await internalRuntime.syncRemotePaneList(surface);
+
+        const screens = await runtime.listScreens();
+        const paneIds = assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 99]);
+        assert.equal(surface.layout?.type, "split");
+        assert.equal(surface.layout?.direction, "vertical");
+
+        await runtime.split({
+          count: 2,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: paneIds[0]!,
+        });
+
+        assert.deepEqual(server.topologyApplyRequests.at(-1)?.layout, {
+          children: [
+            {
+              children: [
+                { paneId: server.initialRemotePaneId, type: "pane" },
+                { paneId: 10000, type: "pane" },
+              ],
+              direction: "vertical",
+              type: "split",
+            },
+            { paneId: 9999, type: "pane" },
+          ],
+          direction: "vertical",
+          type: "split",
+        });
+      },
+    });
+  });
+
+  await t.test("pre-revision pane-list reconciliation skips in-flight topology apply", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        const firstRemotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(firstRemotePane);
+        firstRemotePane.frame = { height: 768, width: 512, x: 0, y: 0 };
+        firstRemotePane.viewport = { height: 768, scale: 2, width: 512 };
+        server.panes.set(9999, {
+          contentId: null,
+          contentType: null,
+          drawings: [],
+          frame: { height: 768, width: 512, x: 512, y: 0 },
+          name: null,
+          paneLabel: 99,
+          paneLineageId: "pl_inflight_provider_geometry",
+          revision: 0,
+          viewport: {
+            height: 768,
+            scale: 2,
+            width: 512,
+          },
+        });
+        server.topologyApplyDelayMs = 100;
+      },
+      run: async ({ runtime, server }) => {
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        await internalRuntime.syncRemotePaneList(surface);
+
+        const screens = await runtime.listScreens();
+        const paneIds = assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 99]);
+        const splitPromise = runtime.split({
+          count: 2,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: paneIds[0]!,
+        });
+        await waitFor(() => server.topologyApplyRequests.length > 0);
+
+        const stagedLayout = structuredClone(surface.layout);
+        await internalRuntime.syncRemotePaneList(surface);
+
+        assert.deepEqual(surface.layout, stagedLayout);
+        await splitPromise;
+      },
+    });
+  });
+
+  await t.test("pre-revision multi-pane provider geometry reconciles before close", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      await livePaneId(runtime, server.surfaceId, 1);
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      server.setSurfaceViewport({ height: 768, scale: 2, width: 1023 });
+
+      const firstRemotePane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(firstRemotePane);
+      firstRemotePane.frame = { height: 768, width: 341, x: 0, y: 0 };
+      firstRemotePane.viewport = { height: 768, scale: 2, width: 341 };
+      for (const [remotePaneId, x] of [[9998, 341], [9999, 682]] as const) {
+        server.panes.set(remotePaneId, {
+          contentId: null,
+          contentType: null,
+          drawings: [],
+          frame: { height: 768, width: 341, x, y: 0 },
+          name: null,
+          paneLabel: remotePaneId === 9998 ? 2 : 3,
+          paneLineageId: `pl_multi_pane_${remotePaneId}`,
+          revision: 0,
+          viewport: {
+            height: 768,
+            scale: 2,
+            width: 341,
+          },
+        });
+      }
+
+      await internalRuntime.syncRemotePaneList(surface);
+
+      const panes = assertPaneLabelsWithOpaqueIds((await runtime.listScreens())[0]?.panes ?? [], [1, 2, 3]);
+      const closed = await runtime.closePane({
+        fingerprint: server.surfaceId,
+        paneId: panes[2]!,
+      });
+      assert.equal(closed.ok, true);
+      assert.equal(closed.paneLabel, 3);
+      assertPaneLabelsWithOpaqueIds((await runtime.listScreens())[0]?.panes ?? [], [1, 2]);
     });
   });
 
