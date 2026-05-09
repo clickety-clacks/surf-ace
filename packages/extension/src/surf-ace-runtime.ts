@@ -1373,6 +1373,66 @@ function managedLayoutFromPanes(
   };
 }
 
+function approxEqual(left: number, right: number): boolean {
+  return Math.abs(left - right) <= 1;
+}
+
+function managedLayoutFromEqualProviderGeometry(panes: ManagedPane[]): ManagedLayoutNode | null {
+  if (panes.length === 0) {
+    return null;
+  }
+  if (panes.length === 1) {
+    return { paneId: panes[0]!.paneId, type: "pane" };
+  }
+  if (panes.length !== 2) {
+    return null;
+  }
+  if (panes.some((pane) => !pane.geometry)) {
+    return null;
+  }
+  const frames = panes.map((pane) => ({
+    bounds: pane.geometry!.surfaceBounds,
+    frame: pane.geometry!.paneFrame,
+    pane,
+  }));
+  const surfaceBounds = frames[0]!.bounds;
+  if (
+    frames.some(
+      ({ bounds }) =>
+        !approxEqual(bounds.x, surfaceBounds.x) ||
+        !approxEqual(bounds.y, surfaceBounds.y) ||
+        !approxEqual(bounds.width, surfaceBounds.width) ||
+        !approxEqual(bounds.height, surfaceBounds.height),
+    )
+  ) {
+    return null;
+  }
+  const vertical = [...frames].sort((left, right) => left.frame.x - right.frame.x || left.pane.paneId.localeCompare(right.pane.paneId));
+  const verticalTile =
+    vertical.every(({ frame }) => approxEqual(frame.y, surfaceBounds.y) && approxEqual(frame.height, surfaceBounds.height)) &&
+    vertical.every(({ frame }) => approxEqual(frame.width, vertical[0]!.frame.width)) &&
+    vertical.every(({ frame }, index) => approxEqual(frame.x, surfaceBounds.x + index * vertical[0]!.frame.width)) &&
+    approxEqual(vertical[0]!.frame.width * vertical.length, surfaceBounds.width);
+  if (verticalTile) {
+    return managedLayoutFromPanes(vertical.map(({ pane }) => pane), "vertical");
+  }
+
+  const horizontal = [...frames].sort((left, right) => left.frame.y - right.frame.y || left.pane.paneId.localeCompare(right.pane.paneId));
+  const horizontalTile =
+    horizontal.every(({ frame }) => approxEqual(frame.x, surfaceBounds.x) && approxEqual(frame.width, surfaceBounds.width)) &&
+    horizontal.every(({ frame }) => approxEqual(frame.height, horizontal[0]!.frame.height)) &&
+    horizontal.every(({ frame }, index) => approxEqual(frame.y, surfaceBounds.y + index * horizontal[0]!.frame.height)) &&
+    approxEqual(horizontal[0]!.frame.height * horizontal.length, surfaceBounds.height);
+  if (horizontalTile) {
+    return managedLayoutFromPanes(horizontal.map(({ pane }) => pane), "horizontal");
+  }
+  return null;
+}
+
+function managedLayoutEquals(left: ManagedLayoutNode | null, right: ManagedLayoutNode | null): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function integerPaneRect(rect: Rect): Rect {
   return {
     height: Math.max(0, Math.round(rect.height)),
@@ -3072,6 +3132,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
+    await this.syncRemotePaneList(surface);
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     const previousLayout = surface.layout;
     const currentLayout = this.topologySeedLayout(surface);
@@ -3301,6 +3362,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface: ManagedSurface,
     input: { fingerprint: string; paneId: PaneId },
   ): Promise<SurfAceClosePaneResult> {
+    await this.syncRemotePaneList(surface);
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     if (surface.panes.size <= 1) {
       throw new SurfAceToolError(
@@ -3310,7 +3372,25 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     const currentLayout = collapseManagedLayout(surface.layout);
-    const nextLayout = collapseManagedLayout(removePaneFromManagedLayout(currentLayout, pane.paneId));
+    const layoutPaneIds = flattenManagedLayout(currentLayout);
+    if (
+      layoutPaneIds.length !== surface.panes.size ||
+      layoutPaneIds.some((layoutPaneId) => !surface.panes.has(layoutPaneId)) ||
+      !layoutPaneIds.includes(pane.paneId)
+    ) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        "Cannot close pane because the provider topology is ambiguous.",
+      );
+    }
+    const nextLayoutCandidate = removePaneFromManagedLayout(currentLayout, pane.paneId);
+    if (!nextLayoutCandidate && surface.panes.size > 1) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        "Cannot close pane because the provider topology is ambiguous.",
+      );
+    }
+    const nextLayout = collapseManagedLayout(nextLayoutCandidate);
     surface.layout = nextLayout;
     surface.panes.delete(pane.paneId);
 
@@ -4914,6 +4994,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private topologySeedLayout(surface: ManagedSurface): ManagedLayoutNode {
     if (surface.topologyRevision > 0) {
+      return collapseManagedLayout(surface.layout);
+    }
+    const layoutPaneIds = flattenManagedLayout(surface.layout);
+    if (
+      layoutPaneIds.length === surface.panes.size &&
+      layoutPaneIds.every((paneId) => surface.panes.has(paneId))
+    ) {
       return collapseManagedLayout(surface.layout);
     }
     return managedLayoutFromPanes(this.orderedPanes(surface));
@@ -9111,13 +9198,37 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
       }
     }
+    const topologyChanged = this.reconcilePreRevisionPaneListLayout(surface);
     const labelsChanged = this.adoptProviderPaneLabels(surface, providerPaneLabels);
     if (lineageChanged) {
       await this.persistSurfaceTargetState(surface, "pane list lineage repair");
     }
-    if (labelsChanged) {
-      this.queuePersistScreenSnapshot("pane list label repair");
+    if (labelsChanged || topologyChanged) {
+      this.queuePersistScreenSnapshot(labelsChanged ? "pane list label repair" : "pane list topology repair");
     }
+  }
+
+  private reconcilePreRevisionPaneListLayout(surface: ManagedSurface): boolean {
+    if (surface.topologyRevision > 0) {
+      return false;
+    }
+    if (surface.topologyApplyInFlight) {
+      return false;
+    }
+    const ordered = this.orderedPanes(surface);
+    if (ordered.length <= 1) {
+      return false;
+    }
+    const layoutPaneIds = flattenManagedLayout(surface.layout);
+    if (layoutPaneIds.some((paneId) => !isBoundRemotePaneId(surface.panes.get(paneId)?.remotePaneId))) {
+      return false;
+    }
+    const providerLayout = managedLayoutFromEqualProviderGeometry(ordered);
+    if (!providerLayout || managedLayoutEquals(surface.layout, providerLayout)) {
+      return false;
+    }
+    surface.layout = providerLayout;
+    return true;
   }
 
   private async ensureCurrentPaneLineage(surface: ManagedSurface, pane: ManagedPane): Promise<void> {
