@@ -24,6 +24,7 @@ export const surfAceToolNames = [
   "surf_ace_realize_topologies",
   "surf_ace_close_pane",
   "surf_ace_read",
+  "surf_ace_capture_pane",
   "surf_ace_annotations_remove",
 ] as const;
 
@@ -374,6 +375,20 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_read",
+    },
+    {
+      description: "Capture the actual rendered contents of one explicit Surf Ace pane and return PNG bytes plus surface, pane, topology, content, dimension, scale, timestamp, and failure metadata.",
+      execute: async (args: { fingerprint: string; paneId: PaneId }) => await runtime.capturePane(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          fingerprint: fingerprintParam,
+          paneId: paneIdParam,
+        },
+        required: ["fingerprint", "paneId"],
+        type: "object",
+      },
+      name: "surf_ace_capture_pane",
     },
     {
       description: "Remove specific annotation strokes from the currently rendered Surf Ace overlay.",

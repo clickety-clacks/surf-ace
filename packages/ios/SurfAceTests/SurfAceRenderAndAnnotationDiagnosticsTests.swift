@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 @testable import SurfAce
 
@@ -74,6 +75,83 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(render["bridgeAttached"] as? Bool, true)
         XCTAssertEqual(render["status"] as? String, "render_requested")
         XCTAssertEqual(render["contentId"] as? String, "ct_1234abcd")
+    }
+
+    func testStalePaneBridgeDetachDoesNotClearReplacementBridge() throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "stale-bridge-detach")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let staleBridge = RecordingPaneBridge()
+        let replacementBridge = RecordingPaneBridge()
+
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: staleBridge)
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: replacementBridge)
+        runtime.detachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: staleBridge)
+
+        XCTAssertTrue(pane.bridge === replacementBridge)
+        runtime.detachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: replacementBridge)
+        XCTAssertNil(pane.bridge)
+    }
+
+    func testMarkdownRenderMarksWebContentPendingUntilLoaded() throws {
+        let frame = CGRect(x: 0, y: 0, width: 320, height: 240)
+        let hostView = SurfAceSurfaceHostView(frame: frame)
+        defer {
+            hostView.render(
+                entry: SurfAcePaneEntry.from(
+                    frame: SurfAceFrame(
+                        contentId: "ct_cleanup",
+                        revision: 3,
+                        contentType: .pdf,
+                        payload: .pdf(data: ""),
+                        reloadSource: nil,
+                        title: nil,
+                        scrollable: true,
+                        interactive: true
+                    ),
+                    historyOwnerToken: "hot_test"
+                ),
+                restoreViewport: nil
+            )
+        }
+
+        hostView.render(
+            entry: SurfAcePaneEntry.from(
+                frame: SurfAceFrame(
+                    contentId: "ct_aaaabbbb",
+                    revision: 1,
+                    contentType: .html,
+                    payload: .html(html: "<html><body style='margin:0;background:#f00;height:100vh'>T272-ALEPH-RETRY-1 pane capture visual oracle</body></html>", baseURL: nil),
+                    reloadSource: nil,
+                    title: nil,
+                    scrollable: true,
+                    interactive: true
+                ),
+                historyOwnerToken: "hot_test"
+            ),
+            restoreViewport: nil
+        )
+
+        XCTAssertTrue(hostView.hasPendingWebContentRenderForTesting)
+
+        hostView.render(
+            entry: SurfAcePaneEntry.from(
+                frame: SurfAceFrame(
+                    contentId: "ct_ccccdddd",
+                    revision: 2,
+                    contentType: .markdown,
+                    payload: .markdown(markdown: "# Argus wrapped markdown\n\nThis is the currently visible markdown pane."),
+                    reloadSource: nil,
+                    title: nil,
+                    scrollable: true,
+                    interactive: true
+                ),
+                historyOwnerToken: "hot_test"
+            ),
+            restoreViewport: nil
+        )
+
+        XCTAssertTrue(hostView.hasPendingWebContentRenderForTesting)
     }
 
     func testPencilStrokeTransitionsAnnotationModeAndRecordsTool() {
