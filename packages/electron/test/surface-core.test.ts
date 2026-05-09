@@ -352,7 +352,7 @@ test("surface core starts browser_url targets without reporting unverified navig
   assert.equal(snapshot.contentType, null);
 });
 
-test("surface core does not persist browser_url renderer history across restart", () => {
+test("surface core persists browser_url renderer history across restart", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -389,9 +389,9 @@ test("surface core does not persist browser_url renderer history across restart"
   restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
 
   const restoredPane = restoredCore.getRendererWindowState(surface.surfaceId).panes[0]!;
-  assert.equal(restoredPane.content.contentType, null);
-  assert.equal(restoredPane.content.contentId, null);
-  assert.equal(restoredPane.content.content, null);
+  assert.equal(restoredPane.content.contentType, "browser_url");
+  assert.equal(restoredPane.content.contentId, "tg_google");
+  assert.deepEqual(restoredPane.content.content, { url: "https://google.com/" });
 });
 
 test("surface core exposes reload only for browser_url and file-backed content", () => {
@@ -476,6 +476,40 @@ test("surface core exposes reload only for browser_url and file-backed content",
     ],
   });
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.reloadable, false);
+});
+
+test("surface core promotes html navigation into browser_url history with normalized URL", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<a href=\"/docs#intro\">docs</a>" },
+    contentId: "ct_html" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  const navigation = core.applyNavigation(surface.surfaceId, paneId, "https://example.com/docs#intro");
+  assert.deepEqual(navigation, {
+    blocked: false,
+    contentId: "ct_html",
+    revision: 1,
+    url: "https://example.com/docs#intro",
+  });
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(pane.content.contentId, "ct_html");
+  assert.equal(pane.content.contentType, "browser_url");
+  assert.deepEqual(pane.content.content, { url: "https://example.com/docs#intro" });
+  assert.equal(pane.canGoBack, true);
 });
 
 test("surface core reloads file-backed content without changing content identity or revision", () => {
@@ -1089,6 +1123,12 @@ test("surface core assigns pane history and split topology", () => {
   });
 
   assert.deepEqual(split.panes.map((pane) => pane.paneId), [initialPaneId, 9]);
+  core.updatePaneSnapshot(surface.surfaceId, initialPaneId, {
+    bounds: { height: 400, width: 1200, x: 0, y: 0 },
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 9, {
+    bounds: { height: 400, width: 1200, x: 0, y: 400 },
+  });
   const paneViewports = core.panesList(surface.surfaceId).panes.map((pane) => pane.viewport);
   assert.deepEqual(paneViewports, [
     { height: 400, scale: 2, width: 1200 },
@@ -1433,6 +1473,12 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
     newPaneLabels: [9],
     paneId,
   });
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    bounds: { height: 400, width: 1200, x: 0, y: 0 },
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 9, {
+    bounds: { height: 400, width: 1200, x: 0, y: 400 },
+  });
 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   assert.deepEqual(listedPane.viewport, { height: 400, scale: 2, width: 1200 });
@@ -1443,7 +1489,7 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
     viewport: { height: 400, scale: 2, width: 1200 },
   });
   assert.equal(listedPane.geometry.coordinateSpace, "surface_logical");
-  assert.equal(listedPane.geometry.geometryRevision, 3);
+  assert.equal(listedPane.geometry.geometryRevision, 4);
   assert.equal(listedPane.geometry.topologyEpoch, 0);
 });
 

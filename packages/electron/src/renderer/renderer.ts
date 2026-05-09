@@ -996,7 +996,6 @@ function htmlFrameBridgeScript(): string {
     if (!link?.href) {
       return;
     }
-    event.preventDefault();
     emit({ type: "navigation", url: link.href });
   }, { capture: true });
 
@@ -1004,7 +1003,6 @@ function htmlFrameBridgeScript(): string {
     if (!(event.target instanceof HTMLFormElement)) {
       return;
     }
-    event.preventDefault();
     emit({ type: "navigation", url: event.target.action || window.location.href });
   }, { capture: true });
 

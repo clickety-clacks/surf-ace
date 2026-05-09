@@ -83,7 +83,9 @@ import {
   type SurfAceLogger,
   createBonjourSurfAceDiscoveryService,
 } from "./surf-ace-discovery.js";
+import { SurfAceOwnershipRecoveryPolicy } from "./surf-ace-ownership-recovery-policy.js";
 import { SurfAceWireClient } from "./surf-ace-server.js";
+import { SurfAceStateRepository } from "./surf-ace-state-repository.js";
 
 export type SurfAceConnectionState = "connected" | "connecting" | "unreachable";
 export type SurfAceConnectionCircuitState = "closed" | "open" | "given_up";
@@ -1512,9 +1514,10 @@ function viewportFromResolvedPaneGeometry(pane: ManagedPane): SurfaceViewport {
 function remoteLayoutToTopologyLayout(
   surface: ManagedSurface,
   node: ManagedLayoutNode,
+  panes: Map<PaneId, ManagedPane> = surface.panes,
 ): TopologyApplyRequest["payload"]["layout"] {
   if (node.type === "pane") {
-    const pane = surface.panes.get(node.paneId);
+    const pane = panes.get(node.paneId);
     if (!pane) {
       throw new SurfAceToolError(
         "internal_error",
@@ -1527,7 +1530,7 @@ function remoteLayoutToTopologyLayout(
     };
   }
   return {
-    children: node.children.map((child) => remoteLayoutToTopologyLayout(surface, child)),
+    children: node.children.map((child) => remoteLayoutToTopologyLayout(surface, child, panes)),
     direction: node.direction,
     type: "split",
   };
@@ -2371,6 +2374,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly now: () => number;
   private readonly providerIdentityPath: string;
   private readonly providerName: string;
+  private readonly ownershipRecoveryPolicy = new SurfAceOwnershipRecoveryPolicy();
+  private readonly stateRepository: SurfAceStateRepository<RuntimeStateFile>;
   private readonly stateDir: string;
   private readonly warnLegacyStateRoot: boolean;
   private readonly surfaces = new Map<string, ManagedSurface>();
@@ -2420,6 +2425,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
     this.providerName = options.providerName ?? "CLU / Surf Ace";
     this.stateDir = options.stateDir ?? resolveDefaultSurfAceStateDir(options.openClawStateDir);
+    this.stateRepository = new SurfAceStateRepository<RuntimeStateFile>(this.stateDir, STATE_FILE_NAME);
     this.warnLegacyStateRoot = !options.stateDir && !options.legacyStateDir;
   }
 
@@ -3147,38 +3153,36 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     await this.syncRemotePaneList(surface);
     const pane = this.requirePane(surface.surfaceId, input.paneId);
-    const previousLayout = surface.layout;
     const currentLayout = this.topologySeedLayout(surface);
     const beforePaneIds = this.visiblePanes(surface).map((managedPane) => managedPane.paneId);
     const beforeRemotePaneIds = this.visiblePanes(surface).map((managedPane) => Number(managedPane.remotePaneId));
     const direction = input.direction ?? this.defaultSplitDirection(surface, pane);
+    const nextPanes = new Map(surface.panes);
     const reservedPanes: ManagedPane[] = [];
     const additionalPaneCount = input.count - 1;
     for (let index = 0; index < additionalPaneCount; index += 1) {
       const paneId = this.allocatePaneId();
       const remotePaneId = this.allocateRemotePaneId();
-      const paneLabel = this.ensurePaneLabel(surface, null);
+      const paneLabel = this.ensurePaneLabel({ ...surface, panes: nextPanes }, null, remotePaneId);
       const created = createPane(paneId, paneLabel, remotePaneId, surface.viewport);
-      surface.panes.set(created.paneId, created);
+      nextPanes.set(created.paneId, created);
       reservedPanes.push(created);
     }
 
-    surface.layout = splitManagedLayoutNode(
+    const nextLayout = splitManagedLayoutNode(
       currentLayout,
       pane.paneId,
       direction,
       [pane.paneId, ...reservedPanes.map((reservedPane) => reservedPane.paneId)],
     );
 
-    try {
-      await this.pushTopology(surface, { beforePaneIds, beforeRemotePaneIds, increment: true });
-    } catch (error) {
-      surface.layout = previousLayout;
-      for (const reservedPane of reservedPanes) {
-        surface.panes.delete(reservedPane.paneId);
-      }
-      throw error;
-    }
+    await this.pushTopology(surface, {
+      beforePaneIds,
+      beforeRemotePaneIds,
+      increment: true,
+      nextLayout,
+      nextPanes,
+    });
     this.queuePersistScreenSnapshot("pane split");
     return this.visiblePanes(surface)
       .sort((left, right) => left.paneLabel - right.paneLabel || left.paneId.localeCompare(right.paneId))
@@ -3262,7 +3266,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const paneId = this.allocatePaneId();
     const remotePaneId = this.allocateRemotePaneId();
-    const paneLabel = this.ensurePaneLabel(surface, null, remotePaneId);
+    const paneLabel = this.ensurePaneLabel({ ...surface, panes }, null, remotePaneId);
     const created = createPane(paneId, paneLabel, remotePaneId, surface.viewport);
     if ("name" in leaf) {
       created.name = leaf.name ?? null;
@@ -3292,10 +3296,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       throw new SurfAceToolError("invalid_operation", `Unknown Surf Ace pane ${targetPaneId} on ${surface.surfaceId}`);
     }
 
+    const currentLayoutPaneIds = flattenManagedLayout(currentLayout);
     const targetPaneIds = new Set(
       targetPaneId
-        ? flattenManagedLayout(currentLayout).filter((paneId) => paneId === targetPaneId)
-        : [...surface.panes.keys()],
+        ? currentLayoutPaneIds.filter((paneId) => paneId === targetPaneId)
+        : currentLayoutPaneIds.length > 0
+          ? currentLayoutPaneIds
+          : [...surface.panes.keys()],
     );
     if (targetPaneId && targetPaneIds.size === 0) {
       throw new SurfAceToolError("invalid_operation", `Pane ${targetPaneId} is not present in the current topology.`);
@@ -3333,20 +3340,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     for (const paneId of destroyedPaneIds) {
       nextPanes.delete(paneId);
     }
+    const nextLayoutPaneIds = new Set(flattenManagedLayout(collapseManagedLayout(nextLayout.layout)));
+    for (const paneId of nextPanes.keys()) {
+      if (!nextLayoutPaneIds.has(paneId)) {
+        nextPanes.delete(paneId);
+      }
+    }
 
-    const previousLayout = surface.layout;
-    const previousPanes = surface.panes;
     const beforePaneIds = this.visiblePanes(surface).map((pane) => pane.paneId);
     const beforeRemotePaneIds = this.visiblePanes(surface).map((pane) => Number(pane.remotePaneId));
-    surface.layout = collapseManagedLayout(nextLayout.layout);
-    surface.panes = nextPanes;
-    try {
-      await this.pushTopology(surface, { beforePaneIds, beforeRemotePaneIds, increment: true });
-    } catch (error) {
-      surface.layout = previousLayout;
-      surface.panes = previousPanes;
-      throw error;
-    }
+    await this.pushTopology(surface, {
+      beforePaneIds,
+      beforeRemotePaneIds,
+      increment: true,
+      nextLayout: collapseManagedLayout(nextLayout.layout),
+      nextPanes,
+    });
 
     this.queuePersistScreenSnapshot("topology realization");
     const topology = managedLayoutToSummary(collapseManagedLayout(surface.layout))!;
@@ -3401,17 +3410,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
     const nextLayout = collapseManagedLayout(nextLayoutCandidate);
-    surface.layout = nextLayout;
-    surface.panes.delete(pane.paneId);
+    const nextPanes = new Map(surface.panes);
+    nextPanes.delete(pane.paneId);
 
-    try {
-      await this.pushTopology(surface, { increment: true });
-      await this.tombstonePaneTarget(surface, pane);
-    } catch (error) {
-      surface.panes.set(pane.paneId, pane);
-      surface.layout = currentLayout;
-      throw error;
-    }
+    await this.pushTopology(surface, { increment: true, nextLayout, nextPanes });
+    await this.tombstonePaneTarget(surface, pane);
 
     this.queuePersistScreenSnapshot("pane close");
     return {
@@ -4979,22 +4982,30 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private orderedPanes(surface: ManagedSurface): ManagedPane[] {
+    return this.orderedPanesFrom(surface, surface.panes, surface.layout);
+  }
+
+  private orderedPanesFrom(
+    surface: ManagedSurface,
+    panes: Map<PaneId, ManagedPane>,
+    layout: ManagedLayoutNode | null,
+  ): ManagedPane[] {
     const ordered: ManagedPane[] = [];
     const seen = new Set<PaneId>();
-    for (const paneId of flattenManagedLayout(surface.layout)) {
-      const pane = surface.panes.get(paneId);
+    for (const paneId of flattenManagedLayout(layout)) {
+      const pane = panes.get(paneId);
       if (!pane) {
         continue;
       }
       ordered.push(pane);
       seen.add(paneId);
     }
-    if (ordered.length === surface.panes.size) {
+    if (ordered.length === panes.size) {
       return ordered;
     }
     return [
       ...ordered,
-      ...[...surface.panes.values()].filter((pane) => !seen.has(pane.paneId)).sort((left, right) => (
+      ...[...panes.values()].filter((pane) => !seen.has(pane.paneId)).sort((left, right) => (
         left.paneLabel - right.paneLabel || left.paneId.localeCompare(right.paneId)
       )),
     ];
@@ -5002,6 +5013,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private visiblePanes(surface: ManagedSurface): ManagedPane[] {
     return surface.topologyRevision > 0 ? this.layoutPanes(surface) : this.orderedPanes(surface);
+  }
+
+  private visiblePanesFrom(
+    surface: ManagedSurface,
+    panes: Map<PaneId, ManagedPane>,
+    layout: ManagedLayoutNode | null,
+  ): ManagedPane[] {
+    return surface.topologyRevision > 0
+      ? flattenManagedLayout(layout).map((paneId) => panes.get(paneId)).filter((pane): pane is ManagedPane => Boolean(pane))
+      : this.orderedPanesFrom(surface, panes, layout);
   }
 
   private visiblePaneSummaryProjections(surface: ManagedSurface): Array<{ pane: ManagedPane; paneLabel: number }> {
@@ -5521,27 +5542,36 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async pushTopology(
     surface: ManagedSurface,
-    options: { beforePaneIds?: PaneId[]; beforeRemotePaneIds?: number[]; increment?: boolean } = {},
+    options: {
+      beforePaneIds?: PaneId[];
+      beforeRemotePaneIds?: number[];
+      increment?: boolean;
+      nextLayout?: ManagedLayoutNode | null;
+      nextPanes?: Map<PaneId, ManagedPane>;
+    } = {},
   ): Promise<void> {
     while (surface.topologyApplyInFlight) {
       await sleep(10);
     }
     surface.topologyApplyInFlight = true;
     try {
+    const draftLayout = collapseManagedLayout(options.nextLayout ?? surface.layout);
+    if (!draftLayout) {
+      throw new SurfAceToolError("invalid_operation", "Cannot publish empty Surf Ace topology.");
+    }
+    const draftPanes = options.nextPanes ?? surface.panes;
+    const draftVisiblePanes = this.visiblePanesFrom(surface, draftPanes, draftLayout);
     const orderedBeforePanes = this.visiblePanes(surface);
     const beforePaneIds = options.beforePaneIds ?? orderedBeforePanes.map((pane) => pane.paneId);
     const beforeRemotePaneIds = options.beforeRemotePaneIds ?? orderedBeforePanes.map((pane) => Number(pane.remotePaneId));
-    const layout = collapseManagedLayout(surface.layout);
-    surface.layout = layout;
     this.repairLiveWindowLabelInvariant("topology publish");
-    this.repairLivePaneLabelInvariant("topology publish", surface, surface);
     const topologyRevision = this.nextTopologyRevision(surface, options.increment ?? false);
     const request: TopologyApplyRequest = {
       id: makeBrandedRequestId(),
       op: "topology.apply",
       payload: {
-        layout: remoteLayoutToTopologyLayout(surface, layout),
-        panes: this.visiblePanes(surface).map((pane) => ({
+        layout: remoteLayoutToTopologyLayout(surface, draftLayout, draftPanes),
+        panes: draftVisiblePanes.map((pane) => ({
           name: pane.name,
           paneId: pane.remotePaneId,
           paneLabel: pane.paneLabel,
@@ -5590,6 +5620,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const payload = (response as TopologyApplyResponse).payload;
     this.assertProviderPaneLabelsUnique(surface, payload.panes);
+    if (options.nextPanes || options.nextLayout !== undefined) {
+      surface.layout = draftLayout;
+      surface.panes = draftPanes;
+    } else {
+      surface.layout = draftLayout;
+    }
     surface.topologyRevision = Number(payload.topologyRevision);
     let lineageChanged = false;
     for (const paneState of payload.panes) {
@@ -6438,35 +6474,31 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async loadState(): Promise<void> {
-    const statePath = path.join(this.stateDir, STATE_FILE_NAME);
     let loadedStateProviderId = "";
     let shouldPersistState = false;
-    try {
-      const raw = await fs.readFile(statePath, "utf8");
-      const parsed = JSON.parse(raw) as RuntimeStateFile & { endpointSurfaces?: Record<string, string> };
-      if (parsed.version === 1) {
-        loadedStateProviderId = parsed.providerId;
-        this.persistentState = {
-          nextRemotePaneId: parsed.nextRemotePaneId ?? (parsed as { nextPaneId?: number }).nextPaneId ?? 1,
-          nextPaneLabel: parsed.nextPaneLabel ?? 1,
-          nextWindowLabelIndex: parsed.nextWindowLabelIndex,
-          paneLabelsByPaneId: parsed.paneLabelsByPaneId ?? {},
-          providerId: parsed.providerId,
-          providerLineage: parsed.providerLineage ?? [],
-          selfOwnedSurfaceIds: parsed.selfOwnedSurfaceIds ?? {},
-          targetStateBySurfaceId: parsed.targetStateBySurfaceId ?? {},
-          tombstonedEndpointIds: parsed.tombstonedEndpointIds ?? [],
-          version: 1,
-          windowLabels: parsed.windowLabels ?? {},
-        };
-        this.tombstonedEndpointIds.clear();
-        for (const endpointId of this.persistentState.tombstonedEndpointIds ?? []) {
-          if (typeof endpointId === "string" && endpointId.length > 0) {
-            this.tombstonedEndpointIds.add(endpointId);
-          }
+    const parsed = await this.stateRepository.load() as RuntimeStateFile & { endpointSurfaces?: Record<string, string> } | null;
+    if (parsed?.version === 1) {
+      loadedStateProviderId = parsed.providerId;
+      this.persistentState = {
+        nextRemotePaneId: parsed.nextRemotePaneId ?? (parsed as { nextPaneId?: number }).nextPaneId ?? 1,
+        nextPaneLabel: parsed.nextPaneLabel ?? 1,
+        nextWindowLabelIndex: parsed.nextWindowLabelIndex,
+        paneLabelsByPaneId: parsed.paneLabelsByPaneId ?? {},
+        providerId: parsed.providerId,
+        providerLineage: parsed.providerLineage ?? [],
+        selfOwnedSurfaceIds: parsed.selfOwnedSurfaceIds ?? {},
+        targetStateBySurfaceId: parsed.targetStateBySurfaceId ?? {},
+        tombstonedEndpointIds: parsed.tombstonedEndpointIds ?? [],
+        version: 1,
+        windowLabels: parsed.windowLabels ?? {},
+      };
+      this.tombstonedEndpointIds.clear();
+      for (const endpointId of this.persistentState.tombstonedEndpointIds ?? []) {
+        if (typeof endpointId === "string" && endpointId.length > 0) {
+          this.tombstonedEndpointIds.add(endpointId);
         }
       }
-    } catch {
+    } else {
       shouldPersistState = true;
     }
 
@@ -7010,11 +7042,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async persistState(): Promise<void> {
-    const statePath = path.join(this.stateDir, STATE_FILE_NAME);
     this.stateWrite = this.stateWrite
       .catch(() => {})
       .then(async () => {
-        await fs.writeFile(statePath, JSON.stringify(this.persistentState, null, 2));
+        await this.stateRepository.save(this.persistentState);
       });
     await this.stateWrite;
   }
@@ -8517,33 +8548,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private isKnownSelfOwnedSurface(surface: ManagedSurface): boolean {
-    if (this.hasValidResumeSession(surface)) {
-      return true;
-    }
-    const ownership = this.persistentState.selfOwnedSurfaceIds?.[surface.surfaceId];
-    return Boolean(
-      ownership &&
-        !ownership.relinquishedAt &&
-        ownership.source !== "current_target_state" &&
-        this.isTrustedProviderLineageId(ownership.providerId),
+    return this.ownershipRecoveryPolicy.isKnownSelfOwnedSurface(
+      this.persistentState,
+      surface.surfaceId,
+      this.hasValidResumeSession(surface),
     );
   }
 
   private isTrustedProviderLineageId(providerId: string): boolean {
-    if (!providerId) {
-      return false;
-    }
-    return providerId === this.persistentState.providerId ||
-      (this.persistentState.providerLineage ?? []).some((entry) => entry.providerId === providerId);
+    return this.ownershipRecoveryPolicy.isTrustedProviderLineageId(this.persistentState, providerId);
   }
 
   private hasTrustedLineageSelfOwnership(surface: ManagedSurface): boolean {
-    const ownership = this.persistentState.selfOwnedSurfaceIds?.[surface.surfaceId];
-    return Boolean(
-      ownership &&
-        !ownership.relinquishedAt &&
-        ownership.providerId !== this.persistentState.providerId &&
-        this.isTrustedProviderLineageId(ownership.providerId),
+    return this.ownershipRecoveryPolicy.hasTrustedForeignLineageSelfOwnership(
+      this.persistentState,
+      surface.surfaceId,
     );
   }
 
@@ -8593,25 +8612,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private durableSelfReclaimResumeSessionId(surface: ManagedSurface): SessionId | null {
-    if (surface.sessionId) {
-      return surface.sessionId;
-    }
-    const targetState = this.persistentState.targetStateBySurfaceId?.[surface.surfaceId];
-    const ownership = this.persistentState.selfOwnedSurfaceIds?.[surface.surfaceId];
-    if (!targetState || !ownership || ownership.relinquishedAt || ownership.source === "current_target_state") {
-      return null;
-    }
-    const targetRecords = Array.isArray(targetState.targetRecords) ? targetState.targetRecords : [];
-    for (const target of [...targetRecords].reverse()) {
-      if (
-        typeof target.ownershipSessionId === "string" &&
-        target.ownershipSessionId.length > 0 &&
-        this.isTrustedProviderLineageId(target.ownerProviderId)
-      ) {
-        return asSessionId(target.ownershipSessionId);
-      }
-    }
-    return null;
+    const sessionId = this.ownershipRecoveryPolicy.durableSelfReclaimResumeSessionId(
+      this.persistentState,
+      surface.surfaceId,
+      surface.sessionId,
+    );
+    return sessionId ? asSessionId(sessionId) : null;
   }
 
   private hasValidResumeSession(surface: ManagedSurface): boolean {

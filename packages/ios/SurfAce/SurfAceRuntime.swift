@@ -140,6 +140,7 @@ private struct SurfAceRequestReplayEntry {
 private struct SurfAcePairCommitPlan {
     let surfaceId: String
     let session: SurfAceSessionState
+    let supersededSession: SurfAceSessionState?
     let resumed: Bool
     let providerName: String?
     let providerInitialPaneId: Int
@@ -238,7 +239,6 @@ final class SurfAceRuntime {
     @ObservationIgnored private var activeSessions: [String: SurfAceSessionState] = [:]
     @ObservationIgnored private var lastHeartbeatAtBySurfaceId: [String: Date] = [:]
     @ObservationIgnored private var ownershipLocksBySurfaceId: [String: SurfAceOwnershipLockState] = [:]
-    @ObservationIgnored private var ownershipLockOrphanedAt: [String: Date] = [:]
     @ObservationIgnored private var surfaceNeedsResumedEvent: Set<String> = []
     @ObservationIgnored private var terminatedConnectionUUIDs: Set<String> = []
     @ObservationIgnored private var identityMapping = SurfAceIdentityMapping()
@@ -253,7 +253,6 @@ final class SurfAceRuntime {
     private let resumeGraceMilliseconds = 20_000
     private let heartbeatTimeoutMilliseconds = 25_000
     private let heartbeatWatchdogCheckMilliseconds = 5_000
-    private let ownershipLockExpiryMilliseconds = 60_000
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
@@ -452,6 +451,10 @@ final class SurfAceRuntime {
             pane.pendingFlushTask = nil
         }
         surfaces.removeAll { $0.surfaceId == surfaceId }
+        identityMapping.surfacesBySceneKey.removeValue(forKey: sceneKey)
+        persistIdentityMapping()
+        persistedSurfaceTopologies.removeValue(forKey: surfaceId)
+        persistSurfaceTopologies()
 
         broadcastLifecycleEvent(
             op: "event.surface_removed",
@@ -530,7 +533,7 @@ final class SurfAceRuntime {
     func attachPaneBridge(surfaceId: String, paneId: Int, bridge: any SurfAcePaneBridging) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         pane.bridge = bridge
-        bridge.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry, restoreViewport: nil)
+        bridge.render(entry: renderableEntry(pane.currentEntry), restoreViewport: nil)
         noteRenderDiagnostics(
             surfaceId: surfaceId,
             pane: pane,
@@ -611,7 +614,7 @@ final class SurfAceRuntime {
             pane.currentEntry = next
         }
 
-        pane.bridge?.render(entry: pane.currentEntry.contentId == nil ? nil : pane.currentEntry, restoreViewport: nil)
+        pane.bridge?.render(entry: renderableEntry(pane.currentEntry), restoreViewport: nil)
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
         pane.lastNavigationURL = pane.currentEntry.url
         if eventIsEnabled(surfaceId: surfaceId, eventName: "event.history_navigated") {
@@ -756,8 +759,23 @@ final class SurfAceRuntime {
               let normalized = normalizeURL(url) else {
             return
         }
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return
+        }
 
-        pane.currentEntry.url = normalized
+        let previousEntry = pane.currentEntry
+        if !isVisibleEmptyEntry(previousEntry) {
+            pane.backStack.append(previousEntry)
+            trimVisibleHistory(pane)
+        }
+        pane.forwardStack.removeAll()
+        pane.currentEntry = .browserURL(
+            targetId: contentId,
+            targetEpoch: previousEntry.revision,
+            url: normalized,
+            title: previousEntry.title
+        )
         pane.lastNavigationURL = normalized
         sendEvent(
             surfaceId: surfaceId,
@@ -1274,6 +1292,7 @@ final class SurfAceRuntime {
         let resumed: Bool
         let sessionId: String
         let ownershipEpoch: Int
+        var supersededSession: SurfAceSessionState? = nil
 
         if let ownershipLock {
             if takeover {
@@ -1284,11 +1303,7 @@ final class SurfAceRuntime {
                 sessionId = randomHex(prefix: "sa", byteCount: 12)
                 ownershipEpoch = ownershipLock.ownershipEpoch + 1
                 if let activeSession, activeSession.connectionUUID != connectionUUID {
-                    Task {
-                        await activeSession.socket.close(code: 1000, reason: "superseded")
-                    }
-                    activeSessions.removeValue(forKey: surfaceId)
-                    lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
+                    supersededSession = activeSession
                 }
             } else if ownershipLock.providerId == providerId {
                 guard resumeSessionId == ownershipLock.sessionId else {
@@ -1312,11 +1327,7 @@ final class SurfAceRuntime {
                     "event=pair_request_resumed \(surfAceDiagnosticFields([("provider_id", providerId), ("session_id", sessionId), ("surface_id", surfaceId)]))"
                 )
                 if let activeSession, activeSession.connectionUUID != connectionUUID {
-                    Task {
-                        await activeSession.socket.close(code: 1000, reason: "superseded")
-                    }
-                    activeSessions.removeValue(forKey: surfaceId)
-                    lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
+                    supersededSession = activeSession
                 }
             } else {
                 surfAceGatewayLog(
@@ -1414,6 +1425,7 @@ final class SurfAceRuntime {
             postSendPairCommit: SurfAcePairCommitPlan(
                 surfaceId: surfaceId,
                 session: session,
+                supersededSession: supersededSession,
                 resumed: resumed,
                 providerName: providerName,
                 providerInitialPaneId: providerInitialPaneId,
@@ -1445,10 +1457,15 @@ final class SurfAceRuntime {
             ownershipEpoch: plan.session.ownershipEpoch
         )
         lastHeartbeatAtBySurfaceId[plan.surfaceId] = Date()
-        ownershipLockOrphanedAt.removeValue(forKey: plan.surfaceId)
         refreshConnectionState(surfaceId: plan.surfaceId)
         reschedulePendingFlushes(surfaceId: plan.surfaceId)
         refreshBonjourTXT()
+        if let supersededSession = plan.supersededSession,
+           supersededSession.connectionUUID != plan.session.connectionUUID {
+            Task {
+                await supersededSession.socket.close(code: 1000, reason: "superseded")
+            }
+        }
 
         if plan.shouldEnqueuePostReconnectEvents {
             surfaceNeedsResumedEvent.remove(plan.surfaceId)
@@ -1570,27 +1587,16 @@ final class SurfAceRuntime {
         }
 
         if let clear = payload["clear"] as? Bool, clear {
-            guard revision >= pane.currentEntry.revision else {
-                return staleRevisionResponse(op: "content.apply", id: id, expectedRevision: pane.currentEntry.revision)
+            guard revision == pane.currentEntry.revision + 1 else {
+                return staleRevisionResponse(op: "content.apply", id: id, expectedRevision: pane.currentEntry.revision + 1)
             }
             guard !pane.annotationMode else {
                 pane.toast = "Finish annotation (Done) to navigate"
                 return makeErrorResponse(op: "content.apply", id: id, code: "invalid_operation", message: "annotation mode is active")
             }
-            if revision == pane.currentEntry.revision, pane.currentEntry.contentId == nil {
-                var response = mutationAck(id: id, op: "content.apply", paneId: paneId, entry: pane.currentEntry)
-                if var payloadObject = response["payload"] as? [String: Any],
-                   let topologyRevision = payload["topologyRevision"] as? Int {
-                    payloadObject["topologyRevision"] = topologyRevision
-                    response["payload"] = payloadObject
-                }
-                return response
-            }
-            if pane.currentEntry.contentId != nil {
+            if !isVisibleEmptyEntry(pane.currentEntry) {
                 pane.backStack.append(pane.currentEntry)
-                if pane.backStack.count > 20 {
-                    pane.backStack.removeFirst(pane.backStack.count - 20)
-                }
+                trimVisibleHistory(pane)
             }
             pane.forwardStack.removeAll()
             pane.currentTarget = nil
@@ -1616,21 +1622,12 @@ final class SurfAceRuntime {
         guard let contentId = payload["contentId"] as? String else {
             return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "contentId is required")
         }
-        guard revision >= pane.currentEntry.revision else {
-            return staleRevisionResponse(op: "content.apply", id: id, expectedRevision: pane.currentEntry.revision)
+        guard revision == pane.currentEntry.revision + 1 else {
+            return staleRevisionResponse(op: "content.apply", id: id, expectedRevision: pane.currentEntry.revision + 1)
         }
         guard !pane.annotationMode else {
             pane.toast = "Finish annotation (Done) to navigate"
             return makeErrorResponse(op: "content.apply", id: id, code: "invalid_operation", message: "annotation mode is active")
-        }
-        if revision == pane.currentEntry.revision, pane.currentEntry.contentId == contentId {
-            var response = mutationAck(id: id, op: "content.apply", paneId: paneId, entry: pane.currentEntry)
-            if var payloadObject = response["payload"] as? [String: Any],
-               let topologyRevision = payload["topologyRevision"] as? Int {
-                payloadObject["topologyRevision"] = topologyRevision
-                response["payload"] = payloadObject
-            }
-            return response
         }
         guard payloadByteCount(payload) <= maxFrameBytes else {
             return makeErrorResponse(op: "content.apply", id: id, code: "content_too_large", message: "content exceeds maxFrameBytes")
@@ -1816,9 +1813,9 @@ final class SurfAceRuntime {
         }
         guard let header = payload["targetHeader"] as? [String: Any],
               let requiredCapabilities = header["requiredCapabilities"] as? [String],
-              requiredCapabilities.contains("target.browser_url.v1"),
+              requiredCapabilities == ["target.browser_url.v1"],
               header["replaySemantics"] as? String == "navigate" else {
-            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsafe_payload", message: "browser_url requires target.browser_url.v1 and navigate semantics")
+            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "capability_missing", message: "required target capability is not advertised")
         }
         guard let pane = paneByLineage(surfaceId: surfaceId, paneLineageId: paneLineageId) else {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "pane_lineage_missing", message: "pane lineage is unknown")
@@ -1833,11 +1830,9 @@ final class SurfAceRuntime {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsafe_payload", message: "browser_url targetPayload.url must be http or https")
         }
 
-        if pane.currentEntry.contentId != nil {
+        if !isVisibleEmptyEntry(pane.currentEntry) {
             pane.backStack.append(pane.currentEntry)
-            if pane.backStack.count > 20 {
-                pane.backStack.removeFirst(pane.backStack.count - 20)
-            }
+            trimVisibleHistory(pane)
         }
         pane.forwardStack.removeAll()
         pane.currentEntry = .browserURL(
@@ -1901,13 +1896,11 @@ final class SurfAceRuntime {
               let directionRaw = payload["direction"] as? String,
               let direction = SurfAceLayoutDirection(rawValue: directionRaw),
               let newPaneIds = payload["newPaneIds"] as? [Int],
+              let newPaneLabels = payload["newPaneLabels"] as? [Int],
               count >= 2,
               newPaneIds.count == count - 1,
+              newPaneLabels.count == count - 1,
               let _ = surface.panesById[paneId] else {
-            return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "invalid pane.split payload")
-        }
-        let newPaneLabels = (payload["newPaneLabels"] as? [Int]) ?? newPaneIds
-        guard newPaneLabels.count == count - 1 else {
             return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "invalid pane.split payload")
         }
 
@@ -2216,11 +2209,9 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "content.clear", id: id, code: "invalid_operation", message: "annotation mode is active")
         }
 
-        if pane.currentEntry.contentId != nil {
+        if !isVisibleEmptyEntry(pane.currentEntry) {
             pane.backStack.append(pane.currentEntry)
-            if pane.backStack.count > 20 {
-                pane.backStack.removeFirst(pane.backStack.count - 20)
-            }
+            trimVisibleHistory(pane)
         }
         pane.forwardStack.removeAll()
         pane.currentTarget = nil
@@ -2375,7 +2366,6 @@ final class SurfAceRuntime {
         }
 
         ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
-        ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
         activeSessions.removeValue(forKey: surfaceId)
         lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
         surfaceNeedsResumedEvent.remove(surfaceId)
@@ -2414,12 +2404,6 @@ final class SurfAceRuntime {
         activeSessions.removeValue(forKey: surfaceId)
         lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
         surfaceById[surfaceId]?.providerName = nil
-        // Track when the ownership lock became orphaned (session gone, lock stays
-        // for resume support).  The heartbeat watchdog will expire the lock if no
-        // new session arrives within ownershipLockExpiryMilliseconds.
-        if ownershipLocksBySurfaceId[surfaceId] != nil {
-            ownershipLockOrphanedAt[surfaceId] = Date()
-        }
         refreshConnectionState(surfaceId: surfaceId)
         refreshBonjourTXT()
     }
@@ -2432,7 +2416,6 @@ final class SurfAceRuntime {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self.expireStaleSessionsForHeartbeat()
-                    self.expireOrphanedOwnershipLocks()
                 }
             }
         }
@@ -2461,39 +2444,6 @@ final class SurfAceRuntime {
             Task {
                 await expiredSession.session.socket.close(code: 1000, reason: "heartbeat_timeout")
             }
-        }
-        refreshBonjourTXT()
-    }
-
-    private func expireOrphanedOwnershipLocks() {
-        guard !ownershipLockOrphanedAt.isEmpty else { return }
-        let now = Date()
-        var expiredSurfaceIds: [String] = []
-        var reconciledSurfaceIds: [String] = []
-
-        for (surfaceId, orphanedAt) in ownershipLockOrphanedAt {
-            // If a session was re-established, the orphan record is stale.
-            guard activeSessions[surfaceId] == nil else {
-                reconciledSurfaceIds.append(surfaceId)
-                continue
-            }
-            let ageMilliseconds = now.timeIntervalSince(orphanedAt) * 1000
-            if ageMilliseconds > Double(ownershipLockExpiryMilliseconds) {
-                expiredSurfaceIds.append(surfaceId)
-            }
-        }
-
-        for surfaceId in reconciledSurfaceIds {
-            ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
-        }
-
-        guard !expiredSurfaceIds.isEmpty else { return }
-
-        for surfaceId in expiredSurfaceIds {
-            ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
-            ownershipLockOrphanedAt.removeValue(forKey: surfaceId)
-            surfaceById[surfaceId]?.providerName = nil
-            refreshConnectionState(surfaceId: surfaceId)
         }
         refreshBonjourTXT()
     }
@@ -2790,7 +2740,7 @@ final class SurfAceRuntime {
 
     private func applyContentSet(frame: SurfAceFrame, to pane: SurfAcePaneModel, historyOwnerToken: String) -> [String: Any]? {
         let nextEntry = SurfAcePaneEntry.from(frame: frame, historyOwnerToken: historyOwnerToken)
-        let shouldReplaceInPlace = pane.currentEntry.contentId != nil
+        let shouldReplaceInPlace = !isVisibleEmptyEntry(pane.currentEntry)
             && pane.currentEntry.historyOwnerToken == historyOwnerToken
 
         if shouldReplaceInPlace {
@@ -2799,12 +2749,10 @@ final class SurfAceRuntime {
         }
 
         var historyInfo: [String: Any]?
-        if pane.currentEntry.contentId != nil {
+        if !isVisibleEmptyEntry(pane.currentEntry) {
             let displacedEntry = pane.currentEntry
             pane.backStack.append(displacedEntry)
-            if pane.backStack.count > 20 {
-                pane.backStack.removeFirst(pane.backStack.count - 20)
-            }
+            trimVisibleHistory(pane)
 
             if let displacedContentId = displacedEntry.contentId,
                let displacedHistoryOwnerToken = displacedEntry.historyOwnerToken,
@@ -2924,11 +2872,7 @@ final class SurfAceRuntime {
             ]
         }
         guard let snapshot = currentPaneGeometrySnapshot(surface: surface, pane: pane) else {
-            return [
-                "width": 1,
-                "height": 1,
-                "scale": Double(max(surface.viewportScale, 1)),
-            ]
+            return viewportPayload(for: surface)
         }
         let rect = snapshot.contentViewport
         return [
@@ -3003,10 +2947,12 @@ final class SurfAceRuntime {
         scale: CGFloat,
         surfaceBounds: CGRect
     ) -> [String: Any] {
-        let rect = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let width = max(surfaceBounds.width, 1)
+        let height = max(surfaceBounds.height, 1)
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
         let viewport: [String: Any] = [
-            "width": 1,
-            "height": 1,
+            "width": Int(width.rounded()),
+            "height": Int(height.rounded()),
             "scale": Double(max(scale, 1)),
         ]
         return [
@@ -3015,6 +2961,8 @@ final class SurfAceRuntime {
             "topologyEpoch": topologyEpoch,
             "surfaceEpoch": String(surfaceEpoch),
             "geometryRevision": 0,
+            "geometryUnavailable": true,
+            "unavailableReason": "missing_resolved_snapshot",
             "coordinateSpace": SurfAcePaneGeometrySnapshot.coordinateSpace,
             "surfaceBounds": rectPayload(surfaceBounds),
             "paneFrame": rectPayload(rect),
@@ -3100,9 +3048,28 @@ final class SurfAceRuntime {
     private func normalizeURL(_ url: String) -> String? {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        guard var components = URLComponents(string: trimmed) else { return trimmed }
-        components.fragment = nil
+        guard let components = URLComponents(string: trimmed) else { return trimmed }
         return components.string ?? trimmed
+    }
+
+    private func isVisibleEmptyEntry(_ entry: SurfAcePaneEntry) -> Bool {
+        entry.contentId == nil && entry.contentType == nil && entry.payload == nil && entry.url == nil
+    }
+
+    private func renderableEntry(_ entry: SurfAcePaneEntry) -> SurfAcePaneEntry? {
+        isVisibleEmptyEntry(entry) ? nil : entry
+    }
+
+    private func trimVisibleHistory(_ pane: SurfAcePaneModel) {
+        while pane.backStack.count + 1 + pane.forwardStack.count > 20 {
+            if !pane.backStack.isEmpty {
+                pane.backStack.removeFirst()
+            } else if !pane.forwardStack.isEmpty {
+                pane.forwardStack.removeLast()
+            } else {
+                break
+            }
+        }
     }
 
     private func payloadByteCount(_ payload: [String: Any]) -> Int {

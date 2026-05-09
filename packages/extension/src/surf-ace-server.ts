@@ -55,6 +55,10 @@ export class SurfAceWireClient {
       }
     });
 
+    ws.on("message", (data) => {
+      this.handleMessage(data);
+    });
+
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         ws.close();
@@ -79,10 +83,6 @@ export class SurfAceWireClient {
 
       ws.once("open", handleOpen);
       ws.once("error", handleError);
-    });
-
-    ws.on("message", (data) => {
-      this.handleMessage(data);
     });
 
     ws.on("error", (error) => {
@@ -183,13 +183,14 @@ export class SurfAceWireClient {
     if (parsed.type === "request") {
       if (parsed.op === "target.register") {
         const validation = validateEnvelopeType("target.register", parsed);
-        if (!validation.ok) {
-          const ws = this.ws;
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(targetRegisterRejected(parsed, validation.reason)));
-          }
-          return;
+        const reason = validation.ok
+          ? "surface-side target.register is not supported by this product surface"
+          : validation.reason;
+        const ws = this.ws;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(targetRegisterRejected(parsed, reason)));
         }
+        return;
       }
       void Promise.resolve()
         .then(async () => await this.onRequest?.(parsed))
@@ -206,12 +207,6 @@ export class SurfAceWireClient {
           console.warn(
             `[surf-ace:wire] unhandled error in onRequest callback (op=${parsed.op}): ${String(error)}`,
           );
-          if (parsed.op === "target.register") {
-            const ws = this.ws;
-            if (ws?.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(targetRegisterRejected(parsed, asError(error).message)));
-            }
-          }
         });
       return;
     }

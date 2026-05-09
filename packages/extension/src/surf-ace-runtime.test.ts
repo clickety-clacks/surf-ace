@@ -8,6 +8,7 @@ import { WebSocketServer } from "ws";
 import type WebSocket from "ws";
 
 import type { SurfAceDiscoveryEndpoint, SurfAceDiscoveryService } from "./surf-ace-discovery.js";
+import { SurfAceOwnershipRecoveryPolicy } from "./surf-ace-ownership-recovery-policy.js";
 import { createSurfAceRuntime, resolveDefaultSurfAceStateDir } from "./surf-ace-runtime.js";
 
 type TestPane = {
@@ -42,6 +43,35 @@ type TestSurfaceState = {
     width: number;
   };
 };
+
+test("ownership recovery policy evaluates self-reclaim without file I/O", () => {
+  const policy = new SurfAceOwnershipRecoveryPolicy();
+  const state = {
+    providerId: "pv_current",
+    providerLineage: [{ providerId: "pv_legacy" }],
+    selfOwnedSurfaceIds: {
+      sf_active: { providerId: "pv_current", source: "current_local_ownership" },
+      sf_foreign: { providerId: "pv_foreign", source: "current_local_ownership" },
+      sf_legacy: { providerId: "pv_legacy", source: "legacy_local_ownership" },
+      sf_relinquished: { providerId: "pv_current", relinquishedAt: 1, source: "current_local_ownership" },
+    },
+    targetStateBySurfaceId: {
+      sf_legacy: {
+        targetRecords: [
+          { ownerProviderId: "pv_foreign", ownershipSessionId: "sa_foreign" },
+          { ownerProviderId: "pv_legacy", ownershipSessionId: "sa_legacy" },
+        ],
+      },
+    },
+  };
+
+  assert.equal(policy.isKnownSelfOwnedSurface(state, "sf_active", false), true);
+  assert.equal(policy.isKnownSelfOwnedSurface(state, "sf_relinquished", false), false);
+  assert.equal(policy.hasTrustedForeignLineageSelfOwnership(state, "sf_legacy"), true);
+  assert.equal(policy.hasTrustedForeignLineageSelfOwnership(state, "sf_foreign"), false);
+  assert.equal(policy.durableSelfReclaimResumeSessionId(state, "sf_legacy", null), "sa_legacy");
+  assert.equal(policy.durableSelfReclaimResumeSessionId(state, "sf_active", "sa_live"), "sa_live");
+});
 
 class StaticDiscoveryService implements SurfAceDiscoveryService {
   private readonly listeners = new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void | Promise<void>>();

@@ -88,7 +88,7 @@ struct SurfAceFramePatchRequest {
     let html: String?
 }
 
-enum SurfAceFramePayload: Equatable {
+enum SurfAceFramePayload: Equatable, Codable {
     case html(html: String, baseURL: String?)
     case image(data: String, mediaType: String, alt: String?)
     case pdf(data: String)
@@ -97,6 +97,102 @@ enum SurfAceFramePayload: Equatable {
     case video(url: String)
     case canvas(color: String?, grid: Bool)
     case browserURL(url: String, allowedSnapshotFallback: Bool?, fallbackSnapshotTargetId: String?)
+
+    private enum CodingKeys: String, CodingKey {
+        case allowedSnapshotFallback
+        case alt
+        case baseURL
+        case color
+        case data
+        case fallbackSnapshotTargetId
+        case grid
+        case html
+        case kind
+        case lines
+        case markdown
+        case mediaType
+        case scrollback
+        case url
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "html":
+            self = .html(
+                html: try container.decode(String.self, forKey: .html),
+                baseURL: try container.decodeIfPresent(String.self, forKey: .baseURL)
+            )
+        case "image":
+            self = .image(
+                data: try container.decode(String.self, forKey: .data),
+                mediaType: try container.decode(String.self, forKey: .mediaType),
+                alt: try container.decodeIfPresent(String.self, forKey: .alt)
+            )
+        case "pdf":
+            self = .pdf(data: try container.decode(String.self, forKey: .data))
+        case "terminal":
+            self = .terminal(
+                lines: try container.decode([String].self, forKey: .lines),
+                scrollback: try container.decode(Int.self, forKey: .scrollback)
+            )
+        case "markdown":
+            self = .markdown(markdown: try container.decode(String.self, forKey: .markdown))
+        case "video":
+            self = .video(url: try container.decode(String.self, forKey: .url))
+        case "canvas":
+            self = .canvas(
+                color: try container.decodeIfPresent(String.self, forKey: .color),
+                grid: try container.decodeIfPresent(Bool.self, forKey: .grid) ?? false
+            )
+        case "browserURL":
+            self = .browserURL(
+                url: try container.decode(String.self, forKey: .url),
+                allowedSnapshotFallback: try container.decodeIfPresent(Bool.self, forKey: .allowedSnapshotFallback),
+                fallbackSnapshotTargetId: try container.decodeIfPresent(String.self, forKey: .fallbackSnapshotTargetId)
+            )
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Unknown SurfAceFramePayload kind")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .html(let html, let baseURL):
+            try container.encode("html", forKey: .kind)
+            try container.encode(html, forKey: .html)
+            try container.encodeIfPresent(baseURL, forKey: .baseURL)
+        case .image(let data, let mediaType, let alt):
+            try container.encode("image", forKey: .kind)
+            try container.encode(data, forKey: .data)
+            try container.encode(mediaType, forKey: .mediaType)
+            try container.encodeIfPresent(alt, forKey: .alt)
+        case .pdf(let data):
+            try container.encode("pdf", forKey: .kind)
+            try container.encode(data, forKey: .data)
+        case .terminal(let lines, let scrollback):
+            try container.encode("terminal", forKey: .kind)
+            try container.encode(lines, forKey: .lines)
+            try container.encode(scrollback, forKey: .scrollback)
+        case .markdown(let markdown):
+            try container.encode("markdown", forKey: .kind)
+            try container.encode(markdown, forKey: .markdown)
+        case .video(let url):
+            try container.encode("video", forKey: .kind)
+            try container.encode(url, forKey: .url)
+        case .canvas(let color, let grid):
+            try container.encode("canvas", forKey: .kind)
+            try container.encodeIfPresent(color, forKey: .color)
+            try container.encode(grid, forKey: .grid)
+        case .browserURL(let url, let allowedSnapshotFallback, let fallbackSnapshotTargetId):
+            try container.encode("browserURL", forKey: .kind)
+            try container.encode(url, forKey: .url)
+            try container.encodeIfPresent(allowedSnapshotFallback, forKey: .allowedSnapshotFallback)
+            try container.encodeIfPresent(fallbackSnapshotTargetId, forKey: .fallbackSnapshotTargetId)
+        }
+    }
 }
 
 struct SurfAceFrame: Equatable {
@@ -194,7 +290,7 @@ struct SurfAceFrame: Equatable {
     }
 }
 
-struct SurfAceContentReloadSource: Equatable {
+struct SurfAceContentReloadSource: Codable, Equatable {
     let kind: String
     let path: String
 
@@ -273,7 +369,7 @@ struct SurfAceSurfaceSnapshot {
     let imageBase64: String?
 }
 
-struct SurfAcePaneEntry {
+struct SurfAcePaneEntry: Codable {
     var contentId: String?
     var revision: Int
     var historyOwnerToken: String?
@@ -350,7 +446,7 @@ struct SurfAcePaneEntry {
     }
 }
 
-struct SurfAcePaneTargetState: Equatable {
+struct SurfAcePaneTargetState: Codable, Equatable {
     var targetId: String
     var targetKind: String
     var paneLineageId: String
@@ -358,6 +454,54 @@ struct SurfAcePaneTargetState: Equatable {
     var restorePolicy: String
     var currentState: String
     var lastApplyEvidence: [String: Any]?
+
+    private enum CodingKeys: String, CodingKey {
+        case currentState
+        case paneLineageId
+        case restorePolicy
+        case targetEpoch
+        case targetId
+        case targetKind
+    }
+
+    init(
+        targetId: String,
+        targetKind: String,
+        paneLineageId: String,
+        targetEpoch: Int,
+        restorePolicy: String,
+        currentState: String,
+        lastApplyEvidence: [String: Any]? = nil
+    ) {
+        self.targetId = targetId
+        self.targetKind = targetKind
+        self.paneLineageId = paneLineageId
+        self.targetEpoch = targetEpoch
+        self.restorePolicy = restorePolicy
+        self.currentState = currentState
+        self.lastApplyEvidence = lastApplyEvidence
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.targetId = try container.decode(String.self, forKey: .targetId)
+        self.targetKind = try container.decode(String.self, forKey: .targetKind)
+        self.paneLineageId = try container.decode(String.self, forKey: .paneLineageId)
+        self.targetEpoch = try container.decode(Int.self, forKey: .targetEpoch)
+        self.restorePolicy = try container.decode(String.self, forKey: .restorePolicy)
+        self.currentState = try container.decode(String.self, forKey: .currentState)
+        self.lastApplyEvidence = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(targetId, forKey: .targetId)
+        try container.encode(targetKind, forKey: .targetKind)
+        try container.encode(paneLineageId, forKey: .paneLineageId)
+        try container.encode(targetEpoch, forKey: .targetEpoch)
+        try container.encode(restorePolicy, forKey: .restorePolicy)
+        try container.encode(currentState, forKey: .currentState)
+    }
 
     static func == (lhs: SurfAcePaneTargetState, rhs: SurfAcePaneTargetState) -> Bool {
         lhs.targetId == rhs.targetId &&
@@ -524,13 +668,23 @@ indirect enum SurfAcePaneLayoutNode {
 }
 
 struct SurfAcePersistedPaneTopology: Codable {
-    var paneId: Int
-    var paneLineageId: String
+    var annotationMode: Bool?
+    var backStack: [SurfAcePaneEntry]?
+    var currentEntry: SurfAcePaneEntry?
+    var currentTarget: SurfAcePaneTargetState?
+    var forwardStack: [SurfAcePaneEntry]?
     var paneLabel: Int
+    var paneLineageId: String
+    var paneId: Int
     var name: String?
 
     @MainActor
     init(pane: SurfAcePaneModel) {
+        self.annotationMode = pane.annotationMode
+        self.backStack = pane.backStack
+        self.currentEntry = pane.currentEntry
+        self.currentTarget = pane.currentTarget
+        self.forwardStack = pane.forwardStack
         self.paneId = pane.paneId
         self.paneLineageId = pane.paneLineageId
         self.paneLabel = pane.paneLabel
@@ -539,7 +693,13 @@ struct SurfAcePersistedPaneTopology: Codable {
 
     @MainActor
     func makePane() -> SurfAcePaneModel {
-        SurfAcePaneModel(paneId: paneId, paneLineageId: paneLineageId, paneLabel: paneLabel, name: name)
+        let pane = SurfAcePaneModel(paneId: paneId, paneLineageId: paneLineageId, paneLabel: paneLabel, name: name)
+        pane.annotationMode = annotationMode ?? false
+        pane.backStack = backStack ?? []
+        pane.currentEntry = currentEntry ?? .empty()
+        pane.forwardStack = forwardStack ?? []
+        pane.currentTarget = currentTarget
+        return pane
     }
 }
 
