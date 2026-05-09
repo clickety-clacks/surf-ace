@@ -615,26 +615,71 @@ test("ws server rejects invalid provider bootstrap without leaving an ownership 
   });
 });
 
-test("ws server rejects topology.apply attempts to override the paired window ID", async () => {
+test("ws server adopts provider window relabels on topology.apply", async () => {
   await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
     try {
-      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", {
+        windowLabel: "h",
+      }));
       assert.equal(paired.ok, true);
+      assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "h");
 
-      const invalid = topologyApplyRequest();
-      invalid.payload.windowLabel = "docs" as never;
+      const rejectedRelabel = topologyApplyRequest();
+      rejectedRelabel.payload.windowLabel = "a";
+      rejectedRelabel.payload.panes[1]!.paneLabel = 41;
 
-      const rejected = await request(owner, invalid);
+      const rejected = await request(owner, rejectedRelabel);
 
       assert.equal(rejected.ok, false);
       assert.equal(rejected.op, "topology.apply");
       assert.equal(rejected.error.code, "invalid_payload");
-      assert.match(rejected.error.message, /windowLabel must match the paired surface identity/);
+      assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "h");
+
+      const relabeled = topologyApplyRequest();
+      relabeled.payload.windowLabel = "a";
+
+      const accepted = await request(owner, relabeled);
+
+      assert.equal(accepted.ok, true);
+      assert.equal(accepted.op, "topology.apply");
       assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "a");
     } finally {
       await closeSocket(owner);
     }
+  });
+});
+
+test("ws server adopts provider window relabels on resumed pair", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha", {
+      windowLabel: "h",
+    }));
+    assert.equal(first.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "h");
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+    const resumedSocket = await connect(url);
+    const resumed = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", {
+        resumeSessionId: first.payload.sessionId,
+        windowLabel: "a",
+      }),
+    );
+
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.op, "pair.request");
+    assert.equal(resumed.payload.resumed, true);
+    assert.equal(resumed.payload.sessionId, first.payload.sessionId);
+    assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "a");
+
+    await closeSocket(resumedSocket);
   });
 });
 
@@ -892,6 +937,53 @@ test("ws server scopes explicit takeover to the requested surface only", async (
 
     await closeSocket(takeoverA);
     await closeSocket(ownerB);
+  });
+});
+
+test("ws server rejects duplicate-label takeover before detaching the active owner", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const otherSurface = core.createAdditionalSurface("Surf Ace B", { height: 700, scale: 2, width: 1000 });
+    const ownerA = await connect(url);
+    const firstA = await request(ownerA, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(firstA.ok, true);
+
+    const ownerB = await connect(url);
+    const firstB = await request(
+      ownerB,
+      pairRequest(otherSurface.surfaceId, "pv_alpha", {
+        windowLabel: "b",
+      }),
+    );
+    assert.equal(firstB.ok, true);
+
+    const takeoverB = await connect(url);
+    const rejected = await request(
+      takeoverB,
+      pairRequest(otherSurface.surfaceId, "pv_bravo", {
+        takeover: true,
+        windowLabel: "a",
+      }),
+    );
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "invalid_payload");
+    assert.match(rejected.error.message, /Duplicate windowLabel in live surface set: a/);
+    assert.equal(ownerB.readyState, WebSocket.OPEN);
+
+    const panesB = await request(ownerB, {
+      id: `rq_${Math.random().toString(16).slice(2)}` as never,
+      op: "panes.list",
+      payload: {},
+      sentAt: Date.now() as never,
+      type: "request",
+      v: 1,
+    });
+    assert.equal(panesB.ok, true);
+    assert.equal(core.getRendererWindowState(otherSurface.surfaceId).windowLabel, "b");
+
+    await closeSocket(takeoverB);
+    await closeSocket(ownerB);
+    await closeSocket(ownerA);
   });
 });
 
@@ -1892,6 +1984,100 @@ test("ws server rolls back retained native topology geometry when overlay update
       assert.equal(state.panes[0]!.externalNative, true);
 
       await closeSocket(owner);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server rolls back native resume relabel geometry when overlay update fails", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  let overlayRequests = 0;
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      if (message.type === "get_status") {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            logical_surface_height: 3840,
+            logical_surface_width: 2160,
+            pane_geometry_coordinate_space: "compositor_logical",
+          },
+        })}\n`);
+      } else if (message.type === "overlay_regions.set") {
+        overlayRequests += 1;
+        socket.write(`${JSON.stringify(overlayRequests === 2 ? { error: "overlay denied", ok: false } : { ok: true })}\n`);
+      } else {
+        socket.write(`${JSON.stringify({ ok: true })}\n`);
+      }
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ core, surfaceId, url }) => {
+      const owner = await connect(url);
+      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", {
+        windowLabel: "h",
+      }));
+      assert.equal(paired.ok, true);
+      const pane = paired.payload.state.panes[0]!;
+
+      const nativeApplied = await request(owner, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: pane.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+      assert.equal(nativeApplied.payload.status, "applied");
+      await closeSocket(owner, 1000, "provider_shutdown");
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 25);
+      });
+
+      const resumedSocket = await connect(url);
+      const rejected = await request(
+        resumedSocket,
+        pairRequest(surfaceId, "pv_alpha", {
+          resumeSessionId: paired.payload.sessionId,
+          windowLabel: "a",
+        }),
+      );
+
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.error.code, "render_failed");
+      assert.deepEqual(received.map((message) => (message as { type: string }).type), [
+        "get_status",
+        "native_pane.host",
+        "overlay_regions.set",
+        "get_status",
+        "native_pane.update",
+        "overlay_regions.set",
+        "get_status",
+        "native_pane.update",
+        "overlay_regions.set",
+      ]);
+      const state = core.getRendererWindowState(surfaceId);
+      assert.equal(state.windowLabel, "h");
+      assert.equal(state.panes.length, 1);
+      assert.equal(state.panes[0]!.externalNative, true);
+
+      await closeSocket(resumedSocket);
     }, { compositorSocketPath: socketPath });
   } finally {
     await new Promise<void>((resolve) => compositor.close(() => resolve()));

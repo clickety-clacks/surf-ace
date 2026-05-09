@@ -690,6 +690,8 @@ export class SurfaceCore {
     payload: TopologyApplyRequest["payload"],
   ): NativePaneMaterialization | null {
     const surface = this.getSurface(surfaceId);
+    assertValidWindowLabel(payload.windowLabel);
+    this.assertWindowLabelAvailable(surfaceId, payload.windowLabel);
     const paneIds = this.nativeHostedPaneIdsForTopologyGeometryUpdate(surfaceId, payload);
     if (paneIds.length === 0) {
       return null;
@@ -702,7 +704,24 @@ export class SurfaceCore {
     return this.projectNativePaneGeometryUpdateForLayout(surface, paneIds, nextLayout, {
       geometryRevision: surface.geometryRevision + 1,
       topologyRevision: Number(payload.topologyRevision),
-      windowLabel: surface.windowLabel,
+      windowLabel: payload.windowLabel,
+    });
+  }
+
+  projectNativePaneOverlayWindowLabelUpdate(surfaceId: string, windowLabel: string): NativePaneMaterialization | null {
+    assertValidWindowLabel(windowLabel);
+    this.assertWindowLabelAvailable(surfaceId, windowLabel);
+    const surface = this.getSurface(surfaceId);
+    const paneIds = [...surface.panes.values()]
+      .filter((pane) => pane.externalNative)
+      .map((pane) => pane.paneId);
+    if (paneIds.length === 0) {
+      return null;
+    }
+    return this.projectNativePaneGeometryUpdateForLayout(surface, paneIds, surface.layout!, {
+      geometryRevision: surface.geometryRevision + 1,
+      topologyRevision: surface.topologyRevision,
+      windowLabel,
     });
   }
 
@@ -916,12 +935,13 @@ export class SurfaceCore {
     const nextLayout = topologyLayoutToSurfaceLayout(payload.layout, paneStateById);
     const currentRects = layoutPaneRects(surface.layout!, surface.viewport);
     const nextRects = layoutPaneRects(nextLayout, surface.viewport);
+    const windowLabelChanged = surface.windowLabel !== payload.windowLabel;
     return [...surface.panes.values()]
       .filter((pane) => pane.externalNative)
       .filter((pane) => {
         const currentRect = currentRects.get(pane.paneId);
         const nextRect = nextRects.get(pane.paneId);
-        return Boolean(currentRect && nextRect && !sameRect(currentRect, nextRect));
+        return Boolean(currentRect && nextRect && (windowLabelChanged || !sameRect(currentRect, nextRect)));
       })
       .map((pane) => pane.paneId);
   }
@@ -1091,11 +1111,20 @@ export class SurfaceCore {
 
   applyWindowLabelOnly(surfaceId: string, windowLabel: string): void {
     assertValidWindowLabel(windowLabel);
+    this.assertWindowLabelAvailable(surfaceId, windowLabel);
     const surface = this.getSurface(surfaceId);
     if (surface.windowLabel !== windowLabel) {
+      if ([...surface.panes.values()].some((pane) => pane.externalNative)) {
+        bumpGeometryRevision(surface);
+      }
       surface.windowLabel = windowLabel;
       this.emit({ surfaceId, type: "surface-changed" });
     }
+  }
+
+  assertProviderWindowLabelAvailable(surfaceId: string, windowLabel: string): void {
+    assertValidWindowLabel(windowLabel);
+    this.assertWindowLabelAvailable(surfaceId, windowLabel);
   }
 
   applyProviderBootstrapTopology(
@@ -1103,6 +1132,7 @@ export class SurfaceCore {
     payload: { initialPaneId: number; initialPaneLabel: number; windowLabel: string },
   ): void {
     assertValidWindowLabel(payload.windowLabel);
+    this.assertWindowLabelAvailable(surfaceId, payload.windowLabel);
     const surface = this.getSurface(surfaceId);
     let didChange = false;
 
@@ -1127,9 +1157,7 @@ export class SurfaceCore {
   ): TopologyApplyResponse["payload"] {
     const surface = this.getSurface(surfaceId);
     assertValidWindowLabel(payload.windowLabel);
-    if (surface.windowLabel !== payload.windowLabel) {
-      throw new SurfaceCoreError("invalid_payload", "topology.apply windowLabel must match the paired surface identity");
-    }
+    this.assertWindowLabelAvailable(surfaceId, payload.windowLabel);
     assertSingleSurfacePaneLabelPayload(payload.panes);
     const paneStateById = new Map<number, TopologyApplyRequest["payload"]["panes"][number]>();
     for (const pane of payload.panes) {
@@ -1155,12 +1183,15 @@ export class SurfaceCore {
     const previousRects = layoutPaneRects(surface.layout!, surface.viewport);
     const nextRects = layoutPaneRects(layout, surface.viewport);
     const geometryChanged = !samePaneRectSet(previousRects, nextRects);
+    const windowLabelChanged = surface.windowLabel !== payload.windowLabel;
+    const nativeWindowLabelChanged = windowLabelChanged && activePaneIds.some((paneId) => surface.panes.get(paneId)?.externalNative);
 
     surface.layout = layout;
+    surface.windowLabel = payload.windowLabel;
     surface.paneOrder = orderedPanes;
     surface.panes = nextPanes;
     surface.topologyRevision = Number(payload.topologyRevision);
-    if (geometryChanged) {
+    if (geometryChanged || nativeWindowLabelChanged) {
       bumpGeometryRevision(surface);
     }
     this.ensureActiveKeyboardPane(surface);
@@ -1178,6 +1209,17 @@ export class SurfaceCore {
       }),
       topologyRevision: payload.topologyRevision,
     };
+  }
+
+  private assertWindowLabelAvailable(surfaceId: string, windowLabel: string): void {
+    for (const [otherSurfaceId, surface] of this.surfaces) {
+      if (otherSurfaceId === surfaceId) {
+        continue;
+      }
+      if (surface.windowLabel === windowLabel) {
+        throw new SurfaceCoreError("invalid_payload", `Duplicate windowLabel in live surface set: ${windowLabel}`);
+      }
+    }
   }
 
   contentApply(

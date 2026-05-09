@@ -5,11 +5,16 @@ import type { Revision } from "../../protocol/src/index.js";
 import type { NativePaneMaterialization } from "../src/native-pane-bridge.js";
 import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
 
-function applyProviderBootstrap(core: SurfaceCore, surfaceId: string, initialPaneId: number): number {
+function applyProviderBootstrap(
+  core: SurfaceCore,
+  surfaceId: string,
+  initialPaneId: number,
+  windowLabel = "a",
+): number {
   core.applyProviderBootstrapTopology(surfaceId, {
     initialPaneId,
     initialPaneLabel: initialPaneId,
-    windowLabel: "a",
+    windowLabel,
   });
   return core.getRendererWindowState(surfaceId).panes[0]!.paneId;
 }
@@ -779,7 +784,7 @@ test("surface core rejects stale native materialization identity after geometry 
   );
 });
 
-test("surface core projects native topology overlay identity from resolved surface state", () => {
+test("surface core projects native topology overlay identity from accepted topology payload", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -832,7 +837,116 @@ test("surface core projects native topology overlay identity from resolved surfa
     windowLabel: "docs",
   });
 
-  assert.equal(projected?.overlaySet.windowId, "a");
+  assert.equal(projected?.overlaySet.windowId, "docs");
+});
+
+test("surface core resyncs native topology overlays on window relabel without geometry changes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  core.markNativePaneMaterialized(surface.surfaceId, {
+    op: "native_pane.host",
+    panes: [
+      {
+        id: String(paneId),
+        binding_id: `${paneId}:target_top`,
+        content_id: "target_top",
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: listedPane.geometry.geometryRevision,
+          height: listedPane.geometry.contentViewport.height,
+          paneInstanceId: listedPane.geometry.paneInstanceId,
+          surfaceEpoch: listedPane.geometry.surfaceEpoch,
+          topologyEpoch: listedPane.geometry.topologyEpoch,
+          width: listedPane.geometry.contentViewport.width,
+          x: listedPane.geometry.contentViewport.x,
+          y: listedPane.geometry.contentViewport.y,
+        },
+        process: { args: ["top"], command: "top" },
+        revision: 1 as Revision,
+        target: "terminal",
+      },
+    ],
+  });
+
+  const projected = core.projectNativePaneGeometryUpdateForTopologyApply(surface.surfaceId, {
+    layout: { paneId: paneId as never, type: "pane" },
+    panes: [
+      { name: "Docs", paneId: paneId as never, paneLabel: 7 },
+    ],
+    topologyRevision: 2 as never,
+    windowLabel: "b",
+  });
+
+  assert.equal(projected?.overlaySet.windowId, "b");
+  assert.deepEqual(projected?.panes.map((pane) => pane.id), [String(paneId)]);
+
+  const beforeRevision = core.panesList(surface.surfaceId).panes[0]!.geometry.geometryRevision;
+  core.topologyApply(surface.surfaceId, {
+    layout: { paneId: paneId as never, type: "pane" },
+    panes: [
+      { name: "Docs", paneId: paneId as never, paneLabel: 7 },
+    ],
+    topologyRevision: 2 as never,
+    windowLabel: "b",
+  });
+  assert.equal(core.panesList(surface.surfaceId).panes[0]!.geometry.geometryRevision, Number(beforeRevision) + 1);
+});
+
+test("surface core advances native overlay revision on label-only provider resume relabel", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  core.markNativePaneMaterialized(surface.surfaceId, {
+    op: "native_pane.host",
+    panes: [
+      {
+        id: String(paneId),
+        binding_id: `${paneId}:target_top`,
+        content_id: "target_top",
+        geometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: listedPane.geometry.geometryRevision,
+          height: listedPane.geometry.contentViewport.height,
+          paneInstanceId: listedPane.geometry.paneInstanceId,
+          surfaceEpoch: listedPane.geometry.surfaceEpoch,
+          topologyEpoch: listedPane.geometry.topologyEpoch,
+          width: listedPane.geometry.contentViewport.width,
+          x: listedPane.geometry.contentViewport.x,
+          y: listedPane.geometry.contentViewport.y,
+        },
+        process: { args: ["top"], command: "top" },
+        revision: 1 as Revision,
+        target: "terminal",
+      },
+    ],
+  });
+
+  const beforeRevision = core.panesList(surface.surfaceId).panes[0]!.geometry.geometryRevision;
+  const projected = core.projectNativePaneOverlayWindowLabelUpdate(surface.surfaceId, "b");
+
+  assert.equal(projected?.overlaySet.windowId, "b");
+  assert.equal(projected?.panes[0]?.geometry.geometryRevision, Number(beforeRevision) + 1);
+
+  core.applyWindowLabelOnly(surface.surfaceId, "b");
+
+  const windowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(windowState.windowLabel, "b");
+  assert.equal(core.panesList(surface.surfaceId).panes[0]!.geometry.geometryRevision, Number(beforeRevision) + 1);
 });
 
 test("surface core records confirmed browser_url navigation success evidence", () => {
@@ -1286,7 +1400,7 @@ test("surface core lets fresh provider bootstrap replace stale local window labe
   assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
 });
 
-test("surface core rejects topology.apply window label overrides after bootstrap", () => {
+test("surface core commits topology.apply provider window relabels atomically", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -1301,16 +1415,87 @@ test("surface core rejects topology.apply window label overrides after bootstrap
       layout: { paneId: paneId as never, type: "pane" },
       panes: [
         { name: "Docs", paneId: paneId as never, paneLabel: 41 },
+        { name: "Duplicate", paneId: 8 as never, paneLabel: 41 },
       ],
       topologyRevision: 3 as never,
-      windowLabel: "docs",
+      windowLabel: "b",
     }),
-    /topology.apply windowLabel must match the paired surface identity/,
+    /Duplicate paneLabel in surface payload/,
   );
 
-  const windowState = core.getRendererWindowState(surface.surfaceId);
-  assert.equal(windowState.windowLabel, "a");
-  assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
+  const rejectedWindowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(rejectedWindowState.windowLabel, "a");
+  assert.deepEqual(rejectedWindowState.panes.map((pane) => pane.label), ["7"]);
+
+  assert.doesNotThrow(() => core.topologyApply(surface.surfaceId, {
+    layout: { paneId: paneId as never, type: "pane" },
+    panes: [
+      { name: "Docs", paneId: paneId as never, paneLabel: 41 },
+    ],
+    topologyRevision: 4 as never,
+    windowLabel: "b",
+  }));
+
+  const acceptedWindowState = core.getRendererWindowState(surface.surfaceId);
+  assert.equal(acceptedWindowState.windowLabel, "b");
+  assert.deepEqual(acceptedWindowState.panes.map((pane) => pane.label), ["41"]);
+});
+
+test("surface core rejects provider window relabels that collide with another live surface", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const primary = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const secondary = core.createAdditionalSurface("Surf Ace", { height: 700, scale: 1, width: 1000 });
+  const primaryPaneId = applyProviderBootstrap(core, primary.surfaceId, 7, "a");
+  const secondaryPaneId = applyProviderBootstrap(core, secondary.surfaceId, 11, "b");
+
+  assert.throws(
+    () => core.applyWindowLabelOnly(secondary.surfaceId, "a"),
+    /Duplicate windowLabel in live surface set: a/,
+  );
+  assert.throws(
+    () => core.projectNativePaneOverlayWindowLabelUpdate(secondary.surfaceId, "a"),
+    /Duplicate windowLabel in live surface set: a/,
+  );
+  assert.throws(
+    () => core.applyProviderBootstrapTopology(secondary.surfaceId, {
+      initialPaneId: secondaryPaneId,
+      initialPaneLabel: secondaryPaneId,
+      windowLabel: "a",
+    }),
+    /Duplicate windowLabel in live surface set: a/,
+  );
+  assert.throws(
+    () => core.projectNativePaneGeometryUpdateForTopologyApply(secondary.surfaceId, {
+      layout: { paneId: secondaryPaneId as never, type: "pane" },
+      panes: [
+        { name: "Secondary", paneId: secondaryPaneId as never, paneLabel: secondaryPaneId },
+      ],
+      topologyRevision: 2 as never,
+      windowLabel: "a",
+    }),
+    /Duplicate windowLabel in live surface set: a/,
+  );
+  assert.throws(
+    () => core.topologyApply(secondary.surfaceId, {
+      layout: { paneId: secondaryPaneId as never, type: "pane" },
+      panes: [
+        { name: "Secondary", paneId: secondaryPaneId as never, paneLabel: secondaryPaneId },
+      ],
+      topologyRevision: 2 as never,
+      windowLabel: "a",
+    }),
+    /Duplicate windowLabel in live surface set: a/,
+  );
+
+  assert.equal(core.getRendererWindowState(primary.surfaceId).windowLabel, "a");
+  assert.deepEqual(core.getRendererWindowState(primary.surfaceId).panes.map((pane) => pane.paneId), [primaryPaneId]);
+  assert.equal(core.getRendererWindowState(secondary.surfaceId).windowLabel, "b");
+  assert.deepEqual(core.getRendererWindowState(secondary.surfaceId).panes.map((pane) => pane.paneId), [secondaryPaneId]);
 });
 
 test("surface core rejects pane.split with duplicate pane labels inside one surface", () => {

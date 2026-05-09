@@ -217,6 +217,7 @@ export class SurfaceWsServer {
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly transports = new Map<string, SurfaceTransportState>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
+  private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
 
   constructor(options: SurfaceWsServerOptions) {
@@ -996,6 +997,10 @@ export class SurfaceWsServer {
       );
     }
 
+    return await this.runProviderWindowLabelMutation(() => this.acceptPairRequest(socket, request, meta));
+  }
+
+  private async acceptPairRequest(socket: WebSocket, request: PairRequest, meta: SocketMeta | undefined): Promise<Response> {
     const surfaceId = request.payload.surfaceId;
     this.core.getSurface(surfaceId);
     const transport = this.transport(surfaceId);
@@ -1025,6 +1030,7 @@ export class SurfaceWsServer {
         takeover: request.payload.takeover ?? false,
       },
     );
+    this.core.assertProviderWindowLabelAvailable(surfaceId, request.payload.windowLabel);
 
     let resumed = false;
     let sessionId: string;
@@ -1149,7 +1155,11 @@ export class SurfaceWsServer {
       );
     }
 
-    if (!resumed) {
+    if (resumed) {
+      await this.runSurfaceMutation(surfaceId, async () => {
+        await this.adoptProviderWindowLabel(surfaceId, request.payload.windowLabel, "pair.resume", request.id);
+      });
+    } else {
       this.core.applyProviderBootstrapTopology(surfaceId, {
         initialPaneId: Number(request.payload.initialPaneId),
         initialPaneLabel: Number(request.payload.initialPaneLabel),
@@ -1287,6 +1297,25 @@ export class SurfaceWsServer {
     }
   }
 
+  private async runProviderWindowLabelMutation<T>(operation: () => Promise<T> | T): Promise<T> {
+    const previous = this.providerWindowLabelQueue;
+    let releaseQueue = (): void => {};
+    const current = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
+    const queued = previous.catch(() => undefined).then(() => current);
+    this.providerWindowLabelQueue = queued;
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      releaseQueue();
+      if (this.providerWindowLabelQueue === queued) {
+        this.providerWindowLabelQueue = Promise.resolve();
+      }
+    }
+  }
+
   async setViewport(surfaceId: string, viewport: SurfaceViewport): Promise<boolean> {
     return await this.runSurfaceMutation(surfaceId, async () => {
       const nativePaneIds = this.core.panesList(surfaceId).panes
@@ -1349,7 +1378,6 @@ export class SurfaceWsServer {
         window_label: request.payload.windowLabel,
       },
     );
-    const currentWindowLabel = this.core.surfaceWindowLabel(surfaceId);
     if (!isValidWindowLabel(request.payload.windowLabel)) {
       persistentServerDiagnostic(
         "warn",
@@ -1366,24 +1394,8 @@ export class SurfaceWsServer {
         "topology.apply windowLabel must be a lowercase alphabetic provider identity label",
       );
     }
-    if (request.payload.windowLabel !== currentWindowLabel) {
-      persistentServerDiagnostic(
-        "warn",
-        "topology_apply_validation_failed",
-        {
-          code: "window_label_mismatch",
-          current_window_label: currentWindowLabel,
-          request_id: request.id,
-          surface_id: surfaceId,
-          window_label: request.payload.windowLabel,
-        },
-      );
-      throw new SurfaceCoreError(
-        "invalid_payload",
-        "topology.apply windowLabel must match the paired surface identity",
-      );
-    }
-    const payload = await this.runSurfaceMutation(surfaceId, async () => {
+    const payload = await this.runProviderWindowLabelMutation(() => this.runSurfaceMutation(surfaceId, async () => {
+      const previousWindowLabel = this.core.surfaceWindowLabel(surfaceId);
       const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
       const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForTopologyApply(surfaceId, request.payload);
       const rollbackNativeGeometry = nativeGeometryUpdate
@@ -1401,9 +1413,10 @@ export class SurfaceWsServer {
         throw new SurfaceCoreError("render_failed", releaseFailure);
       }
       const result = this.core.topologyApply(surfaceId, request.payload);
+      this.recordProviderWindowRelabel(surfaceId, previousWindowLabel, request.payload.windowLabel, "topology.apply", request.id);
       this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
       return result;
-    });
+    }));
     persistentServerDiagnostic(
       "info",
       "topology_apply_applied",
@@ -2064,6 +2077,49 @@ export class SurfaceWsServer {
       });
     }
     return true;
+  }
+
+  private async adoptProviderWindowLabel(
+    surfaceId: string,
+    windowLabel: string,
+    source: "pair.resume",
+    requestId: string,
+  ): Promise<void> {
+    const currentWindowLabel = this.core.surfaceWindowLabel(surfaceId);
+    if (windowLabel === currentWindowLabel) {
+      return;
+    }
+    const nativeOverlayUpdate = this.core.projectNativePaneOverlayWindowLabelUpdate(surfaceId, windowLabel);
+    const rollbackNativeGeometry = nativeOverlayUpdate
+      ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeOverlayUpdate.panes.map((pane) => Number(pane.id)))
+      : null;
+    await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeOverlayUpdate, source, rollbackNativeGeometry);
+    this.recordProviderWindowRelabel(surfaceId, currentWindowLabel, windowLabel, source, requestId);
+    this.core.applyWindowLabelOnly(surfaceId, windowLabel);
+    this.markUpdatedNativePaneGeometry(surfaceId, nativeOverlayUpdate);
+  }
+
+  private recordProviderWindowRelabel(
+    surfaceId: string,
+    currentWindowLabel: string,
+    windowLabel: string,
+    source: "pair.resume" | "topology.apply",
+    requestId: string,
+  ): void {
+    if (windowLabel === currentWindowLabel) {
+      return;
+    }
+    persistentServerDiagnostic(
+      "info",
+      "topology_apply_window_relabel",
+      {
+        current_window_label: currentWindowLabel || "nil",
+        request_id: requestId,
+        source,
+        surface_id: surfaceId,
+        window_label: windowLabel,
+      },
+    );
   }
 
   private targetApplyFailureResponse(
