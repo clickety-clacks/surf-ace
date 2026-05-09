@@ -124,6 +124,7 @@ class FakeSurfAceWsServer {
   }> = [];
   readonly pairRequests: Array<{ initialPaneId: number; initialPaneLabel: number; windowLabel: string }> = [];
   readonly pairRequestSurfaceIds: string[] = [];
+  panesListErrorCode: string | null = null;
   panesListRequests = 0;
   pairResponseOwnershipEpoch = 1;
   readonly panes: Map<number, TestPane>;
@@ -1034,6 +1035,14 @@ class FakeSurfAceWsServer {
       }
       case "panes.list": {
         this.panesListRequests += 1;
+        if (this.panesListErrorCode) {
+          socket.send(
+            JSON.stringify(
+              this.errorResponse(message.id, "panes.list", this.panesListErrorCode, "panes.list failed"),
+            ),
+          );
+          return;
+        }
         const targetSurface = this.requirePairedSurface(socket);
         socket.send(
           JSON.stringify(
@@ -2636,7 +2645,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         drawings: [],
         frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
-        paneLabel: 77,
+        paneLabel: 5,
         revision: 0,
         viewport: {
           height: 768,
@@ -2647,7 +2656,44 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       await internalRuntime.syncSurfaceSnapshots(surface, true);
       const screens = await runtime.listScreens();
-      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 77]);
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 5]);
+    });
+  });
+
+  await t.test("provider-visible pane labels cannot default to remote pane ids", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      const paneId = paneByLabel(screen, 1).paneId;
+      server.panes.set(77, {
+        contentId: null,
+        contentType: null,
+        drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
+        name: null,
+        paneLabel: 77,
+        revision: 0,
+        viewport: {
+          height: 768,
+          scale: 2,
+          width: 1024,
+        },
+      });
+
+      await assert.rejects(
+        async () =>
+          await runtime.push(
+            {
+              content: "# invalid pane label",
+              contentType: "markdown",
+              fingerprint: server.surfaceId,
+              paneId,
+            },
+            { sessionKey: "agent:test:invalid-pane-label" },
+          ),
+        /invalid pane label/,
+      );
+      assert.equal(server.contentSetRequests.length, 0);
     });
   });
 
@@ -2878,7 +2924,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         drawings: [],
         frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
-        paneLabel: 77,
+        paneLabel: 3,
         revision: 0,
         viewport: {
           height: 768,
@@ -2906,10 +2952,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         [
           { paneId: server.initialRemotePaneId, paneLabel: 1 },
           { paneId: 78, paneLabel: 2 },
-          { paneId: 77, paneLabel: 77 },
+          { paneId: 77, paneLabel: 3 },
         ],
       );
-      assertPaneLabelsWithOpaqueIds(split, [1, 2, 77]);
+      assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
     });
   });
 
@@ -5872,7 +5918,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("provider root realization removes allowed stale panes outside the current layout", async () => {
+  await t.test("provider root realization prunes stale local panes outside provider authority", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const before = (await runtime.listScreens())[0]!;
       const firstPaneId = paneByLabel(before, 1).paneId;
@@ -5889,19 +5935,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         remotePaneId: 999,
       });
 
-      await assert.rejects(
-        runtime.realizeTopology({
-          allowDestroyPaneIds: [firstPaneId],
-          desired: { type: "pane" },
-          expectedTopologyRevision: before.topologyRevision,
-          fingerprint: server.surfaceId,
-          target: { root: true },
-        }),
-        /would destroy pane\(s\) pn_stale_outside_layout without allowDestroyPaneIds/,
-      );
-
       const realized = await runtime.realizeTopology({
-        allowDestroyPaneIds: [firstPaneId, stalePaneId],
+        allowDestroyPaneIds: [firstPaneId],
         desired: {
           children: [{ type: "pane" }, { type: "pane" }],
           direction: "vertical",
@@ -5912,9 +5947,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         target: { root: true },
       });
 
-      assert.deepEqual(realized.destroyedPaneIds.sort(), [firstPaneId, stalePaneId].sort());
+      assert.deepEqual(realized.destroyedPaneIds, [firstPaneId]);
       assert.equal(realized.panes.length, 2);
       assert.ok(!realized.panes.some((pane) => pane.paneId === stalePaneId));
+      assert.equal(surface.panes.has(stalePaneId), false);
       const after = (await runtime.listScreens())[0]!;
       assert.deepEqual(after.panes.map((pane) => pane.paneId).sort(), realized.createdPaneIds.sort());
     });
@@ -5949,6 +5985,318 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const after = (await runtime.listScreens())[0]!;
       assert.deepEqual(after.panes.map((pane) => pane.paneId).sort(), realized.createdPaneIds.sort());
       assert.deepEqual(after.panes.map((pane) => pane.paneLabel), realized.panes.map((pane) => pane.paneLabel));
+    });
+  });
+
+  await t.test("provider reconciles client-listed orphan panes into topology authority before close", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const before = (await runtime.listScreens())[0]!;
+      const firstPane = before.panes[0]!;
+      const firstServerPane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(firstServerPane);
+      server.panes.set(77, {
+        ...structuredClone(firstServerPane),
+        contentId: null,
+        contentType: null,
+        frame: { height: 384, width: 1024, x: 0, y: 384 },
+        paneLabel: 5,
+        paneLineageId: `${firstServerPane.paneLineageId}-orphan`,
+        revision: 0,
+        viewport: { height: 384, scale: 2, width: 1024 },
+      });
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await internalRuntime.syncRemotePaneList(surface);
+
+      const withOrphan = (await runtime.listScreens())[0]!;
+      assert.deepEqual(withOrphan.topology, { paneId: firstPane.paneId, type: "pane" });
+      const orphanPane = paneByLabel(withOrphan, 5);
+
+      const close = await runtime.closePane({
+        fingerprint: server.surfaceId,
+        paneId: orphanPane.paneId,
+      });
+
+      assert.deepEqual(close, { ok: true, paneId: orphanPane.paneId, paneLabel: 5 });
+      assert.deepEqual(server.topologyApplyRequests.at(-1), {
+        layout: { paneId: server.initialRemotePaneId, type: "pane" },
+        paneIds: [server.initialRemotePaneId],
+        paneLabels: [1],
+        topologyRevision: 1,
+        windowLabel: "a",
+      });
+      const after = (await runtime.listScreens())[0]!;
+      assert.deepEqual(after.panes.map((pane) => pane.paneId), [firstPane.paneId]);
+      assert.deepEqual(after.topology, { paneId: firstPane.paneId, type: "pane" });
+    });
+  });
+
+  await t.test("provider rejects duplicate client pane labels before close mutates topology", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const before = (await runtime.listScreens())[0]!;
+      const firstServerPane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(firstServerPane);
+      server.panes.set(77, {
+        ...structuredClone(firstServerPane),
+        contentId: null,
+        contentType: null,
+        frame: { height: 384, width: 1024, x: 0, y: 384 },
+        paneLabel: 1,
+        paneLineageId: `${firstServerPane.paneLineageId}-duplicate`,
+        revision: 0,
+        viewport: { height: 384, scale: 2, width: 1024 },
+      });
+
+      await assert.rejects(
+        runtime.closePane({
+          fingerprint: server.surfaceId,
+          paneId: before.panes[0]!.paneId,
+        }),
+        /duplicate pane labels/,
+      );
+      assert.equal(server.topologyApplyRequests.length, 0);
+    });
+  });
+
+  await t.test("authority reconciliation prunes zero-revision local panes absent from provider list", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const before = (await runtime.listScreens())[0]!;
+      const firstPane = before.panes[0]!;
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const sourcePane = surface.panes.get(firstPane.paneId);
+      assert.ok(sourcePane);
+      const stalePane = structuredClone(sourcePane);
+      stalePane.paneId = internalRuntime.allocatePaneId();
+      stalePane.remotePaneId = 9999;
+      stalePane.paneLabel = 5;
+      stalePane.paneLineageId = "pl_zero_revision_stale_local";
+      surface.panes.set(stalePane.paneId, stalePane);
+
+      await assert.rejects(
+        runtime.closePane({
+          fingerprint: server.surfaceId,
+          paneId: stalePane.paneId,
+        }),
+        /Unknown Surf Ace pane/,
+      );
+      assert.equal(surface.panes.has(stalePane.paneId), false);
+      assert.equal(server.topologyApplyRequests.length, 0);
+    });
+  });
+
+  await t.test("target push reconciles provider-listed panes before applying browser URL", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstServerPane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(firstServerPane);
+        server.panes.set(77, {
+          ...structuredClone(firstServerPane),
+          contentId: null,
+          contentType: null,
+          frame: { height: 384, width: 1024, x: 0, y: 384 },
+          paneLabel: 5,
+          paneLineageId: `${firstServerPane.paneLineageId}-target`,
+          revision: 0,
+          viewport: { height: 384, scale: 2, width: 1024 },
+        });
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        await internalRuntime.syncRemotePaneList(surface);
+        const targetPane = [...surface.panes.values()].find((pane: any) => pane.paneLabel === 5);
+        assert.ok(targetPane);
+
+        const pushed = await runtime.push({
+          content: "https://example.com/authority",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: targetPane.paneId,
+        });
+
+        assert.equal(pushed.targetKind, "browser_url");
+        assert.equal(server.targetApplyRequests.at(-1)?.paneLineageId, `${firstServerPane.paneLineageId}-target`);
+        const after = (await runtime.listScreens())[0]!;
+        assert.deepEqual(after.panes.map((pane) => pane.paneLabel), [1, 5]);
+      },
+    });
+  });
+
+  await t.test("capture reconciles provider-listed panes before snapshot request", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstServerPane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(firstServerPane);
+      server.panes.set(77, {
+        ...structuredClone(firstServerPane),
+        contentId: null,
+        contentType: null,
+        frame: { height: 384, width: 1024, x: 0, y: 384 },
+        paneLabel: 5,
+        paneLineageId: `${firstServerPane.paneLineageId}-capture`,
+        revision: 0,
+        viewport: { height: 384, scale: 2, width: 1024 },
+      });
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await internalRuntime.syncRemotePaneList(surface);
+      const capturePane = [...surface.panes.values()].find((pane: any) => pane.paneLabel === 5);
+      assert.ok(capturePane);
+
+      const captured = await runtime.capturePane({
+        fingerprint: server.surfaceId,
+        paneId: capturePane.paneId,
+      });
+
+      assert.equal(captured.capture.paneLabel, 5);
+      assert.equal(server.snapshotRequests.at(-1)?.paneId, 77);
+    });
+  });
+
+  await t.test("read and snapshot remain local projections without provider reconciliation", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const before = (await runtime.listScreens())[0]!;
+      const firstPane = before.panes[0]!;
+      const panesListRequests = server.panesListRequests;
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const sourcePane = surface.panes.get(firstPane.paneId);
+      assert.ok(sourcePane);
+      const stalePane = structuredClone(sourcePane);
+      stalePane.paneId = internalRuntime.allocatePaneId();
+      stalePane.remotePaneId = 9999;
+      stalePane.paneLabel = 9999;
+      stalePane.paneLineageId = "pl_zero_revision_stale_local_read";
+      surface.panes.set(stalePane.paneId, stalePane);
+
+      const read = await runtime.read({
+        fingerprint: server.surfaceId,
+        paneId: stalePane.paneId,
+      });
+      assert.equal(read.paneId, stalePane.paneId);
+      assert.equal(read.paneLabel, 2);
+      assert.equal(stalePane.paneLabel, 9999);
+      assert.equal(surface.panes.has(stalePane.paneId), true);
+
+      const secondStalePane = structuredClone(sourcePane);
+      secondStalePane.paneId = internalRuntime.allocatePaneId();
+      secondStalePane.remotePaneId = 9998;
+      secondStalePane.paneLabel = 9998;
+      secondStalePane.paneLineageId = "pl_zero_revision_stale_local_snapshot";
+      surface.panes.set(secondStalePane.paneId, secondStalePane);
+      const snapshot = await runtime.snapshot({
+        fingerprint: server.surfaceId,
+        paneId: secondStalePane.paneId,
+      });
+      assert.equal(snapshot.paneId, secondStalePane.paneId);
+      const after = (await runtime.listScreens())[0]!;
+      const projectedSnapshotPane = after.panes.find((pane) => pane.paneId === secondStalePane.paneId);
+      assert.equal(snapshot.paneLabel, projectedSnapshotPane?.paneLabel);
+      assert.notEqual(snapshot.paneLabel, secondStalePane.paneLabel);
+      assert.equal(secondStalePane.paneLabel, 9998);
+      assert.equal(surface.panes.has(secondStalePane.paneId), true);
+      assert.equal(server.panesListRequests, panesListRequests);
+    });
+  });
+
+  await t.test("authority mutations fail closed when provider pane list is unavailable", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      server.panesListErrorCode = "internal_error";
+
+      await assert.rejects(
+        runtime.push({
+          content: "# blocked",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        }),
+        /pane authority unavailable/,
+      );
+      assert.equal(server.contentSetRequests.length, 0);
+
+      await assert.rejects(
+        runtime.realizeTopology({
+          allowDestroyPaneIds: [],
+          desired: {
+            children: [{ paneId: firstPaneId, type: "pane" }, { type: "pane" }],
+            direction: "vertical",
+            type: "split",
+          },
+          expectedTopologyRevision: 0,
+          fingerprint: server.surfaceId,
+          target: { root: true },
+        }),
+        /pane authority unavailable/,
+      );
+      assert.equal(server.topologyApplyRequests.length, 0);
+    });
+  });
+
+  await t.test("surf_ace_list projects pane label repair without mutating or publishing topology", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const topologyApplyCount = server.topologyApplyRequests.length;
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const panes = internalRuntime.visiblePanes(surface);
+      assert.equal(panes.length, 2);
+      panes[1].paneLabel = Number(panes[1].remotePaneId);
+
+      const after = (await runtime.listScreens())[0]!;
+      assert.deepEqual(after.panes.map((pane) => pane.paneLabel), [1, 2]);
+      assert.equal(panes[1].paneLabel, Number(panes[1].remotePaneId));
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+      assert.equal(server.topologyApplyRequests.length, topologyApplyCount);
+    });
+  });
+
+  await t.test("screen summaries use client-resolved pane geometry after topology reconciliation", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const panes = [...server.panes.values()];
+      assert.equal(panes.length, 2);
+      panes[0]!.frame = { height: 700, width: 333, x: 0, y: 0 };
+      panes[0]!.viewport = { height: 700, scale: 2, width: 333 };
+      panes[1]!.frame = { height: 700, width: 691, x: 333, y: 0 };
+      panes[1]!.viewport = { height: 700, scale: 2, width: 691 };
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await internalRuntime.syncRemotePaneList(surface);
+
+      const after = (await runtime.listScreens())[0]!;
+      assert.deepEqual(
+        after.panes.map((pane) => pane.viewport),
+        [
+          { height: 700, scale: 2, width: 333 },
+          { height: 700, scale: 2, width: 691 },
+        ],
+      );
     });
   });
 
@@ -8575,6 +8923,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
                 currentContentId: null,
                 currentRevision: 0,
                 paneId: server.initialRemotePaneId,
+                paneLabel: 1,
               },
             ],
           },
@@ -8638,6 +8987,46 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         paneId: visiblePaneIds[0],
       });
       assert.equal(server.topologyApplyRequests.at(-1)?.paneIds.includes(9999), false);
+    });
+  });
+
+  await t.test("close counts accepted visible topology panes instead of stale local panes", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const visiblePaneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+
+      await runtime.closePane({
+        fingerprint: server.surfaceId,
+        paneId: visiblePaneIds[1]!,
+      });
+      const topologyApplyCount = server.topologyApplyRequests.length;
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const sourcePane = surface.panes.get(visiblePaneIds[0]!);
+      assert.ok(sourcePane);
+      const orphanPane = structuredClone(sourcePane);
+      orphanPane.paneId = internalRuntime.allocatePaneId();
+      orphanPane.remotePaneId = 9999;
+      orphanPane.paneLabel = 99;
+      orphanPane.paneLineageId = "pl_close_orphan_non_layout";
+      surface.panes.set(orphanPane.paneId, orphanPane);
+
+      await assert.rejects(
+        runtime.closePane({
+          fingerprint: server.surfaceId,
+          paneId: visiblePaneIds[0]!,
+        }),
+        /Cannot close the last remaining pane/,
+      );
+      assert.equal(server.topologyApplyRequests.length, topologyApplyCount);
     });
   });
 
@@ -8743,7 +9132,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         drawings: [],
         frame: { height: 768, width: 1024, x: 0, y: 0 },
         name: null,
-        paneLabel: 900,
+        paneLabel: 7,
         revision: 0,
         viewport: {
           height: 768,
@@ -8758,12 +9147,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
       const afterReconnect = (await runtime.listScreens())[0];
-      assertPaneLabelsWithOpaqueIds(afterReconnect?.panes ?? [], [900]);
+      assertPaneLabelsWithOpaqueIds(afterReconnect?.panes ?? [], [7]);
 
       const remappedPane = surface.panes.get(firstPaneId);
       assert.ok(remappedPane);
       assert.equal(remappedPane.remotePaneId, 900);
-      assert.equal(remappedPane.paneLabel, 900);
+      assert.equal(remappedPane.paneLabel, 7);
 
       await runtime.push(
         {
