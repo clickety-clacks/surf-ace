@@ -3040,7 +3040,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       fingerprint: input.fingerprint,
       notFoundStrokeIds: [...payload.notFoundStrokeIds],
       paneId: pane.paneId,
-      paneLabel: pane.paneLabel,
+      paneLabel: this.projectedPaneLabel(surface, pane),
       remainingStrokeCount: payload.remainingStrokeCount,
       removedStrokeIds: [...payload.removedStrokeIds],
     };
@@ -5503,6 +5503,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
     const payload = (response as TopologyApplyResponse).payload;
+    this.assertProviderPaneLabelsUnique(surface, payload.panes);
     surface.topologyRevision = Number(payload.topologyRevision);
     let lineageChanged = false;
     for (const paneState of payload.panes) {
@@ -7401,7 +7402,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             contentValue: denormalizeContent(entry.contentType, entry.contentValue),
             display: entry.display ? structuredClone(entry.display) : null,
             historyOwnerToken: entry.historyOwnerToken,
-            paneLabel: pane.paneLabel,
+            paneLabel: this.projectedPaneLabel(surface, pane),
             remotePaneId: Number(pane.remotePaneId),
             revision: entry.revision,
             sessionKey: entry.sessionKey,
