@@ -21,6 +21,7 @@
     "surf_ace_realize_topologies",
     "surf_ace_close_pane",
     "surf_ace_read",
+    "surf_ace_capture_pane",
     "surf_ace_annotations_remove"
   ],
   "contracts": {
@@ -35,6 +36,7 @@
       "surf_ace_realize_topologies",
       "surf_ace_close_pane",
       "surf_ace_read",
+      "surf_ace_capture_pane",
       "surf_ace_annotations_remove"
     ]
   },
