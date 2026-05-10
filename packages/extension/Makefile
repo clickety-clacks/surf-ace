@@ -11,8 +11,14 @@
 PKG_DIR := dist/openclaw-package
 TARS_EXTENSION_DEPLOY_HOST := tars.tail4105e8.ts.net
 SURF_ACE_EXTENSION_DEPLOY_HOST ?= $(TARS_EXTENSION_DEPLOY_HOST)
+SURF_ACE_CONTINUITY_FILES := \
+	surf-ace-provider-identity.json \
+	surf-ace-runtime-state.json \
+	surf-ace-runtime-screens.json \
+	surf-ace-runtime-owner.lock
+SURF_ACE_CONTINUITY_PROTECT_FILTERS := $(foreach file,$(SURF_ACE_CONTINUITY_FILES),--filter='P /$(file)')
 
-.PHONY: package verify-package deploy-tars guard-tars-extension-deploy clean
+.PHONY: package verify-package verify-deploy-state-preservation deploy-tars guard-tars-extension-deploy clean
 
 package:
 	pnpm exec tsc -p tsconfig.json
@@ -34,6 +40,22 @@ package:
 verify-package: package
 	node scripts/verify-openclaw-package.mjs
 
+verify-deploy-state-preservation:
+	@tmpdir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	mkdir -p "$$tmpdir/src/dist" "$$tmpdir/dest"; \
+	printf 'current-build\n' > "$$tmpdir/src/dist/surf-ace.js"; \
+	for file in $(SURF_ACE_CONTINUITY_FILES); do \
+		printf 'preserve:%s\n' "$$file" > "$$tmpdir/dest/$$file"; \
+	done; \
+	printf 'remove-me\n' > "$$tmpdir/dest/stale-build-artifact.txt"; \
+	rsync -a --delete $(SURF_ACE_CONTINUITY_PROTECT_FILTERS) "$$tmpdir/src/" "$$tmpdir/dest/"; \
+	for file in $(SURF_ACE_CONTINUITY_FILES); do \
+		test "$$(cat "$$tmpdir/dest/$$file")" = "preserve:$$file" || { echo "Continuity file was not preserved: $$file" >&2; exit 1; }; \
+	done; \
+	test ! -e "$$tmpdir/dest/stale-build-artifact.txt" || { echo "Stale build artifact was not deleted" >&2; exit 1; }; \
+	test "$$(cat "$$tmpdir/dest/dist/surf-ace.js")" = "current-build" || { echo "Build artifact was not synced" >&2; exit 1; }
+
 guard-tars-extension-deploy:
 	@case "$(SURF_ACE_EXTENSION_DEPLOY_HOST)" in \
 		tars|tars.tail4105e8.ts.net|mike@tars|mike@tars.tail4105e8.ts.net) ;; \
@@ -50,7 +72,7 @@ guard-tars-extension-deploy:
 	esac
 
 deploy-tars: guard-tars-extension-deploy package
-	rsync -av --delete $(PKG_DIR)/ $(SURF_ACE_EXTENSION_DEPLOY_HOST):~/.openclaw/extensions/surf-ace/
+	rsync -av --delete $(SURF_ACE_CONTINUITY_PROTECT_FILTERS) $(PKG_DIR)/ $(SURF_ACE_EXTENSION_DEPLOY_HOST):~/.openclaw/extensions/surf-ace/
 
 clean:
 	rm -rf $(PKG_DIR)
