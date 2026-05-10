@@ -271,6 +271,18 @@ function reportPaneSnapshot(view: PaneView): void {
   });
 }
 
+function reportAllPaneSnapshots(): void {
+  if (!latestState) {
+    return;
+  }
+  for (const pane of latestState.panes) {
+    const view = paneViews.get(pane.paneId);
+    if (view) {
+      reportPaneSnapshot(view);
+    }
+  }
+}
+
 function overlayRegionForElement(
   pane: RendererPaneState,
   element: HTMLElement,
@@ -1915,9 +1927,11 @@ function renderWindow(state: RendererWindowState): void {
   appRoot.replaceChildren(wrapper);
   setAllPaneChromeMetrics();
   refreshDynamicPaneFrames();
+  reportAllPaneSnapshots();
   window.requestAnimationFrame(() => {
     setAllPaneChromeMetrics();
     refreshDynamicPaneFrames();
+    reportAllPaneSnapshots();
   });
   scheduleCompositorOverlayRegionReport("layout");
 }

@@ -35,6 +35,22 @@ test("renderer reapplies browser_url frame sizing after layout commits and windo
   assert.match(source, /window\.addEventListener\("resize"[\s\S]*const frame = currentPaneFrameElement\(view\);[\s\S]*applyPaneFrameSize\(view, frame\)/);
 });
 
+test("renderer reports pane snapshots after layout commits", async () => {
+  const source = await rendererSource();
+  const helperIndex = source.indexOf("function reportAllPaneSnapshots");
+  const renderIndex = source.indexOf("function renderWindow");
+  const replaceIndex = source.indexOf("appRoot.replaceChildren(wrapper);", renderIndex);
+  const immediateReportIndex = source.indexOf("reportAllPaneSnapshots();", replaceIndex);
+  const rafIndex = source.indexOf("window.requestAnimationFrame", immediateReportIndex);
+  const rafReportIndex = source.indexOf("reportAllPaneSnapshots();", rafIndex);
+
+  assert.ok(helperIndex > -1);
+  assert.ok(renderIndex > helperIndex);
+  assert.ok(immediateReportIndex > replaceIndex);
+  assert.ok(rafIndex > immediateReportIndex);
+  assert.ok(rafReportIndex > rafIndex);
+});
+
 test("content replacement resets the pane scroll origin before browser_url mounts", async () => {
   const source = await rendererSource();
   const resetIndex = source.indexOf("function resetDynamicContent");
