@@ -383,8 +383,7 @@ private struct SurfAcePaneView: View {
                 .background(Color.black.opacity(0.92))
 
                 SurfAcePaneIdentityOverlay(
-                    windowLabel: surface.windowLabel,
-                    paneLabel: pane.labelText,
+                    displayId: pane.displayId(windowLabel: surface.windowLabel),
                     paneSize: proxy.size,
                     connectionState: surface.connectionBarState
                 )
@@ -480,8 +479,7 @@ func surfAceShowsAnnotationBorder(annotationMode: Bool) -> Bool {
 }
 
 private struct SurfAcePaneIdentityOverlay: View {
-    let windowLabel: String
-    let paneLabel: String
+    let displayId: String
     let paneSize: CGSize
     let connectionState: SurfAceConnectionBarState
 
@@ -491,23 +489,7 @@ private struct SurfAcePaneIdentityOverlay: View {
 
     var body: some View {
         HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
-            if !windowLabel.isEmpty {
-                Text(windowLabel.uppercased())
-                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
-                    .foregroundStyle(connectionColor.opacity(0.35))
-                    .lineLimit(1)
-                    .tracking(fontSize * SurfAceRajdhaniMetrics.windowTextRatio * SurfAceRajdhaniMetrics.windowTrackingRatio)
-                    .padding(.horizontal, fontSize * SurfAceRajdhaniMetrics.windowBoxPaddingRatio)
-                    .frame(minWidth: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
-                    .frame(height: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: fontSize * 0.04, style: .continuous)
-                            .strokeBorder(connectionColor.opacity(0.35), lineWidth: max(1, fontSize * 0.008))
-                    }
-                    .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
-            }
-
-            SurfAcePaneNumberText(paneLabel: paneLabel, fontSize: fontSize)
+            SurfAcePaneNumberText(paneLabel: displayId.uppercased(), fontSize: fontSize)
                 .lineLimit(1)
                 .minimumScaleFactor(0.35)
                 .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }

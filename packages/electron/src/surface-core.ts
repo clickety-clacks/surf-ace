@@ -199,6 +199,8 @@ export type RendererPaneState = {
   name: string | null;
   ownerName: string | null;
   paneId: number;
+  displayId: string;
+  visibleAddress: string;
   showDone: boolean;
   toast: string | null;
 };
@@ -269,6 +271,10 @@ export function assertValidWindowLabel(windowLabel: unknown): asserts windowLabe
   if (!isValidWindowLabel(windowLabel)) {
     throw new SurfaceCoreError("invalid_payload", "windowLabel must be a lowercase alphabetic provider identity label");
   }
+}
+
+function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
+  return windowLabel && paneLabel > 0 ? `${windowLabel}${paneLabel}` : paneLabel > 0 ? String(paneLabel) : "";
 }
 
 const DEFAULT_VISIBLE_RECT = { height: 768, width: 1024, x: 0, y: 0 };
@@ -451,6 +457,8 @@ export class SurfaceCore {
           name: pane.name,
           ownerName: current.display?.title ?? null,
           paneId,
+          displayId: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
+          visibleAddress: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
           showDone: pane.annotating,
           toast: pane.toast,
         };

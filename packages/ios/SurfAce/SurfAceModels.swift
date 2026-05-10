@@ -878,6 +878,13 @@ final class SurfAcePaneModel {
     }
 
     var labelText: String { "\(paneLabel)" }
+    func displayId(windowLabel: String) -> String {
+        guard !windowLabel.isEmpty else { return labelText }
+        return "\(windowLabel)\(paneLabel)"
+    }
+    func visibleAddress(windowLabel: String) -> String {
+        displayId(windowLabel: windowLabel)
+    }
     var activeContentId: String? { currentEntry.contentId }
     var activeContentType: SurfAceContentType? { currentEntry.contentType }
     var currentRevision: Int { currentEntry.revision }

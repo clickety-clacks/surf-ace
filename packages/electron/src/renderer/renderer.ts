@@ -130,6 +130,8 @@ type RendererPaneState = {
   label: string;
   ownerName: string | null;
   paneId: number;
+  displayId: string;
+  visibleAddress: string;
   showDone: boolean;
   toast: string | null;
 };
@@ -1878,9 +1880,13 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement;
   const windowLabel = labelWrap.querySelector(".pane-label__window") as HTMLSpanElement;
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
-  windowLabel.textContent = latestState?.windowLabel ? latestState.windowLabel.toUpperCase() : "";
-  label.textContent = pane.label;
-  labelWrap.hidden = !pane.label;
+  const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
+  windowLabel.textContent = "";
+  windowLabel.hidden = true;
+  label.textContent = visibleAddress.toUpperCase();
+  labelWrap.hidden = !visibleAddress;
+  labelWrap.title = visibleAddress;
+  labelWrap.setAttribute("aria-label", visibleAddress ? `Surf Ace pane ${visibleAddress}` : "");
   buildControls(view, pane);
   renderPaneContent(view, pane);
 

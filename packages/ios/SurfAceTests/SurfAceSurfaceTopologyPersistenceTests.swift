@@ -55,6 +55,8 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")
 
         XCTAssertEqual(pane.labelText, "42")
+        XCTAssertEqual(pane.displayId(windowLabel: "c"), "c42")
+        XCTAssertEqual(pane.visibleAddress(windowLabel: "c"), "c42")
     }
 
     @MainActor

@@ -216,11 +216,15 @@ test("surface core renders the visible pane label separately from paneId", () =>
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.panes[0]?.paneId, 7);
   assert.equal(windowState.panes[0]?.label, "41");
+  assert.equal(windowState.panes[0]?.displayId, "a41");
+  assert.equal(windowState.panes[0]?.visibleAddress, "a41");
 
   core.paneRename(surface.surfaceId, 7, "Notes");
   const renamedState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(renamedState.panes[0]?.name, "Notes");
   assert.equal(renamedState.panes[0]?.label, "41");
+  assert.equal(renamedState.panes[0]?.displayId, "a41");
+  assert.equal(renamedState.panes[0]?.visibleAddress, "a41");
 });
 
 test("same pane id, different initial pane label - Electron bootstrap enforces provider label", () => {
