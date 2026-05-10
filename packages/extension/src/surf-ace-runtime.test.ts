@@ -3548,7 +3548,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const displayIds = screens.flatMap((screen) => screen.panes.map((pane) => pane.displayId));
       const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
       assert.equal(paneLabels.every((paneLabel) => Number.isInteger(paneLabel) && paneLabel > 0), true);
-      assert.deepEqual(paneLabels, [1, 2]);
+      assert.deepEqual([...paneLabels].sort((a, b) => a - b), [1, 2]);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
       assert.deepEqual(displayIds.sort(), ["1", "2"]);
       assert.deepEqual(visibleAddresses.sort(), ["1", "2"]);
@@ -5171,7 +5171,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("provider invalidates current targets when ownership epoch changes", async () => {
+  await t.test("provider rebinds current self-owned targets when ownership refreshes by stable pane lineage", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
         server.targetCapabilities = [
@@ -5196,13 +5196,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         internalRuntime.markPairConnected(surface, "sa_reowned_session", surface.ownershipEpoch + 1, false);
 
         const pane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
-        assert.equal(pane?.target?.blockedReason, "ownership_epoch_mismatch");
+        assert.equal(pane?.target?.blockedReason, null);
         assert.equal(pane?.target?.targetKind, "browser_url");
         assert.equal(server.targetApplyRequests.length, 1);
 
-        const staleTarget = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "browser_url");
-        assert.equal(staleTarget?.currentState, "stale");
-        assert.equal(surface.panes.get(firstPaneId)?.currentTargetId, null);
+        const reboundTarget = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "browser_url");
+        assert.equal(reboundTarget?.currentState, "current");
+        assert.equal(reboundTarget?.ownershipSessionId, "sa_reowned_session");
+        assert.equal(reboundTarget?.ownershipEpoch, surface.ownershipEpoch);
+        assert.equal(surface.panes.get(firstPaneId)?.currentTargetId, reboundTarget?.targetId);
 
         internalRuntime.captureSurfaceTargetState(surface);
         surface.targetRecords = new Map();
@@ -5211,7 +5213,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         internalRuntime.hydrateSurfaceTargetState(surface, true);
 
         const rehydratedPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
-        assert.equal(rehydratedPane?.target?.blockedReason, "ownership_epoch_mismatch");
+        assert.equal(rehydratedPane?.target?.blockedReason, null);
         assert.equal(rehydratedPane?.target?.targetKind, "browser_url");
       },
     });
@@ -8932,7 +8934,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("known self-owned invalid_resume reconnect self-reclaims with stable provider identity", async () => {
+  await t.test("known self-owned invalid_resume with an active resume token does not force a takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -8947,20 +8949,21 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await surface.client.close(1000, "test_invalid_resume_self_reclaim_identity");
 
       await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
-      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(
+        () => warnings.some((warning) => warning.includes("ownership_self_reclaim_blocked")),
+        12_000,
+      );
 
       const reconnectAttempts = server.pairAttemptDetails.slice(1);
       assert.deepEqual(
-        reconnectAttempts.slice(0, 2).map((attempt) => attempt.providerId),
-        [initialProviderId, initialProviderId],
+        reconnectAttempts.slice(0, 1).map((attempt) => attempt.providerId),
+        [initialProviderId],
       );
       assert.deepEqual(
-        reconnectAttempts.slice(0, 2).map((attempt) => attempt.takeover),
-        [false, true],
+        reconnectAttempts.slice(0, 1).map((attempt) => attempt.takeover),
+        [false],
       );
-      assert.ok(
-        warnings.some((warning) => warning.includes("ownership_self_reclaim")),
-      );
+      assert.ok(reconnectAttempts.every((attempt) => attempt.takeover !== true));
     });
   });
 

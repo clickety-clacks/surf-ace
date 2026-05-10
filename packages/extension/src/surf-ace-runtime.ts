@@ -7227,7 +7227,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.queuePersistScreenSnapshot(`target state (${reason})`);
   }
 
-  private hydrateSurfaceTargetState(surface: ManagedSurface, resumed: boolean): void {
+  private hydrateSurfaceTargetState(
+    surface: ManagedSurface,
+    resumed: boolean,
+    previousOwnership?: {
+      ownershipEpoch: number;
+      sessionId: SessionId | null;
+    },
+  ): void {
     const persisted = this.persistentState.targetStateBySurfaceId?.[surface.surfaceId];
     if (!persisted) {
       return;
@@ -7267,6 +7274,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             target.ownershipSessionId !== (surface.sessionId ?? "") ||
             target.ownershipEpoch !== surface.ownershipEpoch)
         ) {
+          if (this.rebindCurrentSelfTargetOwnership(
+            surface,
+            target,
+            pane,
+            surface.sessionId ?? "",
+            surface.ownershipEpoch,
+            {
+              previousOwnershipEpoch: previousOwnership?.ownershipEpoch ?? -1,
+              previousSessionId: previousOwnership?.sessionId ?? null,
+            },
+          )) {
+            staleTargetStateChanged = true;
+            continue;
+          }
           const reason = target.ownershipEpoch !== surface.ownershipEpoch
             ? "ownership_epoch_mismatch"
             : target.ownershipSessionId !== (surface.sessionId ?? "")
@@ -7293,6 +7314,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         target.ownershipEpoch !== surface.ownershipEpoch ||
         !matchingPane
       ) {
+        if (this.rebindCurrentSelfTargetOwnership(
+          surface,
+          target,
+          matchingPane,
+          surface.sessionId ?? "",
+          surface.ownershipEpoch,
+          {
+            previousOwnershipEpoch: previousOwnership?.ownershipEpoch ?? -1,
+            previousSessionId: previousOwnership?.sessionId ?? null,
+          },
+        )) {
+          staleTargetStateChanged = true;
+          continue;
+        }
         const reason = target.ownershipEpoch !== surface.ownershipEpoch
           ? "ownership_epoch_mismatch"
           : target.ownershipSessionId !== (surface.sessionId ?? "")
@@ -8708,6 +8743,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
       return response;
     }
+    if (response.error.code === "invalid_resume" && resumeSessionId) {
+      this.logger.warn?.(
+        runtimeDiagnostic("ownership_self_reclaim_blocked", {
+          had_paired_session: surface.hasPairedInGatewaySession,
+          had_resume_session: true,
+          provider_id: this.persistentState.providerId,
+          reason: "invalid_resume_stale_active_resume",
+          surface_id: surface.surfaceId,
+        }),
+      );
+      return response;
+    }
     this.logger.warn?.(
       runtimeDiagnostic("ownership_self_reclaim", {
         had_paired_session: surface.hasPairedInGatewaySession,
@@ -9021,6 +9068,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               surface.localOwnership.providerId === this.persistentState.providerId &&
               surface.localOwnership.sessionId === surface.sessionId &&
               surface.localOwnership.surfaceId === surface.surfaceId;
+            const previousOwnership = {
+              ownershipEpoch: surface.ownershipEpoch,
+              sessionId: surface.sessionId,
+            };
             this.markPairConnected(
               surface,
               asSessionId(pairResponse.payload.sessionId),
@@ -9049,6 +9100,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               (surface.topologyRevision > 0 ||
                 surface.panes.size > pairResponse.payload.state.panes.length);
           this.applyPairState(surface, pairResponse, {
+            previousOwnership,
             pruneStalePanes: !shouldRestoreProviderTopology,
           });
           const shouldPublishProviderTopology =
@@ -9682,6 +9734,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     ownershipEpoch: number,
     resumed: boolean,
   ): void {
+    const previousSessionId = surface.sessionId;
+    const previousOwnershipEpoch = surface.ownershipEpoch;
     surface.consecutiveResumeFailures = 0;
     surface.consecutiveOwnershipLockFailures = 0;
     surface.connectedAt = this.now();
@@ -9702,8 +9756,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.noteSelfOwnedSurface(surface.surfaceId, this.persistentState.providerId, "current_local_ownership");
     const ownershipChanged =
       !resumed ||
-      surface.sessionId !== sessionId ||
-      surface.ownershipEpoch !== ownershipEpoch;
+      previousSessionId !== sessionId ||
+      previousOwnershipEpoch !== ownershipEpoch;
     surface.ownershipEpoch = ownershipEpoch;
     if (ownershipChanged) {
       let staleTargetStateChanged = false;
@@ -9713,6 +9767,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         }
         const pane = [...surface.panes.values()].find((candidate) => candidate.currentTargetId === target.targetId) ??
           [...surface.panes.values()].find((candidate) => candidate.paneLineageId === target.paneLineageId);
+        if (this.rebindCurrentSelfTargetOwnership(surface, target, pane, sessionId, ownershipEpoch, {
+          previousOwnershipEpoch,
+          previousSessionId,
+        })) {
+          staleTargetStateChanged = true;
+          continue;
+        }
         staleTargetStateChanged = this.markTargetStale(
           surface,
           target,
@@ -9730,6 +9791,64 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.sessionId = sessionId;
     this.repairLiveWindowLabelInvariant("pair connected");
     this.queuePersistScreenSnapshot("pair connected");
+  }
+
+  private rebindCurrentSelfTargetOwnership(
+    surface: ManagedSurface,
+    target: PaneTargetRecord,
+    pane: ManagedPane | undefined,
+    sessionId: SessionId | string,
+    ownershipEpoch: number,
+    previousOwnership: {
+      previousOwnershipEpoch: number;
+      previousSessionId: SessionId | string | null;
+    },
+  ): boolean {
+    if (
+      !pane ||
+      target.currentState !== "current" ||
+      target.targetKind !== "browser_url" ||
+      target.surfaceId !== surface.surfaceId ||
+      target.paneLineageId !== pane.paneLineageId ||
+      !this.isTrustedProviderLineageId(target.ownerProviderId) ||
+      !previousOwnership.previousSessionId ||
+      target.ownershipSessionId !== previousOwnership.previousSessionId ||
+      target.ownershipEpoch !== previousOwnership.previousOwnershipEpoch
+    ) {
+      return false;
+    }
+    if (pane.currentTargetId !== null && pane.currentTargetId !== target.targetId) {
+      return false;
+    }
+    let changed = false;
+    if (target.ownerProviderId !== this.persistentState.providerId) {
+      target.ownerProviderId = this.persistentState.providerId;
+      changed = true;
+    }
+    if (target.ownershipSessionId !== sessionId) {
+      target.ownershipSessionId = String(sessionId);
+      changed = true;
+    }
+    if (target.ownershipEpoch !== ownershipEpoch) {
+      target.ownershipEpoch = ownershipEpoch;
+      changed = true;
+    }
+    if (pane.currentTargetId !== target.targetId) {
+      pane.currentTargetId = target.targetId;
+      changed = true;
+    }
+    if (pane.staleTargetId === target.targetId) {
+      pane.staleTargetId = null;
+      changed = true;
+    }
+    if (
+      pane.lastRestoreBlockedReason === "ownership_epoch_mismatch" ||
+      pane.lastRestoreBlockedReason === "ownership_session_mismatch"
+    ) {
+      pane.lastRestoreBlockedReason = null;
+      changed = true;
+    }
+    return changed;
   }
 
   private noteConnectionEnded(surface: ManagedSurface): void {
@@ -10067,7 +10186,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private applyPairState(
     surface: ManagedSurface,
     response: PairResponse,
-    options: { pruneStalePanes?: boolean } = {},
+    options: {
+      previousOwnership?: {
+        ownershipEpoch: number;
+        sessionId: SessionId | null;
+      };
+      pruneStalePanes?: boolean;
+    } = {},
   ): void {
     surface.name = response.payload.surfaceName;
     surface.viewport = cloneViewport(response.payload.viewport);
@@ -10078,7 +10203,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       response.payload.resumed === true,
       options,
     );
-    this.hydrateSurfaceTargetState(surface, response.payload.resumed === true);
+    this.hydrateSurfaceTargetState(surface, response.payload.resumed === true, options.previousOwnership);
     this.queuePersistScreenSnapshot("apply pair state");
   }
 

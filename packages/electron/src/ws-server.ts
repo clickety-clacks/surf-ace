@@ -1079,7 +1079,25 @@ export class SurfaceWsServer {
         },
       );
     } else if (lock.providerId === providerId) {
-      if (request.payload.takeover === true) {
+      if (request.payload.takeover === true && resumeSessionId === lock.sessionId) {
+        resumed = true;
+        sessionId = lock.sessionId;
+        ownershipEpoch = lock.ownershipEpoch;
+        if (existing && existing.socket !== socket) {
+          supersededSession = existing;
+        }
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_takeover_resumed",
+          {
+            provider_id: providerId,
+            request_id: request.id,
+            session_id: sessionId,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+      } else if (request.payload.takeover === true) {
         if (existing && existing.socket !== socket) {
           supersededSession = existing;
         }
