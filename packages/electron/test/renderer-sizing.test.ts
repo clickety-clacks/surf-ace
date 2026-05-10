@@ -175,3 +175,24 @@ test("split flex children do not force every pane to full window height", async 
   assert.match(splitChildRule, /height:\s*auto;/);
   assert.match(splitChildRule, /min-height:\s*0;/);
 });
+
+test("renderer chrome shows separate session, window, and global pane identity fields", async () => {
+  const source = await rendererSource();
+  const styles = await rendererStyles();
+
+  assert.match(source, /provenanceName: string \| null/);
+  assert.match(source, /const navigationOwnerName = pane\.provenanceName \?\? pane\.ownerName/);
+  assert.match(source, /ownerName\.textContent = navigationOwnerName/);
+  assert.match(source, /provenanceLabelEl\.className = "pane-label__sender"/);
+  assert.match(source, /labelEl\.append\(provenanceLabelEl, windowLabelEl, labelTextEl\)/);
+  assert.match(source, /windowLabel\.hidden = !visibleWindowLabel/);
+  assert.doesNotMatch(source, /windowLabel\.hidden = true/);
+  assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);
+  assert.match(source, /` window \$\{visibleWindowLabel\}`/);
+  assert.match(source, /`Surf Ace\$\{visibleWindowLabel/);
+  assert.match(source, /pane \$\{visibleAddress\}/);
+  assert.doesNotMatch(source, /displayId:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
+  assert.doesNotMatch(source, /visibleAddress:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
+
+  assert.match(styles, /\.pane-label__sender\s*\{/);
+});

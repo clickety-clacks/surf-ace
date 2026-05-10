@@ -216,15 +216,40 @@ test("surface core renders the visible pane label separately from paneId", () =>
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.panes[0]?.paneId, 7);
   assert.equal(windowState.panes[0]?.label, "41");
-  assert.equal(windowState.panes[0]?.displayId, "a41");
-  assert.equal(windowState.panes[0]?.visibleAddress, "a41");
+  assert.equal(windowState.panes[0]?.displayId, "41");
+  assert.equal(windowState.panes[0]?.visibleAddress, "41");
 
   core.paneRename(surface.surfaceId, 7, "Notes");
   const renamedState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(renamedState.panes[0]?.name, "Notes");
   assert.equal(renamedState.panes[0]?.label, "41");
-  assert.equal(renamedState.panes[0]?.displayId, "a41");
-  assert.equal(renamedState.panes[0]?.visibleAddress, "a41");
+  assert.equal(renamedState.panes[0]?.displayId, "41");
+  assert.equal(renamedState.panes[0]?.visibleAddress, "41");
+});
+
+test("surface core never projects window-letter composites as pane display ids", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 16,
+    initialPaneLabel: 16,
+    windowLabel: "e",
+  });
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0];
+  assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "e");
+  assert.equal(pane?.displayId, "16");
+  assert.equal(pane?.visibleAddress, "16");
+  assert.notEqual(pane?.displayId, "e16");
+  assert.notEqual(pane?.displayId, "e1");
+  assert.notEqual(pane?.displayId, "b13");
+  assert.doesNotMatch(pane?.displayId ?? "", /^[a-z]+\d+$/i);
 });
 
 test("same pane id, different initial pane label - Electron bootstrap enforces provider label", () => {
@@ -351,6 +376,7 @@ test("surface core starts browser_url targets without reporting unverified navig
   assert.equal(pane.content.contentType, "browser_url");
   assert.deepEqual(pane.content.content, { url: "https://google.com/" });
   assert.equal(pane.ownerName, "Browser Pusher");
+  assert.equal(pane.provenanceName, "Browser Pusher");
   const snapshot = core.captureSnapshot(surface.surfaceId, paneId);
   assert.equal(snapshot.contentId, null);
   assert.equal(snapshot.contentType, null);
@@ -1731,6 +1757,36 @@ test("surface core reports the current history entry owner name for chrome", () 
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.ownerName, "Session B");
   core.navigateHistory(surface.surfaceId, paneId, "back");
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.ownerName, "Session A");
+});
+
+test("surface core exposes provenance display name separately from content title", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 31);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Provenance" },
+    contentId: "ct_provn1" as never,
+    contentType: "markdown",
+    display: {
+      provenance: {
+        displayName: "Session One",
+        streamLabel: "Stream One",
+      },
+      title: "Document Title",
+    },
+    historyOwnerToken: "hot_provenance",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  const visible = core.getRendererWindowState(surface.surfaceId).panes[0];
+  assert.equal(visible?.ownerName, "Session One");
+  assert.equal(visible?.provenanceName, "Session One");
 });
 
 test("surface core does not leak provider name as chrome owner fallback", () => {

@@ -1843,6 +1843,9 @@ final class SurfAceRuntime {
             allowedSnapshotFallback: targetPayload["allowedSnapshotFallback"] as? Bool,
             fallbackSnapshotTargetId: targetPayload["fallbackSnapshotTargetId"] as? String
         )
+        pane.currentEntry.provenanceDisplayName = SurfAceRuntime.provenanceDisplayName(
+            from: payload["display"] as? [String: Any]
+        )
         pane.pendingFlushStrokes.removeAll()
         pane.firstPendingStrokeAt = nil
         pane.lastPendingStrokeAt = nil
@@ -3285,6 +3288,19 @@ final class SurfAceRuntime {
             return "Server failed after trying ports \(fixedServerPort)-\(fixedServerPort + SurfAceHTTPServer.fallbackPortOffsetLimit): port is already in use"
         }
         return "Server failed on fixed port \(fixedServerPort): \(error.localizedDescription)"
+    }
+
+    private static func provenanceDisplayName(from display: [String: Any]?) -> String? {
+        guard let provenance = display?["provenance"] as? [String: Any] else { return nil }
+        if let displayName = provenance["displayName"] as? String,
+           !displayName.isEmpty {
+            return displayName
+        }
+        if let streamLabel = provenance["streamLabel"] as? String,
+           !streamLabel.isEmpty {
+            return streamLabel
+        }
+        return nil
     }
 }
 

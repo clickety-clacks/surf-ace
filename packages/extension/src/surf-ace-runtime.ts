@@ -1161,7 +1161,8 @@ function cloneViewport(viewport: SurfaceViewport): SurfaceViewport {
 }
 
 function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
-  return windowLabel && paneLabel > 0 ? `${windowLabel}${paneLabel}` : paneLabel > 0 ? String(paneLabel) : "";
+  void windowLabel;
+  return paneLabel > 0 ? String(paneLabel) : "";
 }
 
 function createPaneBuffer(): MutablePaneBuffer {
@@ -2820,6 +2821,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const surface = this.requireKnownSurface(input.fingerprint);
     const pane = this.requirePane(input.fingerprint, input.paneId);
+    this.repairLivePaneLabelInvariant("read", surface);
     const paneLabel = this.projectedPaneLabel(surface, pane);
     const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
     const returnedFrames: SurfAceFrame[] = [];
@@ -2893,6 +2895,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const surface = this.requireConnectedSurface(input.fingerprint);
     await this.reconcilePaneTopologyAuthority(surface, "capture");
+    this.repairLivePaneLabelInvariant("capture", surface);
     const pane = this.requirePane(input.fingerprint, input.paneId);
     const capturedAt = this.now();
     let payload: SnapshotResponse["payload"] | null = null;
@@ -3093,6 +3096,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const surface = this.requireKnownSurface(input.fingerprint);
     const pane = this.requirePane(input.fingerprint, input.paneId);
+    this.repairLivePaneLabelInvariant("snapshot", surface);
     const paneLabel = this.projectedPaneLabel(surface, pane);
     const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
     return {
@@ -3142,6 +3146,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const payload = (response as AnnotationsRemoveResponse).payload;
     this.removeStrokesFromLiveState(pane, new Set(payload.removedStrokeIds));
+    this.repairLivePaneLabelInvariant("annotations remove", surface);
     const paneLabel = this.projectedPaneLabel(surface, pane);
     const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
 
@@ -3464,6 +3469,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     await this.pushTopology(surface, { increment: true, nextLayout, nextPanes });
     await this.tombstonePaneTarget(surface, pane);
+    this.repairLivePaneLabelInvariant("pane close", surface);
 
     this.queuePersistScreenSnapshot("pane close");
     const displayId = visiblePaneAddress(surface.windowLabel, pane.paneLabel);
@@ -3482,6 +3488,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     context?: SurfAceSessionContext,
   ): Promise<SurfAcePushResult> {
     await this.reconcilePaneTopologyAuthority(surface, "content push");
+    this.repairLivePaneLabelInvariant("content push", surface);
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     await this.ensureCurrentPaneLineage(surface, pane);
     this.finalizeLiveFrame(surface, pane);
@@ -3577,6 +3584,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.diagnosticContent = null;
 
     const evidence = await this.materializeTargetRecord(surface, pane, target, "initial_apply");
+    this.repairLivePaneLabelInvariant("browser_url target push", surface);
     const paneLabel = this.projectedPaneLabel(surface, pane);
     const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
     return {
@@ -3658,6 +3666,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       strokeId: stroke.strokeId,
     }));
 
+    this.repairLivePaneLabelInvariant("settled annotation turn", surface);
     const paneLabel = this.projectedPaneLabel(surface, pane);
     const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
     return {
@@ -5317,6 +5326,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     message: string,
   ): Promise<SurfAceTargetRegisterResult> {
     if (input.registrationState === "attached") {
+      this.repairLivePaneLabelInvariant("target registration rejection", surface);
       const paneLabel = this.projectedPaneLabel(surface, pane);
       const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
       const now = new Date(this.now()).toISOString();
@@ -6181,32 +6191,31 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private usedLivePaneLabels(
-    surface: ManagedSurface,
+    includeSurface: ManagedSurface,
     excluding?: { pane?: ManagedPane | null; storageKey?: string | null },
   ): Set<number> {
     const usedPaneLabels = new Set<number>();
     const liveStorageKeys = new Set<string>();
-    for (const pane of surface.panes.values()) {
-      const storageKey = this.livePaneLabelStorageKey(surface, pane);
-      if (storageKey) {
-        liveStorageKeys.add(storageKey);
-      }
-      if (excluding?.pane && pane.paneId === excluding.pane.paneId) {
-        continue;
-      }
-      if (excluding?.storageKey && storageKey === excluding.storageKey) {
-        continue;
-      }
-      if (this.isUsablePaneLabelValue(pane.remotePaneId, pane.paneLabel, surface)) {
-        usedPaneLabels.add(pane.paneLabel);
+    const liveSurfaces = this.paneLabelRepairSurfaces(includeSurface);
+    for (const surface of liveSurfaces) {
+      for (const pane of surface.panes.values()) {
+        const storageKey = this.livePaneLabelStorageKey(surface, pane);
+        if (storageKey) {
+          liveStorageKeys.add(storageKey);
+        }
+        if (excluding?.pane && pane.paneId === excluding.pane.paneId) {
+          continue;
+        }
+        if (excluding?.storageKey && storageKey === excluding.storageKey) {
+          continue;
+        }
+        if (this.isUsablePaneLabelValue(pane.remotePaneId, pane.paneLabel, surface)) {
+          usedPaneLabels.add(pane.paneLabel);
+        }
       }
     }
-    const surfacePrefix = `${surface.surfaceId}::`;
     for (const [storageKey, paneLabel] of Object.entries(this.persistentState.paneLabelsByPaneId)) {
       if (excluding?.storageKey && storageKey === excluding.storageKey) {
-        continue;
-      }
-      if (!storageKey.startsWith(surfacePrefix)) {
         continue;
       }
       if (!liveStorageKeys.has(storageKey)) {
@@ -6301,15 +6310,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         left.surfaceId.localeCompare(right.surfaceId, "en")
       );
 
+    const usedPaneLabels = new Set<number>();
+    const nextAvailable = (): number => {
+      let paneLabel = 1;
+      while (usedPaneLabels.has(paneLabel)) {
+        paneLabel += 1;
+      }
+      return paneLabel;
+    };
     for (const surface of orderedSurfaces) {
-      const usedPaneLabels = new Set<number>();
-      const nextAvailable = (): number => {
-        let paneLabel = 1;
-        while (usedPaneLabels.has(paneLabel)) {
-          paneLabel += 1;
-        }
-        return paneLabel;
-      };
       const orderedPanes = this.visiblePanes(surface);
       for (const pane of orderedPanes) {
         const storageKey = this.livePaneLabelStorageKey(surface, pane);
@@ -6415,24 +6424,55 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.assertProviderPaneLabelsUnique(surface, entries);
     const labelCounts = new Map<number, number>();
     const entryPaneIds = new Set<PaneId>();
+    const entryStorageKeys = new Set<string>();
+    const usedPaneLabels = new Set<number>();
     const providerLabels = new Set<number>();
     for (const entry of entries) {
       entryPaneIds.add(entry.pane.paneId);
+      const storageKey = paneLabelStorageKey(surface.surfaceId, entry.remotePaneId);
+      entryStorageKeys.add(storageKey);
       if (this.isUsablePaneLabelValue(entry.remotePaneId, entry.paneLabel, surface)) {
         labelCounts.set(entry.paneLabel, (labelCounts.get(entry.paneLabel) ?? 0) + 1);
       }
     }
+    for (const repairSurface of this.paneLabelRepairSurfaces(surface)) {
+      if (repairSurface.surfaceId === surface.surfaceId) {
+        continue;
+      }
+      for (const pane of repairSurface.panes.values()) {
+        const storageKey = this.livePaneLabelStorageKey(repairSurface, pane);
+        if (storageKey && entryStorageKeys.has(storageKey)) {
+          continue;
+        }
+        if (this.isUsablePaneLabelValue(pane.remotePaneId, pane.paneLabel, repairSurface)) {
+          usedPaneLabels.add(pane.paneLabel);
+        }
+      }
+    }
+    for (const [storageKey, paneLabel] of Object.entries(this.persistentState.paneLabelsByPaneId)) {
+      if (storageKey.startsWith(`${surface.surfaceId}::`)) {
+        continue;
+      }
+      if (entryStorageKeys.has(storageKey)) {
+        continue;
+      }
+      if (this.isUsablePaneLabelValue(undefined, paneLabel)) {
+        usedPaneLabels.add(paneLabel);
+      }
+    }
     for (const [paneLabel, count] of labelCounts) {
-      if (count === 1) {
+      if (count === 1 && !usedPaneLabels.has(paneLabel)) {
         providerLabels.add(paneLabel);
       }
     }
-    const usedPaneLabels = new Set(providerLabels);
+    for (const paneLabel of providerLabels) {
+      usedPaneLabels.add(paneLabel);
+    }
     for (const pane of surface.panes.values()) {
       if (
         !entryPaneIds.has(pane.paneId) &&
         this.isUsablePaneLabelValue(pane.remotePaneId, pane.paneLabel, surface) &&
-        !providerLabels.has(pane.paneLabel)
+        !usedPaneLabels.has(pane.paneLabel)
       ) {
         usedPaneLabels.add(pane.paneLabel);
       }
@@ -7000,6 +7040,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.pruneUnownedDisconnectedGhostSurfaces("screen summary");
     this.pruneStaleAcceptedSurfaces("screen summary");
     this.repairLiveWindowLabelInvariant("screen summary");
+    this.repairLivePaneLabelInvariant("screen summary");
     return this.listVisibleSurfaces()
       .sort((left, right) => this.screenSummarySortKey(left).localeCompare(this.screenSummarySortKey(right), "en"))
       .map((surface) => this.buildScreenSummary(surface, {
@@ -7352,6 +7393,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return windowLabel;
     };
 
+    const usedPaneLabels = new Set<number>();
+    let nextPaneLabel = 1;
+    const nextAvailablePaneLabel = (): number => {
+      let paneLabel = nextPaneLabel;
+      while (usedPaneLabels.has(paneLabel)) {
+        paneLabel += 1;
+      }
+      nextPaneLabel = paneLabel + 1;
+      return paneLabel;
+    };
+
     return screens.map((screen) => {
       let windowLabel = screen.windowLabel;
       const isDiagnosticOnly = screen.panes.length === 0 &&
@@ -7369,16 +7421,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         }
       }
 
-      const usedPaneLabels = new Set<number>();
-      let nextPaneLabel = 1;
-      const nextAvailablePaneLabel = (): number => {
-        let paneLabel = nextPaneLabel;
-        while (usedPaneLabels.has(paneLabel)) {
-          paneLabel += 1;
-        }
-        nextPaneLabel = paneLabel + 1;
-        return paneLabel;
-      };
       const panes = screen.panes.map((pane) => {
         const paneLabel = Number.isInteger(pane.paneLabel) &&
           pane.paneLabel > 0 &&
@@ -7387,8 +7429,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           : nextAvailablePaneLabel();
         usedPaneLabels.add(paneLabel);
         nextPaneLabel = Math.max(nextPaneLabel, paneLabel + 1);
+        const displayId = visiblePaneAddress(windowLabel, paneLabel);
         return {
           ...pane,
+          displayId,
+          paneAddress: displayId,
           paneLabel,
         };
       });
@@ -9453,6 +9498,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const topologyChanged = this.reconcilePreRevisionPaneListLayout(surface);
     const labelsChanged = this.adoptProviderPaneLabels(surface, providerPaneLabels);
+    this.repairLivePaneLabelInvariant(
+      "pane list sync",
+      surface,
+      surface.topologyApplyInFlight ? surface : undefined,
+    );
     if (lineageChanged) {
       await this.persistSurfaceTargetState(surface, "pane list lineage repair");
     }
@@ -10411,6 +10461,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     pane.pendingOwnerSessionKey = null;
     pane.currentRevision = payload.currentRevision;
+    this.repairLivePaneLabelInvariant(`mutation ${request.op}`, surface);
     this.queuePersistScreenSnapshot(`mutation ${request.op}`);
 
     if (isClearRequest) {

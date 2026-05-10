@@ -82,22 +82,27 @@ test("pane label overlay region uses tight combined label affordance bounds", ()
   const windowId = document.createElement("span");
   windowId.className = "pane-label__window";
   windowId.textContent = "FK";
+  const sender = document.createElement("span");
+  sender.className = "pane-label__sender";
+  sender.textContent = "Session One";
   const paneNumber = document.createElement("span");
   paneNumber.className = "pane-label__number";
   paneNumber.textContent = "4";
-  wrapper.append(windowId, paneNumber);
+  wrapper.append(sender, windowId, paneNumber);
   document.body.appendChild(wrapper);
 
   setRect(wrapper, { height: 114, width: 124, x: 1032, y: 3688 });
+  setRect(sender, { height: 630, width: 2090, x: 0, y: 3209 });
   setRect(windowId, { height: 630, width: 2090, x: 0, y: 3209 });
   setRect(paneNumber, { height: 630, width: 2090, x: 0, y: 3209 });
+  setTextRect(sender, { height: 20, width: 88, x: 944, y: 3718 });
   setTextRect(windowId, { height: 18, width: 34, x: 1040, y: 3720 });
   setTextRect(paneNumber, { height: 90, width: 60, x: 1088, y: 3690 });
 
   assert.deepEqual(visibleOverlayRect(wrapper, "pane-label"), {
     height: 94,
-    width: 124,
-    x: 1032,
+    width: 220,
+    x: 936,
     y: 3688,
   });
 });

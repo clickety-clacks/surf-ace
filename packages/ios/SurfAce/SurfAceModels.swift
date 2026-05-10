@@ -202,8 +202,31 @@ struct SurfAceFrame: Equatable {
     let payload: SurfAceFramePayload
     let reloadSource: SurfAceContentReloadSource?
     let title: String?
+    let provenanceDisplayName: String?
     let scrollable: Bool
     let interactive: Bool
+
+    init(
+        contentId: String,
+        revision: Int,
+        contentType: SurfAceContentType,
+        payload: SurfAceFramePayload,
+        reloadSource: SurfAceContentReloadSource?,
+        title: String?,
+        provenanceDisplayName: String? = nil,
+        scrollable: Bool,
+        interactive: Bool
+    ) {
+        self.contentId = contentId
+        self.revision = revision
+        self.contentType = contentType
+        self.payload = payload
+        self.reloadSource = reloadSource
+        self.title = title
+        self.provenanceDisplayName = provenanceDisplayName
+        self.scrollable = scrollable
+        self.interactive = interactive
+    }
 
     static func from(contentId: String, revision: Int, jsonObject: [String: Any]) throws -> SurfAceFrame {
         guard contentId.range(of: #"^ct_[0-9a-f]{8}$"#, options: .regularExpression) != nil else {
@@ -284,9 +307,23 @@ struct SurfAceFrame: Equatable {
             payload: payload,
             reloadSource: SurfAceContentReloadSource.from(jsonObject["reloadSource"] as? [String: Any]),
             title: display?["title"] as? String,
+            provenanceDisplayName: SurfAceFrame.provenanceDisplayName(from: display),
             scrollable: display?["scrollable"] as? Bool ?? true,
             interactive: display?["interactive"] as? Bool ?? true
         )
+    }
+
+    private static func provenanceDisplayName(from display: [String: Any]?) -> String? {
+        guard let provenance = display?["provenance"] as? [String: Any] else { return nil }
+        if let displayName = provenance["displayName"] as? String,
+           !displayName.isEmpty {
+            return displayName
+        }
+        if let streamLabel = provenance["streamLabel"] as? String,
+           !streamLabel.isEmpty {
+            return streamLabel
+        }
+        return nil
     }
 }
 
@@ -377,11 +414,42 @@ struct SurfAcePaneEntry: Codable {
     var payload: SurfAceFramePayload?
     var reloadSource: SurfAceContentReloadSource?
     var title: String?
+    var provenanceDisplayName: String?
     var scrollable: Bool
     var interactive: Bool
     var url: String?
     var drawingData: Data
     var strokesById: [String: SurfAceStroke]
+
+    init(
+        contentId: String?,
+        revision: Int,
+        historyOwnerToken: String?,
+        contentType: SurfAceContentType?,
+        payload: SurfAceFramePayload?,
+        reloadSource: SurfAceContentReloadSource? = nil,
+        title: String?,
+        provenanceDisplayName: String? = nil,
+        scrollable: Bool,
+        interactive: Bool,
+        url: String?,
+        drawingData: Data,
+        strokesById: [String: SurfAceStroke]
+    ) {
+        self.contentId = contentId
+        self.revision = revision
+        self.historyOwnerToken = historyOwnerToken
+        self.contentType = contentType
+        self.payload = payload
+        self.reloadSource = reloadSource
+        self.title = title
+        self.provenanceDisplayName = provenanceDisplayName
+        self.scrollable = scrollable
+        self.interactive = interactive
+        self.url = url
+        self.drawingData = drawingData
+        self.strokesById = strokesById
+    }
 
     static func empty(revision: Int = 0, historyOwnerToken: String? = nil) -> SurfAcePaneEntry {
         SurfAcePaneEntry(
@@ -392,6 +460,7 @@ struct SurfAcePaneEntry: Codable {
             payload: nil,
             reloadSource: nil,
             title: nil,
+            provenanceDisplayName: nil,
             scrollable: true,
             interactive: true,
             url: nil,
@@ -409,6 +478,7 @@ struct SurfAcePaneEntry: Codable {
             payload: frame.payload,
             reloadSource: frame.reloadSource,
             title: frame.title,
+            provenanceDisplayName: frame.provenanceDisplayName,
             scrollable: frame.scrollable,
             interactive: frame.interactive,
             url: nil,
@@ -437,6 +507,7 @@ struct SurfAcePaneEntry: Codable {
             ),
             reloadSource: nil,
             title: title,
+            provenanceDisplayName: nil,
             scrollable: true,
             interactive: true,
             url: url,
@@ -879,8 +950,7 @@ final class SurfAcePaneModel {
 
     var labelText: String { "\(paneLabel)" }
     func displayId(windowLabel: String) -> String {
-        guard !windowLabel.isEmpty else { return labelText }
-        return "\(windowLabel)\(paneLabel)"
+        labelText
     }
     func visibleAddress(windowLabel: String) -> String {
         displayId(windowLabel: windowLabel)
@@ -905,6 +975,18 @@ final class SurfAcePaneModel {
             return title
         }
         return nil
+    }
+
+    func currentProvenanceDisplayName() -> String? {
+        if let displayName = currentEntry.provenanceDisplayName,
+           !displayName.isEmpty {
+            return displayName
+        }
+        return nil
+    }
+
+    func currentChromeDisplayName() -> String? {
+        currentProvenanceDisplayName() ?? currentOwnerDisplayName()
     }
 }
 

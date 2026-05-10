@@ -55,8 +55,69 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")
 
         XCTAssertEqual(pane.labelText, "42")
-        XCTAssertEqual(pane.displayId(windowLabel: "c"), "c42")
-        XCTAssertEqual(pane.visibleAddress(windowLabel: "c"), "c42")
+        XCTAssertEqual(pane.displayId(windowLabel: "c"), "42")
+        XCTAssertEqual(pane.visibleAddress(windowLabel: "c"), "42")
+        XCTAssertFalse(pane.displayId(windowLabel: "c").contains("c"))
+    }
+
+    @MainActor
+    func testPaneChromeIdentityUsesGlobalPaneTokenWindowLabelAndSessionName() {
+        let surface = SurfAceSurfaceModel(sceneKey: "scene-chrome", surfaceId: "sf_chrome", windowLabel: "c", name: "Surf Ace")
+        let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_chrome",
+            revision: 1,
+            historyOwnerToken: "hot_chrome",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# Chrome"),
+            title: "Document Title",
+            provenanceDisplayName: "Session One",
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+
+        let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
+
+        XCTAssertEqual(identity.displayId, "42")
+        XCTAssertEqual(identity.windowLabel, "c")
+        XCTAssertEqual(identity.sessionName, "Session One")
+        XCTAssertFalse(identity.displayId.contains(identity.windowLabel))
+        XCTAssertNotEqual(identity.displayId, "c42")
+        XCTAssertNotEqual(identity.displayId, "c-42")
+        XCTAssertNotEqual(identity.displayId, "e1")
+        XCTAssertNotEqual(identity.displayId, "e16")
+        XCTAssertNotEqual(identity.displayId, "b13")
+    }
+
+    @MainActor
+    func testPaneChromeIdentityDoesNotUseContentTitleAsSessionName() {
+        let surface = SurfAceSurfaceModel(sceneKey: "scene-chrome-title", surfaceId: "sf_chrome_title", windowLabel: "e", name: "Surf Ace")
+        let pane = SurfAcePaneModel(paneId: 16, paneLabel: 99, name: "Right")
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_chrome_title",
+            revision: 1,
+            historyOwnerToken: "hot_chrome_title",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# Chrome"),
+            title: "Document Title",
+            provenanceDisplayName: nil,
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+
+        let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
+
+        XCTAssertEqual(identity.displayId, "99")
+        XCTAssertEqual(identity.windowLabel, "e")
+        XCTAssertNil(identity.sessionName)
+        XCTAssertNotEqual(identity.sessionName, "Document Title")
+        XCTAssertNotEqual(identity.displayId, "e16")
     }
 
     @MainActor

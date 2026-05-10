@@ -68,6 +68,8 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
 
         XCTAssertEqual(bridge.renderedBrowserURLEntries.map(\.title), ["Browser Pusher"])
         XCTAssertEqual(surface.panes.first?.currentOwnerDisplayName(), "Browser Pusher")
+        XCTAssertEqual(surface.panes.first?.currentProvenanceDisplayName(), "Browser Pusher")
+        XCTAssertEqual(surface.panes.first?.currentChromeDisplayName(), "Browser Pusher")
     }
 
     func testBrowserURLTargetApplyRecordsFailedNavigationEvidence() async throws {

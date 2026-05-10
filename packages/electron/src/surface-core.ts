@@ -200,6 +200,7 @@ export type RendererPaneState = {
   ownerName: string | null;
   paneId: number;
   displayId: string;
+  provenanceName: string | null;
   visibleAddress: string;
   showDone: boolean;
   toast: string | null;
@@ -274,7 +275,12 @@ export function assertValidWindowLabel(windowLabel: unknown): asserts windowLabe
 }
 
 function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
-  return windowLabel && paneLabel > 0 ? `${windowLabel}${paneLabel}` : paneLabel > 0 ? String(paneLabel) : "";
+  void windowLabel;
+  return paneLabel > 0 ? String(paneLabel) : "";
+}
+
+function provenanceDisplayName(display: ContentDisplay | undefined): string | null {
+  return display?.provenance?.displayName ?? display?.provenance?.streamLabel ?? null;
 }
 
 const DEFAULT_VISIBLE_RECT = { height: 768, width: 1024, x: 0, y: 0 };
@@ -455,9 +461,10 @@ export class SurfaceCore {
           flushInFlight: pane.flushInFlight,
           label: pane.paneLabel > 0 ? String(pane.paneLabel) : "",
           name: pane.name,
-          ownerName: current.display?.title ?? null,
+          ownerName: provenanceDisplayName(current.display) ?? current.display?.title ?? null,
           paneId,
           displayId: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
+          provenanceName: provenanceDisplayName(current.display),
           visibleAddress: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
           showDone: pane.annotating,
           toast: pane.toast,
