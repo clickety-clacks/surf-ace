@@ -139,6 +139,7 @@ const DEFAULT_LIMITS = {
   maxVisibleTextBytes: 4096,
 };
 const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
+const PANE_GEOMETRY_READY_TIMEOUT_MS = 8_000;
 const WS_DIAGNOSTIC_LOG_PATH = process.env.SURF_ACE_WS_DIAGNOSTIC_LOG ?? path.join(
   os.homedir(),
   "Library",
@@ -668,6 +669,7 @@ export class SurfaceWsServer {
       case "surface-created":
       case "surface-removed":
       case "surface-changed":
+      case "pane-geometry-changed":
         return;
     }
   }
@@ -1296,6 +1298,63 @@ export class SurfaceWsServer {
     }
   }
 
+  private async waitForResolvedPaneGeometry(
+    surfaceId: string,
+    paneIds: number[],
+    operation: string,
+  ): Promise<void> {
+    const uniquePaneIds = [...new Set(paneIds)];
+    if (uniquePaneIds.length === 0) {
+      return;
+    }
+    let missing = this.core.missingResolvedPaneGeometry(surfaceId, uniquePaneIds);
+    if (missing.length === 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      let unsubscribe = (): void => {};
+      const cleanup = (): void => {
+        clearTimeout(timeout);
+        unsubscribe();
+      };
+      const check = (): void => {
+        try {
+          missing = this.core.missingResolvedPaneGeometry(surfaceId, uniquePaneIds);
+        } catch (error) {
+          cleanup();
+          reject(error);
+          return;
+        }
+        if (missing.length === 0) {
+          cleanup();
+          resolve();
+        }
+      };
+      const timeout = setTimeout(() => {
+        cleanup();
+        persistentServerDiagnostic("warn", "pane_geometry_ready_timeout", {
+          missing_pane_ids: missing.join(","),
+          operation,
+          surface_id: surfaceId,
+        });
+        reject(new SurfaceCoreError(
+          "render_failed",
+          `${operation} did not produce resolved pane geometry for pane(s): ${missing.join(",")}`,
+        ));
+      }, PANE_GEOMETRY_READY_TIMEOUT_MS);
+      unsubscribe = this.core.subscribe((event) => {
+        if (event.surfaceId !== surfaceId) {
+          return;
+        }
+        if (event.type === "pane-geometry-changed" || event.type === "surface-changed") {
+          check();
+        }
+      });
+      check();
+    });
+  }
+
   async setViewport(surfaceId: string, viewport: SurfaceViewport): Promise<boolean> {
     return await this.runSurfaceMutation(surfaceId, async () => {
       const nativePaneIds = this.core.panesList(surfaceId).panes
@@ -1411,6 +1470,11 @@ export class SurfaceWsServer {
       }
       const result = this.core.topologyApply(surfaceId, request.payload);
       this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      await this.waitForResolvedPaneGeometry(
+        surfaceId,
+        result.panes.map((pane) => Number(pane.paneId)),
+        "topology.apply",
+      );
       return result;
     });
     persistentServerDiagnostic(
@@ -2185,6 +2249,11 @@ export class SurfaceWsServer {
       await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.split", rollbackNativeGeometry);
       const result = this.core.paneSplit(surfaceId, splitPayload);
       this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      await this.waitForResolvedPaneGeometry(
+        surfaceId,
+        result.panes.map((pane) => Number(pane.paneId)),
+        "pane.split",
+      );
       return result;
     });
     return {
@@ -2236,6 +2305,11 @@ export class SurfaceWsServer {
       }
       const result = this.core.paneClose(surfaceId, paneId);
       this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      await this.waitForResolvedPaneGeometry(
+        surfaceId,
+        this.core.getRendererWindowState(surfaceId).panes.map((pane) => pane.paneId),
+        "pane.close",
+      );
       return result;
     });
     return {

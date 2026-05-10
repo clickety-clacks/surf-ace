@@ -252,6 +252,18 @@ function seedHorizontalSplitSnapshots(core: SurfaceCore, surfaceId: string, topP
   });
 }
 
+async function waitForRendererPaneSet(core: SurfaceCore, surfaceId: string, paneIds: number[]): Promise<void> {
+  const expected = new Set(paneIds);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const live = new Set(core.getRendererWindowState(surfaceId).panes.map((pane) => pane.paneId));
+    if ([...expected].every((paneId) => live.has(paneId))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail(`renderer pane set did not include ${paneIds.join(",")}`);
+}
+
 function contentApplyRequest(paneId: number, revision: number): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
@@ -1805,7 +1817,10 @@ test("ws server updates retained native-hosted panes after topology.apply change
         bounds: { height: 400, width: 1200, x: 0, y: 0 },
       });
 
-      const topology = await request(owner, topologyApplyRequest());
+      const topologyPromise = request(owner, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const topology = await topologyPromise;
       assert.equal(topology.ok, true);
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
@@ -2115,7 +2130,7 @@ test("ws server updates native-hosted pane after pane.split changes geometry", a
         bounds: { height: 400, width: 1200, x: 0, y: 0 },
       });
 
-      const split = await request(owner, {
+      const splitPromise = request(owner, {
         id: `rq_${Math.random().toString(16).slice(2)}` as never,
         op: "pane.split",
         payload: {
@@ -2129,6 +2144,9 @@ test("ws server updates native-hosted pane after pane.split changes geometry", a
         type: "request",
         v: 1,
       });
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const split = await splitPromise;
       assert.equal(split.ok, true);
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
@@ -2200,14 +2218,16 @@ test("ws server updates retained native-hosted panes before pane.close commits g
         bounds: { height: 400, width: 1200, x: 0, y: 0 },
       });
 
-      const topology = await request(owner, topologyApplyRequest());
-      assert.equal(topology.ok, true);
+      const topologyPromise = request(owner, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
       core.updatePaneSnapshot(surfaceId, 2, {
         bounds: { height: 400, width: 1200, x: 0, y: 400 },
       });
       core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
         bounds: { height: 800, width: 1200, x: 0, y: 0 },
       });
+      const topology = await topologyPromise;
+      assert.equal(topology.ok, true);
 
       const close = await request(owner, paneCloseRequest(2));
       assert.equal(close.ok, true);
@@ -2847,9 +2867,11 @@ test("ws server derives target.apply native pane geometry from resolved topology
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
 
-      const topology = await request(socket, topologyApplyRequest());
-      assert.equal(topology.ok, true);
+      const topologyPromise = request(socket, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
       seedHorizontalSplitSnapshots(core, surfaceId);
+      const topology = await topologyPromise;
+      assert.equal(topology.ok, true);
       const paneLineageId = topology.payload.panes.find((pane) => Number(pane.paneId) === 1)?.paneLineageId;
       assert.ok(paneLineageId);
 
@@ -2925,9 +2947,11 @@ test("ws server derives target.apply native pane identity from pane lineage", as
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
 
-      const topology = await request(socket, topologyApplyRequest());
-      assert.equal(topology.ok, true);
+      const topologyPromise = request(socket, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
       seedHorizontalSplitSnapshots(core, surfaceId);
+      const topology = await topologyPromise;
+      assert.equal(topology.ok, true);
       const secondPaneLineageId = topology.payload.panes.find((pane) => Number(pane.paneId) === 2)?.paneLineageId;
       assert.ok(secondPaneLineageId);
 
@@ -3318,7 +3342,10 @@ test("ws server sanitizes stale layout pane ids before pane.split responds", asy
     const contentClear = await request(owner, contentClearRequest(1, 2));
     assert.equal(contentClear.ok, true);
 
-    const split = await request(owner, paneSplitRequest(1, { newPaneIds: [2], newPaneLabels: [2] }));
+    const splitPromise = request(owner, paneSplitRequest(1, { newPaneIds: [2], newPaneLabels: [2] }));
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId);
+    const split = await splitPromise;
     assert.equal(split.ok, true);
     assert.equal(split.op, "pane.split");
     assert.deepEqual(split.payload.panes, [
@@ -3423,9 +3450,11 @@ test("ws server accepts topology.apply and content.apply over the paired surface
     const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(paired.ok, true);
 
-    const topology = await request(owner, topologyApplyRequest());
-    assert.equal(topology.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
     seedHorizontalSplitSnapshots(core, surfaceId);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
     assert.equal(topology.op, "topology.apply");
     assert.equal(topology.payload.topologyRevision, 7);
     assert.equal(topology.payload.panes[0]?.name, "Left");
@@ -3456,6 +3485,41 @@ test("ws server accepts topology.apply and content.apply over the paired surface
     assert.deepEqual(panes.payload.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.name]), [
       [1, 41, "Left"],
       [2, 42, "Right"],
+    ]);
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server acknowledges topology.apply only after panes.list identity has resolved geometry", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    let topologySettled = false;
+    const topologyPromise = request(owner, topologyApplyRequest()).finally(() => {
+      topologySettled = true;
+    });
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    assert.equal(topologySettled, false);
+
+    seedHorizontalSplitSnapshots(core, surfaceId);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+
+    const panes = await request(owner, {
+      id: `rq_${Math.random().toString(16).slice(2)}` as never,
+      op: "panes.list",
+      payload: {},
+      sentAt: Date.now() as never,
+      type: "request",
+      v: 1,
+    });
+    assert.equal(panes.ok, true);
+    assert.deepEqual(panes.payload.panes.map((pane) => [pane.paneId, pane.paneLabel]), [
+      [1, 41],
+      [2, 42],
     ]);
 
     await closeSocket(owner);

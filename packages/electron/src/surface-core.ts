@@ -228,6 +228,7 @@ export type CoreEvent =
   | { surfaceId: string; type: "surface-changed" }
   | { surfaceId: string; type: "surface-created" }
   | { surfaceId: string; type: "surface-removed" }
+  | { paneIds: number[]; surfaceId: string; type: "pane-geometry-changed" }
   | { fromSplit: boolean; paneId: number; paneLabel: number; parentPaneId: number | null; surfaceId: string; type: "pane-created" }
   | { paneId: number; surfaceId: string; type: "pane-removed" }
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
@@ -579,6 +580,23 @@ export class SurfaceCore {
         };
       }),
     };
+  }
+
+  missingResolvedPaneGeometry(surfaceId: string, paneIds: Iterable<number>): number[] {
+    const surface = this.getSurface(surfaceId);
+    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const seen = new Set<number>();
+    const missing: number[] = [];
+    for (const paneId of paneIds) {
+      if (seen.has(paneId)) {
+        continue;
+      }
+      seen.add(paneId);
+      if (!paneGeometry.has(paneId)) {
+        missing.push(paneId);
+      }
+    }
+    return missing;
   }
 
   projectNativePaneMaterialization(
@@ -1678,6 +1696,7 @@ export class SurfaceCore {
     const nextBounds = pane.snapshot.bounds;
     if (nextBounds && (!previousBounds || !sameRect(previousBounds, nextBounds))) {
       bumpGeometryRevision(surface);
+      this.emit({ paneIds: [pane.paneId], surfaceId, type: "pane-geometry-changed" });
     }
   }
 
