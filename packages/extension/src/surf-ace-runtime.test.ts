@@ -8,6 +8,7 @@ import { WebSocketServer } from "ws";
 import type WebSocket from "ws";
 
 import type { SurfAceDiscoveryEndpoint, SurfAceDiscoveryService } from "./surf-ace-discovery.js";
+import { SurfAceOwnershipRecoveryPolicy } from "./surf-ace-ownership-recovery-policy.js";
 import { createSurfAceRuntime, resolveDefaultSurfAceStateDir } from "./surf-ace-runtime.js";
 
 type TestPane = {
@@ -42,6 +43,35 @@ type TestSurfaceState = {
     width: number;
   };
 };
+
+test("ownership recovery policy evaluates self-reclaim without file I/O", () => {
+  const policy = new SurfAceOwnershipRecoveryPolicy();
+  const state = {
+    providerId: "pv_current",
+    providerLineage: [{ providerId: "pv_legacy" }],
+    selfOwnedSurfaceIds: {
+      sf_active: { providerId: "pv_current", source: "current_local_ownership" },
+      sf_foreign: { providerId: "pv_foreign", source: "current_local_ownership" },
+      sf_legacy: { providerId: "pv_legacy", source: "legacy_local_ownership" },
+      sf_relinquished: { providerId: "pv_current", relinquishedAt: 1, source: "current_local_ownership" },
+    },
+    targetStateBySurfaceId: {
+      sf_legacy: {
+        targetRecords: [
+          { ownerProviderId: "pv_foreign", ownershipSessionId: "sa_foreign" },
+          { ownerProviderId: "pv_legacy", ownershipSessionId: "sa_legacy" },
+        ],
+      },
+    },
+  };
+
+  assert.equal(policy.isKnownSelfOwnedSurface(state, "sf_active", false), true);
+  assert.equal(policy.isKnownSelfOwnedSurface(state, "sf_relinquished", false), false);
+  assert.equal(policy.hasTrustedForeignLineageSelfOwnership(state, "sf_legacy"), true);
+  assert.equal(policy.hasTrustedForeignLineageSelfOwnership(state, "sf_foreign"), false);
+  assert.equal(policy.durableSelfReclaimResumeSessionId(state, "sf_legacy", null), "sa_legacy");
+  assert.equal(policy.durableSelfReclaimResumeSessionId(state, "sf_active", "sa_live"), "sa_live");
+});
 
 class StaticDiscoveryService implements SurfAceDiscoveryService {
   private readonly listeners = new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void | Promise<void>>();
@@ -2279,7 +2309,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("passive persisted screen repair keeps pane labels surface-local", async () => {
+  await t.test("passive persisted screen repair projects global pane display tokens", async () => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port);
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-passive-surface-local-labels-"));
@@ -2350,7 +2380,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         passiveScreens.flatMap((screen) =>
           screen.panes.map((pane) => `${screen.windowLabel}:${pane.paneLabel}`)
         ),
-        ["a:1", "b:1"],
+        ["a:1", "b:2"],
+      );
+      assert.deepEqual(
+        passiveScreens.flatMap((screen) => screen.panes.map((pane) => pane.displayId)),
+        ["1", "2"],
+      );
+      assert.deepEqual(
+        passiveScreens.flatMap((screen) => screen.panes.map((pane) => pane.paneAddress)),
+        ["1", "2"],
       );
     } finally {
       await runtimeB.stop();
@@ -2583,8 +2621,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(screen.connectionDiagnostics.givenUp, false);
         assert.deepEqual(
           Object.keys(screen.panes[0] ?? {}).sort(),
-        ["activeContent", "historySummary", "name", "paneId", "paneLabel", "target", "viewport"].sort(),
+        ["activeContent", "displayId", "historySummary", "name", "paneAddress", "paneId", "paneLabel", "target", "viewport"].sort(),
       );
+      assert.equal(screen.panes[0]?.displayId, "1");
+      assert.equal(screen.panes[0]?.paneAddress, "1");
       assert.deepEqual(screen.panes[0]?.viewport, { height: 768, scale: 2, width: 1024 });
     });
   });
@@ -2847,6 +2887,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.equal(pushed.paneId, paneId);
       assert.equal(pushed.paneLabel, 6);
+      assert.equal(pushed.displayId, "6");
+      assert.equal(pushed.paneAddress, "6");
       assert.equal(server.contentSetRequests.at(-1)?.paneId, server.initialRemotePaneId);
 
       const screenAfterPush = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
@@ -2854,11 +2896,16 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const listedPane = screenAfterPush.panes.find((candidate) => candidate.paneId === paneId);
       assert.ok(listedPane);
       assert.equal(listedPane.paneLabel, 6);
+      assert.equal(listedPane.displayId, "6");
+      assert.equal(listedPane.paneAddress, "6");
       assert.equal(listedPane.activeContent?.contentId, pushed.contentId);
 
       const read = await runtime.read({ fingerprint: server.surfaceId, paneId });
       assert.equal(read.paneId, paneId);
       assert.equal(read.paneLabel, 6);
+      assert.equal(read.displayId, "6");
+      assert.equal(read.paneAddress, "6");
+      assert.equal(read.windowLabel, "a");
       assert.equal(read.contentSnapshot?.contentId, pushed.contentId);
       assert.deepEqual(read.contentSnapshot?.content, { markdown: "# visible pane identity" });
     });
@@ -3150,9 +3197,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const visibleCoordinates = screens.flatMap((screen) =>
         screen.panes.map((pane) => `${screen.windowLabel}:${pane.paneLabel}`)
       );
+      const visibleAddresses = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneAddress));
+      const displayIds = screens.flatMap((screen) => screen.panes.map((pane) => pane.displayId));
       const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
       assert.equal(paneLabels.every((paneLabel) => Number.isInteger(paneLabel) && paneLabel > 0), true);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
+      assert.equal(new Set(visibleAddresses).size, visibleAddresses.length);
+      assert.equal(new Set(displayIds).size, displayIds.length);
+      assert.deepEqual(displayIds.sort(), ["1", "2"]);
+      assert.deepEqual(visibleAddresses.sort(), ["1", "2"]);
       assert.equal(new Set(firstPaneIds).size, firstPaneIds.length);
         assert.deepEqual(
           [serverA.pairRequests[0]?.windowLabel, serverB.pairRequests[0]?.windowLabel].sort(),
@@ -3174,7 +3227,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(initialRemotePaneIds.every((paneId) => paneId > 0));
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [1, 1],
+        [1, 2],
       );
     } finally {
       await runtime.stop();
@@ -3184,7 +3237,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("pane label repair does not rewrite matching labels on different windows", async () => {
+  await t.test("pane label repair rewrites matching labels across windows before visible exposure", async () => {
     const portA = nextPort++;
     const portB = nextPort++;
     const serverA = new FakeSurfAceWsServer(portA, { surfaceId: "sf_surface-a" });
@@ -3221,9 +3274,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         screens.map((screen) => ({ paneLabel: screen.panes[0]?.paneLabel, windowLabel: screen.windowLabel })),
         [
           { paneLabel: 1, windowLabel: "a" },
-          { paneLabel: 1, windowLabel: "b" },
+          { paneLabel: 2, windowLabel: "b" },
         ],
       );
+      assert.deepEqual(screens.flatMap((screen) => screen.panes.map((pane) => pane.displayId)).sort(), ["1", "2"]);
+      assert.deepEqual(screens.flatMap((screen) => screen.panes.map((pane) => pane.paneAddress)).sort(), ["1", "2"]);
+      assert.equal(new Set(screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel))).size, 2);
       assert.equal(serverA.topologyApplyRequests.length, 0);
       assert.equal(serverB.topologyApplyRequests.length, 0);
     } finally {
@@ -3293,7 +3349,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(initialRemotePaneIds.every((paneId) => paneId > 0));
       assert.deepEqual(
         [...requestsBySurface.values()].map((request) => request?.initialPaneLabel).sort(),
-        [1, 1, 1],
+        [1, 2, 3],
       );
       const internalRuntime = runtime as any;
       assert.deepEqual(
@@ -3430,7 +3486,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("provider pane labels remain surface-local before exposure", async () => {
+  await t.test("provider pane labels are repaired into global display tokens before exposure", async () => {
     const portA = nextPort++;
     const portB = nextPort++;
     const serverA = new FakeSurfAceWsServer(portA, {
@@ -3488,23 +3544,31 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const visibleCoordinates = screens.flatMap((screen) =>
         screen.panes.map((pane) => `${screen.windowLabel}:${pane.paneLabel}`)
       );
+      const visibleAddresses = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneAddress));
+      const displayIds = screens.flatMap((screen) => screen.panes.map((pane) => pane.displayId));
       const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
       assert.equal(paneLabels.every((paneLabel) => Number.isInteger(paneLabel) && paneLabel > 0), true);
-      assert.deepEqual(paneLabels, [1, 1]);
+      assert.deepEqual([...paneLabels].sort((a, b) => a - b), [1, 2]);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
+      assert.deepEqual(displayIds.sort(), ["1", "2"]);
+      assert.deepEqual(visibleAddresses.sort(), ["1", "2"]);
+      assert.equal(displayIds.includes("e1"), false);
+      assert.equal(displayIds.includes("e16"), false);
+      assert.equal(displayIds.includes("b13"), false);
+      assert.equal(displayIds.every((displayId) => !/^[a-z]+-?\d+$/i.test(displayId)), true);
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [1, 1],
+        [1, 2],
       );
       const repairedState = JSON.parse(await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"));
       assert.deepEqual(
         [
           repairedState.paneLabelsByPaneId[`${serverA.surfaceId}::6242`],
           repairedState.paneLabelsByPaneId[`${serverB.surfaceId}::6243`],
-        ],
-        [1, 1],
+        ].sort(),
+        [1, 2],
       );
-      assert.equal(repairedState.nextPaneLabel, 6244);
+      assert.equal(repairedState.nextPaneLabel >= 3, true);
     } finally {
       await runtime.stop();
       await serverB.close();
@@ -3572,7 +3636,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         screen.panes.map((pane) => `${screen.windowLabel}:${pane.paneLabel}`)
       );
       const paneLabels = screens.flatMap((screen) => screen.panes.map((pane) => pane.paneLabel));
-      assert.deepEqual(paneLabels.sort((left, right) => left - right), [1, 1]);
+      assert.deepEqual(paneLabels.sort((left, right) => left - right), [1, 2]);
       assert.equal(new Set(visibleCoordinates).size, visibleCoordinates.length);
       assert.deepEqual(
         [serverA.pairRequests[0]?.windowLabel, serverB.pairRequests[0]?.windowLabel].sort(),
@@ -3580,7 +3644,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         [serverA.pairRequests[0]?.initialPaneLabel, serverB.pairRequests[0]?.initialPaneLabel].sort(),
-        [1, 1],
+        [1, 2],
       );
       const screenA = screens.find((screen) => screen.fingerprint === serverA.surfaceId);
       const screenB = screens.find((screen) => screen.fingerprint === serverB.surfaceId);
@@ -4275,14 +4339,16 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           strokeIds: ["stroke_abc123"],
         });
         assert.deepEqual(removed, {
+          displayId: "1",
           fingerprint: server.surfaceId,
           notFoundStrokeIds: [],
+          paneAddress: "1",
           paneId: firstPaneId,
           paneLabel: 1,
           remainingStrokeCount: 0,
           removedStrokeIds: ["stroke_abc123"],
         });
-        assert.equal(pane.paneLabel, Number(pane.remotePaneId));
+        assert.equal(pane.paneLabel, 1);
         assert.deepEqual(server.annotationsRemoveRequests, [
           {
             contentId: third.contentId,
@@ -4557,7 +4623,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const clear = await runtime.clear({ fingerprint: server.surfaceId, paneId: firstPaneId });
       assert.deepEqual(clear, {
+        displayId: "1",
         fingerprint: server.surfaceId,
+        paneAddress: "1",
         paneId: firstPaneId,
         paneLabel: 1,
         revision: clear.revision,
@@ -5103,7 +5171,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("provider invalidates current targets when ownership epoch changes", async () => {
+  await t.test("provider rebinds current self-owned targets when ownership refreshes by stable pane lineage", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
         server.targetCapabilities = [
@@ -5128,13 +5196,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         internalRuntime.markPairConnected(surface, "sa_reowned_session", surface.ownershipEpoch + 1, false);
 
         const pane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
-        assert.equal(pane?.target?.blockedReason, "ownership_epoch_mismatch");
+        assert.equal(pane?.target?.blockedReason, null);
         assert.equal(pane?.target?.targetKind, "browser_url");
         assert.equal(server.targetApplyRequests.length, 1);
 
-        const staleTarget = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "browser_url");
-        assert.equal(staleTarget?.currentState, "stale");
-        assert.equal(surface.panes.get(firstPaneId)?.currentTargetId, null);
+        const reboundTarget = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "browser_url");
+        assert.equal(reboundTarget?.currentState, "current");
+        assert.equal(reboundTarget?.ownershipSessionId, "sa_reowned_session");
+        assert.equal(reboundTarget?.ownershipEpoch, surface.ownershipEpoch);
+        assert.equal(surface.panes.get(firstPaneId)?.currentTargetId, reboundTarget?.targetId);
 
         internalRuntime.captureSurfaceTargetState(surface);
         surface.targetRecords = new Map();
@@ -5143,7 +5213,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         internalRuntime.hydrateSurfaceTargetState(surface, true);
 
         const rehydratedPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
-        assert.equal(rehydratedPane?.target?.blockedReason, "ownership_epoch_mismatch");
+        assert.equal(rehydratedPane?.target?.blockedReason, null);
         assert.equal(rehydratedPane?.target?.targetKind, "browser_url");
       },
     });
@@ -5778,7 +5848,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         fingerprint: server.surfaceId,
         paneId: splitPaneIds[1]!,
       });
-      assert.deepEqual(close, { ok: true, paneId: splitPaneIds[1], paneLabel: 2 });
+      assert.deepEqual(close, { displayId: "2", ok: true, paneAddress: "2", paneId: splitPaneIds[1], paneLabel: 2 });
       assert.deepEqual(server.closePaneRequests, []);
       assert.deepEqual(server.topologyApplyRequests.at(-1), {
         layout: {
@@ -5920,6 +5990,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.ok(surfaceB);
         const paneA = surfaceA.panes[0]!;
         const paneB = surfaceB.panes[0]!;
+        const topologyApplyCount = server.topologyApplyRequests.length;
+        const surfaceATopologyRevision = surfaceA.topologyRevision;
+        const surfaceBTopologyRevision = surfaceB.topologyRevision;
 
         const realized = await runtime.realizeTopologies({
           operations: [
@@ -5956,15 +6029,23 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.deepEqual(realized.applied.map((result) => result.operationId), ["surface-a", "surface-b"]);
         assert.deepEqual(realized.applied.map((result) => result.fingerprint), [surfaceA.fingerprint, surfaceB.fingerprint]);
         assert.deepEqual(realized.applied.map((result) => result.createdPaneIds.length), [1, 1]);
-        assert.equal(server.topologyApplyRequests.length, 2);
+        assert.equal(server.topologyApplyRequests.length - topologyApplyCount, 2);
+        const returnedDisplayIds = realized.applied.flatMap((result) => result.panes.map((pane) => pane.displayId));
+        const returnedPaneAddresses = realized.applied.flatMap((result) => result.panes.map((pane) => pane.paneAddress));
+        assert.equal(new Set(returnedDisplayIds).size, returnedDisplayIds.length);
+        assert.equal(new Set(returnedPaneAddresses).size, returnedPaneAddresses.length);
+        assert.equal(returnedDisplayIds.every((displayId) => !/^[a-z]+-?\d+$/i.test(displayId)), true);
+        assert.equal(returnedDisplayIds.includes("e1"), false);
+        assert.equal(returnedDisplayIds.includes("e16"), false);
+        assert.equal(returnedDisplayIds.includes("b13"), false);
 
         const after = await runtime.listScreens();
         const afterA = after.find((screen) => screen.fingerprint === surfaceA.fingerprint);
         const afterB = after.find((screen) => screen.fingerprint === surfaceB.fingerprint);
         assert.equal(afterA?.panes.length, 2);
         assert.equal(afterB?.panes.length, 2);
-        assert.equal(afterA?.topologyRevision, 1);
-        assert.equal(afterB?.topologyRevision, 1);
+        assert.equal(afterA?.topologyRevision, surfaceATopologyRevision + 1);
+        assert.equal(afterB?.topologyRevision, surfaceBTopologyRevision + 1);
       },
     });
   });
@@ -5984,6 +6065,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const surfaceB = before.find((screen) => screen.fingerprint === "sf_surface-b");
         assert.ok(surfaceA);
         assert.ok(surfaceB);
+        const surfaceATopologyRevision = surfaceA.topologyRevision;
+        const surfaceBTopologyRevision = surfaceB.topologyRevision;
         const result = await runtime.realizeTopologies({
           operations: [
             {
@@ -6021,8 +6104,14 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.deepEqual(result.skipped.map((skipped) => skipped.operationId), ["skipped-third"]);
 
         const after = await runtime.listScreens();
-        assert.equal(after.find((screen) => screen.fingerprint === surfaceA.fingerprint)?.topologyRevision, 1);
-        assert.equal(after.find((screen) => screen.fingerprint === surfaceB.fingerprint)?.topologyRevision, 0);
+        assert.equal(
+          after.find((screen) => screen.fingerprint === surfaceA.fingerprint)?.topologyRevision,
+          surfaceATopologyRevision + 1,
+        );
+        assert.equal(
+          after.find((screen) => screen.fingerprint === surfaceB.fingerprint)?.topologyRevision,
+          surfaceBTopologyRevision,
+        );
       },
     });
   });
@@ -6127,7 +6216,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         paneId: orphanPane.paneId,
       });
 
-      assert.deepEqual(close, { ok: true, paneId: orphanPane.paneId, paneLabel: 5 });
+      assert.deepEqual(close, { displayId: "5", ok: true, paneAddress: "5", paneId: orphanPane.paneId, paneLabel: 5 });
       assert.deepEqual(server.topologyApplyRequests.at(-1), {
         layout: { paneId: server.initialRemotePaneId, type: "pane" },
         paneIds: [server.initialRemotePaneId],
@@ -6270,7 +6359,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("read and snapshot remain local projections without provider reconciliation", async () => {
+  await t.test("read and snapshot repair global pane display tokens without provider reconciliation", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const before = (await runtime.listScreens())[0]!;
       const firstPane = before.panes[0]!;
@@ -6293,7 +6382,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
       assert.equal(read.paneId, stalePane.paneId);
       assert.equal(read.paneLabel, 2);
-      assert.equal(stalePane.paneLabel, 9999);
+      assert.equal(stalePane.paneLabel, 2);
       assert.equal(surface.panes.has(stalePane.paneId), true);
 
       const secondStalePane = structuredClone(sourcePane);
@@ -6310,8 +6399,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const after = (await runtime.listScreens())[0]!;
       const projectedSnapshotPane = after.panes.find((pane) => pane.paneId === secondStalePane.paneId);
       assert.equal(snapshot.paneLabel, projectedSnapshotPane?.paneLabel);
-      assert.notEqual(snapshot.paneLabel, secondStalePane.paneLabel);
-      assert.equal(secondStalePane.paneLabel, 9998);
+      assert.notEqual(snapshot.paneLabel, 9998);
+      assert.equal(secondStalePane.paneLabel, projectedSnapshotPane?.paneLabel);
       assert.equal(surface.panes.has(secondStalePane.paneId), true);
       assert.equal(server.panesListRequests, panesListRequests);
     });
@@ -6351,7 +6440,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("surf_ace_list projects pane label repair without mutating or publishing topology", async () => {
+  await t.test("surf_ace_list repairs global pane display tokens and publishes accepted topology", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       await runtime.split({
@@ -6370,11 +6459,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const after = (await runtime.listScreens())[0]!;
       assert.deepEqual(after.panes.map((pane) => pane.paneLabel), [1, 2]);
-      assert.equal(panes[1].paneLabel, Number(panes[1].remotePaneId));
-      await new Promise((resolve) => {
-        setTimeout(resolve, 50);
-      });
-      assert.equal(server.topologyApplyRequests.length, topologyApplyCount);
+      assert.equal(panes[1].paneLabel, 2);
+      await waitFor(() => server.topologyApplyRequests.length > topologyApplyCount);
     });
   });
 
@@ -6699,8 +6785,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         turn.idempotencyKey,
         `surf-ace-annotation-intent:${server.surfaceId}:${firstPaneId}:${turn.frame.frameId}`,
       );
+      assert.match(turn.message, /Surf Ace settled annotation on surface "Surface A", pane 1\./);
       assert.match(turn.message, /Treat the attached image as the primary annotation input\./);
       assert.match(turn.message, /Use the stroke metadata below as secondary context only\./);
+      assert.match(turn.message, /"displayId": "1"/);
+      assert.match(turn.message, /"paneAddress": "1"/);
 
       const closedRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
       assert.equal(closedRead.frames.length, 1);
@@ -7119,11 +7208,24 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(firstPane);
       firstPane.paneLabel = Number(firstPane.remotePaneId);
       await internalRuntime.persistScreenSnapshot();
-      const projectedSnapshot = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+      let projectedSnapshot: {
         contentContinuity?: Record<string, Array<{
           paneLabel: number;
         }>>;
-      };
+      } | null = null;
+      await waitFor(async () => {
+        const rawSnapshot = await fs.readFile(snapshotPath, "utf8");
+        if (rawSnapshot.length === 0) {
+          return false;
+        }
+        projectedSnapshot = JSON.parse(rawSnapshot) as {
+          contentContinuity?: Record<string, Array<{
+            paneLabel: number;
+          }>>;
+        };
+        return true;
+      });
+      assert.ok(projectedSnapshot);
       const projectedContinuityEntry = projectedSnapshot.contentContinuity?.[server.surfaceId]?.[0];
       assert.equal(continuityEntry?.contentId, pushed.contentId);
       assert.equal(continuityEntry?.contentType, "markdown");
@@ -7133,7 +7235,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(continuityEntry?.revision, pushed.revision);
       assert.equal(continuityEntry?.sessionKey, "agent:test:restart-persist");
       assert.equal(projectedContinuityEntry?.paneLabel, 1);
-      assert.equal(firstPane.paneLabel, Number(firstPane.remotePaneId));
+      assert.equal(firstPane.paneLabel, 1);
     });
   });
 
@@ -7747,7 +7849,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(freshSurfaceScreen.panes[0]?.activeContent, null);
       assert.equal(surface.panes.size, 1);
       assert.equal(surface.topologyRevision, 0);
-      assert.equal(server.topologyApplyRequests.length, topologyRequestsBeforeFreshPair);
+      assert.equal(server.topologyApplyRequests.length >= topologyRequestsBeforeFreshPair, true);
       assert.equal(server.contentSetRequests.length, contentRequestsBeforeFreshPair);
       assert.equal(server.clearRequests.length, clearRequestsBeforeFreshPair);
     });
@@ -8832,7 +8934,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("known self-owned invalid_resume reconnect self-reclaims with stable provider identity", async () => {
+  await t.test("known self-owned invalid_resume with an active resume token does not force a takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -8847,20 +8949,21 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await surface.client.close(1000, "test_invalid_resume_self_reclaim_identity");
 
       await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
-      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(
+        () => warnings.some((warning) => warning.includes("ownership_self_reclaim_blocked")),
+        12_000,
+      );
 
       const reconnectAttempts = server.pairAttemptDetails.slice(1);
       assert.deepEqual(
-        reconnectAttempts.slice(0, 2).map((attempt) => attempt.providerId),
-        [initialProviderId, initialProviderId],
+        reconnectAttempts.slice(0, 1).map((attempt) => attempt.providerId),
+        [initialProviderId],
       );
       assert.deepEqual(
-        reconnectAttempts.slice(0, 2).map((attempt) => attempt.takeover),
-        [false, true],
+        reconnectAttempts.slice(0, 1).map((attempt) => attempt.takeover),
+        [false],
       );
-      assert.ok(
-        warnings.some((warning) => warning.includes("ownership_self_reclaim")),
-      );
+      assert.ok(reconnectAttempts.every((attempt) => attempt.takeover !== true));
     });
   });
 

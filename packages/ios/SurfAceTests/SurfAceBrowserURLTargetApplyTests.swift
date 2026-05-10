@@ -68,6 +68,8 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
 
         XCTAssertEqual(bridge.renderedBrowserURLEntries.map(\.title), ["Browser Pusher"])
         XCTAssertEqual(surface.panes.first?.currentOwnerDisplayName(), "Browser Pusher")
+        XCTAssertEqual(surface.panes.first?.currentProvenanceDisplayName(), "Browser Pusher")
+        XCTAssertEqual(surface.panes.first?.currentChromeDisplayName(), "Browser Pusher")
     }
 
     func testBrowserURLTargetApplyRecordsFailedNavigationEvidence() async throws {
@@ -115,6 +117,39 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         XCTAssertEqual(payload["errorCode"] as? String, "unsafe_payload")
         XCTAssertTrue(bridge.renderedBrowserURLEntries.isEmpty)
         XCTAssertNil(surface.panes.first?.currentTarget)
+    }
+
+    func testHTMLNavigationEventIsRejectedWhileAnnotationModeIsActive() throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "html-navigation-annotating")
+        let pane = try XCTUnwrap(surface.panes.first)
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_12345678",
+            revision: 4,
+            historyOwnerToken: "hot_html",
+            contentType: .html,
+            payload: .html(html: "<a href=\"https://example.com/next\">next</a>", baseURL: nil),
+            reloadSource: nil,
+            title: "HTML",
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+        pane.annotationMode = true
+
+        runtime.handleNavigationEvent(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            url: "https://example.com/next#section",
+            sentAt: nil
+        )
+
+        XCTAssertEqual(pane.currentEntry.contentType, .html)
+        XCTAssertEqual(pane.currentEntry.contentId, "ct_12345678")
+        XCTAssertTrue(pane.backStack.isEmpty)
+        XCTAssertEqual(pane.toast, "Finish annotation (Done) to navigate")
     }
 
     private func isolatedUserDefaults() -> UserDefaults {

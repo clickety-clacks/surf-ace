@@ -221,11 +221,40 @@ test("surface core renders the visible pane label separately from paneId", () =>
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.panes[0]?.paneId, 7);
   assert.equal(windowState.panes[0]?.label, "41");
+  assert.equal(windowState.panes[0]?.displayId, "41");
+  assert.equal(windowState.panes[0]?.visibleAddress, "41");
 
   core.paneRename(surface.surfaceId, 7, "Notes");
   const renamedState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(renamedState.panes[0]?.name, "Notes");
   assert.equal(renamedState.panes[0]?.label, "41");
+  assert.equal(renamedState.panes[0]?.displayId, "41");
+  assert.equal(renamedState.panes[0]?.visibleAddress, "41");
+});
+
+test("surface core never projects window-letter composites as pane display ids", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 16,
+    initialPaneLabel: 16,
+    windowLabel: "e",
+  });
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0];
+  assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "e");
+  assert.equal(pane?.displayId, "16");
+  assert.equal(pane?.visibleAddress, "16");
+  assert.notEqual(pane?.displayId, "e16");
+  assert.notEqual(pane?.displayId, "e1");
+  assert.notEqual(pane?.displayId, "b13");
+  assert.doesNotMatch(pane?.displayId ?? "", /^[a-z]+\d+$/i);
 });
 
 test("same pane id, different initial pane label - Electron bootstrap enforces provider label", () => {
@@ -352,12 +381,13 @@ test("surface core starts browser_url targets without reporting unverified navig
   assert.equal(pane.content.contentType, "browser_url");
   assert.deepEqual(pane.content.content, { url: "https://google.com/" });
   assert.equal(pane.ownerName, "Browser Pusher");
+  assert.equal(pane.provenanceName, "Browser Pusher");
   const snapshot = core.captureSnapshot(surface.surfaceId, paneId);
   assert.equal(snapshot.contentId, null);
   assert.equal(snapshot.contentType, null);
 });
 
-test("surface core does not persist browser_url renderer history across restart", () => {
+test("surface core persists browser_url renderer history across restart", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -394,9 +424,9 @@ test("surface core does not persist browser_url renderer history across restart"
   restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
 
   const restoredPane = restoredCore.getRendererWindowState(surface.surfaceId).panes[0]!;
-  assert.equal(restoredPane.content.contentType, null);
-  assert.equal(restoredPane.content.contentId, null);
-  assert.equal(restoredPane.content.content, null);
+  assert.equal(restoredPane.content.contentType, "browser_url");
+  assert.equal(restoredPane.content.contentId, "tg_google");
+  assert.deepEqual(restoredPane.content.content, { url: "https://google.com/" });
 });
 
 test("surface core exposes reload only for browser_url and file-backed content", () => {
@@ -481,6 +511,40 @@ test("surface core exposes reload only for browser_url and file-backed content",
     ],
   });
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.reloadable, false);
+});
+
+test("surface core promotes html navigation into browser_url history with normalized URL", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<a href=\"/docs#intro\">docs</a>" },
+    contentId: "ct_html" as never,
+    contentType: "html",
+    historyOwnerToken: "hot_html",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  const navigation = core.applyNavigation(surface.surfaceId, paneId, "https://example.com/docs#intro");
+  assert.deepEqual(navigation, {
+    blocked: false,
+    contentId: "ct_html",
+    revision: 1,
+    url: "https://example.com/docs#intro",
+  });
+
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  assert.equal(pane.content.contentId, "ct_html");
+  assert.equal(pane.content.contentType, "browser_url");
+  assert.deepEqual(pane.content.content, { url: "https://example.com/docs#intro" });
+  assert.equal(pane.canGoBack, true);
 });
 
 test("surface core reloads file-backed content without changing content identity or revision", () => {
@@ -1203,6 +1267,12 @@ test("surface core assigns pane history and split topology", () => {
   });
 
   assert.deepEqual(split.panes.map((pane) => pane.paneId), [initialPaneId, 9]);
+  core.updatePaneSnapshot(surface.surfaceId, initialPaneId, {
+    bounds: { height: 400, width: 1200, x: 0, y: 0 },
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 9, {
+    bounds: { height: 400, width: 1200, x: 0, y: 400 },
+  });
   const paneViewports = core.panesList(surface.surfaceId).panes.map((pane) => pane.viewport);
   assert.deepEqual(paneViewports, [
     { height: 400, scale: 2, width: 1200 },
@@ -1618,6 +1688,12 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
     newPaneLabels: [9],
     paneId,
   });
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    bounds: { height: 400, width: 1200, x: 0, y: 0 },
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 9, {
+    bounds: { height: 400, width: 1200, x: 0, y: 400 },
+  });
 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   assert.deepEqual(listedPane.viewport, { height: 400, scale: 2, width: 1200 });
@@ -1628,7 +1704,7 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
     viewport: { height: 400, scale: 2, width: 1200 },
   });
   assert.equal(listedPane.geometry.coordinateSpace, "surface_logical");
-  assert.equal(listedPane.geometry.geometryRevision, 3);
+  assert.equal(listedPane.geometry.geometryRevision, 4);
   assert.equal(listedPane.geometry.topologyEpoch, 0);
 });
 
@@ -1866,6 +1942,36 @@ test("surface core reports the current history entry owner name for chrome", () 
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.ownerName, "Session B");
   core.navigateHistory(surface.surfaceId, paneId, "back");
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.ownerName, "Session A");
+});
+
+test("surface core exposes provenance display name separately from content title", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 31);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Provenance" },
+    contentId: "ct_provn1" as never,
+    contentType: "markdown",
+    display: {
+      provenance: {
+        displayName: "Session One",
+        streamLabel: "Stream One",
+      },
+      title: "Document Title",
+    },
+    historyOwnerToken: "hot_provenance",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  const visible = core.getRendererWindowState(surface.surfaceId).panes[0];
+  assert.equal(visible?.ownerName, "Session One");
+  assert.equal(visible?.provenanceName, "Session One");
 });
 
 test("surface core does not leak provider name as chrome owner fallback", () => {

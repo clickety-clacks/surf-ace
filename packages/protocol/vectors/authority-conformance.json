@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "source": "authority-consistency-client-harmonization-omnibus-20260509",
+  "vectors": [
+    {
+      "id": "target-register-quarantine",
+      "requirements": ["A2", "T1"],
+      "contract": "surface-side target.register is not a supported product surface",
+      "expected": "schema-valid inbound target.register receives target.register.rejected and is never silently accepted or dropped"
+    },
+    {
+      "id": "pair-response-before-commit",
+      "requirements": ["D9", "T2"],
+      "contract": "pair.response delivery precedes active session and ownership lock commit",
+      "expected": "failed response delivery leaves previous ownership state unchanged and does not close the old socket"
+    },
+    {
+      "id": "same-provider-live-resume-supersedes-after-response",
+      "requirements": ["D8", "D9", "T2"],
+      "contract": "same-provider live resume may supersede an older open socket only after pair.response delivery",
+      "expected": "new socket receives resumed pair response, then old socket closes with superseded"
+    },
+    {
+      "id": "browser-url-visible-history-restart",
+      "requirements": ["D2", "D3", "D12", "T3"],
+      "contract": "browser_url is first-class visible history state",
+      "expected": "browser_url participates in back/forward, clear, depth cap, and restart restore by pane lineage"
+    },
+    {
+      "id": "html-navigation-normalized-browser-url",
+      "requirements": ["D6", "D7", "T4"],
+      "contract": "pushed HTML uses real navigation and promotes committed navigation into browser_url history",
+      "expected": "anchor, relative, absolute, and form navigations emit normalized absolute URLs and preserve fragments"
+    },
+    {
+      "id": "annotation-mode-freezes-visible-navigation",
+      "requirements": ["D17", "T4"],
+      "contract": "annotation mode rejects visible content mutation and navigation",
+      "expected": "content.set/apply/clear, browser_url navigation, and pushed-HTML navigation reject until annotation exits"
+    },
+    {
+      "id": "geometry-from-resolved-snapshot",
+      "requirements": ["A1", "D10", "T4"],
+      "contract": "protocol geometry comes from resolved pane geometry snapshots",
+      "expected": "missing snapshots do not fall back to topology-derived pane frames"
+    },
+    {
+      "id": "topology-apply-committed-truth-only",
+      "requirements": ["A7", "T4"],
+      "contract": "extension topology mutation stages desired topology privately until topology.apply ACK",
+      "expected": "list/read/persisted state do not expose speculative panes/layout while apply is in flight"
+    },
+    {
+      "id": "content-apply-strict-revision",
+      "requirements": ["C1"],
+      "contract": "content.apply accepts only current revision plus one",
+      "expected": "duplicate, stale, skipped, and out-of-order revisions reject identically across clients"
+    },
+    {
+      "id": "ios-user-close-retires-identity",
+      "requirements": ["D11", "C3"],
+      "contract": "user-closed iOS scene identities are tombstoned and cannot resurrect stale targetable surfaces",
+      "expected": "unregistered scene reconnects as a fresh surface unless explicit OS restoration metadata exists"
+    }
+  ]
+}

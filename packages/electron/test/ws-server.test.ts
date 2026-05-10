@@ -32,6 +32,14 @@ async function closeSocket(socket: WebSocket, code = 1000, reason = "test_done")
   });
 }
 
+function waitForSocketClose(socket: WebSocket): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve) => {
+    socket.once("close", (code, reason) => {
+      resolve({ code, reason: reason.toString() });
+    });
+  });
+}
+
 async function request(socket: WebSocket, payload: Request): Promise<Response> {
   const response = new Promise<Response>((resolve, reject) => {
     const onMessage = (data: WebSocket.RawData) => {
@@ -233,6 +241,27 @@ function topologyApplyRequest(): Request {
     type: "request",
     v: 1,
   };
+}
+
+function seedHorizontalSplitSnapshots(core: SurfaceCore, surfaceId: string, topPaneId = 1, bottomPaneId = 2): void {
+  core.updatePaneSnapshot(surfaceId, topPaneId, {
+    bounds: { height: 400, width: 1200, x: 0, y: 0 },
+  });
+  core.updatePaneSnapshot(surfaceId, bottomPaneId, {
+    bounds: { height: 400, width: 1200, x: 0, y: 400 },
+  });
+}
+
+async function waitForRendererPaneSet(core: SurfaceCore, surfaceId: string, paneIds: number[]): Promise<void> {
+  const expected = new Set(paneIds);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const live = new Set(core.getRendererWindowState(surfaceId).panes.map((pane) => pane.paneId));
+    if ([...expected].every((paneId) => live.has(paneId))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail(`renderer pane set did not include ${paneIds.join(",")}`);
 }
 
 function contentApplyRequest(paneId: number, revision: number): Request {
@@ -615,6 +644,62 @@ test("ws server rejects invalid provider bootstrap without leaving an ownership 
   });
 });
 
+test("ws server does not commit pair ownership when pair.response is not delivered", async () => {
+  await withServer(async ({ server, surfaceId, url }) => {
+    const originalReply = (server as unknown as {
+      reply: (socket: WebSocket, response: Response) => Promise<boolean>;
+    }).reply.bind(server);
+    let dropPairResponse = true;
+    (server as unknown as {
+      reply: (socket: WebSocket, response: Response) => Promise<boolean>;
+    }).reply = async (socket: WebSocket, response: Response) => {
+      if (dropPairResponse && response.op === "pair.request" && response.ok) {
+        dropPairResponse = false;
+        return false;
+      }
+      return await originalReply(socket, response);
+    };
+
+    const owner = await connect(url);
+    owner.send(JSON.stringify(pairRequest(surfaceId, "pv_alpha")));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+
+    const probe = await connect(url);
+    const listed = await request(probe, surfacesListRequest());
+    assert.equal(listed.ok, true);
+    assert.equal(listed.op, "surfaces.list");
+    assert.equal(listed.payload.surfaces.find((entry) => entry.surfaceId === surfaceId)?.paired, false);
+
+    await closeSocket(probe);
+    await closeSocket(owner);
+  });
+});
+
+test("ws server rejects invalid topology.apply authority payloads before provider relabel", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    try {
+      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const invalid = topologyApplyRequest();
+      invalid.payload.windowLabel = "docs" as never;
+      invalid.payload.panes[1]!.paneLabel = 41;
+
+      const rejected = await request(owner, invalid);
+
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.op, "topology.apply");
+      assert.equal(rejected.error.code, "invalid_payload");
+      assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "a");
+    } finally {
+      await closeSocket(owner);
+    }
+  });
+});
+
 test("ws server adopts provider window relabels on topology.apply", async () => {
   await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
@@ -639,7 +724,10 @@ test("ws server adopts provider window relabels on topology.apply", async () => 
       const relabeled = topologyApplyRequest();
       relabeled.payload.windowLabel = "a";
 
-      const accepted = await request(owner, relabeled);
+      const acceptedPromise = request(owner, relabeled);
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const accepted = await acceptedPromise;
 
       assert.equal(accepted.ok, true);
       assert.equal(accepted.op, "topology.apply");
@@ -815,7 +903,7 @@ test("ws server allows explicit same-provider takeover without the old resume se
   });
 });
 
-test("ws server rejects duplicate same-provider pair requests while the active socket is still open", async () => {
+test("ws server rejects duplicate same-provider pair requests without resume while the active socket is still open", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const owner = await connect(url);
     const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
@@ -826,7 +914,7 @@ test("ws server rejects duplicate same-provider pair requests while the active s
 
     assert.equal(rejected.ok, false);
     assert.equal(rejected.op, "pair.request");
-    assert.equal(rejected.error.code, "busy");
+    assert.equal(rejected.error.code, "invalid_resume");
     assert.equal(owner.readyState, WebSocket.OPEN);
 
     const panes = await request(owner, {
@@ -842,6 +930,30 @@ test("ws server rejects duplicate same-provider pair requests while the active s
 
     await closeSocket(duplicate);
     await closeSocket(owner);
+  });
+});
+
+test("ws server resumes same-provider pair requests with a valid resume token while the old socket is active", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+
+    const ownerClosed = waitForSocketClose(owner);
+    const resumedSocket = await connect(url);
+    const resumed = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", { resumeSessionId: first.payload.sessionId }),
+    );
+
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.op, "pair.request");
+    assert.equal(resumed.payload.resumed, true);
+    assert.equal(resumed.payload.sessionId, first.payload.sessionId);
+    assert.equal(resumed.payload.ownershipEpoch, first.payload.ownershipEpoch);
+    assert.deepEqual(await ownerClosed, { code: 1000, reason: "superseded" });
+
+    await closeSocket(resumedSocket);
   });
 });
 
@@ -1286,7 +1398,7 @@ test("ws server rejects renderer replacement when native release overlay resync 
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const owner = await connect(url);
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
@@ -1300,7 +1412,7 @@ test("ws server rejects renderer replacement when native release overlay resync 
       assert.equal(nativeApplied.ok, true);
       assert.equal(nativeApplied.payload.status, "applied");
 
-      const replaced = await request(owner, contentApplyRequest(Number(pane.paneId), 999));
+      const replaced = await request(owner, contentApplyRequest(Number(pane.paneId), 1));
       assert.equal(replaced.ok, false);
       assert.equal(replaced.error.code, "render_failed");
       await closeSocket(owner);
@@ -1439,7 +1551,7 @@ test("ws server releases native-hosted pane before renderer content.apply", asyn
       assert.equal(nativeApplied.payload.status, "applied");
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
 
-      const applied = await request(owner, contentApplyRequest(Number(pane.paneId), 4));
+      const applied = await request(owner, contentApplyRequest(Number(pane.paneId), 1));
       assert.equal(applied.ok, true);
       assert.equal(applied.op, "content.apply");
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
@@ -1516,7 +1628,7 @@ test("ws server preserves native-hosted pane when renderer content release fails
       }));
       assert.equal(nativeApplied.payload.status, "applied");
 
-      const rejected = await request(owner, contentApplyRequest(Number(pane.paneId), 4));
+      const rejected = await request(owner, contentApplyRequest(Number(pane.paneId), 1));
       assert.equal(rejected.ok, false);
       assert.equal(rejected.error.code, "render_failed");
       assert.equal(rejected.error.message, "release denied");
@@ -1538,7 +1650,7 @@ test("ws server preserves native-hosted pane when renderer content release fails
   }
 });
 
-test("ws server releases native-hosted pane for content.apply clear no-op revision", async () => {
+test("ws server releases native-hosted pane for content.apply clear next revision", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
@@ -1587,7 +1699,7 @@ test("ws server releases native-hosted pane for content.apply clear no-op revisi
       assert.equal(nativeApplied.payload.status, "applied");
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
 
-      const cleared = await request(owner, contentApplyClearRequest(Number(pane.paneId), 3));
+      const cleared = await request(owner, contentApplyClearRequest(Number(pane.paneId), 1));
       assert.equal(cleared.ok, true);
       assert.equal(cleared.op, "content.apply");
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
@@ -1736,6 +1848,9 @@ test("ws server preserves native-hosted pane for topology.apply with unchanged g
       }));
       assert.equal(nativeApplied.payload.status, "applied");
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
+      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+        bounds: { height: 800, width: 1200, x: 0, y: 0 },
+      });
 
       const topology = await request(owner, {
         id: `rq_${Math.random().toString(16).slice(2)}` as never,
@@ -1816,8 +1931,14 @@ test("ws server updates retained native-hosted panes after topology.apply change
       }));
       assert.equal(nativeApplied.payload.status, "applied");
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
+      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+        bounds: { height: 400, width: 1200, x: 0, y: 0 },
+      });
 
-      const topology = await request(owner, topologyApplyRequest());
+      const topologyPromise = request(owner, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const topology = await topologyPromise;
       assert.equal(topology.ok, true);
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
@@ -2217,8 +2338,11 @@ test("ws server updates native-hosted pane after pane.split changes geometry", a
         surfaceId: paired.payload.surfaceId,
       }));
       assert.equal(nativeApplied.payload.status, "applied");
+      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+        bounds: { height: 400, width: 1200, x: 0, y: 0 },
+      });
 
-      const split = await request(owner, {
+      const splitPromise = request(owner, {
         id: `rq_${Math.random().toString(16).slice(2)}` as never,
         op: "pane.split",
         payload: {
@@ -2232,6 +2356,9 @@ test("ws server updates native-hosted pane after pane.split changes geometry", a
         type: "request",
         v: 1,
       });
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const split = await splitPromise;
       assert.equal(split.ok, true);
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
@@ -2299,8 +2426,19 @@ test("ws server updates retained native-hosted panes before pane.close commits g
         surfaceId: paired.payload.surfaceId,
       }));
       assert.equal(nativeApplied.payload.status, "applied");
+      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+        bounds: { height: 400, width: 1200, x: 0, y: 0 },
+      });
 
-      const topology = await request(owner, topologyApplyRequest());
+      const topologyPromise = request(owner, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      core.updatePaneSnapshot(surfaceId, 2, {
+        bounds: { height: 400, width: 1200, x: 0, y: 400 },
+      });
+      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+        bounds: { height: 800, width: 1200, x: 0, y: 0 },
+      });
+      const topology = await topologyPromise;
       assert.equal(topology.ok, true);
 
       const close = await request(owner, paneCloseRequest(2));
@@ -2411,7 +2549,7 @@ test("ws server serializes native target.apply against renderer content replacem
       }));
       await hostSeenPromise;
 
-      const contentPromise = request(owner, contentApplyRequest(Number(pane.paneId), 4));
+      const contentPromise = request(owner, contentApplyRequest(Number(pane.paneId), 1));
       await new Promise((resolve) => setTimeout(resolve, 25));
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.content.contentId, null);
 
@@ -2845,7 +2983,7 @@ test("ws server derives target.apply native pane host materialization for compos
   });
   try {
     const nativeMaterializedSurfaces: string[] = [];
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
@@ -2936,12 +3074,15 @@ test("ws server derives target.apply native pane geometry from resolved topology
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
 
-      const topology = await request(socket, topologyApplyRequest());
+      const topologyPromise = request(socket, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const topology = await topologyPromise;
       assert.equal(topology.ok, true);
       const paneLineageId = topology.payload.panes.find((pane) => Number(pane.paneId) === 1)?.paneLineageId;
       assert.ok(paneLineageId);
@@ -2966,7 +3107,7 @@ test("ws server derives target.apply native pane geometry from resolved topology
       const hostPane = (received[1] as { panes: Array<Record<string, unknown>> }).panes[0]!;
       assert.deepEqual(hostPane.geometry, {
         coordinateSpace: "compositor_logical",
-        geometryRevision: 3,
+        geometryRevision: 5,
         height: 400,
         paneInstanceId: paneLineageId,
         surfaceEpoch: `${surfaceId}:1`,
@@ -3013,12 +3154,15 @@ test("ws server derives target.apply native pane identity from pane lineage", as
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
 
-      const topology = await request(socket, topologyApplyRequest());
+      const topologyPromise = request(socket, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const topology = await topologyPromise;
       assert.equal(topology.ok, true);
       const secondPaneLineageId = topology.payload.panes.find((pane) => Number(pane.paneId) === 2)?.paneLineageId;
       assert.ok(secondPaneLineageId);
@@ -3042,7 +3186,7 @@ test("ws server derives target.apply native pane identity from pane lineage", as
       assert.equal(hostPane.binding_id, "2:target_top_118");
       assert.deepEqual(hostPane.geometry, {
         coordinateSpace: "compositor_logical",
-        geometryRevision: 3,
+        geometryRevision: 5,
         height: 400,
         paneInstanceId: secondPaneLineageId,
         surfaceEpoch: `${surfaceId}:1`,
@@ -3410,7 +3554,10 @@ test("ws server sanitizes stale layout pane ids before pane.split responds", asy
     const contentClear = await request(owner, contentClearRequest(1, 2));
     assert.equal(contentClear.ok, true);
 
-    const split = await request(owner, paneSplitRequest(1, { newPaneIds: [2], newPaneLabels: [2] }));
+    const splitPromise = request(owner, paneSplitRequest(1, { newPaneIds: [2], newPaneLabels: [2] }));
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId);
+    const split = await splitPromise;
     assert.equal(split.ok, true);
     assert.equal(split.op, "pane.split");
     assert.deepEqual(split.payload.panes, [
@@ -3510,12 +3657,15 @@ test("ws server emits annotation_committed after the final drawing flush when an
 });
 
 test("ws server accepts topology.apply and content.apply over the paired surface session", async () => {
-  await withServer(async ({ surfaceId, url }) => {
+  await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
     const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(paired.ok, true);
 
-    const topology = await request(owner, topologyApplyRequest());
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId);
+    const topology = await topologyPromise;
     assert.equal(topology.ok, true);
     assert.equal(topology.op, "topology.apply");
     assert.equal(topology.payload.topologyRevision, 7);
@@ -3547,6 +3697,41 @@ test("ws server accepts topology.apply and content.apply over the paired surface
     assert.deepEqual(panes.payload.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.name]), [
       [1, 41, "Left"],
       [2, 42, "Right"],
+    ]);
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server acknowledges topology.apply only after panes.list identity has resolved geometry", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    let topologySettled = false;
+    const topologyPromise = request(owner, topologyApplyRequest()).finally(() => {
+      topologySettled = true;
+    });
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    assert.equal(topologySettled, false);
+
+    seedHorizontalSplitSnapshots(core, surfaceId);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+
+    const panes = await request(owner, {
+      id: `rq_${Math.random().toString(16).slice(2)}` as never,
+      op: "panes.list",
+      payload: {},
+      sentAt: Date.now() as never,
+      type: "request",
+      v: 1,
+    });
+    assert.equal(panes.ok, true);
+    assert.deepEqual(panes.payload.panes.map((pane) => [pane.paneId, pane.paneLabel]), [
+      [1, 41],
+      [2, 42],
     ]);
 
     await closeSocket(owner);

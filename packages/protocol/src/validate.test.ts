@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -8,6 +9,17 @@ import {
 import { SURF_ACE_PROTOCOL_SCHEMAS } from "./schemas-manifest.js";
 import { annotationCommittedEventSchema, drawingFlushEventSchema } from "./schemas.js";
 import { validateEnvelopeType } from "./validate.js";
+
+const authorityVectorSet = JSON.parse(
+  readFileSync(new URL("../vectors/authority-conformance.json", import.meta.url), "utf8"),
+) as {
+  vectors: Array<{
+    contract: string;
+    expected: string;
+    id: string;
+    requirements: string[];
+  }>;
+};
 
 test("validateEnvelopeType accepts current request envelopes", () => {
   const result = validateEnvelopeType("pair.request", {
@@ -89,6 +101,28 @@ test("manifest covers every spec-defined request, response, and event op", () =>
   for (const op of EVENT_MESSAGES) {
     const entry = SURF_ACE_PROTOCOL_SCHEMAS[op];
     assert.ok(entry.event, `${op} event schema missing`);
+  }
+});
+
+test("authority conformance vector set covers omnibus blocker contracts", () => {
+  const vectorsById = new Map(authorityVectorSet.vectors.map((vector) => [vector.id, vector]));
+  for (const id of [
+    "target-register-quarantine",
+    "pair-response-before-commit",
+    "same-provider-live-resume-supersedes-after-response",
+    "browser-url-visible-history-restart",
+    "html-navigation-normalized-browser-url",
+    "annotation-mode-freezes-visible-navigation",
+    "geometry-from-resolved-snapshot",
+    "topology-apply-committed-truth-only",
+    "content-apply-strict-revision",
+    "ios-user-close-retires-identity",
+  ]) {
+    const vector = vectorsById.get(id);
+    assert.ok(vector, `missing authority vector ${id}`);
+    assert.ok(vector.requirements.length > 0, `${id} must name requirement ids`);
+    assert.ok(vector.contract.length > 0, `${id} must name the shared contract`);
+    assert.ok(vector.expected.length > 0, `${id} must name expected behavior`);
   }
 });
 

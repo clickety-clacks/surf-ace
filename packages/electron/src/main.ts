@@ -995,7 +995,9 @@ function installIpc(): void {
           break;
         }
         if (!result.blocked) {
-          void server.emitNavigation(surfaceId, paneId, url);
+          void server.emitNavigation(surfaceId, paneId, result.url ?? url, result.contentId && result.revision !== undefined
+            ? { contentId: result.contentId, revision: result.revision }
+            : undefined);
         }
         break;
       }

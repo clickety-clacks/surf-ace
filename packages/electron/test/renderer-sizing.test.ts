@@ -35,6 +35,22 @@ test("renderer reapplies browser_url frame sizing after layout commits and windo
   assert.match(source, /window\.addEventListener\("resize"[\s\S]*const frame = currentPaneFrameElement\(view\);[\s\S]*applyPaneFrameSize\(view, frame\)/);
 });
 
+test("renderer reports pane snapshots after layout commits", async () => {
+  const source = await rendererSource();
+  const helperIndex = source.indexOf("function reportAllPaneSnapshots");
+  const renderIndex = source.indexOf("function renderWindow");
+  const replaceIndex = source.indexOf("appRoot.replaceChildren(wrapper);", renderIndex);
+  const immediateReportIndex = source.indexOf("reportAllPaneSnapshots();", replaceIndex);
+  const rafIndex = source.indexOf("window.requestAnimationFrame", immediateReportIndex);
+  const rafReportIndex = source.indexOf("reportAllPaneSnapshots();", rafIndex);
+
+  assert.ok(helperIndex > -1);
+  assert.ok(renderIndex > helperIndex);
+  assert.ok(immediateReportIndex > replaceIndex);
+  assert.ok(rafIndex > immediateReportIndex);
+  assert.ok(rafReportIndex > rafIndex);
+});
+
 test("content replacement resets the pane scroll origin before browser_url mounts", async () => {
   const source = await rendererSource();
   const resetIndex = source.indexOf("function resetDynamicContent");
@@ -158,4 +174,25 @@ test("split flex children do not force every pane to full window height", async 
   assert.match(splitChildRule, /flex:\s*1 1 0;/);
   assert.match(splitChildRule, /height:\s*auto;/);
   assert.match(splitChildRule, /min-height:\s*0;/);
+});
+
+test("renderer chrome shows separate session, window, and global pane identity fields", async () => {
+  const source = await rendererSource();
+  const styles = await rendererStyles();
+
+  assert.match(source, /provenanceName: string \| null/);
+  assert.match(source, /const navigationOwnerName = pane\.provenanceName \?\? pane\.ownerName/);
+  assert.match(source, /ownerName\.textContent = navigationOwnerName/);
+  assert.match(source, /provenanceLabelEl\.className = "pane-label__sender"/);
+  assert.match(source, /labelEl\.append\(provenanceLabelEl, windowLabelEl, labelTextEl\)/);
+  assert.match(source, /windowLabel\.hidden = !visibleWindowLabel/);
+  assert.doesNotMatch(source, /windowLabel\.hidden = true/);
+  assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);
+  assert.match(source, /` window \$\{visibleWindowLabel\}`/);
+  assert.match(source, /`Surf Ace\$\{visibleWindowLabel/);
+  assert.match(source, /pane \$\{visibleAddress\}/);
+  assert.doesNotMatch(source, /displayId:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
+  assert.doesNotMatch(source, /visibleAddress:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
+
+  assert.match(styles, /\.pane-label__sender\s*\{/);
 });

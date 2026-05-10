@@ -130,6 +130,9 @@ type RendererPaneState = {
   label: string;
   ownerName: string | null;
   paneId: number;
+  displayId: string;
+  provenanceName: string | null;
+  visibleAddress: string;
   showDone: boolean;
   toast: string | null;
 };
@@ -269,6 +272,18 @@ function reportPaneSnapshot(view: PaneView): void {
     viewport,
     visibleText,
   });
+}
+
+function reportAllPaneSnapshots(): void {
+  if (!latestState) {
+    return;
+  }
+  for (const pane of latestState.panes) {
+    const view = paneViews.get(pane.paneId);
+    if (view) {
+      reportPaneSnapshot(view);
+    }
+  }
 }
 
 function overlayRegionForElement(
@@ -717,9 +732,11 @@ function ensurePaneView(paneId: number): PaneView {
   surfAceOverlay(labelEl, "pane-label");
   const windowLabelEl = document.createElement("span");
   windowLabelEl.className = "pane-label__window";
+  const provenanceLabelEl = document.createElement("span");
+  provenanceLabelEl.className = "pane-label__sender";
   const labelTextEl = document.createElement("span");
   labelTextEl.className = "pane-label__number";
-  labelEl.append(windowLabelEl, labelTextEl);
+  labelEl.append(provenanceLabelEl, windowLabelEl, labelTextEl);
   const focusOverlayEl = document.createElement("div");
   focusOverlayEl.className = "keyboard-focus-overlay";
   for (const edge of ["top", "right", "bottom", "left"]) {
@@ -818,10 +835,11 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
       });
       navigationPill.appendChild(forward);
     }
-    if (pane.ownerName) {
+    const navigationOwnerName = pane.provenanceName ?? pane.ownerName;
+    if (navigationOwnerName) {
       const ownerName = document.createElement("span");
       ownerName.className = "navigation-pill__owner";
-      ownerName.textContent = pane.ownerName;
+      ownerName.textContent = navigationOwnerName;
       navigationPill.appendChild(ownerName);
     }
     if (navigationPill.childElementCount > 0) {
@@ -996,7 +1014,6 @@ function htmlFrameBridgeScript(): string {
     if (!link?.href) {
       return;
     }
-    event.preventDefault();
     emit({ type: "navigation", url: link.href });
   }, { capture: true });
 
@@ -1004,7 +1021,6 @@ function htmlFrameBridgeScript(): string {
     if (!(event.target instanceof HTMLFormElement)) {
       return;
     }
-    event.preventDefault();
     emit({ type: "navigation", url: event.target.action || window.location.href });
   }, { capture: true });
 
@@ -1867,10 +1883,25 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   view.annotationShield.classList.toggle("enabled", pane.annotationBorderVisible);
   const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement;
   const windowLabel = labelWrap.querySelector(".pane-label__window") as HTMLSpanElement;
+  const provenanceLabel = labelWrap.querySelector(".pane-label__sender") as HTMLSpanElement;
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
-  windowLabel.textContent = latestState?.windowLabel ? latestState.windowLabel.toUpperCase() : "";
-  label.textContent = pane.label;
-  labelWrap.hidden = !pane.label;
+  const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
+  const visibleWindowLabel = latestState?.windowLabel ?? "";
+  provenanceLabel.textContent = pane.provenanceName ?? "";
+  provenanceLabel.hidden = !pane.provenanceName;
+  windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
+  windowLabel.hidden = !visibleWindowLabel;
+  label.textContent = visibleAddress.toUpperCase();
+  labelWrap.hidden = !visibleAddress;
+  labelWrap.title = [pane.provenanceName, visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]
+    .filter(Boolean)
+    .join(" ");
+  labelWrap.setAttribute(
+    "aria-label",
+    visibleAddress
+      ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}${pane.provenanceName ? ` ${pane.provenanceName}` : ""}`
+      : "",
+  );
   buildControls(view, pane);
   renderPaneContent(view, pane);
 
@@ -1917,9 +1948,11 @@ function renderWindow(state: RendererWindowState): void {
   appRoot.replaceChildren(wrapper);
   setAllPaneChromeMetrics();
   refreshDynamicPaneFrames();
+  reportAllPaneSnapshots();
   window.requestAnimationFrame(() => {
     setAllPaneChromeMetrics();
     refreshDynamicPaneFrames();
+    reportAllPaneSnapshots();
   });
   scheduleCompositorOverlayRegionReport("layout");
 }

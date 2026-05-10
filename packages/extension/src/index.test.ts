@@ -10,6 +10,7 @@ import {
 } from "./annotation-intent-delivery.js";
 import { surfAceToolContextFromOpenClawContext } from "./openclaw-tool-context.js";
 import { evaluateProviderHostGuard } from "./provider-host-guard.js";
+import { SurfAceWireClient } from "./surf-ace-server.js";
 
 test("Surf Ace extension does not inject static instructions through prompt-build hooks", () => {
   const indexSource = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
@@ -94,6 +95,71 @@ test("Surf Ace provider host guard allows explicit non-TARS override", () => {
       reason: "override",
     },
   );
+});
+
+test("Surf Ace wire client rejects inbound target.register as unsupported product surface", async () => {
+  const server = new WebSocketServer({ port: 0 });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("failed to bind test websocket server");
+  }
+
+  const responsePromise = new Promise<Record<string, any>>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("timed out waiting for target.register rejection"));
+    }, 3000);
+    server.once("connection", (socket) => {
+      socket.on("message", (data) => {
+        clearTimeout(timeout);
+        resolve(JSON.parse(Buffer.from(data).toString("utf8")) as Record<string, any>);
+      });
+      socket.send(JSON.stringify({
+        id: "req_register",
+        op: "target.register",
+        payload: {
+          expectedPreviousTargetEpoch: null,
+          idempotencyKey: "idem_1",
+          launchedAt: new Date(0).toISOString(),
+          ownershipEpoch: 1,
+          ownershipSessionId: "sa_1",
+          paneLineageId: "pl_1",
+          registrationState: "attached",
+          surfaceId: "sf_1",
+          surfaceInstanceId: null,
+          targetHeader: {
+            payloadSchemaVersion: 1,
+            replaySemantics: "navigate",
+            requiredCapabilities: ["target.browser_url.v1"],
+            safeToLogFields: ["url"],
+            safetyClass: "network",
+            summary: "https://example.com/",
+          },
+          targetKind: "browser_url",
+          targetPayload: { url: "https://example.com/" },
+        },
+        sentAt: Date.now(),
+        type: "request",
+        v: 1,
+      }));
+    });
+  });
+
+  const client = new SurfAceWireClient(`ws://127.0.0.1:${address.port}`);
+  try {
+    await client.connect(1000);
+    const response = await responsePromise;
+    assert.equal(response.type, "response");
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "target.register.rejected");
+    assert.equal(response.payload?.status, "rejected");
+    assert.equal(response.payload?.errorCode, "registration_failed");
+    assert.match(String(response.payload?.message), /not supported by this product surface/);
+  } finally {
+    await client.close();
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  }
 });
 
 test("settled annotation delivery connects to the gateway and sends the image attachment via agent", async () => {

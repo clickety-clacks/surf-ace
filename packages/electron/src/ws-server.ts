@@ -77,6 +77,13 @@ type OwnershipLock = {
   sessionId: string;
 };
 
+type PairPostResponseCommit = {
+  providerName: string;
+  session: ActiveSession;
+  supersededSession: ActiveSession | null;
+  surfaceId: string;
+};
+
 type PaneFlushTimers = {
   commitAfterFlush: boolean;
   idleTimer: NodeJS.Timeout | null;
@@ -132,6 +139,7 @@ const DEFAULT_LIMITS = {
   maxVisibleTextBytes: 4096,
 };
 const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
+const PANE_GEOMETRY_READY_TIMEOUT_MS = 8_000;
 const WS_DIAGNOSTIC_LOG_PATH = process.env.SURF_ACE_WS_DIAGNOSTIC_LOG ?? path.join(
   os.homedir(),
   "Library",
@@ -215,6 +223,7 @@ export class SurfaceWsServer {
   private readonly httpServer: http.Server;
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
+  private readonly pendingPairCommits = new WeakMap<Response, PairPostResponseCommit>();
   private readonly transports = new Map<string, SurfaceTransportState>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
@@ -493,16 +502,27 @@ export class SurfaceWsServer {
     });
   }
 
-  async emitNavigation(surfaceId: string, paneId: number, url: string): Promise<void> {
+  async emitNavigation(
+    surfaceId: string,
+    paneId: number,
+    url: string,
+    navigationState?: { contentId: string; revision: number },
+  ): Promise<void> {
     const session = this.activeSession(surfaceId);
     if (!session || !isEventEnabled(session.eventProfile, "event.navigation")) {
       return;
     }
-    const state = this.tryCaptureSnapshot(surfaceId, paneId);
+    const state = navigationState ?? (() => {
+      const snapshot = this.tryCaptureSnapshot(surfaceId, paneId);
+      if (!snapshot || !snapshot.contentId || snapshot.contentType !== "html") {
+        return null;
+      }
+      return {
+        contentId: snapshot.contentId,
+        revision: snapshot.revision,
+      };
+    })();
     if (!state) {
-      return;
-    }
-    if (!state.contentId || state.contentType !== "html") {
       return;
     }
     await this.sendEvent(session.socket, {
@@ -650,6 +670,7 @@ export class SurfaceWsServer {
       case "surface-created":
       case "surface-removed":
       case "surface-changed":
+      case "pane-geometry-changed":
         return;
     }
   }
@@ -783,12 +804,24 @@ export class SurfaceWsServer {
 
     cache.set(request.id, { payloadHash, response });
     trimCache(cache);
-    await this.reply(socket, response);
+    const responseDelivered = await this.reply(socket, response);
+    if (
+      response.type === "response" &&
+      response.ok &&
+      response.op === "pair.request"
+    ) {
+      if (responseDelivered) {
+        this.commitPairResponse(response);
+      } else {
+        this.pendingPairCommits.delete(response);
+      }
+    }
     if (request.op === "pair.request") {
       persistentServerDiagnostic(
-        response.ok ? "info" : "warn",
+        response.ok && responseDelivered ? "info" : "warn",
         "pair_response_sent",
         {
+          delivered: responseDelivered,
           error_code: !response.ok ? response.error.code : undefined,
           ok: response.ok,
           request_id: request.id,
@@ -1035,6 +1068,7 @@ export class SurfaceWsServer {
     let resumed = false;
     let sessionId: string;
     let ownershipEpoch: number;
+    let supersededSession: ActiveSession | null = null;
 
     if (!lock) {
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
@@ -1051,9 +1085,27 @@ export class SurfaceWsServer {
         },
       );
     } else if (lock.providerId === providerId) {
-      if (request.payload.takeover === true) {
+      if (request.payload.takeover === true && resumeSessionId === lock.sessionId) {
+        resumed = true;
+        sessionId = lock.sessionId;
+        ownershipEpoch = lock.ownershipEpoch;
         if (existing && existing.socket !== socket) {
-          this.detachActiveSession(surfaceId, "superseded");
+          supersededSession = existing;
+        }
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_takeover_resumed",
+          {
+            provider_id: providerId,
+            request_id: request.id,
+            session_id: sessionId,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+      } else if (request.payload.takeover === true) {
+        if (existing && existing.socket !== socket) {
+          supersededSession = existing;
         }
         sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
         ownershipEpoch = lock.ownershipEpoch + 1;
@@ -1072,19 +1124,6 @@ export class SurfaceWsServer {
             surface_id: surfaceId,
           },
         );
-      } else if (existingOpenElsewhere) {
-        persistentServerDiagnostic(
-          "warn",
-          "pair_request_duplicate_active",
-          {
-            provider_id: providerId,
-            request_id: request.id,
-            session_id: lock.sessionId,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-        throw new SurfaceCoreError("busy", "Provider already holds an active socket for this surface");
       } else if (resumeSessionId !== lock.sessionId) {
         persistentServerDiagnostic(
           "warn",
@@ -1103,6 +1142,9 @@ export class SurfaceWsServer {
         resumed = true;
         sessionId = lock.sessionId;
         ownershipEpoch = lock.ownershipEpoch;
+        if (existing && existing.socket !== socket) {
+          supersededSession = existing;
+        }
         persistentServerDiagnostic(
           "info",
           "pair_request_resumed",
@@ -1114,9 +1156,6 @@ export class SurfaceWsServer {
             surface_id: surfaceId,
           },
         );
-        if (existing && existing.socket !== socket) {
-          this.detachActiveSession(surfaceId, "superseded");
-        }
       }
     } else {
       if (!request.payload.takeover) {
@@ -1134,7 +1173,7 @@ export class SurfaceWsServer {
         throw new SurfaceCoreError("busy", "Surface ownership lock is held by another provider");
       }
       if (existing && existing.socket !== socket) {
-        this.detachActiveSession(surfaceId, "superseded");
+        supersededSession = existing;
       }
       sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
       ownershipEpoch = lock.ownershipEpoch + 1;
@@ -1179,22 +1218,6 @@ export class SurfaceWsServer {
       sessionId,
       socket,
     };
-    transport.active = session;
-    transport.lock = {
-      drawingFlushConfig,
-      eventProfile: requestedProfile,
-      ownershipEpoch,
-      providerId,
-      sessionId,
-    };
-    if (meta) {
-      meta.pairedSurfaceId = surfaceId;
-    }
-
-    this.core.setConnectionBar(surfaceId, "connecting");
-    this.core.setProviderName(surfaceId, request.payload.providerName);
-    this.onBusyChanged?.();
-
     const response: Response = {
       id: request.id,
       ok: true,
@@ -1222,6 +1245,12 @@ export class SurfaceWsServer {
       type: "response",
       v: 1,
     };
+    this.pendingPairCommits.set(response, {
+      providerName: request.payload.providerName,
+      session,
+      supersededSession,
+      surfaceId,
+    });
 
     persistentServerDiagnostic(
       "info",
@@ -1316,6 +1345,63 @@ export class SurfaceWsServer {
     }
   }
 
+  private async waitForResolvedPaneGeometry(
+    surfaceId: string,
+    paneIds: number[],
+    operation: string,
+  ): Promise<void> {
+    const uniquePaneIds = [...new Set(paneIds)];
+    if (uniquePaneIds.length === 0) {
+      return;
+    }
+    let missing = this.core.missingResolvedPaneGeometry(surfaceId, uniquePaneIds);
+    if (missing.length === 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      let unsubscribe = (): void => {};
+      const cleanup = (): void => {
+        clearTimeout(timeout);
+        unsubscribe();
+      };
+      const check = (): void => {
+        try {
+          missing = this.core.missingResolvedPaneGeometry(surfaceId, uniquePaneIds);
+        } catch (error) {
+          cleanup();
+          reject(error);
+          return;
+        }
+        if (missing.length === 0) {
+          cleanup();
+          resolve();
+        }
+      };
+      const timeout = setTimeout(() => {
+        cleanup();
+        persistentServerDiagnostic("warn", "pane_geometry_ready_timeout", {
+          missing_pane_ids: missing.join(","),
+          operation,
+          surface_id: surfaceId,
+        });
+        reject(new SurfaceCoreError(
+          "render_failed",
+          `${operation} did not produce resolved pane geometry for pane(s): ${missing.join(",")}`,
+        ));
+      }, PANE_GEOMETRY_READY_TIMEOUT_MS);
+      unsubscribe = this.core.subscribe((event) => {
+        if (event.surfaceId !== surfaceId) {
+          return;
+        }
+        if (event.type === "pane-geometry-changed" || event.type === "surface-changed") {
+          check();
+        }
+      });
+      check();
+    });
+  }
+
   async setViewport(surfaceId: string, viewport: SurfaceViewport): Promise<boolean> {
     return await this.runSurfaceMutation(surfaceId, async () => {
       const nativePaneIds = this.core.panesList(surfaceId).panes
@@ -1325,7 +1411,7 @@ export class SurfaceWsServer {
         this.core.setViewport(surfaceId, viewport);
         return true;
       }
-      const rollbackMaterialization = this.core.projectNativePaneGeometryUpdate(surfaceId, nativePaneIds);
+      const rollbackMaterialization = this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds);
       const materialization = this.core.projectNativePaneGeometryUpdateForViewport(surfaceId, nativePaneIds, viewport);
       const updateResult = await this.applyNativePaneGeometryToCompositor(materialization);
       if (updateResult.failure) {
@@ -1394,12 +1480,29 @@ export class SurfaceWsServer {
         "topology.apply windowLabel must be a lowercase alphabetic provider identity label",
       );
     }
+    const currentWindowLabel = this.core.surfaceWindowLabel(surfaceId);
+    if (request.payload.windowLabel.length > 3 && request.payload.windowLabel !== currentWindowLabel) {
+      persistentServerDiagnostic(
+        "warn",
+        "topology_apply_validation_failed",
+        {
+          code: "invalid_window_label",
+          request_id: request.id,
+          surface_id: surfaceId,
+          window_label: request.payload.windowLabel,
+        },
+      );
+      throw new SurfaceCoreError(
+        "invalid_payload",
+        "topology.apply windowLabel must match the paired surface identity",
+      );
+    }
     const payload = await this.runProviderWindowLabelMutation(() => this.runSurfaceMutation(surfaceId, async () => {
       const previousWindowLabel = this.core.surfaceWindowLabel(surfaceId);
       const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
       const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForTopologyApply(surfaceId, request.payload);
       const rollbackNativeGeometry = nativeGeometryUpdate
-        ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+        ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
         : null;
       this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
       await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "topology.apply", rollbackNativeGeometry);
@@ -1415,6 +1518,13 @@ export class SurfaceWsServer {
       const result = this.core.topologyApply(surfaceId, request.payload);
       this.recordProviderWindowRelabel(surfaceId, previousWindowLabel, request.payload.windowLabel, "topology.apply", request.id);
       this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      if (previousWindowLabel === request.payload.windowLabel) {
+        await this.waitForResolvedPaneGeometry(
+          surfaceId,
+          result.panes.map((pane) => Number(pane.paneId)),
+          "topology.apply",
+        );
+      }
       return result;
     }));
     persistentServerDiagnostic(
@@ -1924,7 +2034,7 @@ export class SurfaceWsServer {
     return null;
   }
 
-	  private async updateNativePaneGeometryBeforeLayout(
+  private async updateNativePaneGeometryBeforeLayout(
     surfaceId: string,
     materialization: NativePaneMaterialization | null,
     operation: string,
@@ -1937,18 +2047,18 @@ export class SurfaceWsServer {
       throw new SurfaceCoreError("render_failed", `${operation} cannot update live native-hosted pane geometry without native pane update support`);
     }
     const updateResult = await this.applyNativePaneGeometryToCompositor(materialization);
-	    if (updateResult.failure) {
-	      if (updateResult.updated) {
-	        await this.rollbackNativePaneGeometry(surfaceId, rollbackMaterialization, operation, updateResult.failure);
-	      }
-	      throw new SurfaceCoreError("render_failed", updateResult.failure);
-	    }
+    if (updateResult.failure) {
+      if (updateResult.updated) {
+        await this.rollbackNativePaneGeometry(surfaceId, rollbackMaterialization, operation, updateResult.failure);
+      }
+      throw new SurfaceCoreError("render_failed", updateResult.failure);
+    }
     const staleSourceFailure = rollbackMaterialization
       ? this.core.validateNativePaneMaterializationLayout(surfaceId, rollbackMaterialization)
       : null;
     if (staleSourceFailure) {
       const currentMaterialization = rollbackMaterialization
-        ? this.core.projectNativePaneGeometryUpdate(surfaceId, rollbackMaterialization.panes.map((pane) => Number(pane.id)))
+        ? this.core.projectCurrentNativePaneGeometry(surfaceId, rollbackMaterialization.panes.map((pane) => Number(pane.id)))
         : null;
       await this.rollbackNativePaneGeometry(surfaceId, currentMaterialization, operation, staleSourceFailure);
       throw new SurfaceCoreError("render_failed", staleSourceFailure);
@@ -2218,7 +2328,7 @@ export class SurfaceWsServer {
       const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForPaneSplit(surfaceId, splitPayload);
       const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForPaneSplit(surfaceId, splitPayload);
       const rollbackNativeGeometry = nativeGeometryUpdate
-        ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+        ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
         : null;
       const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
         surfaceId,
@@ -2232,6 +2342,11 @@ export class SurfaceWsServer {
       await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.split", rollbackNativeGeometry);
       const result = this.core.paneSplit(surfaceId, splitPayload);
       this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      await this.waitForResolvedPaneGeometry(
+        surfaceId,
+        result.panes.map((pane) => Number(pane.paneId)),
+        "pane.split",
+      );
       return result;
     });
     return {
@@ -2269,7 +2384,7 @@ export class SurfaceWsServer {
       const nativeHostedPaneId = this.core.nativeHostedPaneIdForPaneClose(surfaceId, paneId);
       const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForPaneClose(surfaceId, paneId);
       const rollbackNativeGeometry = nativeGeometryUpdate
-        ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+        ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
         : null;
       await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.close", rollbackNativeGeometry);
       const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
@@ -2283,6 +2398,11 @@ export class SurfaceWsServer {
       }
       const result = this.core.paneClose(surfaceId, paneId);
       this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      await this.waitForResolvedPaneGeometry(
+        surfaceId,
+        this.core.getRendererWindowState(surfaceId).panes.map((pane) => pane.paneId),
+        "pane.close",
+      );
       return result;
     });
     return {
@@ -2511,10 +2631,41 @@ export class SurfaceWsServer {
     if (!active) {
       return;
     }
-    clearPaneTimers(active.paneFlushTimers);
     transport.active = null;
-    const meta = this.socketMeta.get(active.socket);
+    this.closeSession(surfaceId, active, reason);
+  }
+
+  private commitPairResponse(response: Response): void {
+    const plan = this.pendingPairCommits.get(response);
+    if (!plan) {
+      return;
+    }
+    this.pendingPairCommits.delete(response);
+    const transport = this.transport(plan.surfaceId);
+    transport.active = plan.session;
+    transport.lock = {
+      drawingFlushConfig: plan.session.drawingFlushConfig,
+      eventProfile: plan.session.eventProfile,
+      ownershipEpoch: plan.session.ownershipEpoch,
+      providerId: plan.session.providerId,
+      sessionId: plan.session.sessionId,
+    };
+    const meta = this.socketMeta.get(plan.session.socket);
     if (meta) {
+      meta.pairedSurfaceId = plan.surfaceId;
+    }
+    this.core.setConnectionBar(plan.surfaceId, "connecting");
+    this.core.setProviderName(plan.surfaceId, plan.providerName);
+    this.onBusyChanged?.();
+    if (plan.supersededSession && plan.supersededSession.socket !== plan.session.socket) {
+      this.closeSession(plan.surfaceId, plan.supersededSession, "superseded");
+    }
+  }
+
+  private closeSession(surfaceId: string, active: ActiveSession, reason: string): void {
+    clearPaneTimers(active.paneFlushTimers);
+    const meta = this.socketMeta.get(active.socket);
+    if (meta?.pairedSurfaceId === surfaceId) {
       meta.pairedSurfaceId = null;
     }
     console.info(
@@ -2688,29 +2839,29 @@ export class SurfaceWsServer {
     }
   }
 
-  private async reply(socket: WebSocket, response: Response): Promise<void> {
-    await this.send(socket, JSON.stringify(response));
+  private async reply(socket: WebSocket, response: Response): Promise<boolean> {
+    return await this.send(socket, JSON.stringify(response));
   }
 
-  private async sendEvent(socket: WebSocket, event: Event): Promise<void> {
-    await this.send(socket, JSON.stringify(event));
+  private async sendEvent(socket: WebSocket, event: Event): Promise<boolean> {
+    return await this.send(socket, JSON.stringify(event));
   }
 
-  private async send(socket: WebSocket, payload: string): Promise<void> {
+  private async send(socket: WebSocket, payload: string): Promise<boolean> {
     if (socket.readyState !== WebSocket.OPEN) {
-      return;
+      return false;
     }
-    await new Promise<void>((resolve, reject) => {
+    return await new Promise<boolean>((resolve, reject) => {
       socket.send(payload, (error) => {
         if (error) {
           if (socket.readyState !== WebSocket.OPEN || isSocketClosedError(error)) {
-            resolve();
+            resolve(false);
             return;
           }
           reject(error);
           return;
         }
-        resolve();
+        resolve(true);
       });
     });
   }

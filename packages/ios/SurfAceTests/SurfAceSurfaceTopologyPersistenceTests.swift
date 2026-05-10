@@ -55,6 +55,69 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")
 
         XCTAssertEqual(pane.labelText, "42")
+        XCTAssertEqual(pane.displayId(windowLabel: "c"), "42")
+        XCTAssertEqual(pane.visibleAddress(windowLabel: "c"), "42")
+        XCTAssertFalse(pane.displayId(windowLabel: "c").contains("c"))
+    }
+
+    @MainActor
+    func testPaneChromeIdentityUsesGlobalPaneTokenWindowLabelAndSessionName() {
+        let surface = SurfAceSurfaceModel(sceneKey: "scene-chrome", surfaceId: "sf_chrome", windowLabel: "c", name: "Surf Ace")
+        let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_chrome",
+            revision: 1,
+            historyOwnerToken: "hot_chrome",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# Chrome"),
+            title: "Document Title",
+            provenanceDisplayName: "Session One",
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+
+        let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
+
+        XCTAssertEqual(identity.displayId, "42")
+        XCTAssertEqual(identity.windowLabel, "c")
+        XCTAssertEqual(identity.sessionName, "Session One")
+        XCTAssertFalse(identity.displayId.contains(identity.windowLabel))
+        XCTAssertNotEqual(identity.displayId, "c42")
+        XCTAssertNotEqual(identity.displayId, "c-42")
+        XCTAssertNotEqual(identity.displayId, "e1")
+        XCTAssertNotEqual(identity.displayId, "e16")
+        XCTAssertNotEqual(identity.displayId, "b13")
+    }
+
+    @MainActor
+    func testPaneChromeIdentityDoesNotUseContentTitleAsSessionName() {
+        let surface = SurfAceSurfaceModel(sceneKey: "scene-chrome-title", surfaceId: "sf_chrome_title", windowLabel: "e", name: "Surf Ace")
+        let pane = SurfAcePaneModel(paneId: 16, paneLabel: 99, name: "Right")
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_chrome_title",
+            revision: 1,
+            historyOwnerToken: "hot_chrome_title",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# Chrome"),
+            title: "Document Title",
+            provenanceDisplayName: nil,
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+
+        let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
+
+        XCTAssertEqual(identity.displayId, "99")
+        XCTAssertEqual(identity.windowLabel, "e")
+        XCTAssertNil(identity.sessionName)
+        XCTAssertNotEqual(identity.sessionName, "Document Title")
+        XCTAssertNotEqual(identity.displayId, "e16")
     }
 
     @MainActor
@@ -94,6 +157,88 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(restoredSurface.panes.map(\.paneLabel), [1, 2, 3])
         XCTAssertEqual(restoredSurface.panes.map(\.name), ["One", "Two", "Three"])
         XCTAssertTrue(restoredSurface.providerTopologyInitialized)
+    }
+
+    @MainActor
+    func testRegisterSurfaceRestoresPersistedPaneContentHistoryAndTargetStateAfterRelaunch() {
+        let suiteName = "SurfAceSurfaceTopologyPersistenceTests.\(UUID().uuidString)"
+        guard let userDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        userDefaults.removePersistentDomain(forName: suiteName)
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let firstRuntime = SurfAceRuntime(userDefaults: userDefaults)
+        let firstSurface = firstRuntime.registerSurface(sceneKey: "scene-content")
+        let pane = SurfAcePaneModel(paneId: 1, paneLineageId: "pl_content", paneLabel: 1, name: "Browser")
+        pane.backStack = [
+            SurfAcePaneEntry.empty(revision: 1),
+        ]
+        pane.currentEntry = .browserURL(
+            targetId: "tg_browser",
+            targetEpoch: 2,
+            url: "https://example.com/docs#intro",
+            title: "Docs"
+        )
+        pane.forwardStack = [
+            SurfAcePaneEntry.empty(revision: 3),
+        ]
+        pane.currentTarget = SurfAcePaneTargetState(
+            targetId: "tg_browser",
+            targetKind: "browser_url",
+            paneLineageId: "pl_content",
+            targetEpoch: 2,
+            restorePolicy: "auto",
+            currentState: "applied"
+        )
+        firstSurface.windowLabel = "a"
+        firstSurface.panesById = [1: pane]
+        firstSurface.paneLayout = .leaf(1)
+        firstSurface.providerTopologyInitialized = true
+        firstRuntime.persistSurfaceTopology(surfaceId: firstSurface.surfaceId)
+
+        let relaunchedRuntime = SurfAceRuntime(userDefaults: userDefaults)
+        let restoredSurface = relaunchedRuntime.registerSurface(sceneKey: "scene-content")
+        let restoredPane = restoredSurface.panes.first
+
+        XCTAssertEqual(restoredSurface.surfaceId, firstSurface.surfaceId)
+        XCTAssertEqual(restoredPane?.paneLineageId, "pl_content")
+        XCTAssertEqual(restoredPane?.currentEntry.url, "https://example.com/docs#intro")
+        XCTAssertEqual(restoredPane?.currentEntry.revision, 2)
+        XCTAssertEqual(restoredPane?.currentEntry.title, "Docs")
+        XCTAssertEqual(restoredPane?.backStack.map(\.revision), [1])
+        XCTAssertEqual(restoredPane?.forwardStack.map(\.revision), [3])
+        XCTAssertEqual(restoredPane?.currentTarget?.targetId, "tg_browser")
+        XCTAssertEqual(restoredPane?.currentTarget?.targetKind, "browser_url")
+    }
+
+    @MainActor
+    func testUnregisterSurfaceRetiresSceneIdentityInsteadOfRestoringTombstonedSurface() {
+        let suiteName = "SurfAceSurfaceTopologyPersistenceTests.\(UUID().uuidString)"
+        guard let userDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        userDefaults.removePersistentDomain(forName: suiteName)
+        defer {
+            userDefaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let firstRuntime = SurfAceRuntime(userDefaults: userDefaults)
+        let firstSurface = firstRuntime.registerSurface(sceneKey: "scene-closed")
+        firstSurface.windowLabel = "a"
+        firstRuntime.persistSurfaceTopology(surfaceId: firstSurface.surfaceId)
+        firstRuntime.unregisterSurface(sceneKey: "scene-closed")
+
+        let relaunchedRuntime = SurfAceRuntime(userDefaults: userDefaults)
+        let reopenedSurface = relaunchedRuntime.registerSurface(sceneKey: "scene-closed")
+
+        XCTAssertNotEqual(reopenedSurface.surfaceId, firstSurface.surfaceId)
+        XCTAssertEqual(reopenedSurface.windowLabel, "")
+        XCTAssertFalse(reopenedSurface.providerTopologyInitialized)
     }
 
     @MainActor
@@ -264,9 +409,11 @@ final class SurfAcePaneGeometrySnapshotTests: XCTestCase {
         let staleGeometry = runtime.paneGeometryPayload(surfaceId: surface.surfaceId, paneId: 1)
         let staleContentViewport = staleGeometry["contentViewport"] as? [String: Double]
 
-        XCTAssertEqual(staleViewport["width"] as? Int, 1)
+        XCTAssertEqual(staleViewport["width"] as? Int, 400)
         XCTAssertEqual(staleGeometry["geometryRevision"] as? Int, 0)
+        XCTAssertEqual(staleGeometry["geometryUnavailable"] as? Bool, true)
+        XCTAssertEqual(staleGeometry["unavailableReason"] as? String, "missing_resolved_snapshot")
         XCTAssertEqual(staleGeometry["topologyEpoch"] as? Int, surface.topologyEpoch)
-        XCTAssertEqual(staleContentViewport?["width"], 1)
+        XCTAssertEqual(staleContentViewport?["width"], 400)
     }
 }
