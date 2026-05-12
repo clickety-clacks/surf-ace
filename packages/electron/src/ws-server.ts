@@ -8,6 +8,7 @@ import { WebSocket, WebSocketServer } from "ws";
 
 import type {
   AnnotationsRemoveRequest,
+  AuthorityStateRequest,
   ContentApplyRequest,
   ContentAppendRequest,
   ContentClearRequest,
@@ -64,6 +65,7 @@ type ActiveSession = {
   paneFlushTimers: Map<number, PaneFlushTimers>;
   pairConfirmed: boolean;
   providerId: string;
+  providerName: string;
   requestCache: Map<string, SocketCacheEntry>;
   sessionId: string;
   socket: WebSocket;
@@ -917,6 +919,8 @@ export class SurfaceWsServer {
         return await this.handleAnnotationsRemove(socket, request);
       case "snapshot.get":
         return await this.handleSnapshotGet(socket, request);
+      case "authority.state":
+        return this.handleAuthorityState(socket, request);
       case "heartbeat.ping":
         return this.handleHeartbeat(socket, request);
     }
@@ -1214,6 +1218,7 @@ export class SurfaceWsServer {
       paneFlushTimers: new Map(),
       pairConfirmed: false,
       providerId,
+      providerName: request.payload.providerName,
       requestCache: new Map(),
       sessionId,
       socket,
@@ -2555,13 +2560,69 @@ export class SurfaceWsServer {
     }
     if (!transport.active.pairConfirmed) {
       transport.active.pairConfirmed = true;
-      this.core.setConnectionBar(surfaceId, "connected");
     }
     return {
       id: request.id,
       ok: true,
       op: "heartbeat.ping",
       payload: { nonce: request.payload.nonce },
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private handleAuthorityState(socket: WebSocket, request: AuthorityStateRequest): Response {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    const transport = this.transport(surfaceId);
+    const active = transport.active;
+    const payload = request.payload;
+    let accepted = false;
+    let reason: string | null = null;
+
+    if (!active || active.socket !== socket) {
+      reason = "not_active_session";
+    } else if (payload.surfaceId !== surfaceId) {
+      reason = "surface_id_mismatch";
+    } else if (
+      payload.providerId !== active.providerId ||
+      payload.sessionId !== active.sessionId ||
+      payload.ownershipEpoch !== active.ownershipEpoch
+    ) {
+      reason = "session_identity_mismatch";
+    } else {
+      const surface = this.core.getSurface(surfaceId);
+      const panes = this.core.pairState(surfaceId).panes;
+      const panesMatch = panes.length === payload.panes.length &&
+        panes.every((pane, index) => {
+          const candidate = payload.panes[index];
+          return Boolean(candidate) &&
+            candidate.paneId === pane.paneId &&
+            candidate.paneLabel === pane.paneLabel &&
+            (candidate.paneLineageId ?? null) === (pane.paneLineageId ?? null);
+        });
+      if (payload.windowLabel !== surface.windowLabel) {
+        reason = "window_label_mismatch";
+      } else if (!panesMatch) {
+        reason = "pane_identity_mismatch";
+      } else if (!payload.actionable) {
+        reason = payload.reason ?? "provider_not_actionable";
+      } else {
+        accepted = true;
+        this.core.setProviderName(surfaceId, active.providerName);
+        this.core.setConnectionBar(surfaceId, "connected");
+      }
+    }
+
+    if (!accepted) {
+      this.core.setConnectionBar(surfaceId, "connecting");
+    }
+
+    return {
+      id: request.id,
+      ok: true,
+      op: "authority.state",
+      payload: { accepted, reason },
       sentAt: Date.now(),
       type: "response",
       v: 1,
@@ -2590,6 +2651,7 @@ export class SurfaceWsServer {
     const capabilities = this.core.capabilities();
     return {
       ...capabilities,
+      protocolFeatures: ["authority.state.v1"],
       targetCapabilities: this.compositorSocketPath
         ? [...capabilities.targetCapabilities, "target.terminal_app.v1"]
         : capabilities.targetCapabilities,

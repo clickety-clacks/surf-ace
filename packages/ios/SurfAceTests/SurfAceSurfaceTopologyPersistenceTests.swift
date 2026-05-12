@@ -40,6 +40,75 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         ]))
     }
 
+    func testAuthorityStateRequiresProviderActionabilityAndExactPaneIdentity() {
+        let panes = [
+            SurfAceAuthorityPaneIdentity(paneId: 41, paneLabel: 1, paneLineageId: "pl_41"),
+        ]
+        let basePayload: [String: Any] = [
+            "actionable": true,
+            "reason": NSNull(),
+            "ownershipEpoch": 7,
+            "providerId": "pv_1",
+            "sessionId": "sa_1",
+            "surfaceId": "sf_1",
+            "windowLabel": "a",
+            "panes": [
+                [
+                    "paneId": 41,
+                    "paneLabel": 1,
+                    "paneLineageId": "pl_41",
+                ],
+            ],
+        ]
+
+        XCTAssertNil(surfAceAuthorityStateRejectionReason(
+            payload: basePayload,
+            surfaceId: "sf_1",
+            providerId: "pv_1",
+            sessionId: "sa_1",
+            ownershipEpoch: 7,
+            lockProviderId: "pv_1",
+            lockSessionId: "sa_1",
+            windowLabel: "a",
+            panes: panes
+        ))
+
+        var wrongPaneLabel = basePayload
+        wrongPaneLabel["panes"] = [
+            [
+                "paneId": 41,
+                "paneLabel": 2,
+                "paneLineageId": "pl_41",
+            ],
+        ]
+        XCTAssertEqual(surfAceAuthorityStateRejectionReason(
+            payload: wrongPaneLabel,
+            surfaceId: "sf_1",
+            providerId: "pv_1",
+            sessionId: "sa_1",
+            ownershipEpoch: 7,
+            lockProviderId: "pv_1",
+            lockSessionId: "sa_1",
+            windowLabel: "a",
+            panes: panes
+        ), "pane_identity_mismatch")
+
+        var blocked = basePayload
+        blocked["actionable"] = false
+        blocked["reason"] = "surface_tombstoned"
+        XCTAssertEqual(surfAceAuthorityStateRejectionReason(
+            payload: blocked,
+            surfaceId: "sf_1",
+            providerId: "pv_1",
+            sessionId: "sa_1",
+            ownershipEpoch: 7,
+            lockProviderId: "pv_1",
+            lockSessionId: "sa_1",
+            windowLabel: "a",
+            panes: panes
+        ), "surface_tombstoned")
+    }
+
     func testKeyboardFocusOutlineIsSuppressedForSinglePaneSurfaces() {
         XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: 1, paneId: 1, paneCount: 1))
         XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: nil, paneId: 1, paneCount: 1))

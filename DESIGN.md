@@ -253,7 +253,7 @@ Surface ownership behavior:
 ### 4.5 Keepalive
 
 Application-level keepalive is required:
-1. Provider starts heartbeat only after successful `pair.response`.
+1. Provider starts heartbeat only after successful `pair.response` and accepted provider authority state.
 2. Provider sends `heartbeat.ping` every 10s.
 3. Surface replies with `heartbeat.pong` within 3s.
 4. Surface MUST prioritize heartbeat handling above queued frame/render work and MUST NOT queue `heartbeat.pong` behind render/mutation tasks.
@@ -482,6 +482,8 @@ These rules are normative for the single-visible-owner history model:
 
 #### Protocol forward compatibility
 The `video` and `canvas` content types are included in the `ContentType` schema enum in v1 so that implementations can reject them with `unsupported_content_type` rather than `invalid_payload`. This preserves forward compatibility: a v1 surface that does not implement these types still handles the message gracefully. A surface advertises supported content types via `cap` bitmask in mDNS TXT and in the `pair.response` capabilities field.
+
+Provider authority acknowledgement is an optional v1 protocol feature advertised as `authority.state.v1` in `pair.response.capabilities.protocolFeatures`. Providers MUST fail closed when a paired client omits this feature: pairing, durable provider identity, saved pane lineage, restored target/window state, and heartbeat are not enough to mark the surface actionable. For omitted capability, the provider does not send `authority.state`, does not start heartbeat, and projects the surface as non-actionable/non-green. New clients that advertise the feature must accept the exact provider-approved surface/window/pane identity before CLU-facing state can become actionable.
 
 ## 7. Always-On Event Delivery
 
@@ -2632,6 +2634,18 @@ pendingEvents     int       Count of buffered events not yet read by CLU
 ```
 
 **Errors:** none (always returns current known local state, possibly empty array)
+
+---
+
+#### `surf_ace_authority_diagnostics`
+
+Returns the provider authority projection used to decide which surfaces are admitted and actionable. Read-only, local.
+
+**Params:** none
+
+**Returns:** a diagnostic record containing persisted surfaces, live surfaces, runtime screen snapshot ids, target/window record ids, tombstones, pane counters, blocked surface ids, per-surface blocker reasons, provider identity, and runtime owner/process state.
+
+**Behavior:** This tool is available even when `surf_ace_list` is empty, so stale self-owned persisted surfaces and disabled/passive runtime state remain inspectable without first admitting a usable surface.
 
 ---
 

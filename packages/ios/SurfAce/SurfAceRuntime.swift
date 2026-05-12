@@ -49,6 +49,12 @@ struct SurfAceProviderBootstrapIdentity {
     let initialPaneLabel: Int
 }
 
+struct SurfAceAuthorityPaneIdentity {
+    let paneId: Int
+    let paneLabel: Int
+    let paneLineageId: String?
+}
+
 func surfAceValidatedProviderBootstrapIdentity(from payload: [String: Any]) -> SurfAceProviderBootstrapIdentity? {
     guard let windowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
           let initialPaneId = surfAceValidatedPositiveProviderIdentifier(from: payload["initialPaneId"]),
@@ -60,6 +66,47 @@ func surfAceValidatedProviderBootstrapIdentity(from payload: [String: Any]) -> S
         initialPaneId: initialPaneId,
         initialPaneLabel: initialPaneLabel
     )
+}
+
+func surfAceAuthorityStateRejectionReason(
+    payload: [String: Any],
+    surfaceId: String,
+    providerId: String,
+    sessionId: String,
+    ownershipEpoch: Int,
+    lockProviderId: String,
+    lockSessionId: String,
+    windowLabel: String,
+    panes: [SurfAceAuthorityPaneIdentity]
+) -> String? {
+    if payload["surfaceId"] as? String != surfaceId {
+        return "surface_id_mismatch"
+    }
+    if payload["providerId"] as? String != providerId ||
+        payload["sessionId"] as? String != sessionId ||
+        payload["ownershipEpoch"] as? Int != ownershipEpoch ||
+        lockProviderId != providerId ||
+        lockSessionId != sessionId {
+        return "session_identity_mismatch"
+    }
+    if payload["windowLabel"] as? String != windowLabel {
+        return "window_label_mismatch"
+    }
+    guard let payloadPanes = payload["panes"] as? [[String: Any]],
+          payloadPanes.count == panes.count else {
+        return "pane_identity_mismatch"
+    }
+    for (pane, candidate) in zip(panes, payloadPanes) {
+        guard candidate["paneId"] as? Int == pane.paneId,
+              candidate["paneLabel"] as? Int == pane.paneLabel,
+              candidate["paneLineageId"] as? String == pane.paneLineageId else {
+            return "pane_identity_mismatch"
+        }
+    }
+    if payload["actionable"] as? Bool != true {
+        return payload["reason"] as? String ?? "provider_not_actionable"
+    }
+    return nil
 }
 
 actor SurfAceOutboundSender {
@@ -166,6 +213,7 @@ private struct SurfAceSessionState {
     let ownershipEpoch: Int
     let pairedAt: Date
     var pairConfirmed: Bool
+    var authorityConfirmed: Bool
 }
 
 private struct SurfAceOwnershipLockState {
@@ -911,6 +959,7 @@ final class SurfAceRuntime {
                             "content.clear",
                             "annotations.remove",
                             "snapshot.get",
+                            "authority.state",
                             "heartbeat.ping",
                             "ownership.relinquish",
                             "panes.list",
@@ -1154,6 +1203,11 @@ final class SurfAceRuntime {
                 responseObject: await handleSnapshotGet(id: id, payload: payload, connectionUUID: connectionUUID),
                 postSendPairCommit: nil
             )
+        case "authority.state":
+            return SurfAceProcessedRequestResult(
+                responseObject: handleAuthorityState(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         case "heartbeat.ping":
             return SurfAceProcessedRequestResult(
                 responseObject: handleHeartbeatPing(id: id, payload: payload, connectionUUID: connectionUUID),
@@ -1363,7 +1417,8 @@ final class SurfAceRuntime {
             drawingFlushConfig: drawingFlushConfig,
             ownershipEpoch: ownershipEpoch,
             pairedAt: Date(),
-            pairConfirmed: false
+            pairConfirmed: false,
+            authorityConfirmed: false
         )
 
         surfAceGatewayLog(
@@ -1386,6 +1441,7 @@ final class SurfAceRuntime {
                 "capabilities": [
                     "contentTypes": supportedContentTypes.map(\.rawValue),
                     "eventTypes": eventTypes,
+                    "protocolFeatures": ["authority.state.v1"],
                     "targetCapabilities": targetCapabilities,
                 ],
                 "eventConfig": [
@@ -2347,6 +2403,55 @@ final class SurfAceRuntime {
         ]
     }
 
+    private func handleAuthorityState(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
+              var session = activeSessions[surfaceId],
+              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
+            return makeErrorResponse(op: "authority.state", id: id, code: "not_paired", message: "pair.request required")
+        }
+
+        let reason = surfAceAuthorityStateRejectionReason(
+            payload: payload,
+            surfaceId: surfaceId,
+            providerId: session.providerId,
+            sessionId: session.sessionId,
+            ownershipEpoch: session.ownershipEpoch,
+            lockProviderId: ownershipLock.providerId,
+            lockSessionId: ownershipLock.sessionId,
+            windowLabel: surface.windowLabel,
+            panes: surface.panes.map {
+                SurfAceAuthorityPaneIdentity(
+                    paneId: $0.paneId,
+                    paneLabel: $0.paneLabel,
+                    paneLineageId: $0.paneLineageId
+                )
+            }
+        )
+        let accepted = reason == nil
+
+        if accepted {
+            session.authorityConfirmed = true
+            activeSessions[surfaceId] = session
+        } else {
+            session.authorityConfirmed = false
+            activeSessions[surfaceId] = session
+        }
+        refreshConnectionState(surfaceId: surfaceId)
+
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "authority.state",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "accepted": accepted,
+                "reason": reason.map { $0 as Any } ?? NSNull(),
+            ],
+        ]
+    }
+
     private func handleOwnershipRelinquish(id: String, connectionUUID: String) -> [String: Any] {
         guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
               let activeSession = activeSessions[surfaceId],
@@ -2469,6 +2574,7 @@ final class SurfAceRuntime {
             return false
         }
         return session.pairConfirmed
+            && session.authorityConfirmed
             && ownershipLock.providerId == session.providerId
             && ownershipLock.sessionId == session.sessionId
     }

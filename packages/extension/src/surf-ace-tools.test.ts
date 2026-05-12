@@ -50,6 +50,25 @@ function createStubRuntime(): SurfAceRuntime {
       paneLabel: 1,
     }),
     listScreens: async () => [],
+    providerAuthorityDiagnostics: async () => ({
+      activeTargetRecordCount: 0,
+      authorityBlockedSurfaceIds: [],
+      authorityBlockersBySurfaceId: {},
+      disabled: false,
+      liveSurfaceIds: [],
+      nextRemotePaneId: 1,
+      ownerStatus: "active",
+      ownsRuntimeLease: true,
+      persistedSelfOwnedSurfaceIds: [],
+      persistedSurfaceIds: [],
+      processId: process.pid,
+      providerId: "pv_test",
+      runtimeScreenIds: [],
+      started: true,
+      surfaceTombstones: {},
+      targetStateSurfaceIds: [],
+      windowLabelSurfaceIds: [],
+    }),
     push: async () => ({
       contentId: "ct_1",
       displayId: "1",
@@ -126,6 +145,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
 
   assert.deepEqual(surfAceToolNames, [
     "surf_ace_list",
+    "surf_ace_authority_diagnostics",
     "surf_ace_push",
     "surf_ace_clear",
     "surf_ace_relinquish",

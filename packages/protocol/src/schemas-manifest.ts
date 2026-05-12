@@ -2,6 +2,8 @@ import {
   annotationCommittedEventSchema,
   annotationsRemoveRequestSchema,
   annotationsRemoveResponseSchema,
+  authorityStateRequestSchema,
+  authorityStateResponseSchema,
   contentAppendRequestSchema,
   contentClearRequestSchema,
   contentPatchRequestSchema,
@@ -101,6 +103,11 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "snapshot.get": {
     request: snapshotGetRequestSchema,
     response: snapshotResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "authority.state": {
+    request: authorityStateRequestSchema,
+    response: authorityStateResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "heartbeat.ping": {

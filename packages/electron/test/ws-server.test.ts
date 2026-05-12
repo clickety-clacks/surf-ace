@@ -443,6 +443,34 @@ function heartbeatRequest(): Request {
   };
 }
 
+function authorityStateRequest(
+  paired: Extract<Response, { op: "pair.request"; ok: true }>,
+  options: { paneLabel?: number; windowLabel?: string } = {},
+): Request {
+  const pane = paired.payload.state.panes[0]!;
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "authority.state",
+    payload: {
+      actionable: true,
+      ownershipEpoch: paired.payload.ownershipEpoch,
+      panes: [{
+        paneId: pane.paneId,
+        paneLabel: options.paneLabel ?? pane.paneLabel,
+        paneLineageId: pane.paneLineageId,
+      }],
+      providerId: "pv_alpha" as never,
+      reason: null,
+      sessionId: paired.payload.sessionId,
+      surfaceId: paired.payload.surfaceId,
+      windowLabel: options.windowLabel ?? "a",
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 function overlayDiagnosticsRequest(): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
@@ -1132,6 +1160,10 @@ test("ws server exposes providerName while connected and clears it on relinquish
 
     const heartbeat = await request(owner, heartbeatRequest());
     assert.equal(heartbeat.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+
+    const authority = await request(owner, authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>));
+    assert.equal(authority.ok, true);
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     const relinquished = await request(owner, relinquishRequest());
@@ -1142,7 +1174,7 @@ test("ws server exposes providerName while connected and clears it on relinquish
   });
 });
 
-test("ws server does not show green until provider heartbeat confirms readiness", async () => {
+test("ws server does not show green until provider authority confirms exact pane identity", async () => {
   await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
     const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
@@ -1151,7 +1183,20 @@ test("ws server does not show green until provider heartbeat confirms readiness"
 
     const heartbeat = await request(owner, heartbeatRequest());
     assert.equal(heartbeat.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+
+    const rejectedAuthority = await request(owner, authorityStateRequest(
+      paired as Extract<Response, { op: "pair.request"; ok: true }>,
+      { paneLabel: 99 },
+    ));
+    assert.equal(rejectedAuthority.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
+
+    const acceptedAuthority = await request(owner, authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>));
+    assert.equal(acceptedAuthority.ok, true);
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, "test-harness");
 
     await closeSocket(owner);
   });
@@ -1178,6 +1223,7 @@ test("ws server advertises terminal targets when compositor bridge is configured
     const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
 
     assert.equal(paired.ok, true);
+    assert.deepEqual(paired.payload.capabilities.protocolFeatures, ["authority.state.v1"]);
     assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.browser_url.v1", "target.terminal_app.v1"]);
 
     await closeSocket(socket);
@@ -1215,6 +1261,7 @@ test("ws server returns browser_url applied only after renderer load confirmatio
     const owner = await connect(url);
     const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(paired.ok, true);
+    assert.deepEqual(paired.payload.capabilities.protocolFeatures, ["authority.state.v1"]);
     assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.browser_url.v1"]);
 
     const apply = browserUrlTargetApplyRequest({

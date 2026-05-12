@@ -15,6 +15,7 @@ import {
 
 export const surfAceToolNames = [
   "surf_ace_list",
+  "surf_ace_authority_diagnostics",
   "surf_ace_push",
   "surf_ace_clear",
   "surf_ace_relinquish",
@@ -174,6 +175,16 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_list",
+    },
+    {
+      description: "Return provider authority diagnostics for stale persisted surfaces, live surfaces, runtime screen snapshots, target/window records, tombstones, pane counters, blockers, and runtime owner state.",
+      execute: async () => await runtime.providerAuthorityDiagnostics(),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {},
+        type: "object",
+      },
+      name: "surf_ace_authority_diagnostics",
     },
     {
       description: "Push content or a live browser URL target to a Surf Ace pane, replacing whatever is currently visible.",

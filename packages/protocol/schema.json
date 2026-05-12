@@ -38,6 +38,9 @@
       "$ref": "#/$defs/SnapshotGetRequest"
     },
     {
+      "$ref": "#/$defs/AuthorityStateRequest"
+    },
+    {
       "$ref": "#/$defs/HeartbeatPingRequest"
     },
     {
@@ -66,6 +69,9 @@
     },
     {
       "$ref": "#/$defs/SnapshotResponse"
+    },
+    {
+      "$ref": "#/$defs/AuthorityStateResponse"
     },
     {
       "$ref": "#/$defs/HeartbeatPongResponse"
@@ -1590,6 +1596,101 @@
         }
       }
     },
+    "AuthorityStateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "op",
+        "id",
+        "sentAt",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "op": {
+          "const": "authority.state"
+        },
+        "id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/EpochMs"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actionable",
+            "reason",
+            "ownershipEpoch",
+            "providerId",
+            "sessionId",
+            "surfaceId",
+            "windowLabel",
+            "panes"
+          ],
+          "properties": {
+            "actionable": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ownershipEpoch": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "providerId": {
+              "$ref": "#/$defs/ProviderId"
+            },
+            "sessionId": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "surfaceId": {
+              "$ref": "#/$defs/SurfaceId"
+            },
+            "windowLabel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "panes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "paneId",
+                  "paneLabel"
+                ],
+                "properties": {
+                  "paneId": {
+                    "$ref": "#/$defs/PaneId"
+                  },
+                  "paneLabel": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "paneLineageId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "PairResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -1691,6 +1792,14 @@
                   "type": "array",
                   "items": {
                     "$ref": "#/$defs/EventType"
+                  },
+                  "uniqueItems": true
+                },
+                "protocolFeatures": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
                   },
                   "uniqueItems": true
                 },
@@ -2396,6 +2505,58 @@
         }
       }
     },
+    "AuthorityStateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "op",
+        "id",
+        "ok",
+        "sentAt",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "response"
+        },
+        "op": {
+          "const": "authority.state"
+        },
+        "id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "sentAt": {
+          "$ref": "#/$defs/EpochMs"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "accepted",
+            "reason"
+          ],
+          "properties": {
+            "accepted": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
     "ErrorResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -2429,6 +2590,7 @@
             "content.clear",
             "annotations.remove",
             "snapshot.get",
+            "authority.state",
             "heartbeat.ping",
             "panes.list",
             "pane.split",

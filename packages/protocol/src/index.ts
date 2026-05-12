@@ -446,6 +446,27 @@ export type HeartbeatPingRequest = RequestBase<"heartbeat.ping"> & {
 
 export type PanesListRequest = RequestBase<"panes.list">;
 
+export type AuthorityPaneIdentity = {
+  paneId: PaneId;
+  paneLabel: number;
+  paneLineageId?: string;
+};
+
+export type AuthorityStatePayload = {
+  actionable: boolean;
+  reason: string | null;
+  ownershipEpoch: number;
+  providerId: ProviderId;
+  sessionId: SessionId;
+  surfaceId: SurfaceId;
+  windowLabel: string;
+  panes: AuthorityPaneIdentity[];
+};
+
+export type AuthorityStateRequest = RequestBase<"authority.state"> & {
+  payload: AuthorityStatePayload;
+};
+
 export type TopologyLayoutNode =
   | {
       type: "pane";
@@ -566,6 +587,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
     capabilities: {
       contentTypes: ContentType[];
       eventTypes: Event["op"][];
+      protocolFeatures?: string[];
       targetCapabilities?: string[];
     };
     eventConfig: {
@@ -618,6 +640,13 @@ export type MutationAckResponse = ResponseBase<
     currentRevision: Revision;
     contentType?: ContentType | null;
     contentId: ContentId | null;
+  };
+};
+
+export type AuthorityStateResponse = ResponseBase<"authority.state"> & {
+  payload: {
+    accepted: boolean;
+    reason: string | null;
   };
 };
 
@@ -770,6 +799,7 @@ export type ErrorResponse = {
     | "content.clear"
     | "annotations.remove"
     | "snapshot.get"
+    | "authority.state"
     | "heartbeat.ping"
     | "panes.list"
     | "pane.split"
@@ -953,6 +983,7 @@ export type Request =
   | ContentClearRequest
   | AnnotationsRemoveRequest
   | SnapshotGetRequest
+  | AuthorityStateRequest
   | HeartbeatPingRequest
   | PanesListRequest
   | PaneSplitRequest
@@ -971,6 +1002,7 @@ export type Response =
   | MutationAckResponse
   | AnnotationsRemoveResponse
   | SnapshotResponse
+  | AuthorityStateResponse
   | HeartbeatPongResponse
   | PanesListResponse
   | PaneSplitResponse

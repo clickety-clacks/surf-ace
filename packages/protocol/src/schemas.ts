@@ -20,6 +20,7 @@ type ProtocolSchemaDefName =
   | "ContentClearRequest"
   | "AnnotationsRemoveRequest"
   | "SnapshotGetRequest"
+  | "AuthorityStateRequest"
   | "HeartbeatPingRequest"
   | "PanesListRequest"
   | "PaneSplitRequest"
@@ -28,6 +29,7 @@ type ProtocolSchemaDefName =
   | "MutationAckResponse"
   | "AnnotationsRemoveResponse"
   | "SnapshotResponse"
+  | "AuthorityStateResponse"
   | "HeartbeatPongResponse"
   | "PanesListResponse"
   | "PaneSplitResponse"
@@ -78,6 +80,7 @@ export const contentPatchRequestSchema = getSchemaDef("ContentPatchRequest");
 export const contentClearRequestSchema = getSchemaDef("ContentClearRequest");
 export const annotationsRemoveRequestSchema = getSchemaDef("AnnotationsRemoveRequest");
 export const snapshotGetRequestSchema = getSchemaDef("SnapshotGetRequest");
+export const authorityStateRequestSchema = getSchemaDef("AuthorityStateRequest");
 export const heartbeatPingRequestSchema = getSchemaDef("HeartbeatPingRequest");
 export const panesListRequestSchema = getSchemaDef("PanesListRequest");
 export const paneSplitRequestSchema = getSchemaDef("PaneSplitRequest");
@@ -87,6 +90,7 @@ export const paneCloseRequestSchema = getSchemaDef("PaneCloseRequest");
 export const mutationAckResponseSchema = getSchemaDef("MutationAckResponse");
 export const annotationsRemoveResponseSchema = getSchemaDef("AnnotationsRemoveResponse");
 export const snapshotResponseSchema = getSchemaDef("SnapshotResponse");
+export const authorityStateResponseSchema = getSchemaDef("AuthorityStateResponse");
 export const heartbeatPongResponseSchema = getSchemaDef("HeartbeatPongResponse");
 export const panesListResponseSchema = getSchemaDef("PanesListResponse");
 export const paneSplitResponseSchema = getSchemaDef("PaneSplitResponse");

@@ -112,6 +112,12 @@ class StaticDiscoveryService implements SurfAceDiscoveryService {
 class FakeSurfAceWsServer {
   activeSocketCount = 0;
   readonly annotationsRemoveRequests: Array<{ contentId: string; paneId: number; strokeIds: string[] }> = [];
+  readonly authorityStateRequests: Array<{
+    actionable: boolean;
+    paneLabels: number[];
+    reason: string | null;
+  }> = [];
+  rejectAuthorityState = false;
   busyWithoutTakeoverResponsesRemaining = 0;
   readonly clearRequests: Array<{ paneId: number; revision: number }> = [];
   readonly closePaneRequests: Array<{ paneId: number }> = [];
@@ -154,6 +160,7 @@ class FakeSurfAceWsServer {
   }> = [];
   readonly pairRequests: Array<{ initialPaneId: number; initialPaneLabel: number; windowLabel: string }> = [];
   readonly pairRequestSurfaceIds: string[] = [];
+  heartbeatRequests = 0;
   panesListErrorCode: string | null = null;
   panesListRequests = 0;
   pairResponseOwnershipEpoch = 1;
@@ -183,6 +190,7 @@ class FakeSurfAceWsServer {
     "target.native_app.v1",
     "target.compositor_app.v1",
   ];
+  protocolFeatures = ["authority.state.v1"];
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
   busyWithoutTakeoverMessage = "Surface is already paired";
@@ -804,6 +812,7 @@ class FakeSurfAceWsServer {
                   "event.navigation",
                   "event.snapshot_hint",
                 ],
+                protocolFeatures: [...this.protocolFeatures],
                 targetCapabilities: [...this.targetCapabilities],
               },
               eventConfig: {
@@ -1366,10 +1375,28 @@ class FakeSurfAceWsServer {
         return;
       }
       case "heartbeat.ping":
+        this.heartbeatRequests += 1;
         socket.send(
           JSON.stringify(
             this.response(message.id, "heartbeat.ping", {
               nonce: message.payload?.nonce,
+            }),
+          ),
+        );
+        return;
+      case "authority.state":
+        this.authorityStateRequests.push({
+          actionable: (message.payload?.actionable as boolean | undefined) === true,
+          paneLabels: Array.isArray(message.payload?.panes)
+            ? message.payload.panes.map((pane) => Number((pane as { paneLabel?: unknown }).paneLabel ?? 0))
+            : [],
+          reason: typeof message.payload?.reason === "string" ? message.payload.reason : null,
+        });
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "authority.state", {
+              accepted: (message.payload?.actionable as boolean | undefined) === true && !this.rejectAuthorityState,
+              reason: this.rejectAuthorityState ? "test_authority_rejected" : null,
             }),
           ),
         );
@@ -1585,6 +1612,7 @@ async function withRuntimeHarness(
         configureServer?: (server: FakeSurfAceWsServer) => void;
         now?: () => number;
         providerName?: string;
+        waitForAuthority?: boolean;
         waitForPair?: boolean;
         run: (ctx: {
           alertBodies: Array<Record<string, unknown>>;
@@ -1639,6 +1667,9 @@ async function withRuntimeHarness(
     await runtime.start();
     if (options.waitForPair !== false) {
       await waitFor(() => server.pairedSocket !== null);
+      if (options.waitForAuthority !== false) {
+        await waitFor(() => server.authorityStateRequests.some((request) => request.actionable === true));
+      }
     }
     await options.run({ alertBodies, annotationTurns, discovery, infos, runtime, server, stateDir, warnings });
   } finally {
@@ -2593,6 +2624,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         Object.keys(screen).sort(),
           [
             "_debug",
+            "authority",
             "connectionDiagnostics",
             "connectionState",
             "fingerprint",
@@ -2626,6 +2658,488 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(screen.panes[0]?.displayId, "1");
       assert.equal(screen.panes[0]?.paneAddress, "1");
       assert.deepEqual(screen.panes[0]?.viewport, { height: 768, scale: 2, width: 1024 });
+    });
+  });
+
+	  await t.test("startup tombstones stale self-owned persisted churn fixture before discovery workers run", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-self-owned-"));
+    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+    try {
+	      const selfOwnedSurfaceIds: Record<string, unknown> = {};
+	      const targetStateBySurfaceId: Record<string, unknown> = {};
+	      const windowLabels: Record<string, string> = {};
+	      const selfOwnedSources = [
+	        "current_target_state",
+	        "legacy_target_state",
+	        "legacy_local_ownership",
+	        "current_snapshot_local_ownership",
+	      ];
+	      for (let index = 1; index <= 24; index += 1) {
+	        const surfaceId = `sf_churn_${String(index).padStart(2, "0")}`;
+	        const paneLineageId = `pl_${surfaceId}_incident`;
+	        const targetId = `tg_${surfaceId}_incident`;
+	        selfOwnedSurfaceIds[surfaceId] = {
+	          observedAt: Date.now() - 60_000,
+	          providerId: "pv_churn",
+	          source: selfOwnedSources[(index - 1) % selfOwnedSources.length],
+	        };
+	        if (index <= 2) {
+	          targetStateBySurfaceId[surfaceId] = {
+	            ownershipEpoch: index,
+	            paneTargets: {
+	              [paneLineageId]: {
+	                currentTargetId: targetId,
+	                diagnosticContent: null,
+	                lastRestoreBlockedReason: null,
+	                nonDurableTargetDiagnostic: null,
+	                paneLineageId,
+	                targetEpoch: index,
+	              },
+	            },
+	            registeredTargetIdsByIdempotencyKey: {},
+	            targetRecords: [
+	              {
+	                appliedAt: new Date(Date.now() - 60_000).toISOString(),
+	                currentState: "current",
+	                ownerProviderId: "pv_churn",
+	                ownershipEpoch: index,
+	                ownershipSessionId: `sa_deleted_log_${index}`,
+	                paneIdAtApply: `pn_${surfaceId}_incident`,
+	                paneLabelAtApply: index,
+	                paneLineageId,
+	                restorePolicy: "auto",
+	                surfaceId,
+	                surfaceInstanceId: null,
+	                targetEpoch: index,
+	                targetHeader: {
+	                  payloadSchemaVersion: 1,
+	                  replaySemantics: "bytes",
+	                  requiredCapabilities: ["target.markdown.v1"],
+	                  safeToLogFields: [],
+	                  safetyClass: "passive",
+	                  summary: "incident stale target hint",
+	                },
+	                targetId,
+	                targetKind: "markdown",
+	                targetPayload: { markdown: "# stale incident hint" },
+	              },
+	            ],
+	          };
+	          windowLabels[surfaceId] = index === 1 ? "a" : "b";
+	        }
+      }
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 25,
+          nextRemotePaneId: 96363,
+          nextWindowLabelIndex: 24,
+          paneLabelsByPaneId: {},
+          providerId: "pv_churn",
+          selfOwnedSurfaceIds,
+          targetStateBySurfaceId,
+          tombstonedEndpointIds: [],
+          version: 1,
+          windowLabels,
+        }, null, 2),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify({
+          contentContinuity: {},
+          screens: [],
+          updatedAt: Date.now(),
+          version: 1,
+        }, null, 2),
+      );
+
+	      const discovery = new StaticDiscoveryService([]);
+	      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+	      const preStartDiagnostics = await runtime.providerAuthorityDiagnostics();
+	      assert.equal(preStartDiagnostics.ownerStatus, "stopped");
+	      assert.equal(preStartDiagnostics.activeTargetRecordCount, 2);
+	      assert.equal(preStartDiagnostics.targetStateSurfaceIds.length, 2);
+	      assert.equal(preStartDiagnostics.windowLabelSurfaceIds.length, 2);
+	      assert.equal(Object.keys(preStartDiagnostics.surfaceTombstones).length, 0);
+	      const preStartState = JSON.parse(await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"));
+	      assert.equal(Object.keys(preStartState.targetStateBySurfaceId ?? {}).length, 2);
+	      assert.equal(Object.keys(preStartState.windowLabels ?? {}).length, 2);
+	      assert.equal(Object.keys(preStartState.surfaceTombstones ?? {}).length, 0);
+	      const screens = await runtime.listScreens();
+      assert.deepEqual(screens, []);
+      const emptyListDiagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.deepEqual(emptyListDiagnostics.runtimeScreenIds, []);
+      assert.equal(emptyListDiagnostics.nextRemotePaneId, 96363);
+      assert.equal(emptyListDiagnostics.persistedSelfOwnedSurfaceIds.length, 24);
+      assert.equal(emptyListDiagnostics.targetStateSurfaceIds.length, 0);
+      assert.equal(emptyListDiagnostics.windowLabelSurfaceIds.length, 0);
+      assert.equal(emptyListDiagnostics.liveSurfaceIds.length, 0);
+      assert.equal(emptyListDiagnostics.ownsRuntimeLease, true);
+      let repairedState: any = null;
+      await waitFor(async () => {
+        try {
+          repairedState = JSON.parse(await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"));
+          return true;
+        } catch {
+          return false;
+        }
+      });
+	      assert.equal(repairedState.nextRemotePaneId, 96363);
+	      assert.equal(Object.keys(repairedState.surfaceTombstones ?? {}).length, 24);
+	      assert.equal(repairedState.surfaceTombstones.sf_churn_01.hadTargetState, true);
+	      assert.equal(repairedState.surfaceTombstones.sf_churn_01.hadWindowLabel, true);
+	      assert.equal(repairedState.surfaceTombstones.sf_churn_02.hadTargetState, true);
+	      assert.equal(repairedState.surfaceTombstones.sf_churn_02.hadWindowLabel, true);
+	      assert.equal(repairedState.surfaceTombstones.sf_churn_03.hadTargetState, false);
+	      assert.ok(repairedState.selfOwnedSurfaceIds.sf_churn_01.relinquishedAt);
+      const repairedDiagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.equal(repairedDiagnostics.activeTargetRecordCount, 0);
+      assert.equal(Object.keys(repairedDiagnostics.surfaceTombstones).length, 24);
+      assert.equal(repairedDiagnostics.surfaceTombstones.sf_churn_01.reason, "stale_self_owned_persisted_surface");
+
+      await runtime.stop();
+      runtime = null;
+      const port = nextPort++;
+      const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_churn_01" });
+      try {
+        const discovery = new StaticDiscoveryService([discoveryEndpoint(port, "churn01")]);
+        runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+        await new Promise((resolve) => {
+          setTimeout(resolve, 250);
+        });
+        assert.equal(server.surfacesListRequests, 0);
+        assert.equal(server.pairRequests.length, 0);
+        assert.deepEqual(await runtime.listScreens(), []);
+        const diagnostics = await runtime.providerAuthorityDiagnostics();
+        assert.deepEqual(diagnostics.runtimeScreenIds, []);
+        assert.equal(diagnostics.surfaceTombstones.sf_churn_01.reason, "stale_self_owned_persisted_surface");
+      } finally {
+        await server.close();
+      }
+    } finally {
+      await runtime?.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+	  });
+
+  await t.test("startup tombstones stale self-owned persisted surfaces even when discovery is already populated", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-discovered-"));
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_churn_discovered" });
+	    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+	    try {
+	      await fs.writeFile(
+	        path.join(stateDir, "surf-ace-runtime-state.json"),
+	        JSON.stringify({
+	          nextPaneLabel: 2,
+	          nextRemotePaneId: 96363,
+	          nextWindowLabelIndex: 1,
+	          paneLabelsByPaneId: {},
+	          providerId: "pv_churn_discovered",
+	          selfOwnedSurfaceIds: {
+	            sf_churn_discovered: {
+	              observedAt: Date.now() - 60_000,
+	              providerId: "pv_churn_discovered",
+	              source: "legacy_local_ownership",
+	            },
+	          },
+	          targetStateBySurfaceId: {},
+	          tombstonedEndpointIds: [],
+	          version: 1,
+	          windowLabels: {
+	            sf_churn_discovered: "a",
+	          },
+	        }, null, 2),
+	      );
+	      await fs.writeFile(
+	        path.join(stateDir, "surf-ace-runtime-screens.json"),
+	        JSON.stringify({
+	          contentContinuity: {},
+	          screens: [],
+	          updatedAt: Date.now(),
+	          version: 1,
+	        }, null, 2),
+	      );
+	      const discovery = new StaticDiscoveryService([discoveryEndpoint(port, "churn-discovered")]);
+	      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+	      assert.deepEqual(await runtime.listScreens(), []);
+	      await new Promise((resolve) => {
+	        setTimeout(resolve, 250);
+	      });
+	      const diagnostics = await runtime.providerAuthorityDiagnostics();
+	      assert.equal(diagnostics.surfaceTombstones.sf_churn_discovered.reason, "stale_self_owned_persisted_surface");
+	      assert.equal(diagnostics.nextRemotePaneId, 96363);
+	      assert.equal(server.pairRequests.length, 0);
+	      assert.deepEqual(await runtime.listScreens(), []);
+	    } finally {
+	      await runtime?.stop();
+	      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("startup tombstones stale target-owned surfaces despite unrelated discovery endpoints", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-target-discovered-"));
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_unrelated_discovered" });
+    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 2,
+          nextRemotePaneId: 96363,
+          nextWindowLabelIndex: 1,
+          paneLabelsByPaneId: {},
+          providerId: "pv_stale_target_discovered",
+          selfOwnedSurfaceIds: {
+            sf_stale_target_discovered: {
+              observedAt: Date.now() - 60_000,
+              providerId: "pv_stale_target_discovered",
+              source: "current_local_ownership",
+            },
+          },
+          targetStateBySurfaceId: {
+            sf_stale_target_discovered: {
+              ownershipEpoch: 7,
+              paneTargets: {},
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [
+                {
+                  appliedAt: new Date(Date.now() - 60_000).toISOString(),
+                  currentState: "current",
+                  ownerProviderId: "pv_stale_target_discovered",
+                  ownershipEpoch: 7,
+                  ownershipSessionId: "sa_stale_target_discovered",
+                  paneIdAtApply: "pn_stale_target_discovered",
+                  paneLabelAtApply: 1,
+                  paneLineageId: "pl_stale_target_discovered",
+                  targetId: "tg_stale_target_discovered",
+                  targetPayload: { contentType: "markdown", markdown: "# stale" },
+                  targetType: "content",
+                },
+              ],
+            },
+          },
+          tombstonedEndpointIds: [],
+          version: 1,
+          windowLabels: {
+            sf_stale_target_discovered: "a",
+          },
+        }, null, 2),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify({
+          contentContinuity: {},
+          screens: [],
+          updatedAt: Date.now(),
+          version: 1,
+        }, null, 2),
+      );
+
+      const discovery = new StaticDiscoveryService([discoveryEndpoint(port, "unrelated-discovered")]);
+      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+      assert.deepEqual(await runtime.listScreens(), []);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 250);
+      });
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.equal(
+        diagnostics.surfaceTombstones.sf_stale_target_discovered.reason,
+        "stale_self_owned_persisted_surface",
+      );
+      assert.equal(diagnostics.targetStateSurfaceIds.includes("sf_stale_target_discovered"), false);
+      assert.equal(diagnostics.windowLabelSurfaceIds.includes("sf_stale_target_discovered"), false);
+      assert.equal(
+        server.pairRequestSurfaceIds.includes("sf_stale_target_discovered"),
+        false,
+      );
+    } finally {
+      await runtime?.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("startup tombstones stale legacy-root target imports without refreshing ownership age", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-current-"));
+    const legacyStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-root-"));
+    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 1,
+          nextRemotePaneId: 1,
+          nextWindowLabelIndex: 0,
+          paneLabelsByPaneId: {},
+          providerId: "pv_current_stale_legacy_import",
+          selfOwnedSurfaceIds: {},
+          tombstonedEndpointIds: [],
+          version: 1,
+          windowLabels: {},
+        }, null, 2),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify({ contentContinuity: {}, screens: [], updatedAt: Date.now(), version: 1 }, null, 2),
+      );
+
+      const legacyStatePath = path.join(legacyStateDir, "surf-ace-runtime-state.json");
+      await fs.writeFile(
+        legacyStatePath,
+        JSON.stringify({
+          nextPaneLabel: 1,
+          nextRemotePaneId: 1,
+          nextWindowLabelIndex: 0,
+          paneLabelsByPaneId: {},
+          providerId: "pv_legacy_stale_import",
+          targetStateBySurfaceId: {
+            sf_stale_legacy_target_import: {
+              ownershipEpoch: 1,
+              paneTargets: {},
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [],
+            },
+          },
+          version: 1,
+          windowLabels: {},
+        }, null, 2),
+      );
+      const staleTime = new Date(Date.now() - 60_000);
+      await fs.utimes(legacyStatePath, staleTime, staleTime);
+
+      runtime = createSurfAceRuntime({
+        discovery: new StaticDiscoveryService([]),
+        legacyStateDir,
+        stateDir,
+      });
+      assert.deepEqual(await runtime.listScreens(), []);
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.equal(
+        diagnostics.surfaceTombstones.sf_stale_legacy_target_import.reason,
+        "stale_self_owned_persisted_surface",
+      );
+      assert.equal(diagnostics.persistedSelfOwnedSurfaceIds.includes("sf_stale_legacy_target_import"), true);
+      assert.equal(diagnostics.targetStateSurfaceIds.includes("sf_stale_legacy_target_import"), false);
+    } finally {
+      await runtime?.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+      await fs.rm(legacyStateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("provider actionability requires accepted client authority state", async () => {
+	    await withRuntimeHarness({
+	      configureServer: (server) => {
+	        server.rejectAuthorityState = true;
+      },
+      waitForAuthority: false,
+      run: async ({ runtime, server }) => {
+        await waitFor(() => server.authorityStateRequests.length > 0, 12_000);
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        assert.equal(screen.authority.actionable, false);
+        assert.equal(screen.authority.reason, "test_authority_rejected");
+        assert.ok(screen._debug?.providerAuthorityProjection.authorityBlockedSurfaceIds.includes(server.surfaceId));
+        await assert.rejects(
+          runtime.push({
+            content: "# blocked",
+            contentType: "markdown",
+            fingerprint: server.surfaceId,
+            paneId: screen.panes[0]!.paneId,
+          }),
+          /test_authority_rejected/,
+        );
+        assert.equal(server.contentSetRequests.length, 0);
+      },
+	    });
+	  });
+
+		  await t.test("legacy v1 clients without authority state capability fail closed", async () => {
+	    await withRuntimeHarness({
+	      configureServer: (server) => {
+	        server.protocolFeatures = [];
+	      },
+	      waitForAuthority: false,
+	      run: async ({ runtime, server }) => {
+	        await waitFor(() => server.pairedSocket !== null, 12_000);
+	        await new Promise((resolve) => {
+	          setTimeout(resolve, 100);
+	        });
+		        assert.equal(server.authorityStateRequests.length, 0);
+		        assert.equal(server.heartbeatRequests, 0);
+
+		        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+		        assert.ok(screen);
+		        assert.equal(screen.connectionState, "connecting");
+		        assert.equal(screen.authority.actionable, false);
+		        assert.equal(screen.authority.reason, "authority_state_unsupported");
+		        assert.deepEqual(screen.panes, []);
+		        assert.deepEqual(
+		          screen._debug?.providerAuthorityProjection.authorityBlockersBySurfaceId[server.surfaceId],
+		          ["authority_state_unsupported"],
+		        );
+		        await assert.rejects(
+		          runtime.push({
+		            content: "# legacy blocked",
+		            contentType: "markdown",
+		            fingerprint: server.surfaceId,
+		            paneId: "pn_legacy_unsupported",
+		          }),
+		          /authority_state_unsupported/,
+	        );
+	        assert.equal(server.contentSetRequests.length, 0);
+	      },
+	    });
+	  });
+
+	  await t.test("topology mutation invalidates and republishes exact client authority", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await waitFor(() => server.authorityStateRequests.some((request) => request.actionable), 12_000);
+      const initialAuthorityCount = server.authorityStateRequests.length;
+      await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      await waitFor(() => server.authorityStateRequests.length >= initialAuthorityCount + 2, 12_000);
+      const after = server.authorityStateRequests.slice(initialAuthorityCount);
+      assert.ok(after.some((request) => request.actionable === false && request.reason === "topology_update_in_flight"));
+      assert.ok(after.some((request) => request.actionable === true && request.paneLabels.length === 2));
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.equal(screen?.authority.actionable, true);
+      assertPaneLabelsWithOpaqueIds(screen?.panes ?? [], [1, 2]);
+    });
+  });
+
+  await t.test("failed topology mutation republishes current client authority", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await waitFor(() => server.authorityStateRequests.some((request) => request.actionable), 12_000);
+      const initialAuthorityCount = server.authorityStateRequests.length;
+      server.nextTopologyApplyError = { code: "invalid_request", message: "test topology rejection" };
+      await assert.rejects(
+        runtime.split({
+          count: 2,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        }),
+        /test topology rejection/,
+      );
+      await waitFor(() => server.authorityStateRequests.length >= initialAuthorityCount + 2, 12_000);
+      const after = server.authorityStateRequests.slice(initialAuthorityCount);
+      assert.ok(after.some((request) => request.actionable === false && request.reason === "topology_update_in_flight"));
+      assert.ok(after.some((request) => request.actionable === true && request.paneLabels.length === 1));
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.equal(screen?.authority.actionable, true);
+      assertPaneLabelsWithOpaqueIds(screen?.panes ?? [], [1]);
     });
   });
 
@@ -9119,6 +9633,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           capabilities: {
             contentTypes: ["html", "image", "pdf", "terminal", "markdown"],
             eventTypes: [],
+            protocolFeatures: ["authority.state.v1"],
           },
           eventConfig: {
             activeEvents: [],
@@ -11122,7 +11637,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("stale target ownership record does not authorize post-restart invalid_resume self-reclaim", async () => {
+  await t.test("stale target ownership record is tombstoned before post-restart invalid_resume self-reclaim", async () => {
     const port = nextPort++;
     const surfaceId = "sf_stale_target_invalid_resume";
     const providerId = "pv_stale_target_invalid_resume";
@@ -11141,7 +11656,6 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       },
       stateDir,
     });
-    server.invalidResumeWithoutTakeoverResponsesRemaining = 1;
 
     try {
       await fs.writeFile(
@@ -11202,18 +11716,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
 
       await runtime.start();
-      await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
-      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+      await new Promise((resolve) => setTimeout(resolve, 250));
 
-      assert.deepEqual(
-        server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.takeover),
-        [false, false],
-      );
-      assert.deepEqual(
-        server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.resumeSessionId),
-        [null, null],
-      );
-      assert.ok(warnings.some((warning) => warning.includes("ownership_self_reclaim_blocked")));
+      assert.deepEqual(server.pairAttemptDetails, []);
+      assert.equal((await runtime.listScreens())[0]?.connectionState, undefined);
+      const state = JSON.parse(
+        await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+      ) as {
+        selfOwnedSurfaceIds?: Record<string, { relinquishedAt?: number }>;
+        surfaceTombstones?: Record<string, { reason?: string }>;
+      };
+      assert.equal(state.surfaceTombstones?.[surfaceId]?.reason, "stale_self_owned_persisted_surface");
+      assert.equal(state.selfOwnedSurfaceIds?.[surfaceId]?.relinquishedAt !== undefined, true);
+      assert.ok(warnings.some((warning) => warning.includes("persisted_self_owned_surface_reconciled")));
       assert.ok(!warnings.some((warning) => warning.includes("ownership_self_reclaim ")));
     } finally {
       await runtime.stop();

@@ -43,6 +43,47 @@ test("validateEnvelopeType accepts current request envelopes", () => {
   assert.deepEqual(result, { ok: true });
 });
 
+test("validateEnvelopeType accepts provider authority state envelopes", () => {
+  const request = validateEnvelopeType("authority.state", {
+    id: "req_authority_1",
+    op: "authority.state",
+    payload: {
+      actionable: true,
+      reason: null,
+      ownershipEpoch: 1,
+      providerId: "prov_1",
+      sessionId: "sa_1",
+      surfaceId: "sf_1",
+      windowLabel: "a",
+      panes: [
+        {
+          paneId: 41,
+          paneLabel: 1,
+          paneLineageId: "pl_1",
+        },
+      ],
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+  assert.deepEqual(request, { ok: true });
+
+  const response = validateEnvelopeType("authority.state", {
+    id: "req_authority_1",
+    ok: true,
+    op: "authority.state",
+    payload: {
+      accepted: true,
+      reason: null,
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(response, { ok: true });
+});
+
 test("validateEnvelopeType rejects pair requests without providerName", () => {
   const result = validateEnvelopeType("pair.request", {
     id: "req_missing_provider_name",
@@ -221,10 +262,11 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
     ok: true,
     op: "pair.request",
     payload: {
-      capabilities: {
-        contentTypes: ["html"],
-        eventTypes: ["event.drawing_flush"],
-      },
+	      capabilities: {
+	        contentTypes: ["html"],
+	        eventTypes: ["event.drawing_flush"],
+	        protocolFeatures: ["authority.state.v1"],
+	      },
       eventConfig: {
         activeEvents: ["event.drawing_flush"],
         drawingFlushConfig: {
@@ -263,10 +305,60 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
     sentAt: Date.now(),
     type: "response",
     v: 1,
-  });
-  assert.deepEqual(pairResponse, { ok: true });
+	  });
+	  assert.deepEqual(pairResponse, { ok: true });
 
-  const emptyPairPanes = validateEnvelopeType("pair.request", {
+	  const legacyPairResponseWithoutProtocolFeatures = validateEnvelopeType("pair.request", {
+	    id: "req_legacy_pair",
+	    ok: true,
+	    op: "pair.request",
+	    payload: {
+	      capabilities: {
+	        contentTypes: ["html"],
+	        eventTypes: ["event.drawing_flush"],
+	      },
+	      eventConfig: {
+	        activeEvents: ["event.drawing_flush"],
+	        drawingFlushConfig: {
+	          idleWindowMs: 8000,
+	          maxIntervalMs: 30000,
+	        },
+	        profile: "minimum_deep",
+	      },
+	      limits: {
+	        maxDrawingFlushBytes: 1024,
+	        maxFrameBytes: 1024,
+	        maxMessageBytes: 1024,
+	        maxStrokePointsPerFlush: 1024,
+	        maxVisibleTextBytes: 1024,
+	        resumeGraceMs: 20_000,
+	      },
+	      ownershipEpoch: 1,
+	      resumed: false,
+	      sessionId: "sa_pair_legacy_session",
+	      state: {
+	        panes: [
+	          {
+	            contentType: null,
+	            currentContentId: null,
+	            currentRevision: 0,
+	            paneId: 1,
+	            paneLineageId: "pl_legacy",
+	            paneLabel: 1,
+	          },
+	        ],
+	      },
+	      surfaceId: "sf_legacy",
+	      surfaceName: "Legacy Surface",
+	      viewport: { height: 768, scale: 2, width: 1024 },
+	    },
+	    sentAt: Date.now(),
+	    type: "response",
+	    v: 1,
+	  });
+	  assert.deepEqual(legacyPairResponseWithoutProtocolFeatures, { ok: true });
+
+	  const emptyPairPanes = validateEnvelopeType("pair.request", {
     id: "req_empty_pair_panes",
     ok: true,
     op: "pair.request",
