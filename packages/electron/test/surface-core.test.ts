@@ -1808,6 +1808,45 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
   assert.equal(listedPane.geometry.topologyEpoch, 0);
 });
 
+test("surface core materializes terminal_app targets through Surf Ace terminal host", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const pane = core.pairState(surface.surfaceId).panes[0]!;
+
+  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+    ownershipEpoch: 1,
+    ownershipSessionId: "sa_test" as never,
+    paneLineageId: pane.paneLineageId,
+    requestId: "restore_btop",
+    restoreReason: "resume_restore",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 3,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.terminal_app.v1"],
+      safeToLogFields: ["command", "args"],
+      safetyClass: "process",
+      summary: "btop",
+    },
+    targetId: "target_btop",
+    targetKind: "terminal_app",
+    targetPayload: { args: [], command: "btop", envPolicy: "surface_default", pty: true, restartPolicy: "manual_only" },
+  });
+
+  assert.equal(materialization.op, "native_pane.host");
+  assert.deepEqual(materialization.panes[0]?.process, { args: ["-e", "btop"], command: "foot" });
+  assert.equal(materialization.panes[0]?.target, "terminal");
+  assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
+});
+
 test("surface core exposes native materialized panes to the renderer until content changes", () => {
   const core = new SurfaceCore({
     persistentState: {

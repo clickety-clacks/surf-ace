@@ -651,10 +651,13 @@ export class SurfaceCore {
     if (payload.targetKind === "terminal_app" && isPlainRecord(payload.targetPayload)) {
       const { args, command, cwd, env } = payload.targetPayload;
       if (typeof command === "string") {
+        const commandArgs = Array.isArray(args) && args.every((arg) => typeof arg === "string") ? [...args] : [];
+        const executableName = command.split(/[\\/]/).pop() ?? command;
+        const isTerminalHost = ["alacritty", "foot", "ghostty", "kitty", "wezterm"].includes(executableName);
         paneEntry.target = "terminal";
         paneEntry.process = {
-          args: Array.isArray(args) && args.every((arg) => typeof arg === "string") ? [...args] : [],
-          command,
+          args: isTerminalHost ? commandArgs : ["-e", command, ...commandArgs],
+          command: isTerminalHost ? command : "foot",
           ...(typeof cwd === "string" ? { cwd } : {}),
           ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
         };
