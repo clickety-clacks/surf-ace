@@ -2,6 +2,7 @@ import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
 import type { PusherProvenance } from "../../protocol/src/index.js";
 import {
   type SurfAceAnnotateRemoveInput,
+  type SurfAceLaunchTerminalInput,
   type PaneId,
   type SurfAceRealizeTopologyInput,
   type SurfAceRealizeTopologiesInput,
@@ -17,6 +18,7 @@ export const surfAceToolNames = [
   "surf_ace_list",
   "surf_ace_authority_diagnostics",
   "surf_ace_push",
+  "surf_ace_launch_terminal",
   "surf_ace_clear",
   "surf_ace_relinquish",
   "surf_ace_reattempt_connections",
@@ -256,6 +258,61 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_clear",
+    },
+    {
+      description: "Launch a provider-owned process-backed terminal target in a pane through Surf Ace native hosting, applying Surf Ace chrome/overlay regions. Requires confirmed:true.",
+      execute: async (args: SurfAceLaunchTerminalInput, context?: SurfAceToolContext) =>
+        await runtime.launchTerminal(args, {
+          agentId: context?.agentId,
+          displayName: context?.displayName,
+          provenance: context?.provenance,
+          pushedBy: context?.pushedBy,
+          source: context?.source,
+          sourceProvenance: context?.sourceProvenance,
+          sessionDisplayName: context?.sessionDisplayName,
+          sessionKey: context?.sessionKey,
+          streamLabel: context?.streamLabel,
+        }),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          args: {
+            items: { type: "string" },
+            type: "array",
+          },
+          command: {
+            description: "Executable command to launch inside the Surf Ace-owned terminal pane.",
+            minLength: 1,
+            type: "string",
+          },
+          confirmed: {
+            description: "Must be true to apply a process-backed terminal target.",
+            enum: [true],
+            type: "boolean",
+          },
+          cwd: {
+            type: ["string", "null"],
+          },
+          fingerprint: fingerprintParam,
+          idempotencyKey: {
+            description: "Optional stable caller key used to make repeated launches idempotent for the same pane/command.",
+            type: "string",
+          },
+          paneId: paneIdParam,
+          restartPolicy: {
+            default: "manual_only",
+            enum: ["restore_new_process", "manual_only"],
+            type: "string",
+          },
+          summary: {
+            description: "Optional human-readable target summary shown in diagnostics.",
+            type: "string",
+          },
+        },
+        required: ["fingerprint", "paneId", "command", "confirmed"],
+        type: "object",
+      },
+      name: "surf_ace_launch_terminal",
     },
     {
       description: "Relinquish ownership of a Surf Ace surface and stop automatic reconnects for it.",

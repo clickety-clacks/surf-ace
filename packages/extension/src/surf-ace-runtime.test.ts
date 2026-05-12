@@ -5822,6 +5822,94 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("surf_ace_launch_terminal applies a provider-owned process target with opaque geometry", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const [, secondPane] = split;
+      assert.ok(secondPane);
+
+      const launched = await runtime.launchTerminal(
+        {
+          args: ["--utf-force"],
+          command: "btop",
+          confirmed: true,
+          fingerprint: server.surfaceId,
+          paneId: secondPane.paneId,
+          restartPolicy: "restore_new_process",
+          summary: "btop split",
+        },
+        {
+          pushedBy: {
+            displayName: "Terminal Launcher",
+            sessionKey: "agent:test:terminal",
+            source: "openclaw",
+          },
+        },
+      );
+
+      assert.equal(launched.blockedReason, null);
+      assert.equal(launched.contentId, null);
+      assert.equal(launched.targetKind, "terminal_app");
+      assert.equal(launched.targetApplyEvidence?.status, "applied");
+      assert.equal(server.contentSetRequests.length, 0);
+      assert.equal(server.targetApplyRequests.length, 1);
+      const [applyRequest] = server.targetApplyRequests;
+      assert.ok(applyRequest);
+      assert.equal("materialization" in applyRequest, false);
+      assert.equal(applyRequest.paneLineageId, targetRegistrationOwnership(runtime, server.surfaceId, secondPane.paneId).paneLineageId);
+      assert.equal(applyRequest.restoreReason, "confirmed_restore");
+      assert.equal(applyRequest.targetKind, "terminal_app");
+      assert.deepEqual(applyRequest.targetHeader, {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.terminal_app.v1"],
+        safeToLogFields: ["command", "args"],
+        safetyClass: "process",
+        summary: "btop split",
+      });
+      assert.deepEqual(applyRequest.targetPayload, {
+        args: ["--utf-force"],
+        command: "btop",
+        envPolicy: "surface_default",
+        pty: true,
+        restartPolicy: "restore_new_process",
+      });
+
+      const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
+      assert.equal(screenPane?.target?.targetKind, "terminal_app");
+      assert.equal(screenPane?.target?.blockedReason, null);
+      assert.equal(screenPane?.target?.lastApplyEvidence?.status, "applied");
+      assert.deepEqual(screenPane?.target?.targetPayload, {
+        args: ["--utf-force"],
+        command: "btop",
+      });
+    });
+  });
+
+  await t.test("surf_ace_launch_terminal fails closed without explicit confirmation", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+      await assert.rejects(
+        async () => await runtime.launchTerminal({
+          command: "btop",
+          confirmed: false,
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        }),
+        /confirmed:true/,
+      );
+      assert.equal(server.contentSetRequests.length, 0);
+      assert.equal(server.targetApplyRequests.length, 0);
+    });
+  });
+
   await t.test("surf_ace_push browser_url uses pair.response ownership epoch for actionable panes", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {

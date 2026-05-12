@@ -401,6 +401,18 @@ export type SurfAcePushInput = {
 type SurfAceContentPushInput = SurfAcePushInput & { contentType: ContentType };
 type SurfAceBrowserUrlPushInput = SurfAcePushInput & { contentType: "browser_url" };
 
+export type SurfAceLaunchTerminalInput = {
+  args?: string[];
+  command: string;
+  confirmed: boolean;
+  cwd?: string | null;
+  fingerprint: string;
+  idempotencyKey?: string;
+  paneId: PaneId;
+  restartPolicy?: "restore_new_process" | "manual_only";
+  summary?: string;
+};
+
 export type SurfAcePushResult = {
   blockedReason?: TargetErrorCode | null;
   contentId: string | null;
@@ -701,6 +713,7 @@ export interface SurfAceRuntime {
   clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult>;
   closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult>;
   listScreens(): Promise<SurfAceScreenSummary[]>;
+  launchTerminal(input: SurfAceLaunchTerminalInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   providerAuthorityDiagnostics(): Promise<SurfAceProviderAuthorityProjection>;
   push(input: SurfAcePushInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
@@ -1069,6 +1082,11 @@ type OwnerControlCommand =
       context?: SurfAceSessionContext;
       input: SurfAcePushInput;
       op: "push";
+    }
+  | {
+      context?: SurfAceSessionContext;
+      input: SurfAceLaunchTerminalInput;
+      op: "launchTerminal";
     }
   | {
       input: { fingerprint: string; paneId: PaneId };
@@ -2738,6 +2756,28 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     throw new SurfAceToolError("unsupported_content_type", `Unsupported content type: ${String(input.contentType)}`);
   }
 
+  async launchTerminal(
+    input: SurfAceLaunchTerminalInput,
+    context?: SurfAceSessionContext,
+  ): Promise<SurfAcePushResult> {
+    await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAcePushResult>({
+        context,
+        input,
+        op: "launchTerminal",
+      });
+    }
+    if (input.confirmed !== true) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        "Process-backed terminal targets require confirmed:true.",
+      );
+    }
+    const surface = await this.requireActionableSurface(input.fingerprint);
+    return await this.terminalAppTargetSet(surface, input, context);
+  }
+
   async clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult> {
     await this.start();
     if (!this.ownsRuntimeLease) {
@@ -3723,6 +3763,94 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       targetApplyEvidence: evidence,
       targetId: target.targetId,
       targetKind: target.targetKind,
+    };
+  }
+
+  private async terminalAppTargetSet(
+    surface: ManagedSurface,
+    input: SurfAceLaunchTerminalInput,
+    context?: SurfAceSessionContext,
+  ): Promise<SurfAcePushResult> {
+    const command = input.command.trim();
+    if (!command) {
+      throw new SurfAceToolError("invalid_operation", "Terminal command must be non-empty.");
+    }
+    const args = input.args ?? [];
+    if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) {
+      throw new SurfAceToolError("invalid_operation", "Terminal args must be strings.");
+    }
+    const requiredCapability = requiredCapabilityForTargetKind("terminal_app");
+    if (!surface.targetCapabilities.has(requiredCapability)) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Surface ${surface.surfaceId} does not advertise ${requiredCapability}`,
+      );
+    }
+    await this.reconcilePaneTopologyAuthority(surface, "terminal target launch");
+    const pane = this.requirePane(surface.surfaceId, input.paneId);
+    await this.ensureCurrentPaneLineage(surface, pane);
+    this.finalizeLiveFrame(surface, pane);
+
+    const targetHeader: TargetHeader = {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: [requiredCapability],
+      safeToLogFields: ["command", "args"],
+      safetyClass: "process",
+      summary: input.summary?.trim() || [command, ...args].join(" "),
+    };
+    const targetPayload = {
+      args,
+      command,
+      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+      envPolicy: "surface_default" as const,
+      pty: true as const,
+      restartPolicy: input.restartPolicy ?? "manual_only",
+    };
+    const previousTargetEpoch = pane.targetEpoch === 0 ? null : pane.targetEpoch;
+    const registered = await this.registerTarget({
+      expectedPreviousTargetEpoch: previousTargetEpoch,
+      fingerprint: surface.surfaceId,
+      idempotencyKey: input.idempotencyKey ?? `terminal_app:${pane.paneId}:${command}:${JSON.stringify(args)}`,
+      launchedAt: new Date(this.now()).toISOString(),
+      ownershipEpoch: surface.ownershipEpoch,
+      ownershipSessionId: surface.sessionId ?? "",
+      paneId: pane.paneId,
+      paneLineageId: pane.paneLineageId,
+      registrationState: "attached",
+      restorePolicy: "manual",
+      targetHeader,
+      targetKind: "terminal_app",
+      targetPayload,
+    });
+    if (registered.status === "rejected") {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Terminal target registration rejected: ${registered.message}`,
+      );
+    }
+
+    const restored = await this.restoreTarget({
+      confirmed: true,
+      fingerprint: surface.surfaceId,
+      paneId: pane.paneId,
+      targetId: registered.targetId,
+    });
+    this.repairLivePaneLabelInvariant("terminal target launch", surface);
+    const paneLabel = this.projectedPaneLabel(surface, pane);
+    const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
+    return {
+      blockedReason: restored.blockedReason ?? (restored.evidence?.status === "applied" ? null : restored.evidence?.errorCode ?? "materialization_failed"),
+      contentId: null,
+      displayId,
+      fingerprint: surface.surfaceId,
+      paneAddress: displayId,
+      paneId: pane.paneId,
+      paneLabel,
+      revision: pane.currentRevision,
+      targetApplyEvidence: restored.evidence ?? undefined,
+      targetId: registered.targetId,
+      targetKind: "terminal_app",
     };
   }
 
@@ -8369,6 +8497,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.closePane(command.input);
       case "listScreens":
         return await this.listScreens();
+      case "launchTerminal":
+        return await this.launchTerminal(command.input, command.context);
       case "push":
         return await this.push(command.input, command.context);
       case "read":
