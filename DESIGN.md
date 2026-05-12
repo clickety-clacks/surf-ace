@@ -2680,6 +2680,31 @@ revision       int      Revision after push
 
 ---
 
+#### `surf_ace_launch_terminal`
+
+Launch a provider-owned process-backed terminal target in a pane through Surf Ace native hosting. Write.
+
+**Params:**
+```
+fingerprint       string    Target screen
+paneId            integer   Required.
+command           string    Executable command to launch in the terminal pane
+args              string[]  Optional argv entries
+cwd               string?   Optional working directory
+restartPolicy     enum      "manual_only" | "restore_new_process"; default "manual_only"
+confirmed         boolean   Must be true for process-backed target launch
+idempotencyKey    string?   Optional stable caller key for repeated launch-equivalent requests
+summary           string?   Optional human-readable target summary for diagnostics
+```
+
+**Returns:** same pane/target result shape as `surf_ace_push`, with `contentId: null`, `targetKind: "terminal_app"`, and target apply evidence.
+
+**Behavior:** The provider registers a `terminal_app` pane target and applies it with the current provider authority, pane lineage, and client-resolved pane geometry. The client/compositor receives resolved native-host and overlay regions; it must not infer layout intent from the target payload. Without `confirmed:true`, without an actionable provider-admitted pane, or without `target.terminal_app.v1`, the operation fails closed and does not launch a process.
+
+**Errors:** `not_connected`, `screen_not_found`, `invalid_operation`, `materialization_failed`
+
+---
+
 #### `surf_ace_clear`
 
 Clear the currently visible content in the target pane. If older content exists in that pane's surface-managed history, users can still reach it via Back/Forward. Write.

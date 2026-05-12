@@ -246,20 +246,6 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_push",
     },
     {
-      description: "Clear the currently visible content in a pane.",
-      execute: async (args: { fingerprint: string; paneId: PaneId }) => await runtime.clear(args),
-      inputSchema: {
-        additionalProperties: false,
-        properties: {
-          fingerprint: fingerprintParam,
-          paneId: paneIdParam,
-        },
-        required: ["fingerprint", "paneId"],
-        type: "object",
-      },
-      name: "surf_ace_clear",
-    },
-    {
       description: "Launch a provider-owned process-backed terminal target in a pane through Surf Ace native hosting, applying Surf Ace chrome/overlay regions. Requires confirmed:true.",
       execute: async (args: SurfAceLaunchTerminalInput, context?: SurfAceToolContext) =>
         await runtime.launchTerminal(args, {
@@ -313,6 +299,20 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_launch_terminal",
+    },
+    {
+      description: "Clear the currently visible content in a pane.",
+      execute: async (args: { fingerprint: string; paneId: PaneId }) => await runtime.clear(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          fingerprint: fingerprintParam,
+          paneId: paneIdParam,
+        },
+        required: ["fingerprint", "paneId"],
+        type: "object",
+      },
+      name: "surf_ace_clear",
     },
     {
       description: "Relinquish ownership of a Surf Ace surface and stop automatic reconnects for it.",

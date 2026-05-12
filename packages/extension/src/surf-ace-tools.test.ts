@@ -147,6 +147,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_list",
     "surf_ace_authority_diagnostics",
     "surf_ace_push",
+    "surf_ace_launch_terminal",
     "surf_ace_clear",
     "surf_ace_relinquish",
     "surf_ace_reattempt_connections",
