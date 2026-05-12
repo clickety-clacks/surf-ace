@@ -128,6 +128,11 @@ function createRealizeTopologyNodeSchema(depth = 8): Record<string, unknown> {
         enum: ["pane"],
         type: "string",
       },
+      weight: {
+        description: "Optional relative size within the parent split. Omitted means equal share.",
+        exclusiveMinimum: 0,
+        type: "number",
+      },
     },
     type: "object",
   };
@@ -151,6 +156,11 @@ function createRealizeTopologyNodeSchema(depth = 8): Record<string, unknown> {
           type: {
             enum: ["split"],
             type: "string",
+          },
+          weight: {
+            description: "Optional relative size within the parent split. Omitted means equal share.",
+            exclusiveMinimum: 0,
+            type: "number",
           },
         },
         required: ["direction", "children"],

@@ -669,6 +669,23 @@ export class SurfaceWsServer {
           v: 1,
         });
         return;
+      case "topology-changed": {
+        const topology = this.core.topologyState(event.surfaceId);
+        await this.broadcastLifecycleEvent({
+          eventId: makeEventId(),
+          op: "event.topology_changed",
+          payload: {
+            layout: topology.layout,
+            panes: topology.panes,
+            surfaceId: event.surfaceId as never,
+            topologyRevision: topology.topologyRevision,
+          },
+          sentAt: Date.now(),
+          type: "event",
+          v: 1,
+        });
+        return;
+      }
       case "surface-created":
       case "surface-removed":
       case "surface-changed":
@@ -1428,6 +1445,27 @@ export class SurfaceWsServer {
       this.core.setViewport(surfaceId, viewport);
       this.markUpdatedNativePaneGeometry(surfaceId, materialization);
       return true;
+    });
+  }
+
+  async resizeSplit(surfaceId: string, path: number[], weights: number[]): Promise<boolean> {
+    return await this.runSurfaceMutation(surfaceId, async () => {
+      const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForResizeSplit(surfaceId, path, weights);
+      const rollbackNativeGeometry = nativeGeometryUpdate
+        ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+        : null;
+      try {
+        await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.resize", rollbackNativeGeometry);
+        this.core.resizeSplit(surfaceId, path, weights);
+        this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+        return true;
+      } catch (error) {
+        persistentServerDiagnostic("warn", "pane_resize_failed", {
+          surface_id: surfaceId,
+          ...errorDiagnosticFields(error),
+        });
+        return false;
+      }
     });
   }
 

@@ -70,6 +70,7 @@ import type {
   TargetHeader,
   TargetKind,
   TargetMaterializedState,
+  TopologyChangedEvent,
   TopologyApplyResponse,
   Viewport,
   MutationAckResponse,
@@ -165,11 +166,13 @@ export type SurfAceTopologySummaryNode =
   | {
       paneId: PaneId;
       type: "pane";
+      weight?: number;
     }
   | {
       children: SurfAceTopologySummaryNode[];
       direction: "horizontal" | "vertical";
       type: "split";
+      weight?: number;
     };
 
 export type SurfAceScreenSummary = {
@@ -566,11 +569,13 @@ export type SurfAceRealizeTopologyNode =
       children: SurfAceRealizeTopologyNode[];
       direction: "horizontal" | "vertical";
       type?: "split";
+      weight?: number;
     }
   | {
       name?: string | null;
       paneId?: PaneId;
       type?: "pane";
+      weight?: number;
     };
 
 export type SurfAceRealizeTopologyInput = {
@@ -736,11 +741,13 @@ type ManagedLayoutNode =
   | {
       paneId: PaneId;
       type: "pane";
+      weight?: number;
     }
   | {
       children: ManagedLayoutNode[];
       direction: "horizontal" | "vertical";
       type: "split";
+      weight?: number;
     };
 
 type ManagedHistoryEntry = {
@@ -1528,6 +1535,12 @@ function integerPaneRect(rect: Rect): Rect {
   };
 }
 
+function layoutNodeWeight(node: { weight?: number }): number {
+  return typeof node.weight === "number" && Number.isFinite(node.weight) && node.weight > 0
+    ? node.weight
+    : 1;
+}
+
 function collectManagedPaneRects(node: ManagedLayoutNode, rect: Rect, result: Map<PaneId, Rect>): void {
   if (node.type === "pane") {
     result.set(node.paneId, integerPaneRect(rect));
@@ -1538,10 +1551,15 @@ function collectManagedPaneRects(node: ManagedLayoutNode, rect: Rect, result: Ma
     return;
   }
 
+  const totalWeight = Math.max(1, node.children.reduce((sum, child) => sum + layoutNodeWeight(child), 0));
+  let offset = 0;
+
   if (node.direction === "vertical") {
     node.children.forEach((child, index) => {
-      const childStart = Math.round(rect.x + (rect.width * index) / node.children.length);
-      const childEnd = Math.round(rect.x + (rect.width * (index + 1)) / node.children.length);
+      const childWeight = layoutNodeWeight(child);
+      const childStart = Math.round(rect.x + offset);
+      offset += rect.width * (childWeight / totalWeight);
+      const childEnd = index === node.children.length - 1 ? Math.round(rect.x + rect.width) : Math.round(rect.x + offset);
       collectManagedPaneRects(
         child,
         {
@@ -1557,8 +1575,10 @@ function collectManagedPaneRects(node: ManagedLayoutNode, rect: Rect, result: Ma
   }
 
   node.children.forEach((child, index) => {
-    const childStart = Math.round(rect.y + (rect.height * index) / node.children.length);
-    const childEnd = Math.round(rect.y + (rect.height * (index + 1)) / node.children.length);
+    const childWeight = layoutNodeWeight(child);
+    const childStart = Math.round(rect.y + offset);
+    offset += rect.height * (childWeight / totalWeight);
+    const childEnd = index === node.children.length - 1 ? Math.round(rect.y + rect.height) : Math.round(rect.y + offset);
     collectManagedPaneRects(
       child,
       {
@@ -1611,12 +1631,37 @@ function remoteLayoutToTopologyLayout(
     return {
       paneId: pane.remotePaneId,
       type: "pane",
+      ...(node.weight !== undefined ? { weight: node.weight } : {}),
     };
   }
   return {
     children: node.children.map((child) => remoteLayoutToTopologyLayout(surface, child, panes)),
     direction: node.direction,
     type: "split",
+    ...(node.weight !== undefined ? { weight: node.weight } : {}),
+  };
+}
+
+function topologyLayoutToManagedLayout(
+  surface: ManagedSurface,
+  node: TopologyApplyRequest["payload"]["layout"],
+): ManagedLayoutNode {
+  if (node.type === "pane") {
+    const pane = [...surface.panes.values()].find((candidate) => candidate.remotePaneId === node.paneId);
+    if (!pane) {
+      throw new SurfAceToolError("invalid_operation", `Topology update referenced unknown pane ${node.paneId}.`);
+    }
+    return {
+      paneId: pane.paneId,
+      type: "pane",
+      ...(node.weight !== undefined ? { weight: node.weight } : {}),
+    };
+  }
+  return {
+    children: node.children.map((child) => topologyLayoutToManagedLayout(surface, child)),
+    direction: node.direction,
+    type: "split",
+    ...(node.weight !== undefined ? { weight: node.weight } : {}),
   };
 }
 
@@ -1628,12 +1673,14 @@ function managedLayoutToSummary(node: ManagedLayoutNode | null): SurfAceTopology
     return {
       paneId: node.paneId,
       type: "pane",
+      ...(node.weight !== undefined ? { weight: node.weight } : {}),
     };
   }
   return {
     children: node.children.map((child) => managedLayoutToSummary(child)!),
     direction: node.direction,
     type: "split",
+    ...(node.weight !== undefined ? { weight: node.weight } : {}),
   };
 }
 
@@ -3359,6 +3406,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         ),
         direction: maybeSplit.direction,
         type: "split",
+        ...(maybeSplit.weight !== undefined ? { weight: maybeSplit.weight } : {}),
       };
     }
 
@@ -3387,6 +3435,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return {
         paneId: requestedPaneId,
         type: "pane",
+        ...(leaf.weight !== undefined ? { weight: leaf.weight } : {}),
       };
     }
 
@@ -3402,6 +3451,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return {
       paneId: created.paneId,
       type: "pane",
+      ...(leaf.weight !== undefined ? { weight: leaf.weight } : {}),
     };
   }
 
@@ -4145,6 +4195,38 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
   }
 
+  private handleTopologyChangedEvent(surface: ManagedSurface, event: TopologyChangedEvent): void {
+    const panesByRemoteId = new Map(event.payload.panes.map((pane) => [pane.paneId, pane]));
+    for (const paneState of panesByRemoteId.values()) {
+      const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+      if (!pane) {
+        throw new SurfAceToolError("invalid_operation", `Topology update referenced unknown pane ${paneState.paneId}.`);
+      }
+      pane.paneLabel = paneState.paneLabel;
+      pane.name = paneState.name;
+    }
+    const layout = topologyLayoutToManagedLayout(surface, event.payload.layout);
+    const visiblePaneIds = new Set(flattenManagedLayout(layout));
+    surface.layout = collapseManagedLayout(layout);
+    surface.topologyRevision = Math.max(surface.topologyRevision, Number(event.payload.topologyRevision));
+    for (const pane of surface.panes.values()) {
+      if (!visiblePaneIds.has(pane.paneId)) {
+        continue;
+      }
+      const rect = managedPaneRects(surface).get(pane.paneId);
+      if (rect) {
+        pane.viewport = { height: rect.height, scale: surface.viewport.scale, width: rect.width };
+      }
+    }
+    this.logger.info?.(
+      runtimeDiagnostic("topology_changed_event_applied", {
+        pane_ids: [...visiblePaneIds].join(","),
+        surface_id: surface.surfaceId,
+        topology_revision: surface.topologyRevision,
+      }),
+    );
+  }
+
   private handlePageEvent(surface: ManagedSurface, event: PageEvent): void {
     const pane = this.ensurePane(surface, event.payload.paneId);
     pane.buffer.page = {
@@ -4414,6 +4496,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         break;
       case "event.surface_resumed":
         this.handleSurfaceResumedEvent(surface, event);
+        break;
+      case "event.topology_changed":
+        this.handleTopologyChangedEvent(surface, event);
         break;
       case "event.tap":
         this.handleTapEvent(surface, event);

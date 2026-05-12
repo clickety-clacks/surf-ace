@@ -102,11 +102,13 @@ type LayoutNode =
   | {
       paneId: number;
       type: "pane";
+      weight?: number;
     }
   | {
       children: LayoutNode[];
       direction: "horizontal" | "vertical";
       type: "split";
+      weight?: number;
     };
 
 type SurfaceState = {
@@ -237,6 +239,7 @@ export type CoreEvent =
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
   | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
+  | { surfaceId: string; type: "topology-changed" }
   | { paneId: number; surfaceId: string; type: "drawing-dirty" };
 
 export class SurfaceCoreError extends Error {
@@ -786,6 +789,29 @@ export class SurfaceCore {
     });
   }
 
+  projectNativePaneGeometryUpdateForResizeSplit(surfaceId: string, path: number[], weights: number[]): NativePaneMaterialization | null {
+    const surface = this.getSurface(surfaceId);
+    const nextLayout = updateSplitWeights(surface.layout!, path, weights);
+    const currentRects = layoutPaneRects(surface.layout!, surface.viewport);
+    const nextRects = layoutPaneRects(nextLayout, surface.viewport);
+    const paneIds = [...surface.panes.values()]
+      .filter((pane) => pane.externalNative)
+      .filter((pane) => {
+        const currentRect = currentRects.get(pane.paneId);
+        const nextRect = nextRects.get(pane.paneId);
+        return Boolean(currentRect && nextRect && !sameRect(currentRect, nextRect));
+      })
+      .map((pane) => pane.paneId);
+    if (paneIds.length === 0) {
+      return null;
+    }
+    return this.projectNativePaneGeometryUpdateForLayout(surface, paneIds, nextLayout, {
+      geometryRevision: surface.geometryRevision + 1,
+      topologyRevision: Math.max(1, surface.topologyRevision + 1),
+      windowLabel: surface.windowLabel,
+    });
+  }
+
 
   validateNativePaneMaterializationLayout(
     surfaceId: string,
@@ -1120,6 +1146,23 @@ export class SurfaceCore {
           paneLineageId: pane.paneLineageId,
         };
       }),
+    };
+  }
+
+  topologyState(surfaceId: string): TopologyApplyRequest["payload"] {
+    const surface = this.getSurface(surfaceId);
+    return {
+      layout: surfaceLayoutToTopologyLayout(collapseLayout(surface.layout)),
+      panes: surface.paneOrder.map((paneId) => {
+        const pane = surface.panes.get(paneId)!;
+        return {
+          name: pane.name,
+          paneId: pane.paneId as PaneId,
+          paneLabel: pane.paneLabel,
+        };
+      }),
+      topologyRevision: surface.topologyRevision as TopologyRevision,
+      windowLabel: surface.windowLabel,
     };
   }
 
@@ -1507,6 +1550,18 @@ export class SurfaceCore {
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({ name, paneId, surfaceId, type: "pane-renamed" });
     return { name, paneId };
+  }
+
+  resizeSplit(surfaceId: string, path: number[], weights: number[]): void {
+    const surface = this.getSurface(surfaceId);
+    if (!surface.layout) {
+      throw new SurfaceCoreError("invalid_payload", "Cannot resize a surface without layout");
+    }
+    surface.layout = updateSplitWeights(surface.layout, path, weights);
+    surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
+    bumpGeometryRevision(surface);
+    this.emit({ surfaceId, type: "surface-changed" });
+    this.emit({ surfaceId, type: "topology-changed" });
   }
 
   paneClose(surfaceId: string, paneId: number): PaneCloseResponse["payload"] {
@@ -2528,6 +2583,7 @@ function topologyLayoutToSurfaceLayout(
     return {
       paneId,
       type: "pane",
+      ...(typeof node.weight === "number" ? { weight: node.weight } : {}),
     };
   }
 
@@ -2535,6 +2591,23 @@ function topologyLayoutToSurfaceLayout(
     children: node.children.map((child) => topologyLayoutToSurfaceLayout(child, paneStateById)),
     direction: node.direction,
     type: "split",
+    ...(typeof node.weight === "number" ? { weight: node.weight } : {}),
+  };
+}
+
+function surfaceLayoutToTopologyLayout(node: LayoutNode): TopologyApplyRequest["payload"]["layout"] {
+  if (node.type === "pane") {
+    return {
+      paneId: node.paneId as PaneId,
+      type: "pane",
+      ...(node.weight !== undefined ? { weight: node.weight } : {}),
+    };
+  }
+  return {
+    children: node.children.map(surfaceLayoutToTopologyLayout),
+    direction: node.direction,
+    type: "split",
+    ...(node.weight !== undefined ? { weight: node.weight } : {}),
   };
 }
 
@@ -2581,6 +2654,32 @@ function removePaneFromLayout(node: LayoutNode, paneId: number): LayoutNode | nu
   };
 }
 
+function updateSplitWeights(node: LayoutNode, path: number[], weights: number[]): LayoutNode {
+  if (path.length === 0) {
+    if (node.type !== "split" || weights.length !== node.children.length) {
+      throw new SurfaceCoreError("invalid_payload", "resize-split path/weights do not match a split");
+    }
+    return {
+      ...node,
+      children: node.children.map((child, index) => ({
+        ...child,
+        weight: Math.max(0.05, Number(weights[index] ?? 1)),
+      })),
+    };
+  }
+  if (node.type !== "split") {
+    throw new SurfaceCoreError("invalid_payload", "resize-split path does not resolve to a split");
+  }
+  const [nextIndex, ...rest] = path;
+  if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= node.children.length) {
+    throw new SurfaceCoreError("invalid_payload", "resize-split path index is invalid");
+  }
+  return {
+    ...node,
+    children: node.children.map((child, index) => index === nextIndex ? updateSplitWeights(child, rest, weights) : child),
+  };
+}
+
 function sanitizeLayoutNode(node: LayoutNode, knownPaneIds: Set<number>): LayoutNode | null {
   if (node.type === "pane") {
     return knownPaneIds.has(node.paneId) ? node : null;
@@ -2616,6 +2715,12 @@ function collapseLayout(node: LayoutNode | null): LayoutNode {
   };
 }
 
+function layoutNodeWeight(node: { weight?: number }): number {
+  return typeof node.weight === "number" && Number.isFinite(node.weight) && node.weight > 0
+    ? node.weight
+    : 1;
+}
+
 function layoutPaneRects(
   node: LayoutNode,
   viewport: SurfaceViewport,
@@ -2633,24 +2738,27 @@ function layoutPaneRects(
       return;
     }
 
-    const childCount = current.children.length || 1;
+    const totalWeight = Math.max(1, current.children.reduce((sum, child) => sum + layoutNodeWeight(child), 0));
+    let offset = 0;
     current.children.forEach((child, index) => {
+      const childWeight = layoutNodeWeight(child);
       visit(
         child,
         current.direction === "vertical"
           ? {
               height: rect.height,
-              width: rect.width / childCount,
-              x: rect.x + (rect.width * index) / childCount,
+              width: index === current.children.length - 1 ? rect.width - offset : rect.width * (childWeight / totalWeight),
+              x: rect.x + offset,
               y: rect.y,
             }
           : {
-              height: rect.height / childCount,
+              height: index === current.children.length - 1 ? rect.height - offset : rect.height * (childWeight / totalWeight),
               width: rect.width,
               x: rect.x,
-              y: rect.y + (rect.height * index) / childCount,
+              y: rect.y + offset,
             },
       );
+      offset += (current.direction === "vertical" ? rect.width : rect.height) * (childWeight / totalWeight);
     });
   };
 

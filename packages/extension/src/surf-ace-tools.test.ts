@@ -217,11 +217,11 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.ok(Array.isArray(realizeProperties.desired.anyOf));
   const splitDesired = realizeProperties.desired.anyOf.find((variant: any) => variant.properties.children);
   assert.ok(splitDesired);
-  assert.deepEqual(Object.keys(splitDesired.properties).sort(), ["children", "direction", "type"]);
+  assert.deepEqual(Object.keys(splitDesired.properties).sort(), ["children", "direction", "type", "weight"]);
   assert.ok(Array.isArray(splitDesired.properties.children.items.anyOf));
   const paneDesired = realizeProperties.desired.anyOf.find((variant: any) => variant.properties.paneId);
   assert.ok(paneDesired);
-  assert.deepEqual(Object.keys(paneDesired.properties).sort(), ["name", "paneId", "type"]);
+  assert.deepEqual(Object.keys(paneDesired.properties).sort(), ["name", "paneId", "type", "weight"]);
 
   const realizeBatchTool = tools.find((tool) => tool.name === "surf_ace_realize_topologies");
   assert.ok(realizeBatchTool);

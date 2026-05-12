@@ -591,14 +591,15 @@ enum SurfAceLayoutDirection: String, Codable {
 
 enum SurfAcePersistedPaneLayoutNode: Codable {
     case empty
-    case leaf(Int)
-    case split(direction: SurfAceLayoutDirection, children: [SurfAcePersistedPaneLayoutNode])
+    case leaf(Int, weight: Double? = nil)
+    case split(direction: SurfAceLayoutDirection, children: [SurfAcePersistedPaneLayoutNode], weight: Double? = nil)
 
     private enum CodingKeys: String, CodingKey {
         case children
         case direction
         case kind
         case paneId
+        case weight
     }
 
     private enum Kind: String, Codable {
@@ -611,12 +612,13 @@ enum SurfAcePersistedPaneLayoutNode: Codable {
         switch runtimeNode {
         case .empty:
             self = .empty
-        case .leaf(let paneId):
-            self = .leaf(paneId)
-        case .split(let direction, let children):
+        case .leaf(let paneId, let weight):
+            self = .leaf(paneId, weight: weight)
+        case .split(let direction, let children, let weight):
             self = .split(
                 direction: direction,
-                children: children.map(SurfAcePersistedPaneLayoutNode.init(from:))
+                children: children.map(SurfAcePersistedPaneLayoutNode.init(from:)),
+                weight: weight
             )
         }
     }
@@ -625,10 +627,10 @@ enum SurfAcePersistedPaneLayoutNode: Codable {
         switch self {
         case .empty:
             return .empty
-        case .leaf(let paneId):
-            return .leaf(paneId)
-        case .split(let direction, let children):
-            return .split(direction: direction, children: children.map(\.runtimeNode))
+        case .leaf(let paneId, let weight):
+            return .leaf(paneId, weight: weight)
+        case .split(let direction, let children, let weight):
+            return .split(direction: direction, children: children.map(\.runtimeNode), weight: weight)
         }
     }
 
@@ -638,11 +640,15 @@ enum SurfAcePersistedPaneLayoutNode: Codable {
         case .empty:
             self = .empty
         case .leaf:
-            self = .leaf(try container.decode(Int.self, forKey: .paneId))
+            self = .leaf(
+                try container.decode(Int.self, forKey: .paneId),
+                weight: try container.decodeIfPresent(Double.self, forKey: .weight)
+            )
         case .split:
             self = .split(
                 direction: try container.decode(SurfAceLayoutDirection.self, forKey: .direction),
-                children: try container.decode([SurfAcePersistedPaneLayoutNode].self, forKey: .children)
+                children: try container.decode([SurfAcePersistedPaneLayoutNode].self, forKey: .children),
+                weight: try container.decodeIfPresent(Double.self, forKey: .weight)
             )
         }
     }
@@ -652,31 +658,33 @@ enum SurfAcePersistedPaneLayoutNode: Codable {
         switch self {
         case .empty:
             try container.encode(Kind.empty, forKey: .kind)
-        case .leaf(let paneId):
+        case .leaf(let paneId, let weight):
             try container.encode(Kind.leaf, forKey: .kind)
             try container.encode(paneId, forKey: .paneId)
-        case .split(let direction, let children):
+            try container.encodeIfPresent(weight, forKey: .weight)
+        case .split(let direction, let children, let weight):
             try container.encode(Kind.split, forKey: .kind)
             try container.encode(direction, forKey: .direction)
             try container.encode(children, forKey: .children)
+            try container.encodeIfPresent(weight, forKey: .weight)
         }
     }
 }
 
 indirect enum SurfAcePaneLayoutNode {
     case empty
-    case leaf(Int)
-    case split(direction: SurfAceLayoutDirection, children: [SurfAcePaneLayoutNode])
+    case leaf(Int, weight: Double? = nil)
+    case split(direction: SurfAceLayoutDirection, children: [SurfAcePaneLayoutNode], weight: Double? = nil)
 
     var layoutIdentity: String {
         switch self {
         case .empty:
             return "empty"
-        case .leaf(let paneId):
-            return "leaf:\(paneId)"
-        case .split(let direction, let children):
+        case .leaf(let paneId, let weight):
+            return "leaf:\(paneId):\(weight ?? 1)"
+        case .split(let direction, let children, let weight):
             let childIdentity = children.map(\.layoutIdentity).joined(separator: "|")
-            return "split:\(direction.rawValue):[\(childIdentity)]"
+            return "split:\(direction.rawValue):\(weight ?? 1):[\(childIdentity)]"
         }
     }
 
@@ -684,9 +692,9 @@ indirect enum SurfAcePaneLayoutNode {
         switch self {
         case .empty:
             return []
-        case .leaf(let paneId):
+        case .leaf(let paneId, _):
             return [paneId]
-        case .split(_, let children):
+        case .split(_, let children, _):
             return children.flatMap(\.paneIDs)
         }
     }
@@ -695,12 +703,13 @@ indirect enum SurfAcePaneLayoutNode {
         switch self {
         case .empty:
             return self
-        case .leaf(let currentPaneId):
+        case .leaf(let currentPaneId, _):
             return currentPaneId == paneId ? replacement : self
-        case .split(let direction, let children):
+        case .split(let direction, let children, let weight):
             return .split(
                 direction: direction,
-                children: children.map { $0.replacingLeaf(paneId: paneId, with: replacement) }
+                children: children.map { $0.replacingLeaf(paneId: paneId, with: replacement) },
+                weight: weight
             )
         }
     }
@@ -709,12 +718,13 @@ indirect enum SurfAcePaneLayoutNode {
         switch self {
         case .empty:
             return self
-        case .leaf(let paneId):
-            return .leaf(paneId == sourcePaneID ? destinationPaneID : paneId)
-        case .split(let direction, let children):
+        case .leaf(let paneId, let weight):
+            return .leaf(paneId == sourcePaneID ? destinationPaneID : paneId, weight: weight)
+        case .split(let direction, let children, let weight):
             return .split(
                 direction: direction,
-                children: children.map { $0.replacingPaneID(from: sourcePaneID, to: destinationPaneID) }
+                children: children.map { $0.replacingPaneID(from: sourcePaneID, to: destinationPaneID) },
+                weight: weight
             )
         }
     }
@@ -723,9 +733,9 @@ indirect enum SurfAcePaneLayoutNode {
         switch self {
         case .empty:
             return self
-        case .leaf(let currentPaneId):
+        case .leaf(let currentPaneId, _):
             return currentPaneId == paneId ? nil : self
-        case .split(let direction, let children):
+        case .split(let direction, let children, let weight):
             let remaining = children.compactMap { $0.removingLeaf(paneId: paneId) }
             if remaining.isEmpty {
                 return nil
@@ -733,7 +743,43 @@ indirect enum SurfAcePaneLayoutNode {
             if remaining.count == 1 {
                 return remaining[0]
             }
-            return .split(direction: direction, children: remaining)
+            return .split(direction: direction, children: remaining, weight: weight)
+        }
+    }
+
+    var layoutWeight: Double {
+        switch self {
+        case .empty:
+            return 1
+        case .leaf(_, let weight), .split(_, _, let weight):
+            guard let weight, weight.isFinite, weight > 0 else { return 1 }
+            return weight
+        }
+    }
+
+    func updatingSplitWeights(path: [Int], weights: [Double]) -> SurfAcePaneLayoutNode {
+        guard case .split(let direction, let children, let weight) = self else { return self }
+        guard let first = path.first else {
+            let updatedChildren = children.enumerated().map { index, child in
+                child.withWeight(max(0.05, weights.indices.contains(index) ? weights[index] : child.layoutWeight))
+            }
+            return .split(direction: direction, children: updatedChildren, weight: weight)
+        }
+        let rest = Array(path.dropFirst())
+        let updatedChildren = children.enumerated().map { index, child in
+            index == first ? child.updatingSplitWeights(path: rest, weights: weights) : child
+        }
+        return .split(direction: direction, children: updatedChildren, weight: weight)
+    }
+
+    private func withWeight(_ nextWeight: Double) -> SurfAcePaneLayoutNode {
+        switch self {
+        case .empty:
+            return self
+        case .leaf(let paneId, _):
+            return .leaf(paneId, weight: nextWeight)
+        case .split(let direction, let children, _):
+            return .split(direction: direction, children: children, weight: nextWeight)
         }
     }
 }

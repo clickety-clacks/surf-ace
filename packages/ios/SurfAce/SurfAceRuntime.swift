@@ -319,6 +319,7 @@ final class SurfAceRuntime {
         "event.surface_appeared",
         "event.surface_removed",
         "event.surface_resumed",
+        "event.topology_changed",
         "event.snapshot_hint",
         "event.pane_created",
         "event.pane_removed",
@@ -1973,7 +1974,7 @@ final class SurfAceRuntime {
             }
             visiblePaneLabels.insert(newPaneLabel)
         }
-        let children: [SurfAcePaneLayoutNode] = [.leaf(paneId)] + newPaneIds.map(SurfAcePaneLayoutNode.leaf)
+        let children: [SurfAcePaneLayoutNode] = [.leaf(paneId)] + newPaneIds.map { .leaf($0) }
         surface.activeKeyboardPaneId = paneId
         surface.paneLayout = surface.paneLayout.replacingLeaf(
             paneId: paneId,
@@ -2662,6 +2663,37 @@ final class SurfAceRuntime {
         sendEvent(surfaceId: surfaceId, op: "event.snapshot_hint", payload: ["reason": reason])
     }
 
+    func resizeSplit(surfaceId: String, path: [Int], childIndex: Int, delta: CGFloat, extent: CGFloat) {
+        guard let surface = surfaceById[surfaceId], extent > 0 else { return }
+        let target = splitNode(at: path, in: surface.paneLayout)
+        guard case .split(_, let children, _) = target,
+              childIndex >= 0,
+              childIndex + 1 < children.count else { return }
+        let weights = children.map(\.layoutWeight)
+        let total = max(weights.reduce(0, +), 1)
+        let deltaWeight = Double(delta / extent) * total
+        var nextWeights = weights
+        nextWeights[childIndex] = max(0.05, weights[childIndex] + deltaWeight)
+        nextWeights[childIndex + 1] = max(0.05, weights[childIndex + 1] - deltaWeight)
+        surface.paneLayout = surface.paneLayout.updatingSplitWeights(path: path, weights: nextWeights)
+        surface.topologyEpoch += 1
+        persistSurfaceTopology(surfaceId: surfaceId)
+        sendLifecycleEvent(
+            surfaceId: surfaceId,
+            op: "event.topology_changed",
+            payload: topologyChangedPayload(for: surface)
+        )
+    }
+
+    private func splitNode(at path: [Int], in node: SurfAcePaneLayoutNode) -> SurfAcePaneLayoutNode {
+        guard let first = path.first,
+              case .split(_, let children, _) = node,
+              children.indices.contains(first) else {
+            return node
+        }
+        return splitNode(at: Array(path.dropFirst()), in: children[first])
+    }
+
     private func noteRenderDiagnostics(
         surfaceId: String,
         pane: SurfAcePaneModel,
@@ -2906,7 +2938,7 @@ final class SurfAceRuntime {
             return
         }
 
-        if case .leaf(let currentPaneId) = surface.paneLayout,
+        if case .leaf(let currentPaneId, _) = surface.paneLayout,
            let bootstrapPane = surface.panesById[currentPaneId] {
             if currentPaneId != initialPaneId {
                 surface.panesById.removeValue(forKey: currentPaneId)
@@ -2946,7 +2978,7 @@ final class SurfAceRuntime {
                   panesById[paneId] != nil else {
                 return nil
             }
-            return .leaf(paneId)
+            return .leaf(paneId, weight: payload["weight"] as? Double)
         case "split":
             guard let directionRaw = payload["direction"] as? String,
                   let direction = SurfAceLayoutDirection(rawValue: directionRaw),
@@ -2957,7 +2989,7 @@ final class SurfAceRuntime {
             guard children.count == childrenPayload.count else {
                 return nil
             }
-            return .split(direction: direction, children: children)
+            return .split(direction: direction, children: children, weight: payload["weight"] as? Double)
         default:
             return nil
         }
@@ -2968,6 +3000,40 @@ final class SurfAceRuntime {
             "width": max(Int(surface.viewportSize.width.rounded()), 1),
             "height": max(Int(surface.viewportSize.height.rounded()), 1),
             "scale": Double(max(surface.viewportScale, 1)),
+        ]
+    }
+
+    private func topologyLayoutPayload(_ node: SurfAcePaneLayoutNode) -> [String: Any] {
+        switch node {
+        case .empty:
+            return ["type": "split", "direction": "horizontal", "children": []]
+        case .leaf(let paneId, let weight):
+            var payload: [String: Any] = ["type": "pane", "paneId": paneId]
+            if let weight { payload["weight"] = weight }
+            return payload
+        case .split(let direction, let children, let weight):
+            var payload: [String: Any] = [
+                "type": "split",
+                "direction": direction.rawValue,
+                "children": children.map(topologyLayoutPayload),
+            ]
+            if let weight { payload["weight"] = weight }
+            return payload
+        }
+    }
+
+    private func topologyChangedPayload(for surface: SurfAceSurfaceModel) -> [String: Any] {
+        [
+            "surfaceId": surface.surfaceId,
+            "topologyRevision": max(surface.topologyEpoch, 1),
+            "layout": topologyLayoutPayload(surface.paneLayout),
+            "panes": surface.panes.map { pane in
+                [
+                    "paneId": pane.paneId,
+                    "paneLabel": pane.paneLabel,
+                    "name": jsonValue(pane.name),
+                ]
+            },
         ]
     }
 

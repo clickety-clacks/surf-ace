@@ -76,6 +76,7 @@ body.compositor-hosted .pane-shell {
 .layout-split {
   display: flex;
   height: 100%;
+  position: relative;
   width: 100%;
 }
 
@@ -115,6 +116,37 @@ body.compositor-hosted .pane-shell {
 .layout-split.direction-vertical > .pane-shell,
 .layout-split.direction-vertical > .layout-split {
   height: 100%;
+}
+
+.split-resize-handle {
+  position: absolute;
+  z-index: 18;
+  background: rgba(255, 255, 255, 0.08);
+  touch-action: none;
+}
+
+.split-resize-handle-horizontal {
+  cursor: row-resize;
+  height: 10px;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+}
+
+.split-resize-handle-vertical {
+  cursor: col-resize;
+  bottom: 0;
+  top: 0;
+  transform: translateX(-50%);
+  width: 10px;
+}
+
+.split-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.16);
 }
 
 body.compositor-hosted .pane-shell.native-backed .pane-scroll,

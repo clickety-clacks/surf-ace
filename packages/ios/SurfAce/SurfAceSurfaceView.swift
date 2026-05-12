@@ -331,37 +331,84 @@ private struct SurfAcePaneTreeView: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     let node: SurfAcePaneLayoutNode
+    var path: [Int] = []
 
     var body: some View {
         switch node {
         case .empty:
             Color.black.opacity(0.94)
-        case .leaf(let paneId):
+        case .leaf(let paneId, _):
             if let pane = surface.panesById[paneId] {
                 SurfAcePaneView(runtime: runtime, surface: surface, pane: pane)
             } else {
                 Color.clear
             }
-        case .split(let direction, let children):
-            Group {
+        case .split(let direction, let children, _):
+            GeometryReader { proxy in
+                let totalWeight = max(children.reduce(0) { $0 + $1.layoutWeight }, 1)
                 if direction == .vertical {
-                    HStack(spacing: surfAcePaneSplitSpacing) {
-                        ForEach(children, id: \.layoutIdentity) { child in
-                            SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ZStack(alignment: .topLeading) {
+                        HStack(spacing: 0) {
+                            ForEach(Array(children.enumerated()), id: \.element.layoutIdentity) { index, child in
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, path: path + [index])
+                                    .frame(width: max(1, proxy.size.width * child.layoutWeight / totalWeight), height: proxy.size.height)
+                            }
+                        }
+                        ForEach(Array(children.indices.dropLast()), id: \.self) { index in
+                            let offset = proxy.size.width * children.prefix(index + 1).reduce(0) { $0 + $1.layoutWeight } / totalWeight
+                            SurfAceSplitResizeHandle(direction: direction) { delta in
+                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, childIndex: index, delta: delta, extent: proxy.size.width)
+                            }
+                            .position(x: offset, y: proxy.size.height / 2)
                         }
                     }
                 } else {
-                    VStack(spacing: surfAcePaneSplitSpacing) {
-                        ForEach(children, id: \.layoutIdentity) { child in
-                            SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ZStack(alignment: .topLeading) {
+                        VStack(spacing: 0) {
+                            ForEach(Array(children.enumerated()), id: \.element.layoutIdentity) { index, child in
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, path: path + [index])
+                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * child.layoutWeight / totalWeight))
+                            }
+                        }
+                        ForEach(Array(children.indices.dropLast()), id: \.self) { index in
+                            let offset = proxy.size.height * children.prefix(index + 1).reduce(0) { $0 + $1.layoutWeight } / totalWeight
+                            SurfAceSplitResizeHandle(direction: direction) { delta in
+                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, childIndex: index, delta: delta, extent: proxy.size.height)
+                            }
+                            .position(x: proxy.size.width / 2, y: offset)
                         }
                     }
                 }
             }
             .background(Color.white.opacity(0.12))
         }
+    }
+}
+
+private struct SurfAceSplitResizeHandle: View {
+    let direction: SurfAceLayoutDirection
+    let onDrag: (CGFloat) -> Void
+    @State private var previousTranslation: CGFloat = 0
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.18))
+            .frame(
+                width: direction == .vertical ? 10 : nil,
+                height: direction == .horizontal ? 10 : nil
+            )
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let translation = direction == .vertical ? value.translation.width : value.translation.height
+                        onDrag(translation - previousTranslation)
+                        previousTranslation = translation
+                    }
+                    .onEnded { _ in
+                        previousTranslation = 0
+                    }
+            )
     }
 }
 

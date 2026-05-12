@@ -138,8 +138,8 @@ type RendererPaneState = {
 };
 
 type LayoutNode =
-  | { paneId: number; type: "pane" }
-  | { children: LayoutNode[]; direction: "horizontal" | "vertical"; type: "split" };
+  | { paneId: number; type: "pane"; weight?: number }
+  | { children: LayoutNode[]; direction: "horizontal" | "vertical"; type: "split"; weight?: number };
 
 type RendererWindowState = {
   connectionBar: "connected" | "connecting" | "disconnected";
@@ -1914,7 +1914,43 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   reportPaneSnapshot(view);
 }
 
-function renderLayout(node: LayoutNode, panesById: Map<number, RendererPaneState>): HTMLElement {
+function layoutWeight(node: LayoutNode): number {
+  return typeof node.weight === "number" && Number.isFinite(node.weight) && node.weight > 0 ? node.weight : 1;
+}
+
+function attachResizeHandle(handle: HTMLElement, split: HTMLElement, node: Extract<LayoutNode, { type: "split" }>, path: number[], index: number): void {
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    const start = node.direction === "vertical" ? event.clientX : event.clientY;
+    const splitRect = split.getBoundingClientRect();
+    const extent = node.direction === "vertical" ? splitRect.width : splitRect.height;
+    const weights = node.children.map(layoutWeight);
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    const before = weights[index] ?? 1;
+    const after = weights[index + 1] ?? 1;
+    const minWeight = Math.max(0.05, totalWeight * 0.05);
+    const onMove = (moveEvent: PointerEvent) => {
+      const current = node.direction === "vertical" ? moveEvent.clientX : moveEvent.clientY;
+      const deltaWeight = extent > 0 ? ((current - start) / extent) * totalWeight : 0;
+      const pairTotal = before + after;
+      const nextBefore = Math.min(Math.max(minWeight, before + deltaWeight), Math.max(minWeight, pairTotal - minWeight));
+      const nextWeights = [...weights];
+      nextWeights[index] = nextBefore;
+      nextWeights[index + 1] = Math.max(minWeight, pairTotal - nextBefore);
+      window.surfAce.command({ path, type: "resize-split", weights: nextWeights });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      scheduleCompositorOverlayRegionReport("layout");
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  });
+}
+
+function renderLayout(node: LayoutNode, panesById: Map<number, RendererPaneState>, path: number[] = []): HTMLElement {
   if (node.type === "pane") {
     const pane = panesById.get(node.paneId);
     if (!pane) {
@@ -1923,12 +1959,31 @@ function renderLayout(node: LayoutNode, panesById: Map<number, RendererPaneState
     }
     const view = ensurePaneView(node.paneId);
     updatePane(view, pane);
+    view.rootEl.style.flexGrow = String(layoutWeight(node));
     return view.rootEl;
   }
   const split = document.createElement("div");
   split.className = `layout-split direction-${node.direction}`;
-  for (const child of node.children) {
-    split.appendChild(renderLayout(child, panesById));
+  split.style.flexGrow = String(layoutWeight(node));
+  const totalWeight = node.children.reduce((sum, child) => sum + layoutWeight(child), 0);
+  let cumulativeWeight = 0;
+  for (const [index, child] of node.children.entries()) {
+    const childEl = renderLayout(child, panesById, [...path, index]);
+    childEl.style.flexGrow = String(layoutWeight(child));
+    split.appendChild(childEl);
+    cumulativeWeight += layoutWeight(child);
+    if (index < node.children.length - 1) {
+      const handle = document.createElement("div");
+      handle.className = `split-resize-handle split-resize-handle-${node.direction}`;
+      const percent = totalWeight > 0 ? (cumulativeWeight / totalWeight) * 100 : 0;
+      if (node.direction === "vertical") {
+        handle.style.left = `${percent}%`;
+      } else {
+        handle.style.top = `${percent}%`;
+      }
+      attachResizeHandle(handle, split, node, path, index);
+      split.appendChild(handle);
+    }
   }
   return split;
 }

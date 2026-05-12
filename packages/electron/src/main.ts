@@ -951,6 +951,19 @@ function installIpc(): void {
     switch (payload.type) {
       case "focus-pane":
         break;
+      case "resize-split":
+        try {
+          const path = Array.isArray(payload.path) ? payload.path.map((entry) => Number(entry)) : [];
+          const weights = Array.isArray(payload.weights) ? payload.weights.map((entry) => Number(entry)) : [];
+          if (server) {
+            void server.resizeSplit(surfaceId, path, weights);
+          } else {
+            core.resizeSplit(surfaceId, path, weights);
+          }
+        } catch {
+          // Renderer commands can race a pane reset during reconnect.
+        }
+        break;
       case "annotate":
         try {
           core.setAnnotating(surfaceId, paneId, Boolean(payload.enabled));
