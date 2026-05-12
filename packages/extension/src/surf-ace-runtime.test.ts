@@ -7859,23 +7859,13 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("worker closes stale sockets before retrying failed pair attempts", async () => {
+  await t.test("worker closes stale sockets and suppresses invalid_resume retries when the circuit opens", async () => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port);
-    server.forcedPairErrors = [
-      {
-        code: "invalid_resume",
-        message: "Resume session did not match active ownership lock",
-      },
-      {
-        code: "invalid_resume",
-        message: "Resume session did not match active ownership lock",
-      },
-      {
-        code: "invalid_resume",
-        message: "Resume session did not match active ownership lock",
-      },
-    ];
+    server.forcedPairErrors = Array.from({ length: 10 }, () => ({
+      code: "invalid_resume" as const,
+      message: "Resume session did not match active ownership lock",
+    }));
 
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-retry-"));
     const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
@@ -7890,10 +7880,27 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     try {
       await runtime.start();
       await waitFor(() => server.pairRequests.length >= 3, 12_000);
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await waitFor(
+        () => surface.autoRetryEnabled === false && surface.connectionCircuitOpenedAt !== null,
+        12_000,
+      );
+      await waitFor(() => surface.workPromise === null, 12_000);
+      const pairRequestsAfterCircuitOpen = server.pairRequests.length;
       await new Promise((resolve) => {
         setTimeout(resolve, 100);
       });
 
+      assert.equal(server.pairRequests.length, pairRequestsAfterCircuitOpen);
+      assert.equal(surface.autoRetryEnabled, false);
+      assert.equal(surface.connectionState, "unreachable");
+      assert.equal(surface.connectionCircuitOpenedAt !== null, true);
+      assert.equal(internalRuntime.surfaceConnectionDiagnostics(surface).circuitState, "given_up");
+      const screen = (await runtime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
+      assert.equal(screen?.authority.actionable, false);
+      assert.equal(screen?.authority.blockers.includes("not_connected"), true);
       assert.ok(server.activeSocketCount <= 1);
       assert.ok(server.maxConcurrentSocketCount <= 1);
     } finally {
@@ -8499,8 +8506,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(screen.panes, []);
       assert.equal(screen.topology, null);
       assert.equal(screen.topologyRevision, 0);
-      assert.equal(screen.connectionDiagnostics.circuitState, "open");
+      assert.equal(screen.connectionDiagnostics.circuitState, "given_up");
       assert.equal(screen.connectionDiagnostics.circuitOpen, true);
+      assert.equal(screen.connectionDiagnostics.givenUp, true);
       assert.equal(screen._debug?.hasPairedInGatewaySession, false);
       assert.equal(internalRuntime.persistentState.windowLabels[server.surfaceId], undefined);
 
@@ -8510,7 +8518,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           const snapshot = JSON.parse(raw) as { screens: Array<{ fingerprint?: string; connectionDiagnostics?: { circuitState?: string } }> };
           return snapshot.screens.some((entry) =>
             entry.fingerprint === server.surfaceId &&
-            entry.connectionDiagnostics?.circuitState === "open");
+            entry.connectionDiagnostics?.circuitState === "given_up");
         } catch {
           return false;
         }
@@ -8524,7 +8532,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const passiveScreen = (await passiveRuntime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
         assert.equal(passiveScreen?.windowLabel, "");
         assert.deepEqual(passiveScreen?.panes, []);
-        assert.equal(passiveScreen?.connectionDiagnostics.circuitState, "open");
+        assert.equal(passiveScreen?.connectionDiagnostics.circuitState, "given_up");
+        assert.equal(passiveScreen?.connectionDiagnostics.givenUp, true);
       } finally {
         await passiveRuntime.stop();
       }
@@ -9112,16 +9121,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         try {
           const raw = await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8");
           const snapshot = JSON.parse(raw) as { screens: Array<{ connectionDiagnostics?: { circuitState?: string } }> };
-          return snapshot.screens.some((entry) => entry.connectionDiagnostics?.circuitState === "open");
+          return snapshot.screens.some((entry) => entry.connectionDiagnostics?.circuitState === "given_up");
         } catch {
           return false;
         }
       }, 12_000);
       let screen = (await runtime.listScreens())[0];
-      assert.equal(screen?.connectionDiagnostics.circuitState, "open");
+      assert.equal(screen?.connectionDiagnostics.circuitState, "given_up");
       assert.equal(screen?.connectionDiagnostics.circuitOpen, true);
-      assert.equal(screen?.connectionDiagnostics.givenUp, false);
-      assert.equal(screen?._debug?.connectionCircuit.circuitState, "open");
+      assert.equal(screen?.connectionDiagnostics.givenUp, true);
+      assert.equal(screen?._debug?.connectionCircuit.circuitState, "given_up");
+      assert.equal(screen?._debug?.autoRetryEnabled, false);
 
       const passiveRuntime = createSurfAceRuntime({
         discovery: new StaticDiscoveryService([]),
@@ -9130,8 +9140,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       try {
         await passiveRuntime.start();
         const passiveScreen = (await passiveRuntime.listScreens()).find((entry) => entry.fingerprint === server.surfaceId);
-        assert.equal(passiveScreen?.connectionDiagnostics.circuitState, "open");
+        assert.equal(passiveScreen?.connectionDiagnostics.circuitState, "given_up");
         assert.equal(passiveScreen?.connectionDiagnostics.circuitOpen, true);
+        assert.equal(passiveScreen?.connectionDiagnostics.givenUp, true);
       } finally {
         await passiveRuntime.stop();
       }
@@ -9139,9 +9150,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       surface.unreachableFailures = 6;
       internalRuntime.noteSurfaceConnectionFailure(surface, "test duration pressure");
       screen = (await runtime.listScreens())[0];
-      assert.equal(screen?.connectionDiagnostics.circuitState, "open");
-      assert.equal(screen?.connectionDiagnostics.givenUp, false);
-      assert.equal(screen?._debug?.autoRetryEnabled, true);
+      assert.equal(screen?.connectionDiagnostics.circuitState, "given_up");
+      assert.equal(screen?.connectionDiagnostics.givenUp, true);
+      assert.equal(screen?._debug?.autoRetryEnabled, false);
     });
   });
 
@@ -9155,7 +9166,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       internalRuntime.noteSurfaceConnectionFailure(surface, "test duration pressure");
       const result = await runtime.reattemptConnections({ fingerprint: server.surfaceId });
       assert.equal(result.surfaces[0]?.fingerprint, server.surfaceId);
-      assert.equal(result.surfaces[0]?.circuitState, "open");
+      assert.equal(result.surfaces[0]?.circuitState, "given_up");
       assert.equal(surface.autoRetryEnabled, true);
       assert.equal(surface.reconnectAttempt, 0);
       assert.equal(surface.unreachableFailures, 0);

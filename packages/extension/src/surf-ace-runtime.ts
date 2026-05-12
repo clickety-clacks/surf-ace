@@ -10447,8 +10447,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (surface.unreachableFailures >= UNREACHABLE_AFTER_FAILURES && surface.connectionCircuitOpenedAt === null) {
       surface.connectionCircuitOpenedAt = this.now();
       surface.connectionCircuitReason = reason;
+      surface.autoRetryEnabled = false;
+      surface.connectionState = "unreachable";
       this.logger.warn?.(
         runtimeDiagnostic("connection_circuit_open", {
+          auto_retry_enabled: surface.autoRetryEnabled,
           failures: surface.unreachableFailures,
           surface_id: surface.surfaceId,
         }),
@@ -10472,8 +10475,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (probe.unreachableFailures >= UNREACHABLE_AFTER_FAILURES && probe.connectionCircuitOpenedAt === null) {
       probe.connectionCircuitOpenedAt = this.now();
       probe.connectionCircuitReason = reason;
+      probe.autoRetryEnabled = false;
+      probe.connectionState = "unreachable";
       this.logger.warn?.(
         runtimeDiagnostic("endpoint_probe_circuit_open", {
+          auto_retry_enabled: probe.autoRetryEnabled,
           endpoint_id: probe.endpointId,
           failures: probe.unreachableFailures,
         }),
