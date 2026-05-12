@@ -12,6 +12,7 @@
   },
   "tools": [
     "surf_ace_list",
+    "surf_ace_authority_diagnostics",
     "surf_ace_push",
     "surf_ace_clear",
     "surf_ace_relinquish",
@@ -27,6 +28,7 @@
   "contracts": {
     "tools": [
       "surf_ace_list",
+      "surf_ace_authority_diagnostics",
       "surf_ace_push",
       "surf_ace_clear",
       "surf_ace_relinquish",

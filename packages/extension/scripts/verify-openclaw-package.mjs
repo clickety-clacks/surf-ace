@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const packageRoot = new URL("../dist/openclaw-package/", import.meta.url);
 
@@ -19,6 +20,13 @@ function assertFile(relativePath) {
 const packageJson = JSON.parse(readFileSync(packagePath("package.json"), "utf8"));
 assert.deepEqual(packageJson.openclaw?.extensions, ["./surf-ace.ts"]);
 assert.deepEqual(packageJson.openclaw?.runtimeExtensions, ["./dist/extension/src/index.js"]);
+
+const pluginJson = JSON.parse(readFileSync(packagePath("openclaw.plugin.json"), "utf8"));
+const { surfAceToolNames } = await import(
+  pathToFileURL(packagePath("dist/extension/src/surf-ace-tools.js")).href
+);
+assert.deepEqual(pluginJson.tools, surfAceToolNames);
+assert.deepEqual(pluginJson.contracts?.tools, surfAceToolNames);
 
 assertFile("surf-ace.ts");
 assertFile("dist/surf-ace.js");
