@@ -132,6 +132,34 @@ test("surface core persists and restores multiple live windows with pane content
   assert.equal(restoredSecondary.panes[0]?.content.contentType, "markdown");
 });
 
+test("surface core persists and restores local window placement without changing surface identity", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 3);
+
+  core.setWindowPlacement(surface.surfaceId, {
+    bounds: { height: 768, width: 1024, x: 44, y: 88 },
+    displayId: 7,
+    fullscreen: true,
+  });
+
+  const persistentState = core.getPersistentState();
+  const restoredCore = new SurfaceCore({ persistentState });
+  const restoredSurfaces = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  assert.deepEqual(restoredSurfaces.map((restored) => restored.surfaceId), [surface.surfaceId]);
+  assert.deepEqual(restoredCore.getWindowPlacement(surface.surfaceId), {
+    bounds: { height: 768, width: 1024, x: 44, y: 88 },
+    displayId: 7,
+    fullscreen: true,
+  });
+});
+
 test("surface core does not restore a closed stale primary over remaining windows", () => {
   const core = new SurfaceCore({
     persistentState: {

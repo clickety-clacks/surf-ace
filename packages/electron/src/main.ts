@@ -32,6 +32,7 @@ import {
 } from "./surface-core.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
 import { surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
 
 const DEFAULT_WS_PORT = 19001;
@@ -213,6 +214,23 @@ function syncWindowViewport(surfaceId: string, window: BrowserWindow): void {
   }).catch((error) => {
     console.warn(`[surf-ace] viewport resize failed: ${error}`);
   });
+}
+
+function currentWindowPlacement(window: BrowserWindow): WindowPlacement {
+  const bounds = window.getNormalBounds();
+  const display = screen.getDisplayMatching(bounds);
+  return {
+    bounds,
+    displayId: display.id,
+    fullscreen: window.isFullScreen(),
+  };
+}
+
+function syncWindowPlacement(surfaceId: string, window: BrowserWindow): void {
+  if (window.isDestroyed() || resolveCompositorControlSocketPath()) {
+    return;
+  }
+  core.setWindowPlacement(surfaceId, currentWindowPlacement(window));
 }
 
 async function loadPersistentState(): Promise<PersistentSurfaceState | undefined> {
@@ -678,9 +696,13 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   const surface = core.getSurface(surfaceId);
+  const compositorSocketPath = resolveCompositorControlSocketPath();
+  const restoredPlacement = compositorSocketPath
+    ? null
+    : restoreWindowPlacement(core.getWindowPlacement(surfaceId), screen.getAllDisplays(), screen.getPrimaryDisplay());
   const window = new BrowserWindow({
     ...surfaceWindowOptions({
-      compositorSocketPath: resolveCompositorControlSocketPath(),
+      compositorSocketPath,
       endpointName: endpointName(),
       viewport: surface.viewport,
       windowLabel: surface.windowLabel,
@@ -691,33 +713,49 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
       webviewTag: true,
     },
   });
+  if (restoredPlacement?.bounds) {
+    window.setBounds(restoredPlacement.bounds);
+  }
 
   windows.set(surfaceId, window);
   readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);
   window.once("ready-to-show", () => {
     syncWindowViewport(surfaceId, window);
+    syncWindowPlacement(surfaceId, window);
     window.show();
+    if (restoredPlacement?.fullscreen) {
+      window.setFullScreen(true);
+    }
   });
   window.webContents.once("did-finish-load", () => {
     syncWindowViewport(surfaceId, window);
+    syncWindowPlacement(surfaceId, window);
     readyWindows.add(surfaceId);
     flushPendingWindowState(surfaceId);
   });
+  window.on("move", () => {
+    syncWindowPlacement(surfaceId, window);
+  });
   window.on("resize", () => {
     syncWindowViewport(surfaceId, window);
+    syncWindowPlacement(surfaceId, window);
   });
   window.on("maximize", () => {
     syncWindowViewport(surfaceId, window);
+    syncWindowPlacement(surfaceId, window);
   });
   window.on("unmaximize", () => {
     syncWindowViewport(surfaceId, window);
+    syncWindowPlacement(surfaceId, window);
   });
   window.on("enter-full-screen", () => {
     syncWindowViewport(surfaceId, window);
+    syncWindowPlacement(surfaceId, window);
   });
   window.on("leave-full-screen", () => {
     syncWindowViewport(surfaceId, window);
+    syncWindowPlacement(surfaceId, window);
   });
   window.on("closed", () => {
     windows.delete(surfaceId);
@@ -743,7 +781,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
 
   await window.loadFile(path.join(distDir, "renderer", "index.html"), {
     query: surfaceWindowLoadQuery({
-      compositorSocketPath: resolveCompositorControlSocketPath(),
+      compositorSocketPath,
       surfaceId,
     }),
   });

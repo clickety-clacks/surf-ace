@@ -42,6 +42,7 @@ import type {
   TopologyRevision,
 } from "../../protocol/src/index.js";
 import type { NativePaneMaterialization } from "./native-pane-bridge.js";
+import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
 type ContentDisplay = ContentSetRequest["payload"]["display"];
@@ -125,6 +126,7 @@ type SurfaceState = {
   surfaceEpochRevision: number;
   topologyRevision: number;
   viewport: SurfaceViewport;
+  windowPlacement: WindowPlacement | null;
   windowLabel: string;
 };
 
@@ -154,6 +156,7 @@ type PersistentSurfaceRecord = {
   surfaceId: string;
   topologyRevision: number;
   viewport: SurfaceViewport;
+  windowPlacement?: WindowPlacement | null;
   windowLabel: string;
 };
 
@@ -332,6 +335,20 @@ export class SurfaceCore {
       ...structuredClone(this.persistentState),
       surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
     };
+  }
+
+  getWindowPlacement(surfaceId: string): WindowPlacement | null {
+    return cloneWindowPlacement(this.getSurface(surfaceId).windowPlacement);
+  }
+
+  setWindowPlacement(surfaceId: string, placement: WindowPlacement | null): void {
+    const surface = this.getSurface(surfaceId);
+    const nextPlacement = cloneWindowPlacement(placement);
+    if (JSON.stringify(surface.windowPlacement) === JSON.stringify(nextPlacement)) {
+      return;
+    }
+    surface.windowPlacement = nextPlacement;
+    this.emit({ surfaceId, type: "surface-changed" });
   }
 
   ensurePrimarySurface(name: string, viewport: SurfaceViewport): SurfaceState {
@@ -2144,6 +2161,7 @@ export class SurfaceCore {
       surfaceEpochRevision: 1,
       topologyRevision: 0,
       viewport: cloneViewport(viewport),
+      windowPlacement: null,
       windowLabel: "",
     };
     this.surfaces.set(surfaceId, surface);
@@ -2319,6 +2337,7 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
     surfaceId: surface.surfaceId,
     topologyRevision: surface.topologyRevision,
     viewport: cloneViewport(surface.viewport),
+    windowPlacement: cloneWindowPlacement(surface.windowPlacement),
     windowLabel: surface.windowLabel,
   };
 }
@@ -2395,6 +2414,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
       scale: 1,
       width: DEFAULT_VISIBLE_RECT.width,
     },
+    windowPlacement: cloneWindowPlacement(record.windowPlacement),
     windowLabel: isValidWindowLabel(record.windowLabel) ? record.windowLabel : "",
   };
 }
