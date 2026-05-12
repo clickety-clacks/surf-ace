@@ -445,7 +445,7 @@ function heartbeatRequest(): Request {
 
 function authorityStateRequest(
   paired: Extract<Response, { op: "pair.request"; ok: true }>,
-  options: { paneLabel?: number; windowLabel?: string } = {},
+  options: { paneLabel?: number; panes?: Array<{ paneId: number; paneLabel: number; paneLineageId?: string }>; windowLabel?: string } = {},
 ): Request {
   const pane = paired.payload.state.panes[0]!;
   return {
@@ -454,7 +454,7 @@ function authorityStateRequest(
     payload: {
       actionable: true,
       ownershipEpoch: paired.payload.ownershipEpoch,
-      panes: [{
+      panes: options.panes ?? [{
         paneId: pane.paneId,
         paneLabel: options.paneLabel ?? pane.paneLabel,
         paneLineageId: pane.paneLineageId,
@@ -1197,6 +1197,63 @@ test("ws server does not show green until provider authority confirms exact pane
     assert.equal(acceptedAuthority.ok, true);
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
     assert.equal(core.getRendererWindowState(surfaceId).providerName, "test-harness");
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server accepts provider authority panes independent of order", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const topology = topologyApplyRequest();
+    topology.payload.layout = {
+      children: [
+        { paneId: 2 as never, type: "pane" },
+        { paneId: 1 as never, type: "pane" },
+      ],
+      direction: "vertical",
+      type: "split",
+    };
+    const topologyPromise = request(owner, topology);
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 2, 1);
+    const applied = await topologyPromise;
+    assert.equal(applied.ok, true);
+
+    const pairStatePanes = core.pairState(surfaceId).panes;
+    assert.deepEqual(new Set(pairStatePanes.map((pane) => pane.paneId)), new Set([1, 2]));
+    const duplicatePane = pairStatePanes[0]!;
+    const duplicateAuthority = await request(owner, authorityStateRequest(
+      paired as Extract<Response, { op: "pair.request"; ok: true }>,
+      {
+        panes: [duplicatePane, duplicatePane].map((pane) => ({
+          paneId: Number(pane.paneId),
+          paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
+        })),
+      },
+    ));
+    assert.equal(duplicateAuthority.ok, true);
+    assert.equal(duplicateAuthority.op, "authority.state");
+    assert.equal(duplicateAuthority.payload.accepted, false);
+    assert.equal(duplicateAuthority.payload.reason, "pane_identity_mismatch");
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+
+    const providerOrderedPanes = [...pairStatePanes].reverse().map((pane) => ({
+      paneId: Number(pane.paneId),
+      paneLabel: pane.paneLabel,
+      paneLineageId: pane.paneLineageId,
+    }));
+    const authority = await request(owner, authorityStateRequest(
+      paired as Extract<Response, { op: "pair.request"; ok: true }>,
+      { panes: providerOrderedPanes },
+    ));
+
+    assert.equal(authority.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     await closeSocket(owner);
   });

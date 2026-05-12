@@ -2631,11 +2631,13 @@ export class SurfaceWsServer {
     } else {
       const surface = this.core.getSurface(surfaceId);
       const panes = this.core.pairState(surfaceId).panes;
-      const panesMatch = panes.length === payload.panes.length &&
-        panes.every((pane, index) => {
-          const candidate = payload.panes[index];
-          return Boolean(candidate) &&
-            candidate.paneId === pane.paneId &&
+      const panesById = new Map(panes.map((pane) => [pane.paneId, pane]));
+      const payloadPaneIds = new Set(payload.panes.map((pane) => pane.paneId));
+      const panesMatch = panesById.size === payload.panes.length &&
+        payloadPaneIds.size === payload.panes.length &&
+        payload.panes.every((candidate) => {
+          const pane = panesById.get(candidate.paneId);
+          return Boolean(pane) &&
             candidate.paneLabel === pane.paneLabel &&
             (candidate.paneLineageId ?? null) === (pane.paneLineageId ?? null);
         });

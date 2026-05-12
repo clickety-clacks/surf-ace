@@ -73,6 +73,60 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             panes: panes
         ))
 
+        let reorderedPanes = [
+            SurfAceAuthorityPaneIdentity(paneId: 42, paneLabel: 2, paneLineageId: "pl_42"),
+            SurfAceAuthorityPaneIdentity(paneId: 41, paneLabel: 1, paneLineageId: "pl_41"),
+        ]
+        var topologyOrderPayload = basePayload
+        topologyOrderPayload["panes"] = [
+            [
+                "paneId": 41,
+                "paneLabel": 1,
+                "paneLineageId": "pl_41",
+            ],
+            [
+                "paneId": 42,
+                "paneLabel": 2,
+                "paneLineageId": "pl_42",
+            ],
+        ]
+        XCTAssertNil(surfAceAuthorityStateRejectionReason(
+            payload: topologyOrderPayload,
+            surfaceId: "sf_1",
+            providerId: "pv_1",
+            sessionId: "sa_1",
+            ownershipEpoch: 7,
+            lockProviderId: "pv_1",
+            lockSessionId: "sa_1",
+            windowLabel: "a",
+            panes: reorderedPanes
+        ))
+
+        var duplicatePanePayload = topologyOrderPayload
+        duplicatePanePayload["panes"] = [
+            [
+                "paneId": 41,
+                "paneLabel": 1,
+                "paneLineageId": "pl_41",
+            ],
+            [
+                "paneId": 41,
+                "paneLabel": 1,
+                "paneLineageId": "pl_41",
+            ],
+        ]
+        XCTAssertEqual(surfAceAuthorityStateRejectionReason(
+            payload: duplicatePanePayload,
+            surfaceId: "sf_1",
+            providerId: "pv_1",
+            sessionId: "sa_1",
+            ownershipEpoch: 7,
+            lockProviderId: "pv_1",
+            lockSessionId: "sa_1",
+            windowLabel: "a",
+            panes: reorderedPanes
+        ), "pane_identity_mismatch")
+
         var wrongPaneLabel = basePayload
         wrongPaneLabel["panes"] = [
             [

@@ -242,6 +242,12 @@ test("surface core preserves resize weights in topology and renderer geometry", 
       direction: "vertical",
       type: "split",
     });
+    core.updatePaneSnapshot(surface.surfaceId, 7, {
+      bounds: { height: 800, width: 900, x: 0, y: 0 },
+    });
+    core.updatePaneSnapshot(surface.surfaceId, 9, {
+      bounds: { height: 800, width: 300, x: 900, y: 0 },
+    });
     assert.deepEqual(
       core.panesList(surface.surfaceId).panes.map((pane) => pane.viewport),
       [

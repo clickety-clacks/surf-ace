@@ -96,8 +96,12 @@ func surfAceAuthorityStateRejectionReason(
           payloadPanes.count == panes.count else {
         return "pane_identity_mismatch"
     }
-    for (pane, candidate) in zip(panes, payloadPanes) {
-        guard candidate["paneId"] as? Int == pane.paneId,
+    let panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
+    var seenPaneIds = Set<Int>()
+    for candidate in payloadPanes {
+        guard let paneId = candidate["paneId"] as? Int,
+              seenPaneIds.insert(paneId).inserted,
+              let pane = panesById[paneId],
               candidate["paneLabel"] as? Int == pane.paneLabel,
               candidate["paneLineageId"] as? String == pane.paneLineageId else {
             return "pane_identity_mismatch"
