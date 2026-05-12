@@ -675,7 +675,7 @@ export class SurfaceCore {
       overlaySet: {
         coordinateSpace: "surface_logical",
         regions: [{
-          captures: [],
+          captures: ["pointer_hover", "pointer_button", "pointer_axis"],
           kind: "native_pane",
           paneId: String(lineagePane.paneId),
           paneInstanceId: lineagePane.paneLineageId,
@@ -2789,7 +2789,7 @@ function nativePaneMaterializationFromProjectedPanes(
     overlaySet: {
       coordinateSpace: "surface_logical",
       regions: panes.map((pane) => ({
-        captures: [],
+        captures: ["pointer_hover", "pointer_button", "pointer_axis"],
         kind: "native_pane",
         paneId: pane.id,
         paneInstanceId: pane.geometry.paneInstanceId,

@@ -1845,6 +1845,7 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   assert.deepEqual(materialization.panes[0]?.process, { args: ["-e", "btop"], command: "foot" });
   assert.equal(materialization.panes[0]?.target, "terminal");
   assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
+  assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
 });
 
 test("surface core snaps terminal native geometry to compositor integer bounds", () => {
