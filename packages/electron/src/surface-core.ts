@@ -631,19 +631,20 @@ export class SurfaceCore {
     if (!geometry) {
       throw new SurfaceCoreError("invalid_payload", `native pane ${lineagePane.paneId} is not present in the resolved Surf Ace layout`);
     }
+    const compositorViewport = compositorResolvedRect(geometry.contentViewport);
     const paneEntry: NativePaneMaterialization["panes"][number] = {
       binding_id: `${lineagePane.paneId}:${payload.targetId}`,
       content_id: payload.targetId,
       geometry: {
         coordinateSpace: "compositor_logical",
         geometryRevision: geometry.geometryRevision,
-        height: geometry.contentViewport.height,
+        height: compositorViewport.height,
         paneInstanceId: geometry.paneInstanceId,
         surfaceEpoch: geometry.surfaceEpoch,
         topologyEpoch: geometry.topologyEpoch,
-        width: geometry.contentViewport.width,
-        x: geometry.contentViewport.x,
-        y: geometry.contentViewport.y,
+        width: compositorViewport.width,
+        x: compositorViewport.x,
+        y: compositorViewport.y,
       },
       id: String(lineagePane.paneId),
       revision: payload.targetEpoch as Revision,
@@ -664,10 +665,10 @@ export class SurfaceCore {
       }
     }
     const overlayRect = {
-      height: geometry.contentViewport.height,
-      width: geometry.contentViewport.width,
-      x: geometry.contentViewport.x,
-      y: geometry.contentViewport.y,
+      height: compositorViewport.height,
+      width: compositorViewport.width,
+      x: compositorViewport.x,
+      y: compositorViewport.y,
     };
     return {
       op: "native_pane.host",
@@ -841,8 +842,9 @@ export class SurfaceCore {
       ) {
         return `native pane ${pane.id} geometry identity does not match resolved Surf Ace pane geometry`;
       }
-      if (!sameRect(pane.geometry, expected)) {
-        return `native pane ${pane.id} geometry ${formatRect(pane.geometry)} does not match resolved Surf Ace pane geometry ${formatRect(expected)}`;
+      const expectedCompositorRect = compositorResolvedRect(expected);
+      if (!sameRect(pane.geometry, expectedCompositorRect)) {
+        return `native pane ${pane.id} geometry ${formatRect(pane.geometry)} does not match resolved Surf Ace pane geometry ${formatRect(expectedCompositorRect)}`;
       }
     }
     return null;
@@ -896,19 +898,20 @@ export class SurfaceCore {
       if (!geometry) {
         throw new SurfaceCoreError("invalid_payload", `native pane ${pane.paneId} has no resolved Surf Ace geometry snapshot`);
       }
+      const compositorViewport = compositorResolvedRect(geometry.contentViewport);
       return {
         ...(pane.nativeHost?.bindingId ? { binding_id: pane.nativeHost.bindingId } : {}),
         ...(pane.nativeHost?.contentId ? { content_id: pane.nativeHost.contentId } : {}),
         geometry: {
           coordinateSpace: "compositor_logical" as const,
           geometryRevision: revision.geometryRevision as Revision,
-          height: geometry.contentViewport.height,
+          height: compositorViewport.height,
           paneInstanceId: pane.paneLineageId,
           surfaceEpoch: revision.surfaceEpoch ?? surface.surfaceEpoch,
           topologyEpoch: revision.topologyRevision as TopologyRevision,
-          width: geometry.contentViewport.width,
-          x: geometry.contentViewport.x,
-          y: geometry.contentViewport.y,
+          width: compositorViewport.width,
+          x: compositorViewport.x,
+          y: compositorViewport.y,
         },
         id: String(pane.paneId),
         revision: pane.nativeHost?.revision ?? revision.geometryRevision as Revision,
@@ -938,19 +941,20 @@ export class SurfaceCore {
       if (!rect) {
         throw new SurfaceCoreError("invalid_payload", `native pane ${pane.paneId} is not present in the resolved Surf Ace layout`);
       }
+      const compositorViewport = compositorResolvedRect(rect);
       return {
         ...(pane.nativeHost?.bindingId ? { binding_id: pane.nativeHost.bindingId } : {}),
         ...(pane.nativeHost?.contentId ? { content_id: pane.nativeHost.contentId } : {}),
         geometry: {
           coordinateSpace: "compositor_logical" as const,
           geometryRevision: revision.geometryRevision as Revision,
-          height: rect.height,
+          height: compositorViewport.height,
           paneInstanceId: pane.paneLineageId,
           surfaceEpoch: revision.surfaceEpoch ?? surface.surfaceEpoch,
           topologyEpoch: revision.topologyRevision as TopologyRevision,
-          width: rect.width,
-          x: rect.x,
-          y: rect.y,
+          width: compositorViewport.width,
+          x: compositorViewport.x,
+          y: compositorViewport.y,
         },
         id: String(pane.paneId),
         revision: pane.nativeHost?.revision ?? revision.geometryRevision as Revision,
@@ -2868,6 +2872,19 @@ function isRenderableRect(rect: Rect): boolean {
     Number.isFinite(rect.y) &&
     rect.height > 0 &&
     rect.width > 0;
+}
+
+function compositorResolvedRect(rect: Rect): Rect {
+  const x = Math.round(rect.x);
+  const y = Math.round(rect.y);
+  const right = Math.round(rect.x + rect.width);
+  const bottom = Math.round(rect.y + rect.height);
+  return {
+    height: Math.max(1, bottom - y),
+    width: Math.max(1, right - x),
+    x,
+    y,
+  };
 }
 
 function bumpGeometryRevision(

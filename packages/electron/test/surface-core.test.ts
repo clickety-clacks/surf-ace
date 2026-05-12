@@ -1847,6 +1847,60 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
 });
 
+test("surface core snaps terminal native geometry to compositor integer bounds", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 3840, scale: 1, width: 2160 });
+  const topPaneId = applyProviderBootstrap(core, surface.surfaceId, 6);
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [7],
+    newPaneLabels: [7],
+    paneId: topPaneId,
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 7, {
+    bounds: { height: 1920.5, width: 2160, x: 0, y: 1919.5 },
+  });
+  const bottomPane = core.pairState(surface.surfaceId).panes.find((pane) => pane.paneId === 7)!;
+
+  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+    ownershipEpoch: 1,
+    ownershipSessionId: "sa_test" as never,
+    paneLineageId: bottomPane.paneLineageId,
+    requestId: "restore_btop",
+    restoreReason: "resume_restore",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 3,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.terminal_app.v1"],
+      safeToLogFields: ["command", "args"],
+      safetyClass: "process",
+      summary: "btop",
+    },
+    targetId: "target_btop",
+    targetKind: "terminal_app",
+    targetPayload: { args: [], command: "btop", envPolicy: "surface_default", pty: true, restartPolicy: "manual_only" },
+  });
+
+  assert.equal(materialization.panes[0]?.geometry.coordinateSpace, "compositor_logical");
+  assert.equal(materialization.panes[0]?.geometry.height, 1920);
+  assert.equal(materialization.panes[0]?.geometry.paneInstanceId, bottomPane.paneLineageId);
+  assert.match(materialization.panes[0]?.geometry.surfaceEpoch ?? "", new RegExp(`^${surface.surfaceId}:`));
+  assert.equal(materialization.panes[0]?.geometry.width, 2160);
+  assert.equal(materialization.panes[0]?.geometry.x, 0);
+  assert.equal(materialization.panes[0]?.geometry.y, 1920);
+  assert.deepEqual(materialization.overlaySet?.regions[0]?.rect, { height: 1920, width: 2160, x: 0, y: 1920 });
+  assert.equal(core.validateNativePaneMaterializationLayout(surface.surfaceId, materialization), null);
+});
+
 test("surface core exposes native materialized panes to the renderer until content changes", () => {
   const core = new SurfaceCore({
     persistentState: {
