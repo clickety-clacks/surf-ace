@@ -3075,6 +3075,8 @@ test("ws server derives target.apply native pane host materialization for compos
             physical_output_width: 3840,
           },
         })}\n`);
+      } else if (message.type === "native_pane.host") {
+        socket.write(`${JSON.stringify({ ok: true, status: { overlay_regions: { topologyEpoch: "topology-hosted" }, panes: [{ id: "1" }] } })}\n`);
       } else {
         socket.write(`${JSON.stringify({ ok: true, status: { panes: [{ id: "1" }] } })}\n`);
       }
@@ -3106,6 +3108,7 @@ test("ws server derives target.apply native pane host materialization for compos
       assert.equal(applied.payload.status, "applied");
       assert.deepEqual(received[0], { type: "get_status" });
       assert.equal((received[1] as { type: string }).type, "native_pane.host");
+      assert.equal((received[2] as { topologyEpoch?: string }).topologyEpoch, "topology-hosted");
       const hostPane = (received[1] as { panes: Array<Record<string, unknown>> }).panes[0]!;
       assert.deepEqual(hostPane, {
         binding_id: "1:target_top_118",

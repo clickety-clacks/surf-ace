@@ -43,6 +43,7 @@ import {
   type NativePaneMaterialization,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
+  overlayTopologyEpochFromCompositorResponse,
   requestForCompositor,
   resolveCompositorControlSocketPath,
   sendCompositorControl,
@@ -1847,7 +1848,9 @@ export class SurfaceWsServer {
           }
           return postHostSessionFailure;
         }
-        overlayRequest = overlayRequestForCompositor(materialization);
+        overlayRequest = overlayRequestForCompositor(materialization, {
+          topologyEpoch: overlayTopologyEpochFromCompositorResponse(hostResponse) ?? undefined,
+        });
         const overlayResponse = overlayRequest
           ? await sendCompositorControl(this.compositorSocketPath, overlayRequest)
           : null;

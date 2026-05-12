@@ -164,6 +164,7 @@ export function requestForCompositor(
 
 export function overlayRequestForCompositor(
   materialization: NativePaneMaterialization,
+  options: { topologyEpoch?: number | string } = {},
 ): CompositorControlRequest | null {
   if (!materialization.overlaySet) {
     return null;
@@ -188,10 +189,23 @@ export function overlayRequestForCompositor(
       };
     }),
     revision: materialization.panes[0]?.geometry.geometryRevision ?? materialization.overlaySet.revision,
-    topologyEpoch: materialization.panes[0]?.geometry.topologyEpoch ?? materialization.overlaySet.topologyEpoch,
+    topologyEpoch: options.topologyEpoch ?? materialization.panes[0]?.geometry.topologyEpoch ?? materialization.overlaySet.topologyEpoch,
     type: "overlay_regions.set",
     updateReason: materialization.op === "native_pane.host" ? "initial" : "update",
   };
+}
+
+export function overlayTopologyEpochFromCompositorResponse(response: CompositorControlResponse): number | string | null {
+  const status = response.status;
+  if (!status || typeof status !== "object") {
+    return null;
+  }
+  const overlayRegions = (status as Record<string, unknown>).overlay_regions;
+  if (!overlayRegions || typeof overlayRegions !== "object") {
+    return null;
+  }
+  const topologyEpoch = (overlayRegions as Record<string, unknown>).topologyEpoch;
+  return typeof topologyEpoch === "string" || typeof topologyEpoch === "number" ? topologyEpoch : null;
 }
 
 export function overlayRegionsSetRequestForCompositor(snapshot: {
