@@ -9225,7 +9225,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     });
   }
 
-  private async requestPair(surface: ManagedSurface): Promise<PairResponse> {
+  private async requestPair(surface: ManagedSurface): Promise<{ response: PairResponse; requestedWindowLabel: string }> {
     const client = surface.client;
     if (!client || !client.isOpen()) {
       throw new SurfAceToolError(
@@ -9377,7 +9377,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
     }
 
-    return response as PairResponse;
+    return { response: response as PairResponse, requestedWindowLabel: windowLabel };
   }
 
   private assertPairResponseHasTopologyPanes(surface: ManagedSurface, response: PairResponse): void {
@@ -9816,7 +9816,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               surface_id: surface.surfaceId,
             }),
           );
-          const pairResponse = await this.requestPair(surface);
+          const pair = await this.requestPair(surface);
+          const pairResponse = pair.response;
           const canonicalSurface = this.adoptCanonicalSurfaceId(
             surface,
             asSurfaceId(pairResponse.payload.surfaceId),
@@ -9879,7 +9880,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             previousOwnership,
             pruneStalePanes: !shouldRestoreProviderTopology,
           });
-          const pairStateLabelsDiffer = this.pairStatePaneLabelsDiffer(surface, pairResponse.payload.state.panes);
+          const pairStateWindowLabelDiffers = pair.requestedWindowLabel !== surface.windowLabel;
           const shouldRestoreProviderTopologyPublish =
             hadLocalOwnershipForTopologyRestore &&
             shouldRestoreProviderTopology;
@@ -9888,15 +9889,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             publishLabelRepairTopology: false,
             requireProviderList: true,
           });
-          const shouldPublishSinglePaneLabelRepair =
+          const pairStateLabelsDiffer = this.pairStatePaneLabelsDiffer(surface, pairResponse.payload.state.panes);
+          const shouldPublishPaneLabelRepair =
             pairStateLabelsDiffer &&
+            this.hasAcceptedSurfaceTopology(surface);
+          const shouldPublishSinglePaneWindowLabelRepair =
+            pairStateWindowLabelDiffers &&
             pairResponse.payload.state.panes.length === 1 &&
             surface.panes.size === 1 &&
             surface.layout?.type === "pane" &&
             this.hasAcceptedSurfaceTopology(surface);
           const shouldPublishProviderTopology =
             shouldRestoreProviderTopologyPublish ||
-            shouldPublishSinglePaneLabelRepair;
+            shouldPublishPaneLabelRepair ||
+            shouldPublishSinglePaneWindowLabelRepair;
           if (shouldPublishProviderTopology) {
             await this.pushTopology(surface);
           }

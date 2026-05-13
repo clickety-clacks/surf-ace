@@ -112,11 +112,6 @@ class StaticDiscoveryService implements SurfAceDiscoveryService {
 class FakeSurfAceWsServer {
   activeSocketCount = 0;
   readonly annotationsRemoveRequests: Array<{ contentId: string; paneId: number; strokeIds: string[] }> = [];
-  readonly authorityStateRequests: Array<{
-    actionable: boolean;
-    paneLabels: number[];
-    reason: string | null;
-  }> = [];
   rejectAuthorityState = false;
   busyWithoutTakeoverResponsesRemaining = 0;
   readonly clearRequests: Array<{ paneId: number; revision: number }> = [];
@@ -142,6 +137,14 @@ class FakeSurfAceWsServer {
     targetId: string;
     targetKind: string;
     targetPayload: unknown;
+  }> = [];
+  readonly authorityStateRequests: Array<{
+    actionable: boolean;
+    paneIds: number[];
+    paneLabels: number[];
+    reason: string | null;
+    surfaceId: string;
+    windowLabel: string;
   }> = [];
   targetApplyErrorCode: string | null = null;
   readonly topologyApplyRequests: Array<{
@@ -1415,10 +1418,15 @@ class FakeSurfAceWsServer {
       case "authority.state":
         this.authorityStateRequests.push({
           actionable: (message.payload?.actionable as boolean | undefined) === true,
+          paneIds: Array.isArray(message.payload?.panes)
+            ? message.payload.panes.map((pane) => Number((pane as { paneId?: unknown }).paneId ?? 0))
+            : [],
           paneLabels: Array.isArray(message.payload?.panes)
             ? message.payload.panes.map((pane) => Number((pane as { paneLabel?: unknown }).paneLabel ?? 0))
             : [],
           reason: typeof message.payload?.reason === "string" ? message.payload.reason : null,
+          surfaceId: String(message.payload?.surfaceId ?? ""),
+          windowLabel: String(message.payload?.windowLabel ?? ""),
         });
         socket.send(
           JSON.stringify(
@@ -9915,7 +9923,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("pair response does not publish synthetic topology for multi-pane label repair", async () => {
+  await t.test("pair response publishes topology for multi-pane label repair before authority", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
         server.addSurface({
@@ -9942,15 +9950,24 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           },
         });
       },
-      run: async ({ server }) => {
+      run: async ({ runtime, server }) => {
         await waitFor(() => server.pairedSocketFor("sf_surface-b") !== null);
-        assert.equal(
+        await waitFor(() =>
           server.topologyApplyRequests.some((request) =>
-            request.paneIds.includes(42) ||
-            request.paneIds.includes(43),
+            request.paneIds.includes(42) &&
+            request.paneIds.includes(43) &&
+            request.paneLabels.includes(2) &&
+            request.paneLabels.includes(3)
           ),
-          false,
         );
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === "sf_surface-b");
+        assert.ok(screen);
+        assert.deepEqual(screen.panes.map((pane) => pane.paneLabel).sort((left, right) => left - right), [2, 3]);
+        const authorityState = server.authorityStateRequests.findLast((request) =>
+          request.surfaceId === "sf_surface-b" && request.actionable
+        );
+        assert.ok(authorityState);
+        assert.deepEqual(authorityState.paneLabels.sort((left, right) => left - right), [2, 3]);
       },
     });
   });
@@ -9973,12 +9990,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       run: async ({ server }) => {
         await waitFor(() => server.pairedSocketFor("sf_surface-b") !== null);
         await waitFor(() => server.panesListRequests > 0);
-        assert.equal(
+        await waitFor(() =>
           server.topologyApplyRequests.some((request) =>
             request.windowLabel === "b" &&
             (request.paneIds.includes(42) || request.paneIds.includes(43)),
           ),
-          false,
         );
       },
     });
@@ -11125,17 +11141,18 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.equal(server.pairAttemptDetails.length, 1);
       assert.equal(server.pairAttemptDetails[0]?.providerId, providerId);
-        assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
-        assert.equal(server.pairAttemptDetails[0]?.takeover, false);
-        assert.equal(server.pairedSocket !== null, true);
-        await waitFor(() => server.contentSetRequests.length > 0, 12_000);
-        const replayed = server.contentSetRequests.at(-1);
-        assert.equal(replayed?.contentId, "ct_restart_persisted");
-        assert.equal(replayed?.contentType, "markdown");
-        assert.equal(replayed?.revision, 7);
-        const screen = (await runtime.listScreens())[0];
-        assert.equal(screen?.panes[0]?.activeContent?.contentId, "ct_restart_persisted");
-        assert.equal(screen?.panes[0]?.activeContent?.revision, 7);
+      assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
+      assert.equal(server.pairAttemptDetails[0]?.takeover, false);
+      assert.equal(server.pairedSocket !== null, true);
+      await waitFor(() => server.contentSetRequests.length > 0, 12_000);
+      assert.equal(server.topologyApplyRequests.some((request) => request.windowLabel === "a"), false);
+      const replayed = server.contentSetRequests.at(-1);
+      assert.equal(replayed?.contentId, "ct_restart_persisted");
+      assert.equal(replayed?.contentType, "markdown");
+      assert.equal(replayed?.revision, 7);
+      const screen = (await runtime.listScreens())[0];
+      assert.equal(screen?.panes[0]?.activeContent?.contentId, "ct_restart_persisted");
+      assert.equal(screen?.panes[0]?.activeContent?.revision, 7);
     } finally {
       await runtime.stop();
       await server.close();
