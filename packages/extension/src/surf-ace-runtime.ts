@@ -5436,9 +5436,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private async reconcilePaneTopologyAuthorityFromProvider(
     surface: ManagedSurface,
     reason: string,
-    options: { requireProviderList: boolean },
+    options: { publishLabelRepairTopology?: boolean; requireProviderList: boolean },
   ): Promise<void> {
-    const providerPaneIds = await this.syncRemotePaneList(surface);
+    const providerPaneIds = await this.syncRemotePaneList(surface, {
+      publishLabelRepairTopology: options.publishLabelRepairTopology,
+    });
     if (!providerPaneIds && options.requireProviderList) {
       throw new SurfAceToolError(
         "not_connected",
@@ -9877,20 +9879,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             previousOwnership,
             pruneStalePanes: !shouldRestoreProviderTopology,
           });
-          const shouldPublishProviderTopology =
+          const pairStateLabelsDiffer = this.pairStatePaneLabelsDiffer(surface, pairResponse.payload.state.panes);
+          const shouldRestoreProviderTopologyPublish =
             hadLocalOwnershipForTopologyRestore &&
-            shouldRestoreProviderTopology ||
-            (hadLocalOwnershipForTopologyRestore &&
-              hadAcceptedLocalTopology &&
-              this.pairStatePaneLabelsDiffer(surface, pairResponse.payload.state.panes));
+            shouldRestoreProviderTopology;
           this.restoreRestartContent(surface);
-          await this.reconcilePaneTopologyAuthorityFromProvider(surface, "pair response", { requireProviderList: true });
+          await this.reconcilePaneTopologyAuthorityFromProvider(surface, "pair response", {
+            publishLabelRepairTopology: false,
+            requireProviderList: true,
+          });
+          const shouldPublishSinglePaneLabelRepair =
+            pairStateLabelsDiffer &&
+            pairResponse.payload.state.panes.length === 1 &&
+            surface.panes.size === 1 &&
+            surface.layout?.type === "pane" &&
+            this.hasAcceptedSurfaceTopology(surface);
+          const shouldPublishProviderTopology =
+            shouldRestoreProviderTopologyPublish ||
+            shouldPublishSinglePaneLabelRepair;
           if (shouldPublishProviderTopology) {
             await this.pushTopology(surface);
           }
           await this.repushSurfaceContent(surface);
           surface.connectionState = "connected";
-          await this.syncSurfaceSnapshots(surface, true);
+          await this.syncSurfaceSnapshots(surface, true, {
+            publishLabelRepairTopology: shouldPublishProviderTopology,
+          });
           if (await this.publishAuthorityState(surface)) {
             this.startHeartbeat(surface);
           }
@@ -10318,6 +10332,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private async syncSurfaceSnapshots(
     surface: ManagedSurface,
     force = false,
+    options: { publishLabelRepairTopology?: boolean } = {},
   ): Promise<void> {
     if (!this.canSendRequests(surface) || (surface.snapshotSyncInFlight && !force)) {
       return;
@@ -10325,7 +10340,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     surface.snapshotSyncInFlight = true;
     try {
-      await this.syncRemotePaneList(surface);
+      await this.syncRemotePaneList(surface, {
+        publishLabelRepairTopology: options.publishLabelRepairTopology,
+      });
       const panes = this.layoutPanes(surface);
       for (const pane of panes) {
         if (!isBoundRemotePaneId(pane.remotePaneId)) {
@@ -10348,7 +10365,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private async syncRemotePaneList(surface: ManagedSurface): Promise<PaneId[] | null> {
+  private async syncRemotePaneList(
+    surface: ManagedSurface,
+    options: { publishLabelRepairTopology?: boolean } = {},
+  ): Promise<PaneId[] | null> {
     if (!this.canSendRequests(surface)) {
       return null;
     }
@@ -10396,6 +10416,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       "pane list sync",
       surface,
       surface.topologyApplyInFlight ? surface : undefined,
+      { publishTopology: options.publishLabelRepairTopology },
     );
     if (lineageChanged) {
       await this.persistSurfaceTargetState(surface, "pane list lineage repair");

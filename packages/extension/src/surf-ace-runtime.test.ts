@@ -193,6 +193,11 @@ class FakeSurfAceWsServer {
   protocolFeatures = ["authority.state.v1"];
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
+  addPaneAfterPairResponse: {
+    paneId: number;
+    paneLabel: number;
+    surfaceId: string;
+  } | null = null;
   busyWithoutTakeoverMessage = "Surface is already paired";
   invalidResumeWithoutTakeoverResponsesRemaining = 0;
   lockedProviderId: string | null = null;
@@ -856,6 +861,25 @@ class FakeSurfAceWsServer {
             }),
           ),
         );
+        if (this.addPaneAfterPairResponse?.surfaceId === requestedSurface.surfaceId) {
+          requestedSurface.panes.set(this.addPaneAfterPairResponse.paneId, {
+            contentId: null,
+            contentType: null,
+            drawings: [],
+            frame: {
+              height: requestedSurface.viewport.height,
+              width: requestedSurface.viewport.width,
+              x: 0,
+              y: 0,
+            },
+            name: null,
+            paneLabel: this.addPaneAfterPairResponse.paneLabel,
+            paneLineageId: `pl_${requestedSurface.surfaceId}_${this.addPaneAfterPairResponse.paneId}`,
+            revision: 0,
+            viewport: { ...requestedSurface.viewport },
+          });
+          this.addPaneAfterPairResponse = null;
+        }
         return;
       case "topology.apply": {
         const targetSurface = this.requirePairedSurface(socket);
@@ -1498,16 +1522,28 @@ class FakeSurfAceWsServer {
         return;
       }
       const children = record.children;
+      const weights = children.map((child) => {
+        if (!child || typeof child !== "object") {
+          return 1;
+        }
+        const weight = Number((child as Record<string, unknown>).weight ?? 1);
+        return Number.isFinite(weight) && weight > 0 ? weight : 1;
+      });
+      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
       if (record.direction === "horizontal") {
-        const height = rect.height / children.length;
+        let y = rect.y;
         children.forEach((child, index) => {
-          assign(child, { height, width: rect.width, x: rect.x, y: rect.y + height * index });
+          const height = rect.height * (weights[index] / totalWeight);
+          assign(child, { height, width: rect.width, x: rect.x, y });
+          y += height;
         });
         return;
       }
-      const width = rect.width / children.length;
+      let x = rect.x;
       children.forEach((child, index) => {
-        assign(child, { height: rect.height, width, x: rect.x + width * index, y: rect.y });
+        const width = rect.width * (weights[index] / totalWeight);
+        assign(child, { height: rect.height, width, x, y: rect.y });
+        x += width;
       });
     };
 
@@ -9847,6 +9883,104 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const screens = await runtime.listScreens();
       assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1]);
+    });
+  });
+
+  await t.test("pair response publishes topology when global pane label differs from client label", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.addSurface({
+          initialPaneLabel: 1,
+          initialRemotePaneId: 42,
+          name: "Surface B",
+          surfaceId: "sf_surface-b",
+        });
+      },
+      run: async ({ runtime, server }) => {
+        await waitFor(() =>
+          server.topologyApplyRequests.some((request) =>
+            request.paneIds.includes(42) &&
+            request.paneLabels.includes(2),
+          ),
+        );
+
+        await waitFor(async () => {
+          const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === "sf_surface-b");
+          return screen?.authority.actionable === true;
+        });
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === "sf_surface-b");
+        assert.ok(screen);
+        assertPaneLabelsWithOpaqueIds(screen.panes, [2]);
+      },
+    });
+  });
+
+  await t.test("pair response does not publish synthetic topology for multi-pane label repair", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.addSurface({
+          initialPaneLabel: 1,
+          initialRemotePaneId: 42,
+          name: "Surface B",
+          surfaceId: "sf_surface-b",
+        });
+        const surface = (server as unknown as { surfaces: Map<string, TestSurfaceState> }).surfaces.get("sf_surface-b");
+        assert.ok(surface);
+        surface.panes.set(43, {
+          contentId: null,
+          contentType: null,
+          drawings: [],
+          frame: { height: 768, width: 512, x: 512, y: 0 },
+          name: null,
+          paneLabel: 2,
+          paneLineageId: "pl_sf_surface-b_43",
+          revision: 0,
+          viewport: {
+            height: 768,
+            scale: 2,
+            width: 512,
+          },
+        });
+      },
+      run: async ({ server }) => {
+        await waitFor(() => server.pairedSocketFor("sf_surface-b") !== null);
+        assert.equal(
+          server.topologyApplyRequests.some((request) =>
+            request.paneIds.includes(42) ||
+            request.paneIds.includes(43),
+          ),
+          false,
+        );
+      },
+    });
+  });
+
+  await t.test("pair response rechecks single-pane label repair after pane-list reconciliation", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.addSurface({
+          initialPaneLabel: 1,
+          initialRemotePaneId: 42,
+          name: "Surface B",
+          surfaceId: "sf_surface-b",
+        });
+        server.addPaneAfterPairResponse = {
+          paneId: 43,
+          paneLabel: 2,
+          surfaceId: "sf_surface-b",
+        };
+      },
+      run: async ({ server }) => {
+        await waitFor(() => server.pairedSocketFor("sf_surface-b") !== null);
+        await waitFor(() => server.panesListRequests > 0);
+        assert.equal(
+          server.topologyApplyRequests.some((request) =>
+            request.windowLabel === "b" &&
+            (request.paneIds.includes(42) || request.paneIds.includes(43)),
+          ),
+          false,
+        );
+      },
     });
   });
 
