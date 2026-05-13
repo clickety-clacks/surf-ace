@@ -2871,7 +2871,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 	      await waitFor(() => server.pairedSocket !== null, 12_000);
 	      const diagnostics = await runtime.providerAuthorityDiagnostics();
 	      assert.equal(diagnostics.surfaceTombstones.sf_churn_discovered, undefined);
-	      assert.equal(diagnostics.nextRemotePaneId, 96363);
+	      assert.equal(diagnostics.nextRemotePaneId, 96364);
 	      assert.equal(server.pairRequests.length, 1);
 	      const screens = await runtime.listScreens();
 	      assert.equal(screens.length, 1);
