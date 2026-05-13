@@ -382,6 +382,10 @@ class FakeSurfAceWsServer {
     return this.pairedSocketsBySurfaceId.get(surfaceId) ?? null;
   }
 
+  markSurfacePairedForList(surfaceId: string): void {
+    this.pairedSocketsBySurfaceId.set(surfaceId, {} as import("ws").WebSocket);
+  }
+
   setSurfaceViewport(viewport: { height: number; scale: number; width: number }): void {
     this.requireSurface(this.surfaceId).viewport = { ...viewport };
   }
@@ -2822,10 +2826,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
 	  });
 
-  await t.test("startup tombstones stale self-owned persisted surfaces even when discovery is already populated", async () => {
+  await t.test("live surfaces.list rediscovery clears stale self-owned tombstone before worker starts", async () => {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-discovered-"));
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_churn_discovered" });
+    server.markSurfacePairedForList("sf_churn_discovered");
 	    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
 	    try {
 	      await fs.writeFile(
@@ -2863,14 +2868,14 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 	      const discovery = new StaticDiscoveryService([discoveryEndpoint(port, "churn-discovered")]);
 	      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
 	      assert.deepEqual(await runtime.listScreens(), []);
-	      await new Promise((resolve) => {
-	        setTimeout(resolve, 250);
-	      });
+	      await waitFor(() => server.pairedSocket !== null, 12_000);
 	      const diagnostics = await runtime.providerAuthorityDiagnostics();
-	      assert.equal(diagnostics.surfaceTombstones.sf_churn_discovered.reason, "stale_self_owned_persisted_surface");
+	      assert.equal(diagnostics.surfaceTombstones.sf_churn_discovered, undefined);
 	      assert.equal(diagnostics.nextRemotePaneId, 96363);
-	      assert.equal(server.pairRequests.length, 0);
-	      assert.deepEqual(await runtime.listScreens(), []);
+	      assert.equal(server.pairRequests.length, 1);
+	      const screens = await runtime.listScreens();
+	      assert.equal(screens.length, 1);
+	      assert.equal(screens[0]?.fingerprint, "sf_churn_discovered");
 	    } finally {
 	      await runtime?.stop();
 	      await server.close();

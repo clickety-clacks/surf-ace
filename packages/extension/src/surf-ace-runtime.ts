@@ -5178,11 +5178,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const remapFrom = input.remapFrom;
     const oldSurfaceId = remapFrom?.surfaceId;
-    if (
-      this.persistentState.surfaceTombstones?.[input.surfaceId] &&
-      !this.isStalePersistedSurfaceTombstone(input.surfaceId)
-    ) {
-      delete this.persistentState.surfaceTombstones[input.surfaceId];
+    if (this.persistentState.surfaceTombstones?.[input.surfaceId]) {
+      const stalePersistedTombstone = this.isStalePersistedSurfaceTombstone(input.surfaceId);
+      if (stalePersistedTombstone) {
+        if (input.source === "surfaces.list" && input.remotePaired === true) {
+          this.clearSurfaceTombstone(input.surfaceId, "live paired surfaces.list rediscovery");
+        }
+      } else {
+        delete this.persistentState.surfaceTombstones[input.surfaceId];
+        this.tombstonedSurfaceIds.delete(input.surfaceId);
+      }
     }
     const existing = this.surfaces.get(input.surfaceId);
     const previousEndpoint = existing?.endpoint;
@@ -7205,6 +7210,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private isStalePersistedSurfaceTombstone(surfaceId: string): boolean {
     return this.surfaceTombstoneReason(surfaceId) === "stale_self_owned_persisted_surface";
+  }
+
+  private clearSurfaceTombstone(surfaceId: string, reason: string): void {
+    if (!this.persistentState.surfaceTombstones?.[surfaceId]) {
+      return;
+    }
+    delete this.persistentState.surfaceTombstones[surfaceId];
+    this.tombstonedSurfaceIds.delete(asSurfaceId(surfaceId));
+    this.logger.info?.(
+      runtimeDiagnostic("surface_tombstone_cleared", {
+        reason,
+        surface_id: surfaceId,
+      }),
+    );
   }
 
   private noteProviderLineage(
