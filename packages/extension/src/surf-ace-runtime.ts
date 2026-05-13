@@ -2531,6 +2531,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly endpointProbes = new Map<string, EndpointProbe>();
   private readonly tombstonedEndpointIds = new Set<string>();
   private readonly tombstonedSurfaceIds = new Set<SurfaceId>();
+  private readonly livePairedSelfRediscoveredSurfaceIds = new Set<string>();
   private readonly startupImportedOwnershipSurfaceIds = new Set<string>();
   private lastDiscoveryUpdateLogAt = 0;
   private lastDiscoveryUpdateLogKey = "";
@@ -5183,6 +5184,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (stalePersistedTombstone) {
         if (input.source === "surfaces.list" && input.remotePaired === true) {
           this.clearSurfaceTombstone(input.surfaceId, "live paired surfaces.list rediscovery");
+          this.livePairedSelfRediscoveredSurfaceIds.add(input.surfaceId);
         }
       } else {
         delete this.persistentState.surfaceTombstones[input.surfaceId];
@@ -7306,6 +7308,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private markSelfOwnedSurfaceRelinquished(surfaceId: string): void {
+    this.livePairedSelfRediscoveredSurfaceIds.delete(surfaceId);
     this.persistentState.selfOwnedSurfaceIds ??= {};
     const existing = this.persistentState.selfOwnedSurfaceIds[surfaceId];
     this.persistentState.selfOwnedSurfaceIds[surfaceId] = {
@@ -9452,6 +9455,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private isKnownSelfOwnedSurface(surface: ManagedSurface): boolean {
+    if (
+      this.livePairedSelfRediscoveredSurfaceIds.has(surface.surfaceId) &&
+      this.hasCurrentDiscoveryEndpoint(surface)
+    ) {
+      return true;
+    }
     return this.ownershipRecoveryPolicy.isKnownSelfOwnedSurface(
       this.persistentState,
       surface.surfaceId,

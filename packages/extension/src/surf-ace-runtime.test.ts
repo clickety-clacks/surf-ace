@@ -2831,6 +2831,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_churn_discovered" });
     server.markSurfacePairedForList("sf_churn_discovered");
+    server.lockedProviderId = "pv_churn_discovered";
+    server.lockedSessionId = "sa_stale_churn_discovered";
 	    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
 	    try {
 	      await fs.writeFile(
@@ -2872,10 +2874,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 	      const diagnostics = await runtime.providerAuthorityDiagnostics();
 	      assert.equal(diagnostics.surfaceTombstones.sf_churn_discovered, undefined);
 	      assert.equal(diagnostics.nextRemotePaneId, 96364);
-	      assert.equal(server.pairRequests.length, 1);
+	      assert.equal(server.pairRequests.length, 2);
+	      assert.deepEqual(
+	        server.pairAttemptDetails.map((attempt) => attempt.takeover),
+	        [false, true],
+	      );
 	      const screens = await runtime.listScreens();
 	      assert.equal(screens.length, 1);
 	      assert.equal(screens[0]?.fingerprint, "sf_churn_discovered");
+	      const state = (runtime as any).persistentState as {
+	        selfOwnedSurfaceIds?: Record<string, { relinquishedAt?: number; source?: string }>;
+	      };
+	      assert.equal(state.selfOwnedSurfaceIds?.sf_churn_discovered?.relinquishedAt, undefined);
+	      assert.equal(state.selfOwnedSurfaceIds?.sf_churn_discovered?.source, "current_local_ownership");
 	    } finally {
 	      await runtime?.stop();
 	      await server.close();
