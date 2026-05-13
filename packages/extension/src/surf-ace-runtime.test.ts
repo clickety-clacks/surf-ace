@@ -9608,6 +9608,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         source: "legacy_state_root",
       });
       assert.equal(internalRuntime.isKnownSelfOwnedSurface(surface), true);
+
+      internalRuntime.persistentState.selfOwnedSurfaceIds[server.surfaceId] = {
+        observedAt: Date.now(),
+        providerId: "pv_untrusted_previous_owner",
+        relinquishedAt: Date.now(),
+        source: "current_local_ownership",
+      };
+      surface.remotePaired = true;
+      assert.equal(internalRuntime.isKnownSelfOwnedSurface(surface), true);
     });
   });
 

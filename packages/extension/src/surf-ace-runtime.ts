@@ -9461,6 +9461,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     ) {
       return true;
     }
+    if (this.hasTrustedLivePairedSelfRediscovery(surface)) {
+      return true;
+    }
     return this.ownershipRecoveryPolicy.isKnownSelfOwnedSurface(
       this.persistentState,
       surface.surfaceId,
@@ -9553,6 +9556,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.localOwnership.providerId === this.persistentState.providerId &&
       surface.localOwnership.sessionId === surface.sessionId &&
       surface.localOwnership.surfaceId === surface.surfaceId,
+    );
+  }
+
+  private hasTrustedLivePairedSelfRediscovery(surface: ManagedSurface): boolean {
+    if (!surface.remotePaired || !this.hasCurrentDiscoveryEndpoint(surface)) {
+      return false;
+    }
+    const ownership = this.persistentState.selfOwnedSurfaceIds?.[surface.surfaceId];
+    return Boolean(
+      ownership &&
+        ownership.relinquishedAt &&
+        ownership.source !== "current_target_state" &&
+        this.ownershipRecoveryPolicy.isTrustedProviderLineageId(this.persistentState, ownership.providerId),
     );
   }
 
