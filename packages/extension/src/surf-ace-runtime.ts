@@ -2257,7 +2257,7 @@ function defaultRestorePolicyForTarget(
     case "web_snapshot":
       return "auto";
     case "browser_url":
-      return "confirm";
+      return "auto";
     case "terminal_app":
     case "native_app":
     case "compositor_app":

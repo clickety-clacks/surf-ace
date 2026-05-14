@@ -5746,7 +5746,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const screens = await runtime.listScreens();
         const target = screens[0]?.panes[0]?.target;
         assert.equal(target?.targetKind, "browser_url");
-        assert.equal(target?.targetPolicy, "confirm");
+        assert.equal(target?.targetPolicy, "auto");
         assert.equal(target?.display?.title, "Browser Pusher");
         assert.deepEqual(target?.targetPayload, { url: "https://google.com" });
 
@@ -5757,6 +5757,45 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           paneId: firstPaneId,
         });
         assert.equal(server.contentSetRequests.at(-1)?.revision, pushed.revision + 1);
+      },
+    });
+  });
+
+  await t.test("resume replay reapplies browser_url targets through provider authority", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        await runtime.push({
+          content: "https://arstechnica.com/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(server.targetApplyRequests.length, 1);
+
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        await internalRuntime.repushSurfaceContent(surface);
+
+        assert.equal(server.targetApplyRequests.length, 2);
+        const replay = server.targetApplyRequests.at(-1);
+        assert.ok(replay);
+        assert.equal(replay.restoreReason, "resume_restore");
+        assert.equal(replay.targetKind, "browser_url");
+        assert.deepEqual(replay.targetPayload, { url: "https://arstechnica.com/" });
+
+        const pane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
+        assert.equal(pane?.target?.blockedReason, null);
+        assert.equal(pane?.target?.targetKind, "browser_url");
+        assert.equal(pane?.target?.targetPolicy, "auto");
       },
     });
   });
