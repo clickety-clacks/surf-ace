@@ -62,6 +62,7 @@ await build({
     path.join(rootDir, "test", "renderer-sizing.test.ts"),
     path.join(rootDir, "test", "surface-core.test.ts"),
     path.join(rootDir, "test", "tars-autostart-guard.test.ts"),
+    path.join(rootDir, "test", "webauthn-support.test.ts"),
     path.join(rootDir, "test", "window-options.test.ts"),
     path.join(rootDir, "test", "window-placement.test.ts"),
     path.join(rootDir, "test", "ws-server.test.ts"),
