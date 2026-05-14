@@ -3135,6 +3135,11 @@ Electron keyboard defaults:
 - `D` exits annotation mode via Done.
 - `Cmd-[` navigates Back.
 - `Cmd-]` navigates Forward.
+- `Cmd-H/J/K/L` scrolls the keyboard-focused pane left/down/up/right by one 64px line increment while annotation mode is inactive.
+- Arrow keys scroll the keyboard-focused pane left/down/up/right by one 64px line increment while annotation mode is inactive.
+- `PageUp` and `PageDown` scroll the keyboard-focused pane by one 85%-viewport page increment while annotation mode is inactive.
+- `Cmd-Option-Shift-H/J/K/L` moves keyboard focus to the nearest pane left/down/up/right.
+- On non-macOS platforms, ``Cmd-` `` cycles focus to the next Surf Ace window. macOS keeps ``Cmd-` `` platform-owned.
 
 ---
 
@@ -3268,7 +3273,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Explicit Pane Routing** — "Keyboard focus does not create a default target for CLU routing and does not replace explicit `paneId` targeting." Source: §15.3
 - **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
 - **Accessibility Contrast** — "All chrome labels and controls MUST meet WCAG AA contrast." Source: §15.2
-- **Electron Shortcut Defaults** — "`A` enters annotation mode, `D` exits annotation mode via Done, `Cmd-[` navigates Back, `Cmd-]` navigates Forward." Source: §15.2
+- **Electron Shortcut Defaults** — "`A` enters annotation mode, `D` exits annotation mode via Done, `Cmd-[` navigates Back, `Cmd-]` navigates Forward, `Cmd-H/J/K/L` and arrow keys scroll the keyboard-focused pane by a 64px line increment, `PageUp`/`PageDown` scroll by an 85%-viewport page increment, `Cmd-Option-Shift-H/J/K/L` moves keyboard focus by pane geometry, and non-macOS Command-backtick cycles Surf Ace windows." Source: §15.2
 - **Unsupported Content Empty State** — "Unsupported content renders a centered empty-state message." Source: §15.4
 - **Blocked Attempt Toast** — "Blocked navigation or blocked content replacement during annotation mode shows a small toast." Source: §15.4 / §15.6
 - **Flush Indicator** — "While a `drawing_flush` is in-flight, the annotation mode border pulses." Source: §7.4 / §15.5

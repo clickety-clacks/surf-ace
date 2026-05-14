@@ -231,6 +231,50 @@ test("surface core tracks the active keyboard pane and falls back when it closes
   );
 });
 
+test("surface core navigates the active keyboard pane by resolved geometry", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const initialPaneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "vertical",
+    newPaneIds: [9],
+    newPaneLabels: [9],
+    paneId: initialPaneId,
+  });
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [11],
+    newPaneLabels: [11],
+    paneId: initialPaneId,
+  });
+  core.updatePaneSnapshot(surface.surfaceId, initialPaneId, {
+    bounds: { height: 400, width: 600, x: 0, y: 0 },
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 11, {
+    bounds: { height: 400, width: 600, x: 0, y: 400 },
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 9, {
+    bounds: { height: 800, width: 600, x: 600, y: 0 },
+  });
+
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), initialPaneId);
+  assert.equal(core.navigateActiveKeyboardPane(surface.surfaceId, "right"), 9);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), 9);
+  assert.equal(core.navigateActiveKeyboardPane(surface.surfaceId, "left"), initialPaneId);
+  assert.equal(core.navigateActiveKeyboardPane(surface.surfaceId, "down"), 11);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), 11);
+  assert.equal(core.navigateActiveKeyboardPane(surface.surfaceId, "up"), initialPaneId);
+  assert.equal(core.navigateActiveKeyboardPane(surface.surfaceId, "left"), null);
+});
+
 test("surface core preserves resize weights in topology and renderer geometry", () => {
   const core = new SurfaceCore({
     persistentState: {

@@ -138,6 +138,45 @@ test("browser_url diagnostics do not change the active keyboard pane", async () 
   assert.match(source.slice(diagnosticsIndex, focusIndex), /return;/);
 });
 
+test("keyboard shortcuts route pane navigation and focused pane scroll intents", async () => {
+  const source = await mainSource();
+  const shortcutIndex = source.indexOf("function wireWindowShortcuts");
+
+  assert.ok(shortcutIndex > -1);
+  assert.match(source.slice(shortcutIndex), /keyboardDirectionForPhysicalKey\(input\.code\)/);
+  assert.match(source.slice(shortcutIndex), /command && input\.alt && input\.shift && !input\.control && paneNavigationDirection/);
+  assert.match(source.slice(shortcutIndex), /core\.navigateActiveKeyboardPane\(surfaceId, paneNavigationDirection\)/);
+  assert.match(source.slice(shortcutIndex), /core\.navigateActiveKeyboardPane\(surfaceId, paneNavigationDirection\);[\s\S]*event\.preventDefault\(\);[\s\S]*return;/);
+  assert.match(source.slice(shortcutIndex), /activePane\.annotationBorderVisible/);
+  assert.match(source.slice(shortcutIndex), /command && !input\.alt && !input\.shift && !input\.control && vimDirection/);
+  assert.match(source.slice(shortcutIndex), /sendKeyboardScrollIntent\(window, activePaneId, vimDirection, "line"\)/);
+  assert.match(source.slice(shortcutIndex), /keyboardDirectionForArrowKey\(input\.key\)/);
+  assert.match(source.slice(shortcutIndex), /input\.key === "PageUp" \|\| input\.key === "PageDown"/);
+});
+
+test("custom window cycling is not installed on macOS where Cmd-backtick is platform-owned", async () => {
+  const source = await mainSource();
+  const shortcutIndex = source.indexOf("function wireWindowShortcuts");
+
+  assert.ok(shortcutIndex > -1);
+  assert.match(source.slice(shortcutIndex), /process\.platform !== "darwin"[\s\S]*input\.key === "`"[\s\S]*focusNextWindow\(surfaceId\)/);
+});
+
+test("renderer applies keyboard scroll intents to regular, html, and browser_url pane content", async () => {
+  const source = await rendererSource();
+  const intentIndex = source.indexOf("function scrollPaneByKeyboard");
+  const initIndex = source.indexOf("async function init");
+
+  assert.ok(intentIndex > -1);
+  assert.match(source.slice(intentIndex, initIndex), /webview\.executeJavaScript\?\.\(/);
+  assert.match(source.slice(intentIndex, initIndex), /paneStateFor\(view\)\?\.annotationBorderVisible/);
+  assert.match(source.slice(intentIndex, initIndex), /reportBrowserUrlKeyboardScroll\(view, result\)/);
+  assert.match(source.slice(intentIndex, initIndex), /scrollPromise[\s\S]*\.catch\(\(\) => \{\}\)/);
+  assert.match(source.slice(intentIndex, initIndex), /frame\.contentWindow\.scrollBy/);
+  assert.match(source.slice(intentIndex, initIndex), /view\.scrollEl\.scrollBy/);
+  assert.match(source.slice(initIndex), /window\.surfAce\.onKeyboardIntent/);
+});
+
 test("html and browser_url frames have a non-auto CSS height fallback", async () => {
   const styles = await rendererStyles();
   const frameRule = styles.match(/\.content-html-frame\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body ?? "";

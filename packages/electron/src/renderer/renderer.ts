@@ -161,6 +161,18 @@ type Bootstrap = {
   surfaceId: string;
 };
 
+type KeyboardScrollIntent = {
+  amount: "line" | "page";
+  direction: "down" | "left" | "right" | "up";
+  paneId: number;
+  type: "scroll";
+};
+
+type BrowserUrlKeyboardScrollResult = {
+  viewport: Viewport;
+  visibleText: string;
+};
+
 type NavigationMemo = {
   at: number;
   url: string;
@@ -1087,6 +1099,167 @@ function clearWebViewSizer(view: PaneView): void {
 
 function currentPaneFrameElement(view: PaneView): HTMLElement | null {
   return view.contentEl.querySelector<HTMLElement>(".content-html-frame");
+}
+
+function isKeyboardScrollIntent(intent: unknown): intent is KeyboardScrollIntent {
+  if (!intent || typeof intent !== "object") {
+    return false;
+  }
+  const candidate = intent as Partial<KeyboardScrollIntent>;
+  return (
+    candidate.type === "scroll" &&
+    typeof candidate.paneId === "number" &&
+    (candidate.amount === "line" || candidate.amount === "page") &&
+    (candidate.direction === "down" ||
+      candidate.direction === "left" ||
+      candidate.direction === "right" ||
+      candidate.direction === "up")
+  );
+}
+
+function keyboardScrollDelta(view: PaneView, intent: KeyboardScrollIntent): { left: number; top: number } {
+  const lineDistance = 64;
+  const pageDistance = Math.max(1, Math.floor(
+    (intent.direction === "left" || intent.direction === "right"
+      ? view.scrollEl.clientWidth
+      : view.scrollEl.clientHeight) * 0.85,
+  ));
+  const distance = intent.amount === "page" ? pageDistance : lineDistance;
+  switch (intent.direction) {
+    case "left":
+      return { left: -distance, top: 0 };
+    case "right":
+      return { left: distance, top: 0 };
+    case "up":
+      return { left: 0, top: -distance };
+    case "down":
+      return { left: 0, top: distance };
+  }
+}
+
+function isViewport(value: unknown): value is Viewport {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const viewport = value as Partial<Viewport>;
+  return (
+    typeof viewport.zoomLevel === "number" &&
+    isRectSize(viewport.contentSize) &&
+    isPoint(viewport.scrollOffset) &&
+    isViewportRect(viewport.visibleRect)
+  );
+}
+
+function isRectSize(value: unknown): value is { height: number; width: number } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const size = value as { height?: unknown; width?: unknown };
+  return typeof size.height === "number" && typeof size.width === "number";
+}
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const point = value as { x?: unknown; y?: unknown };
+  return typeof point.x === "number" && typeof point.y === "number";
+}
+
+function isViewportRect(value: unknown): value is { height: number; width: number; x: number; y: number } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const rect = value as { height?: unknown; width?: unknown; x?: unknown; y?: unknown };
+  return (
+    typeof rect.height === "number" &&
+    typeof rect.width === "number" &&
+    typeof rect.x === "number" &&
+    typeof rect.y === "number"
+  );
+}
+
+function isBrowserUrlKeyboardScrollResult(value: unknown): value is BrowserUrlKeyboardScrollResult {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const result = value as Partial<BrowserUrlKeyboardScrollResult>;
+  return isViewport(result.viewport) && typeof result.visibleText === "string";
+}
+
+function reportBrowserUrlKeyboardScroll(view: PaneView, result: BrowserUrlKeyboardScrollResult): void {
+  window.surfAce.command({
+    paneId: view.paneId,
+    type: "scroll",
+    viewport: result.viewport,
+    visibleText: result.visibleText,
+  });
+  window.surfAce.reportSnapshot({
+    bounds: paneBounds(view),
+    paneId: view.paneId,
+    selection: null,
+    viewport: result.viewport,
+    visibleText: result.visibleText,
+  });
+}
+
+function scrollPaneByKeyboard(intent: KeyboardScrollIntent): void {
+  const view = paneViews.get(intent.paneId);
+  if (!view) {
+    return;
+  }
+  if (paneStateFor(view)?.annotationBorderVisible) {
+    return;
+  }
+  rememberPaneContext(intent.paneId);
+  const delta = keyboardScrollDelta(view, intent);
+  const frame = currentPaneFrameElement(view);
+  if (frame?.matches("webview.content-browser-url-frame")) {
+    const webview = frame as BrowserUrlWebViewElement;
+    const scrollPromise = webview.executeJavaScript?.(
+      `(() => {
+        window.scrollBy({ left: ${JSON.stringify(delta.left)}, top: ${JSON.stringify(delta.top)}, behavior: "auto" });
+        const root = document.documentElement;
+        const body = document.body;
+        const contentHeight = Math.max(root?.scrollHeight ?? 0, body?.scrollHeight ?? 0);
+        const contentWidth = Math.max(root?.scrollWidth ?? 0, body?.scrollWidth ?? 0);
+        const visibleText = (body?.innerText ?? root?.innerText ?? "").slice(0, 4000);
+        return {
+          viewport: {
+            contentSize: { height: contentHeight, width: contentWidth },
+            scrollOffset: { x: Math.round(window.scrollX), y: Math.round(window.scrollY) },
+            visibleRect: {
+              height: Math.round(window.innerHeight),
+              width: Math.round(window.innerWidth),
+              x: Math.round(window.scrollX),
+              y: Math.round(window.scrollY)
+            },
+            zoomLevel: window.visualViewport?.scale ?? 1
+          },
+          visibleText
+        };
+      })()`,
+    );
+    void scrollPromise
+      ?.then((result) => {
+        if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
+          return;
+        }
+        if (isBrowserUrlKeyboardScrollResult(result)) {
+          reportBrowserUrlKeyboardScroll(view, result);
+          return;
+        }
+        reportPaneSnapshot(view);
+      })
+      .catch(() => {});
+    return;
+  }
+  if (frame instanceof HTMLIFrameElement && frame.contentWindow) {
+    frame.contentWindow.scrollBy({ behavior: "auto", left: delta.left, top: delta.top });
+    window.setTimeout(() => reportPaneSnapshot(view), 0);
+    return;
+  }
+  view.scrollEl.scrollBy({ behavior: "auto", left: delta.left, top: delta.top });
 }
 
 function paneFrameRect(view: PaneView): { height: number; width: number } | null {
@@ -2022,6 +2195,12 @@ async function init(): Promise<void> {
 
   window.surfAce.onState((nextState) => {
     renderWindow(nextState as RendererWindowState);
+  });
+
+  window.surfAce.onKeyboardIntent((intent) => {
+    if (isKeyboardScrollIntent(intent)) {
+      scrollPaneByKeyboard(intent);
+    }
   });
 
   window.addEventListener("resize", () => {
