@@ -128,6 +128,7 @@ type RendererPaneState = {
   externalNative: boolean;
   flushInFlight: boolean;
   label: string;
+  name: string | null;
   ownerName: string | null;
   paneId: number;
   displayId: string;
@@ -220,6 +221,7 @@ const appRoot = document.querySelector("#app") as HTMLDivElement;
 const paneViews = new Map<number, PaneView>();
 let bootstrap: Bootstrap | null = null;
 let latestState: RendererWindowState | null = null;
+let latestLayoutKey: string | null = null;
 let overlayRegionsFrame: number | null = null;
 let overlayRegionsTimer: number | null = null;
 let overlayRevision = 0;
@@ -238,6 +240,29 @@ type SurfAceOverlayKind =
 
 function contentKey(pane: RendererPaneState): string {
   return `${pane.externalNative ? "native" : "renderer"}:${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}:${pane.content.renderVersion}`;
+}
+
+function paneRenderKey(state: RendererWindowState, pane: RendererPaneState): string {
+  return JSON.stringify({
+    activeKeyboardPane: pane.activeKeyboardPane,
+    annotationBorderVisible: pane.annotationBorderVisible,
+    canGoBack: pane.canGoBack,
+    canGoForward: pane.canGoForward,
+    content: contentKey(pane),
+    displayId: pane.displayId,
+    drawings: drawingsKey(pane.drawings),
+    externalNative: pane.externalNative,
+    flushInFlight: pane.flushInFlight,
+    label: pane.label,
+    name: pane.name,
+    ownerName: pane.ownerName,
+    provenanceName: pane.provenanceName,
+    reloadable: pane.content.reloadable,
+    showDone: pane.showDone,
+    toast: pane.toast,
+    visibleAddress: pane.visibleAddress,
+    windowLabel: state.windowLabel,
+  });
 }
 
 function drawingsKey(drawings: Stroke[]): string {
@@ -2161,8 +2186,74 @@ function renderLayout(node: LayoutNode, panesById: Map<number, RendererPaneState
   return split;
 }
 
+function layoutKey(state: RendererWindowState): string {
+  return JSON.stringify(state.layout);
+}
+
+function patchSameLayoutWindow(previousState: RendererWindowState, state: RendererWindowState): boolean {
+  const wrapper = appRoot.firstElementChild as HTMLDivElement | null;
+  if (!wrapper?.classList.contains("surface-window")) {
+    return false;
+  }
+  const nextLayoutKey = layoutKey(state);
+  if (latestLayoutKey !== nextLayoutKey) {
+    return false;
+  }
+
+  wrapper.className = `surface-window connection-${state.connectionBar}`;
+  const previousPanes = new Map(previousState.panes.map((pane) => [pane.paneId, pane]));
+  const viewportChanged = JSON.stringify(previousState.viewport) !== JSON.stringify(state.viewport);
+  const overlayStateChanged = previousState.geometryRevision !== state.geometryRevision ||
+    previousState.topologyRevision !== state.topologyRevision ||
+    previousState.windowLabel !== state.windowLabel ||
+    viewportChanged;
+  let patchedPaneCount = 0;
+  for (const pane of state.panes) {
+    const previousPane = previousPanes.get(pane.paneId);
+    const view = paneViews.get(pane.paneId);
+    if (!previousPane || !view?.rootEl.isConnected) {
+      return false;
+    }
+    if (paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane)) {
+      updatePane(view, pane);
+      patchedPaneCount += 1;
+    }
+  }
+  if (viewportChanged) {
+    setAllPaneChromeMetrics();
+    refreshDynamicPaneFrames();
+    reportAllPaneSnapshots();
+    window.requestAnimationFrame(() => {
+      setAllPaneChromeMetrics();
+      refreshDynamicPaneFrames();
+      reportAllPaneSnapshots();
+    });
+  }
+  if (patchedPaneCount > 0) {
+    for (const pane of state.panes) {
+      const previousPane = previousPanes.get(pane.paneId);
+      const view = paneViews.get(pane.paneId);
+      if (previousPane && view && paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane)) {
+        reportPaneSnapshot(view);
+      }
+    }
+  }
+  if (patchedPaneCount > 0 || overlayStateChanged) {
+    scheduleCompositorOverlayRegionReport("layout");
+  }
+  return true;
+}
+
 function renderWindow(state: RendererWindowState): void {
+  const previousState = latestState;
+  if (previousState) {
+    latestState = state;
+    if (patchSameLayoutWindow(previousState, state)) {
+      return;
+    }
+  }
   latestState = state;
+  latestLayoutKey = layoutKey(state);
   const panesById = new Map(state.panes.map((pane) => [pane.paneId, pane]));
   const wrapper = document.createElement("div");
   wrapper.className = `surface-window connection-${state.connectionBar}`;

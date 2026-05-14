@@ -35,6 +35,21 @@ test("renderer reapplies browser_url frame sizing after layout commits and windo
   assert.match(source, /window\.addEventListener\("resize"[\s\S]*const frame = currentPaneFrameElement\(view\);[\s\S]*applyPaneFrameSize\(view, frame\)/);
 });
 
+test("renderer patches same-layout history updates without replacing sibling panes", async () => {
+  const source = await rendererSource();
+  const patchIndex = source.indexOf("function patchSameLayoutWindow");
+  const renderIndex = source.indexOf("function renderWindow");
+  const fastPathIndex = source.indexOf("patchSameLayoutWindow(previousState, state)", renderIndex);
+  const replaceIndex = source.indexOf("appRoot.replaceChildren(wrapper);", renderIndex);
+
+  assert.ok(patchIndex > -1);
+  assert.ok(fastPathIndex > renderIndex);
+  assert.ok(replaceIndex > fastPathIndex);
+  assert.match(source.slice(patchIndex, renderIndex), /latestLayoutKey !== nextLayoutKey/);
+  assert.match(source.slice(patchIndex, renderIndex), /paneRenderKey\(previousState, previousPane\) !== paneRenderKey\(state, pane\)[\s\S]*updatePane\(view, pane\)/);
+  assert.doesNotMatch(source.slice(patchIndex, renderIndex), /replaceChildren/);
+});
+
 test("renderer reports pane snapshots after layout commits", async () => {
   const source = await rendererSource();
   const helperIndex = source.indexOf("function reportAllPaneSnapshots");
