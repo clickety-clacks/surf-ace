@@ -2257,7 +2257,7 @@ function defaultRestorePolicyForTarget(
     case "web_snapshot":
       return "auto";
     case "browser_url":
-      return "confirm";
+      return "auto";
     case "terminal_app":
     case "native_app":
     case "compositor_app":
@@ -2273,6 +2273,16 @@ function requiredCapabilityForTargetKind(targetKind: TargetKind): string {
 
 function isProcessBackedTargetKind(targetKind: TargetKind): boolean {
   return targetKind === "terminal_app" || targetKind === "native_app" || targetKind === "compositor_app";
+}
+
+function processTargetAllowsResumeRestart(target: PaneTargetRecord): boolean {
+  if (!isProcessBackedTargetKind(target.targetKind)) {
+    return false;
+  }
+  if (!isPlainRecord(target.targetPayload) || target.targetPayload.restartPolicy !== "restore_new_process") {
+    return false;
+  }
+  return target.lastApplyEvidence?.status === "applied";
 }
 
 function contentTargetKind(contentType: ContentType): TargetKind | null {
@@ -3068,6 +3078,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const reattemptedSurfaces: SurfAceReattemptConnectionsResult["surfaces"] = [];
     for (const surface of surfaces) {
       const diagnostics = this.surfaceConnectionDiagnostics(surface);
+      surface.selfOwnershipReclaimAttempted = false;
       this.resetSurfaceConnectionCircuit(surface, "operator reattempt", { enableRetry: !surface.stopRequested });
       this.ensureSurfaceWorker(surface);
       this.wakeSurfaceRetry(surface);
@@ -3876,6 +3887,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const display = displayForPusherProvenance(context);
     const target = await this.createPaneTargetRecord(surface, pane, {
       display,
+      restorePolicy: "auto",
       targetHeader,
       targetKind: "browser_url",
       targetPayload: { url: input.content },
@@ -6231,7 +6243,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         const target = this.currentTargetRecord(surface, pane);
         if (target) {
           await this.ensureCurrentPaneLineage(surface, pane);
-          const blockedReason = this.restoreBlockedReason(surface, pane, target, false);
+          const blockedReason = this.restoreBlockedReason(surface, pane, target, false, {
+            allowResumeProcessRestart: true,
+          });
           if (blockedReason) {
             pane.lastRestoreBlockedReason = blockedReason;
             await this.persistSurfaceTargetState(surface, "restore blocked");
@@ -6336,6 +6350,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane: ManagedPane,
     target: PaneTargetRecord,
     confirmed: boolean,
+    options: { allowResumeProcessRestart?: boolean } = {},
   ): TargetErrorCode | null {
     if (target.surfaceId !== surface.surfaceId || target.paneLineageId !== pane.paneLineageId) {
       return "restore_blocked_stale_target";
@@ -6364,10 +6379,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (target.restorePolicy === "never") {
       return "policy_denied";
     }
-    if (target.restorePolicy === "manual" && !confirmed) {
+    const resumeRestartAllowed = options.allowResumeProcessRestart === true && processTargetAllowsResumeRestart(target);
+    if (target.restorePolicy === "manual" && !confirmed && !resumeRestartAllowed) {
       return "restore_requires_confirmation";
     }
-    if (target.restorePolicy === "confirm" && !confirmed) {
+    if (target.restorePolicy === "confirm" && !confirmed && !resumeRestartAllowed) {
       return "restore_requires_confirmation";
     }
     if ((target.targetHeader.safetyClass === "process" || isProcessBackedTargetKind(target.targetKind)) && target.restorePolicy === "auto") {
@@ -7294,18 +7310,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!this.ownershipRecoveryPolicy.isTrustedProviderLineageId(this.persistentState, ownership.providerId)) {
       return false;
     }
+    if (this.hasRecoverableDurableOwnershipHint(surfaceId)) {
+      return true;
+    }
     const observedAt = Number.isFinite(ownership.observedAt) ? ownership.observedAt : 0;
     if (this.now() - observedAt > STARTUP_SELF_OWNERSHIP_RECLAIM_GRACE_MS) {
       return false;
     }
-    if (this.hasRecoverableDurableOwnershipHint(surfaceId)) {
-      return true;
-    }
     return ownership.source === "current_local_ownership" || ownership.source === "legacy_target_state";
   }
 
-	  private hasRecoverableDurableOwnershipHint(surfaceId: string): boolean {
-	    const targetState = this.persistentState.targetStateBySurfaceId?.[surfaceId];
+  private hasRecoverableDurableOwnershipHint(surfaceId: string): boolean {
+    const targetState = this.persistentState.targetStateBySurfaceId?.[surfaceId];
     const currentTargetIds = new Set(
       Object.values(targetState?.paneTargets ?? {})
         .map((paneTarget) => paneTarget.currentTargetId)
@@ -7314,20 +7330,29 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (currentTargetIds.size === 0) {
       return false;
     }
-	    const targetRecords = Array.isArray(targetState?.targetRecords) ? targetState.targetRecords : [];
-	    return targetRecords.some((target) => (
+    const targetRecords = Array.isArray(targetState?.targetRecords) ? targetState.targetRecords : [];
+    return targetRecords.some((target) => (
       currentTargetIds.has(target.targetId) &&
-	      typeof target.ownershipSessionId === "string" &&
-	      target.ownershipSessionId.length > 0 &&
-	      target.currentState === "current" &&
-	      this.ownershipRecoveryPolicy.isTrustedProviderLineageId(
-	        this.persistentState,
-	        typeof target.ownerProviderId === "string" ? target.ownerProviderId : "",
-	      )
-	    ));
-	  }
+      typeof target.ownershipSessionId === "string" &&
+      target.ownershipSessionId.length > 0 &&
+      target.currentState === "current" &&
+      this.isRecoverableDurableTargetHint(target) &&
+      this.ownershipRecoveryPolicy.isTrustedProviderLineageId(
+        this.persistentState,
+        typeof target.ownerProviderId === "string" ? target.ownerProviderId : "",
+      )
+    ));
+  }
 
-	  private recordSurfaceTombstone(surfaceId: string, reason: string): void {
+  private isRecoverableDurableTargetHint(target: PaneTargetRecord): boolean {
+    if (target.targetHeader?.safetyClass !== "passive") {
+      return true;
+    }
+    const appliedAt = Date.parse(target.appliedAt);
+    return Number.isFinite(appliedAt) && this.now() - appliedAt <= STARTUP_SELF_OWNERSHIP_RECLAIM_GRACE_MS;
+  }
+
+  private recordSurfaceTombstone(surfaceId: string, reason: string): void {
     this.persistentState.surfaceTombstones ??= {};
     this.tombstonedSurfaceIds.add(asSurfaceId(surfaceId));
     const hadTargetState = Boolean(this.persistentState.targetStateBySurfaceId?.[surfaceId]);

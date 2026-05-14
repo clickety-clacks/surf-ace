@@ -3148,6 +3148,103 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("startup preserves aged current browser targets as recovery hints without making them live", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-aged-browser-target-"));
+    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 2,
+          nextRemotePaneId: 96363,
+          nextWindowLabelIndex: 1,
+          paneLabelsByPaneId: {},
+          providerId: "pv_aged_browser_target",
+          selfOwnedSurfaceIds: {
+            sf_aged_browser_target: {
+              observedAt: Date.now() - 120_000,
+              providerId: "pv_aged_browser_target",
+              source: "current_local_ownership",
+            },
+          },
+          targetStateBySurfaceId: {
+            sf_aged_browser_target: {
+              ownershipEpoch: 7,
+              paneTargets: {
+                pl_aged_browser_target: {
+                  currentTargetId: "tg_aged_browser_target",
+                  diagnosticContent: null,
+                  lastRestoreBlockedReason: null,
+                  nonDurableTargetDiagnostic: null,
+                  paneLineageId: "pl_aged_browser_target",
+                  targetEpoch: 1,
+                },
+              },
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [
+                {
+                  appliedAt: new Date(Date.now() - 120_000).toISOString(),
+                  currentState: "current",
+                  ownerProviderId: "pv_aged_browser_target",
+                  ownershipEpoch: 7,
+                  ownershipSessionId: "sa_aged_browser_target",
+                  paneIdAtApply: "pn_aged_browser_target",
+                  paneLabelAtApply: 1,
+                  paneLineageId: "pl_aged_browser_target",
+                  restorePolicy: "auto",
+                  surfaceId: "sf_aged_browser_target",
+                  surfaceInstanceId: null,
+                  targetEpoch: 1,
+                  targetHeader: {
+                    payloadSchemaVersion: 1,
+                    replaySemantics: "navigate",
+                    requiredCapabilities: ["target.browser_url.v1"],
+                    safeToLogFields: ["url"],
+                    safetyClass: "network",
+                    summary: "https://example.com",
+                  },
+                  targetId: "tg_aged_browser_target",
+                  targetKind: "browser_url",
+                  targetPayload: { url: "https://example.com" },
+                },
+              ],
+            },
+          },
+          tombstonedEndpointIds: [],
+          version: 1,
+          windowLabels: {
+            sf_aged_browser_target: "a",
+          },
+        }, null, 2),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify({
+          contentContinuity: {},
+          screens: [],
+          updatedAt: Date.now(),
+          version: 1,
+        }, null, 2),
+      );
+
+      const discovery = new StaticDiscoveryService([]);
+      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+      assert.deepEqual(await runtime.listScreens(), []);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 250);
+      });
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.equal(diagnostics.surfaceTombstones.sf_aged_browser_target, undefined);
+      assert.equal(diagnostics.targetStateSurfaceIds.includes("sf_aged_browser_target"), true);
+      assert.equal(diagnostics.windowLabelSurfaceIds.includes("sf_aged_browser_target"), true);
+      assert.deepEqual(await runtime.listScreens(), []);
+    } finally {
+      await runtime?.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("startup tombstones stale legacy-root target imports without refreshing ownership age", async () => {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-current-"));
     const legacyStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-root-"));
@@ -5746,7 +5843,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const screens = await runtime.listScreens();
         const target = screens[0]?.panes[0]?.target;
         assert.equal(target?.targetKind, "browser_url");
-        assert.equal(target?.targetPolicy, "confirm");
+        assert.equal(target?.targetPolicy, "auto");
         assert.equal(target?.display?.title, "Browser Pusher");
         assert.deepEqual(target?.targetPayload, { url: "https://google.com" });
 
@@ -5757,6 +5854,45 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           paneId: firstPaneId,
         });
         assert.equal(server.contentSetRequests.at(-1)?.revision, pushed.revision + 1);
+      },
+    });
+  });
+
+  await t.test("resume replay reapplies browser_url targets through provider authority", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        await runtime.push({
+          content: "https://arstechnica.com/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(server.targetApplyRequests.length, 1);
+
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        await internalRuntime.repushSurfaceContent(surface);
+
+        assert.equal(server.targetApplyRequests.length, 2);
+        const replay = server.targetApplyRequests.at(-1);
+        assert.ok(replay);
+        assert.equal(replay.restoreReason, "resume_restore");
+        assert.equal(replay.targetKind, "browser_url");
+        assert.deepEqual(replay.targetPayload, { url: "https://arstechnica.com/" });
+
+        const pane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
+        assert.equal(pane?.target?.blockedReason, null);
+        assert.equal(pane?.target?.targetKind, "browser_url");
+        assert.equal(pane?.target?.targetPolicy, "auto");
       },
     });
   });
@@ -6269,6 +6405,77 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         args: ["--utf-force"],
         command: "btop",
       });
+    });
+  });
+
+  await t.test("provider resume replay restores previously confirmed restartable terminal targets", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const [, secondPane] = split;
+      assert.ok(secondPane);
+
+      await runtime.launchTerminal({
+        command: "btop",
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: secondPane.paneId,
+        restartPolicy: "restore_new_process",
+        summary: "btop persisted",
+      });
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.targetApplyRequests.length, 2);
+      const replay = server.targetApplyRequests.at(-1);
+      assert.equal(replay?.restoreReason, "resume_restore");
+      assert.equal(replay?.targetKind, "terminal_app");
+      assert.deepEqual(replay?.targetPayload, {
+        args: [],
+        command: "btop",
+        envPolicy: "surface_default",
+        pty: true,
+        restartPolicy: "restore_new_process",
+      });
+
+      const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
+      assert.equal(screenPane?.target?.targetKind, "terminal_app");
+      assert.equal(screenPane?.target?.blockedReason, null);
+      assert.equal(screenPane?.target?.lastApplyEvidence?.status, "applied");
+    });
+  });
+
+  await t.test("provider resume replay still blocks manual-only terminal targets", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.launchTerminal({
+        command: "btop",
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+        restartPolicy: "manual_only",
+        summary: "btop manual only",
+      });
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.targetApplyRequests.length, 1);
+      const screenPane = (await runtime.listScreens())[0]?.panes[0];
+      assert.equal(screenPane?.target?.targetKind, "terminal_app");
+      assert.equal(screenPane?.target?.blockedReason, "restore_requires_confirmation");
     });
   });
 
@@ -9920,6 +10127,47 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(
         warnings.some((warning) => warning.includes("ownership_self_reclaim_blocked")),
       );
+    });
+  });
+
+  await t.test("operator reattempt resets known self-owned reclaim latch", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      surface.selfOwnershipReclaimAttempted = true;
+      await runtime.reattemptConnections({ fingerprint: server.surfaceId });
+      assert.equal(surface.selfOwnershipReclaimAttempted, false);
+
+      const response = {
+        error: {
+          code: "busy",
+          message: "Surface remained paired after self reclaim",
+        },
+        id: "rq_operator_retry_self_reclaim",
+        ok: false,
+        op: "pair.request",
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+      let takeoverRequests = 0;
+
+      await internalRuntime.maybeRecoverKnownSelfOwnershipLock(
+        surface,
+        response,
+        null,
+        async (takeover: boolean) => {
+          if (takeover) {
+            takeoverRequests += 1;
+          }
+          return response;
+        },
+      );
+
+      assert.equal(takeoverRequests, 1);
+      assert.equal(surface.selfOwnershipReclaimAttempted, true);
     });
   });
 
