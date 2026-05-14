@@ -1157,6 +1157,7 @@ const RESTART_SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60_000;
 const STARTUP_SELF_OWNERSHIP_RECLAIM_GRACE_MS = 30_000;
 const RECONNECT_BACKOFF_BASE_MS = 2_000;
 const RECONNECT_BACKOFF_CAP_MS = 30_000;
+const RESUME_TARGET_MATERIALIZATION_RETRY_DELAYS_MS = [250, 2_000, 10_000] as const;
 const REQUEST_TIMEOUT_MS = 10_000;
 const STABLE_CONNECTION_RESET_MS = 30_000;
 const UNREACHABLE_AFTER_FAILURES = 3;
@@ -2699,6 +2700,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private restartContentBySurface = new Map<string, PersistedRestartContentEntry[]>();
   private restartSnapshots = new Map<string, SurfAceScreenSummary>();
   private persistedRuntimeScreenIds = new Set<string>();
+  private resumeTargetMaterializationRetryDelaysMs: readonly number[] =
+    RESUME_TARGET_MATERIALIZATION_RETRY_DELAYS_MS;
 
   constructor(options: SurfAceRuntimeOptions = {}) {
     this.deliverSettledAnnotationTurn = options.deliverSettledAnnotationTurn;
@@ -6256,17 +6259,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             this.logReplayOutcome(surface, pane, "target", blockedReason);
             continue;
           }
-          const evidence = await this.materializeTargetRecord(surface, pane, target, "resume_restore");
+          const evidence = await this.materializeTargetRecordWithResumeRetries(surface, pane, target);
           this.logReplayOutcome(surface, pane, "target", evidence.status, evidence.errorCode);
-          if (
-            evidence.status !== "applied" &&
-            evidence.errorCode === "materialization_failed" &&
-            processTargetAllowsResumeRestart(target)
-          ) {
-            await sleep(250);
-            const retryEvidence = await this.materializeTargetRecord(surface, pane, target, "resume_restore");
-            this.logReplayOutcome(surface, pane, "target", retryEvidence.status, retryEvidence.errorCode);
-          }
           continue;
         }
 
@@ -6329,6 +6323,69 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         throw error;
       }
     }
+  }
+
+  private async materializeTargetRecordWithResumeRetries(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    target: PaneTargetRecord,
+  ): Promise<ApplyEvidence> {
+    let evidence = await this.materializeTargetRecord(surface, pane, target, "resume_restore");
+    if (!this.shouldRetryResumeTargetMaterialization(surface, pane, target, evidence)) {
+      return evidence;
+    }
+
+    for (const delayMs of this.resumeTargetMaterializationRetryDelaysMs) {
+      await sleep(delayMs);
+      const currentTarget = this.currentTargetRecord(surface, pane);
+      if (currentTarget?.targetId !== target.targetId) {
+        this.logger.info?.(
+          runtimeDiagnostic("target_materialization_retry_aborted", {
+            pane_id: pane.paneId,
+            previous_target_id: target.targetId,
+            surface_id: surface.surfaceId,
+            target_id: currentTarget?.targetId ?? "nil",
+            window_label: surface.windowLabel || "nil",
+          }),
+        );
+        return evidence;
+      }
+      this.logger.info?.(
+        runtimeDiagnostic("target_materialization_retry", {
+          delay_ms: delayMs,
+          pane_id: pane.paneId,
+          surface_id: surface.surfaceId,
+          target_id: target.targetId,
+          target_kind: target.targetKind,
+          window_label: surface.windowLabel || "nil",
+        }),
+      );
+      evidence = await this.materializeTargetRecord(surface, pane, target, "resume_restore");
+      this.logReplayOutcome(surface, pane, "target", evidence.status, evidence.errorCode);
+      if (!this.shouldRetryResumeTargetMaterialization(surface, pane, target, evidence)) {
+        return evidence;
+      }
+    }
+
+    return evidence;
+  }
+
+  private shouldRetryResumeTargetMaterialization(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    target: PaneTargetRecord,
+    evidence: ApplyEvidence,
+  ): boolean {
+    if (!surface.client || surface.connectionState !== "connected") {
+      return false;
+    }
+    if (evidence.status === "applied" || evidence.errorCode !== "materialization_failed") {
+      return false;
+    }
+    if (this.currentTargetRecord(surface, pane)?.targetId !== target.targetId) {
+      return false;
+    }
+    return processTargetAllowsResumeRestart(target);
   }
 
   private logReplayOutcome(

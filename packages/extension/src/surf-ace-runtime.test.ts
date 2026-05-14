@@ -6485,6 +6485,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.targetApplyRequests.length, 1);
 
       const internalRuntime = runtime as any;
+      internalRuntime.resumeTargetMaterializationRetryDelaysMs = [1];
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
       server.targetApplyErrorCode = "materialization_failed";
@@ -6513,7 +6514,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("provider resume replay retries restartable terminal materialization once after transient failure", async () => {
+  await t.test("provider resume replay retries restartable terminal materialization after transient failure", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const split = await runtime.split({
@@ -6536,6 +6537,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.targetApplyRequests.length, 1);
 
       const internalRuntime = runtime as any;
+      internalRuntime.resumeTargetMaterializationRetryDelaysMs = [1];
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
       server.targetApplyErrorCode = "materialization_failed";
@@ -6546,6 +6548,48 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(
         server.targetApplyRequests.slice(1).map((request) => request.restoreReason),
         ["resume_restore", "resume_restore"],
+      );
+      const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
+      assert.equal(screenPane?.target?.targetKind, "terminal_app");
+      assert.equal(screenPane?.target?.blockedReason, null);
+      assert.equal(screenPane?.target?.lastApplyEvidence?.status, "applied");
+    });
+  });
+
+  await t.test("provider resume replay keeps retrying restartable terminal materialization within bounded delays", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const [, secondPane] = split;
+      assert.ok(secondPane);
+
+      await runtime.launchTerminal({
+        command: "btop",
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: secondPane.paneId,
+        restartPolicy: "restore_new_process",
+        summary: "btop delayed retry persisted",
+      });
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const internalRuntime = runtime as any;
+      internalRuntime.resumeTargetMaterializationRetryDelaysMs = [1, 1, 1];
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      server.targetApplyErrorCode = "materialization_failed";
+      server.targetApplyErrorResponsesRemaining = 2;
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.targetApplyRequests.length, 4);
+      assert.deepEqual(
+        server.targetApplyRequests.slice(1).map((request) => request.restoreReason),
+        ["resume_restore", "resume_restore", "resume_restore"],
       );
       const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
       assert.equal(screenPane?.target?.targetKind, "terminal_app");
