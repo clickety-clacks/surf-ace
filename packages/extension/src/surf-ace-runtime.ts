@@ -494,6 +494,7 @@ export type PaneTargetRecord = {
   currentState: "current" | "superseded" | "stale" | "tombstoned";
   supersededByTargetId?: string;
   lastApplyEvidence?: ApplyEvidence;
+  lastSuccessfulApplyEvidence?: ApplyEvidence;
 };
 
 export type DiagnosticPaneContent = {
@@ -2282,7 +2283,7 @@ function processTargetAllowsResumeRestart(target: PaneTargetRecord): boolean {
   if (!isPlainRecord(target.targetPayload) || target.targetPayload.restartPolicy !== "restore_new_process") {
     return false;
   }
-  return target.lastApplyEvidence?.status === "applied";
+  return target.lastSuccessfulApplyEvidence?.status === "applied" || target.lastApplyEvidence?.status === "applied";
 }
 
 function contentTargetKind(contentType: ContentType): TargetKind | null {
@@ -6399,6 +6400,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     restoreReason: TargetApplyReason,
     display?: ContentDisplay,
   ): Promise<ApplyEvidence> {
+    const recordTargetApplyEvidence = (evidence: ApplyEvidence): void => {
+      target.lastApplyEvidence = evidence;
+      if (evidence.status === "applied") {
+        target.lastSuccessfulApplyEvidence = evidence;
+      }
+    };
     const targetDisplay = display ?? target.display ?? undefined;
     const contentTarget = contentPayloadForTarget(target.targetKind, target.targetPayload);
     if (contentTarget) {
@@ -6440,7 +6447,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           requestId: request.id,
           status: "failed",
         };
-        target.lastApplyEvidence = evidence;
+        recordTargetApplyEvidence(evidence);
         pane.lastRestoreBlockedReason = "materialization_failed";
         await this.persistSurfaceTargetState(surface, "content target materialization failed");
         return evidence;
@@ -6453,7 +6460,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           requestId: request.id,
           status: "failed",
         };
-        target.lastApplyEvidence = evidence;
+        recordTargetApplyEvidence(evidence);
         await this.persistSurfaceTargetState(surface, "stale content target apply response");
         return evidence;
       }
@@ -6469,7 +6476,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         requestId: request.id,
         status: "applied",
       };
-      target.lastApplyEvidence = evidence;
+      recordTargetApplyEvidence(evidence);
       pane.lastRestoreBlockedReason = null;
       pane.diagnosticContent = null;
       await this.persistSurfaceTargetState(surface, "target materialized");
@@ -6534,7 +6541,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         requestId,
         status: "failed",
       };
-      target.lastApplyEvidence = evidence;
+      recordTargetApplyEvidence(evidence);
       pane.lastRestoreBlockedReason = evidence.errorCode ?? "materialization_failed";
       if (
         evidence.errorCode === "ownership_epoch_mismatch" ||
@@ -6567,7 +6574,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         requestId,
         status: "failed",
       };
-      target.lastApplyEvidence = evidence;
+      recordTargetApplyEvidence(evidence);
       pane.lastRestoreBlockedReason = "materialization_failed";
       await this.persistSurfaceTargetState(surface, "target apply response mismatch");
       return evidence;
@@ -6580,7 +6587,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       requestId: payload.requestId,
       status: payload.status,
     };
-    target.lastApplyEvidence = evidence;
+    recordTargetApplyEvidence(evidence);
     if (
       evidence.status !== "applied" &&
       (evidence.errorCode === "ownership_epoch_mismatch" ||
@@ -8140,7 +8147,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
     surface.targetRecords = new Map(
-      persisted.targetRecords.map((record) => [record.targetId, structuredClone(record)]),
+      persisted.targetRecords.map((record) => {
+        const hydrated = structuredClone(record);
+        if (!hydrated.lastSuccessfulApplyEvidence && hydrated.lastApplyEvidence?.status === "applied") {
+          hydrated.lastSuccessfulApplyEvidence = structuredClone(hydrated.lastApplyEvidence);
+        }
+        return [hydrated.targetId, hydrated];
+      }),
     );
     surface.registeredTargetIdsByIdempotencyKey = new Map(
       Object.entries(persisted.registeredTargetIdsByIdempotencyKey ?? {}),

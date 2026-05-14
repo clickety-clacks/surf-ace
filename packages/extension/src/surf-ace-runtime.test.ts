@@ -6454,6 +6454,53 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider resume replay keeps restartable terminal eligibility after transient materialization failure", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const [, secondPane] = split;
+      assert.ok(secondPane);
+
+      await runtime.launchTerminal({
+        command: "btop",
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: secondPane.paneId,
+        restartPolicy: "restore_new_process",
+        summary: "btop persisted",
+      });
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      server.targetApplyErrorCode = "materialization_failed";
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.targetApplyRequests.length, 2);
+      let screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
+      assert.equal(screenPane?.target?.targetKind, "terminal_app");
+      assert.equal(screenPane?.target?.blockedReason, "materialization_failed");
+      assert.equal(screenPane?.target?.lastApplyEvidence?.status, "failed");
+
+      server.targetApplyErrorCode = null;
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.targetApplyRequests.length, 3);
+      const replay = server.targetApplyRequests.at(-1);
+      assert.equal(replay?.restoreReason, "resume_restore");
+      assert.equal(replay?.targetKind, "terminal_app");
+      screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
+      assert.equal(screenPane?.target?.blockedReason, null);
+      assert.equal(screenPane?.target?.lastApplyEvidence?.status, "applied");
+    });
+  });
+
   await t.test("provider resume replay still blocks manual-only terminal targets", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
