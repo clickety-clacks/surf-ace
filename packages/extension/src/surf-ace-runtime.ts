@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
@@ -111,6 +112,20 @@ export type SurfAceProviderAuthorityDecision = {
   reason: string | null;
 };
 
+export type SurfAceProviderProcessHealth = {
+  duplicateProviderProcesses: boolean;
+  liveProviderProcessCount: number;
+  pids: number[];
+  reason?: string;
+  source: "injected" | "process_inventory" | "unavailable";
+};
+
+type SurfAceProviderProcessBlockReason =
+  | "duplicate_provider_processes"
+  | "provider_process_inventory_unavailable"
+  | "provider_process_lease_mismatch"
+  | "provider_process_missing";
+
 export type SurfAceProviderAuthorityProjection = {
   activeTargetRecordCount: number;
   authorityBlockedSurfaceIds: string[];
@@ -123,6 +138,8 @@ export type SurfAceProviderAuthorityProjection = {
   persistedSelfOwnedSurfaceIds: string[];
   persistedSurfaceIds: string[];
   processId: number;
+  providerProcessBlockReason: SurfAceProviderProcessBlockReason | null;
+  providerProcessHealth: SurfAceProviderProcessHealth;
   providerId: string;
   runtimeScreenIds: string[];
   started: boolean;
@@ -703,6 +720,7 @@ export type SurfAceRuntimeOptions = {
   logger?: SurfAceLogger;
   now?: () => number;
   openClawStateDir?: string;
+  providerProcessHealth?: (expectedProviderPid?: number | null) => SurfAceProviderProcessHealth;
   providerName?: string;
   stateDir?: string;
 };
@@ -1004,6 +1022,112 @@ function runtimeDiagnostic(event: string, fields: RuntimeDiagnosticFields = {}):
   return suffix.length > 0
     ? `[surf-ace:runtime] event=${event} ${suffix}`
     : `[surf-ace:runtime] event=${event}`;
+}
+
+function commandExecutableToken(command: string): string {
+  return command
+    .trim()
+    .split(/\s+/)
+    .find((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) ?? "";
+}
+
+function isOpenClawGatewayProcess(command: string): boolean {
+  const tokens = command.trim().split(/\s+/);
+  const executable = path.basename(commandExecutableToken(command));
+  if (!/^node(?:$|@)/.test(executable)) {
+    return false;
+  }
+  return tokens.includes("gateway") &&
+    tokens.some((token) => {
+      const pathParts = token.split(/[\\/]/);
+      return path.basename(token) === "index.js" && pathParts.includes("dist");
+    });
+}
+
+function isExpectedProviderOwnerProcess(command: string): boolean {
+  const tokens = command.trim().split(/\s+/);
+  const executable = path.basename(commandExecutableToken(command));
+  if (path.basename(executable) === "openclaw-plugins" || isOpenClawGatewayProcess(command)) {
+    return true;
+  }
+  if (!/^(node(?:$|@)|tsx|ts-node|bun|deno)$/.test(executable) || !tokens.includes("gateway")) {
+    return false;
+  }
+  return tokens.some((token) => {
+    if (/(?:openclaw|surf-ace|clawdbot)/i.test(token)) {
+      return true;
+    }
+    const pathParts = token.split(/[\\/]/);
+    return ["index.js", "index.ts"].includes(path.basename(token)) &&
+      pathParts.some((part) => ["dist", "src", "packages"].includes(part));
+  });
+}
+
+export function providerProcessHealthFromProcessList(
+  processListOutput: string,
+  expectedProviderPid: number | null = process.pid,
+): SurfAceProviderProcessHealth {
+  const processCommands = new Map<number, string>();
+  for (const line of processListOutput.split("\n")) {
+    const match = /^(\d+)\s+(.+)$/.exec(line.trim());
+    if (!match) {
+      continue;
+    }
+    const pid = Number(match[1]);
+    if (Number.isFinite(pid)) {
+      processCommands.set(pid, match[2] ?? "");
+    }
+  }
+
+  const pids = new Set<number>();
+  for (const [pid, command] of processCommands) {
+    const executable = commandExecutableToken(command);
+    if (path.basename(executable) === "openclaw-plugins" || isOpenClawGatewayProcess(command)) {
+      pids.add(pid);
+    }
+  }
+  if (typeof expectedProviderPid === "number") {
+    const expectedCommand = processCommands.get(expectedProviderPid);
+    if (expectedCommand && isExpectedProviderOwnerProcess(expectedCommand)) {
+      pids.add(expectedProviderPid);
+    }
+  }
+
+  const livePids = [...pids].sort((left, right) => left - right);
+  return {
+    duplicateProviderProcesses: livePids.length > 1,
+    liveProviderProcessCount: livePids.length,
+    pids: livePids,
+    source: "process_inventory",
+  };
+}
+
+function defaultProviderProcessHealth(expectedProviderPid: number | null = process.pid): SurfAceProviderProcessHealth {
+  if (process.platform !== "darwin") {
+    return {
+      duplicateProviderProcesses: false,
+      liveProviderProcessCount: 0,
+      pids: [],
+      reason: "process inventory unavailable on this platform",
+      source: "unavailable",
+    };
+  }
+
+  try {
+    const output = execFileSync("ps", ["-axo", "pid=,command="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return providerProcessHealthFromProcessList(output, expectedProviderPid);
+  } catch (error) {
+    return {
+      duplicateProviderProcesses: false,
+      liveProviderProcessCount: 0,
+      pids: [],
+      reason: error instanceof Error ? error.message : String(error),
+      source: "unavailable",
+    };
+  }
 }
 
 function diagnosticJson(value: unknown): string {
@@ -2522,6 +2646,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly logger: SurfAceLogger;
   private readonly now: () => number;
   private readonly providerIdentityPath: string;
+  private readonly providerProcessHealth: (expectedProviderPid?: number | null) => SurfAceProviderProcessHealth;
   private readonly providerName: string;
   private readonly ownershipRecoveryPolicy = new SurfAceOwnershipRecoveryPolicy();
   private readonly stateRepository: SurfAceStateRepository<RuntimeStateFile>;
@@ -2572,6 +2697,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.legacyStateDir = options.legacyStateDir ?? legacySurfAceStateDir();
     this.logger = options.logger ?? console;
     this.now = options.now ?? (() => Date.now());
+    this.providerProcessHealth = options.providerProcessHealth ?? defaultProviderProcessHealth;
     this.providerIdentityPath = path.join(
       options.stateDir ?? path.dirname(resolveDefaultProviderIdentityPath()),
       PROVIDER_IDENTITY_FILE_NAME,
@@ -2724,15 +2850,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!this.started && !this.startPromise) {
       const parsed = await this.readRuntimeStateFile(path.join(this.stateDir, STATE_FILE_NAME));
       const runtimeScreenIds = await this.readPersistedRuntimeScreenIds();
+      const ownerLease = await this.readRuntimeLease();
       return this.buildProviderAuthorityProjection(
         this.runtimeStateForDiagnostics(parsed),
         runtimeScreenIds,
         "stopped",
+        typeof ownerLease.pid === "number" ? ownerLease.pid : process.pid,
       );
     }
     await this.start();
     await this.refreshPersistedRuntimeScreenIds();
-    return this.buildProviderAuthorityProjection();
+    const ownerLease = this.ownsRuntimeLease ? {} : await this.readRuntimeLease();
+    return this.buildProviderAuthorityProjection(
+      this.persistentState,
+      this.persistedRuntimeScreenIds,
+      undefined,
+      typeof ownerLease.pid === "number" ? ownerLease.pid : process.pid,
+    );
   }
 
   async push(
@@ -7440,8 +7574,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     });
   }
 
-  private baseProviderAuthorityForSurface(surface: ManagedSurface): SurfAceProviderAuthorityDecision {
+  private baseProviderAuthorityForSurface(
+    surface: ManagedSurface,
+    expectedProviderPid: number | null = process.pid,
+    providerProcessHealth?: SurfAceProviderProcessHealth,
+  ): SurfAceProviderAuthorityDecision {
     const blockers: string[] = [];
+    const providerProcessBlockReason = this.providerProcessAuthorityBlockReason(
+      expectedProviderPid,
+      providerProcessHealth,
+    );
+    if (providerProcessBlockReason) {
+      blockers.push(providerProcessBlockReason);
+    }
     if (this.isStalePersistedSurfaceTombstone(surface.surfaceId)) {
       blockers.push("surface_tombstoned");
     }
@@ -7472,8 +7617,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     };
   }
 
-  private providerAuthorityForSurface(surface: ManagedSurface): SurfAceProviderAuthorityDecision {
-    const baseDecision = this.baseProviderAuthorityForSurface(surface);
+  private providerAuthorityForSurface(
+    surface: ManagedSurface,
+    expectedProviderPid: number | null = process.pid,
+    providerProcessHealth?: SurfAceProviderProcessHealth,
+  ): SurfAceProviderAuthorityDecision {
+    const baseDecision = this.baseProviderAuthorityForSurface(
+      surface,
+      expectedProviderPid,
+      providerProcessHealth,
+    );
     const blockers = [...baseDecision.blockers];
     if (baseDecision.admitted && surface.authorityAcceptedIdentityKey !== this.authorityIdentityKey(surface)) {
       blockers.push(surface.authorityRejectedReason ?? "client_authority_unconfirmed");
@@ -7500,6 +7653,45 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       blockers,
       reason: blockers[0] ?? null,
     };
+  }
+
+  private currentProviderProcessHealth(expectedProviderPid: number | null = process.pid): SurfAceProviderProcessHealth {
+    try {
+      return this.providerProcessHealth(expectedProviderPid);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn?.(
+        runtimeDiagnostic("provider_process_health_unavailable", {
+          reason,
+        }),
+      );
+      return {
+        duplicateProviderProcesses: false,
+        liveProviderProcessCount: 0,
+        pids: [],
+        reason,
+        source: "unavailable",
+      };
+    }
+  }
+
+  private providerProcessAuthorityBlockReason(
+    expectedProviderPid: number | null,
+    health = this.currentProviderProcessHealth(expectedProviderPid),
+  ): SurfAceProviderProcessBlockReason | null {
+    if (health.source === "unavailable") {
+      return "provider_process_inventory_unavailable";
+    }
+    if (health.liveProviderProcessCount === 0) {
+      return "provider_process_missing";
+    }
+    if (health.duplicateProviderProcesses || health.liveProviderProcessCount > 1) {
+      return "duplicate_provider_processes";
+    }
+    if (typeof expectedProviderPid === "number" && !health.pids.includes(expectedProviderPid)) {
+      return "provider_process_lease_mismatch";
+    }
+    return null;
   }
 
   private authorityIdentityKey(surface: ManagedSurface): string {
@@ -7741,7 +7933,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     state: RuntimeStateFile = this.persistentState,
     runtimeScreenIdsInput: Set<string> = this.persistedRuntimeScreenIds,
     ownerStatusOverride?: "active" | "passive" | "stopped",
+    expectedProviderPid: number | null = process.pid,
   ): SurfAceProviderAuthorityProjection {
+    const providerProcessHealth = this.currentProviderProcessHealth(expectedProviderPid);
+    const providerProcessBlockReason = this.providerProcessAuthorityBlockReason(
+      expectedProviderPid,
+      providerProcessHealth,
+    );
     const liveSurfaceIds = [...this.surfaces.keys()].sort();
     const persistedSelfOwnedSurfaceIds = Object.keys(state.selfOwnedSurfaceIds ?? {}).sort();
     const targetStateSurfaceIds = Object.keys(state.targetStateBySurfaceId ?? {}).sort();
@@ -7760,7 +7958,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const authorityBlockersBySurfaceId: Record<string, string[]> = {};
     const authorityBlockedSurfaceIds: string[] = [];
     for (const surface of this.surfaces.values()) {
-      const authority = this.providerAuthorityForSurface(surface);
+      const authority = this.providerAuthorityForSurface(
+        surface,
+        expectedProviderPid,
+        providerProcessHealth,
+      );
       authorityBlockersBySurfaceId[surface.surfaceId] = authority.blockers;
       if (!authority.admitted) {
         authorityBlockedSurfaceIds.push(surface.surfaceId);
@@ -7779,6 +7981,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       persistedSelfOwnedSurfaceIds,
       persistedSurfaceIds,
       processId: process.pid,
+      providerProcessBlockReason,
+      providerProcessHealth,
       providerId: state.providerId,
       runtimeScreenIds,
       started: this.started,
@@ -8072,9 +8276,68 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     ) {
       return [];
     }
-    return this.repairPersistedScreenSummaryLabels(
-      this.filterPersistedVisibleScreens(snapshotFile?.screens ?? []),
+    return this.applyProviderProcessHealthToPersistedScreens(
+      this.repairPersistedScreenSummaryLabels(
+        this.filterPersistedVisibleScreens(snapshotFile?.screens ?? []),
+      ),
+      typeof ownerLease.pid === "number" ? ownerLease.pid : null,
     );
+  }
+
+  private applyProviderProcessHealthToPersistedScreens(
+    screens: SurfAceScreenSummary[],
+    expectedProviderPid: number | null,
+  ): SurfAceScreenSummary[] {
+    const providerProcessHealth = this.currentProviderProcessHealth(expectedProviderPid);
+    const providerProcessBlockReason = this.providerProcessAuthorityBlockReason(
+      expectedProviderPid,
+      providerProcessHealth,
+    );
+    const providerAuthorityProjection = this.buildProviderAuthorityProjection(
+      this.persistentState,
+      this.persistedRuntimeScreenIds,
+      "passive",
+      expectedProviderPid,
+    );
+    return screens.map((screen) => {
+      if (!providerProcessBlockReason) {
+        return {
+          ...screen,
+          _debug: screen._debug
+            ? {
+                ...screen._debug,
+                providerAuthorityProjection,
+              }
+            : screen._debug,
+        };
+      }
+      const blockers = [...new Set([providerProcessBlockReason, ...(screen.authority?.blockers ?? [])])];
+      const authority = {
+        actionable: false,
+        admitted: false,
+        blockers,
+        reason: providerProcessBlockReason,
+      };
+      return {
+        ...screen,
+        authority,
+        connectionDiagnostics: {
+          ...screen.connectionDiagnostics,
+          reason: screen.connectionDiagnostics.reason ?? providerProcessBlockReason,
+        },
+        connectionState: screen.connectionState === "connected" ? "connecting" : screen.connectionState,
+        panes: [],
+        topology: null,
+        topologyRevision: 0,
+        _debug: screen._debug
+          ? {
+              ...screen._debug,
+              providerAuthority: authority,
+              providerAuthorityProjection,
+            }
+          : screen._debug,
+      };
+    });
   }
 
   private filterPersistedVisibleScreens(screens: SurfAceScreenSummary[]): SurfAceScreenSummary[] {

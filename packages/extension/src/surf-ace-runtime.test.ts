@@ -9,7 +9,27 @@ import type WebSocket from "ws";
 
 import type { SurfAceDiscoveryEndpoint, SurfAceDiscoveryService } from "./surf-ace-discovery.js";
 import { SurfAceOwnershipRecoveryPolicy } from "./surf-ace-ownership-recovery-policy.js";
-import { createSurfAceRuntime, resolveDefaultSurfAceStateDir } from "./surf-ace-runtime.js";
+import {
+  createSurfAceRuntime as createSurfAceRuntimeBase,
+  providerProcessHealthFromProcessList,
+  resolveDefaultSurfAceStateDir,
+  type SurfAceProviderProcessHealth,
+  type SurfAceRuntimeOptions,
+} from "./surf-ace-runtime.js";
+
+const singularProviderProcessHealth = (): SurfAceProviderProcessHealth => ({
+  duplicateProviderProcesses: false,
+  liveProviderProcessCount: 1,
+  pids: [process.pid],
+  source: "injected",
+});
+
+function createSurfAceRuntime(options: SurfAceRuntimeOptions = {}) {
+  return createSurfAceRuntimeBase({
+    ...options,
+    providerProcessHealth: options.providerProcessHealth ?? singularProviderProcessHealth,
+  });
+}
 
 type TestPane = {
   contentId: string | null;
@@ -1659,6 +1679,7 @@ async function withRuntimeHarness(
     | {
         configureServer?: (server: FakeSurfAceWsServer) => void;
         now?: () => number;
+        providerProcessHealth?: SurfAceRuntimeOptions["providerProcessHealth"];
         providerName?: string;
         waitForAuthority?: boolean;
         waitForPair?: boolean;
@@ -1676,7 +1697,14 @@ async function withRuntimeHarness(
 ): Promise<void> {
   const options =
     typeof optionsOrRun === "function"
-      ? { configureServer: undefined, run: optionsOrRun, now: undefined, providerName: undefined, waitForPair: true }
+      ? {
+          configureServer: undefined,
+          providerProcessHealth: undefined,
+          run: optionsOrRun,
+          now: undefined,
+          providerName: undefined,
+          waitForPair: true,
+        }
       : optionsOrRun;
   const port = nextPort++;
   const server = new FakeSurfAceWsServer(port);
@@ -1700,6 +1728,7 @@ async function withRuntimeHarness(
       },
     },
     now: options.now,
+    providerProcessHealth: options.providerProcessHealth,
     providerName: options.providerName,
     stateDir,
   });
@@ -2661,6 +2690,102 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("passive list downgrades connected snapshots when duplicate provider processes are live", async () => {
+    const port = nextPort++;
+    const server = new FakeSurfAceWsServer(port);
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-duplicate-provider-passive-snapshot-"));
+    const discoveryA = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const discoveryB = new StaticDiscoveryService([]);
+    const runtimeA = createSurfAceRuntime({ discovery: discoveryA, stateDir });
+    let observedExpectedProviderPid: number | null | undefined;
+    const runtimeB = createSurfAceRuntime({
+      discovery: discoveryB,
+      providerProcessHealth: (expectedProviderPid) => {
+        observedExpectedProviderPid = expectedProviderPid;
+        return {
+          duplicateProviderProcesses: true,
+          liveProviderProcessCount: 2,
+          pids: [expectedProviderPid ?? -1, 404],
+          source: "injected",
+        };
+      },
+      stateDir,
+    });
+
+    try {
+      await runtimeA.start();
+      await waitFor(() => server.authorityStateRequests.some((request) => request.actionable), 12_000);
+      await waitFor(async () => {
+        const screens = await runtimeA.listScreens();
+        return screens.some((screen) => screen.fingerprint === server.surfaceId && screen.connectionState === "connected");
+      }, 12_000);
+
+      await runtimeB.start();
+      const screens = await runtimeB.listScreens();
+      const passiveScreen = screens.find((screen) => screen.fingerprint === server.surfaceId);
+
+      assert.equal(observedExpectedProviderPid, process.pid);
+      assert.ok(passiveScreen);
+      assert.equal(passiveScreen.connectionState, "connecting");
+      assert.equal(passiveScreen.authority.actionable, false);
+      assert.equal(passiveScreen.authority.reason, "duplicate_provider_processes");
+      assert.deepEqual(passiveScreen.panes, []);
+      assert.equal(passiveScreen.topology, null);
+      assert.equal(passiveScreen._debug?.providerAuthorityProjection.providerProcessBlockReason, "duplicate_provider_processes");
+    } finally {
+      await runtimeB.stop();
+      await runtimeA.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("pre-start provider authority diagnostics use active owner PID", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-prestart-provider-pid-"));
+    const now = Date.now();
+    const activeOwnerPid = process.ppid || process.pid;
+    let observedExpectedProviderPid: number | null | undefined;
+    const runtime = createSurfAceRuntime({
+      discovery: new StaticDiscoveryService([]),
+      providerProcessHealth: (expectedProviderPid) => {
+        observedExpectedProviderPid = expectedProviderPid;
+        return {
+          duplicateProviderProcesses: false,
+          liveProviderProcessCount: 1,
+          pids: [expectedProviderPid ?? -1],
+          source: "injected",
+        };
+      },
+      stateDir,
+    });
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-owner.lock"),
+        JSON.stringify(
+          {
+            controlPort: 0,
+            lastActiveAt: now,
+            pid: activeOwnerPid,
+            startedAt: now - 60_000,
+          },
+          null,
+          2,
+        ),
+      );
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+
+      assert.equal(diagnostics.ownerStatus, "stopped");
+      assert.equal(observedExpectedProviderPid, activeOwnerPid);
+      assert.equal(diagnostics.providerProcessBlockReason, null);
+      assert.deepEqual(diagnostics.providerProcessHealth.pids, [activeOwnerPid]);
+    } finally {
+      await runtime.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("listScreens exposes only the CLU surface fields and local pane identities", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const screens = await runtime.listScreens();
@@ -3118,6 +3243,201 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       },
 	    });
 	  });
+
+  await t.test("provider process inventory recognizes in-process owner and stale plugin siblings", () => {
+    const inProcessHealth = providerProcessHealthFromProcessList(
+      [
+        "48791 /opt/homebrew/opt/node@24/bin/node /Users/mike/openclaw/dist/index.js gateway --port 18789",
+        "49466 node -e const text='openclaw-plugins'",
+      ].join("\n"),
+      48791,
+    );
+    assert.equal(inProcessHealth.duplicateProviderProcesses, false);
+    assert.equal(inProcessHealth.liveProviderProcessCount, 1);
+    assert.deepEqual(inProcessHealth.pids, [48791]);
+
+    const pluginOwnerHealth = providerProcessHealthFromProcessList(
+      "27021 OSLogRateLimit=64 OPENCLAW_GATEWAY_PORT=18789 openclaw-plugins",
+      27021,
+    );
+    assert.equal(pluginOwnerHealth.duplicateProviderProcesses, false);
+    assert.equal(pluginOwnerHealth.liveProviderProcessCount, 1);
+    assert.deepEqual(pluginOwnerHealth.pids, [27021]);
+
+    const staleSiblingHealth = providerProcessHealthFromProcessList(
+      [
+        "48791 /opt/homebrew/opt/node@24/bin/node /Users/mike/openclaw/dist/index.js gateway --port 18789",
+        "27021 OSLogRateLimit=64 OPENCLAW_GATEWAY_PORT=18789 openclaw-plugins",
+      ].join("\n"),
+      48791,
+    );
+    assert.equal(staleSiblingHealth.duplicateProviderProcesses, true);
+    assert.equal(staleSiblingHealth.liveProviderProcessCount, 2);
+    assert.deepEqual(staleSiblingHealth.pids, [27021, 48791]);
+
+    const expectedOwnerWithStaleSiblingHealth = providerProcessHealthFromProcessList(
+      [
+        "48791 /opt/homebrew/bin/node --import tsx packages/extension/src/index.ts gateway --port 18789",
+        "27021 OSLogRateLimit=64 OPENCLAW_GATEWAY_PORT=18789 openclaw-plugins",
+      ].join("\n"),
+      48791,
+    );
+    assert.equal(expectedOwnerWithStaleSiblingHealth.duplicateProviderProcesses, true);
+    assert.equal(expectedOwnerWithStaleSiblingHealth.liveProviderProcessCount, 2);
+    assert.deepEqual(expectedOwnerWithStaleSiblingHealth.pids, [27021, 48791]);
+
+    const duplicateGatewayHealth = providerProcessHealthFromProcessList(
+      [
+        "48791 /opt/homebrew/opt/node@24/bin/node /Users/mike/openclaw/dist/index.js gateway --port 18789",
+        "48802 /opt/homebrew/opt/node@24/bin/node /Users/mike/openclaw/dist/index.js gateway --port 18789",
+      ].join("\n"),
+      48791,
+    );
+    assert.equal(duplicateGatewayHealth.duplicateProviderProcesses, true);
+    assert.equal(duplicateGatewayHealth.liveProviderProcessCount, 2);
+    assert.deepEqual(duplicateGatewayHealth.pids, [48791, 48802]);
+
+    const duplicateRelativeGatewayHealth = providerProcessHealthFromProcessList(
+      [
+        "48791 node dist/index.js gateway --port 18789",
+        "48802 node dist/index.js gateway --port 18789",
+      ].join("\n"),
+      48791,
+    );
+    assert.equal(duplicateRelativeGatewayHealth.duplicateProviderProcesses, true);
+    assert.equal(duplicateRelativeGatewayHealth.liveProviderProcessCount, 2);
+    assert.deepEqual(duplicateRelativeGatewayHealth.pids, [48791, 48802]);
+
+    const missingExpectedOwnerHealth = providerProcessHealthFromProcessList(
+      "27021 OSLogRateLimit=64 OPENCLAW_GATEWAY_PORT=18789 openclaw-plugins",
+      48791,
+    );
+    assert.equal(missingExpectedOwnerHealth.duplicateProviderProcesses, false);
+    assert.equal(missingExpectedOwnerHealth.liveProviderProcessCount, 1);
+    assert.deepEqual(missingExpectedOwnerHealth.pids, [27021]);
+
+    const reusedPidHealth = providerProcessHealthFromProcessList(
+      "48791 /bin/sleep 1000",
+      48791,
+    );
+    assert.equal(reusedPidHealth.duplicateProviderProcesses, false);
+    assert.equal(reusedPidHealth.liveProviderProcessCount, 0);
+    assert.deepEqual(reusedPidHealth.pids, []);
+  });
+
+  await t.test("duplicate provider processes block provider actionability and pane operations", async () => {
+    let health: SurfAceProviderProcessHealth = {
+      duplicateProviderProcesses: true,
+      liveProviderProcessCount: 2,
+      pids: [process.pid, 202],
+      source: "injected",
+    };
+    await withRuntimeHarness({
+      providerProcessHealth: () => ({ ...health, pids: [...health.pids] }),
+      waitForAuthority: false,
+      run: async ({ runtime, server }) => {
+        await waitFor(() => server.authorityStateRequests.length > 0, 12_000);
+
+        const blockedScreen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(blockedScreen);
+        assert.equal(blockedScreen.connectionState, "connecting");
+        assert.equal(blockedScreen.authority.actionable, false);
+        assert.equal(blockedScreen.authority.reason, "duplicate_provider_processes");
+        assert.equal(blockedScreen._debug?.providerAuthorityProjection.providerProcessBlockReason, "duplicate_provider_processes");
+        assert.deepEqual(blockedScreen._debug?.providerAuthorityProjection.providerProcessHealth.pids, [process.pid, 202]);
+
+        const paneId = blockedScreen.panes[0]?.paneId;
+        assert.ok(paneId);
+        await assert.rejects(
+          runtime.push({
+            content: "# blocked while duplicate provider processes are live",
+            contentType: "markdown",
+            fingerprint: server.surfaceId,
+            paneId,
+          }),
+          /duplicate_provider_processes/,
+        );
+        assert.equal(server.contentSetRequests.length, 0);
+
+        health = {
+          duplicateProviderProcesses: false,
+          liveProviderProcessCount: 1,
+          pids: [202],
+          source: "injected",
+        };
+
+        const mismatchedOwnerScreen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(mismatchedOwnerScreen);
+        assert.equal(mismatchedOwnerScreen.authority.actionable, false);
+        assert.equal(mismatchedOwnerScreen.authority.reason, "provider_process_lease_mismatch");
+        assert.equal(
+          mismatchedOwnerScreen._debug?.providerAuthorityProjection.providerProcessBlockReason,
+          "provider_process_lease_mismatch",
+        );
+        await assert.rejects(
+          runtime.push({
+            content: "# blocked while a stale provider process owns the lease",
+            contentType: "markdown",
+            fingerprint: server.surfaceId,
+            paneId,
+          }),
+          /provider_process_lease_mismatch/,
+        );
+        assert.equal(server.contentSetRequests.length, 0);
+
+        health = {
+          duplicateProviderProcesses: false,
+          liveProviderProcessCount: 1,
+          pids: [process.pid],
+          source: "injected",
+        };
+
+        await runtime.push({
+          content: "# accepted after singular provider ownership",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId,
+        });
+        assert.equal(server.contentSetRequests.at(-1)?.paneId, server.initialRemotePaneId);
+        const actionableScreen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.equal(actionableScreen?.authority.actionable, true);
+        assert.equal(actionableScreen?._debug?.providerAuthorityProjection.providerProcessBlockReason, null);
+      },
+    });
+  });
+
+  await t.test("missing or unavailable provider process inventory blocks provider actionability", async () => {
+    let health: SurfAceProviderProcessHealth = {
+      duplicateProviderProcesses: false,
+      liveProviderProcessCount: 0,
+      pids: [],
+      source: "process_inventory",
+    };
+    await withRuntimeHarness({
+      providerProcessHealth: () => ({ ...health, pids: [...health.pids] }),
+      waitForAuthority: false,
+      run: async ({ runtime, server }) => {
+        await waitFor(() => server.authorityStateRequests.length > 0, 12_000);
+        const missingScreen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(missingScreen);
+        assert.equal(missingScreen.authority.reason, "provider_process_missing");
+        assert.equal(missingScreen.connectionState, "connecting");
+
+        health = {
+          duplicateProviderProcesses: false,
+          liveProviderProcessCount: 0,
+          pids: [],
+          reason: "process inventory unavailable",
+          source: "unavailable",
+        };
+
+        const unavailableScreen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(unavailableScreen);
+        assert.equal(unavailableScreen.authority.reason, "provider_process_inventory_unavailable");
+        assert.equal(unavailableScreen.connectionState, "connecting");
+      },
+    });
+  });
 
 		  await t.test("legacy v1 clients without authority state capability fail closed", async () => {
 	    await withRuntimeHarness({
@@ -9046,9 +9366,20 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     const now = Date.now();
     const providerId = "pv_current_passive_snapshot";
     const sessionId = "sa_current_snapshot";
+    const activeOwnerPid = process.ppid || process.pid;
+    let observedExpectedProviderPid: number | null | undefined;
     const runtime = createSurfAceRuntime({
       discovery: new StaticDiscoveryService([]),
       now: () => now,
+      providerProcessHealth: (expectedProviderPid) => {
+        observedExpectedProviderPid = expectedProviderPid;
+        return {
+          duplicateProviderProcesses: false,
+          liveProviderProcessCount: 1,
+          pids: [expectedProviderPid ?? -1],
+          source: "injected",
+        };
+      },
       stateDir,
     });
 
@@ -9075,7 +9406,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           {
             controlPort: 0,
             lastActiveAt: now,
-            pid: process.pid,
+            pid: activeOwnerPid,
             startedAt: now - 60_000,
           },
           null,
@@ -9147,6 +9478,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(screens.length, 1);
       assert.equal(screens[0]?.fingerprint, "sf_current_snapshot");
       assert.equal(screens[0]?.connectionState, "connected");
+      assert.equal(observedExpectedProviderPid, activeOwnerPid);
+      assert.equal(screens[0]?._debug?.providerAuthorityProjection.providerProcessBlockReason, null);
     } finally {
       await runtime.stop();
       await fs.rm(stateDir, { force: true, recursive: true });
