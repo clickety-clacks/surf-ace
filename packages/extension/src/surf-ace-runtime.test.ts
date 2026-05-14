@@ -10130,6 +10130,47 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("operator reattempt resets known self-owned reclaim latch", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      surface.selfOwnershipReclaimAttempted = true;
+      await runtime.reattemptConnections({ fingerprint: server.surfaceId });
+      assert.equal(surface.selfOwnershipReclaimAttempted, false);
+
+      const response = {
+        error: {
+          code: "busy",
+          message: "Surface remained paired after self reclaim",
+        },
+        id: "rq_operator_retry_self_reclaim",
+        ok: false,
+        op: "pair.request",
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+      let takeoverRequests = 0;
+
+      await internalRuntime.maybeRecoverKnownSelfOwnershipLock(
+        surface,
+        response,
+        null,
+        async (takeover: boolean) => {
+          if (takeover) {
+            takeoverRequests += 1;
+          }
+          return response;
+        },
+      );
+
+      assert.equal(takeoverRequests, 1);
+      assert.equal(surface.selfOwnershipReclaimAttempted, true);
+    });
+  });
+
   await t.test("known self-owned reclaim latch resets after transport failure", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;

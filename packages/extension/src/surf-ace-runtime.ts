@@ -3078,6 +3078,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const reattemptedSurfaces: SurfAceReattemptConnectionsResult["surfaces"] = [];
     for (const surface of surfaces) {
       const diagnostics = this.surfaceConnectionDiagnostics(surface);
+      surface.selfOwnershipReclaimAttempted = false;
       this.resetSurfaceConnectionCircuit(surface, "operator reattempt", { enableRetry: !surface.stopRequested });
       this.ensureSurfaceWorker(surface);
       this.wakeSurfaceRetry(surface);
