@@ -5,9 +5,11 @@ import path from "node:path";
 import {
   app,
   BrowserWindow,
+  dialog,
   Menu,
   ipcMain,
   screen,
+  session,
   type ContextMenuParams,
   type MenuItemConstructorOptions,
   type WebContents,
@@ -51,6 +53,9 @@ const EXPLICIT_WS_PORT = process.env.SURF_ACE_PORT != null;
 const STATE_FILE_NAME = "surface-core-state.json";
 const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
 const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
+const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
+
+type WebAuthnAccountSelectionCallback = (credentialId?: string | null) => void;
 
 function advertisingDisabled(): boolean {
   const value = process.env.SURF_ACE_DISABLE_ADVERTISING?.trim().toLowerCase();
@@ -67,6 +72,19 @@ function gpuDisableRequested(): boolean {
 if (gpuDisableRequested()) {
   app.commandLine.appendSwitch("disable-gpu");
 }
+
+function configurePlatformWebAuthn(): void {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  app.configureWebAuthn({
+    touchID: {
+      keychainAccessGroup: SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP,
+    },
+  });
+}
+
+configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
@@ -1095,6 +1113,46 @@ function installMenu(): void {
   Menu.setApplicationMenu(menu);
 }
 
+function webAuthnAccountLabel(account: Electron.WebAuthnAccount, index: number): string {
+  if (account.displayName && account.name && account.displayName !== account.name) {
+    return `${account.displayName} (${account.name})`;
+  }
+  return account.displayName || account.name || `Passkey ${index + 1}`;
+}
+
+async function promptWebAuthnAccountSelection(
+  details: Electron.SelectWebauthnAccountDetails,
+  callback: WebAuthnAccountSelectionCallback,
+): Promise<void> {
+  try {
+    if (details.accounts.length === 1) {
+      callback(details.accounts[0]?.credentialId ?? null);
+      return;
+    }
+    const accountButtons = details.accounts.map(webAuthnAccountLabel);
+    const cancelId = accountButtons.length;
+    const result = await dialog.showMessageBox({
+      buttons: [...accountButtons, "Cancel"],
+      cancelId,
+      defaultId: 0,
+      message: `Select a passkey for ${details.relyingPartyId}`,
+      noLink: true,
+      title: "Select Passkey",
+      type: "question",
+    });
+    callback(details.accounts[result.response]?.credentialId ?? null);
+  } catch (error) {
+    console.warn(`[surf-ace] WebAuthn account selection failed: ${error}`);
+    callback(null);
+  }
+}
+
+function installWebAuthnAccountSelection(): void {
+  session.defaultSession.on("select-webauthn-account", (_event, details, callback) => {
+    void promptWebAuthnAccountSelection(details, callback);
+  });
+}
+
 function installIpc(): void {
   ipcMain.handle("surface:get-bootstrap", async (event) => {
     const surfaceId = surfaceIdForSender(event.sender);
@@ -1291,6 +1349,7 @@ async function boot(): Promise<void> {
 
   installMenu();
   installIpc();
+  installWebAuthnAccountSelection();
 
   if (!advertisingDisabled()) {
     advertiser = new BonjourAdvertiser({
