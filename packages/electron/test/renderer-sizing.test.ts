@@ -162,6 +162,20 @@ test("custom window cycling is not installed on macOS where Cmd-backtick is plat
   assert.match(source.slice(shortcutIndex), /process\.platform !== "darwin"[\s\S]*input\.key === "`"[\s\S]*focusNextWindow\(surfaceId\)/);
 });
 
+test("application menu preserves native clipboard and selection edit roles", async () => {
+  const source = await mainSource();
+  const menuIndex = source.indexOf("function installMenu");
+  const ipcIndex = source.indexOf("function installIpc");
+  const menuSource = source.slice(menuIndex, ipcIndex);
+
+  assert.ok(menuIndex > -1);
+  assert.ok(ipcIndex > menuIndex);
+  assert.match(menuSource, /label: "Edit"/);
+  for (const role of ["undo", "redo", "cut", "copy", "paste", "pasteAndMatchStyle", "selectAll"]) {
+    assert.match(menuSource, new RegExp(`role: "${role}"`));
+  }
+});
+
 test("renderer applies keyboard scroll intents to regular, html, and browser_url pane content", async () => {
   const source = await rendererSource();
   const intentIndex = source.indexOf("function scrollPaneByKeyboard");
