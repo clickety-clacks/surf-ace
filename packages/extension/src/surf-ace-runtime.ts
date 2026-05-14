@@ -3876,6 +3876,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const display = displayForPusherProvenance(context);
     const target = await this.createPaneTargetRecord(surface, pane, {
       display,
+      restorePolicy: "auto",
       targetHeader,
       targetKind: "browser_url",
       targetPayload: { url: input.content },
