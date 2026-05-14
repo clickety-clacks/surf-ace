@@ -5281,14 +5281,14 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           server.contentSetRequests[0]?.historyOwnerToken,
           server.contentSetRequests[2]?.historyOwnerToken,
         );
-      assert.deepEqual(
-        server.contentSetRequests.map((request) => request.displayTitle),
-        ["Session One", "Session One", "Session Two"],
-      );
-      assert.deepEqual(
-        server.contentSetRequests.map((request) => request.displaySenderName),
-        ["Session One", "Session One", "Session Two"],
-      );
+        assert.deepEqual(
+          server.contentSetRequests.map((request) => request.displayTitle),
+          ["Session One", "Session One", "Session Two"],
+        );
+        assert.deepEqual(
+          server.contentSetRequests.map((request) => request.displaySenderName),
+          ["Session One", "Session One", "Session Two"],
+        );
         assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
           displayName: "Session One",
           sessionKey: "agent:test:1",
@@ -5417,11 +5417,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.contentSetRequests[0]?.displayTitle, "Nested Display");
       assert.equal(server.contentSetRequests[0]?.displaySenderName, "Nested Display");
       assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
-        agentId: "agent_raw_123",
+        agentId: "agent_nested",
         displayName: "Nested Display",
-        sessionKey: "agent:test:raw-only",
+        sessionKey: "agent:test:nested",
         source: "openclaw",
-        streamLabel: "Surf Ace Stream",
+        streamLabel: "Nested Stream",
       });
       assert.equal(server.contentSetRequests[1]?.displayTitle, null);
       assert.equal(server.contentSetRequests[1]?.displaySenderName, null);
@@ -5484,7 +5484,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.contentSetRequests[0]?.displayTitle, "Flynn / T263");
       assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
         displayName: "T231 Pusher",
-        sessionKey: "agent:test:t263-session",
+        sessionKey: "agent:test:t231-pusher",
         source: "openclaw",
       });
     });

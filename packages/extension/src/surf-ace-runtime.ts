@@ -1990,7 +1990,7 @@ function pusherProvenanceFromContext(context?: SurfAceSessionContext): PusherPro
   if (!context) {
     return null;
   }
-  let provenance: Partial<PusherProvenance> = {};
+  let provenance: Partial<PusherProvenance> = mergeProvenance({}, context);
   if (typeof context.source === "object") {
     provenance = mergeProvenance(provenance, context.source);
   } else {
@@ -1999,9 +1999,7 @@ function pusherProvenanceFromContext(context?: SurfAceSessionContext): PusherPro
   provenance = mergeProvenance(provenance, context.sourceProvenance);
   provenance = mergeProvenance(provenance, context.provenance);
   provenance = mergeProvenance(provenance, context.pushedBy);
-  const nestedDisplayName = provenance.displayName;
-  provenance = mergeProvenance(provenance, context);
-  provenance.displayName = nestedDisplayName ?? provenance.displayName ?? cleanProvenanceString(context.sessionDisplayName);
+  provenance.displayName ??= cleanProvenanceString(context.sessionDisplayName);
 
   const cleaned = Object.fromEntries(
     Object.entries(provenance).filter((entry): entry is [keyof PusherProvenance, string] =>
