@@ -176,6 +176,36 @@ test("application menu preserves native clipboard and selection edit roles", asy
   }
 });
 
+test("editable contexts show native text input context menu in renderer and browser_url webviews", async () => {
+  const source = await mainSource();
+  const templateIndex = source.indexOf("function editableContextMenuTemplate");
+  const contextWireIndex = source.indexOf("function wireEditableContextMenu");
+  const shortcutIndex = source.indexOf("function wireWindowShortcuts");
+  const wireIndex = source.indexOf("function wireWindowInputMenus");
+  const createWindowIndex = source.indexOf("async function createWindowForSurface");
+  const templateSource = source.slice(templateIndex, shortcutIndex);
+  const contextWireSource = source.slice(contextWireIndex, shortcutIndex);
+  const wireSource = source.slice(wireIndex, createWindowIndex);
+  const createWindowSource = source.slice(createWindowIndex);
+
+  assert.ok(templateIndex > -1);
+  assert.ok(contextWireIndex > templateIndex);
+  assert.ok(shortcutIndex > templateIndex);
+  assert.ok(wireIndex > shortcutIndex);
+  assert.ok(createWindowIndex > wireIndex);
+  assert.match(templateSource, /role: "cut"/);
+  assert.match(templateSource, /role: "copy"/);
+  assert.match(templateSource, /role: "paste"/);
+  assert.match(templateSource, /role: "pasteAndMatchStyle"/);
+  assert.match(templateSource, /role: "delete"/);
+  assert.match(templateSource, /role: "selectAll"/);
+  assert.match(contextWireSource, /if \(!params\.isEditable\)/);
+  assert.match(contextWireSource, /event\.preventDefault\(\)/);
+  assert.match(contextWireSource, /Menu\.buildFromTemplate\(editableContextMenuTemplate\(params\)\)\.popup\(\{ window \}\)/);
+  assert.match(wireSource, /window\.webContents\.on\("did-attach-webview"[\s\S]*wireEditableContextMenu\(webContents, window\)/);
+  assert.match(createWindowSource, /wireWindowInputMenus\(window\)/);
+});
+
 test("renderer applies keyboard scroll intents to regular, html, and browser_url pane content", async () => {
   const source = await rendererSource();
   const intentIndex = source.indexOf("function scrollPaneByKeyboard");
