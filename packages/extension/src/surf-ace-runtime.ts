@@ -9838,7 +9838,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     surface.selfOwnershipReclaimAttempted = true;
     try {
-      return await sendPairRequest(true, reclaimResumeSessionId);
+      const reclaimResponse = await sendPairRequest(true, reclaimResumeSessionId);
+      if (reclaimResumeSessionId && isResumeSessionMismatch(reclaimResponse)) {
+        this.logger.warn?.(
+          runtimeDiagnostic("ownership_self_reclaim_resume_stale", {
+            provider_id: this.persistentState.providerId,
+            surface_id: surface.surfaceId,
+          }),
+        );
+        this.clearSurfaceResumeState(surface);
+        return await sendPairRequest(true, null);
+      }
+      return reclaimResponse;
     } catch (error) {
       surface.selfOwnershipReclaimAttempted = false;
       throw error;

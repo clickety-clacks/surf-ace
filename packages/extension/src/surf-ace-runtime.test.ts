@@ -228,6 +228,7 @@ class FakeSurfAceWsServer {
   lockUntilNewProviderIdCode: "busy" | "invalid_resume" | null = null;
   lockUntilNewProviderIdProviderId: string | null = null;
   takeoverRequiresResumeSessionId: string | null = null;
+  clearTakeoverResumeRequirementAfterMismatch = false;
   maxConcurrentSocketCount = 0;
   rejectNextResumePairWithSessionMismatch = false;
   resumePairMismatchResponsesRemaining = 0;
@@ -774,6 +775,9 @@ class FakeSurfAceWsServer {
             this.takeoverRequiresResumeSessionId &&
             attemptedResumeSessionId !== this.takeoverRequiresResumeSessionId
           ) {
+            if (this.clearTakeoverResumeRequirementAfterMismatch) {
+              this.takeoverRequiresResumeSessionId = null;
+            }
             socket.send(
               JSON.stringify(
                 this.errorResponse(
@@ -12501,6 +12505,114 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           warning.includes("invalid_resume on cold-start reconnect") &&
           warning.includes(surfaceId)),
       );
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("known-self self-reclaim retries takeover without stale durable resume session", async () => {
+    const port = nextPort++;
+    const surfaceId = "sf_known_self_stale_reclaim_session";
+    const providerId = "pv_known_self_stale_reclaim_session";
+    const ownershipSessionId = "sa_known_self_stale_reclaim_session";
+    const paneLineageId = `pl_${surfaceId}_durable`;
+    const server = new FakeSurfAceWsServer(port, { surfaceId });
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-known-self-stale-reclaim-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const warnings: string[] = [];
+    const runtime = createSurfAceRuntime({
+      discovery,
+      logger: {
+        error: () => {},
+        info: () => {},
+        warn: (message: string) => warnings.push(message),
+      },
+      stateDir,
+    });
+    server.lockedProviderId = providerId;
+    server.lockedSessionId = "sa_actual_active_lock";
+    server.takeoverRequiresResumeSessionId = "sa_actual_active_lock";
+    server.clearTakeoverResumeRequirementAfterMismatch = true;
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 1,
+          nextRemotePaneId: 1,
+          nextWindowLabelIndex: 0,
+          paneLabelsByPaneId: {},
+          providerId,
+          selfOwnedSurfaceIds: {
+            [surfaceId]: {
+              observedAt: Date.now(),
+              providerId,
+              source: "legacy_target_state",
+            },
+          },
+          targetStateBySurfaceId: {
+            [surfaceId]: {
+              ownershipEpoch: 1,
+              paneTargets: {
+                [paneLineageId]: {
+                  currentTargetId: "tg_known_self_stale_reclaim_session",
+                  diagnosticContent: null,
+                  lastRestoreBlockedReason: null,
+                  nonDurableTargetDiagnostic: null,
+                  paneLineageId,
+                  targetEpoch: 1,
+                },
+              },
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [
+                {
+                  appliedAt: new Date().toISOString(),
+                  currentState: "current",
+                  ownerProviderId: providerId,
+                  ownershipEpoch: 1,
+                  ownershipSessionId,
+                  paneIdAtApply: "pn_previous_known_self",
+                  paneLabelAtApply: 1,
+                  paneLineageId,
+                  restorePolicy: "auto",
+                  surfaceId,
+                  surfaceInstanceId: null,
+                  targetEpoch: 1,
+                  targetHeader: {
+                    payloadSchemaVersion: 1,
+                    replaySemantics: "bytes",
+                    requiredCapabilities: ["target.markdown.v1"],
+                    safeToLogFields: [],
+                    safetyClass: "passive",
+                    summary: "known-self stale durable reclaim target",
+                  },
+                  targetId: "tg_known_self_stale_reclaim_session",
+                  targetKind: "markdown",
+                  targetPayload: { markdown: "# stale durable reclaim" },
+                },
+              ],
+            },
+          },
+          version: 1,
+          windowLabels: {},
+        }),
+      );
+
+      await runtime.start();
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(0, 3).map((attempt) => attempt.takeover),
+        [false, true, true],
+      );
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(0, 3).map((attempt) => attempt.resumeSessionId),
+        [null, ownershipSessionId, null],
+      );
+      assert.ok(warnings.some((warning) => warning.includes("ownership_self_reclaim_resume_stale")));
     } finally {
       await runtime.stop();
       await server.close();
