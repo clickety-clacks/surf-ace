@@ -6258,6 +6258,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           }
           const evidence = await this.materializeTargetRecord(surface, pane, target, "resume_restore");
           this.logReplayOutcome(surface, pane, "target", evidence.status, evidence.errorCode);
+          if (
+            evidence.status !== "applied" &&
+            evidence.errorCode === "materialization_failed" &&
+            processTargetAllowsResumeRestart(target)
+          ) {
+            await sleep(250);
+            const retryEvidence = await this.materializeTargetRecord(surface, pane, target, "resume_restore");
+            this.logReplayOutcome(surface, pane, "target", retryEvidence.status, retryEvidence.errorCode);
+          }
           continue;
         }
 
