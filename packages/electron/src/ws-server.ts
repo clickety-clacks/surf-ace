@@ -40,9 +40,11 @@ import type {
 } from "../../protocol/src/index.js";
 import {
   compositorFailureMessage,
+  isOverlayNativePaneLivenessFailure,
   type NativePaneMaterialization,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
+  overlayTopologyEpochFromCompositorResponse,
   requestForCompositor,
   resolveCompositorControlSocketPath,
   sendCompositorControl,
@@ -142,6 +144,8 @@ const DEFAULT_LIMITS = {
 };
 const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
 const PANE_GEOMETRY_READY_TIMEOUT_MS = 8_000;
+const NATIVE_OVERLAY_LIVENESS_RETRY_COUNT = 10;
+const NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS = 100;
 const WS_DIAGNOSTIC_LOG_PATH = process.env.SURF_ACE_WS_DIAGNOSTIC_LOG ?? path.join(
   os.homedir(),
   "Library",
@@ -1752,7 +1756,7 @@ export class SurfaceWsServer {
         const payload: TargetApplyResponse["payload"] = {
           appliedAt,
           errorCode: "materialization_failed",
-          message: publicTargetApplyMessage("materialization_failed"),
+          message: error instanceof Error ? error.message : publicTargetApplyMessage("materialization_failed"),
           paneLineageId: request.payload.paneLineageId,
           requestId: request.payload.requestId,
           status: "failed",
@@ -1809,9 +1813,11 @@ export class SurfaceWsServer {
           }
           return postHostSessionFailure;
         }
-        overlayRequest = overlayRequestForCompositor(materialization);
+        overlayRequest = overlayRequestForCompositor(materialization, {
+          topologyEpoch: overlayTopologyEpochFromCompositorResponse(hostResponse) ?? undefined,
+        });
         const overlayResponse = overlayRequest
-          ? await sendCompositorControl(this.compositorSocketPath, overlayRequest)
+          ? await this.sendNativeOverlayRequestWithLivenessRetry(overlayRequest)
           : null;
         if (overlayResponse) {
           const overlayFailure = compositorFailureMessage(overlayResponse);
@@ -1939,6 +1945,29 @@ export class SurfaceWsServer {
       );
     }
     pending.resolve(payload);
+  }
+
+  private async sendNativeOverlayRequestWithLivenessRetry(
+    request: CompositorControlRequest,
+  ): Promise<CompositorControlResponse> {
+    if (!this.compositorSocketPath || request.type !== "overlay_regions.set") {
+      return await sendCompositorControl(this.compositorSocketPath ?? "", request);
+    }
+    let currentRequest = request;
+    let response = await sendCompositorControl(this.compositorSocketPath, currentRequest);
+    for (let attempt = 0; attempt < NATIVE_OVERLAY_LIVENESS_RETRY_COUNT && isOverlayNativePaneLivenessFailure(response); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS));
+      const status = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      const topologyEpoch = overlayTopologyEpochFromCompositorResponse(status);
+      currentRequest = topologyEpoch === null
+        ? currentRequest
+        : {
+            ...currentRequest,
+            topologyEpoch,
+          };
+      response = await sendCompositorControl(this.compositorSocketPath, currentRequest);
+    }
+    return response;
   }
 
   private async waitForBrowserUrlNavigation(

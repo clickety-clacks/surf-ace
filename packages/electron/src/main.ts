@@ -759,6 +759,10 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
   if (!bounds) {
     return null;
   }
+  const nativeHostedPaneId = core.nativeHostedPaneIdForPaneId(surfaceId, paneId);
+  if (nativeHostedPaneId !== null) {
+    return await captureNativeHostedPaneImage(bounds);
+  }
   const image = await window.capturePage({
     height: Math.max(1, Math.floor(bounds.height)),
     width: Math.max(1, Math.floor(bounds.width)),
@@ -766,6 +770,40 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
     y: Math.max(0, Math.floor(bounds.y)),
   });
   return image.toPNG().toString("base64");
+}
+
+async function captureNativeHostedPaneImage(bounds: { height: number; width: number; x: number; y: number }): Promise<string | null> {
+  const socketPath = resolveCompositorControlSocketPath();
+  if (!socketPath) {
+    console.warn("[surf-ace] native pane capture unavailable: compositor control socket is not configured");
+    return null;
+  }
+  const outputPath = path.join(
+    os.tmpdir(),
+    `surf-ace-native-pane-capture-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.png`,
+  );
+  try {
+    const response = await sendCompositorControl(socketPath, {
+      height: Math.max(1, Math.floor(bounds.height)),
+      output_path: outputPath,
+      type: "capture_screen_region",
+      width: Math.max(1, Math.floor(bounds.width)),
+      x: Math.max(0, Math.floor(bounds.x)),
+      y: Math.max(0, Math.floor(bounds.y)),
+    });
+    const failure = compositorFailureMessage(response);
+    if (failure) {
+      console.warn(`[surf-ace] native pane capture unavailable: ${failure}`);
+      return null;
+    }
+    const bytes = await fs.readFile(outputPath);
+    return bytes.toString("base64");
+  } catch (error) {
+    console.warn(`[surf-ace] native pane capture failed: ${error}`);
+    return null;
+  } finally {
+    await fs.unlink(outputPath).catch(() => undefined);
+  }
 }
 
 async function reloadPaneFromSource(surfaceId: string, paneId: number): Promise<void> {
