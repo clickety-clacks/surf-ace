@@ -25,6 +25,7 @@ import {
   sendCompositorControl,
 } from "./native-pane-bridge.js";
 import {
+  type PaneNavigationDirection,
   SurfaceCore,
   type PersistentSurfaceState,
   type ReloadEntryIdentity,
@@ -654,14 +655,141 @@ function focusExistingWindow(): void {
   }
 }
 
+type KeyboardScrollDirection = "down" | "left" | "right" | "up";
+type KeyboardScrollAmount = "line" | "page";
+
+function keyboardDirectionForVimKey(key: string): KeyboardScrollDirection | null {
+  switch (key.toLowerCase()) {
+    case "h":
+      return "left";
+    case "j":
+      return "down";
+    case "k":
+      return "up";
+    case "l":
+      return "right";
+    default:
+      return null;
+  }
+}
+
+function keyboardDirectionForPhysicalKey(code: string | undefined): PaneNavigationDirection | null {
+  switch (code) {
+    case "KeyH":
+      return "left";
+    case "KeyJ":
+      return "down";
+    case "KeyK":
+      return "up";
+    case "KeyL":
+      return "right";
+    default:
+      return null;
+  }
+}
+
+function keyboardDirectionForArrowKey(key: string): KeyboardScrollDirection | null {
+  switch (key) {
+    case "Left":
+    case "ArrowLeft":
+      return "left";
+    case "Down":
+    case "ArrowDown":
+      return "down";
+    case "Up":
+    case "ArrowUp":
+      return "up";
+    case "Right":
+    case "ArrowRight":
+      return "right";
+    default:
+      return null;
+  }
+}
+
+function sendKeyboardScrollIntent(
+  window: BrowserWindow,
+  paneId: number,
+  direction: KeyboardScrollDirection,
+  amount: KeyboardScrollAmount,
+): void {
+  window.webContents.send("surface:keyboard-intent", {
+    amount,
+    direction,
+    paneId,
+    type: "scroll",
+  });
+}
+
+function focusNextWindow(currentSurfaceId: string): void {
+  const entries = [...windows.entries()].filter(([, candidate]) => !candidate.isDestroyed());
+  if (entries.length < 2) {
+    return;
+  }
+  const currentIndex = entries.findIndex(([surfaceId]) => surfaceId === currentSurfaceId);
+  const next = entries[(currentIndex + 1 + entries.length) % entries.length]?.[1];
+  if (!next) {
+    return;
+  }
+  if (next.isMinimized()) {
+    next.restore();
+  }
+  next.show();
+  next.focus();
+}
+
 function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
-  window.webContents.on("before-input-event", (_event, input) => {
+  window.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") {
       return;
     }
     const state = core.getRendererWindowState(surfaceId);
     const activePaneId = core.activeKeyboardPaneId(surfaceId);
-    if (!activePaneId || !state.panes.some((pane) => pane.paneId === activePaneId)) {
+    const activePane = state.panes.find((pane) => pane.paneId === activePaneId);
+    if (!activePaneId || !activePane) {
+      return;
+    }
+    const command = input.meta;
+    const vimDirection = keyboardDirectionForVimKey(input.key);
+    const paneNavigationDirection = keyboardDirectionForPhysicalKey(input.code);
+    if (command && input.alt && input.shift && !input.control && paneNavigationDirection) {
+      core.navigateActiveKeyboardPane(surfaceId, paneNavigationDirection);
+      event.preventDefault();
+      return;
+    }
+    if (!activePane.annotationBorderVisible && command && !input.alt && !input.shift && !input.control && vimDirection) {
+      sendKeyboardScrollIntent(window, activePaneId, vimDirection, "line");
+      event.preventDefault();
+      return;
+    }
+    const arrowDirection = keyboardDirectionForArrowKey(input.key);
+    if (
+      !activePane.annotationBorderVisible &&
+      !input.meta &&
+      !input.alt &&
+      !input.control &&
+      !input.shift &&
+      arrowDirection
+    ) {
+      sendKeyboardScrollIntent(window, activePaneId, arrowDirection, "line");
+      event.preventDefault();
+      return;
+    }
+    if (
+      !activePane.annotationBorderVisible &&
+      !input.meta &&
+      !input.alt &&
+      !input.control &&
+      !input.shift &&
+      (input.key === "PageUp" || input.key === "PageDown")
+    ) {
+      sendKeyboardScrollIntent(window, activePaneId, input.key === "PageUp" ? "up" : "down", "page");
+      event.preventDefault();
+      return;
+    }
+    if (process.platform !== "darwin" && command && !input.alt && !input.shift && !input.control && input.key === "`") {
+      focusNextWindow(surfaceId);
+      event.preventDefault();
       return;
     }
     if (input.key.toLowerCase() === "a" && !input.meta) {

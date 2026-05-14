@@ -139,6 +139,8 @@ type BrowserUrlTargetValidation =
       result: TargetApplyResponse["payload"];
     };
 
+export type PaneNavigationDirection = "down" | "left" | "right" | "up";
+
 export type PersistentSurfaceState = {
   primarySurfaceId: string | null;
   surfaces?: PersistentSurfaceRecord[];
@@ -512,6 +514,26 @@ export class SurfaceCore {
     }
     surface.activeKeyboardPaneId = paneId;
     this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  navigateActiveKeyboardPane(surfaceId: string, direction: PaneNavigationDirection): number | null {
+    const surface = this.getSurface(surfaceId);
+    this.ensureActiveKeyboardPane(surface);
+    const activePaneId = surface.activeKeyboardPaneId;
+    if (activePaneId === null) {
+      return null;
+    }
+    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const active = paneGeometry.get(activePaneId)?.paneFrame;
+    if (!active) {
+      return null;
+    }
+    const nextPaneId = nearestPaneInDirection(activePaneId, active, paneGeometry, direction);
+    if (nextPaneId === null || nextPaneId === activePaneId) {
+      return null;
+    }
+    this.setActiveKeyboardPane(surfaceId, nextPaneId);
+    return nextPaneId;
   }
 
   clearToast(surfaceId: string, paneId: number): void {
@@ -2938,6 +2960,68 @@ function samePaneRectSet(left: Map<number, Rect>, right: Map<number, Rect>): boo
     }
   }
   return true;
+}
+
+function nearestPaneInDirection(
+  activePaneId: number,
+  active: Rect,
+  paneGeometry: Map<number, PaneGeometryProjection>,
+  direction: PaneNavigationDirection,
+): number | null {
+  const activeCenter = rectCenter(active);
+  const candidates = [...paneGeometry.values()]
+    .filter((pane) => pane.paneId !== activePaneId)
+    .map((pane) => {
+      const rect = pane.paneFrame;
+      const center = rectCenter(rect);
+      const deltaX = center.x - activeCenter.x;
+      const deltaY = center.y - activeCenter.y;
+      const primaryDistance =
+        direction === "left" ? -deltaX :
+        direction === "right" ? deltaX :
+        direction === "up" ? -deltaY :
+        deltaY;
+      if (primaryDistance <= 0) {
+        return null;
+      }
+      const overlap = direction === "left" || direction === "right"
+        ? intervalOverlap(active.y, active.y + active.height, rect.y, rect.y + rect.height)
+        : intervalOverlap(active.x, active.x + active.width, rect.x, rect.x + rect.width);
+      const secondaryDistance = direction === "left" || direction === "right"
+        ? Math.abs(deltaY)
+        : Math.abs(deltaX);
+      return {
+        overlap,
+        paneId: Number(pane.paneId),
+        primaryDistance,
+        secondaryDistance,
+      };
+    })
+    .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+    .sort((left, right) => {
+      const overlapDelta = Number(right.overlap > 0) - Number(left.overlap > 0);
+      if (overlapDelta !== 0) {
+        return overlapDelta;
+      }
+      return (
+        left.primaryDistance - right.primaryDistance ||
+        left.secondaryDistance - right.secondaryDistance ||
+        left.paneId - right.paneId
+      );
+    });
+
+  return candidates[0]?.paneId ?? null;
+}
+
+function rectCenter(rect: Rect): { x: number; y: number } {
+  return {
+    x: rect.x + rect.width / 2,
+    y: rect.y + rect.height / 2,
+  };
+}
+
+function intervalOverlap(leftStart: number, leftEnd: number, rightStart: number, rightEnd: number): number {
+  return Math.max(0, Math.min(leftEnd, rightEnd) - Math.max(leftStart, rightStart));
 }
 
 function formatRect(rect: Rect): string {

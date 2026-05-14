@@ -4,6 +4,11 @@ contextBridge.exposeInMainWorld("surfAce", {
   clearToast: (paneId: number) => ipcRenderer.send("surface:clear-toast", { paneId }),
   command: (payload: Record<string, unknown>) => ipcRenderer.send("surface:command", payload),
   getBootstrap: () => ipcRenderer.invoke("surface:get-bootstrap"),
+  onKeyboardIntent: (listener: (intent: unknown) => void) => {
+    const wrapped = (_event: unknown, intent: unknown) => listener(intent);
+    ipcRenderer.on("surface:keyboard-intent", wrapped);
+    return () => ipcRenderer.removeListener("surface:keyboard-intent", wrapped);
+  },
   onState: (listener: (state: unknown) => void) => {
     const wrapped = (_event: unknown, state: unknown) => listener(state);
     ipcRenderer.on("surface:state", wrapped);
@@ -20,6 +25,7 @@ declare global {
       clearToast: (paneId: number) => void;
       command: (payload: Record<string, unknown>) => void;
       getBootstrap: () => Promise<unknown>;
+      onKeyboardIntent: (listener: (intent: unknown) => void) => () => void;
       onState: (listener: (state: unknown) => void) => () => void;
       reportOverlayRegions: (payload: Record<string, unknown>) => void;
       reportPage: (payload: Record<string, unknown>) => void;
