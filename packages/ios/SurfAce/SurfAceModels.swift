@@ -1032,7 +1032,7 @@ final class SurfAcePaneModel {
     }
 
     func currentChromeDisplayName() -> String? {
-        currentProvenanceDisplayName() ?? currentOwnerDisplayName()
+        currentProvenanceDisplayName()
     }
 }
 

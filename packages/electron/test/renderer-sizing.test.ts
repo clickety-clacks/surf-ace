@@ -220,7 +220,8 @@ test("renderer chrome shows separate session, window, and global pane identity f
   const styles = await rendererStyles();
 
   assert.match(source, /provenanceName: string \| null/);
-  assert.match(source, /const navigationOwnerName = pane\.provenanceName \?\? pane\.ownerName/);
+  assert.match(source, /const navigationOwnerName = pane\.provenanceName/);
+  assert.doesNotMatch(source, /const navigationOwnerName = pane\.provenanceName \?\? pane\.ownerName/);
   assert.match(source, /ownerName\.textContent = navigationOwnerName/);
   assert.match(source, /provenanceLabelEl\.className = "pane-label__sender"/);
   assert.match(source, /labelEl\.append\(provenanceLabelEl, windowLabelEl, labelTextEl\)/);

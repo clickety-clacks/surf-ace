@@ -5421,6 +5421,31 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider prefers session display name over tool display name for sender provenance", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push(
+        {
+          content: "# wrapped review",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        {
+          displayName: "Wrapped XHigh reviews",
+          sessionDisplayName: "Flynn / T263",
+          sessionKey: "agent:test:session-display",
+        },
+      );
+
+      assert.equal(server.contentSetRequests[0]?.displayTitle, "Flynn / T263");
+      assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
+        displayName: "Flynn / T263",
+        sessionKey: "agent:test:session-display",
+      });
+    });
+  });
+
   await t.test("provider uses nested pusher session keys for content ownership", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);

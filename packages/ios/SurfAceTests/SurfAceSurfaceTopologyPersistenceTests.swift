@@ -239,6 +239,8 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(identity.displayId, "99")
         XCTAssertEqual(identity.windowLabel, "e")
         XCTAssertNil(identity.sessionName)
+        XCTAssertEqual(pane.currentOwnerDisplayName(), "Document Title")
+        XCTAssertNil(pane.currentChromeDisplayName())
         XCTAssertNotEqual(identity.sessionName, "Document Title")
         XCTAssertNotEqual(identity.displayId, "e16")
     }

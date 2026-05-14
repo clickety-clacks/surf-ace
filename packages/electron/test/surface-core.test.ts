@@ -2238,6 +2238,7 @@ test("surface core exposes provenance display name separately from content title
   const visible = core.getRendererWindowState(surface.surfaceId).panes[0];
   assert.equal(visible?.ownerName, "Session One");
   assert.equal(visible?.provenanceName, "Session One");
+  assert.equal(visible?.content.display?.title, "Document Title");
 });
 
 test("surface core does not leak provider name as chrome owner fallback", () => {

@@ -2000,7 +2000,7 @@ function pusherProvenanceFromContext(context?: SurfAceSessionContext): PusherPro
   provenance = mergeProvenance(provenance, context.provenance);
   provenance = mergeProvenance(provenance, context.pushedBy);
   provenance = mergeProvenance(provenance, context);
-  provenance.displayName ??= cleanProvenanceString(context.sessionDisplayName);
+  provenance.displayName = cleanProvenanceString(context.sessionDisplayName) ?? provenance.displayName;
 
   const cleaned = Object.fromEntries(
     Object.entries(provenance).filter((entry): entry is [keyof PusherProvenance, string] =>
