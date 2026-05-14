@@ -2,7 +2,16 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { app, BrowserWindow, Menu, ipcMain, screen, type WebContents } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  ipcMain,
+  screen,
+  type ContextMenuParams,
+  type MenuItemConstructorOptions,
+  type WebContents,
+} from "electron";
 
 import type { ContentSetRequest, Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
@@ -66,6 +75,7 @@ const overlayDiagnostics = new Map<string, Record<string, unknown>>();
 const overlayForwardState = new Map<string, { revision: number; topologyEpoch: string | null }>();
 const latestRendererOverlayPayloads = new Map<string, Record<string, unknown>>();
 const nativePaneInstances = new Map<string, Map<string, ResolvedNativePaneGeometry>>();
+const editableContextMenuContents = new WeakSet<WebContents>();
 const rendererOverlaySnapshots = new Map<string, {
   regions: CompositorOverlayRegion[];
   revision: number;
@@ -738,6 +748,35 @@ function focusNextWindow(currentSurfaceId: string): void {
   next.focus();
 }
 
+function editableContextMenuTemplate(params: ContextMenuParams): MenuItemConstructorOptions[] {
+  return [
+    { enabled: params.editFlags.canUndo, role: "undo" },
+    { enabled: params.editFlags.canRedo, role: "redo" },
+    { type: "separator" },
+    { enabled: params.editFlags.canCut, role: "cut" },
+    { enabled: params.editFlags.canCopy, role: "copy" },
+    { enabled: params.editFlags.canPaste, role: "paste" },
+    { enabled: params.editFlags.canPaste, role: "pasteAndMatchStyle" },
+    { enabled: params.editFlags.canDelete, role: "delete" },
+    { type: "separator" },
+    { enabled: params.editFlags.canSelectAll, role: "selectAll" },
+  ];
+}
+
+function wireEditableContextMenu(contents: WebContents, window: BrowserWindow): void {
+  if (editableContextMenuContents.has(contents)) {
+    return;
+  }
+  editableContextMenuContents.add(contents);
+  contents.on("context-menu", (event, params) => {
+    if (!params.isEditable) {
+      return;
+    }
+    event.preventDefault();
+    Menu.buildFromTemplate(editableContextMenuTemplate(params)).popup({ window });
+  });
+}
+
 function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
   window.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") {
@@ -816,6 +855,13 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
   });
 }
 
+function wireWindowInputMenus(window: BrowserWindow): void {
+  wireEditableContextMenu(window.webContents, window);
+  window.webContents.on("did-attach-webview", (_event, webContents) => {
+    wireEditableContextMenu(webContents, window);
+  });
+}
+
 async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow> {
   const existing = windows.get(surfaceId);
   if (existing && !existing.isDestroyed()) {
@@ -848,6 +894,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   windows.set(surfaceId, window);
   readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);
+  wireWindowInputMenus(window);
   window.once("ready-to-show", () => {
     syncWindowViewport(surfaceId, window);
     syncWindowPlacement(surfaceId, window);
@@ -1028,6 +1075,20 @@ function installMenu(): void {
           label: "New Window",
         },
         { role: "quit" },
+      ],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "pasteAndMatchStyle" },
+        { type: "separator" },
+        { role: "selectAll" },
       ],
     },
   ]);
