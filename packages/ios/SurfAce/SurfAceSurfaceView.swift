@@ -349,15 +349,20 @@ private struct SurfAcePaneTreeView: View {
                 if direction == .vertical {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
-                            ForEach(Array(children.enumerated()), id: \.element.layoutIdentity) { index, child in
+                            ForEach(Array(children.enumerated()), id: \.offset) { index, child in
                                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, path: path + [index])
                                     .frame(width: max(1, proxy.size.width * child.layoutWeight / totalWeight), height: proxy.size.height)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
                             let offset = proxy.size.width * children.prefix(index + 1).reduce(0) { $0 + $1.layoutWeight } / totalWeight
-                            SurfAceSplitResizeHandle(direction: direction) { delta in
-                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, childIndex: index, delta: delta, extent: proxy.size.width)
+                            SurfAceSplitResizeHandle(
+                                direction: direction,
+                                weights: children.map(\.layoutWeight),
+                                childIndex: index,
+                                extent: proxy.size.width
+                            ) { weights in
+                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, weights: weights)
                             }
                             .position(x: offset, y: proxy.size.height / 2)
                         }
@@ -365,15 +370,20 @@ private struct SurfAcePaneTreeView: View {
                 } else {
                     ZStack(alignment: .topLeading) {
                         VStack(spacing: 0) {
-                            ForEach(Array(children.enumerated()), id: \.element.layoutIdentity) { index, child in
+                            ForEach(Array(children.enumerated()), id: \.offset) { index, child in
                                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, path: path + [index])
                                     .frame(width: proxy.size.width, height: max(1, proxy.size.height * child.layoutWeight / totalWeight))
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
                             let offset = proxy.size.height * children.prefix(index + 1).reduce(0) { $0 + $1.layoutWeight } / totalWeight
-                            SurfAceSplitResizeHandle(direction: direction) { delta in
-                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, childIndex: index, delta: delta, extent: proxy.size.height)
+                            SurfAceSplitResizeHandle(
+                                direction: direction,
+                                weights: children.map(\.layoutWeight),
+                                childIndex: index,
+                                extent: proxy.size.height
+                            ) { weights in
+                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, weights: weights)
                             }
                             .position(x: proxy.size.width / 2, y: offset)
                         }
@@ -387,8 +397,12 @@ private struct SurfAcePaneTreeView: View {
 
 private struct SurfAceSplitResizeHandle: View {
     let direction: SurfAceLayoutDirection
-    let onDrag: (CGFloat) -> Void
-    @State private var previousTranslation: CGFloat = 0
+    let weights: [Double]
+    let childIndex: Int
+    let extent: CGFloat
+    let onResize: ([Double]) -> Void
+    @State private var dragStartLocation: CGFloat?
+    @State private var dragStartWeights: [Double]?
 
     var body: some View {
         Rectangle()
@@ -399,16 +413,42 @@ private struct SurfAceSplitResizeHandle: View {
             )
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        let translation = direction == .vertical ? value.translation.width : value.translation.height
-                        onDrag(translation - previousTranslation)
-                        previousTranslation = translation
+                        let startLocation = dragStartLocation ?? axisLocation(value.startLocation)
+                        let startWeights = dragStartWeights ?? weights
+                        dragStartLocation = startLocation
+                        dragStartWeights = startWeights
+                        onResize(resizedWeights(from: startWeights, startLocation: startLocation, currentLocation: axisLocation(value.location)))
                     }
                     .onEnded { _ in
-                        previousTranslation = 0
+                        dragStartLocation = nil
+                        dragStartWeights = nil
                     }
             )
+    }
+
+    private func axisLocation(_ point: CGPoint) -> CGFloat {
+        direction == .vertical ? point.x : point.y
+    }
+
+    private func resizedWeights(from startWeights: [Double], startLocation: CGFloat, currentLocation: CGFloat) -> [Double] {
+        guard extent > 0,
+              childIndex >= 0,
+              childIndex + 1 < startWeights.count else {
+            return weights
+        }
+        let totalWeight = max(startWeights.reduce(0, +), 1)
+        let before = startWeights[childIndex]
+        let after = startWeights[childIndex + 1]
+        let pairTotal = before + after
+        let minimumWeight = min(max(0.05, totalWeight * 0.05), pairTotal / 2)
+        let deltaWeight = Double((currentLocation - startLocation) / extent) * totalWeight
+        let nextBefore = min(max(minimumWeight, before + deltaWeight), max(minimumWeight, pairTotal - minimumWeight))
+        var nextWeights = startWeights
+        nextWeights[childIndex] = nextBefore
+        nextWeights[childIndex + 1] = max(minimumWeight, pairTotal - nextBefore)
+        return nextWeights
     }
 }
 

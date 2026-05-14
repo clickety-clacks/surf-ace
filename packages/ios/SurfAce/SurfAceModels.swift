@@ -684,11 +684,11 @@ indirect enum SurfAcePaneLayoutNode {
         switch self {
         case .empty:
             return "empty"
-        case .leaf(let paneId, let weight):
-            return "leaf:\(paneId):\(weight ?? 1)"
-        case .split(let direction, let children, let weight):
+        case .leaf(let paneId, _):
+            return "leaf:\(paneId)"
+        case .split(let direction, let children, _):
             let childIdentity = children.map(\.layoutIdentity).joined(separator: "|")
-            return "split:\(direction.rawValue):\(weight ?? 1):[\(childIdentity)]"
+            return "split:\(direction.rawValue):[\(childIdentity)]"
         }
     }
 

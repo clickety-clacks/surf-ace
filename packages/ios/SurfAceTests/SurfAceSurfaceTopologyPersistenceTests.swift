@@ -2,6 +2,70 @@ import XCTest
 @testable import SurfAce
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
+    func testPaneLayoutIdentityIgnoresWeightOnlyChanges() {
+        let initial = SurfAcePaneLayoutNode.split(
+            direction: .vertical,
+            children: [
+                .leaf(1, weight: 1),
+                .split(direction: .horizontal, children: [.leaf(2, weight: 1), .leaf(3, weight: 1)], weight: 1),
+            ],
+            weight: 1
+        )
+        let resized = initial.updatingSplitWeights(path: [], weights: [1.5, 0.5])
+        let nestedResized = initial.updatingSplitWeights(path: [1], weights: [1.75, 0.25])
+
+        XCTAssertEqual(resized.layoutIdentity, initial.layoutIdentity)
+        XCTAssertEqual(nestedResized.layoutIdentity, initial.layoutIdentity)
+    }
+
+    @MainActor
+    func testResizeSplitDeltaPreservesPairTotalAtMinimumClamp() {
+        let runtime = SurfAceRuntime()
+        let surface = runtime.registerSurface(sceneKey: "resize-clamp")
+        surface.panesById = [
+            1: SurfAcePaneModel(paneId: 1, paneLabel: 1),
+            2: SurfAcePaneModel(paneId: 2, paneLabel: 2),
+            3: SurfAcePaneModel(paneId: 3, paneLabel: 3),
+            4: SurfAcePaneModel(paneId: 4, paneLabel: 4),
+        ]
+        surface.paneLayout = .split(
+            direction: .vertical,
+            children: [
+                .leaf(1, weight: 10),
+                .leaf(2, weight: 0.6),
+                .leaf(3, weight: 0.6),
+                .leaf(4, weight: 10),
+            ]
+        )
+
+        runtime.resizeSplit(surfaceId: surface.surfaceId, path: [], childIndex: 1, delta: 200, extent: 200)
+
+        guard case .split(_, let children, _) = surface.paneLayout else {
+            return XCTFail("Expected split layout after resize")
+        }
+        XCTAssertEqual(children[1].layoutWeight + children[2].layoutWeight, 1.2, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testResizeSplitAppliesAbsoluteWeightsAndBumpsTopologyEpoch() {
+        let runtime = SurfAceRuntime()
+        let surface = runtime.registerSurface(sceneKey: "resize-weights")
+        surface.panesById = [
+            1: SurfAcePaneModel(paneId: 1, paneLabel: 1),
+            2: SurfAcePaneModel(paneId: 2, paneLabel: 2),
+        ]
+        surface.paneLayout = .split(direction: .vertical, children: [.leaf(1, weight: 1), .leaf(2, weight: 1)])
+        surface.topologyEpoch = 3
+
+        runtime.resizeSplit(surfaceId: surface.surfaceId, path: [], weights: [1.4, 0.6])
+
+        guard case .split(_, let children, _) = surface.paneLayout else {
+            return XCTFail("Expected split layout after resize")
+        }
+        XCTAssertEqual(children.map(\.layoutWeight), [1.4, 0.6])
+        XCTAssertEqual(surface.topologyEpoch, 4)
+    }
+
     func testProviderBootstrapIdentityRejectsCallerControlledWindowLabels() {
         XCTAssertEqual(surfAceValidatedProviderWindowLabel(from: "a"), "a")
         XCTAssertEqual(surfAceValidatedProviderWindowLabel(from: "aa"), "aa")

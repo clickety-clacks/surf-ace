@@ -2676,10 +2676,24 @@ final class SurfAceRuntime {
         let weights = children.map(\.layoutWeight)
         let total = max(weights.reduce(0, +), 1)
         let deltaWeight = Double(delta / extent) * total
+        let pairTotal = weights[childIndex] + weights[childIndex + 1]
+        let minimumWeight = min(max(0.05, total * 0.05), pairTotal / 2)
+        let nextBefore = min(
+            max(minimumWeight, weights[childIndex] + deltaWeight),
+            max(minimumWeight, pairTotal - minimumWeight)
+        )
         var nextWeights = weights
-        nextWeights[childIndex] = max(0.05, weights[childIndex] + deltaWeight)
-        nextWeights[childIndex + 1] = max(0.05, weights[childIndex + 1] - deltaWeight)
-        surface.paneLayout = surface.paneLayout.updatingSplitWeights(path: path, weights: nextWeights)
+        nextWeights[childIndex] = nextBefore
+        nextWeights[childIndex + 1] = max(minimumWeight, pairTotal - nextBefore)
+        resizeSplit(surfaceId: surfaceId, path: path, weights: nextWeights)
+    }
+
+    func resizeSplit(surfaceId: String, path: [Int], weights: [Double]) {
+        guard let surface = surfaceById[surfaceId] else { return }
+        let target = splitNode(at: path, in: surface.paneLayout)
+        guard case .split(_, let children, _) = target,
+              weights.count == children.count else { return }
+        surface.paneLayout = surface.paneLayout.updatingSplitWeights(path: path, weights: weights)
         surface.topologyEpoch += 1
         persistSurfaceTopology(surfaceId: surfaceId)
         sendLifecycleEvent(
