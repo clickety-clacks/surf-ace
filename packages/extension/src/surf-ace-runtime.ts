@@ -6415,7 +6415,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     target: PaneTargetRecord,
     evidence: ApplyEvidence,
   ): boolean {
-    if (!surface.client || surface.connectionState !== "connected") {
+    if (!(surface.client?.isOpen() ?? false)) {
       return false;
     }
     if (evidence.status === "applied" || evidence.errorCode !== "materialization_failed") {
