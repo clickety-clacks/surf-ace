@@ -377,6 +377,9 @@
         "title": {
           "type": "string"
         },
+        "senderDisplayName": {
+          "type": "string"
+        },
         "scrollable": {
           "type": "boolean"
         },
@@ -1158,6 +1161,9 @@
                   "additionalProperties": false,
                   "properties": {
                     "title": {
+                      "type": "string"
+                    },
+                    "senderDisplayName": {
                       "type": "string"
                     },
                     "scrollable": {

@@ -288,7 +288,7 @@ function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
 }
 
 function provenanceDisplayName(display: ContentDisplay | undefined): string | null {
-  return display?.provenance?.displayName ?? display?.provenance?.streamLabel ?? null;
+  return display?.senderDisplayName ?? display?.provenance?.displayName ?? display?.provenance?.streamLabel ?? null;
 }
 
 const DEFAULT_VISIBLE_RECT = { height: 768, width: 1024, x: 0, y: 0 };

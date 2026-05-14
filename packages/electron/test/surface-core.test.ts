@@ -2224,9 +2224,10 @@ test("surface core exposes provenance display name separately from content title
     contentId: "ct_provn1" as never,
     contentType: "markdown",
     display: {
+      senderDisplayName: "Session One",
       provenance: {
-        displayName: "Session One",
-        streamLabel: "Stream One",
+        displayName: "T231 Pusher",
+        streamLabel: "Pusher Stream",
       },
       title: "Document Title",
     },
@@ -2239,6 +2240,7 @@ test("surface core exposes provenance display name separately from content title
   assert.equal(visible?.ownerName, "Session One");
   assert.equal(visible?.provenanceName, "Session One");
   assert.equal(visible?.content.display?.title, "Document Title");
+  assert.equal(visible?.content.display?.provenance?.displayName, "T231 Pusher");
 });
 
 test("surface core does not leak provider name as chrome owner fallback", () => {

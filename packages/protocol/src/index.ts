@@ -241,6 +241,7 @@ export type ContentValue =
 
 export type ContentDisplay = {
   title?: string;
+  senderDisplayName?: string;
   scrollable?: boolean;
   interactive?: boolean;
   provenance?: PusherProvenance;

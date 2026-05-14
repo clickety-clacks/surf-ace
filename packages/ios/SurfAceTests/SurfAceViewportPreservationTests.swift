@@ -184,6 +184,28 @@ final class SurfAceViewportPreservationTests: XCTestCase {
         }
     }
 
+    func testContentApplyParserUsesSenderDisplayNameSeparatelyFromDocumentTitleAndPusherProvenance() throws {
+        let frame = try SurfAceFrame.from(
+            contentId: "ct_5eadee11",
+            revision: 1,
+            jsonObject: [
+                "contentType": "markdown",
+                "content": ["markdown": "# Sender"],
+                "display": [
+                    "senderDisplayName": "Session One",
+                    "title": "Document Title",
+                    "provenance": [
+                        "displayName": "T231 Pusher",
+                        "streamLabel": "Pusher Stream",
+                    ],
+                ],
+            ]
+        )
+
+        XCTAssertEqual(frame.title, "Document Title")
+        XCTAssertEqual(frame.provenanceDisplayName, "Session One")
+    }
+
     func testBrowserURLNavigationSuccessEvidenceIsApplied() {
         let payload = SurfAceRuntime.browserURLApplyResultPayload(
             requestId: "tr_google",

@@ -1999,8 +1999,9 @@ function pusherProvenanceFromContext(context?: SurfAceSessionContext): PusherPro
   provenance = mergeProvenance(provenance, context.sourceProvenance);
   provenance = mergeProvenance(provenance, context.provenance);
   provenance = mergeProvenance(provenance, context.pushedBy);
+  const nestedDisplayName = provenance.displayName;
   provenance = mergeProvenance(provenance, context);
-  provenance.displayName = cleanProvenanceString(context.sessionDisplayName) ?? provenance.displayName;
+  provenance.displayName = nestedDisplayName ?? provenance.displayName ?? cleanProvenanceString(context.sessionDisplayName);
 
   const cleaned = Object.fromEntries(
     Object.entries(provenance).filter((entry): entry is [keyof PusherProvenance, string] =>
@@ -2016,12 +2017,12 @@ function displayTitleFromProvenance(provenance: PusherProvenance | null): string
 
 function displayForPusherProvenance(context?: SurfAceSessionContext): ContentDisplay | undefined {
   const provenance = pusherProvenanceFromContext(context);
-  const title = displayTitleFromProvenance(provenance);
-  if (!provenance && !title) {
+  const senderDisplayName = cleanProvenanceString(context?.sessionDisplayName) ?? displayTitleFromProvenance(provenance);
+  if (!provenance && !senderDisplayName) {
     return undefined;
   }
   return {
-    ...(title ? { title } : {}),
+    ...(senderDisplayName ? { senderDisplayName, title: senderDisplayName } : {}),
     ...(provenance ? { provenance } : {}),
   };
 }

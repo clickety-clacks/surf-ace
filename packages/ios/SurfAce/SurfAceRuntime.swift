@@ -3467,6 +3467,10 @@ final class SurfAceRuntime {
     }
 
     private static func provenanceDisplayName(from display: [String: Any]?) -> String? {
+        if let senderDisplayName = display?["senderDisplayName"] as? String,
+           !senderDisplayName.isEmpty {
+            return senderDisplayName
+        }
         guard let provenance = display?["provenance"] as? [String: Any] else { return nil }
         if let displayName = provenance["displayName"] as? String,
            !displayName.isEmpty {
