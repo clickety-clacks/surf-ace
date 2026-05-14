@@ -145,6 +145,7 @@ class FakeSurfAceWsServer {
     contentId: string;
     contentType: string;
     displayProvenance?: unknown;
+    displaySenderName?: string | null;
     displayTitle?: string | null;
     historyOwnerToken: string;
     paneId: number;
@@ -155,6 +156,7 @@ class FakeSurfAceWsServer {
     ownershipSessionId: string;
     paneLineageId: string;
     displayProvenance?: unknown;
+    displaySenderName?: string | null;
     displayTitle?: string | null;
     restoreReason: string;
     targetHeader: unknown;
@@ -1057,6 +1059,7 @@ class FakeSurfAceWsServer {
           contentId: pane.contentId,
           contentType: pane.contentType,
           displayProvenance: structuredClone(message.payload?.display?.provenance ?? null),
+          displaySenderName: typeof message.payload?.display?.senderDisplayName === "string" ? message.payload.display.senderDisplayName : null,
           displayTitle: typeof message.payload?.display?.title === "string" ? message.payload.display.title : null,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
           paneId,
@@ -1096,6 +1099,7 @@ class FakeSurfAceWsServer {
           ...(message.payload?.display
             ? {
                 displayProvenance: structuredClone(message.payload.display.provenance ?? null),
+                displaySenderName: typeof message.payload.display.senderDisplayName === "string" ? message.payload.display.senderDisplayName : null,
                 displayTitle: typeof message.payload.display.title === "string" ? message.payload.display.title : null,
               }
             : {}),
@@ -1256,6 +1260,7 @@ class FakeSurfAceWsServer {
           contentId: pane.contentId,
           contentType: pane.contentType,
           displayProvenance: structuredClone(message.payload?.display?.provenance ?? null),
+          displaySenderName: typeof message.payload?.display?.senderDisplayName === "string" ? message.payload.display.senderDisplayName : null,
           displayTitle: typeof message.payload?.display?.title === "string" ? message.payload.display.title : null,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
           paneId,
@@ -5280,6 +5285,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           server.contentSetRequests.map((request) => request.displayTitle),
           ["Session One", "Session One", "Session Two"],
         );
+        assert.deepEqual(
+          server.contentSetRequests.map((request) => request.displaySenderName),
+          ["Session One", "Session One", "Session Two"],
+        );
         assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
           displayName: "Session One",
           sessionKey: "agent:test:1",
@@ -5406,17 +5415,77 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
 
       assert.equal(server.contentSetRequests[0]?.displayTitle, "Nested Display");
+      assert.equal(server.contentSetRequests[0]?.displaySenderName, "Nested Display");
       assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
-        agentId: "agent_raw_123",
+        agentId: "agent_nested",
         displayName: "Nested Display",
-        sessionKey: "agent:test:raw-only",
+        sessionKey: "agent:test:nested",
         source: "openclaw",
-        streamLabel: "Surf Ace Stream",
+        streamLabel: "Nested Stream",
       });
       assert.equal(server.contentSetRequests[1]?.displayTitle, null);
+      assert.equal(server.contentSetRequests[1]?.displaySenderName, null);
       assert.deepEqual(server.contentSetRequests[1]?.displayProvenance, {
         agentId: "agent_raw_456",
         sessionKey: "agent:test:raw-only-2",
+      });
+    });
+  });
+
+  await t.test("provider prefers session display name over tool display name for sender provenance", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push(
+        {
+          content: "# wrapped review",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        {
+          displayName: "Wrapped XHigh reviews",
+          sessionDisplayName: "Flynn / T263",
+          sessionKey: "agent:test:session-display",
+        },
+      );
+
+      assert.equal(server.contentSetRequests[0]?.displayTitle, "Flynn / T263");
+      assert.equal(server.contentSetRequests[0]?.displaySenderName, "Flynn / T263");
+      assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
+        displayName: "Wrapped XHigh reviews",
+        sessionKey: "agent:test:session-display",
+      });
+    });
+  });
+
+  await t.test("provider keeps explicit pusher provenance when session display name supplies sender chrome", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push(
+        {
+          content: "# t231 separation",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        {
+          displayName: "Generic Tool Wrapper",
+          pushedBy: {
+            displayName: "T231 Pusher",
+            sessionKey: "agent:test:t231-pusher",
+            source: "openclaw",
+          },
+          sessionDisplayName: "Flynn / T263",
+          sessionKey: "agent:test:t263-session",
+        },
+      );
+
+      assert.equal(server.contentSetRequests[0]?.displaySenderName, "Flynn / T263");
+      assert.equal(server.contentSetRequests[0]?.displayTitle, "Flynn / T263");
+      assert.deepEqual(server.contentSetRequests[0]?.displayProvenance, {
+        displayName: "T231 Pusher",
+        sessionKey: "agent:test:t231-pusher",
+        source: "openclaw",
       });
     });
   });
@@ -5460,6 +5529,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
       assert.deepEqual(
         server.contentSetRequests.map((request) => request.displayTitle),
+        ["Alpha Stream", "Beta Stream"],
+      );
+      assert.deepEqual(
+        server.contentSetRequests.map((request) => request.displaySenderName),
         ["Alpha Stream", "Beta Stream"],
       );
 
@@ -5839,6 +5912,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.ok(applyRequest);
         assert.equal("materialization" in applyRequest, false);
         assert.equal(applyRequest.displayTitle, "Browser Pusher");
+        assert.equal(applyRequest.displaySenderName, "Browser Pusher");
         assert.deepEqual(applyRequest.displayProvenance, {
           displayName: "Browser Pusher",
           sessionKey: "agent:test:browser",

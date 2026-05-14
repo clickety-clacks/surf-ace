@@ -872,7 +872,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
       });
       navigationPill.appendChild(forward);
     }
-    const navigationOwnerName = pane.provenanceName ?? pane.ownerName;
+    const navigationOwnerName = pane.provenanceName;
     if (navigationOwnerName) {
       const ownerName = document.createElement("span");
       ownerName.className = "navigation-pill__owner";

@@ -1990,7 +1990,7 @@ function pusherProvenanceFromContext(context?: SurfAceSessionContext): PusherPro
   if (!context) {
     return null;
   }
-  let provenance: Partial<PusherProvenance> = {};
+  let provenance: Partial<PusherProvenance> = mergeProvenance({}, context);
   if (typeof context.source === "object") {
     provenance = mergeProvenance(provenance, context.source);
   } else {
@@ -1999,7 +1999,6 @@ function pusherProvenanceFromContext(context?: SurfAceSessionContext): PusherPro
   provenance = mergeProvenance(provenance, context.sourceProvenance);
   provenance = mergeProvenance(provenance, context.provenance);
   provenance = mergeProvenance(provenance, context.pushedBy);
-  provenance = mergeProvenance(provenance, context);
   provenance.displayName ??= cleanProvenanceString(context.sessionDisplayName);
 
   const cleaned = Object.fromEntries(
@@ -2016,12 +2015,12 @@ function displayTitleFromProvenance(provenance: PusherProvenance | null): string
 
 function displayForPusherProvenance(context?: SurfAceSessionContext): ContentDisplay | undefined {
   const provenance = pusherProvenanceFromContext(context);
-  const title = displayTitleFromProvenance(provenance);
-  if (!provenance && !title) {
+  const senderDisplayName = cleanProvenanceString(context?.sessionDisplayName) ?? displayTitleFromProvenance(provenance);
+  if (!provenance && !senderDisplayName) {
     return undefined;
   }
   return {
-    ...(title ? { title } : {}),
+    ...(senderDisplayName ? { senderDisplayName, title: senderDisplayName } : {}),
     ...(provenance ? { provenance } : {}),
   };
 }
