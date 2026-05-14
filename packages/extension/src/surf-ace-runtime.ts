@@ -2275,6 +2275,16 @@ function isProcessBackedTargetKind(targetKind: TargetKind): boolean {
   return targetKind === "terminal_app" || targetKind === "native_app" || targetKind === "compositor_app";
 }
 
+function processTargetAllowsResumeRestart(target: PaneTargetRecord): boolean {
+  if (!isProcessBackedTargetKind(target.targetKind)) {
+    return false;
+  }
+  if (!isPlainRecord(target.targetPayload) || target.targetPayload.restartPolicy !== "restore_new_process") {
+    return false;
+  }
+  return target.lastApplyEvidence?.status === "applied";
+}
+
 function contentTargetKind(contentType: ContentType): TargetKind | null {
   switch (contentType) {
     case "html":
@@ -6232,7 +6242,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         const target = this.currentTargetRecord(surface, pane);
         if (target) {
           await this.ensureCurrentPaneLineage(surface, pane);
-          const blockedReason = this.restoreBlockedReason(surface, pane, target, false);
+          const blockedReason = this.restoreBlockedReason(surface, pane, target, false, {
+            allowResumeProcessRestart: true,
+          });
           if (blockedReason) {
             pane.lastRestoreBlockedReason = blockedReason;
             await this.persistSurfaceTargetState(surface, "restore blocked");
@@ -6337,6 +6349,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane: ManagedPane,
     target: PaneTargetRecord,
     confirmed: boolean,
+    options: { allowResumeProcessRestart?: boolean } = {},
   ): TargetErrorCode | null {
     if (target.surfaceId !== surface.surfaceId || target.paneLineageId !== pane.paneLineageId) {
       return "restore_blocked_stale_target";
@@ -6365,10 +6378,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (target.restorePolicy === "never") {
       return "policy_denied";
     }
-    if (target.restorePolicy === "manual" && !confirmed) {
+    const resumeRestartAllowed = options.allowResumeProcessRestart === true && processTargetAllowsResumeRestart(target);
+    if (target.restorePolicy === "manual" && !confirmed && !resumeRestartAllowed) {
       return "restore_requires_confirmation";
     }
-    if (target.restorePolicy === "confirm" && !confirmed) {
+    if (target.restorePolicy === "confirm" && !confirmed && !resumeRestartAllowed) {
       return "restore_requires_confirmation";
     }
     if ((target.targetHeader.safetyClass === "process" || isProcessBackedTargetKind(target.targetKind)) && target.restorePolicy === "auto") {

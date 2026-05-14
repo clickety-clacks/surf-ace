@@ -6408,6 +6408,77 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider resume replay restores previously confirmed restartable terminal targets", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const [, secondPane] = split;
+      assert.ok(secondPane);
+
+      await runtime.launchTerminal({
+        command: "btop",
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: secondPane.paneId,
+        restartPolicy: "restore_new_process",
+        summary: "btop persisted",
+      });
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.targetApplyRequests.length, 2);
+      const replay = server.targetApplyRequests.at(-1);
+      assert.equal(replay?.restoreReason, "resume_restore");
+      assert.equal(replay?.targetKind, "terminal_app");
+      assert.deepEqual(replay?.targetPayload, {
+        args: [],
+        command: "btop",
+        envPolicy: "surface_default",
+        pty: true,
+        restartPolicy: "restore_new_process",
+      });
+
+      const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
+      assert.equal(screenPane?.target?.targetKind, "terminal_app");
+      assert.equal(screenPane?.target?.blockedReason, null);
+      assert.equal(screenPane?.target?.lastApplyEvidence?.status, "applied");
+    });
+  });
+
+  await t.test("provider resume replay still blocks manual-only terminal targets", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.launchTerminal({
+        command: "btop",
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+        restartPolicy: "manual_only",
+        summary: "btop manual only",
+      });
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.targetApplyRequests.length, 1);
+      const screenPane = (await runtime.listScreens())[0]?.panes[0];
+      assert.equal(screenPane?.target?.targetKind, "terminal_app");
+      assert.equal(screenPane?.target?.blockedReason, "restore_requires_confirmation");
+    });
+  });
+
   await t.test("surf_ace_launch_terminal fails closed without explicit confirmation", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
