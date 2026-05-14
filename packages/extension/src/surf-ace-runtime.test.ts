@@ -9957,6 +9957,27 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("operator reattempt-connections clears stale invalid_resume session before retry", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.equal(surface.sessionId, "sa_test_session");
+
+      surface.unreachableFailures = 6;
+      internalRuntime.noteSurfaceConnectionFailure(surface, "SurfAceToolError: Resume session did not match active ownership lock");
+      const result = await runtime.reattemptConnections({ fingerprint: server.surfaceId });
+
+      assert.equal(result.surfaces[0]?.fingerprint, server.surfaceId);
+      assert.equal(result.surfaces[0]?.circuitState, "given_up");
+      assert.equal(surface.sessionId, null);
+      assert.equal(surface.hasPairedInGatewaySession, false);
+      assert.equal(surface.localOwnership, null);
+      assert.equal(surface.connectionCircuitOpenedAt, null);
+      assert.equal(surface.autoRetryEnabled, true);
+    });
+  });
+
   await t.test("operator reattempt-all suppresses endpoint probes covered by owned workers", async () => {
     await withRuntimeHarness(async ({ infos, runtime, server }) => {
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);

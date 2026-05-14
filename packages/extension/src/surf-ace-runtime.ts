@@ -3080,6 +3080,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     for (const surface of surfaces) {
       const diagnostics = this.surfaceConnectionDiagnostics(surface);
       surface.selfOwnershipReclaimAttempted = false;
+      if (diagnostics.reason?.includes("invalid_resume") || diagnostics.reason?.includes("Resume session did not match")) {
+        this.clearSurfaceResumeState(surface);
+      }
       this.resetSurfaceConnectionCircuit(surface, "operator reattempt", { enableRetry: !surface.stopRequested });
       this.ensureSurfaceWorker(surface);
       this.wakeSurfaceRetry(surface);
