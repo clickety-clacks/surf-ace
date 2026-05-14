@@ -2700,6 +2700,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private restartContentBySurface = new Map<string, PersistedRestartContentEntry[]>();
   private restartSnapshots = new Map<string, SurfAceScreenSummary>();
   private persistedRuntimeScreenIds = new Set<string>();
+  private resumeTargetMaterializationInFlight = new Map<string, Promise<ApplyEvidence>>();
   private resumeTargetMaterializationRetryDelaysMs: readonly number[] =
     RESUME_TARGET_MATERIALIZATION_RETRY_DELAYS_MS;
 
@@ -6326,6 +6327,44 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async materializeTargetRecordWithResumeRetries(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    target: PaneTargetRecord,
+  ): Promise<ApplyEvidence> {
+    const key = this.resumeTargetMaterializationKey(surface, pane, target);
+    const inFlight = this.resumeTargetMaterializationInFlight.get(key);
+    if (inFlight) {
+      this.logger.info?.(
+        runtimeDiagnostic("target_materialization_join_in_flight", {
+          pane_id: pane.paneId,
+          surface_id: surface.surfaceId,
+          target_id: target.targetId,
+          target_kind: target.targetKind,
+          window_label: surface.windowLabel || "nil",
+        }),
+      );
+      return inFlight;
+    }
+    const materialization = this.materializeTargetRecordWithResumeRetriesExclusive(surface, pane, target);
+    this.resumeTargetMaterializationInFlight.set(key, materialization);
+    try {
+      return await materialization;
+    } finally {
+      if (this.resumeTargetMaterializationInFlight.get(key) === materialization) {
+        this.resumeTargetMaterializationInFlight.delete(key);
+      }
+    }
+  }
+
+  private resumeTargetMaterializationKey(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    target: PaneTargetRecord,
+  ): string {
+    return `${surface.surfaceId}:${pane.paneLineageId}:${target.targetId}`;
+  }
+
+  private async materializeTargetRecordWithResumeRetriesExclusive(
     surface: ManagedSurface,
     pane: ManagedPane,
     target: PaneTargetRecord,

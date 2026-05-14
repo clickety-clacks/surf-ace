@@ -31,6 +31,10 @@ function createSurfAceRuntime(options: SurfAceRuntimeOptions = {}) {
   });
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 type TestPane = {
   contentId: string | null;
   contentType: string | null;
@@ -168,6 +172,7 @@ class FakeSurfAceWsServer {
   }> = [];
   targetApplyErrorCode: string | null = null;
   targetApplyErrorResponsesRemaining = Number.POSITIVE_INFINITY;
+  targetApplyDelayMs = 0;
   readonly topologyApplyRequests: Array<{
     layout: unknown;
     paneIds: number[];
@@ -1100,6 +1105,9 @@ class FakeSurfAceWsServer {
           targetKind: String(message.payload?.targetKind ?? ""),
           targetPayload: structuredClone(message.payload?.targetPayload),
         });
+        if (this.targetApplyDelayMs > 0) {
+          await delay(this.targetApplyDelayMs);
+        }
         if (this.targetApplyErrorCode && this.targetApplyErrorResponsesRemaining > 0) {
           if (Number.isFinite(this.targetApplyErrorResponsesRemaining)) {
             this.targetApplyErrorResponsesRemaining -= 1;
@@ -6590,6 +6598,52 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.deepEqual(
         server.targetApplyRequests.slice(1).map((request) => request.restoreReason),
         ["resume_restore", "resume_restore", "resume_restore"],
+      );
+      const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
+      assert.equal(screenPane?.target?.targetKind, "terminal_app");
+      assert.equal(screenPane?.target?.blockedReason, null);
+      assert.equal(screenPane?.target?.lastApplyEvidence?.status, "applied");
+    });
+  });
+
+  await t.test("provider resume replay coalesces concurrent restartable terminal materialization", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "horizontal",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const [, secondPane] = split;
+      assert.ok(secondPane);
+
+      await runtime.launchTerminal({
+        command: "btop",
+        confirmed: true,
+        fingerprint: server.surfaceId,
+        paneId: secondPane.paneId,
+        restartPolicy: "restore_new_process",
+        summary: "btop concurrent replay persisted",
+      });
+      assert.equal(server.targetApplyRequests.length, 1);
+
+      const internalRuntime = runtime as any;
+      internalRuntime.resumeTargetMaterializationRetryDelaysMs = [1, 1, 1];
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      server.targetApplyDelayMs = 10;
+      server.targetApplyErrorCode = "materialization_failed";
+      server.targetApplyErrorResponsesRemaining = 1;
+      await Promise.all([
+        internalRuntime.repushSurfaceContent(surface),
+        internalRuntime.repushSurfaceContent(surface),
+      ]);
+
+      assert.equal(server.targetApplyRequests.length, 3);
+      assert.deepEqual(
+        server.targetApplyRequests.slice(1).map((request) => request.restoreReason),
+        ["resume_restore", "resume_restore"],
       );
       const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === secondPane.paneId);
       assert.equal(screenPane?.target?.targetKind, "terminal_app");
