@@ -7295,18 +7295,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!this.ownershipRecoveryPolicy.isTrustedProviderLineageId(this.persistentState, ownership.providerId)) {
       return false;
     }
+    if (this.hasRecoverableDurableOwnershipHint(surfaceId)) {
+      return true;
+    }
     const observedAt = Number.isFinite(ownership.observedAt) ? ownership.observedAt : 0;
     if (this.now() - observedAt > STARTUP_SELF_OWNERSHIP_RECLAIM_GRACE_MS) {
       return false;
     }
-    if (this.hasRecoverableDurableOwnershipHint(surfaceId)) {
-      return true;
-    }
     return ownership.source === "current_local_ownership" || ownership.source === "legacy_target_state";
   }
 
-	  private hasRecoverableDurableOwnershipHint(surfaceId: string): boolean {
-	    const targetState = this.persistentState.targetStateBySurfaceId?.[surfaceId];
+  private hasRecoverableDurableOwnershipHint(surfaceId: string): boolean {
+    const targetState = this.persistentState.targetStateBySurfaceId?.[surfaceId];
     const currentTargetIds = new Set(
       Object.values(targetState?.paneTargets ?? {})
         .map((paneTarget) => paneTarget.currentTargetId)
@@ -7315,20 +7315,29 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (currentTargetIds.size === 0) {
       return false;
     }
-	    const targetRecords = Array.isArray(targetState?.targetRecords) ? targetState.targetRecords : [];
-	    return targetRecords.some((target) => (
+    const targetRecords = Array.isArray(targetState?.targetRecords) ? targetState.targetRecords : [];
+    return targetRecords.some((target) => (
       currentTargetIds.has(target.targetId) &&
-	      typeof target.ownershipSessionId === "string" &&
-	      target.ownershipSessionId.length > 0 &&
-	      target.currentState === "current" &&
-	      this.ownershipRecoveryPolicy.isTrustedProviderLineageId(
-	        this.persistentState,
-	        typeof target.ownerProviderId === "string" ? target.ownerProviderId : "",
-	      )
-	    ));
-	  }
+      typeof target.ownershipSessionId === "string" &&
+      target.ownershipSessionId.length > 0 &&
+      target.currentState === "current" &&
+      this.isRecoverableDurableTargetHint(target) &&
+      this.ownershipRecoveryPolicy.isTrustedProviderLineageId(
+        this.persistentState,
+        typeof target.ownerProviderId === "string" ? target.ownerProviderId : "",
+      )
+    ));
+  }
 
-	  private recordSurfaceTombstone(surfaceId: string, reason: string): void {
+  private isRecoverableDurableTargetHint(target: PaneTargetRecord): boolean {
+    if (target.targetHeader?.safetyClass !== "passive") {
+      return true;
+    }
+    const appliedAt = Date.parse(target.appliedAt);
+    return Number.isFinite(appliedAt) && this.now() - appliedAt <= STARTUP_SELF_OWNERSHIP_RECLAIM_GRACE_MS;
+  }
+
+  private recordSurfaceTombstone(surfaceId: string, reason: string): void {
     this.persistentState.surfaceTombstones ??= {};
     this.tombstonedSurfaceIds.add(asSurfaceId(surfaceId));
     const hadTargetState = Boolean(this.persistentState.targetStateBySurfaceId?.[surfaceId]);

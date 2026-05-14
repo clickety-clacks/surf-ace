@@ -3148,6 +3148,103 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("startup preserves aged current browser targets as recovery hints without making them live", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-aged-browser-target-"));
+    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 2,
+          nextRemotePaneId: 96363,
+          nextWindowLabelIndex: 1,
+          paneLabelsByPaneId: {},
+          providerId: "pv_aged_browser_target",
+          selfOwnedSurfaceIds: {
+            sf_aged_browser_target: {
+              observedAt: Date.now() - 120_000,
+              providerId: "pv_aged_browser_target",
+              source: "current_local_ownership",
+            },
+          },
+          targetStateBySurfaceId: {
+            sf_aged_browser_target: {
+              ownershipEpoch: 7,
+              paneTargets: {
+                pl_aged_browser_target: {
+                  currentTargetId: "tg_aged_browser_target",
+                  diagnosticContent: null,
+                  lastRestoreBlockedReason: null,
+                  nonDurableTargetDiagnostic: null,
+                  paneLineageId: "pl_aged_browser_target",
+                  targetEpoch: 1,
+                },
+              },
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [
+                {
+                  appliedAt: new Date(Date.now() - 120_000).toISOString(),
+                  currentState: "current",
+                  ownerProviderId: "pv_aged_browser_target",
+                  ownershipEpoch: 7,
+                  ownershipSessionId: "sa_aged_browser_target",
+                  paneIdAtApply: "pn_aged_browser_target",
+                  paneLabelAtApply: 1,
+                  paneLineageId: "pl_aged_browser_target",
+                  restorePolicy: "auto",
+                  surfaceId: "sf_aged_browser_target",
+                  surfaceInstanceId: null,
+                  targetEpoch: 1,
+                  targetHeader: {
+                    payloadSchemaVersion: 1,
+                    replaySemantics: "navigate",
+                    requiredCapabilities: ["target.browser_url.v1"],
+                    safeToLogFields: ["url"],
+                    safetyClass: "network",
+                    summary: "https://example.com",
+                  },
+                  targetId: "tg_aged_browser_target",
+                  targetKind: "browser_url",
+                  targetPayload: { url: "https://example.com" },
+                },
+              ],
+            },
+          },
+          tombstonedEndpointIds: [],
+          version: 1,
+          windowLabels: {
+            sf_aged_browser_target: "a",
+          },
+        }, null, 2),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify({
+          contentContinuity: {},
+          screens: [],
+          updatedAt: Date.now(),
+          version: 1,
+        }, null, 2),
+      );
+
+      const discovery = new StaticDiscoveryService([]);
+      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+      assert.deepEqual(await runtime.listScreens(), []);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 250);
+      });
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.equal(diagnostics.surfaceTombstones.sf_aged_browser_target, undefined);
+      assert.equal(diagnostics.targetStateSurfaceIds.includes("sf_aged_browser_target"), true);
+      assert.equal(diagnostics.windowLabelSurfaceIds.includes("sf_aged_browser_target"), true);
+      assert.deepEqual(await runtime.listScreens(), []);
+    } finally {
+      await runtime?.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("startup tombstones stale legacy-root target imports without refreshing ownership age", async () => {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-current-"));
     const legacyStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-root-"));
