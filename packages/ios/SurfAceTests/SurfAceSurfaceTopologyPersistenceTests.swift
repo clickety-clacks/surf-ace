@@ -104,7 +104,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         ]))
     }
 
-    func testAuthorityStateRequiresProviderActionabilityAndExactPaneIdentity() {
+    func testAuthorityStateRequiresProviderActionabilityAndAdoptsSameProviderPaneIdentity() {
         let panes = [
             SurfAceAuthorityPaneIdentity(paneId: 41, paneLabel: 1, paneLineageId: "pl_41"),
         ]
@@ -241,7 +241,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
                 "paneLineageId": "pl_41",
             ],
         ]
-        XCTAssertEqual(surfAceAuthorityStateRejectionReason(
+        XCTAssertNil(surfAceAuthorityStateRejectionReason(
             payload: wrongPaneLabel,
             surfaceId: "sf_1",
             providerId: "pv_1",
@@ -251,7 +251,27 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             lockSessionId: "sa_1",
             windowLabel: "a",
             panes: panes
-        ), "pane_identity_mismatch")
+        ))
+
+        var wrongPaneLineage = basePayload
+        wrongPaneLineage["panes"] = [
+            [
+                "paneId": 41,
+                "paneLabel": 1,
+                "paneLineageId": "pl_provider_truth",
+            ],
+        ]
+        XCTAssertNil(surfAceAuthorityStateRejectionReason(
+            payload: wrongPaneLineage,
+            surfaceId: "sf_1",
+            providerId: "pv_1",
+            sessionId: "sa_1",
+            ownershipEpoch: 7,
+            lockProviderId: "pv_1",
+            lockSessionId: "sa_1",
+            windowLabel: "a",
+            panes: panes
+        ))
 
         var blocked = basePayload
         blocked["actionable"] = false

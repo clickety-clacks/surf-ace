@@ -450,7 +450,7 @@ export type PanesListRequest = RequestBase<"panes.list">;
 export type AuthorityPaneIdentity = {
   paneId: PaneId;
   paneLabel: number;
-  paneLineageId?: string;
+  paneLineageId: string;
 };
 
 export type AuthorityStatePayload = {

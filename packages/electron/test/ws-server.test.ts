@@ -445,7 +445,7 @@ function heartbeatRequest(): Request {
 
 function authorityStateRequest(
   paired: Extract<Response, { op: "pair.request"; ok: true }>,
-  options: { paneLabel?: number; panes?: Array<{ paneId: number; paneLabel: number; paneLineageId?: string }>; windowLabel?: string } = {},
+  options: { paneLabel?: number; panes?: Array<{ paneId: number; paneLabel: number; paneLineageId: string }>; windowLabel?: string } = {},
 ): Request {
   const pane = paired.payload.state.panes[0]!;
   return {
@@ -1174,7 +1174,7 @@ test("ws server exposes providerName while connected and clears it on relinquish
   });
 });
 
-test("ws server does not show green until provider authority confirms exact pane identity", async () => {
+test("ws server adopts provider authority pane identity before showing green", async () => {
   await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
     const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
@@ -1185,13 +1185,24 @@ test("ws server does not show green until provider authority confirms exact pane
     assert.equal(heartbeat.ok, true);
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
 
-    const rejectedAuthority = await request(owner, authorityStateRequest(
+    const providerPane = core.pairState(surfaceId).panes[0]!;
+    const repairedAuthority = await request(owner, authorityStateRequest(
       paired as Extract<Response, { op: "pair.request"; ok: true }>,
-      { paneLabel: 99 },
+      {
+        panes: [{
+          paneId: Number(providerPane.paneId),
+          paneLabel: 99,
+          paneLineageId: "pl_authority_provider_truth",
+        }],
+      },
     ));
-    assert.equal(rejectedAuthority.ok, true);
-    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
-    assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
+    assert.equal(repairedAuthority.ok, true);
+    assert.equal(repairedAuthority.op, "authority.state");
+    assert.equal(repairedAuthority.payload.accepted, true);
+    assert.equal(core.pairState(surfaceId).panes[0]?.paneLabel, 99);
+    assert.equal(core.pairState(surfaceId).panes[0]?.paneLineageId, "pl_authority_provider_truth");
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, "test-harness");
 
     const acceptedAuthority = await request(owner, authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>));
     assert.equal(acceptedAuthority.ok, true);
@@ -1278,6 +1289,36 @@ test("ws server repairs same-session provider window label disagreement at autho
     assert.equal(authority.payload.accepted, true);
     assert.equal(authority.payload.reason, null);
     assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "a");
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server repairs same-session provider pane label and lineage disagreement at authority state", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const pane = core.pairState(surfaceId).panes[0]!;
+    const authority = await request(owner, authorityStateRequest(
+      paired as Extract<Response, { op: "pair.request"; ok: true }>,
+      {
+        panes: [{
+          paneId: Number(pane.paneId),
+          paneLabel: pane.paneLabel + 10,
+          paneLineageId: "pl_provider_truth",
+        }],
+      },
+    ));
+
+    assert.equal(authority.ok, true);
+    assert.equal(authority.op, "authority.state");
+    assert.equal(authority.payload.accepted, true);
+    assert.equal(authority.payload.reason, null);
+    assert.equal(core.pairState(surfaceId).panes[0]?.paneLabel, pane.paneLabel + 10);
+    assert.equal(core.pairState(surfaceId).panes[0]?.paneLineageId, "pl_provider_truth");
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     await closeSocket(owner);

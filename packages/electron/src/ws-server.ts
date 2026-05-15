@@ -2659,17 +2659,6 @@ export class SurfaceWsServer {
       reason = "session_identity_mismatch";
     } else {
       const surface = this.core.getSurface(surfaceId);
-      const panes = this.core.pairState(surfaceId).panes;
-      const panesById = new Map(panes.map((pane) => [pane.paneId, pane]));
-      const payloadPaneIds = new Set(payload.panes.map((pane) => pane.paneId));
-      const panesMatch = panesById.size === payload.panes.length &&
-        payloadPaneIds.size === payload.panes.length &&
-        payload.panes.every((candidate) => {
-          const pane = panesById.get(candidate.paneId);
-          return Boolean(pane) &&
-            candidate.paneLabel === pane.paneLabel &&
-            (candidate.paneLineageId ?? null) === (pane.paneLineageId ?? null);
-        });
       if (!isValidWindowLabel(payload.windowLabel)) {
         reason = "window_label_mismatch";
       } else if (payload.windowLabel !== surface.windowLabel) {
@@ -2677,7 +2666,10 @@ export class SurfaceWsServer {
           await this.adoptProviderWindowLabel(surfaceId, payload.windowLabel, "authority.state", request.id);
         }));
       }
-      if (!reason && !panesMatch) {
+      if (
+        !reason &&
+        !this.core.adoptProviderAuthorityPaneIdentities(surfaceId, payload.panes)
+      ) {
         reason = "pane_identity_mismatch";
       } else if (!reason && !payload.actionable) {
         reason = payload.reason ?? "provider_not_actionable";
