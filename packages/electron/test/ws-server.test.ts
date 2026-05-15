@@ -1259,6 +1259,48 @@ test("ws server accepts provider authority panes independent of order", async ()
   });
 });
 
+test("ws server repairs same-session provider window label disagreement at authority state", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    core.applyWindowLabelOnly(surfaceId, "b");
+    assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "b");
+
+    const authority = await request(owner, authorityStateRequest(
+      paired as Extract<Response, { op: "pair.request"; ok: true }>,
+      { windowLabel: "a" },
+    ));
+
+    assert.equal(authority.ok, true);
+    assert.equal(authority.op, "authority.state");
+    assert.equal(authority.payload.accepted, true);
+    assert.equal(authority.payload.reason, null);
+    assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "a");
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server still blocks a different provider while a surface is owned", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const foreign = await connect(url);
+    const rejected = await request(foreign, pairRequest(surfaceId, "pv_beta"));
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.op, "pair.request");
+    assert.equal(rejected.error.code, "busy");
+
+    await closeSocket(owner);
+    await closeSocket(foreign);
+  });
+});
+
 test("ws server rejects pair requests without providerName", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const socket = await connect(url);

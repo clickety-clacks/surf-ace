@@ -941,7 +941,7 @@ export class SurfaceWsServer {
       case "snapshot.get":
         return await this.handleSnapshotGet(socket, request);
       case "authority.state":
-        return this.handleAuthorityState(socket, request);
+        return await this.handleAuthorityState(socket, request);
       case "heartbeat.ping":
         return this.handleHeartbeat(socket, request);
     }
@@ -2264,7 +2264,7 @@ export class SurfaceWsServer {
   private async adoptProviderWindowLabel(
     surfaceId: string,
     windowLabel: string,
-    source: "pair.resume",
+    source: "authority.state" | "pair.resume",
     requestId: string,
   ): Promise<void> {
     const currentWindowLabel = this.core.surfaceWindowLabel(surfaceId);
@@ -2285,7 +2285,7 @@ export class SurfaceWsServer {
     surfaceId: string,
     currentWindowLabel: string,
     windowLabel: string,
-    source: "pair.resume" | "topology.apply",
+    source: "authority.state" | "pair.resume" | "topology.apply",
     requestId: string,
   ): void {
     if (windowLabel === currentWindowLabel) {
@@ -2639,7 +2639,7 @@ export class SurfaceWsServer {
     };
   }
 
-  private handleAuthorityState(socket: WebSocket, request: AuthorityStateRequest): Response {
+  private async handleAuthorityState(socket: WebSocket, request: AuthorityStateRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
     const transport = this.transport(surfaceId);
     const active = transport.active;
@@ -2670,13 +2670,18 @@ export class SurfaceWsServer {
             candidate.paneLabel === pane.paneLabel &&
             (candidate.paneLineageId ?? null) === (pane.paneLineageId ?? null);
         });
-      if (payload.windowLabel !== surface.windowLabel) {
+      if (!isValidWindowLabel(payload.windowLabel)) {
         reason = "window_label_mismatch";
-      } else if (!panesMatch) {
+      } else if (payload.windowLabel !== surface.windowLabel) {
+        await this.runProviderWindowLabelMutation(() => this.runSurfaceMutation(surfaceId, async () => {
+          await this.adoptProviderWindowLabel(surfaceId, payload.windowLabel, "authority.state", request.id);
+        }));
+      }
+      if (!reason && !panesMatch) {
         reason = "pane_identity_mismatch";
-      } else if (!payload.actionable) {
+      } else if (!reason && !payload.actionable) {
         reason = payload.reason ?? "provider_not_actionable";
-      } else {
+      } else if (!reason) {
         accepted = true;
         this.core.setProviderName(surfaceId, active.providerName);
         this.core.setConnectionBar(surfaceId, "connected");

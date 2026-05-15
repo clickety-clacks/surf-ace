@@ -89,7 +89,7 @@ func surfAceAuthorityStateRejectionReason(
         lockSessionId != sessionId {
         return "session_identity_mismatch"
     }
-    if payload["windowLabel"] as? String != windowLabel {
+    if surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]) == nil {
         return "window_label_mismatch"
     }
     guard let payloadPanes = payload["panes"] as? [[String: Any]],
@@ -1502,7 +1502,9 @@ final class SurfAceRuntime {
         surfAceGatewayLog(
             "event=pair_commit \(surfAceDiagnosticFields([("provider_id", plan.session.providerId), ("resumed", plan.resumed), ("session_id", plan.session.sessionId), ("surface_id", plan.surfaceId)]))"
         )
-        if !plan.resumed {
+        if plan.resumed {
+            applyProviderWindowLabel(surface: surface, windowLabel: plan.providerWindowLabel)
+        } else {
             applyProviderBootstrapTopology(
                 surface: surface,
                 windowLabel: plan.providerWindowLabel,
@@ -2415,6 +2417,18 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "authority.state", id: id, code: "not_paired", message: "pair.request required")
         }
 
+        let sessionIdentityMatches = payload["surfaceId"] as? String == surfaceId &&
+            payload["providerId"] as? String == session.providerId &&
+            payload["sessionId"] as? String == session.sessionId &&
+            payload["ownershipEpoch"] as? Int == session.ownershipEpoch &&
+            ownershipLock.providerId == session.providerId &&
+            ownershipLock.sessionId == session.sessionId
+        if sessionIdentityMatches,
+           let providerWindowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
+           providerWindowLabel != surface.windowLabel {
+            applyProviderWindowLabel(surface: surface, windowLabel: providerWindowLabel)
+        }
+
         let reason = surfAceAuthorityStateRejectionReason(
             payload: payload,
             surfaceId: surfaceId,
@@ -2947,10 +2961,7 @@ final class SurfAceRuntime {
         initialPaneId: Int,
         initialPaneLabel: Int
     ) {
-        if surface.windowLabel != windowLabel {
-            surface.windowLabel = windowLabel
-            surface.name = "\(screenName) \(windowLabel.uppercased())"
-        }
+        applyProviderWindowLabel(surface: surface, windowLabel: windowLabel)
 
         guard initialPaneId > 0, initialPaneLabel > 0, !surface.providerTopologyInitialized else {
             return
@@ -2971,6 +2982,13 @@ final class SurfAceRuntime {
         surface.panesById[initialPaneId]?.paneLabel = initialPaneLabel
         ensureActiveKeyboardPane(surface: surface)
         surface.providerTopologyInitialized = true
+        persistSurfaceTopology(surfaceId: surface.surfaceId)
+    }
+
+    private func applyProviderWindowLabel(surface: SurfAceSurfaceModel, windowLabel: String) {
+        guard surface.windowLabel != windowLabel else { return }
+        surface.windowLabel = windowLabel
+        surface.name = "\(screenName) \(windowLabel.uppercased())"
         persistSurfaceTopology(surfaceId: surface.surfaceId)
     }
 

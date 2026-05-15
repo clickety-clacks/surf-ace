@@ -485,6 +485,8 @@ The `video` and `canvas` content types are included in the `ContentType` schema 
 
 Provider authority acknowledgement is an optional v1 protocol feature advertised as `authority.state.v1` in `pair.response.capabilities.protocolFeatures`. Providers MUST fail closed when a paired client omits this feature: pairing, durable provider identity, saved pane lineage, restored target/window state, and heartbeat are not enough to mark the surface actionable. For omitted capability, the provider does not send `authority.state`, does not start heartbeat, and projects the surface as non-actionable/non-green. New clients that advertise the feature must accept the exact provider-approved surface/window/pane identity before CLU-facing state can become actionable.
 
+Provider authority reconciliation invariant: after a surface has accepted matching `providerId`, `sessionId`, `ownershipEpoch`, and `surfaceId`, the provider-approved identity in `authority.state` is authoritative. Valid same-provider window/pane label disagreement is reconciliation work: the client MUST adopt the provider label/identity or wait for provider topology repair, and MUST NOT remain in terminal non-actionable/yellow state for that disagreement. The only terminal ownership block is evidence that the surface is owned by a different provider installation, such as mismatched stable `providerId` or foreign ownership lock without explicit takeover.
+
 ## 7. Always-On Event Delivery
 
 Once paired, surface emits events without any subscribe/unsubscribe API.
