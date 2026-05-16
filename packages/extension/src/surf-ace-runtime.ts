@@ -126,6 +126,13 @@ type SurfAceProviderProcessBlockReason =
   | "provider_process_lease_mismatch"
   | "provider_process_missing";
 
+const PROVIDER_PROCESS_BLOCK_REASONS = new Set<string>([
+  "duplicate_provider_processes",
+  "provider_process_inventory_unavailable",
+  "provider_process_lease_mismatch",
+  "provider_process_missing",
+]);
+
 export type SurfAceProviderAuthorityProjection = {
   activeTargetRecordCount: number;
   authorityBlockedSurfaceIds: string[];
@@ -1010,6 +1017,10 @@ function generateProviderId(): string {
   return `pv_${randomUUID().replaceAll("-", "")}`;
 }
 
+function isValidProviderId(value: string): boolean {
+  return /^pv_[A-Za-z0-9_:-]{1,128}$/.test(value);
+}
+
 function formatRuntimeDiagnosticValue(value: string | number | boolean): string {
   const text = String(value);
   return /^[A-Za-z0-9_.,/:@%-]+$/.test(text) ? text : JSON.stringify(text);
@@ -1217,6 +1228,10 @@ type OwnerControlCommand =
   | {
       input: { fingerprint: string; paneId: PaneId };
       op: "capturePane" | "clear" | "closePane" | "read" | "snapshot";
+    }
+  | {
+      input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string };
+      op: "restoreTarget";
     }
   | {
       input: SurfAceSplitInput;
@@ -2559,6 +2574,19 @@ function targetErrorCodeFromResponse(errorCode: string): TargetErrorCode {
     : "materialization_failed";
 }
 
+function isTransientTargetAuthorityErrorCode(errorCode: TargetErrorCode | undefined): boolean {
+  return errorCode === "ownership_epoch_mismatch" ||
+    errorCode === "ownership_session_mismatch" ||
+    errorCode === "pane_lineage_missing" ||
+    errorCode === "pane_lineage_ambiguous" ||
+    errorCode === "restore_blocked_stale_target";
+}
+
+function isTargetSessionAuthorityMismatch(errorCode: TargetErrorCode | undefined): boolean {
+  return errorCode === "ownership_epoch_mismatch" ||
+    errorCode === "ownership_session_mismatch";
+}
+
 function safeDiagnosticTargetPayload(
   targetPayload: unknown,
   safeToLogFields: string[],
@@ -2623,6 +2651,10 @@ function windowLabelForIndex(index: number): string {
     cursor = Math.floor(cursor / 26);
   }
   return label;
+}
+
+function isProviderWindowLabel(windowLabel: unknown): windowLabel is string {
+  return typeof windowLabel === "string" && /^[a-z]+$/.test(windowLabel);
 }
 
 function paneLabelStorageKey(surfaceId: string, remotePaneId: RemotePaneId): string {
@@ -3087,6 +3119,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.clearSurfaceResumeState(surface);
       }
       this.resetSurfaceConnectionCircuit(surface, "operator reattempt", { enableRetry: !surface.stopRequested });
+      if (this.canRepublishAuthorityOnReattempt(surface)) {
+        surface.connectionState = "connected";
+        if (await this.publishAuthorityState(surface)) {
+          this.startHeartbeat(surface);
+        }
+      }
       this.ensureSurfaceWorker(surface);
       this.wakeSurfaceRetry(surface);
       reattemptedSurfaces.push({
@@ -3376,6 +3414,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   async restoreTarget(input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string }): Promise<SurfAceTargetRestoreResult> {
     await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceTargetRestoreResult>({ input, op: "restoreTarget" });
+    }
     const surface = await this.requireActionableSurface(input.fingerprint);
     const pane = this.requirePane(input.fingerprint, input.paneId);
     const target = input.targetId
@@ -3384,7 +3425,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!target) {
       throw new SurfAceToolError("invalid_operation", `No target record for pane ${input.paneId}`);
     }
+    const targetAuthorityRepaired = this.repairCurrentSelfTargetAuthority(surface, pane, target);
     await this.ensureCurrentPaneLineage(surface, pane);
+    const targetLineageRepaired = this.repairCurrentSelfTargetAuthority(surface, pane, target);
+    if (targetAuthorityRepaired || targetLineageRepaired) {
+      await this.persistSurfaceTargetState(surface, "target authority repair before restore");
+    }
     const blockedReason = this.restoreBlockedReason(surface, pane, target, input.confirmed === true);
     if (blockedReason) {
       pane.lastRestoreBlockedReason = blockedReason;
@@ -5103,14 +5149,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private ensureWindowLabel(surfaceId: string): string {
     const existing = this.persistentState.windowLabels[surfaceId];
-    if (existing) {
+    if (isProviderWindowLabel(existing)) {
       return existing;
+    }
+    if (existing) {
+      delete this.persistentState.windowLabels[surfaceId];
     }
     const usedWindowLabels = new Set<string>();
     for (const surface of this.surfaces.values()) {
       if (
         surface.surfaceId === surfaceId ||
-        !surface.windowLabel ||
+        !isProviderWindowLabel(surface.windowLabel) ||
         !this.shouldReserveWindowLabel(surface)
       ) {
         continue;
@@ -5143,15 +5192,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     currentWindowLabel: string,
   ): string {
     const existingNextLabel = this.persistentState.windowLabels[nextSurfaceId];
-    if (existingNextLabel) {
+    if (isProviderWindowLabel(existingNextLabel)) {
       if (previousSurfaceId !== nextSurfaceId) {
         delete this.persistentState.windowLabels[previousSurfaceId];
       }
       return existingNextLabel;
+    } else if (existingNextLabel) {
+      delete this.persistentState.windowLabels[nextSurfaceId];
     }
 
     const migratedLabel = currentWindowLabel || this.persistentState.windowLabels[previousSurfaceId];
-    if (migratedLabel) {
+    if (isProviderWindowLabel(migratedLabel)) {
       this.persistentState.windowLabels[nextSurfaceId] = migratedLabel;
       if (previousSurfaceId !== nextSurfaceId) {
         delete this.persistentState.windowLabels[previousSurfaceId];
@@ -5196,7 +5247,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     for (const surface of orderedSurfaces) {
       let windowLabel = surface.windowLabel || this.persistentState.windowLabels[surface.surfaceId] || "";
-      if (!windowLabel || usedWindowLabels.has(windowLabel)) {
+      if (!isProviderWindowLabel(windowLabel) || usedWindowLabels.has(windowLabel)) {
         windowLabel = nextAvailable();
       }
       usedWindowLabels.add(windowLabel);
@@ -6249,7 +6300,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       try {
         const target = this.currentTargetRecord(surface, pane);
         if (target) {
+          const targetAuthorityRepaired = this.repairCurrentSelfTargetAuthority(surface, pane, target);
           await this.ensureCurrentPaneLineage(surface, pane);
+          const targetLineageRepaired = this.repairCurrentSelfTargetAuthority(surface, pane, target);
+          if (targetAuthorityRepaired || targetLineageRepaired) {
+            await this.persistSurfaceTargetState(surface, "target authority repair before resume restore");
+          }
           const blockedReason = this.restoreBlockedReason(surface, pane, target, false, {
             allowResumeProcessRestart: true,
           });
@@ -6426,6 +6482,31 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return processTargetAllowsResumeRestart(target);
   }
 
+  private async recoverSurfaceAuthoritySession(
+    surface: ManagedSurface,
+    reason: TargetErrorCode,
+  ): Promise<void> {
+    const client = surface.client;
+    this.invalidateClientAuthority(surface, reason);
+    this.clearSurfaceResumeState(surface);
+    surface.connectionState = "connecting";
+    surface.reconnectAttempt = 0;
+    this.logger.warn?.(
+      runtimeDiagnostic("target_authority_session_repair", {
+        reason,
+        surface_id: surface.surfaceId,
+        window_label: surface.windowLabel || "nil",
+      }),
+    );
+    if (client?.isOpen()) {
+      if (surface.client === client) {
+        surface.client = null;
+      }
+      void client.close(1000, clampCloseReason("authority_session_repair")).catch(() => {});
+    }
+    this.wakeSurfaceRetry(surface);
+  }
+
   private logReplayOutcome(
     surface: ManagedSurface,
     pane: ManagedPane,
@@ -6498,6 +6579,60 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return "approval_required";
     }
     return null;
+  }
+
+  private repairCurrentSelfTargetAuthority(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    target: PaneTargetRecord,
+  ): boolean {
+    if (
+      target.surfaceId !== surface.surfaceId ||
+      target.currentState !== "current" ||
+      !this.isTrustedProviderLineageId(target.ownerProviderId)
+    ) {
+      return false;
+    }
+    const sameVisibleTarget = pane.currentTargetId === target.targetId;
+    const samePaneLineage = target.paneLineageId === pane.paneLineageId;
+    if (!sameVisibleTarget && !samePaneLineage) {
+      return false;
+    }
+
+    let changed = false;
+    if (sameVisibleTarget && target.paneLineageId !== pane.paneLineageId) {
+      target.paneLineageId = pane.paneLineageId;
+      changed = true;
+    }
+    if (target.ownerProviderId !== this.persistentState.providerId) {
+      target.ownerProviderId = this.persistentState.providerId;
+      changed = true;
+    }
+    if (target.ownershipSessionId !== (surface.sessionId ?? "")) {
+      target.ownershipSessionId = surface.sessionId ?? "";
+      changed = true;
+    }
+    if (target.ownershipEpoch !== surface.ownershipEpoch) {
+      target.ownershipEpoch = surface.ownershipEpoch;
+      changed = true;
+    }
+    if (pane.currentTargetId !== target.targetId) {
+      pane.currentTargetId = target.targetId;
+      changed = true;
+    }
+    if (pane.staleTargetId === target.targetId) {
+      pane.staleTargetId = null;
+      changed = true;
+    }
+    if (
+      pane.lastRestoreBlockedReason === "ownership_epoch_mismatch" ||
+      pane.lastRestoreBlockedReason === "ownership_session_mismatch" ||
+      pane.lastRestoreBlockedReason === "restore_blocked_stale_target"
+    ) {
+      pane.lastRestoreBlockedReason = null;
+      changed = true;
+    }
+    return changed;
   }
 
   private async materializeTargetRecord(
@@ -6649,13 +6784,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         status: "failed",
       };
       recordTargetApplyEvidence(evidence);
-      pane.lastRestoreBlockedReason = evidence.errorCode ?? "materialization_failed";
-      if (
-        evidence.errorCode === "ownership_epoch_mismatch" ||
-        evidence.errorCode === "ownership_session_mismatch" ||
+      const transientAuthorityError = isTransientTargetAuthorityErrorCode(evidence.errorCode);
+      pane.lastRestoreBlockedReason = transientAuthorityError
+        ? null
+        : evidence.errorCode ?? "materialization_failed";
+      if (!transientAuthorityError && (
         evidence.errorCode === "pane_lineage_missing" ||
         evidence.errorCode === "pane_lineage_ambiguous"
-      ) {
+      )) {
         this.markTargetStale(
           surface,
           target,
@@ -6663,6 +6799,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           response.error.message,
           pane,
         );
+      }
+      if (isTargetSessionAuthorityMismatch(evidence.errorCode)) {
+        await this.recoverSurfaceAuthoritySession(surface, evidence.errorCode as TargetErrorCode);
+      } else if (transientAuthorityError) {
+        await this.publishAuthorityState(surface);
       }
       await this.persistSurfaceTargetState(surface, "target materialization failed");
       return evidence;
@@ -6697,9 +6838,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     recordTargetApplyEvidence(evidence);
     if (
       evidence.status !== "applied" &&
-      (evidence.errorCode === "ownership_epoch_mismatch" ||
-        evidence.errorCode === "ownership_session_mismatch" ||
-        evidence.errorCode === "pane_lineage_missing" ||
+      !isTransientTargetAuthorityErrorCode(evidence.errorCode) &&
+      (evidence.errorCode === "pane_lineage_missing" ||
         evidence.errorCode === "pane_lineage_ambiguous")
     ) {
       this.markTargetStale(
@@ -6714,7 +6854,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       await this.persistSurfaceTargetState(surface, "stale target apply response");
       return evidence;
     }
-    pane.lastRestoreBlockedReason = evidence.status === "applied" ? null : evidence.errorCode ?? "materialization_failed";
+    if (evidence.status !== "applied" && isTargetSessionAuthorityMismatch(evidence.errorCode)) {
+      pane.lastRestoreBlockedReason = null;
+      await this.recoverSurfaceAuthoritySession(surface, evidence.errorCode as TargetErrorCode);
+    } else if (evidence.status !== "applied" && isTransientTargetAuthorityErrorCode(evidence.errorCode)) {
+      pane.lastRestoreBlockedReason = null;
+      await this.publishAuthorityState(surface);
+    } else {
+      pane.lastRestoreBlockedReason = evidence.status === "applied" ? null : evidence.errorCode ?? "materialization_failed";
+    }
     if (evidence.status === "applied") {
       this.clearVisiblePaneContent(pane, asRevision(Math.max(Number(pane.currentRevision), target.targetEpoch)));
     }
@@ -7225,7 +7373,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const durableProviderId = await this.loadOrCreateDurableProviderId(loadedStateProviderId);
     if (this.persistentState.providerId !== durableProviderId) {
-      this.noteProviderLineage(this.persistentState.providerId, "current_state");
+      this.persistentState.providerLineage = [];
+      this.persistentState.selfOwnedSurfaceIds = Object.fromEntries(
+        Object.entries(this.persistentState.selfOwnedSurfaceIds ?? {}).filter(
+          ([, ownership]) => ownership.providerId === durableProviderId,
+        ),
+      );
       this.persistentState.providerId = durableProviderId;
       shouldPersistState = true;
     }
@@ -7240,7 +7393,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (existingProviderId) {
       return existingProviderId;
     }
-    const providerId = seedProviderId || await this.loadProviderIdSeedFromKnownLocalState() || generateProviderId();
+    const providerId = isValidProviderId(seedProviderId)
+      ? seedProviderId
+      : await this.loadProviderIdSeedFromKnownLocalState() || generateProviderId();
     return await this.persistDurableProviderIdentity(providerId);
   }
 
@@ -7248,7 +7403,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     try {
       const raw = await fs.readFile(this.providerIdentityPath, "utf8");
       const parsed = JSON.parse(raw) as ProviderIdentityFile;
-      if (parsed.version === 1 && parsed.providerId) {
+      if (parsed.version === 1 && typeof parsed.providerId === "string" && isValidProviderId(parsed.providerId)) {
         return parsed.providerId;
       }
     } catch {
@@ -7275,13 +7430,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     try {
       const raw = await fs.readFile(statePath, "utf8");
       const parsed = JSON.parse(raw) as Partial<RuntimeStateFile>;
-      return parsed.version === 1 && typeof parsed.providerId === "string" ? parsed.providerId : "";
+      return parsed.version === 1 && typeof parsed.providerId === "string" && isValidProviderId(parsed.providerId)
+        ? parsed.providerId
+        : "";
     } catch {
       return "";
     }
   }
 
   private async persistDurableProviderIdentity(providerId: string): Promise<string> {
+    if (!isValidProviderId(providerId)) {
+      throw new Error(`Invalid Surf Ace provider identity: ${providerId}`);
+    }
     await ensureDirectory(path.dirname(this.providerIdentityPath));
     const identity: ProviderIdentityFile = { providerId, version: 1 };
     try {
@@ -7293,7 +7453,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
       const existingProviderId = await this.readDurableProviderId();
       if (!existingProviderId) {
-        throw error;
+        await fs.writeFile(this.providerIdentityPath, JSON.stringify(identity, null, 2));
+        return providerId;
       }
       return existingProviderId;
     }
@@ -7340,6 +7501,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const legacyStatePath = path.join(legacyDir, STATE_FILE_NAME);
     const legacyState = await this.readRuntimeStateFile(legacyStatePath);
     if (!legacyState?.providerId) {
+      if (importedCurrentSnapshotOwnership) {
+        await this.persistState();
+      }
+      return;
+    }
+    if (legacyState.providerId !== this.persistentState.providerId) {
       if (importedCurrentSnapshotOwnership) {
         await this.persistState();
       }
@@ -7715,17 +7882,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private baseProviderAuthorityForSurface(
     surface: ManagedSurface,
-    expectedProviderPid: number | null = process.pid,
-    providerProcessHealth?: SurfAceProviderProcessHealth,
+    _expectedProviderPid: number | null = process.pid,
+    _providerProcessHealth?: SurfAceProviderProcessHealth,
   ): SurfAceProviderAuthorityDecision {
     const blockers: string[] = [];
-    const providerProcessBlockReason = this.providerProcessAuthorityBlockReason(
-      expectedProviderPid,
-      providerProcessHealth,
-    );
-    if (providerProcessBlockReason) {
-      blockers.push(providerProcessBlockReason);
-    }
     if (this.isStalePersistedSurfaceTombstone(surface.surfaceId)) {
       blockers.push("surface_tombstoned");
     }
@@ -7851,6 +8011,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.authorityAcceptedAt = null;
     surface.authorityAcceptedIdentityKey = null;
     surface.authorityRejectedReason = reason;
+  }
+
+  private canRepublishAuthorityOnReattempt(surface: ManagedSurface): boolean {
+    return (
+      this.hasAcceptedSurfaceTopology(surface) &&
+      this.hasVisibleAcceptedSurfaceTopology(surface) &&
+      surface.authorityRejectedReason === "window_label_mismatch" &&
+      (surface.client?.isOpen() ?? false) &&
+      surface.protocolFeatures.has(AUTHORITY_STATE_PROTOCOL_FEATURE) &&
+      surface.panes.size > 0 &&
+      this.visiblePanes(surface).length > 0
+    );
   }
 
   private hasVisibleConnectionDiagnostic(surface: ManagedSurface): boolean {
@@ -8433,11 +8605,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     screens: SurfAceScreenSummary[],
     expectedProviderPid: number | null,
   ): SurfAceScreenSummary[] {
-    const providerProcessHealth = this.currentProviderProcessHealth(expectedProviderPid);
-    const providerProcessBlockReason = this.providerProcessAuthorityBlockReason(
-      expectedProviderPid,
-      providerProcessHealth,
-    );
     const providerAuthorityProjection = this.buildProviderAuthorityProjection(
       this.persistentState,
       this.persistedRuntimeScreenIds,
@@ -8445,35 +8612,43 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       expectedProviderPid,
     );
     return screens.map((screen) => {
-      if (!providerProcessBlockReason) {
-        return {
-          ...screen,
-          _debug: screen._debug
-            ? {
-                ...screen._debug,
-                providerAuthorityProjection,
-              }
-            : screen._debug,
-        };
-      }
-      const blockers = [...new Set([providerProcessBlockReason, ...(screen.authority?.blockers ?? [])])];
-      const authority = {
-        actionable: false,
-        admitted: false,
-        blockers,
-        reason: providerProcessBlockReason,
-      };
+      const authorityBlockers = screen.authority?.blockers ?? [];
+      const durableBlockers = authorityBlockers.filter((blocker) => !PROVIDER_PROCESS_BLOCK_REASONS.has(blocker));
+      const processOnlyAuthority =
+        screen.authority?.actionable === false &&
+        (
+          (screen.authority.reason ? PROVIDER_PROCESS_BLOCK_REASONS.has(screen.authority.reason) : false) ||
+          authorityBlockers.some((blocker) => PROVIDER_PROCESS_BLOCK_REASONS.has(blocker))
+        ) &&
+        durableBlockers.length === 0;
+      const authority = processOnlyAuthority
+        ? {
+            actionable: true,
+            admitted: true,
+            blockers: [],
+            reason: null,
+          }
+        : durableBlockers.length !== authorityBlockers.length
+          ? {
+              actionable: false,
+              admitted: false,
+              blockers: durableBlockers,
+              reason: durableBlockers[0] ?? screen.authority.reason,
+            }
+          : screen.authority;
+      const connectionDiagnostics =
+        screen.connectionDiagnostics?.reason &&
+        PROVIDER_PROCESS_BLOCK_REASONS.has(screen.connectionDiagnostics.reason)
+          ? {
+              ...screen.connectionDiagnostics,
+              reason: null,
+            }
+          : screen.connectionDiagnostics;
       return {
         ...screen,
         authority,
-        connectionDiagnostics: {
-          ...screen.connectionDiagnostics,
-          reason: screen.connectionDiagnostics.reason ?? providerProcessBlockReason,
-        },
-        connectionState: screen.connectionState === "connected" ? "connecting" : screen.connectionState,
-        panes: [],
-        topology: null,
-        topologyRevision: 0,
+        connectionDiagnostics,
+        connectionState: processOnlyAuthority && screen.panes.length > 0 ? "connected" : screen.connectionState,
         _debug: screen._debug
           ? {
               ...screen._debug,
@@ -8525,7 +8700,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         (screen.connectionDiagnostics?.circuitOpen === true || screen.connectionDiagnostics?.givenUp === true);
       if (isDiagnosticOnly && !windowLabel) {
         windowLabel = "";
-      } else if (!windowLabel || usedWindowLabels.has(windowLabel)) {
+      } else if (!isProviderWindowLabel(windowLabel) || usedWindowLabels.has(windowLabel)) {
         windowLabel = nextAvailableWindowLabel();
       }
       if (windowLabel) {
@@ -8943,6 +9118,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.reattemptConnections(command.input);
       case "relinquish":
         return await this.relinquish(command.input);
+      case "restoreTarget":
+        return await this.restoreTarget(command.input);
       case "snapshot":
         return await this.snapshot(command.input);
       case "split":
@@ -9758,6 +9935,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
+    response = await this.maybeRecoverSameInstallOwnershipLock(
+      surface,
+      response,
+      resumeSessionId,
+      sendPairRequest,
+    );
+
     if (isErrorResponse(response)) {
       if (isOwnershipLockResponse(response)) {
         const ownershipLockCode = response.error.code === "busy" ? "busy" : "invalid_resume";
@@ -9864,6 +10048,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return this.reclaimSelfOwnershipLock(surface, response, resumeSessionId, sendPairRequest);
   }
 
+  private async maybeRecoverSameInstallOwnershipLock(
+    surface: ManagedSurface,
+    response: Response,
+    resumeSessionId: SessionId | null,
+    sendPairRequest: (
+      takeover: boolean,
+      requestedResumeSessionId: SessionId | null,
+    ) => Promise<Response>,
+  ): Promise<Response> {
+    if (
+      !isResumeSessionMismatch(response) ||
+      resumeSessionId ||
+      surface.hasPairedInGatewaySession ||
+      this.hasDurableDifferentProviderOwnership(surface) ||
+      !this.hasCurrentDiscoveryEndpoint(surface)
+    ) {
+      return response;
+    }
+    return this.reclaimSelfOwnershipLock(surface, response, null, sendPairRequest);
+  }
+
   private isKnownSelfOwnedSurface(surface: ManagedSurface): boolean {
     if (
       this.livePairedSelfRediscoveredSurfaceIds.has(surface.surfaceId) &&
@@ -9887,6 +10092,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private hasTrustedLineageSelfOwnership(surface: ManagedSurface): boolean {
     return this.ownershipRecoveryPolicy.hasTrustedForeignLineageSelfOwnership(
+      this.persistentState,
+      surface.surfaceId,
+    );
+  }
+
+  private hasDurableDifferentProviderOwnership(surface: ManagedSurface): boolean {
+    return this.ownershipRecoveryPolicy.hasDurableDifferentProviderOwnership(
       this.persistentState,
       surface.surfaceId,
     );
@@ -10905,8 +11117,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       const sameTargetIdentity =
         target.targetId === previousCurrentTargetId ||
         target.targetId === pane.staleTargetId;
-      if (sameTargetIdentity && isLegacyPaneLineageId(previousLineageId)) {
+      if (sameTargetIdentity) {
         target.paneLineageId = nextLineageId;
+        if (target.currentState === "stale") {
+          target.currentState = "current";
+          delete target.supersededByTargetId;
+        }
+        if (target.targetId === previousCurrentTargetId) {
+          pane.currentTargetId = target.targetId;
+        }
+        if (pane.staleTargetId === target.targetId) {
+          pane.staleTargetId = null;
+        }
+        if (pane.lastRestoreBlockedReason === "restore_blocked_stale_target") {
+          pane.lastRestoreBlockedReason = null;
+        }
       } else if (
         (!isLegacyPaneLineageId(previousLineageId) || !sameTargetIdentity) &&
         target.currentState === "current" &&
@@ -11092,16 +11317,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       previousSessionId: SessionId | string | null;
     },
   ): boolean {
+    void previousOwnership;
     if (
       !pane ||
       target.currentState !== "current" ||
-      target.targetKind !== "browser_url" ||
       target.surfaceId !== surface.surfaceId ||
       target.paneLineageId !== pane.paneLineageId ||
-      !this.isTrustedProviderLineageId(target.ownerProviderId) ||
-      !previousOwnership.previousSessionId ||
-      target.ownershipSessionId !== previousOwnership.previousSessionId ||
-      target.ownershipEpoch !== previousOwnership.previousOwnershipEpoch
+      !this.isTrustedProviderLineageId(target.ownerProviderId)
     ) {
       return false;
     }

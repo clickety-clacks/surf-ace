@@ -52,7 +52,7 @@ struct SurfAceProviderBootstrapIdentity {
 struct SurfAceAuthorityPaneIdentity {
     let paneId: Int
     let paneLabel: Int
-    let paneLineageId: String?
+    let paneLineageId: String
 }
 
 func surfAceValidatedProviderBootstrapIdentity(from payload: [String: Any]) -> SurfAceProviderBootstrapIdentity? {
@@ -89,28 +89,48 @@ func surfAceAuthorityStateRejectionReason(
         lockSessionId != sessionId {
         return "session_identity_mismatch"
     }
-    if payload["windowLabel"] as? String != windowLabel {
+    if surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]) == nil {
         return "window_label_mismatch"
     }
-    guard let payloadPanes = payload["panes"] as? [[String: Any]],
-          payloadPanes.count == panes.count else {
+    guard surfAceProviderAuthorityPaneIdentityMap(from: payload, matching: panes) != nil else {
         return "pane_identity_mismatch"
-    }
-    let panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
-    var seenPaneIds = Set<Int>()
-    for candidate in payloadPanes {
-        guard let paneId = candidate["paneId"] as? Int,
-              seenPaneIds.insert(paneId).inserted,
-              let pane = panesById[paneId],
-              candidate["paneLabel"] as? Int == pane.paneLabel,
-              candidate["paneLineageId"] as? String == pane.paneLineageId else {
-            return "pane_identity_mismatch"
-        }
     }
     if payload["actionable"] as? Bool != true {
         return payload["reason"] as? String ?? "provider_not_actionable"
     }
     return nil
+}
+
+func surfAceProviderAuthorityPaneIdentityMap(
+    from payload: [String: Any],
+    matching panes: [SurfAceAuthorityPaneIdentity]
+) -> [Int: SurfAceAuthorityPaneIdentity]? {
+    guard let payloadPanes = payload["panes"] as? [[String: Any]],
+          payloadPanes.count == panes.count else {
+        return nil
+    }
+    let paneIds = Set(panes.map { $0.paneId })
+    var seenPaneIds = Set<Int>()
+    var seenPaneLabels = Set<Int>()
+    var identitiesByPaneId: [Int: SurfAceAuthorityPaneIdentity] = [:]
+    for candidate in payloadPanes {
+        guard let paneId = candidate["paneId"] as? Int,
+              seenPaneIds.insert(paneId).inserted,
+              paneIds.contains(paneId),
+              let paneLabel = candidate["paneLabel"] as? Int,
+              paneLabel > 0,
+              seenPaneLabels.insert(paneLabel).inserted,
+              let paneLineageId = candidate["paneLineageId"] as? String,
+              !paneLineageId.isEmpty else {
+            return nil
+        }
+        identitiesByPaneId[paneId] = SurfAceAuthorityPaneIdentity(
+            paneId: paneId,
+            paneLabel: paneLabel,
+            paneLineageId: paneLineageId
+        )
+    }
+    return identitiesByPaneId
 }
 
 actor SurfAceOutboundSender {
@@ -1502,7 +1522,9 @@ final class SurfAceRuntime {
         surfAceGatewayLog(
             "event=pair_commit \(surfAceDiagnosticFields([("provider_id", plan.session.providerId), ("resumed", plan.resumed), ("session_id", plan.session.sessionId), ("surface_id", plan.surfaceId)]))"
         )
-        if !plan.resumed {
+        if plan.resumed {
+            applyProviderWindowLabel(surface: surface, windowLabel: plan.providerWindowLabel)
+        } else {
             applyProviderBootstrapTopology(
                 surface: surface,
                 windowLabel: plan.providerWindowLabel,
@@ -2415,6 +2437,31 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "authority.state", id: id, code: "not_paired", message: "pair.request required")
         }
 
+        let sessionIdentityMatches = payload["surfaceId"] as? String == surfaceId &&
+            payload["providerId"] as? String == session.providerId &&
+            payload["sessionId"] as? String == session.sessionId &&
+            payload["ownershipEpoch"] as? Int == session.ownershipEpoch &&
+            ownershipLock.providerId == session.providerId &&
+            ownershipLock.sessionId == session.sessionId
+        if sessionIdentityMatches,
+           let providerWindowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
+           providerWindowLabel != surface.windowLabel {
+            applyProviderWindowLabel(surface: surface, windowLabel: providerWindowLabel)
+        }
+        if sessionIdentityMatches,
+           let providerPaneIdentities = surfAceProviderAuthorityPaneIdentityMap(
+            from: payload,
+            matching: surface.panes.map {
+                SurfAceAuthorityPaneIdentity(
+                    paneId: $0.paneId,
+                    paneLabel: $0.paneLabel,
+                    paneLineageId: $0.paneLineageId
+                )
+            }
+           ) {
+            applyProviderAuthorityPaneIdentities(surface: surface, providerPaneIdentities: providerPaneIdentities)
+        }
+
         let reason = surfAceAuthorityStateRejectionReason(
             payload: payload,
             surfaceId: surfaceId,
@@ -2947,10 +2994,7 @@ final class SurfAceRuntime {
         initialPaneId: Int,
         initialPaneLabel: Int
     ) {
-        if surface.windowLabel != windowLabel {
-            surface.windowLabel = windowLabel
-            surface.name = "\(screenName) \(windowLabel.uppercased())"
-        }
+        applyProviderWindowLabel(surface: surface, windowLabel: windowLabel)
 
         guard initialPaneId > 0, initialPaneLabel > 0, !surface.providerTopologyInitialized else {
             return
@@ -2972,6 +3016,37 @@ final class SurfAceRuntime {
         ensureActiveKeyboardPane(surface: surface)
         surface.providerTopologyInitialized = true
         persistSurfaceTopology(surfaceId: surface.surfaceId)
+    }
+
+    private func applyProviderWindowLabel(surface: SurfAceSurfaceModel, windowLabel: String) {
+        guard surface.windowLabel != windowLabel else { return }
+        surface.windowLabel = windowLabel
+        surface.name = "\(screenName) \(windowLabel.uppercased())"
+        persistSurfaceTopology(surfaceId: surface.surfaceId)
+    }
+
+    private func applyProviderAuthorityPaneIdentities(
+        surface: SurfAceSurfaceModel,
+        providerPaneIdentities: [Int: SurfAceAuthorityPaneIdentity]
+    ) {
+        var changed = false
+        for pane in surface.panes {
+            guard let providerPane = providerPaneIdentities[pane.paneId] else {
+                continue
+            }
+            if pane.paneLabel != providerPane.paneLabel {
+                pane.paneLabel = providerPane.paneLabel
+                changed = true
+            }
+            if pane.paneLineageId != providerPane.paneLineageId {
+                pane.paneLineageId = providerPane.paneLineageId
+                changed = true
+            }
+        }
+        if changed {
+            surface.topologyEpoch += 1
+            persistSurfaceTopology(surfaceId: surface.surfaceId)
+        }
     }
 
     private func ensureActiveKeyboardPane(surface: SurfAceSurfaceModel) {

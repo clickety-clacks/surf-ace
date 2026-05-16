@@ -1680,7 +1680,8 @@
                 "additionalProperties": false,
                 "required": [
                   "paneId",
-                  "paneLabel"
+                  "paneLabel",
+                  "paneLineageId"
                 ],
                 "properties": {
                   "paneId": {
