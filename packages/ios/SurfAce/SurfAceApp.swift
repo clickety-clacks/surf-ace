@@ -96,12 +96,38 @@ struct SurfAceApp: App {
     var body: some Scene {
         WindowGroup(id: SurfAceSceneID.mainWindow) {
             SurfAceRootView(runtime: runtime)
+                .surfAceSpatialWindowContentSizing()
                 .task {
                     await runtime.start()
                 }
         }
+        .surfAceSpatialWindowSizing()
         .commands {
             SurfAceWindowCommands()
         }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func surfAceSpatialWindowContentSizing() -> some View {
+        #if os(visionOS)
+        self.frame(minWidth: 480, minHeight: 320)
+        #else
+        self
+        #endif
+    }
+}
+
+private extension Scene {
+    @SceneBuilder
+    func surfAceSpatialWindowSizing() -> some Scene {
+        #if os(visionOS)
+        self
+            .defaultSize(width: 1200, height: 800)
+            .windowResizability(.contentMinSize)
+        #else
+        self
+        #endif
     }
 }

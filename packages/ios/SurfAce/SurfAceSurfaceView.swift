@@ -760,7 +760,7 @@ private struct SurfAceGlassButtonStyle: ButtonStyle {
             .foregroundStyle(.white)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .surfAceGlassBackground(interactive: true)
             .overlay {
                 Capsule()
                     .strokeBorder(.white.opacity(configuration.isPressed ? 0.32 : 0.18), lineWidth: 1)
@@ -774,7 +774,7 @@ private struct SurfAceControlPillChrome: ViewModifier {
     func body(content: Content) -> some View {
         content
             .padding(6)
-            .glassEffect(.regular, in: Capsule())
+            .surfAceGlassBackground(interactive: false)
             .overlay {
                 Capsule()
                     .strokeBorder(.white.opacity(0.18), lineWidth: 1)
@@ -785,6 +785,19 @@ private struct SurfAceControlPillChrome: ViewModifier {
 private extension View {
     func surfAceControlPillChrome() -> some View {
         modifier(SurfAceControlPillChrome())
+    }
+
+    @ViewBuilder
+    func surfAceGlassBackground(interactive: Bool) -> some View {
+        #if os(visionOS)
+        self.background(.regularMaterial, in: Capsule())
+        #else
+        if interactive {
+            self.glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            self.glassEffect(.regular, in: Capsule())
+        }
+        #endif
     }
 }
 
@@ -1471,7 +1484,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+        #if !os(visionOS)
         webView.scrollView.keyboardDismissMode = .onDrag
+        #endif
 
         pdfView.translatesAutoresizingMaskIntoConstraints = false
         pdfView.backgroundColor = .black
