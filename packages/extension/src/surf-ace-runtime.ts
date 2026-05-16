@@ -9935,6 +9935,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
+    response = await this.maybeRecoverSameInstallOwnershipLock(
+      surface,
+      response,
+      resumeSessionId,
+      sendPairRequest,
+    );
+
     if (isErrorResponse(response)) {
       if (isOwnershipLockResponse(response)) {
         const ownershipLockCode = response.error.code === "busy" ? "busy" : "invalid_resume";
@@ -10041,6 +10048,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return this.reclaimSelfOwnershipLock(surface, response, resumeSessionId, sendPairRequest);
   }
 
+  private async maybeRecoverSameInstallOwnershipLock(
+    surface: ManagedSurface,
+    response: Response,
+    resumeSessionId: SessionId | null,
+    sendPairRequest: (
+      takeover: boolean,
+      requestedResumeSessionId: SessionId | null,
+    ) => Promise<Response>,
+  ): Promise<Response> {
+    if (
+      !isResumeSessionMismatch(response) ||
+      resumeSessionId ||
+      surface.hasPairedInGatewaySession ||
+      this.hasDurableDifferentProviderOwnership(surface) ||
+      !this.hasCurrentDiscoveryEndpoint(surface)
+    ) {
+      return response;
+    }
+    return this.reclaimSelfOwnershipLock(surface, response, null, sendPairRequest);
+  }
+
   private isKnownSelfOwnedSurface(surface: ManagedSurface): boolean {
     if (
       this.livePairedSelfRediscoveredSurfaceIds.has(surface.surfaceId) &&
@@ -10064,6 +10092,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private hasTrustedLineageSelfOwnership(surface: ManagedSurface): boolean {
     return this.ownershipRecoveryPolicy.hasTrustedForeignLineageSelfOwnership(
+      this.persistentState,
+      surface.surfaceId,
+    );
+  }
+
+  private hasDurableDifferentProviderOwnership(surface: ManagedSurface): boolean {
+    return this.ownershipRecoveryPolicy.hasDurableDifferentProviderOwnership(
       this.persistentState,
       surface.surfaceId,
     );

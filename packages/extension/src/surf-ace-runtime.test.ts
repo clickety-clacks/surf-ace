@@ -86,6 +86,32 @@ test("ownership recovery policy evaluates self-reclaim without file I/O", () => 
           { ownerProviderId: "pv_legacy", ownershipSessionId: "sa_legacy" },
         ],
       },
+      sf_foreign_current: {
+        paneTargets: {
+          pl_current: { currentTargetId: "tg_foreign_current" },
+        },
+        targetRecords: [
+          {
+            currentState: "current",
+            ownerProviderId: "pv_foreign",
+            ownershipSessionId: "sa_foreign_current",
+            targetId: "tg_foreign_current",
+          },
+        ],
+      },
+      sf_foreign_stale: {
+        paneTargets: {
+          pl_stale: { currentTargetId: null },
+        },
+        targetRecords: [
+          {
+            currentState: "stale",
+            ownerProviderId: "pv_foreign",
+            ownershipSessionId: "sa_foreign_stale",
+            targetId: "tg_foreign_stale",
+          },
+        ],
+      },
     },
   };
 
@@ -93,6 +119,9 @@ test("ownership recovery policy evaluates self-reclaim without file I/O", () => 
   assert.equal(policy.isKnownSelfOwnedSurface(state, "sf_relinquished", false), false);
   assert.equal(policy.hasTrustedForeignLineageSelfOwnership(state, "sf_legacy"), true);
   assert.equal(policy.hasTrustedForeignLineageSelfOwnership(state, "sf_foreign"), false);
+  assert.equal(policy.hasDurableDifferentProviderOwnership(state, "sf_foreign"), true);
+  assert.equal(policy.hasDurableDifferentProviderOwnership(state, "sf_foreign_current"), true);
+  assert.equal(policy.hasDurableDifferentProviderOwnership(state, "sf_foreign_stale"), false);
   assert.equal(policy.durableSelfReclaimResumeSessionId(state, "sf_legacy", null), "sa_legacy");
   assert.equal(policy.durableSelfReclaimResumeSessionId(state, "sf_active", "sa_live"), "sa_live");
 });
@@ -13798,6 +13827,153 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("rediscovered nil-session active ownership lock self-reclaims without opening circuit", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      const providerId = server.pairAttemptDetails[0]?.providerId;
+      assert.equal(typeof providerId, "string");
+
+      surface.hasPairedInGatewaySession = false;
+      surface.sessionId = null;
+      surface.localOwnership = null;
+      delete internalRuntime.persistentState.selfOwnedSurfaceIds?.[server.surfaceId];
+      delete internalRuntime.persistentState.targetStateBySurfaceId?.[server.surfaceId];
+      server.lockedProviderId = providerId ?? null;
+      server.lockedSessionId = "sa_restart_active_lock";
+
+      await surface.client.close(1000, "test_nil_session_active_lock_self_reclaim");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.resumeSessionId),
+        [null, null, null],
+      );
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.takeover),
+        [false, false, true],
+      );
+      assert.equal(surface.autoRetryEnabled, true);
+      assert.equal(surface.connectionCircuitOpenedAt, null);
+      assert.equal(surface.unreachableFailures, 0);
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      assert.equal(screen.connectionState, "connected");
+      assert.equal(screen.authority.actionable, true);
+      assert.equal(screen._debug.ownershipRecovery, "active");
+      assert.ok(
+        warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
+      );
+    });
+  });
+
+  await t.test("durable different-provider target proof blocks active-lock self-reclaim", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      const providerId = server.pairAttemptDetails[0]?.providerId;
+      assert.equal(typeof providerId, "string");
+
+      surface.hasPairedInGatewaySession = false;
+      surface.sessionId = null;
+      surface.localOwnership = null;
+      delete internalRuntime.persistentState.selfOwnedSurfaceIds?.[server.surfaceId];
+      internalRuntime.persistentState.targetStateBySurfaceId = {
+        [server.surfaceId]: {
+          paneTargets: {
+            pl_different_install: {
+              currentTargetId: "tg_different_install",
+            },
+          },
+          registeredTargetIdsByIdempotencyKey: {},
+          targetRecords: [
+            {
+              currentState: "current",
+              ownerProviderId: "pv_different_install",
+              ownershipSessionId: "sa_different_install",
+              targetId: "tg_different_install",
+            },
+          ],
+        },
+      };
+      server.lockUntilNewProviderIdCode = "invalid_resume";
+      server.lockUntilNewProviderIdProviderId = providerId ?? null;
+
+      await surface.client.close(1000, "test_durable_different_provider_blocks_active_lock_reclaim");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.resumeSessionId),
+        [null, null],
+      );
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
+        [false, false],
+      );
+    });
+  });
+
+  await t.test("stale different-provider target record does not block active-lock self-reclaim", async () => {
+    await withRuntimeHarness(async ({ runtime, server, warnings }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      const providerId = server.pairAttemptDetails[0]?.providerId;
+      assert.equal(typeof providerId, "string");
+
+      surface.hasPairedInGatewaySession = false;
+      surface.sessionId = null;
+      surface.localOwnership = null;
+      delete internalRuntime.persistentState.selfOwnedSurfaceIds?.[server.surfaceId];
+      internalRuntime.persistentState.targetStateBySurfaceId = {
+        [server.surfaceId]: {
+          paneTargets: {
+            pl_stale_different_install: {
+              currentTargetId: null,
+            },
+          },
+          registeredTargetIdsByIdempotencyKey: {},
+          targetRecords: [
+            {
+              currentState: "stale",
+              ownerProviderId: "pv_different_install",
+              ownershipSessionId: "sa_different_install",
+              targetId: "tg_stale_different_install",
+            },
+          ],
+        },
+      };
+      server.lockedProviderId = providerId ?? null;
+      server.lockedSessionId = "sa_restart_active_lock";
+
+      await surface.client.close(1000, "test_stale_different_provider_does_not_block_active_lock_reclaim");
+
+      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.deepEqual(
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.takeover),
+        [false, false, true],
+      );
+      assert.equal(surface.autoRetryEnabled, true);
+      assert.equal(surface.connectionCircuitOpenedAt, null);
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      assert.equal(screen.authority.actionable, true);
+      assert.ok(
+        warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
+      );
+    });
+  });
+
   await t.test("cold-start invalid_resume ignores legacy endpoint mapping state without takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
@@ -13829,7 +14005,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("cold-start invalid_resume with persisted target state but no local ownership provenance does not self-reclaim", async () => {
+  await t.test("cold-start invalid_resume with target state but no different-provider proof self-reclaims", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -13853,23 +14029,24 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       await surface.client.close(1000, "test_cold_start_invalid_resume_self_reclaim");
 
-      await waitFor(() => server.pairAttemptDetails.length >= 3, 12_000);
+      await waitFor(() => server.pairAttemptDetails.length >= 4, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
       assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.resumeSessionId),
-        [null, null],
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.resumeSessionId),
+        [null, null, null],
       );
       assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.takeover),
-        [false, false],
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.takeover),
+        [false, false, true],
       );
       assert.deepEqual(
-        server.pairAttemptDetails.slice(1, 3).map((attempt) => attempt.providerId),
-        [providerId, providerId],
+        server.pairAttemptDetails.slice(1, 4).map((attempt) => attempt.providerId),
+        [providerId, providerId, providerId],
       );
       assert.ok(
         warnings.some((warning) =>
-          warning.includes("ownership_self_reclaim_blocked") &&
+          warning.includes("ownership_self_reclaim") &&
           warning.includes("reason=invalid_resume") &&
           warning.includes(server.surfaceId),
         ),
