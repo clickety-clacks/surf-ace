@@ -3119,6 +3119,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         this.clearSurfaceResumeState(surface);
       }
       this.resetSurfaceConnectionCircuit(surface, "operator reattempt", { enableRetry: !surface.stopRequested });
+      if (this.canRepublishAuthorityOnReattempt(surface)) {
+        surface.connectionState = "connected";
+        if (await this.publishAuthorityState(surface)) {
+          this.startHeartbeat(surface);
+        }
+      }
       this.ensureSurfaceWorker(surface);
       this.wakeSurfaceRetry(surface);
       reattemptedSurfaces.push({
@@ -8005,6 +8011,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.authorityAcceptedAt = null;
     surface.authorityAcceptedIdentityKey = null;
     surface.authorityRejectedReason = reason;
+  }
+
+  private canRepublishAuthorityOnReattempt(surface: ManagedSurface): boolean {
+    return (
+      this.hasAcceptedSurfaceTopology(surface) &&
+      this.hasVisibleAcceptedSurfaceTopology(surface) &&
+      surface.authorityRejectedReason === "window_label_mismatch" &&
+      (surface.client?.isOpen() ?? false) &&
+      surface.protocolFeatures.has(AUTHORITY_STATE_PROTOCOL_FEATURE) &&
+      surface.panes.size > 0 &&
+      this.visiblePanes(surface).length > 0
+    );
   }
 
   private hasVisibleConnectionDiagnostic(surface: ManagedSurface): boolean {

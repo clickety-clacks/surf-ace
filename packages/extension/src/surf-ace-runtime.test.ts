@@ -172,6 +172,7 @@ class FakeSurfAceWsServer {
     surfaceId: string;
     windowLabel: string;
   }> = [];
+  rejectAuthorityStateReason = "test_authority_rejected";
   targetApplyErrorCode: string | null = null;
   targetApplyErrorResponsesRemaining = Number.POSITIVE_INFINITY;
   targetApplyDelayMs = 0;
@@ -1473,7 +1474,7 @@ class FakeSurfAceWsServer {
           JSON.stringify(
             this.response(message.id, "authority.state", {
               accepted: (message.payload?.actionable as boolean | undefined) === true && !this.rejectAuthorityState,
-              reason: this.rejectAuthorityState ? "test_authority_rejected" : null,
+              reason: this.rejectAuthorityState ? this.rejectAuthorityStateReason : null,
             }),
           ),
         );
@@ -10469,6 +10470,39 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(surface.localOwnership, null);
       assert.equal(surface.connectionCircuitOpenedAt, null);
       assert.equal(surface.autoRetryEnabled, true);
+    });
+  });
+
+  await t.test("operator reattempt-connections republishes same-provider authority after window label mismatch", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.rejectAuthorityState = true;
+        server.rejectAuthorityStateReason = "window_label_mismatch";
+      },
+      waitForAuthority: false,
+      run: async ({ runtime, server }) => {
+        await waitFor(() => server.authorityStateRequests.some((request) => request.actionable), 12_000);
+
+        let screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        assert.equal(screen.connectionState, "connecting");
+        assert.equal(screen.authority.actionable, false);
+        assert.equal(screen.authority.reason, "window_label_mismatch");
+
+        const authorityCountBeforeReattempt = server.authorityStateRequests.length;
+        server.rejectAuthorityState = false;
+
+        const result = await runtime.reattemptConnections({ fingerprint: server.surfaceId });
+        assert.equal(result.surfaces[0]?.fingerprint, server.surfaceId);
+        await waitFor(() => server.authorityStateRequests.length > authorityCountBeforeReattempt, 12_000);
+
+        screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        assert.equal(screen.connectionState, "connected");
+        assert.equal(screen.authority.actionable, true);
+        assert.equal(screen.authority.reason, null);
+        assert.equal(screen.authority.blockers.length, 0);
+      },
     });
   });
 
