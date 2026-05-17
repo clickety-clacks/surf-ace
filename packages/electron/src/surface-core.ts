@@ -1181,6 +1181,7 @@ export class SurfaceCore {
   pairState(surfaceId: string): PairResponse["payload"]["state"] {
     const surface = this.getSurface(surfaceId);
     return {
+      layout: surfaceLayoutToTopologyLayout(collapseLayout(surface.layout)),
       panes: surface.paneOrder.map((paneId) => {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
@@ -1193,6 +1194,7 @@ export class SurfaceCore {
           paneLineageId: pane.paneLineageId,
         };
       }),
+      topologyRevision: surface.topologyRevision as TopologyRevision,
     };
   }
 

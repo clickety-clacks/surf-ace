@@ -624,6 +624,8 @@ export type PairResponse = ResponseBase<"pair.request"> & {
         currentRevision: Revision;
         contentType: ContentType | null;
       }>;
+      layout: TopologyLayoutNode;
+      topologyRevision: TopologyRevision;
     };
   };
 };

@@ -61,6 +61,8 @@ type TestSurfaceState = {
   name: string;
   panes: Map<number, TestPane>;
   surfaceId: string;
+  topologyLayout: Record<string, unknown>;
+  topologyRevision: number;
   viewport: {
     height: number;
     scale: number;
@@ -322,6 +324,8 @@ class FakeSurfAceWsServer {
       name: "Surface A",
       panes: this.panes,
       surfaceId: this.surfaceId,
+      topologyLayout: { paneId: this.initialRemotePaneId, type: "pane" },
+      topologyRevision: 0,
       viewport: {
         height: 768,
         scale: 2,
@@ -356,6 +360,17 @@ class FakeSurfAceWsServer {
     });
   }
 
+  setTopologyLayout(
+    layout: Record<string, unknown>,
+    topologyRevision = 1,
+    surfaceId = this.surfaceId,
+  ): void {
+    const surface = this.requireSurface(surfaceId);
+    surface.topologyLayout = structuredClone(layout);
+    surface.topologyRevision = topologyRevision;
+    this.applyTopologyFrames(surface, layout);
+  }
+
   resetToSinglePane(paneId = this.initialRemotePaneId): void {
     this.panes.clear();
     this.panes.set(paneId, {
@@ -378,6 +393,7 @@ class FakeSurfAceWsServer {
         width: 1024,
       },
     });
+    this.setTopologyLayout({ paneId, type: "pane" }, 0);
   }
 
   async close(): Promise<void> {
@@ -441,6 +457,8 @@ class FakeSurfAceWsServer {
         ],
       ]),
       surfaceId: options.surfaceId,
+      topologyLayout: { paneId: initialRemotePaneId, type: "pane" },
+      topologyRevision: 0,
       viewport,
     });
   }
@@ -451,6 +469,39 @@ class FakeSurfAceWsServer {
 
   markSurfacePairedForList(surfaceId: string): void {
     this.pairedSocketsBySurfaceId.set(surfaceId, {} as import("ws").WebSocket);
+  }
+
+  private topologyLayoutForPairPanes(panes: Array<{ paneId: number }>): Record<string, unknown> {
+    if (panes.length === 1) {
+      return { paneId: panes[0]!.paneId, type: "pane" };
+    }
+    return {
+      children: panes.map((pane) => ({ paneId: pane.paneId, type: "pane" })),
+      direction: "horizontal",
+      type: "split",
+    };
+  }
+
+  private topologyLayoutPaneIds(layout: Record<string, unknown>): number[] {
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+    if (layout.type === "pane") {
+      return typeof layout.paneId === "number" ? [layout.paneId] : [];
+    }
+    if (layout.type === "split" && Array.isArray(layout.children)) {
+      return layout.children.flatMap((child) =>
+        isRecord(child) ? this.topologyLayoutPaneIds(child) : [],
+      );
+    }
+    return [];
+  }
+
+  private topologyLayoutMatchesPairPanes(layout: Record<string, unknown>, panes: Array<{ paneId: number }>): boolean {
+    const layoutPaneIds = this.topologyLayoutPaneIds(layout);
+    const layoutPaneIdSet = new Set(layoutPaneIds);
+    return layoutPaneIds.length === panes.length &&
+      layoutPaneIdSet.size === layoutPaneIds.length &&
+      panes.every((pane) => layoutPaneIdSet.has(pane.paneId));
   }
 
   setSurfaceViewport(viewport: { height: number; scale: number; width: number }): void {
@@ -613,6 +664,12 @@ class FakeSurfAceWsServer {
       revision: number;
     },
   ): void {
+    const surface = this.surfaces.get(options.fromSurfaceId ?? this.surfaceId);
+    const pane = surface?.panes.get(paneId);
+    if (pane) {
+      pane.contentId = options.contentId;
+      pane.revision = options.revision;
+    }
     this.pairedSocketFor(options.fromSurfaceId ?? this.surfaceId)?.send(
       JSON.stringify({
         eventId: `ev_${this.nextEventId++}`,
@@ -851,10 +908,10 @@ class FakeSurfAceWsServer {
           }
         }
         const requestedSurface = this.requireSurface(String(message.payload?.surfaceId ?? this.surfaceId));
-        const pairResponsePanes = this.forceEmptyPairResponsePanes
-          ? []
-          : [...requestedSurface.panes.entries()].map(([paneId, pane]) => {
-              const paneState: Record<string, unknown> = {
+	        const pairResponsePanes = this.forceEmptyPairResponsePanes
+	          ? []
+	          : [...requestedSurface.panes.entries()].map(([paneId, pane]) => {
+	              const paneState: Record<string, unknown> = {
               contentType: pane.contentType,
               currentContentId: pane.contentId,
               currentRevision: pane.revision,
@@ -863,10 +920,13 @@ class FakeSurfAceWsServer {
               };
               if (!this.omitPairPaneLabel) {
                 paneState.paneLabel = pane.paneLabel;
-              }
-              return paneState;
-            });
-        this.pairedSocketsBySurfaceId.set(requestedSurface.surfaceId, socket);
+	              }
+	              return paneState;
+	            });
+        const pairStateLayout = this.topologyLayoutMatchesPairPanes(requestedSurface.topologyLayout, pairResponsePanes)
+          ? requestedSurface.topologyLayout
+          : this.topologyLayoutForPairPanes(pairResponsePanes);
+	        this.pairedSocketsBySurfaceId.set(requestedSurface.surfaceId, socket);
         this.socketSurfaceIds.set(socket, requestedSurface.surfaceId);
         if (requestedSurface.surfaceId === this.surfaceId) {
           this.pairedSocket = socket;
@@ -916,10 +976,12 @@ class FakeSurfAceWsServer {
               },
               ownershipEpoch: this.pairResponseOwnershipEpoch,
               resumed: pairResponseResumed,
-              sessionId: pairResponseSessionId,
-              state: {
-                panes: pairResponsePanes,
-              },
+	              sessionId: pairResponseSessionId,
+	              state: {
+	                layout: structuredClone(pairStateLayout),
+	                panes: pairResponsePanes,
+	                topologyRevision: requestedSurface.topologyRevision,
+	              },
               surfaceId: requestedSurface.surfaceId,
               surfaceName: requestedSurface.name,
               viewport: requestedSurface.viewport,
@@ -1010,6 +1072,8 @@ class FakeSurfAceWsServer {
             viewport: previousPane?.viewport ?? { ...targetSurface.viewport },
           });
         }
+        targetSurface.topologyLayout = structuredClone(message.payload?.layout) as Record<string, unknown>;
+        targetSurface.topologyRevision = Number(message.payload?.topologyRevision ?? 0);
         this.applyTopologyFrames(targetSurface, message.payload?.layout);
         socket.send(
           JSON.stringify(
@@ -8347,7 +8411,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("extension-owned topology is re-applied after reconnect instead of importing collapsed surface panes", async () => {
+  await t.test("pair reconnect imports authoritative provider topology instead of replaying stale local split", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const split = await runtime.split({
@@ -8393,32 +8457,651 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         revision: 0,
         viewport: { height: 768, scale: 2, width: 1024 },
       });
+      server.setTopologyLayout({ paneId: server.initialRemotePaneId, type: "pane" }, 9);
 
       const initialTopologyApplyCount = server.topologyApplyRequests.length;
       const initialContentApplyCount = server.contentSetRequests.length;
       await surface.client.close(1000, "test_authoritative_topology_reconnect");
 
       await waitFor(() => server.pairRequests.length >= 2, 12_000);
-      await waitFor(() => server.topologyApplyRequests.length > initialTopologyApplyCount, 12_000);
       await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
-      const lastTopologyApply = server.topologyApplyRequests.at(-1);
-      assert.deepEqual(lastTopologyApply?.paneLabels, [1, 2, 3]);
-      assert.deepEqual(lastTopologyApply?.paneIds, [server.initialRemotePaneId, 42, 43]);
-
-      await waitFor(() => server.contentSetRequests.length >= initialContentApplyCount + 2, 12_000);
-      const repushedContentIds = server.contentSetRequests.slice(-2).map((request) => request.contentId);
-      assert.deepEqual(repushedContentIds.sort(), [firstPush.contentId, secondPush.contentId].sort());
+      assert.equal(
+        server.topologyApplyRequests
+          .slice(initialTopologyApplyCount)
+          .some((request) => request.paneIds.length > 1),
+        false,
+      );
+      assert.equal(
+        server.contentSetRequests.length,
+        initialContentApplyCount,
+        JSON.stringify(server.contentSetRequests.map((request) => ({
+          contentId: request.contentId,
+          contentType: request.contentType,
+          revision: request.revision,
+        }))),
+      );
 
       const screens = await runtime.listScreens();
-      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 2, 3]);
-      assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, firstPush.contentId);
-      assert.equal(screens[0]?.panes[1]?.activeContent?.contentId, secondPush.contentId);
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1]);
+      assert.equal(screens[0]?.topologyRevision, 9);
+      assert.notEqual(screens[0]?.panes[0]?.activeContent?.contentId, firstPush.contentId);
+      assert.notEqual(screens[0]?.panes[0]?.activeContent?.contentId, secondPush.contentId);
     });
   });
 
-  await t.test("history navigation updates provider-owned visible content for reconnect repush", async () => {
+  await t.test("pair reconnect does not replay stale target or restart content over provider-cleared panes", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        await runtime.push({
+          content: "https://example.com/stale-before-pair",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        assert.ok(surface.client);
+        const pane = surface.panes.get(firstPaneId);
+        assert.ok(pane);
+        const target = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "browser_url");
+        assert.ok(target);
+        internalRuntime.captureSurfaceTargetState(surface);
+        internalRuntime.restartContentBySurface.set(server.surfaceId, [
+          {
+            contentId: "ct_stale_restart_pair_import",
+            contentType: "html",
+            contentValue: { html: "<p>stale restart</p>" },
+            display: null,
+            historyOwnerToken: "hot_stale_restart_pair_import",
+            paneLabel: pane.paneLabel,
+            remotePaneId: Number(pane.remotePaneId),
+            revision: 1,
+            sessionKey: "agent:test:stale-restart-pair-import",
+          },
+        ]);
+
+        server.panes.clear();
+        server.panes.set(server.initialRemotePaneId, {
+          contentId: null,
+          contentType: null,
+          drawings: [],
+          frame: { height: 768, width: 1024, x: 0, y: 0 },
+          name: null,
+          paneLabel: 1,
+          paneLineageId: pane.paneLineageId,
+          revision: 0,
+          viewport: { height: 768, scale: 2, width: 1024 },
+        });
+        server.setTopologyLayout({ paneId: server.initialRemotePaneId, type: "pane" }, 10);
+
+        const initialTargetApplyCount = server.targetApplyRequests.length;
+        const initialContentApplyCount = server.contentSetRequests.length;
+        await surface.client.close(1000, "test_no_stale_target_restart_replay_after_pair_import");
+
+        await waitFor(() => server.pairRequests.length >= 2, 12_000);
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+        assert.equal(server.targetApplyRequests.length, initialTargetApplyCount);
+        assert.equal(server.contentSetRequests.length, initialContentApplyCount);
+        assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), false);
+        const importedPane = [...surface.panes.values()].find((candidate: any) => Number(candidate.remotePaneId) === server.initialRemotePaneId);
+        assert.ok(importedPane);
+        assert.equal(importedPane.currentTargetId, null);
+        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "stale");
+      },
+    });
+  });
+
+  await t.test("pair reconnect drops restart content for provider-pruned local panes", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const splitPaneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      assert.ok(surface.client);
+      const firstPane = surface.panes.get(splitPaneIds[0]!);
+      const prunedPane = surface.panes.get(splitPaneIds[1]!);
+      assert.ok(firstPane);
+      assert.ok(prunedPane);
+      internalRuntime.restartContentBySurface.set(server.surfaceId, [
+        {
+          contentId: "ct_stale_restart_pruned_pair_import",
+          contentType: "html",
+          contentValue: { html: "<p>stale pruned restart</p>" },
+          display: null,
+          historyOwnerToken: "hot_stale_restart_pruned_pair_import",
+          paneLabel: prunedPane.paneLabel,
+          remotePaneId: Number(prunedPane.remotePaneId),
+          revision: 1,
+          sessionKey: "agent:test:stale-pruned-restart-pair-import",
+        },
+      ]);
+
+      server.panes.clear();
+      server.panes.set(server.initialRemotePaneId, {
+        contentId: null,
+        contentType: null,
+        drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
+        name: null,
+        paneLabel: 1,
+        paneLineageId: firstPane.paneLineageId,
+        revision: 0,
+        viewport: { height: 768, scale: 2, width: 1024 },
+      });
+      server.setTopologyLayout({ paneId: server.initialRemotePaneId, type: "pane" }, 12);
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      await surface.client.close(1000, "test_no_pruned_restart_replay_after_pair_import");
+
+      await waitFor(() => server.pairRequests.length >= 2, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+      assert.equal(
+        server.contentSetRequests.length,
+        initialContentApplyCount,
+        JSON.stringify(server.contentSetRequests.map((request) => ({
+          contentId: request.contentId,
+          contentType: request.contentType,
+          revision: request.revision,
+        }))),
+      );
+      assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), false);
+      const screens = await runtime.listScreens();
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1]);
+      assert.equal(screens[0]?.topologyRevision, 12);
+      assert.equal(screens[0]?.panes[0]?.activeContent, null);
+    });
+  });
+
+  await t.test("fresh pair import prunes persisted target state before replay", async () => {
+    const port = nextPort++;
+    const surfaceId = "sf_fresh_pair_stale_target";
+    const providerId = "pv_fresh_pair_stale_target";
+    const remotePaneId = 41;
+    const paneLineageId = `pl_${surfaceId}_${remotePaneId}`;
+    const targetId = "tg_fresh_pair_stale_target";
+    const server = new FakeSurfAceWsServer(port, { surfaceId });
+    server.targetCapabilities = [
+      ...server.targetCapabilities,
+      "target.browser_url.v1",
+    ];
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-fresh-pair-stale-target-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 2,
+            nextRemotePaneId: 2,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId,
+            selfOwnedSurfaceIds: {
+              [surfaceId]: {
+                observedAt: Date.now(),
+                providerId,
+                source: "current_local_ownership",
+              },
+            },
+            targetStateBySurfaceId: {
+              [surfaceId]: {
+                ownershipEpoch: 1,
+                paneTargets: {
+                  [paneLineageId]: {
+                    currentTargetId: targetId,
+                    diagnosticContent: null,
+                    lastRestoreBlockedReason: null,
+                    nonDurableTargetDiagnostic: null,
+                    paneLineageId,
+                    targetEpoch: 1,
+                  },
+                },
+                registeredTargetIdsByIdempotencyKey: {},
+                targetRecords: [
+                  {
+                    appliedAt: new Date(Date.now() - 120_000).toISOString(),
+                    currentState: "current",
+                    ownerProviderId: providerId,
+                    ownershipEpoch: 1,
+                    ownershipSessionId: "sa_stale_fresh_pair",
+                    paneIdAtApply: "pn_stale_fresh_pair",
+                    paneLabelAtApply: 1,
+                    paneLineageId,
+                    restorePolicy: "auto",
+                    surfaceId,
+                    surfaceInstanceId: null,
+                    targetEpoch: 1,
+                    targetHeader: {
+                      payloadSchemaVersion: 1,
+                      replaySemantics: "navigate",
+                      requiredCapabilities: ["target.browser_url.v1"],
+                      safeToLogFields: ["url"],
+                      safetyClass: "network",
+                      summary: "https://example.com/stale-fresh-pair",
+                    },
+                    targetId,
+                    targetKind: "browser_url",
+                    targetPayload: { url: "https://example.com/stale-fresh-pair" },
+                  },
+                ],
+              },
+            },
+            version: 1,
+            windowLabels: {
+              [surfaceId]: "a",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      await runtime.start();
+      const internalRuntime = runtime as any;
+      await waitFor(() => {
+        const surface = internalRuntime.surfaces.get(surfaceId);
+        return surface?.connectionState === "connected";
+      }, 12_000);
+
+      assert.equal(server.targetApplyRequests.length, 0);
+      assert.equal(server.contentSetRequests.length, 0);
+      const surface = internalRuntime.surfaces.get(surfaceId);
+      assert.ok(surface);
+      const pane = internalRuntime.findPaneByRemoteId(surface, remotePaneId);
+      assert.ok(pane);
+      assert.equal(pane.currentTargetId, null);
+      assert.equal(surface.targetRecords.get(targetId)?.currentState, "stale");
+      const screen = (await runtime.listScreens())[0];
+      assert.equal(screen?.panes[0]?.target?.targetId, targetId);
+      assert.equal(screen?.panes[0]?.target?.blockedReason, "restore_blocked_stale_target");
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("fresh pair import marks lineage-only persisted target records stale", async () => {
+    const port = nextPort++;
+    const surfaceId = "sf_fresh_pair_lineage_only_target";
+    const providerId = "pv_fresh_pair_lineage_only_target";
+    const remotePaneId = 41;
+    const paneLineageId = `pl_${surfaceId}_${remotePaneId}`;
+    const targetId = "tg_fresh_pair_lineage_only_target";
+    const server = new FakeSurfAceWsServer(port, { surfaceId });
+    server.targetCapabilities = [
+      ...server.targetCapabilities,
+      "target.browser_url.v1",
+    ];
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-fresh-pair-lineage-target-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 2,
+            nextRemotePaneId: 2,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId,
+            selfOwnedSurfaceIds: {
+              [surfaceId]: {
+                observedAt: Date.now(),
+                providerId,
+                source: "current_local_ownership",
+              },
+            },
+            targetStateBySurfaceId: {
+              [surfaceId]: {
+                ownershipEpoch: 1,
+                paneTargets: {},
+                registeredTargetIdsByIdempotencyKey: {},
+                targetRecords: [
+                  {
+                    appliedAt: new Date(Date.now() - 120_000).toISOString(),
+                    currentState: "current",
+                    ownerProviderId: providerId,
+                    ownershipEpoch: 1,
+                    ownershipSessionId: "sa_lineage_only_stale_pair",
+                    paneIdAtApply: "pn_lineage_only_stale_pair",
+                    paneLabelAtApply: 1,
+                    paneLineageId,
+                    restorePolicy: "auto",
+                    surfaceId,
+                    surfaceInstanceId: null,
+                    targetEpoch: 1,
+                    targetHeader: {
+                      payloadSchemaVersion: 1,
+                      replaySemantics: "navigate",
+                      requiredCapabilities: ["target.browser_url.v1"],
+                      safeToLogFields: ["url"],
+                      safetyClass: "network",
+                      summary: "https://example.com/lineage-only-stale-pair",
+                    },
+                    targetId,
+                    targetKind: "browser_url",
+                    targetPayload: { url: "https://example.com/lineage-only-stale-pair" },
+                  },
+                ],
+              },
+            },
+            version: 1,
+            windowLabels: {
+              [surfaceId]: "a",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      await runtime.start();
+      const internalRuntime = runtime as any;
+      await waitFor(() => {
+        const surface = internalRuntime.surfaces.get(surfaceId);
+        return surface?.connectionState === "connected";
+      }, 12_000);
+
+      assert.equal(server.targetApplyRequests.length, 0);
+      assert.equal(server.contentSetRequests.length, 0);
+      const surface = internalRuntime.surfaces.get(surfaceId);
+      assert.ok(surface);
+      const pane = internalRuntime.findPaneByRemoteId(surface, remotePaneId);
+      assert.ok(pane);
+      assert.equal(pane.currentTargetId, null);
+      assert.equal(surface.targetRecords.get(targetId)?.currentState, "stale");
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("post-pair lineage repair does not resurrect stale imported target records", async () => {
+    const port = nextPort++;
+    const surfaceId = "sf_pair_lineage_repair_stale_target";
+    const providerId = "pv_pair_lineage_repair_stale_target";
+    const remotePaneId = 41;
+    const originalLineageId = `pl_${surfaceId}_${remotePaneId}`;
+    const repairedLineageId = `${originalLineageId}_provider_repair`;
+    const targetId = "tg_pair_lineage_repair_stale_target";
+    const server = new FakeSurfAceWsServer(port, { surfaceId });
+    server.targetCapabilities = [
+      ...server.targetCapabilities,
+      "target.browser_url.v1",
+    ];
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-pair-lineage-repair-stale-target-"));
+    const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+    const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 2,
+            nextRemotePaneId: 2,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId,
+            selfOwnedSurfaceIds: {
+              [surfaceId]: {
+                observedAt: Date.now(),
+                providerId,
+                source: "current_local_ownership",
+              },
+            },
+            targetStateBySurfaceId: {
+              [surfaceId]: {
+                ownershipEpoch: 1,
+                paneTargets: {},
+                registeredTargetIdsByIdempotencyKey: {},
+                targetRecords: [
+                  {
+                    appliedAt: new Date(Date.now() - 120_000).toISOString(),
+                    currentState: "current",
+                    ownerProviderId: providerId,
+                    ownershipEpoch: 1,
+                    ownershipSessionId: "sa_pair_lineage_repair",
+                    paneIdAtApply: "pn_pair_lineage_repair",
+                    paneLabelAtApply: 1,
+                    paneLineageId: originalLineageId,
+                    restorePolicy: "auto",
+                    surfaceId,
+                    surfaceInstanceId: null,
+                    targetEpoch: 1,
+                    targetHeader: {
+                      payloadSchemaVersion: 1,
+                      replaySemantics: "navigate",
+                      requiredCapabilities: ["target.browser_url.v1"],
+                      safeToLogFields: ["url"],
+                      safetyClass: "network",
+                      summary: "https://example.com/pair-lineage-repair-stale-target",
+                    },
+                    targetId,
+                    targetKind: "browser_url",
+                    targetPayload: { url: "https://example.com/pair-lineage-repair-stale-target" },
+                  },
+                ],
+              },
+            },
+            version: 1,
+            windowLabels: {
+              [surfaceId]: "a",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      await runtime.start();
+      const internalRuntime = runtime as any;
+      await waitFor(() => {
+        const surface = internalRuntime.surfaces.get(surfaceId);
+        return surface?.connectionState === "connected";
+      }, 12_000);
+
+      const surface = internalRuntime.surfaces.get(surfaceId);
+      assert.ok(surface);
+      const pane = internalRuntime.findPaneByRemoteId(surface, remotePaneId);
+      assert.ok(pane);
+      const targetBeforeRepair = surface.targetRecords.get(targetId);
+      assert.ok(targetBeforeRepair);
+      assert.equal(targetBeforeRepair.currentState, "stale");
+      assert.equal(pane.currentTargetId, null);
+      const previousLineageId = pane.paneLineageId;
+      targetBeforeRepair.paneLineageId = previousLineageId;
+      pane.staleTargetId = targetId;
+      pane.lastRestoreBlockedReason = "restore_blocked_stale_target";
+
+      internalRuntime.adoptPaneLineage(surface, pane, repairedLineageId);
+
+      const target = surface.targetRecords.get(targetId);
+      assert.equal(target?.paneLineageId, repairedLineageId);
+      assert.equal(target?.currentState, "stale");
+      assert.equal(pane.currentTargetId, null);
+      assert.equal(pane.staleTargetId, targetId);
+      assert.equal(pane.lastRestoreBlockedReason, "restore_blocked_stale_target");
+      assert.equal(server.targetApplyRequests.length, 0);
+      assert.equal(server.contentSetRequests.length, 0);
+    } finally {
+      await runtime.stop();
+      await server.close();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("matching provider pair content preserves current target through lineage repair", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(firstPaneId);
+        assert.ok(pane);
+        const targetId = "tg_matching_pair_content_current_target";
+        const contentId = "ct_matching_pair_content_current_target";
+        pane.activeContentId = contentId;
+        pane.contentType = "html";
+        pane.currentRevision = 7;
+        pane.currentTargetId = targetId;
+        surface.targetRecords.set(targetId, {
+          appliedAt: new Date().toISOString(),
+          currentState: "current",
+          ownerProviderId: internalRuntime.persistentState.providerId,
+          ownershipEpoch: surface.ownershipEpoch,
+          ownershipSessionId: surface.sessionId,
+          paneIdAtApply: pane.paneId,
+          paneLabelAtApply: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
+          restorePolicy: "auto",
+          surfaceId: surface.surfaceId,
+          surfaceInstanceId: null,
+          targetEpoch: pane.targetEpoch + 1,
+          targetHeader: {
+            payloadSchemaVersion: 1,
+            replaySemantics: "navigate",
+            requiredCapabilities: ["target.browser_url.v1"],
+            safeToLogFields: ["url"],
+            safetyClass: "network",
+            summary: "https://example.com/current-target-pair-content",
+          },
+          targetId,
+          targetKind: "browser_url",
+          targetPayload: { url: "https://example.com/current-target-pair-content" },
+        });
+
+        internalRuntime.applyPairPaneContentState(pane, {
+          contentType: "html",
+          currentContentId: contentId,
+          currentRevision: 7,
+          paneId: server.initialRemotePaneId,
+          paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
+        });
+
+        assert.equal(pane.currentTargetId, targetId);
+        assert.equal(surface.targetRecords.get(targetId)?.currentState, "current");
+        const repairedLineageId = `${pane.paneLineageId}_provider_repair`;
+        internalRuntime.adoptPaneLineage(surface, pane, repairedLineageId);
+
+        assert.equal(pane.currentTargetId, targetId);
+        assert.equal(surface.targetRecords.get(targetId)?.currentState, "current");
+        assert.equal(surface.targetRecords.get(targetId)?.paneLineageId, repairedLineageId);
+      },
+    });
+  });
+
+  await t.test("pair reconnect does not replay stale target or content over provider-owned content", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        await runtime.push({
+          content: "https://example.com/stale-provider-content",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        assert.ok(surface.client);
+        const pane = surface.panes.get(firstPaneId);
+        assert.ok(pane);
+        const target = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "browser_url");
+        assert.ok(target);
+        internalRuntime.captureSurfaceTargetState(surface);
+        internalRuntime.restartContentBySurface.set(server.surfaceId, [
+          {
+            contentId: "ct_stale_restart_nonempty_pair_import",
+            contentType: "html",
+            contentValue: { html: "<p>stale restart</p>" },
+            display: null,
+            historyOwnerToken: "hot_stale_restart_nonempty_pair_import",
+            paneLabel: pane.paneLabel,
+            remotePaneId: Number(pane.remotePaneId),
+            revision: 1,
+            sessionKey: "agent:test:stale-nonempty-pair-import",
+          },
+        ]);
+
+        server.panes.clear();
+        server.panes.set(server.initialRemotePaneId, {
+          contentId: "ct_a1b2c3d4",
+          contentType: "html",
+          drawings: [],
+          frame: { height: 768, width: 1024, x: 0, y: 0 },
+          name: null,
+          paneLabel: 1,
+          paneLineageId: pane.paneLineageId,
+          revision: 17,
+          viewport: { height: 768, scale: 2, width: 1024 },
+        });
+        server.setTopologyLayout({ paneId: server.initialRemotePaneId, type: "pane" }, 11);
+
+        const initialTargetApplyCount = server.targetApplyRequests.length;
+        const initialContentApplyCount = server.contentSetRequests.length;
+        await surface.client.close(1000, "test_no_stale_replay_over_provider_content");
+
+        await waitFor(() => server.pairRequests.length >= 2, 12_000);
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+        assert.equal(server.targetApplyRequests.length, initialTargetApplyCount);
+        assert.equal(server.contentSetRequests.length, initialContentApplyCount);
+        assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), false);
+        const importedPane = [...surface.panes.values()].find((candidate: any) => Number(candidate.remotePaneId) === server.initialRemotePaneId);
+        assert.ok(importedPane);
+        assert.equal(importedPane.currentTargetId, null);
+        assert.equal(importedPane.activeContentId, "ct_a1b2c3d4");
+        assert.equal(importedPane.contentValue, null);
+        assert.equal(importedPane.currentRevision, 17);
+        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "stale");
+      },
+    });
+  });
+
+  await t.test("history navigation provider-owned visible content is not replayed after reconnect", async () => {
+    await withRuntimeHarness(async ({ infos, runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const first = await runtime.push(
         {
@@ -8456,12 +9139,23 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await surface.client.close(1000, "test_history_repush_reconnect");
 
       await waitFor(() => server.pairRequests.length >= 2, 12_000);
-      await waitFor(() => server.contentSetRequests.length > initialContentApplyCount, 12_000);
+      await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
-      const repushed = server.contentSetRequests.at(-1);
-      assert.equal(repushed?.contentId, first.contentId);
-      assert.notEqual(repushed?.contentId, second.contentId);
-      assert.deepEqual(repushed?.content, { html: "<p>first</p>" });
+      assert.equal(
+        server.contentSetRequests.length,
+        initialContentApplyCount,
+        JSON.stringify(server.contentSetRequests.map((request) => ({
+          contentId: request.contentId,
+          contentType: request.contentType,
+          revision: request.revision,
+        }))),
+      );
+      assert.ok(
+        infos.some((info) =>
+          info.includes("event=resume_replay_outcome") &&
+          info.includes("content_id=" + first.contentId) &&
+          info.includes("outcome=skipped_provider_owned")),
+      );
 
       const screens = await runtime.listScreens();
       assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, first.contentId);
@@ -11076,15 +11770,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           resumed: false,
           sessionId: "sa_repaired",
           state: {
-            panes: [
-              {
-                contentType: null,
-                currentContentId: null,
-                currentRevision: 0,
+            layout: { paneId: server.initialRemotePaneId, type: "pane" },
+	                panes: [
+	                  {
+	                    contentType: null,
+	                    currentContentId: null,
+	                    currentRevision: 0,
                 paneId: server.initialRemotePaneId,
                 paneLabel: 1,
               },
             ],
+            topologyRevision: 0,
           },
           surfaceId: server.surfaceId,
           surfaceName: "Surface A",
@@ -11155,6 +11851,18 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             width: 512,
           },
         });
+        server.setTopologyLayout(
+          {
+            children: [
+              { paneId: 42, type: "pane" },
+              { paneId: 43, type: "pane" },
+            ],
+            direction: "vertical",
+            type: "split",
+          },
+          0,
+          "sf_surface-b",
+        );
       },
       run: async ({ runtime, server }) => {
         await waitFor(() => server.pairedSocketFor("sf_surface-b") !== null);
@@ -11372,6 +12080,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             width: 512,
           },
         });
+        server.setTopologyLayout(
+          {
+            children: [
+              { paneId: server.initialRemotePaneId, type: "pane" },
+              { paneId: 9999, type: "pane" },
+            ],
+            direction: "vertical",
+            type: "split",
+          },
+          0,
+        );
       },
       run: async ({ runtime, server }) => {
         const internalRuntime = runtime as any;
@@ -11394,6 +12113,222 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           type: "split",
         });
       },
+    });
+  });
+
+  await t.test("pair response preserves arbitrary restored split-tree topology", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      internalRuntime.applyPairState(surface, {
+        id: "rq_pair_tree_restore",
+        ok: true,
+        op: "pair.request",
+        payload: {
+          capabilities: {
+            contentTypes: ["html", "image", "pdf", "terminal", "markdown"],
+            eventTypes: [],
+            protocolFeatures: ["authority.state.v1"],
+          },
+          eventConfig: {
+            activeEvents: [],
+            drawingFlushConfig: {
+              idleWindowMs: 8000,
+              maxIntervalMs: 30000,
+            },
+            profile: "minimum_deep",
+          },
+          limits: {
+            maxDrawingFlushBytes: 2 * 1024 * 1024,
+            maxFrameBytes: 10 * 1024 * 1024,
+            maxMessageBytes: 12 * 1024 * 1024,
+            maxStrokePointsPerFlush: 8192,
+            maxVisibleTextBytes: 4096,
+            resumeGraceMs: 20_000,
+          },
+          resumed: false,
+          sessionId: "sa_pair_tree_restore",
+          state: {
+            layout: {
+              children: [
+                {
+                  children: [
+                    { paneId: server.initialRemotePaneId, type: "pane" },
+                    { paneId: 9998, type: "pane", weight: 2 },
+                  ],
+                  direction: "horizontal",
+                  type: "split",
+                  weight: 3,
+                },
+                {
+                  children: [
+                    { paneId: 9999, type: "pane" },
+                    { paneId: 10000, type: "pane" },
+                  ],
+                  direction: "vertical",
+                  type: "split",
+                },
+              ],
+              direction: "vertical",
+              type: "split",
+            },
+            panes: [
+              {
+                contentType: null,
+                currentContentId: null,
+                currentRevision: 0,
+                paneId: server.initialRemotePaneId,
+                paneLabel: 1,
+              },
+              {
+                contentType: null,
+                currentContentId: null,
+                currentRevision: 0,
+                paneId: 9998,
+                paneLabel: 2,
+              },
+              {
+                contentType: null,
+                currentContentId: null,
+                currentRevision: 0,
+                paneId: 9999,
+                paneLabel: 3,
+              },
+              {
+                contentType: null,
+                currentContentId: null,
+                currentRevision: 0,
+                paneId: 10000,
+                paneLabel: 4,
+              },
+            ],
+            topologyRevision: 7,
+          },
+          surfaceId: server.surfaceId,
+          surfaceName: "Surface A",
+          viewport: { height: 768, scale: 2, width: 1024 },
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      });
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      const paneIdByLabel = new Map(screen.panes.map((pane) => [pane.paneLabel, pane.paneId]));
+
+      assert.equal(surface.topologyRevision, 7);
+      assert.deepEqual(surface.layout, {
+        children: [
+          {
+            children: [
+              { paneId: paneIdByLabel.get(1), type: "pane" },
+              { paneId: paneIdByLabel.get(2), type: "pane", weight: 2 },
+            ],
+            direction: "horizontal",
+            type: "split",
+            weight: 3,
+          },
+          {
+            children: [
+              { paneId: paneIdByLabel.get(3), type: "pane" },
+              { paneId: paneIdByLabel.get(4), type: "pane" },
+            ],
+            direction: "vertical",
+            type: "split",
+          },
+        ],
+        direction: "vertical",
+        type: "split",
+      });
+    });
+  });
+
+  await t.test("pair response rejects topology that does not exactly cover restored panes", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const beforeLayout = structuredClone(surface.layout);
+      const beforeTopologyRevision = surface.topologyRevision;
+      const beforePanes = structuredClone([...surface.panes.values()]);
+      assert.throws(
+        () =>
+          internalRuntime.applyPairPaneState(
+            surface,
+            [
+              {
+                contentType: null,
+                currentContentId: null,
+                currentRevision: 0,
+                paneId: server.initialRemotePaneId,
+                paneLabel: 1,
+              },
+              {
+                contentType: null,
+                currentContentId: null,
+                currentRevision: 0,
+                paneId: 9998,
+                paneLabel: 2,
+              },
+            ],
+            false,
+            {
+              pairStateLayout: {
+                children: [
+                  { paneId: server.initialRemotePaneId, type: "pane" },
+                  { paneId: server.initialRemotePaneId, type: "pane" },
+                ],
+                direction: "vertical",
+                type: "split",
+              },
+              pairStateTopologyRevision: 7,
+            },
+          ),
+        /did not exactly match its pane list/,
+      );
+      assert.deepEqual(surface.layout, beforeLayout);
+      assert.equal(surface.topologyRevision, beforeTopologyRevision);
+      assert.deepEqual([...surface.panes.values()], beforePanes);
+      const beforeSessionId = surface.sessionId;
+      const beforeOwnershipEpoch = surface.ownershipEpoch;
+      assert.throws(
+        () =>
+          internalRuntime.assertPairResponseTopologyMatchesPanes(surface, {
+            payload: {
+              state: {
+                layout: {
+                  children: [
+                    { paneId: server.initialRemotePaneId, type: "pane" },
+                    { paneId: server.initialRemotePaneId, type: "pane" },
+                  ],
+                  direction: "vertical",
+                  type: "split",
+                },
+                panes: [
+                  {
+                    contentType: null,
+                    currentContentId: null,
+                    currentRevision: 0,
+                    paneId: server.initialRemotePaneId,
+                    paneLabel: 1,
+                  },
+                  {
+                    contentType: null,
+                    currentContentId: null,
+                    currentRevision: 0,
+                    paneId: 9998,
+	                    paneLabel: 2,
+	                  },
+	                ],
+	                topologyRevision: 7,
+	              },
+	            },
+	          }),
+        /did not exactly match its pane list/,
+      );
+      assert.equal(surface.sessionId, beforeSessionId);
+      assert.equal(surface.ownershipEpoch, beforeOwnershipEpoch);
     });
   });
 
@@ -11420,6 +12355,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             width: 600,
           },
         });
+        server.setTopologyLayout(
+          {
+            children: [
+              { paneId: server.initialRemotePaneId, type: "pane" },
+              { paneId: 9999, type: "pane" },
+            ],
+            direction: "vertical",
+            type: "split",
+          },
+          0,
+        );
       },
       run: async ({ runtime, server }) => {
         const internalRuntime = runtime as any;
@@ -11464,6 +12410,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             width: 512,
           },
         });
+        server.setTopologyLayout(
+          {
+            children: [
+              { paneId: server.initialRemotePaneId, type: "pane" },
+              { paneId: 9999, type: "pane" },
+            ],
+            direction: "vertical",
+            type: "split",
+          },
+          0,
+        );
       },
       run: async ({ runtime, server }) => {
         const internalRuntime = runtime as any;
@@ -11483,12 +12440,18 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           paneId: paneIds[0]!,
         });
 
-        assert.deepEqual(server.topologyApplyRequests.at(-1)?.layout, {
+        const topologyApply = server.topologyApplyRequests.at(-1);
+        assert.ok(topologyApply);
+        const newRemotePaneId = topologyApply.paneIds.find((paneId) =>
+          paneId !== server.initialRemotePaneId && paneId !== 9999
+        );
+        assert.ok(newRemotePaneId);
+        assert.deepEqual(topologyApply.layout, {
           children: [
             {
               children: [
                 { paneId: server.initialRemotePaneId, type: "pane" },
-                { paneId: 10000, type: "pane" },
+                { paneId: newRemotePaneId, type: "pane" },
               ],
               direction: "vertical",
               type: "split",
@@ -11524,6 +12487,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             width: 512,
           },
         });
+        server.setTopologyLayout(
+          {
+            children: [
+              { paneId: server.initialRemotePaneId, type: "pane" },
+              { paneId: 9999, type: "pane" },
+            ],
+            direction: "vertical",
+            type: "split",
+          },
+          0,
+        );
         server.topologyApplyDelayMs = 100;
       },
       run: async ({ runtime, server }) => {
@@ -12205,6 +13179,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         width: 1024,
       },
     });
+    server.setTopologyLayout(
+      {
+        children: [
+          { paneId: 6245, type: "pane" },
+          { paneId: 6243, type: "pane" },
+        ],
+        direction: "vertical",
+        type: "split",
+      },
+      0,
+    );
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-pane-label-polluted-"));
     const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
     const runtime = createSurfAceRuntime({ discovery, stateDir });
@@ -12255,14 +13240,23 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("provider restart resumes still-running surface with persisted ownership identity", async () => {
+  await t.test("provider restart resumes ownership identity without replaying stale restart content", async () => {
     const port = nextPort++;
     const server = new FakeSurfAceWsServer(port, { surfaceId: "sf_restart_owner" });
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-restart-owner-"));
     const providerId = "pv_restart_owner";
     const sessionId = "sa_restart_session";
     const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
-    const runtime = createSurfAceRuntime({ discovery, stateDir });
+    const infos: string[] = [];
+    const runtime = createSurfAceRuntime({
+      discovery,
+      logger: {
+        info: (message: string) => {
+          infos.push(message);
+        },
+      },
+      stateDir,
+    });
     server.lockedProviderId = providerId;
     server.lockedSessionId = sessionId;
 
@@ -12324,7 +13318,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
               contentContinuity: {
                 [server.surfaceId]: [
                   {
-                    contentId: "ct_restart_persisted",
+                    contentId: "ct_aabbccdd",
                     contentType: "markdown",
                     contentValue: "# restart persisted content",
                     historyOwnerToken: "hot_restart_persisted",
@@ -12350,15 +13344,18 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(server.pairAttemptDetails[0]?.resumeSessionId, sessionId);
       assert.equal(server.pairAttemptDetails[0]?.takeover, false);
       assert.equal(server.pairedSocket !== null, true);
-      await waitFor(() => server.contentSetRequests.length > 0, 12_000);
+      await waitFor(
+        () =>
+          infos.some((info) =>
+            info.includes("event=resume_replay_outcome") &&
+            info.includes("outcome=skipped_provider_owned")),
+        12_000,
+      );
       assert.equal(server.topologyApplyRequests.some((request) => request.windowLabel === "a"), false);
-      const replayed = server.contentSetRequests.at(-1);
-      assert.equal(replayed?.contentId, "ct_restart_persisted");
-      assert.equal(replayed?.contentType, "markdown");
-      assert.equal(replayed?.revision, 7);
+      assert.equal(server.contentSetRequests.length, 0);
       const screen = (await runtime.listScreens())[0];
-      assert.equal(screen?.panes[0]?.activeContent?.contentId, "ct_restart_persisted");
-      assert.equal(screen?.panes[0]?.activeContent?.revision, 7);
+      assert.equal(screen?.panes[0]?.activeContent?.contentId ?? null, null);
+      assert.equal(screen?.panes[0]?.activeContent?.revision ?? null, null);
     } finally {
       await runtime.stop();
       await server.close();
@@ -13506,7 +14503,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
     });
 
-    await t.test("ambiguous busy reconciles same-provider target state evidence", async () => {
+    await t.test("ambiguous busy marks same-provider target evidence stale before fresh pair replay", async () => {
       await withRuntimeHarness({
         configureServer: (server) => {
           server.targetCapabilities = [
@@ -13549,15 +14546,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           assert.ok(targetState);
           assert.equal(
             targetState.targetRecords.some(
-              (record: any) => record.targetId === target.targetId && record.currentState === "current",
+              (record: any) => record.targetId === target.targetId && record.currentState === "stale",
             ),
             true,
           );
           const reconnectedPane = (await runtime.listScreens())[0]?.panes[0];
           assert.equal(reconnectedPane?.target?.targetId, target.targetId);
           assert.equal(reconnectedPane?.target?.targetKind, "browser_url");
-          assert.equal(reconnectedPane?.target?.blockedReason, null);
-          assert.equal(server.targetApplyRequests.length, targetApplyRequestsBeforeReconnect + 1);
+          assert.equal(reconnectedPane?.target?.blockedReason, "restore_blocked_stale_target");
+          assert.equal(server.targetApplyRequests.length, targetApplyRequestsBeforeReconnect);
           assert.ok(warnings.some((warning) => warning.includes("foreign_ownership_lock_cleared")));
         },
       });
@@ -14089,7 +15086,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("stale content during resumed replay is skipped without provider shutdown loop", async () => {
+  await t.test("provider-owned content during resumed replay is skipped without provider shutdown loop", async () => {
     await withRuntimeHarness(async ({ infos, runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       await runtime.push({
@@ -14105,10 +15102,6 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(surface.client);
       surface.topologyRevision = 1;
 
-      server.nextContentApplyError = {
-        code: "stale_content",
-        message: "content.apply targeted stale content",
-      };
       await surface.client.close(1000, "test_stale_replay_skip");
 
       await waitFor(() => server.pairAttemptDetails.length >= 2, 12_000);
@@ -14117,8 +15110,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(
         infos.some((info) =>
           info.includes("event=resume_replay_outcome") &&
-          info.includes("outcome=skipped_stale") &&
-          info.includes("error_code=stale_content")),
+          info.includes("outcome=skipped_provider_owned")),
       );
     });
   });

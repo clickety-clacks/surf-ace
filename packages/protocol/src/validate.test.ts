@@ -315,6 +315,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
       resumed: false,
       sessionId: "sa_pair_session",
       state: {
+        layout: { paneId: 1, type: "pane" },
         panes: [
           {
             contentType: null,
@@ -325,6 +326,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
             paneLabel: 1,
           },
         ],
+        topologyRevision: 0,
       },
       surfaceId: "sf_1",
       surfaceName: "Surface A",
@@ -362,20 +364,22 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
 	        resumeGraceMs: 20_000,
 	      },
 	      ownershipEpoch: 1,
-	      resumed: false,
-	      sessionId: "sa_pair_legacy_session",
-	      state: {
-	        panes: [
-	          {
-	            contentType: null,
-	            currentContentId: null,
+		      resumed: false,
+		      sessionId: "sa_pair_legacy_session",
+		      state: {
+		        layout: { paneId: 1, type: "pane" },
+		        panes: [
+		          {
+		            contentType: null,
+		            currentContentId: null,
 	            currentRevision: 0,
 	            paneId: 1,
 	            paneLineageId: "pl_legacy",
-	            paneLabel: 1,
-	          },
-	        ],
-	      },
+		            paneLabel: 1,
+		          },
+		        ],
+		        topologyRevision: 0,
+		      },
 	      surfaceId: "sf_legacy",
 	      surfaceName: "Legacy Surface",
 	      viewport: { height: 768, scale: 2, width: 1024 },
@@ -415,7 +419,9 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
       resumed: false,
       sessionId: "sa_pair_session",
       state: {
+        layout: { paneId: 1, type: "pane" },
         panes: [],
+        topologyRevision: 0,
       },
       surfaceId: "sf_1",
       surfaceName: "Surface A",

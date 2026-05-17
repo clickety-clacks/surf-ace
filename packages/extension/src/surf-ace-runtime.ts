@@ -80,6 +80,7 @@ import type {
   PageEvent,
   TopologyApplyRequest,
 } from "../../protocol/src/index.js";
+import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
   type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
@@ -125,6 +126,17 @@ type SurfAceProviderProcessBlockReason =
   | "provider_process_inventory_unavailable"
   | "provider_process_lease_mismatch"
   | "provider_process_missing";
+
+const SURF_ACE_CONTENT_TYPES = new Set<string>([
+  "canvas",
+  "html",
+  "image",
+  "markdown",
+  "pdf",
+  "terminal",
+  "video",
+]);
+const SURF_ACE_CONTENT_ID_PATTERN = /^ct_[0-9a-f]{8}$/;
 
 const PROVIDER_PROCESS_BLOCK_REASONS = new Set<string>([
   "duplicate_provider_processes",
@@ -820,6 +832,7 @@ type ManagedPane = {
   paneLabel: number;
   paneLineageId: string;
   pendingOwnerSessionKey: string | null;
+  pairImportedContentAuthority: boolean;
   remotePaneId: RemotePaneId;
   geometry: PaneGeometryProjection | null;
   snapshot: CachedSnapshot | null;
@@ -1431,6 +1444,7 @@ function createPane(
     paneLabel,
     paneLineageId: legacyPaneLineageId(remotePaneId),
     pendingOwnerSessionKey: null,
+    pairImportedContentAuthority: false,
     remotePaneId,
     geometry: null,
     snapshot: null,
@@ -1543,6 +1557,94 @@ function flattenManagedLayout(node: ManagedLayoutNode | null): PaneId[] {
     return [node.paneId];
   }
   return node.children.flatMap((child) => flattenManagedLayout(child));
+}
+
+function flattenTopologyLayoutRemotePaneIds(node: TopologyApplyRequest["payload"]["layout"]): RemotePaneId[] {
+  if (node.type === "pane") {
+    return [node.paneId];
+  }
+  return node.children.flatMap((child) => flattenTopologyLayoutRemotePaneIds(child));
+}
+
+function isValidTopologyLayoutNode(node: unknown): node is TopologyApplyRequest["payload"]["layout"] {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return false;
+  }
+  const record = node as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (record.weight !== undefined && (typeof record.weight !== "number" || !Number.isFinite(record.weight) || record.weight <= 0)) {
+    return false;
+  }
+  if (record.type === "pane") {
+    return keys.every((key) => key === "type" || key === "paneId" || key === "weight") &&
+      Number.isInteger(record.paneId) &&
+      Number(record.paneId) >= 1;
+  }
+  if (record.type !== "split") {
+    return false;
+  }
+  if (!keys.every((key) => key === "type" || key === "direction" || key === "children" || key === "weight")) {
+    return false;
+  }
+  if (record.direction !== "horizontal" && record.direction !== "vertical") {
+    return false;
+  }
+  if (!Array.isArray(record.children) || record.children.length === 0) {
+    return false;
+  }
+  return record.children.every((child) => isValidTopologyLayoutNode(child));
+}
+
+function topologyLayoutExactlyCoversRemotePaneIds(
+  layout: TopologyApplyRequest["payload"]["layout"],
+  remotePaneIds: readonly RemotePaneId[],
+): boolean {
+  const layoutRemotePaneIds = flattenTopologyLayoutRemotePaneIds(layout);
+  const layoutRemotePaneIdSet = new Set(layoutRemotePaneIds);
+  return layoutRemotePaneIds.length === remotePaneIds.length &&
+    layoutRemotePaneIdSet.size === layoutRemotePaneIds.length &&
+    remotePaneIds.every((paneId) => layoutRemotePaneIdSet.has(paneId));
+}
+
+function isValidPairResponsePaneState(node: unknown): node is PairResponse["payload"]["state"]["panes"][number] {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return false;
+  }
+  const record = node as Record<string, unknown>;
+  const allowedKeys = new Set([
+    "contentType",
+    "currentContentId",
+    "currentRevision",
+    "paneId",
+    "paneLabel",
+    "paneLineageId",
+  ]);
+  if (!Object.keys(record).every((key) => allowedKeys.has(key))) {
+    return false;
+  }
+  if (!Number.isInteger(record.paneId) || Number(record.paneId) < 1) {
+    return false;
+  }
+  if (!Number.isInteger(record.paneLabel) || Number(record.paneLabel) < 1) {
+    return false;
+  }
+  if (!Number.isInteger(record.currentRevision) || Number(record.currentRevision) < 0) {
+    return false;
+  }
+  if (
+    record.currentContentId !== null &&
+    (
+      typeof record.currentContentId !== "string" ||
+      !SURF_ACE_CONTENT_ID_PATTERN.test(record.currentContentId)
+    )
+  ) {
+    return false;
+  }
+  if (record.contentType !== null && !SURF_ACE_CONTENT_TYPES.has(record.contentType as ContentType)) {
+    return false;
+  }
+  return record.paneLineageId === undefined ||
+    (typeof record.paneLineageId === "string" && record.paneLineageId.length > 0);
 }
 
 function splitManagedLayoutNode(
@@ -1805,8 +1907,15 @@ function topologyLayoutToManagedLayout(
   surface: ManagedSurface,
   node: TopologyApplyRequest["payload"]["layout"],
 ): ManagedLayoutNode {
+  return topologyLayoutToManagedLayoutFromPanes([...surface.panes.values()], node);
+}
+
+function topologyLayoutToManagedLayoutFromPanes(
+  panes: readonly ManagedPane[],
+  node: TopologyApplyRequest["payload"]["layout"],
+): ManagedLayoutNode {
   if (node.type === "pane") {
-    const pane = [...surface.panes.values()].find((candidate) => candidate.remotePaneId === node.paneId);
+    const pane = panes.find((candidate) => candidate.remotePaneId === node.paneId);
     if (!pane) {
       throw new SurfAceToolError("invalid_operation", `Topology update referenced unknown pane ${node.paneId}.`);
     }
@@ -1817,7 +1926,7 @@ function topologyLayoutToManagedLayout(
     };
   }
   return {
-    children: node.children.map((child) => topologyLayoutToManagedLayout(surface, child)),
+    children: node.children.map((child) => topologyLayoutToManagedLayoutFromPanes(panes, child)),
     direction: node.direction,
     type: "split",
     ...(node.weight !== undefined ? { weight: node.weight } : {}),
@@ -2655,6 +2764,17 @@ function windowLabelForIndex(index: number): string {
 
 function isProviderWindowLabel(windowLabel: unknown): windowLabel is string {
   return typeof windowLabel === "string" && /^[a-z]+$/.test(windowLabel);
+}
+
+function firstAvailablePaneLabel(usedPaneLabels: ReadonlySet<number>, start = 1): number {
+  const firstCandidate = Math.max(1, Math.trunc(start));
+  const upperBound = firstCandidate + usedPaneLabels.size;
+  for (let paneLabel = firstCandidate; paneLabel <= upperBound; paneLabel += 1) {
+    if (!usedPaneLabels.has(paneLabel)) {
+      return paneLabel;
+    }
+  }
+  return upperBound + 1;
 }
 
 function paneLabelStorageKey(surfaceId: string, remotePaneId: RemotePaneId): string {
@@ -5609,11 +5729,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private visiblePaneSummaryProjections(surface: ManagedSurface): Array<{ pane: ManagedPane; paneLabel: number }> {
     const usedPaneLabels = new Set<number>();
     const nextAvailable = (): number => {
-      let paneLabel = 1;
-      while (usedPaneLabels.has(paneLabel)) {
-        paneLabel += 1;
-      }
-      return paneLabel;
+      return firstAvailablePaneLabel(usedPaneLabels);
     };
     return this.visiblePanes(surface).map((pane) => {
       const paneLabel = this.isUsablePaneLabelValue(pane.remotePaneId, pane.paneLabel, surface) &&
@@ -5827,6 +5943,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.staleTargetId = null;
     pane.nonDurableTargetDiagnostic = null;
     pane.lastRestoreBlockedReason = null;
+    pane.pairImportedContentAuthority = false;
     if (input.deferPersist !== true) {
       await this.persistSurfaceTargetState(surface, "target record");
     }
@@ -6045,6 +6162,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.display = entry.display ? structuredClone(entry.display) : null;
     pane.historyOwnerToken = entry.historyOwnerToken;
     pane.ownerSessionKey = entry.sessionKey;
+    pane.pairImportedContentAuthority = false;
     this.selectVisiblePaneTarget(surface, pane, entry.targetId);
     pane.historySummary.visibleContentId = entry.contentId;
     this.ensureContentSnapshot(surface, pane);
@@ -6298,6 +6416,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         continue;
       }
       try {
+        if (pane.pairImportedContentAuthority) {
+          this.logReplayOutcome(surface, pane, "content", "skipped_provider_owned");
+          continue;
+        }
+
         const target = this.currentTargetRecord(surface, pane);
         if (target) {
           const targetAuthorityRepaired = this.repairCurrentSelfTargetAuthority(surface, pane, target);
@@ -6320,7 +6443,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           continue;
         }
 
-        if (!pane.activeContentId || !pane.contentType || pane.contentValue === null) {
+        if (pane.activeContentId && pane.contentType && pane.contentValue === null) {
+          this.logReplayOutcome(surface, pane, "content", "skipped_provider_owned");
+          continue;
+        }
+
+        if (!pane.activeContentId || !pane.contentType) {
           if (pane.currentRevision <= asRevision(0)) {
             this.logReplayOutcome(surface, pane, "clear", "skipped_empty_revision");
             continue;
@@ -6982,10 +7110,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     excluding?: { pane?: ManagedPane | null; storageKey?: string | null },
   ): number {
     const usedPaneLabels = this.usedLivePaneLabels(surface, excluding);
-    let paneLabel = 1;
-    while (usedPaneLabels.has(paneLabel)) {
-      paneLabel += 1;
-    }
+    const paneLabel = firstAvailablePaneLabel(usedPaneLabels);
     if (paneLabel >= this.persistentState.nextPaneLabel) {
       this.persistentState.nextPaneLabel = paneLabel + 1;
     }
@@ -7061,11 +7186,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     const usedPaneLabels = new Set<number>();
     const nextAvailable = (): number => {
-      let paneLabel = 1;
-      while (usedPaneLabels.has(paneLabel)) {
-        paneLabel += 1;
-      }
-      return paneLabel;
+      return firstAvailablePaneLabel(usedPaneLabels);
     };
     for (const surface of orderedSurfaces) {
       const orderedPanes = this.visiblePanes(surface);
@@ -7227,10 +7348,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
     const nextAvailable = (): number => {
-      let paneLabel = 1;
-      while (usedPaneLabels.has(paneLabel)) {
-        paneLabel += 1;
-      }
+      const paneLabel = firstAvailablePaneLabel(usedPaneLabels);
       usedPaneLabels.add(paneLabel);
       return paneLabel;
     };
@@ -8420,6 +8538,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       ownershipEpoch: number;
       sessionId: SessionId | null;
     },
+    pairImportedRemotePaneIds: Set<number> = new Set(),
   ): void {
     const persisted = this.persistentState.targetStateBySurfaceId?.[surface.surfaceId];
     if (!persisted) {
@@ -8438,9 +8557,30 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       Object.entries(persisted.registeredTargetIdsByIdempotencyKey ?? {}),
     );
     let staleTargetStateChanged = false;
+    const markImportedPaneTargetRecordsStale = (pane: ManagedPane): void => {
+      for (const target of surface.targetRecords.values()) {
+        if (
+          target.currentState !== "current" ||
+          target.surfaceId !== surface.surfaceId ||
+          target.paneLineageId !== pane.paneLineageId
+        ) {
+          continue;
+        }
+        staleTargetStateChanged = this.markTargetStale(
+          surface,
+          target,
+          "restore_blocked_stale_target",
+          "Pair response imported authoritative provider pane state",
+          pane,
+        ) || staleTargetStateChanged;
+      }
+    };
     for (const pane of surface.panes.values()) {
       const paneTarget = persisted.paneTargets[pane.paneLineageId];
       if (!paneTarget) {
+        if (pairImportedRemotePaneIds.has(Number(pane.remotePaneId))) {
+          markImportedPaneTargetRecordsStale(pane);
+        }
         pane.currentTargetId = null;
         pane.lastRestoreBlockedReason = null;
         pane.nonDurableTargetDiagnostic = null;
@@ -8456,6 +8596,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         ? structuredClone(paneTarget.nonDurableTargetDiagnostic)
         : null;
       pane.targetEpoch = paneTarget.targetEpoch;
+      if (pairImportedRemotePaneIds.has(Number(pane.remotePaneId))) {
+        markImportedPaneTargetRecordsStale(pane);
+        if (pane.currentTargetId) {
+          const target = surface.targetRecords.get(pane.currentTargetId);
+          if (target) {
+            staleTargetStateChanged = this.markTargetStale(
+              surface,
+              target,
+              "restore_blocked_stale_target",
+              "Pair response imported authoritative provider pane state",
+              pane,
+            ) || staleTargetStateChanged;
+          } else {
+            pane.currentTargetId = null;
+            pane.lastRestoreBlockedReason = null;
+          }
+        }
+        pane.diagnosticContent = null;
+        pane.nonDurableTargetDiagnostic = null;
+        continue;
+      }
       if (pane.currentTargetId) {
         const target = surface.targetRecords.get(pane.currentTargetId);
         if (
@@ -8685,10 +8846,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const usedPaneLabels = new Set<number>();
     let nextPaneLabel = 1;
     const nextAvailablePaneLabel = (): number => {
-      let paneLabel = nextPaneLabel;
-      while (usedPaneLabels.has(paneLabel)) {
-        paneLabel += 1;
-      }
+      const paneLabel = firstAvailablePaneLabel(usedPaneLabels, nextPaneLabel);
       nextPaneLabel = paneLabel + 1;
       return paneLabel;
     };
@@ -8893,6 +9051,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (!pane) {
         continue;
       }
+      if (pane.pairImportedContentAuthority) {
+        this.logReplayOutcome(surface, pane, "content", "skipped_provider_owned");
+        continue;
+      }
       this.applyVisibleEntry(surface, pane, {
         contentId: entry.contentId as ContentId,
         contentType: entry.contentType,
@@ -8934,9 +9096,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     };
     this.screenSnapshotWrite = this.screenSnapshotWrite
       .catch(() => {})
-      .then(async () => {
-        await fs.writeFile(snapshotPath, JSON.stringify(payload, null, 2));
-      });
+      .then(() => fs.writeFile(snapshotPath, JSON.stringify(payload, null, 2)));
     await this.screenSnapshotWrite;
   }
 
@@ -9845,7 +10005,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       includePairingSurfaces: true,
     });
     const windowLabel = surface.windowLabel;
-    this.repairLivePaneLabelInvariant("pair request", surface);
+    this.repairLivePaneLabelInvariant("pair request", surface, surface);
     const resumeSessionId = this.shouldAttemptResume(surface) ? surface.sessionId : null;
     const providerName = this.providerNameForSurface(surface);
 
@@ -9969,6 +10129,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
     }
 
+    const responseState = (response as { payload?: { state?: { panes?: unknown } } }).payload?.state;
+    if (Array.isArray(responseState?.panes) && responseState.panes.length === 0) {
+      throw new SurfAceToolError(
+        "internal_error",
+        `Surf Ace pair.response for ${surface.surfaceId} contained no topology panes; fresh surfaces must expose at least one targetable pane`,
+      );
+    }
+
+    const validation = validateEnvelopeType("pair.request", response);
+    if (!validation.ok) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Surf Ace pair.response for ${surface.surfaceId} failed protocol validation: ${validation.reason}`,
+      );
+    }
+
     return { response: response as PairResponse, requestedWindowLabel: windowLabel };
   }
 
@@ -9979,6 +10155,42 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     throw new SurfAceToolError(
       "internal_error",
       `Surf Ace pair.response for ${surface.surfaceId} contained no topology panes; fresh surfaces must expose at least one targetable pane`,
+    );
+  }
+
+  private assertPairResponseTopologyMatchesPanes(surface: ManagedSurface, response: PairResponse): void {
+    if (
+      !Number.isInteger(response.payload.state.topologyRevision) ||
+      Number(response.payload.state.topologyRevision) < 0
+    ) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Surf Ace pair.response topology for ${surface.surfaceId} contained an invalid topologyRevision.`,
+      );
+    }
+    if (!response.payload.state.panes.every((paneState) => isValidPairResponsePaneState(paneState))) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Surf Ace pair.response state for ${surface.surfaceId} contained a schema-invalid pane entry.`,
+      );
+    }
+    if (!isValidTopologyLayoutNode(response.payload.state.layout)) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Surf Ace pair.response topology for ${surface.surfaceId} was not a valid recursive layout.`,
+      );
+    }
+    if (
+      topologyLayoutExactlyCoversRemotePaneIds(
+        response.payload.state.layout,
+        response.payload.state.panes.map((pane) => pane.paneId),
+      )
+    ) {
+      return;
+    }
+    throw new SurfAceToolError(
+      "invalid_operation",
+      `Surf Ace pair.response topology for ${surface.surfaceId} did not exactly match its pane list.`,
     );
   }
 
@@ -10449,6 +10661,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           );
           const pair = await this.requestPair(surface);
           const pairResponse = pair.response;
+          this.assertPairResponseHasTopologyPanes(surface, pairResponse);
+          this.assertPairResponseTopologyMatchesPanes(surface, pairResponse);
           const canonicalSurface = this.adoptCanonicalSurfaceId(
             surface,
             asSurfaceId(pairResponse.payload.surfaceId),
@@ -10461,7 +10675,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           if (canonicalSurface !== surface) {
             surface = canonicalSurface;
           }
-            this.assertPairResponseHasTopologyPanes(surface, pairResponse);
             const hadAcceptedLocalTopology =
               this.hasAcceptedSurfaceTopology(surface) &&
               surface.panes.size > 0;
@@ -10469,23 +10682,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               surface.restartOwnershipPendingPair &&
               surface.hasPairedInGatewaySession &&
               surface.sessionId !== null;
-            const hadLocalOwnershipForTopologyRestore =
-              surface.hasPairedInGatewaySession &&
-              surface.sessionId !== null &&
-              surface.localOwnership !== null &&
-              surface.localOwnership.providerId === this.persistentState.providerId &&
-              surface.localOwnership.sessionId === surface.sessionId &&
-              surface.localOwnership.surfaceId === surface.surfaceId;
             const previousOwnership = {
               ownershipEpoch: surface.ownershipEpoch,
               sessionId: surface.sessionId,
             };
-            this.markPairConnected(
-              surface,
-              asSessionId(pairResponse.payload.sessionId),
-              pairResponse.payload.ownershipEpoch,
-              pairResponse.payload.resumed,
-            );
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
               panes: pairResponse.payload.state.panes.length,
@@ -10501,25 +10701,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 preserveRestartContent: hadRestartOwnershipPendingPair,
                 preserveTargetState: this.hasSurfaceTargetState(surface),
               });
-            }
-            const shouldRestoreProviderTopology =
-              hadLocalOwnershipForTopologyRestore &&
-              hadAcceptedLocalTopology &&
-              (surface.topologyRevision > 0 ||
-                surface.panes.size > pairResponse.payload.state.panes.length);
+          }
           this.applyPairState(surface, pairResponse, {
             previousOwnership,
-            pruneStalePanes: !shouldRestoreProviderTopology,
+            prunePairClearedPaneTargets: true,
           });
+          this.markPairConnected(
+            surface,
+            asSessionId(pairResponse.payload.sessionId),
+            pairResponse.payload.ownershipEpoch,
+            pairResponse.payload.resumed,
+          );
           const pairStateWindowLabelDiffers = pair.requestedWindowLabel !== surface.windowLabel;
-          const shouldRestoreProviderTopologyPublish =
-            hadLocalOwnershipForTopologyRestore &&
-            shouldRestoreProviderTopology;
           this.restoreRestartContent(surface);
           await this.reconcilePaneTopologyAuthorityFromProvider(surface, "pair response", {
             publishLabelRepairTopology: false,
             requireProviderList: true,
           });
+          surface.connectionState = "connected";
           const pairStateLabelsDiffer = this.pairStatePaneLabelsDiffer(surface, pairResponse.payload.state.panes);
           const shouldPublishPaneLabelRepair =
             pairStateLabelsDiffer &&
@@ -10531,7 +10730,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             surface.layout?.type === "pane" &&
             this.hasAcceptedSurfaceTopology(surface);
           const shouldPublishProviderTopology =
-            shouldRestoreProviderTopologyPublish ||
             shouldPublishPaneLabelRepair ||
             shouldPublishSinglePaneWindowLabelRepair;
           if (shouldPublishProviderTopology) {
@@ -11114,23 +11312,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (target.paneLineageId !== previousLineageId) {
         continue;
       }
+      const matchesPreviousCurrentTarget = target.targetId === previousCurrentTargetId;
       const sameTargetIdentity =
-        target.targetId === previousCurrentTargetId ||
+        matchesPreviousCurrentTarget ||
         target.targetId === pane.staleTargetId;
       if (sameTargetIdentity) {
         target.paneLineageId = nextLineageId;
-        if (target.currentState === "stale") {
+        if (matchesPreviousCurrentTarget && target.currentState === "stale") {
           target.currentState = "current";
           delete target.supersededByTargetId;
         }
-        if (target.targetId === previousCurrentTargetId) {
+        if (matchesPreviousCurrentTarget) {
           pane.currentTargetId = target.targetId;
-        }
-        if (pane.staleTargetId === target.targetId) {
-          pane.staleTargetId = null;
-        }
-        if (pane.lastRestoreBlockedReason === "restore_blocked_stale_target") {
-          pane.lastRestoreBlockedReason = null;
+          if (pane.staleTargetId === target.targetId) {
+            pane.staleTargetId = null;
+          }
+          if (pane.lastRestoreBlockedReason === "restore_blocked_stale_target") {
+            pane.lastRestoreBlockedReason = null;
+          }
         }
       } else if (
         (!isLegacyPaneLineageId(previousLineageId) || !sameTargetIdentity) &&
@@ -11707,20 +11906,67 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         ownershipEpoch: number;
         sessionId: SessionId | null;
       };
+      prunePairClearedPaneTargets?: boolean;
       pruneStalePanes?: boolean;
     } = {},
   ): void {
+    const previousName = surface.name;
+    const previousViewport = cloneViewport(surface.viewport);
+    const previousProtocolFeatures = new Set(surface.protocolFeatures);
+    const previousTargetCapabilities = new Set(surface.targetCapabilities);
     surface.name = response.payload.surfaceName;
     surface.viewport = cloneViewport(response.payload.viewport);
     surface.protocolFeatures = new Set(response.payload.capabilities.protocolFeatures ?? []);
     surface.targetCapabilities = this.targetCapabilitiesForPair(response);
-    this.applyPairPaneState(
-      surface,
-      response.payload.state.panes,
-      response.payload.resumed === true,
-      options,
-    );
-    this.hydrateSurfaceTargetState(surface, response.payload.resumed === true, options.previousOwnership);
+    try {
+      const pairImportedRemotePaneIds = new Set<number>();
+      const pairResponseRemotePaneIds = new Set<number>();
+      if (options.prunePairClearedPaneTargets === true) {
+        for (const paneState of response.payload.state.panes) {
+          pairResponseRemotePaneIds.add(Number(paneState.paneId));
+          const existingPane = this.findPaneByRemoteId(surface, paneState.paneId);
+          if (
+            paneState.currentContentId === null ||
+            !existingPane ||
+            existingPane.activeContentId !== paneState.currentContentId ||
+            existingPane.contentType !== paneState.contentType
+          ) {
+            pairImportedRemotePaneIds.add(Number(paneState.paneId));
+          }
+        }
+      }
+      this.applyPairPaneState(
+        surface,
+        response.payload.state.panes,
+        response.payload.resumed === true,
+        {
+          ...options,
+          pairStateLayout: response.payload.state.layout,
+          pairStateTopologyRevision: response.payload.state.topologyRevision,
+        },
+      );
+      if (options.prunePairClearedPaneTargets === true) {
+        this.pruneRestartContentForPairImportedPanes(
+          surface,
+          pairResponseRemotePaneIds,
+        );
+      }
+      this.hydrateSurfaceTargetState(
+        surface,
+        response.payload.resumed === true,
+        options.previousOwnership,
+        pairImportedRemotePaneIds,
+      );
+      if (options.prunePairClearedPaneTargets === true) {
+        this.prunePairClearedPaneTargets(surface, response.payload.state.panes);
+      }
+    } catch (error) {
+      surface.name = previousName;
+      surface.viewport = previousViewport;
+      surface.protocolFeatures = previousProtocolFeatures;
+      surface.targetCapabilities = previousTargetCapabilities;
+      throw error;
+    }
     this.queuePersistScreenSnapshot("apply pair state");
   }
 
@@ -11740,90 +11986,162 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private applyPairPaneState(
     surface: ManagedSurface,
     paneStates: PairResponse["payload"]["state"]["panes"],
-    sameSession: boolean,
-    options: { pruneStalePanes?: boolean } = {},
+    _sameSession: boolean,
+    options: {
+      pairStateLayout?: PairResponse["payload"]["state"]["layout"];
+      pairStateTopologyRevision?: PairResponse["payload"]["state"]["topologyRevision"];
+      pruneStalePanes?: boolean;
+    } = {},
   ): void {
     this.assertProviderPaneLabelsUnique(surface, paneStates);
-    const preserveExtensionTopology =
-      sameSession &&
-      surface.hasPairedInGatewaySession &&
-      surface.sessionId !== null &&
-      surface.topologyRevision > 0 &&
-      paneStates.length < surface.panes.size;
-    if (preserveExtensionTopology) {
-      let lineageChanged = false;
-      let contentChanged = false;
-      const providerPaneLabels: Array<{ pane: ManagedPane; paneLabel: number; remotePaneId: RemotePaneId }> = [];
+    if (paneStates.length === 0) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Pair response for ${surface.surfaceId} did not include any topology panes.`,
+      );
+    }
+    const nextPanes = new Map<PaneId, ManagedPane>();
+    const previousPanes = new Map(surface.panes);
+    const previousLayout = surface.layout;
+    const previousTopologyRevision = surface.topologyRevision;
+    const previousPaneSnapshots = new Map(
+      [...surface.panes.entries()].map(([paneId, pane]) => [paneId, structuredClone(pane)]),
+    );
+    let lineageChanged = false;
+    let consumedBootstrapPane = false;
+    const providerPaneLabels: Array<{ pane: ManagedPane; paneLabel: number; remotePaneId: RemotePaneId }> = [];
+    try {
       for (const paneState of paneStates) {
-        const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+        let pane = this.findPaneByRemoteId(surface, paneState.paneId);
+        if (!pane && !consumedBootstrapPane && nextPanes.size === 0) {
+          pane = this.consumeBootstrapPaneForPairState(surface, paneState.paneId);
+          consumedBootstrapPane = pane !== null;
+        }
+        pane ??=
+          this.recoverSolePaneForTopologySync(surface, paneState.paneId, paneStates.length) ??
+          this.ensurePane(surface, paneState.paneId);
+        providerPaneLabels.push({ pane, paneLabel: paneState.paneLabel, remotePaneId: paneState.paneId });
+        nextPanes.set(pane.paneId, pane);
+      }
+
+      if (!(options.pruneStalePanes ?? true)) {
+        if (typeof options.pairStateTopologyRevision === "number") {
+          surface.topologyRevision = Number(options.pairStateTopologyRevision);
+        }
+        for (const paneState of paneStates) {
+          const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+          if (!pane) {
+            continue;
+          }
+          if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
+            lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
+          }
+          this.applyPairPaneContentState(pane, paneState);
+          pane.viewport = cloneViewport(surface.viewport);
+        }
+        this.adoptProviderPaneLabels(surface, providerPaneLabels);
+        this.queuePersistScreenSnapshot("apply pair state");
+        return;
+      }
+
+      const paneIds = [...nextPanes.keys()];
+      const pairLayout = options.pairStateLayout
+        ? topologyLayoutToManagedLayoutFromPanes([...nextPanes.values()], options.pairStateLayout)
+        : null;
+      const pairLayoutPaneIds = pairLayout ? flattenManagedLayout(pairLayout) : [];
+      const pairLayoutPaneIdSet = new Set(pairLayoutPaneIds);
+      const pairLayoutMatchesPanes = pairLayoutPaneIds.length === paneIds.length &&
+        pairLayoutPaneIdSet.size === pairLayoutPaneIds.length &&
+        paneIds.every((paneId) => pairLayoutPaneIdSet.has(paneId));
+      if (!pairLayout || !pairLayoutMatchesPanes) {
+        throw new SurfAceToolError(
+          "invalid_operation",
+          `Pair response topology for ${surface.surfaceId} did not exactly match its pane list.`,
+        );
+      }
+
+      const paneByRemoteId = new Map(providerPaneLabels.map((entry) => [entry.remotePaneId, entry.pane]));
+      for (const paneState of paneStates) {
+        const pane = paneByRemoteId.get(paneState.paneId);
         if (!pane) {
           continue;
         }
         if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
           lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
         }
-        providerPaneLabels.push({ pane, paneLabel: paneState.paneLabel, remotePaneId: paneState.paneId });
-        if (!this.hasReplayableLocalPaneContent(surface, pane)) {
-          contentChanged = this.applyPairPaneContentState(pane, paneState) || contentChanged;
-        }
+        this.applyPairPaneContentState(pane, paneState);
         pane.viewport = cloneViewport(surface.viewport);
       }
-      const labelsChanged = this.adoptProviderPaneLabels(surface, providerPaneLabels);
-      if (lineageChanged) {
-        this.runBackgroundTask("persist pair lineage repair", async () => {
-          await this.persistSurfaceTargetState(surface, "pair lineage repair");
-        });
-      }
-      if (labelsChanged || contentChanged) {
-        this.queuePersistScreenSnapshot(labelsChanged ? "pair label repair" : "pair content repair");
-      }
-      return;
-    }
-    const nextPanes = new Map<PaneId, ManagedPane>();
-    let lineageChanged = false;
-    const providerPaneLabels: Array<{ pane: ManagedPane; paneLabel: number; remotePaneId: RemotePaneId }> = [];
-    for (const paneState of paneStates) {
-      const pane =
-        this.findPaneByRemoteId(surface, paneState.paneId) ??
-        this.consumeBootstrapPaneForPairState(surface, paneState.paneId) ??
-        this.recoverSolePaneForTopologySync(surface, paneState.paneId, paneStates.length) ??
-        this.ensurePane(surface, paneState.paneId);
-      if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
-        lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
-      }
-      providerPaneLabels.push({ pane, paneLabel: paneState.paneLabel, remotePaneId: paneState.paneId });
-      this.applyPairPaneContentState(pane, paneState);
-      pane.viewport = cloneViewport(surface.viewport);
-      nextPanes.set(pane.paneId, pane);
-    }
-    this.adoptProviderPaneLabels(surface, providerPaneLabels);
+      this.adoptProviderPaneLabels(surface, providerPaneLabels);
 
-    if (!(options.pruneStalePanes ?? true)) {
-      this.queuePersistScreenSnapshot("apply pair state");
-      return;
+      surface.panes = nextPanes;
+      surface.layout = pairLayout;
+      if (typeof options.pairStateTopologyRevision === "number") {
+        surface.topologyRevision = Number(options.pairStateTopologyRevision);
+      }
+    } catch (error) {
+      surface.panes = new Map(previousPanes);
+      for (const [paneId, pane] of previousPaneSnapshots) {
+        surface.panes.set(paneId, pane);
+      }
+      surface.layout = previousLayout;
+      surface.topologyRevision = previousTopologyRevision;
+      throw error;
     }
 
-    surface.panes = nextPanes;
-    const paneIds = [...nextPanes.keys()];
-    if (paneIds.length === 0) {
-      surface.layout = null;
-    } else if (paneIds.length === 1) {
-      surface.layout = { paneId: paneIds[0]!, type: "pane" };
-    } else {
-      const preservedPaneIds = new Set(paneIds);
-      const preservedLayout = surface.layout ? this.filterLayoutToPanes(surface.layout, preservedPaneIds) : null;
-      surface.layout = preservedLayout ?? {
-        children: paneIds.map((paneId) => ({ paneId, type: "pane" as const })),
-        direction: "horizontal",
-        type: "split",
-      };
-    }
     if (lineageChanged) {
       this.runBackgroundTask("persist pair lineage repair", async () => {
         await this.persistSurfaceTargetState(surface, "pair lineage repair");
       });
     }
     this.queuePersistScreenSnapshot("apply pair state");
+  }
+
+  private prunePairClearedPaneTargets(
+    surface: ManagedSurface,
+    paneStates: PairResponse["payload"]["state"]["panes"],
+  ): void {
+    let changed = false;
+    for (const paneState of paneStates) {
+      if (paneState.currentContentId !== null) {
+        continue;
+      }
+      const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+      if (!pane) {
+        continue;
+      }
+      const target = this.currentTargetRecord(surface, pane);
+      if (target) {
+        changed = this.markTargetStale(
+          surface,
+          target,
+          "restore_blocked_stale_target",
+          "Pair response reported an empty provider pane",
+          pane,
+        ) || changed;
+        continue;
+      }
+      if (pane.currentTargetId !== null) {
+        pane.currentTargetId = null;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.runBackgroundTask("persist pair-cleared target state", async () => {
+      await this.persistSurfaceTargetState(surface, "pair-cleared target state");
+      });
+    }
+  }
+
+  private pruneRestartContentForPairImportedPanes(
+    surface: ManagedSurface,
+    pairImportedRemotePaneIds: Set<number>,
+  ): void {
+    const restartEntries = this.restartContentBySurface.get(surface.surfaceId);
+    if (!restartEntries || restartEntries.length === 0 || pairImportedRemotePaneIds.size === 0) {
+      return;
+    }
+    this.restartContentBySurface.delete(surface.surfaceId);
   }
 
   private applyPairPaneContentState(
@@ -11845,37 +12163,56 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         pane.snapshot !== null ||
         pane.buffer.liveFrame !== null ||
         pane.buffer.liveDirtyStrokeIds.length > 0 ||
+        pane.currentTargetId !== null ||
         pane.currentRevision !== paneState.currentRevision;
       this.clearVisiblePaneContent(pane, paneState.currentRevision);
+      pane.currentTargetId = null;
+      pane.pairImportedContentAuthority = true;
       return changed;
     }
-    return false;
-  }
-
-  private hasReplayableLocalPaneContent(surface: ManagedSurface, pane: ManagedPane): boolean {
-    return this.currentTargetRecord(surface, pane) !== null || this.visibleHistoryEntry(pane) !== null;
-  }
-
-  private filterLayoutToPanes(
-    node: ManagedLayoutNode,
-    paneIds: Set<PaneId>,
-  ): ManagedLayoutNode | null {
-    if (node.type === "pane") {
-      return paneIds.has(node.paneId) ? node : null;
+    const preservesCurrentTarget =
+      pane.activeContentId === paneState.currentContentId &&
+      pane.contentType === paneState.contentType;
+    const changed =
+      pane.activeContentId !== paneState.currentContentId ||
+      pane.contentType !== paneState.contentType ||
+      pane.contentValue !== null ||
+      pane.display !== null ||
+      pane.historyOwnerToken !== null ||
+      pane.ownerSessionKey !== null ||
+      pane.historySummary.visibleContentId !== paneState.currentContentId ||
+      pane.diagnosticContent !== null ||
+      pane.nonDurableTargetDiagnostic !== null ||
+      pane.buffer.currentUrl !== null ||
+      (pane.snapshot !== null && pane.snapshot.contentId !== paneState.currentContentId) ||
+      pane.buffer.liveFrame !== null ||
+      pane.buffer.liveDirtyStrokeIds.length > 0 ||
+      (!preservesCurrentTarget && pane.currentTargetId !== null) ||
+      pane.currentRevision !== paneState.currentRevision;
+    pane.activeContentId = paneState.currentContentId;
+    pane.contentType = paneState.contentType;
+    pane.contentValue = null;
+    pane.currentRevision = paneState.currentRevision;
+    pane.display = null;
+    pane.historyOwnerToken = null;
+    pane.ownerSessionKey = null;
+    pane.historySummary.visibleContentId = paneState.currentContentId;
+    pane.diagnosticContent = null;
+    pane.nonDurableTargetDiagnostic = null;
+    pane.buffer.currentUrl = null;
+    pane.buffer.liveFrame = null;
+    pane.buffer.liveDirtyStrokeIds = [];
+    if (!preservesCurrentTarget) {
+      pane.currentTargetId = null;
     }
-    const children = node.children
-      .map((child) => this.filterLayoutToPanes(child, paneIds))
-      .filter((child): child is ManagedLayoutNode => child !== null);
-    if (children.length === 0) {
-      return null;
+    pane.pairImportedContentAuthority = true;
+    if (pane.snapshot?.contentId !== paneState.currentContentId) {
+      pane.snapshot = null;
+    } else if (pane.snapshot) {
+      pane.snapshot.contentType = paneState.contentType;
+      pane.snapshot.revision = paneState.currentRevision;
     }
-    if (children.length === 1) {
-      return children[0]!;
-    }
-    return {
-      ...node,
-      children,
-    };
+    return changed;
   }
 
   private targetCapabilitiesForPair(response: PairResponse): Set<string> {
@@ -12057,6 +12394,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     if (isClearRequest) {
       this.clearVisiblePaneContent(pane, payload.currentRevision);
+      pane.pairImportedContentAuthority = false;
       await this.tombstonePaneTarget(surface, pane);
     } else {
       if (contentChanged) {
@@ -12069,6 +12407,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       pane.display = setPayload?.display ? structuredClone(setPayload.display) : null;
       pane.historyOwnerToken = setPayload?.historyOwnerToken ?? pane.historyOwnerToken;
       pane.ownerSessionKey = nextOwner;
+      pane.pairImportedContentAuthority = false;
       pane.historySummary.visibleContentId = payload.currentContentId;
       if (pane.snapshot && setPayload) {
         pane.snapshot.contentId = payload.currentContentId;

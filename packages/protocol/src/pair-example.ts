@@ -55,6 +55,10 @@ export function buildExamplePairResponse(): PairResponse {
       ownershipEpoch: 1,
       sessionId: "sa_example_session" as PairResponse["payload"]["sessionId"],
       state: {
+        layout: {
+          paneId: 1 as PairResponse["payload"]["state"]["panes"][number]["paneId"],
+          type: "pane",
+        },
         panes: [
           {
             contentType: null,
@@ -65,6 +69,7 @@ export function buildExamplePairResponse(): PairResponse {
             paneLabel: 1,
           },
         ],
+        topologyRevision: 0 as PairResponse["payload"]["state"]["topologyRevision"],
       },
       surfaceId: "sf_surface_a" as PairResponse["payload"]["surfaceId"],
       surfaceName: "Surf Ace A",
