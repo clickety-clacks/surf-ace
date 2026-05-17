@@ -4,6 +4,10 @@ import test from "node:test";
 
 import { surfaceWindowLoadQuery, surfaceWindowOptions } from "../src/window-options.js";
 
+async function mainSource(): Promise<string> {
+  return fs.readFile(new URL("../../src/main.ts", import.meta.url), "utf8");
+}
+
 test("surface window is frameless and visible when hosted by the compositor", () => {
   const options = surfaceWindowOptions({
     compositorSocketPath: "/tmp/surf-ace-compositor.sock",
@@ -89,4 +93,13 @@ test("compositor-hosted windows materialize with alpha bootstrap in one option p
   assert.equal(options.backgroundColor, "#00000000");
   assert.deepEqual(query, { compositorHosted: "1", surfaceId: "sf_alpha" });
   assert.ok(bootstrapScript !== -1 && stylesheetLink !== -1 && bootstrapScript < stylesheetLink);
+});
+
+test("compositor hosting does not enable renderer overlay debug borders in product mode", async () => {
+  const source = await mainSource();
+  const bootstrapHandler = source.match(/ipcMain\.handle\("surface:get-bootstrap"[\s\S]*?ipcMain\.on\("surface:snapshot"/)?.[0] ?? "";
+
+  assert.match(bootstrapHandler, /compositorHosted:\s*Boolean\(resolveCompositorControlSocketPath\(\)\)/);
+  assert.match(bootstrapHandler, /overlayDebugBorders:\s*false/);
+  assert.doesNotMatch(bootstrapHandler, /overlayDebugBorders:\s*Boolean\(resolveCompositorControlSocketPath\(\)\)/);
 });

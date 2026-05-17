@@ -1147,7 +1147,7 @@ function installIpc(): void {
     const state = core.getRendererWindowState(surfaceId);
     return {
       compositorHosted: Boolean(resolveCompositorControlSocketPath()),
-      overlayDebugBorders: Boolean(resolveCompositorControlSocketPath()),
+      overlayDebugBorders: false,
       state,
       surfaceId,
     };
