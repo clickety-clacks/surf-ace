@@ -16,7 +16,7 @@ test("Surf Ace enables Electron platform WebAuthn before app readiness", async (
   assert.match(mainSource, /session\.defaultSession\.on\("select-webauthn-account"/);
 });
 
-test("mac package entitlements match the WebAuthn keychain access group", async () => {
+test("mac package entitlements remain launchable without an embedded provisioning profile", async () => {
   const packageJson = JSON.parse(await fs.readFile(new URL("../../package.json", import.meta.url), "utf8")) as {
     build?: { mac?: { entitlements?: string } };
   };
@@ -25,5 +25,6 @@ test("mac package entitlements match the WebAuthn keychain access group", async 
 
   assert.equal(packageJson.build?.mac?.entitlements, "build/entitlements.mac.plist");
   assert.ok(mainSource.includes(keychainAccessGroup));
-  assert.ok(entitlements.includes(`<string>${keychainAccessGroup}</string>`));
+  assert.ok(!entitlements.includes("keychain-access-groups"));
+  assert.ok(!entitlements.includes(`<string>${keychainAccessGroup}</string>`));
 });
