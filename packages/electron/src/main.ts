@@ -1174,12 +1174,20 @@ function installIpc(): void {
       return;
     }
     try {
-      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), {
-        bounds: payload.bounds as { height: number; width: number; x: number; y: number } | null,
-        selection: (payload.selection ?? null) as never,
-        viewport: payload.viewport as never,
-        visibleText: String(payload.visibleText ?? ""),
-      });
+      const snapshot: Parameters<SurfaceCore["updatePaneSnapshot"]>[2] = {};
+      if ("bounds" in payload) {
+        snapshot.bounds = payload.bounds as { height: number; width: number; x: number; y: number } | null;
+      }
+      if ("selection" in payload) {
+        snapshot.selection = (payload.selection ?? null) as never;
+      }
+      if ("viewport" in payload) {
+        snapshot.viewport = payload.viewport as never;
+      }
+      if ("visibleText" in payload) {
+        snapshot.visibleText = String(payload.visibleText ?? "");
+      }
+      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot);
     } catch {
       // Renderer snapshot updates are best-effort; stale pane ids should not crash the app.
     }

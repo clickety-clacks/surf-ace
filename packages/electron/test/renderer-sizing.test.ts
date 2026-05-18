@@ -73,6 +73,22 @@ test("renderer reports pane snapshots after layout commits", async () => {
   assert.ok(rafReportIndex > rafIndex);
 });
 
+test("main preserves omitted browser-hosted snapshot fields", async () => {
+  const source = await mainSource();
+  const snapshotIndex = source.indexOf("ipcMain.on(\"surface:snapshot\"");
+  const pageIndex = source.indexOf("ipcMain.on(\"surface:page\"", snapshotIndex);
+  const handlerSource = source.slice(snapshotIndex, pageIndex);
+
+  assert.ok(snapshotIndex > -1);
+  assert.ok(pageIndex > snapshotIndex);
+  assert.match(handlerSource, /const snapshot: Parameters<SurfaceCore\["updatePaneSnapshot"\]>\[2\] = \{\};/);
+  for (const key of ["bounds", "selection", "viewport", "visibleText"]) {
+    assert.match(handlerSource, new RegExp(`if \\("${key}" in payload\\)`));
+  }
+  assert.doesNotMatch(handlerSource, /selection:\s*\(payload\.selection \?\? null\)/);
+  assert.doesNotMatch(handlerSource, /visibleText:\s*String\(payload\.visibleText \?\? ""\)/);
+});
+
 test("content replacement resets the pane scroll origin before browser_url mounts", async () => {
   const source = await rendererSource();
   const resetIndex = source.indexOf("function resetDynamicContent");
