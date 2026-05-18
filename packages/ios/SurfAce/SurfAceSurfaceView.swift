@@ -511,7 +511,7 @@ private struct SurfAcePaneView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, 28)
                 .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
-                .surfAceSpatialIdentityDepthOffset()
+                .surfAceSpatialChromeDepthOffset()
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
 
@@ -538,6 +538,7 @@ private struct SurfAcePaneView: View {
                         Spacer()
                         SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
                             .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                            .surfAceSpatialChromeDepthOffset()
                     }
                 }
             }
@@ -822,7 +823,7 @@ private struct SurfAcePaneIdentityOverlay: View {
 
 private extension View {
     @ViewBuilder
-    func surfAceSpatialIdentityDepthOffset() -> some View {
+    func surfAceSpatialChromeDepthOffset() -> some View {
         #if os(visionOS)
         if Bundle.main.bundleIdentifier == SurfAceSpatialIdentityLayout.bundleIdentifier {
             self.offset(z: SurfAceSpatialIdentityLayout.depthOffset)
