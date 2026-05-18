@@ -17,6 +17,13 @@ import {
 
 import type { ContentSetRequest, Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
+import {
+  CLIENT_FLIGHT_RECORDER_LOG_PATH,
+  clientFlightRecorderGrepCommand,
+  clientFlightRecorderTailCommand,
+  errorDiagnosticFields,
+  recordClientDiagnostic,
+} from "./client-flight-recorder.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import {
   type CompositorControlRequest,
@@ -63,6 +70,14 @@ function advertisingDisabled(): boolean {
   return value === "1" || value === "true" || value === "yes";
 }
 
+function clientInfo(event: string, fields: Record<string, boolean | number | string | null | undefined> = {}): void {
+  recordClientDiagnostic("info", "app", event, fields);
+}
+
+function clientWarn(event: string, fields: Record<string, boolean | number | string | null | undefined> = {}): void {
+  recordClientDiagnostic("warn", "app", event, fields);
+}
+
 function gpuDisableRequested(): boolean {
   const value = process.env.SURF_ACE_DISABLE_GPU?.trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes";
@@ -72,6 +87,7 @@ function gpuDisableRequested(): boolean {
 // reproduce the original GPU-process crash path.
 if (gpuDisableRequested()) {
   app.commandLine.appendSwitch("disable-gpu");
+  clientInfo("gpu_disable_requested");
 }
 
 function configurePlatformWebAuthn(): void {
@@ -166,9 +182,22 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
           `[surf-ace] WS port ${WS_PORT} unavailable; using ${port} for this Electron surface on ${shortHostName()}.`,
         );
       }
+      clientInfo("selected_provider_endpoint", {
+        bind_address: BIND_ADDRESS,
+        endpoint_name: endpointName(),
+        host_name: shortHostName(),
+        port,
+        requested_port: WS_PORT,
+        ws_path: candidate.wsPath,
+      });
       return { port, server: candidate };
     } catch (error) {
       lastError = error;
+      clientWarn("provider_endpoint_bind_failed", {
+        bind_address: BIND_ADDRESS,
+        port,
+        ...errorDiagnosticFields(error),
+      });
       if (!isAddressInUse(error) || port === ports.at(-1)) {
         throw error;
       }
@@ -264,9 +293,20 @@ function syncWindowPlacement(surfaceId: string, window: BrowserWindow): void {
 }
 
 async function loadPersistentState(): Promise<PersistentSurfaceState | undefined> {
+  const statePath = path.join(stateDir, STATE_FILE_NAME);
   try {
-    return JSON.parse(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8")) as PersistentSurfaceState;
-  } catch {
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as PersistentSurfaceState;
+    clientInfo("state_restore_read_ok", {
+      path: statePath,
+      primary_surface_id: state.primarySurfaceId,
+      surface_count: state.surfaces?.length ?? 0,
+    });
+    return state;
+  } catch (error) {
+    clientInfo("state_restore_read_miss", {
+      path: statePath,
+      ...errorDiagnosticFields(error),
+    });
     return undefined;
   }
 }
@@ -877,6 +917,13 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   const restoredPlacement = compositorSocketPath
     ? null
     : restoreWindowPlacement(core.getWindowPlacement(surfaceId), screen.getAllDisplays(), screen.getPrimaryDisplay());
+  clientInfo("window_restore_attempt", {
+    compositor_socket: compositorSocketPath ?? "none",
+    has_restored_bounds: Boolean(restoredPlacement?.bounds),
+    restored_fullscreen: restoredPlacement?.fullscreen ?? false,
+    surface_id: surfaceId,
+    window_label: surface.windowLabel,
+  });
   const window = new BrowserWindow({
     ...surfaceWindowOptions({
       compositorSocketPath,
@@ -895,6 +942,11 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   windows.set(surfaceId, window);
+  clientInfo("window_created", {
+    pane_ids: core.activePaneIds(surfaceId).join(","),
+    surface_id: surfaceId,
+    window_label: surface.windowLabel,
+  });
   readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);
   wireWindowInputMenus(window);
@@ -911,6 +963,11 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     syncWindowPlacement(surfaceId, window);
     readyWindows.add(surfaceId);
     flushPendingWindowState(surfaceId);
+    clientInfo("window_renderer_ready", {
+      pane_ids: core.activePaneIds(surfaceId).join(","),
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
   });
   window.on("move", () => {
     syncWindowPlacement(surfaceId, window);
@@ -936,6 +993,12 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     syncWindowPlacement(surfaceId, window);
   });
   window.on("closed", () => {
+    clientInfo("window_closed", {
+      is_quitting: isQuitting,
+      pane_ids: core.activePaneIds(surfaceId).join(","),
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
     windows.delete(surfaceId);
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
@@ -1311,16 +1374,33 @@ async function boot(): Promise<void> {
   stateDir = app.getPath("userData");
   await fs.mkdir(stateDir, { recursive: true });
   distDir = path.resolve(__dirname);
+  clientInfo("app_launch", {
+    app_version: app.getVersion(),
+    log_path: CLIENT_FLIGHT_RECORDER_LOG_PATH,
+    platform: process.platform,
+    state_dir: stateDir,
+    tail_command: clientFlightRecorderTailCommand(),
+    grep_command: clientFlightRecorderGrepCommand(),
+  });
 
   const persistentState = await loadPersistentState();
   const identity = await loadOrCreateIdentity(stateDir);
   identityFingerprint = identity.fingerprintPrefix;
+  clientInfo("identity_loaded", {
+    fingerprint: identityFingerprint,
+    state_dir: stateDir,
+  });
 
   core = new SurfaceCore({ persistentState });
   const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
   const primarySurface = restoredSurfaces.find((surface) => surface.surfaceId === persistentState?.primarySurfaceId)
     ?? restoredSurfaces[0]
     ?? core.ensurePrimarySurface(endpointName(), displayViewport());
+  clientInfo("surface_restore_result", {
+    primary_surface_id: primarySurface.surfaceId,
+    restored_surface_ids: restoredSurfaces.map((surface) => surface.surfaceId).join(","),
+    restored_surface_count: restoredSurfaces.length,
+  });
 
   const serverStart = await createAndStartServer(core);
   server = serverStart.server;
@@ -1343,6 +1423,12 @@ async function boot(): Promise<void> {
       txtProvider: () => server.advertisedTxt(identityFingerprint),
     });
     advertiser.start();
+    clientInfo("bonjour_advertising_start", {
+      endpoint_name: endpointName(),
+      port: serverStart.port,
+    });
+  } else {
+    clientInfo("bonjour_advertising_disabled");
   }
 
   const surfacesToOpen = core.listSurfaces();
@@ -1352,18 +1438,26 @@ async function boot(): Promise<void> {
   if (surfacesToOpen.length === 0) {
     await createWindowForSurface(primarySurface.surfaceId);
   }
+  clientInfo("app_ready", {
+    open_window_count: windows.size,
+    surface_ids: core.listSurfaces().map((surface) => surface.surfaceId).join(","),
+  });
 }
 
 if (!singleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
+    clientInfo("second_instance_focus");
     focusExistingWindow();
   });
 
   app.whenReady().then(async () => {
     await boot();
     app.on("activate", async () => {
+      clientInfo("app_activate", {
+        window_count: windows.size,
+      });
       if (windows.size > 0) {
         focusExistingWindow();
         return;
@@ -1371,9 +1465,15 @@ if (!singleInstanceLock) {
       const primary = core.ensurePrimarySurface(endpointName(), displayViewport());
       await createWindowForSurface(primary.surfaceId);
     });
+  }).catch((error) => {
+    clientWarn("app_boot_failed", errorDiagnosticFields(error));
+    throw error;
   });
 
   app.on("before-quit", async () => {
+    clientInfo("app_before_quit", {
+      active_window_count: windows.size,
+    });
     isQuitting = true;
     clearAdvertiserTxtRefreshTimer();
     await Promise.allSettled(

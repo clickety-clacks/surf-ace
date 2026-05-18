@@ -1,8 +1,5 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -53,6 +50,12 @@ import {
   type CompositorControlRequest,
   type CompositorControlResponse,
 } from "./native-pane-bridge.js";
+import {
+  type ClientDiagnosticFields,
+  clientDiagnosticLine,
+  errorDiagnosticFields,
+  recordClientDiagnostic,
+} from "./client-flight-recorder.js";
 import { isValidWindowLabel, SurfaceCore, SurfaceCoreError, type CoreEvent } from "./surface-core.js";
 
 type SocketCacheEntry = {
@@ -147,30 +150,10 @@ const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
 const PANE_GEOMETRY_READY_TIMEOUT_MS = 8_000;
 const NATIVE_OVERLAY_LIVENESS_RETRY_COUNT = 10;
 const NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS = 100;
-const WS_DIAGNOSTIC_LOG_PATH = process.env.SURF_ACE_WS_DIAGNOSTIC_LOG ?? path.join(
-  os.homedir(),
-  "Library",
-  "Application Support",
-  "@surf-ace",
-  "electron",
-  "ws-diagnostics.log",
-);
-
-type ServerDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
-
-function formatServerDiagnosticValue(value: string | number | boolean): string {
-  const text = String(value);
-  return /^[A-Za-z0-9_./:@%-]+$/.test(text) ? text : JSON.stringify(text);
-}
+type ServerDiagnosticFields = ClientDiagnosticFields;
 
 function serverDiagnostic(event: string, fields: ServerDiagnosticFields = {}): string {
-  const suffix = Object.entries(fields)
-    .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(([key, value]) => `${key}=${formatServerDiagnosticValue(value)}`)
-    .join(" ");
-  return suffix.length > 0
-    ? `[surf-ace:server] event=${event} ${suffix}`
-    : `[surf-ace:server] event=${event}`;
+  return clientDiagnosticLine("server", event, fields);
 }
 
 function diagnosticJson(value: unknown): string {
@@ -181,33 +164,12 @@ function diagnosticJson(value: unknown): string {
   }
 }
 
-function errorDiagnosticFields(error: unknown): ServerDiagnosticFields {
-  if (error instanceof Error) {
-    return {
-      error_message: error.message,
-      error_name: error.name,
-    };
-  }
-  return { error_message: String(error) };
-}
-
-function appendServerDiagnostic(line: string): void {
-  try {
-    fs.mkdirSync(path.dirname(WS_DIAGNOSTIC_LOG_PATH), { recursive: true });
-    fs.appendFileSync(WS_DIAGNOSTIC_LOG_PATH, `${new Date().toISOString()} ${line}\n`);
-  } catch {
-    // Diagnostics must never change WebSocket behavior.
-  }
-}
-
 function persistentServerDiagnostic(
   level: "info" | "warn" | "error",
   event: string,
   fields: ServerDiagnosticFields = {},
 ): void {
-  const line = serverDiagnostic(event, fields);
-  appendServerDiagnostic(line);
-  console[level](line);
+  recordClientDiagnostic(level, "server", event, fields);
 }
 
 export class SurfaceWsServer {
@@ -267,11 +229,13 @@ export class SurfaceWsServer {
 
     this.httpServer.on("upgrade", (request, socket, head) => {
       if (request.url !== this.wsPath) {
-        console.warn(
-          serverDiagnostic("socket_reject", {
+        persistentServerDiagnostic(
+          "warn",
+          "socket_reject",
+          {
             path: request.url ?? "<none>",
             reason: "bad_path",
-          }),
+          },
         );
         socket.destroy();
         return;
@@ -342,34 +306,40 @@ export class SurfaceWsServer {
   }
 
   async start(): Promise<void> {
-    console.info(
-      serverDiagnostic("bind_start", {
+    persistentServerDiagnostic(
+      "info",
+      "server_bind_start",
+      {
         host: this.bindAddress,
         port: this.port,
         ws_path: this.wsPath,
-      }),
+      },
     );
     await new Promise<void>((resolve, reject) => {
       this.httpServer.listen(this.port, this.bindAddress, () => resolve());
       this.httpServer.once("error", reject);
     });
     this.ignoreInitialSurfaceEvents = false;
-    console.info(
-      serverDiagnostic("bind_ok", {
+    persistentServerDiagnostic(
+      "info",
+      "server_bind_ok",
+      {
         endpoint_name: this.endpointName,
         host: this.bindAddress,
         host_name: this.hostName,
         port: this.port,
         ws_path: this.wsPath,
-      }),
+      },
     );
   }
 
   async stop(): Promise<void> {
-    console.info(
-      serverDiagnostic("stop_begin", {
+    persistentServerDiagnostic(
+      "info",
+      "server_stop_begin",
+      {
         active_sessions: [...this.transports.values()].filter((transport) => Boolean(transport.active)).length,
-      }),
+      },
     );
     for (const transport of this.transports.values()) {
       clearTransport(transport);
@@ -392,7 +362,7 @@ export class SurfaceWsServer {
         });
       });
     });
-    console.info(serverDiagnostic("stop_ok"));
+    persistentServerDiagnostic("info", "server_stop_ok");
   }
 
   advertisedTxt(fingerprintPrefix: string): Record<string, string> {
@@ -746,12 +716,14 @@ export class SurfaceWsServer {
     const cached = cache.get(request.id);
     if (cached) {
       if (cached.payloadHash !== payloadHash) {
-        console.warn(
-          serverDiagnostic("request_reject", {
+        persistentServerDiagnostic(
+          "warn",
+          "request_reject",
+          {
             op: request.op,
             reason: "request_id_reuse_mismatch",
             request_id: request.id,
-          }),
+          },
         );
         await this.reply(socket, errorResponse(request.op, request.id, "invalid_request_id_reuse", "Request id was reused with different payload"));
         return;
@@ -802,11 +774,13 @@ export class SurfaceWsServer {
         );
       }
       if (error instanceof SurfaceCoreError) {
-        console.warn(
-          serverDiagnostic("request_error", {
+        persistentServerDiagnostic(
+          "warn",
+          "request_error",
+          {
             code: error.code,
             op: request.op,
-          }),
+          },
         );
         response = errorResponse(
           request.op,
@@ -816,11 +790,13 @@ export class SurfaceWsServer {
           error.details,
         );
       } else {
-        console.warn(
-          serverDiagnostic("request_error", {
+        persistentServerDiagnostic(
+          "warn",
+          "request_error",
+          {
             code: "internal_error",
             op: request.op,
-          }),
+          },
         );
         response = errorResponse(request.op, request.id, "internal_error", "Unhandled surface error");
       }
@@ -2755,12 +2731,14 @@ export class SurfaceWsServer {
     const session = transport.active;
     clearPaneTimers(session.paneFlushTimers);
     transport.active = null;
-    console.info(
-      serverDiagnostic("session_detached", {
+    persistentServerDiagnostic(
+      "info",
+      "session_detached",
+      {
         provider_id: session.providerId,
         session_id: session.sessionId,
         surface_id: surfaceId,
-      }),
+      },
     );
     this.core.setConnectionBar(surfaceId, "connecting");
     this.onBusyChanged?.();
@@ -2809,13 +2787,15 @@ export class SurfaceWsServer {
     if (meta?.pairedSurfaceId === surfaceId) {
       meta.pairedSurfaceId = null;
     }
-    console.info(
-      serverDiagnostic("session_detach_request", {
+    persistentServerDiagnostic(
+      "info",
+      "session_detach_request",
+      {
         provider_id: active.providerId,
         reason,
         session_id: active.sessionId,
         surface_id: surfaceId,
-      }),
+      },
     );
     active.socket.close(1000, reason);
   }
