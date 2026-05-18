@@ -1942,6 +1942,33 @@ test("pane capture returns failure metadata when client cannot provide image byt
   });
 });
 
+test("pane capture fails closed when authority changes during capture", async () => {
+  await withRuntimeHarness({
+    configureServer: (server) => {
+      server.snapshotDelayMs = 50;
+    },
+    run: async ({ runtime, server }) => {
+      const screen = (await runtime.listScreens())[0];
+      const paneId = screen?.panes[0]?.paneId;
+      assert.ok(paneId);
+
+      const initialSnapshotRequestCount = server.snapshotRequests.length;
+      const capture = runtime.capturePane({ fingerprint: server.surfaceId, paneId });
+      await waitFor(() => server.snapshotRequests.length > initialSnapshotRequestCount);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      surface.connectionState = "unreachable";
+
+      await assert.rejects(
+        capture,
+        /Surf Ace authority changed during capture; refresh surf_ace_list and retry\./,
+      );
+    },
+  });
+});
+
 function assertAnnotationAlertBody(
   body: Record<string, unknown>,
   params: {
@@ -3874,6 +3901,42 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(screen);
       assert.equal(screen.connectionState, "connecting");
       assert.equal(screen._debug?.wsOpen, false);
+    });
+  });
+
+  await t.test("listScreens and authority diagnostics report one authority snapshot", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      assert.deepEqual(
+        screen._debug?.providerAuthorityProjection.authorityBlockersBySurfaceId[server.surfaceId],
+        screen.authority.blockers,
+      );
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.deepEqual(
+        diagnostics.authorityBlockersBySurfaceId[server.surfaceId],
+        screen.authority.blockers,
+      );
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      surface.connectionState = "unreachable";
+
+      const staleScreen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.ok(staleScreen);
+      assert.equal(staleScreen.authority.actionable, false);
+      assert.deepEqual(
+        staleScreen._debug?.providerAuthorityProjection.authorityBlockersBySurfaceId[server.surfaceId],
+        staleScreen.authority.blockers,
+      );
+
+      const staleDiagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.deepEqual(
+        staleDiagnostics.authorityBlockersBySurfaceId[server.surfaceId],
+        staleScreen.authority.blockers,
+      );
     });
   });
 
