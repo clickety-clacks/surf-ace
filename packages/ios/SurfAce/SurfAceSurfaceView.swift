@@ -397,7 +397,7 @@ private struct SurfAcePaneTreeView: View {
                     }
                 }
             }
-            .background(Color.white.opacity(0.12))
+            .background(surfAceSplitBackdropColor())
         }
     }
 }
@@ -603,6 +603,14 @@ private func surfAcePaneBackdropColor(isEmpty: Bool) -> Color {
     isEmpty ? Color.clear : Color.black.opacity(0.92)
 #else
     Color.black.opacity(0.92)
+#endif
+}
+
+private func surfAceSplitBackdropColor() -> Color {
+#if os(visionOS)
+    Color.clear
+#else
+    Color.white.opacity(0.12)
 #endif
 }
 
