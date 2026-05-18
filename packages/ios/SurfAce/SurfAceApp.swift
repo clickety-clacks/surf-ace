@@ -98,6 +98,7 @@ struct SurfAceApp: App {
             SurfAceRootView(runtime: runtime)
                 .surfAceSpatialWindowContentSizing()
                 .surfAceSpatialWindowTransparency()
+                .surfAceSpatialWindowOrnament()
                 .task {
                     await runtime.start()
                 }
@@ -127,6 +128,15 @@ private extension View {
         self
         #endif
     }
+
+    @ViewBuilder
+    func surfAceSpatialWindowOrnament() -> some View {
+        #if os(visionOS)
+        self.modifier(SurfAceSpatialWindowOrnament())
+        #else
+        self
+        #endif
+    }
 }
 
 private extension Scene {
@@ -144,6 +154,25 @@ private extension Scene {
 }
 
 #if os(visionOS)
+private struct SurfAceSpatialWindowOrnament: ViewModifier {
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content
+            .ornament(visibility: .visible, attachmentAnchor: .scene(.top)) {
+                Button {
+                    SurfAceSceneActivation.requestNewWindow(source: "spatial_ornament_plus", openWindow: openWindow)
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("New Window")
+            }
+    }
+}
+
 @MainActor
 private struct SurfAceSpatialWindowTransparencyProbe: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
