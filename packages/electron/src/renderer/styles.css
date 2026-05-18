@@ -345,10 +345,6 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   background: #fff;
 }
 
-.content-html-frame--host-relay {
-  pointer-events: none;
-}
-
 .content-browser-url-frame {
   display: flex;
 }
