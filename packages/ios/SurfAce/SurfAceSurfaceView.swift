@@ -18,7 +18,7 @@ private enum SurfAceSpatialPaneChromeLayout {
     static let endpointTrimDegrees: Double = 14
     static let lineWidth: CGFloat = 3
     static let opacity: Double = 0.18
-    static let fillOpacity: Double = 0.05
+    static let fillOpacity: Double = 0.01
 }
 
 private enum SurfAceSplitHandleLayout {
@@ -269,7 +269,7 @@ private enum SurfAceRajdhaniMetrics {
 }
 
 private enum SurfAceSpatialIdentityLayout {
-    static let depthOffset: CGFloat = 28
+    static let depthOffset: CGFloat = 56
     static let bundleIdentifier = "co.clicketyclacks.SurfAce.spatial"
 }
 
