@@ -16,7 +16,7 @@ private enum SurfAceSpatialPaneChromeLayout {
     static let cornerInset: CGFloat = 10
     static let cornerRadius: CGFloat = 45
     static let endpointTrimDegrees: Double = 14
-    static let lineWidth: CGFloat = 1.5
+    static let lineWidth: CGFloat = 3
     static let opacity: Double = 0.18
 }
 
