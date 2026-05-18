@@ -521,6 +521,10 @@ struct SurfAcePaneEntry: Codable {
     }
 }
 
+func surfAceEntryIsVisibleEmpty(_ entry: SurfAcePaneEntry) -> Bool {
+    entry.contentId == nil && entry.contentType == nil && entry.payload == nil && entry.url == nil
+}
+
 struct SurfAcePaneTargetState: Codable, Equatable {
     var targetId: String
     var targetKind: String

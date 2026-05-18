@@ -582,9 +582,9 @@ func surfAceShowsAnnotationBorder(annotationMode: Bool) -> Bool {
     annotationMode
 }
 
-private func surfAceShowsSpatialEmptyPaneChrome(entry: SurfAcePaneEntry) -> Bool {
+func surfAceShowsSpatialEmptyPaneChrome(entry: SurfAcePaneEntry) -> Bool {
 #if os(visionOS)
-    entry.contentId == nil && entry.payload == nil
+    surfAceEntryIsVisibleEmpty(entry)
 #else
     false
 #endif
