@@ -13,14 +13,15 @@ private enum SurfAcePaneChromeLayout {
 }
 
 private enum SurfAceSpatialPaneChromeLayout {
-    static let armLength: CGFloat = 18
+    static let cornerInset: CGFloat = 10
     static let cornerRadius: CGFloat = 45
+    static let endpointTrimDegrees: Double = 14
     static let lineWidth: CGFloat = 1.5
     static let opacity: Double = 0.18
 }
 
 private enum SurfAceSplitHandleLayout {
-    static let size: CGFloat = 44
+    static let visibleSize: CGFloat = 44
     static let iconSize: CGFloat = 17
 }
 
@@ -421,7 +422,7 @@ private struct SurfAceSplitResizeHandle: View {
             .font(.system(size: SurfAceSplitHandleLayout.iconSize, weight: .semibold))
             .foregroundStyle(.white.opacity(0.86))
             .rotationEffect(direction == .vertical ? .degrees(90) : .zero)
-            .frame(width: SurfAceSplitHandleLayout.size, height: SurfAceSplitHandleLayout.size)
+            .frame(width: SurfAceSplitHandleLayout.visibleSize, height: SurfAceSplitHandleLayout.visibleSize)
             .background {
                 Circle()
                     .fill(.regularMaterial)
@@ -430,7 +431,7 @@ private struct SurfAceSplitResizeHandle: View {
                 Circle()
                     .stroke(.white.opacity(0.18), lineWidth: 1)
             }
-            .contentShape(Circle())
+            .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
@@ -629,7 +630,9 @@ private func surfAceSplitBackdropColor() -> Color {
 private struct SurfAceSpatialEmptyPaneChrome: View {
     var body: some View {
         Canvas { context, size in
-            let markerSize = SurfAceSpatialPaneChromeLayout.cornerRadius + SurfAceSpatialPaneChromeLayout.armLength
+            let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
+                + SurfAceSpatialPaneChromeLayout.cornerRadius
+                + SurfAceSpatialPaneChromeLayout.lineWidth
             drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topLeading)
             drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topTrailing)
             drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
@@ -652,9 +655,10 @@ private struct SurfAceSpatialEmptyPaneChrome: View {
         guard width > SurfAceSpatialPaneChromeLayout.lineWidth,
               height > SurfAceSpatialPaneChromeLayout.lineWidth else { return }
 
+        let inset = min(SurfAceSpatialPaneChromeLayout.cornerInset, max(0, min(size.width - width, size.height - height)))
         let origin = CGPoint(
-            x: corner == .topLeading || corner == .bottomLeading ? 0 : size.width - width,
-            y: corner == .topLeading || corner == .topTrailing ? 0 : size.height - height
+            x: corner == .topLeading || corner == .bottomLeading ? inset : size.width - width - inset,
+            y: corner == .topLeading || corner == .topTrailing ? inset : size.height - height - inset
         )
         var path = cornerPath(size: CGSize(width: width, height: height), corner: corner)
         path = path.applying(CGAffineTransform(translationX: origin.x, y: origin.y))
@@ -677,57 +681,41 @@ private struct SurfAceSpatialEmptyPaneChrome: View {
         let minY = strokeInset
         let maxY = size.height - strokeInset
         let radius = min(SurfAceSpatialPaneChromeLayout.cornerRadius, size.width - SurfAceSpatialPaneChromeLayout.lineWidth, size.height - SurfAceSpatialPaneChromeLayout.lineWidth)
-        let armLength = SurfAceSpatialPaneChromeLayout.armLength
+        let trim = SurfAceSpatialPaneChromeLayout.endpointTrimDegrees
 
         switch corner {
         case .topLeading:
-            let arcEndX = minX + radius
-            path.move(to: CGPoint(x: minX, y: min(maxY, minY + radius + armLength)))
-            path.addLine(to: CGPoint(x: minX, y: minY + radius))
             path.addArc(
                 center: CGPoint(x: minX + radius, y: minY + radius),
                 radius: radius,
-                startAngle: .degrees(180),
-                endAngle: .degrees(270),
+                startAngle: .degrees(180 + trim),
+                endAngle: .degrees(270 - trim),
                 clockwise: false
             )
-            path.addLine(to: CGPoint(x: min(maxX, arcEndX + armLength), y: minY))
         case .topTrailing:
-            let arcEndX = maxX - radius
-            path.move(to: CGPoint(x: maxX, y: min(maxY, minY + radius + armLength)))
-            path.addLine(to: CGPoint(x: maxX, y: minY + radius))
             path.addArc(
                 center: CGPoint(x: maxX - radius, y: minY + radius),
                 radius: radius,
-                startAngle: .degrees(0),
-                endAngle: .degrees(270),
+                startAngle: .degrees(360 - trim),
+                endAngle: .degrees(270 + trim),
                 clockwise: true
             )
-            path.addLine(to: CGPoint(x: max(minX, arcEndX - armLength), y: minY))
         case .bottomLeading:
-            let arcEndX = minX + radius
-            path.move(to: CGPoint(x: minX, y: maxY - radius - armLength))
-            path.addLine(to: CGPoint(x: minX, y: maxY - radius))
             path.addArc(
                 center: CGPoint(x: minX + radius, y: maxY - radius),
                 radius: radius,
-                startAngle: .degrees(180),
-                endAngle: .degrees(90),
+                startAngle: .degrees(180 - trim),
+                endAngle: .degrees(90 + trim),
                 clockwise: true
             )
-            path.addLine(to: CGPoint(x: min(maxX, arcEndX + armLength), y: maxY))
         case .bottomTrailing:
-            let arcEndX = maxX - radius
-            path.move(to: CGPoint(x: maxX, y: maxY - radius - armLength))
-            path.addLine(to: CGPoint(x: maxX, y: maxY - radius))
             path.addArc(
                 center: CGPoint(x: maxX - radius, y: maxY - radius),
                 radius: radius,
-                startAngle: .degrees(0),
-                endAngle: .degrees(90),
+                startAngle: .degrees(trim),
+                endAngle: .degrees(90 - trim),
                 clockwise: false
             )
-            path.addLine(to: CGPoint(x: max(minX, arcEndX - armLength), y: maxY))
         }
 
         return path
