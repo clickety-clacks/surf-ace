@@ -19,6 +19,11 @@ private enum SurfAceSpatialPaneChromeLayout {
     static let opacity: Double = 0.18
 }
 
+private enum SurfAceSplitHandleLayout {
+    static let size: CGFloat = 44
+    static let iconSize: CGFloat = 17
+}
+
 func surfAceEscapeHTML(_ string: String) -> String {
     string
         .replacingOccurrences(of: "&", with: "&amp;")
@@ -412,13 +417,20 @@ private struct SurfAceSplitResizeHandle: View {
     @State private var dragStartWeights: [Double]?
 
     var body: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.18))
-            .frame(
-                width: direction == .vertical ? 10 : nil,
-                height: direction == .horizontal ? 10 : nil
-            )
-            .contentShape(Rectangle())
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: SurfAceSplitHandleLayout.iconSize, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.86))
+            .rotationEffect(direction == .vertical ? .degrees(90) : .zero)
+            .frame(width: SurfAceSplitHandleLayout.size, height: SurfAceSplitHandleLayout.size)
+            .background {
+                Circle()
+                    .fill(.regularMaterial)
+            }
+            .overlay {
+                Circle()
+                    .stroke(.white.opacity(0.18), lineWidth: 1)
+            }
+            .contentShape(Circle())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
