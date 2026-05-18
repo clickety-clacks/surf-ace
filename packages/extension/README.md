@@ -14,3 +14,32 @@ This package owns:
 Surf Ace OpenClaw extension/provider installs and provider identity/state belong on TARS only. Do not install or run this package under `~/.openclaw/extensions/surf-ace/` on eezo or other non-TARS hosts; eezo may run the Surf Ace Electron client for display/testing.
 
 Deploy provider changes with `make -C packages/extension deploy-tars`. The deploy target fails closed for non-TARS deploy hosts unless `SURF_ACE_ALLOW_NON_TARS_PROVIDER=1` is set for an explicit approved override. The runtime entrypoint enforces the same guard before resolving OpenClaw state or starting the provider.
+
+## OpenClaw Tool Admission
+
+The extension registers the `surf_ace_*` tools, but OpenClaw will not expose them from the normal coding tool profile unless the Surf Ace plugin is explicitly admitted in `~/.openclaw/openclaw.json`.
+
+Required TARS config:
+
+    {
+      "tools": {
+        "profile": "coding",
+        "alsoAllow": ["surf-ace"]
+      },
+      "plugins": {
+        "allow": ["surf-ace"],
+        "entries": {
+          "surf-ace": { "enabled": true }
+        }
+      }
+    }
+
+Use `tools.alsoAllow` so Surf Ace is added to the coding profile. Do not replace it with `tools.allow` unless the session is intentionally restricted to plugin tools only.
+
+Verification must happen through the official tool surface: a normal OpenClaw session should declare `surf_ace_*`, and a harmless `surf_ace_list` should succeed. Logs, direct HTTP/WS calls, DNS-SD, screenshots, or remembered pane IDs are useful diagnostics but are not installation proof.
+
+## Topology Soak Proof Gate
+
+Topology soak reports must cite the governing procedure in `/Users/mike/shared-workspace/surf-ace/specs/fleet-soak-procedure.md` and cannot pass on pane count alone. A normal CLU session must declare the official `surf_ace_*` tools, harmless `surf_ace_list` must succeed through that tool path, and the returned recursive topology must be cross-checked against independent rendered/provider truth such as `surf_ace_capture_pane` metadata/pixels plus `surf_ace_read` for the same `fingerprint` + opaque `paneId` tuple.
+
+Direct runtime calls, logs, DNS-SD, screenshots, local state files, and debug JSON are diagnostic-only. They may explain a mismatch, but they do not replace the official tool-surface admission gate or the rendered/provider topology cross-check.

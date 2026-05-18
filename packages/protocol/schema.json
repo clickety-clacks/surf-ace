@@ -1893,7 +1893,9 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "panes"
+                "layout",
+                "panes",
+                "topologyRevision"
               ],
               "properties": {
                 "panes": {
@@ -1946,6 +1948,12 @@
                       }
                     }
                   }
+                },
+                "layout": {
+                  "$ref": "#/$defs/TopologyLayoutNode"
+                },
+                "topologyRevision": {
+                  "$ref": "#/$defs/TopologyRevision"
                 }
               }
             },

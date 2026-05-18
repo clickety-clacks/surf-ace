@@ -353,6 +353,52 @@ export function isOverlayNativePaneLivenessFailure(response: CompositorControlRe
   return Boolean(message && /^invalid overlay region: pane .+ is not a live native-hosted pane$/.test(message));
 }
 
+export function overlayLivePaneInstanceIdFromCompositorResponse(response: CompositorControlResponse): string | null {
+  const authority = overlayLivePaneAuthorityFromCompositorResponse(response);
+  if (authority) {
+    return authority.paneInstanceId;
+  }
+  const message = compositorFailureMessage(response);
+  if (!message) {
+    return null;
+  }
+  const match = /does not match live pane instance '([^']+)'/.exec(message);
+  return match?.[1] ?? null;
+}
+
+export function overlayLivePaneAuthorityFromCompositorResponse(response: CompositorControlResponse): { paneId: string; paneInstanceId: string } | null {
+  const message = compositorFailureMessage(response);
+  if (!message) {
+    return null;
+  }
+  const match = /pane PaneId\("([^"]+)"\) pane instance '[^']+' does not match live pane instance '([^']+)'/.exec(message);
+  return match ? { paneId: match[1]!, paneInstanceId: match[2]! } : null;
+}
+
+export function overlayRegionsWithLivePaneInstanceAuthority<Region extends { paneId: number | string; paneInstanceId: string }>(
+  regions: Region[],
+  response: CompositorControlResponse,
+): Region[] | null {
+  const authority = overlayLivePaneAuthorityFromCompositorResponse(response);
+  if (authority) {
+    let updated = false;
+    const nextRegions = regions.map((region) => {
+      if (String(region.paneId) !== authority.paneId) {
+        return region;
+      }
+      updated = true;
+      return { ...region, paneInstanceId: authority.paneInstanceId };
+    });
+    return updated ? nextRegions : null;
+  }
+
+  const paneInstanceId = overlayLivePaneInstanceIdFromCompositorResponse(response);
+  if (!paneInstanceId || regions.length !== 1) {
+    return null;
+  }
+  return [{ ...regions[0]!, paneInstanceId }];
+}
+
 function statusNumber(response: CompositorControlResponse, field: string): number | null {
   const direct = response[field];
   if (typeof direct === "number") {

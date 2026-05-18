@@ -8,9 +8,5 @@
     <true/>
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
-    <key>keychain-access-groups</key>
-    <array>
-      <string>Z7R59J7QV8.ai.surf-ace.electron.webauthn</string>
-    </array>
-  </dict>
+</dict>
 </plist>

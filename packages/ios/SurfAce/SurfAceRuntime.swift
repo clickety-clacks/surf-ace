@@ -1494,9 +1494,10 @@ final class SurfAceRuntime {
                             "currentContentId": jsonValue(pane.currentEntry.contentId),
                             "currentRevision": pane.currentEntry.revision,
                             "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
-                            "currentTarget": jsonValue(targetStatePayload(pane.currentTarget)),
                         ]
                     },
+                    "layout": topologyLayoutPayload(surface.paneLayout),
+                    "topologyRevision": surface.topologyEpoch,
                 ],
             ],
         ]

@@ -31,6 +31,29 @@ Surf Ace launchd/auto-start installs are also TARS-only. Do not run `pnpm --filt
 
 Provider runtime state must use the same standard OpenClaw extension state root on TARS: `/Users/mike/.openclaw/extensions/surf-ace/`. The legacy standalone state root `~/.surf-ace-openclaw-extension` is non-standard and must not be used for durable installs, gateway runtime, or soak harnesses.
 
+### OpenClaw Tool Admission
+
+Surf Ace is an OpenClaw plugin tool surface. In installs that use the normal coding tool profile, the plugin must be explicitly admitted in `~/.openclaw/openclaw.json`; plugin installation/enabling alone is not enough to make `surf_ace_*` tools visible to CLU sessions.
+
+Required TARS OpenClaw config:
+
+    {
+      "tools": {
+        "profile": "coding",
+        "alsoAllow": ["surf-ace"]
+      },
+      "plugins": {
+        "allow": ["surf-ace"],
+        "entries": {
+          "surf-ace": { "enabled": true }
+        }
+      }
+    }
+
+Use `tools.alsoAllow`, not `tools.allow`, when the install should keep the normal coding tools and add Surf Ace. `tools.allow: ["surf-ace"]` is plugin-only admission and can hide the normal coding profile tools.
+
+After changing tool admission, reload OpenClaw/gateway sessions before verification. The product-level proof is that a normal session declares the `surf_ace_*` tools and a harmless `surf_ace_list` succeeds through that tool surface. Direct Surf Ace HTTP/WS calls, provider logs, DNS-SD, screenshots, and stale pane IDs are diagnostic only; they are not proof that the operator surface is installed correctly.
+
 ## Status
 
 - [x] Wire protocol spec (DESIGN.md)
