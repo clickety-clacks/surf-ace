@@ -1494,6 +1494,7 @@ final class SurfAceRuntime {
                             "currentContentId": jsonValue(pane.currentEntry.contentId),
                             "currentRevision": pane.currentEntry.revision,
                             "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
+                            "display": jsonValue(contentDisplayPayload(for: pane.currentEntry)),
                         ]
                     },
                     "layout": topologyLayoutPayload(surface.paneLayout),
@@ -1578,6 +1579,7 @@ final class SurfAceRuntime {
                         "name": jsonValue(pane.name),
                         "activeContentId": jsonValue(pane.currentEntry.contentId),
                         "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
+                        "display": jsonValue(contentDisplayPayload(for: pane.currentEntry)),
                         "currentTarget": jsonValue(targetStatePayload(pane.currentTarget)),
                         "viewport": paneViewportPayload(surfaceId: surfaceId, paneId: pane.paneId),
                         "geometry": paneGeometryPayload(surfaceId: surfaceId, paneId: pane.paneId),
@@ -1930,6 +1932,12 @@ final class SurfAceRuntime {
         pane.currentEntry.provenanceDisplayName = SurfAceRuntime.provenanceDisplayName(
             from: payload["display"] as? [String: Any]
         )
+        let provenance = (payload["display"] as? [String: Any])?["provenance"] as? [String: Any]
+        pane.currentEntry.provenanceSessionKey = provenance?["sessionKey"] as? String
+        pane.currentEntry.provenanceSource = provenance?["source"] as? String
+        pane.currentEntry.provenanceAgentId = provenance?["agentId"] as? String
+        pane.currentEntry.provenanceStreamLabel = provenance?["streamLabel"] as? String
+        pane.currentEntry.provenancePushedAt = provenance?["pushedAt"] as? String
         pane.pendingFlushStrokes.removeAll()
         pane.firstPendingStrokeAt = nil
         pane.lastPendingStrokeAt = nil
@@ -3381,6 +3389,39 @@ final class SurfAceRuntime {
 
     private func jsonValue<T>(_ value: T?) -> Any {
         value ?? NSNull()
+    }
+
+    private func contentDisplayPayload(for entry: SurfAcePaneEntry) -> [String: Any]? {
+        var display: [String: Any] = [:]
+        if let title = entry.title, !title.isEmpty {
+            display["title"] = title
+        }
+        if let provenanceDisplayName = entry.provenanceDisplayName, !provenanceDisplayName.isEmpty {
+            display["senderDisplayName"] = provenanceDisplayName
+        }
+        var provenance: [String: Any] = [:]
+        if let provenanceSessionKey = entry.provenanceSessionKey, !provenanceSessionKey.isEmpty {
+            provenance["sessionKey"] = provenanceSessionKey
+        }
+        if let provenanceDisplayName = entry.provenanceDisplayName, !provenanceDisplayName.isEmpty {
+            provenance["displayName"] = provenanceDisplayName
+        }
+        if let provenanceSource = entry.provenanceSource, !provenanceSource.isEmpty {
+            provenance["source"] = provenanceSource
+        }
+        if let provenanceAgentId = entry.provenanceAgentId, !provenanceAgentId.isEmpty {
+            provenance["agentId"] = provenanceAgentId
+        }
+        if let provenanceStreamLabel = entry.provenanceStreamLabel, !provenanceStreamLabel.isEmpty {
+            provenance["streamLabel"] = provenanceStreamLabel
+        }
+        if let provenancePushedAt = entry.provenancePushedAt, !provenancePushedAt.isEmpty {
+            provenance["pushedAt"] = provenancePushedAt
+        }
+        if !provenance.isEmpty {
+            display["provenance"] = provenance
+        }
+        return display.isEmpty ? nil : display
     }
 
     private func targetStatePayload(_ target: SurfAcePaneTargetState?) -> [String: Any]? {

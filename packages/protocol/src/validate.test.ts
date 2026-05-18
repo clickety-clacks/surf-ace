@@ -243,6 +243,15 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
         {
           activeContentId: null,
           contentType: null,
+          display: {
+            provenance: {
+              displayName: "Session One",
+              pushedAt: "2026-05-17T12:00:00.000Z",
+              sessionKey: "agent:test:session-one",
+            },
+            senderDisplayName: "Session One",
+            title: "Document Title",
+          },
           externalNative: false,
           geometry: {
             contentViewport: { height: 384, width: 1024, x: 0, y: 384 },
@@ -321,6 +330,15 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
             contentType: null,
             currentContentId: null,
             currentRevision: 0,
+            display: {
+              provenance: {
+                displayName: "Session One",
+                pushedAt: "2026-05-17T12:00:00.000Z",
+                sessionKey: "agent:test:session-one",
+              },
+              senderDisplayName: "Session One",
+              title: "Document Title",
+            },
             paneId: 1,
             paneLineageId: "pl_1",
             paneLabel: 1,

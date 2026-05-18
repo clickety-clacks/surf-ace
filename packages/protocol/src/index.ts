@@ -250,6 +250,7 @@ export type ContentDisplay = {
 export type PusherProvenance = {
   agentId?: string;
   displayName?: string;
+  pushedAt?: string;
   sessionKey?: string;
   source?: string;
   streamLabel?: string;
@@ -623,6 +624,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
         currentContentId: ContentId | null;
         currentRevision: Revision;
         contentType: ContentType | null;
+        display?: ContentDisplay;
       }>;
       layout: TopologyLayoutNode;
       topologyRevision: TopologyRevision;
@@ -717,6 +719,7 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
       name: string | null;
       activeContentId: ContentId | null;
       contentType: ContentType | null;
+      display?: ContentDisplay;
       externalNative?: boolean;
       viewport: SurfaceViewport;
       geometry: PaneGeometryProjection;

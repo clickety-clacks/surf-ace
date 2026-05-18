@@ -693,7 +693,7 @@ private struct SurfAcePaneControls: View {
                     if let ownerName {
                         Text(ownerName)
                             .font(.custom(SurfAceChromeFont.regularName, size: 13))
-                            .foregroundStyle(.white.opacity(0.86))
+                            .foregroundStyle(surfAceToolbarForeground().opacity(0.86))
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .padding(.leading, 4)
@@ -757,13 +757,17 @@ private struct SurfAceGlassButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.custom(SurfAceChromeFont.regularName, size: 18))
-            .foregroundStyle(.white)
+            .foregroundStyle(surfAceToolbarForeground())
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
             .glassEffect(.regular.interactive(), in: Capsule())
             .overlay {
                 Capsule()
-                    .strokeBorder(.white.opacity(configuration.isPressed ? 0.32 : 0.18), lineWidth: 1)
+                    .strokeBorder(
+                        surfAceToolbarBorder()
+                            .opacity(configuration.isPressed ? 0.32 : 0.18),
+                        lineWidth: 1
+                    )
             }
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
@@ -777,9 +781,17 @@ private struct SurfAceControlPillChrome: ViewModifier {
             .glassEffect(.regular, in: Capsule())
             .overlay {
                 Capsule()
-                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                    .strokeBorder(surfAceToolbarBorder().opacity(0.18), lineWidth: 1)
             }
     }
+}
+
+func surfAceToolbarForeground() -> Color {
+    .primary
+}
+
+func surfAceToolbarBorder() -> Color {
+    surfAceToolbarForeground()
 }
 
 private extension View {

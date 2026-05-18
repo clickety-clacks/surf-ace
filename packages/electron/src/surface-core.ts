@@ -628,6 +628,7 @@ export class SurfaceCore {
         return {
           activeContentId: protocolContentId(current),
           contentType: protocolContentType(current),
+          display: current.display ? structuredClone(current.display) : undefined,
           externalNative: pane.externalNative,
           geometry,
           name: pane.name,
@@ -1189,6 +1190,7 @@ export class SurfaceCore {
           contentType: protocolContentType(current),
           currentContentId: protocolContentId(current),
           currentRevision: current.revision as Revision,
+          display: current.display ? structuredClone(current.display) : undefined,
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
           paneLineageId: pane.paneLineageId,

@@ -57,6 +57,46 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.equal(windowState.panes[0]?.activeKeyboardPane, true);
 });
 
+test("surface core exports visible content provenance in provider state", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.contentSet(surface.surfaceId, {
+    content: { html: "<p>session content</p>" },
+    contentId: "ct_11111111" as never,
+    contentType: "html",
+    display: {
+      provenance: {
+        displayName: "Session One",
+        pushedAt: "2026-05-17T12:00:00.000Z",
+        sessionKey: "agent:test:session-one",
+        source: "openclaw",
+      },
+      senderDisplayName: "Session One",
+      title: "Document Title",
+    },
+    historyOwnerToken: "hot_session_one",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  assert.equal(listedPane.display?.senderDisplayName, "Session One");
+  assert.equal(listedPane.display?.title, "Document Title");
+  assert.equal(listedPane.display?.provenance?.sessionKey, "agent:test:session-one");
+  assert.equal(listedPane.display?.provenance?.pushedAt, "2026-05-17T12:00:00.000Z");
+
+  const pairPane = core.pairState(surface.surfaceId).panes[0]!;
+  assert.equal(pairPane.display?.senderDisplayName, "Session One");
+  assert.equal(pairPane.display?.provenance?.sessionKey, "agent:test:session-one");
+});
+
 test("surface core removes closed windows from live topology immediately", () => {
   const core = new SurfaceCore({
     persistentState: {

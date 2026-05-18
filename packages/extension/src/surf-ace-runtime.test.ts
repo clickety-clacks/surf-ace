@@ -38,6 +38,11 @@ function delay(ms: number): Promise<void> {
 type TestPane = {
   contentId: string | null;
   contentType: string | null;
+  display?: {
+    provenance?: Record<string, unknown>;
+    senderDisplayName?: string;
+    title?: string;
+  } | null;
   drawings: string[];
   externalNative?: boolean;
   frame: {
@@ -908,21 +913,22 @@ class FakeSurfAceWsServer {
           }
         }
         const requestedSurface = this.requireSurface(String(message.payload?.surfaceId ?? this.surfaceId));
-	        const pairResponsePanes = this.forceEmptyPairResponsePanes
-	          ? []
-	          : [...requestedSurface.panes.entries()].map(([paneId, pane]) => {
-	              const paneState: Record<string, unknown> = {
-              contentType: pane.contentType,
-              currentContentId: pane.contentId,
-              currentRevision: pane.revision,
-              paneId,
-              ...(this.includePairPaneLineageIds ? { paneLineageId: pane.paneLineageId } : {}),
+        const pairResponsePanes = this.forceEmptyPairResponsePanes
+          ? []
+          : [...requestedSurface.panes.entries()].map(([paneId, pane]) => {
+              const paneState: Record<string, unknown> = {
+                contentType: pane.contentType,
+                currentContentId: pane.contentId,
+                currentRevision: pane.revision,
+                ...(pane.display !== undefined ? { display: pane.display } : {}),
+                paneId,
+                ...(this.includePairPaneLineageIds ? { paneLineageId: pane.paneLineageId } : {}),
               };
               if (!this.omitPairPaneLabel) {
                 paneState.paneLabel = pane.paneLabel;
-	              }
-	              return paneState;
-	            });
+              }
+              return paneState;
+            });
         const pairStateLayout = this.topologyLayoutMatchesPairPanes(requestedSurface.topologyLayout, pairResponsePanes)
           ? requestedSurface.topologyLayout
           : this.topologyLayoutForPairPanes(pairResponsePanes);
@@ -1278,6 +1284,7 @@ class FakeSurfAceWsServer {
                 const paneState: Record<string, unknown> = {
                   activeContentId: pane.contentId,
                   contentType: pane.contentType,
+                  ...(pane.display !== undefined ? { display: pane.display } : {}),
                   externalNative: pane.externalNative ?? false,
                   geometry: this.paneGeometry(targetSurface, paneId, pane),
                   name: pane.name,
@@ -11682,6 +11689,156 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("same-url discovery with a different fingerprint does not steal a live paired surface", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(originalSurface);
+      assert.ok(originalSurface.client?.isOpen());
+      const originalEndpoint = structuredClone(originalSurface.endpoint);
+
+      const conflictingEndpoint = {
+        ...originalEndpoint,
+        endpointId: `${originalEndpoint.endpointId}-conflict`,
+        fingerprintPrefix: `${originalEndpoint.fingerprintPrefix}-conflict`,
+        name: `${originalEndpoint.name} conflict`,
+      };
+
+      internalRuntime.refreshEndpointTopology(conflictingEndpoint);
+      internalRuntime.upsertCanonicalVisibleSurface({
+        endpoint: conflictingEndpoint,
+        name: originalSurface.name,
+        remotePaired: true,
+        source: "surfaces.list",
+        surfaceId: originalSurface.surfaceId,
+        viewport: structuredClone(originalSurface.viewport),
+      });
+
+      assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
+      assert.deepEqual(originalSurface.endpoint, originalEndpoint);
+      assert.equal(originalSurface.endpointId, originalEndpoint.endpointId);
+      assert.equal(originalSurface.fingerprintPrefix, originalEndpoint.fingerprintPrefix);
+      assert.equal(originalSurface.client?.isOpen(), true);
+    });
+  });
+
+  await t.test("same-url discovery with a different fingerprint is not current for owned surface matching", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(originalSurface);
+      assert.ok(originalSurface.client?.isOpen());
+      const originalEndpoint = structuredClone(originalSurface.endpoint);
+      const conflictingEndpoint = {
+        ...originalEndpoint,
+        endpointId: `${originalEndpoint.endpointId}-conflict-current`,
+        fingerprintPrefix: `${originalEndpoint.fingerprintPrefix}-conflict-current`,
+        name: `${originalEndpoint.name} conflict current`,
+      };
+
+      discovery.setEndpoints([conflictingEndpoint]);
+      await discovery.refreshNow();
+
+      assert.equal(internalRuntime.hasCurrentDiscoveryEndpoint(originalSurface), false);
+      assert.deepEqual(internalRuntime.ownedSurfacesForEndpoint(conflictingEndpoint), []);
+      assert.deepEqual(originalSurface.endpoint, originalEndpoint);
+      assert.equal(originalSurface.client?.isOpen(), true);
+    });
+  });
+
+  await t.test("same-endpoint-id discovery with a different fingerprint does not steal a live paired surface", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const replacementPort = nextPort++;
+      const replacementServer = new FakeSurfAceWsServer(replacementPort);
+
+      try {
+        const internalRuntime = runtime as any;
+        const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(originalSurface);
+        assert.ok(originalSurface.client?.isOpen());
+        const originalEndpoint = structuredClone(originalSurface.endpoint);
+
+        internalRuntime.refreshEndpointTopology({
+          ...discoveryEndpoint(replacementPort, `${originalSurface.fingerprintPrefix}-conflict`),
+          endpointId: originalSurface.endpointId,
+        });
+
+        assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
+        assert.deepEqual(originalSurface.endpoint, originalEndpoint);
+        assert.equal(originalSurface.client?.isOpen(), true);
+      } finally {
+        await replacementServer.close();
+      }
+    });
+  });
+
+  await t.test("same-endpoint-id probe with a different fingerprint keeps separate authority probe", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(originalSurface);
+      const originalEndpoint = structuredClone(originalSurface.endpoint);
+      const originalProbe = internalRuntime.upsertEndpointProbe(originalEndpoint);
+      const conflictingEndpoint = {
+        ...originalEndpoint,
+        fingerprintPrefix: `${originalEndpoint.fingerprintPrefix}-probe-conflict`,
+        name: `${originalEndpoint.name} probe conflict`,
+      };
+
+      const conflictingProbe = internalRuntime.upsertEndpointProbe(conflictingEndpoint);
+
+      assert.notEqual(conflictingProbe, originalProbe);
+      assert.equal(originalProbe.endpointId, originalEndpoint.endpointId);
+      assert.equal(originalProbe.fingerprintPrefix, originalEndpoint.fingerprintPrefix);
+      assert.equal(conflictingProbe.endpointId, originalEndpoint.endpointId);
+      assert.equal(conflictingProbe.fingerprintPrefix, conflictingEndpoint.fingerprintPrefix);
+      assert.ok([...internalRuntime.endpointProbes.values()].includes(originalProbe));
+      assert.ok([...internalRuntime.endpointProbes.values()].includes(conflictingProbe));
+    });
+  });
+
+  await t.test("different-fingerprint surfaces.list cleanup does not remove another authority surface", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(originalSurface);
+      assert.ok(originalSurface.client?.isOpen());
+      const originalEndpoint = structuredClone(originalSurface.endpoint);
+      const conflictingEndpoint = {
+        ...originalEndpoint,
+        endpointId: `${originalEndpoint.endpointId}-cleanup-conflict`,
+        fingerprintPrefix: `${originalEndpoint.fingerprintPrefix}-cleanup-conflict`,
+        name: `${originalEndpoint.name} cleanup conflict`,
+      };
+
+      internalRuntime.reconcileCanonicalSurfacesFromRemoteList({
+        endpoint: conflictingEndpoint,
+        remoteSurfaces: [],
+        source: "surfaces.list",
+        startDiscoveredSiblings: true,
+      });
+      assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
+
+      internalRuntime.reconcileCanonicalSurfacesFromRemoteList({
+        endpoint: conflictingEndpoint,
+        remoteSurfaces: [
+          {
+            name: "Conflicting Surface",
+            paired: true,
+            surfaceId: "sf_conflicting_authority",
+            viewport: conflictingEndpoint.viewport,
+          },
+        ],
+        source: "surfaces.list",
+        startDiscoveredSiblings: true,
+      });
+
+      assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
+      assert.deepEqual(originalSurface.endpoint, originalEndpoint);
+      assert.equal(originalSurface.client?.isOpen(), true);
+    });
+  });
+
   await t.test("connect-failure refresh does not rebind by ambiguous fingerprint prefix", async () => {
     await withRuntimeHarness(async ({ discovery, runtime, server, warnings }) => {
       const internalRuntime = runtime as any;
@@ -11726,7 +11883,175 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("pair response replaces stale local panes from prior sessions", async () => {
+	  await t.test("pair response imports visible content provenance for list/topology state", async () => {
+	    await withRuntimeHarness(async ({ runtime, server }) => {
+	      const internalRuntime = runtime as any;
+	      const surface = internalRuntime.surfaces.get(server.surfaceId);
+	      assert.ok(surface);
+	      const display = {
+	        provenance: {
+	          displayName: "Session One",
+	          pushedAt: "2026-05-17T12:00:00.000Z",
+	          sessionKey: "agent:test:session-one",
+	          source: "openclaw",
+	        },
+	        senderDisplayName: "Session One",
+	        title: "Document Title",
+	      };
+	      const remotePane = server.panes.get(server.initialRemotePaneId);
+	      assert.ok(remotePane);
+	      remotePane.contentId = "ct_12345678";
+	      remotePane.contentType = "html";
+	      remotePane.display = structuredClone(display);
+	      remotePane.revision = 4;
+
+	      internalRuntime.applyPairState(surface, {
+	        id: "rq_provenance_import",
+	        ok: true,
+        op: "pair.request",
+        payload: {
+          capabilities: {
+            contentTypes: ["html", "image", "pdf", "terminal", "markdown"],
+            eventTypes: [],
+            protocolFeatures: ["authority.state.v1"],
+          },
+          eventConfig: {
+            activeEvents: [],
+            drawingFlushConfig: {
+              idleWindowMs: 8000,
+              maxIntervalMs: 30000,
+            },
+            profile: "minimum_deep",
+          },
+          limits: {
+            maxDrawingFlushBytes: 2 * 1024 * 1024,
+            maxFrameBytes: 10 * 1024 * 1024,
+            maxMessageBytes: 12 * 1024 * 1024,
+            maxStrokePointsPerFlush: 8192,
+            maxVisibleTextBytes: 4096,
+            resumeGraceMs: 20_000,
+          },
+          resumed: false,
+          sessionId: "sa_provenance_import",
+          state: {
+            layout: { paneId: server.initialRemotePaneId, type: "pane" },
+	            panes: [
+	              {
+	                contentType: "html",
+	                currentContentId: "ct_12345678",
+	                currentRevision: 4,
+	                display: structuredClone(display),
+	                paneId: server.initialRemotePaneId,
+	                paneLabel: 1,
+	                paneLineageId: `pl_${server.surfaceId}_${server.initialRemotePaneId}`,
+              },
+            ],
+            topologyRevision: 0,
+          },
+          surfaceId: server.surfaceId,
+          surfaceName: "Test Surface",
+          viewport: server.viewport,
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      });
+
+      const screens = await runtime.listScreens();
+      const pane = screens[0]?.panes[0];
+      assert.equal(pane?.activeContent?.contentId, "ct_12345678");
+      assert.equal(pane?.activeContent?.display?.senderDisplayName, "Session One");
+      assert.equal(pane?.activeContent?.display?.title, "Document Title");
+	      assert.equal(pane?.activeContent?.display?.provenance?.sessionKey, "agent:test:session-one");
+	      assert.equal(pane?.historySummary.visibleProvenance?.sessionKey, "agent:test:session-one");
+	      assert.equal(pane?.historySummary.visibleProvenance?.displayName, "Session One");
+	      assert.equal(pane?.historySummary.visibleProvenance?.pushedAt, "2026-05-17T12:00:00.000Z");
+	      const importedPane = [...surface.panes.values()].find(
+	        (candidate) => Number(candidate.remotePaneId) === server.initialRemotePaneId,
+	      );
+	      assert.equal(importedPane?.ownerSessionKey, "agent:test:session-one");
+	    });
+	  });
+
+	  await t.test("visible content provenance does not use document title as sender display name", async () => {
+	    await withRuntimeHarness(async ({ runtime, server }) => {
+	      const internalRuntime = runtime as any;
+	      const surface = internalRuntime.surfaces.get(server.surfaceId);
+	      assert.ok(surface);
+	      const display = {
+	        provenance: {
+	          sessionKey: "agent:test:session-titleless",
+	          source: "openclaw",
+	        },
+	        title: "Document Title Only",
+	      };
+	      const remotePane = server.panes.get(server.initialRemotePaneId);
+	      assert.ok(remotePane);
+	      remotePane.contentId = "ct_87654321";
+	      remotePane.contentType = "html";
+	      remotePane.display = structuredClone(display);
+	      remotePane.revision = 5;
+
+	      internalRuntime.applyPairState(surface, {
+	        id: "rq_provenance_title_only",
+	        ok: true,
+	        op: "pair.request",
+	        payload: {
+	          capabilities: {
+	            contentTypes: ["html", "image", "pdf", "terminal", "markdown"],
+	            eventTypes: [],
+	            protocolFeatures: ["authority.state.v1"],
+	          },
+	          eventConfig: {
+	            activeEvents: [],
+	            drawingFlushConfig: {
+	              idleWindowMs: 8000,
+	              maxIntervalMs: 30000,
+	            },
+	            profile: "minimum_deep",
+	          },
+	          limits: {
+	            maxDrawingFlushBytes: 2 * 1024 * 1024,
+	            maxFrameBytes: 10 * 1024 * 1024,
+	            maxMessageBytes: 12 * 1024 * 1024,
+	            maxStrokePointsPerFlush: 8192,
+	            maxVisibleTextBytes: 4096,
+	            resumeGraceMs: 20_000,
+	          },
+	          resumed: false,
+	          sessionId: "sa_provenance_title_only",
+	          state: {
+	            layout: { paneId: server.initialRemotePaneId, type: "pane" },
+	            panes: [
+	              {
+	                contentType: "html",
+	                currentContentId: "ct_87654321",
+	                currentRevision: 5,
+	                display: structuredClone(display),
+	                paneId: server.initialRemotePaneId,
+	                paneLabel: 1,
+	                paneLineageId: `pl_${server.surfaceId}_${server.initialRemotePaneId}`,
+	              },
+	            ],
+	            topologyRevision: 0,
+	          },
+	          surfaceId: server.surfaceId,
+	          surfaceName: "Test Surface",
+	          viewport: server.viewport,
+	        },
+	        sentAt: Date.now(),
+	        type: "response",
+	        v: 1,
+	      });
+
+	      const pane = (await runtime.listScreens())[0]?.panes[0];
+	      assert.equal(pane?.activeContent?.display?.title, "Document Title Only");
+	      assert.equal(pane?.historySummary.visibleProvenance?.sessionKey, "agent:test:session-titleless");
+	      assert.equal(pane?.historySummary.visibleProvenance?.displayName, undefined);
+	    });
+	  });
+
+	  await t.test("pair response replaces stale local panes from prior sessions", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const split = await runtime.split({

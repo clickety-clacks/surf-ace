@@ -177,6 +177,16 @@ export type SurfAceHistorySummary = {
   backCount: number;
   forwardCount: number;
   visibleContentId: string | null;
+  visibleProvenance?: SurfAceVisibleContentProvenance | null;
+};
+
+export type SurfAceVisibleContentProvenance = {
+  agentId?: string;
+  displayName?: string;
+  pushedAt?: string;
+  sessionKey: string | null;
+  source?: string;
+  streamLabel?: string;
 };
 
 export type SurfAcePaneSummary = {
@@ -909,6 +919,7 @@ type EndpointProbe = {
   lastSeenAt: number;
   name: string;
   reconnectAttempt: number;
+  registryKey: string;
   reconcileWorkPromise: Promise<void> | null;
   retryDelayResolver: (() => void) | null;
   stopRequested: boolean;
@@ -1540,6 +1551,7 @@ function createEndpointProbe(endpoint: SurfAceDiscoveryEndpoint, now: number): E
     lastSeenAt: now,
     name: endpoint.name,
     reconnectAttempt: 0,
+    registryKey: endpoint.endpointId,
     reconcileWorkPromise: null,
     retryDelayResolver: null,
     stopRequested: false,
@@ -2104,6 +2116,7 @@ function mergeProvenance(
   return {
     agentId: cleanProvenanceString(record.agentId) ?? base.agentId,
     displayName: cleanProvenanceString(record.displayName) ?? base.displayName,
+    pushedAt: cleanProvenanceString(record.pushedAt) ?? base.pushedAt,
     sessionKey: cleanProvenanceString(record.sessionKey) ?? base.sessionKey,
     source: cleanProvenanceString(record.source) ?? base.source,
     streamLabel: cleanProvenanceString(record.streamLabel) ?? base.streamLabel,
@@ -2151,6 +2164,30 @@ function displayForPusherProvenance(context?: SurfAceSessionContext): ContentDis
 
 function pusherSessionKeyFromContext(context?: SurfAceSessionContext): string | undefined {
   return pusherProvenanceFromContext(context)?.sessionKey;
+}
+
+function pusherSessionKeyFromDisplay(display: ContentDisplay | null | undefined): string | null {
+  return cleanProvenanceString(display?.provenance?.sessionKey) ?? null;
+}
+
+function visibleContentProvenance(pane: ManagedPane): SurfAceVisibleContentProvenance | null {
+  if (!pane.activeContentId || !pane.contentType) {
+    return null;
+  }
+  const provenance = pane.display?.provenance;
+  const sessionKey = cleanProvenanceString(provenance?.sessionKey) ?? pane.ownerSessionKey;
+  const displayName =
+    cleanProvenanceString(pane.display?.senderDisplayName) ??
+    cleanProvenanceString(provenance?.displayName);
+  const projection: SurfAceVisibleContentProvenance = {
+    ...(cleanProvenanceString(provenance?.agentId) ? { agentId: cleanProvenanceString(provenance?.agentId) } : {}),
+    ...(displayName ? { displayName } : {}),
+    ...(cleanProvenanceString(provenance?.pushedAt) ? { pushedAt: cleanProvenanceString(provenance?.pushedAt) } : {}),
+    sessionKey,
+    ...(cleanProvenanceString(provenance?.source) ? { source: cleanProvenanceString(provenance?.source) } : {}),
+    ...(cleanProvenanceString(provenance?.streamLabel) ? { streamLabel: cleanProvenanceString(provenance?.streamLabel) } : {}),
+  };
+  return projection.sessionKey || Object.keys(projection).length > 1 ? projection : null;
 }
 
 function sameHistorySessionKey(left: string | null, right: string | null): boolean {
@@ -2734,6 +2771,20 @@ function endpointProbeKey(endpoint: SurfAceDiscoveryEndpoint): string {
     return `fp:${fingerprintPrefix}`;
   }
   return `ws:${buildWsUrl(endpoint)}`;
+}
+
+function endpointsShareAuthorityIdentity(
+  left: SurfAceDiscoveryEndpoint,
+  right: SurfAceDiscoveryEndpoint,
+): boolean {
+  const leftFingerprint = left.fingerprintPrefix.trim();
+  const rightFingerprint = right.fingerprintPrefix.trim();
+  if (leftFingerprint.length > 0 && rightFingerprint.length > 0) {
+    return leftFingerprint === rightFingerprint;
+  }
+  return left.endpointId === right.endpointId ||
+    endpointProbeKey(left) === endpointProbeKey(right) ||
+    buildWsUrl(left) === buildWsUrl(right);
 }
 
 function isSocketClosedError(error: unknown): boolean {
@@ -4446,10 +4497,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.refreshEndpointTopology(endpoint);
     }
 
-    const currentEndpointIds = new Set(canonicalEndpoints.map((endpoint) => endpoint.endpointId));
-    const currentEndpointKeys = new Set(canonicalEndpoints.map((endpoint) => endpointProbeKey(endpoint)));
     for (const surface of this.allManagedSurfaces()) {
-      if (!currentEndpointIds.has(surface.endpointId) && !currentEndpointKeys.has(endpointProbeKey(surface.endpoint))) {
+      if (!canonicalEndpoints.some((endpoint) => endpointsShareAuthorityIdentity(surface.endpoint, endpoint))) {
         const wsOpen = surface.client?.isOpen() ?? false;
         const preserveOwnedSurface =
           wsOpen ||
@@ -4466,12 +4515,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
     for (const probe of this.endpointProbes.values()) {
-      if (currentEndpointIds.has(probe.endpointId) || currentEndpointKeys.has(probe.canonicalKey)) {
+      if (canonicalEndpoints.some((endpoint) => endpointsShareAuthorityIdentity(probe.endpoint, endpoint))) {
         continue;
       }
       probe.stopRequested = true;
       this.wakeEndpointProbeRetry(probe);
-      this.endpointProbes.delete(probe.endpointId);
+      this.endpointProbes.delete(probe.registryKey);
       if (probe.client) {
         this.runBackgroundTask(
           `close removed endpoint probe ${probe.endpointId}`,
@@ -4536,11 +4585,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private hasEndpointAliasFailure(endpoint: SurfAceDiscoveryEndpoint): boolean {
     const endpointUrl = buildWsUrl(endpoint);
     const probe = this.endpointProbes.get(endpoint.endpointId);
-    if (probe && probe.unreachableFailures > 0) {
+    if (probe && endpointsShareAuthorityIdentity(probe.endpoint, endpoint) && probe.unreachableFailures > 0) {
       return true;
     }
     return this.allManagedSurfaces().some((surface) =>
-      surface.endpointId === endpoint.endpointId &&
+      endpointsShareAuthorityIdentity(surface.endpoint, endpoint) &&
       buildWsUrl(surface.endpoint) === endpointUrl &&
       surface.unreachableFailures > 0 &&
       surface.connectionState !== "connected"
@@ -5521,16 +5570,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       existing &&
       existing !== remapFrom &&
       previousEndpoint &&
-      previousEndpoint.endpointId !== input.endpoint.endpointId &&
-      buildWsUrl(previousEndpoint) !== buildWsUrl(input.endpoint) &&
-      endpointProbeKey(previousEndpoint) !== endpointProbeKey(input.endpoint) &&
+      !endpointsShareAuthorityIdentity(previousEndpoint, input.endpoint) &&
       !existing.stopRequested
     ) {
       this.logger.warn?.(
         runtimeDiagnostic("canonical_surface_rebind_skipped", {
           existing_endpoint_id: previousEndpoint.endpointId,
           incoming_endpoint_id: input.endpoint.endpointId,
-          reason: "endpoint_id_and_url_changed",
+          reason: "endpoint_authority_identity_changed",
           source: input.source,
           surface_id: input.surfaceId,
         }),
@@ -8177,11 +8224,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private hasCurrentDiscoveryEndpoint(surface: ManagedSurface): boolean {
-    const endpointKey = endpointProbeKey(surface.endpoint);
     return this.dedupeDiscoveryEndpoints(this.discovery.getSnapshot()).some((endpoint) =>
-      endpoint.endpointId === surface.endpointId ||
-      buildWsUrl(endpoint) === buildWsUrl(surface.endpoint) ||
-      endpointProbeKey(endpoint) === endpointKey
+      endpointsShareAuthorityIdentity(surface.endpoint, endpoint)
     );
   }
 
@@ -8318,7 +8362,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 }
               : null,
             displayId: visiblePaneAddress(surface.windowLabel, paneLabel),
-            historySummary: structuredClone(pane.historySummary),
+            historySummary: {
+              ...structuredClone(pane.historySummary),
+              visibleProvenance: visibleContentProvenance(pane),
+            },
             name: pane.name,
             paneAddress: visiblePaneAddress(surface.windowLabel, paneLabel),
             paneId: pane.paneId,
@@ -9583,23 +9630,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         surface_name: endpoint.name,
       }),
     );
-    const endpointKey = endpointProbeKey(endpoint);
     for (const candidate of [...this.surfaces.values()]) {
       if (candidate.stopRequested && candidate.endpointId === endpoint.endpointId) {
         this.removeManagedSurfaceFromRegistries(candidate);
       }
     }
     const matchingSurfaces = [...this.surfaces.values()].filter((candidate) =>
-      candidate.endpointId === endpoint.endpointId ||
-      buildWsUrl(candidate.endpoint) === buildWsUrl(endpoint) ||
-      endpointProbeKey(candidate.endpoint) === endpointKey
+      endpointsShareAuthorityIdentity(candidate.endpoint, endpoint)
     );
     for (const candidate of [...this.surfaces.values()]) {
-      if (
-        candidate.endpointId === endpoint.endpointId ||
-        buildWsUrl(candidate.endpoint) === buildWsUrl(endpoint) ||
-        endpointProbeKey(candidate.endpoint) === endpointKey
-      ) {
+      if (endpointsShareAuthorityIdentity(candidate.endpoint, endpoint)) {
         this.assignEndpoint(candidate, endpoint);
         this.ensureSurfaceWorker(candidate);
       }
@@ -9636,14 +9676,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private ownedSurfacesForEndpoint(endpoint: SurfAceDiscoveryEndpoint): ManagedSurface[] {
-    const endpointKey = endpointProbeKey(endpoint);
     return [...this.surfaces.values()].filter((surface) =>
       this.hasOwnedEndpointWorker(surface) &&
-      (
-        surface.endpointId === endpoint.endpointId ||
-        buildWsUrl(surface.endpoint) === buildWsUrl(endpoint) ||
-        endpointProbeKey(surface.endpoint) === endpointKey
-      )
+      endpointsShareAuthorityIdentity(surface.endpoint, endpoint)
     );
   }
 
@@ -9702,39 +9737,52 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private upsertEndpointProbe(endpoint: SurfAceDiscoveryEndpoint): EndpointProbe {
     const canonicalKey = endpointProbeKey(endpoint);
-    const existing = this.endpointProbes.get(endpoint.endpointId) ??
+    const endpointIdProbe = this.endpointProbes.get(endpoint.endpointId);
+    const existing = endpointIdProbe && endpointsShareAuthorityIdentity(endpointIdProbe.endpoint, endpoint)
+      ? endpointIdProbe
+      : this.findEndpointProbeByCanonicalKey(canonicalKey);
+    const conflictingEndpointIdProbe = endpointIdProbe && endpointIdProbe !== existing
+      ? endpointIdProbe
+      : null;
+    const nextRegistryKey = conflictingEndpointIdProbe &&
+        !endpointsShareAuthorityIdentity(conflictingEndpointIdProbe.endpoint, endpoint)
+      ? `${endpoint.endpointId}#${canonicalKey}`
+      : endpoint.endpointId;
+    const probe = existing ??
       this.findEndpointProbeByCanonicalKey(canonicalKey);
-    if (!existing) {
+    if (!probe) {
       const probe = createEndpointProbe(endpoint, this.now());
-      this.endpointProbes.set(endpoint.endpointId, probe);
+      probe.registryKey = nextRegistryKey;
+      this.endpointProbes.set(nextRegistryKey, probe);
       return probe;
     }
-    const endpointChanged = buildWsUrl(existing.endpoint) !== buildWsUrl(endpoint);
-    if (existing.endpointId !== endpoint.endpointId) {
-      this.endpointProbes.delete(existing.endpointId);
-      this.endpointProbes.set(endpoint.endpointId, existing);
+    const endpointChanged = buildWsUrl(probe.endpoint) !== buildWsUrl(endpoint);
+    if (probe.registryKey !== nextRegistryKey) {
+      this.endpointProbes.delete(probe.registryKey);
+      probe.registryKey = nextRegistryKey;
+      this.endpointProbes.set(nextRegistryKey, probe);
     }
-    existing.canonicalKey = canonicalKey;
-    existing.endpoint = endpoint;
-    existing.endpointId = endpoint.endpointId;
-    existing.fingerprintPrefix = endpoint.fingerprintPrefix;
-    existing.lastSeenAt = this.now();
-    existing.name = endpoint.name;
-    existing.viewport = cloneViewport(endpoint.viewport);
-    existing.stopRequested = false;
+    probe.canonicalKey = canonicalKey;
+    probe.endpoint = endpoint;
+    probe.endpointId = endpoint.endpointId;
+    probe.fingerprintPrefix = endpoint.fingerprintPrefix;
+    probe.lastSeenAt = this.now();
+    probe.name = endpoint.name;
+    probe.viewport = cloneViewport(endpoint.viewport);
+    probe.stopRequested = false;
     if (endpointChanged) {
-      this.resetEndpointProbeConnectionCircuit(existing, "endpoint changed");
-      if (existing.client) {
+      this.resetEndpointProbeConnectionCircuit(probe, "endpoint changed");
+      if (probe.client) {
         this.runBackgroundTask(
-          `refresh endpoint probe client ${existing.endpointId}`,
+          `refresh endpoint probe client ${probe.endpointId}`,
           async () => {
-            await existing.client?.close(1000, clampCloseReason("provider_shutdown"));
+            await probe.client?.close(1000, clampCloseReason("provider_shutdown"));
           },
         );
       }
-      this.wakeEndpointProbeRetry(existing);
+      this.wakeEndpointProbeRetry(probe);
     }
-    return existing;
+    return probe;
   }
 
   private findEndpointProbeByCanonicalKey(canonicalKey: string): EndpointProbe | undefined {
@@ -9844,11 +9892,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     startDiscoveredSiblings: boolean;
   }): ManagedSurface[] {
     const endpointId = input.endpoint.endpointId;
-    const endpointKey = endpointProbeKey(input.endpoint);
     if (input.remoteSurfaces.length === 0) {
       this.tombstoneEndpointId(endpointId, "empty surfaces.list");
       for (const candidate of [...this.surfaces.values()]) {
-        if (candidate.endpointId === endpointId || endpointProbeKey(candidate.endpoint) === endpointKey) {
+        if (endpointsShareAuthorityIdentity(candidate.endpoint, input.endpoint)) {
           this.removeClosedSurface(candidate.surfaceId, "surfaces_list_absent");
         }
       }
@@ -9904,7 +9951,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     for (const candidate of [...this.surfaces.values()]) {
-      if (candidate.endpointId !== endpointId && endpointProbeKey(candidate.endpoint) !== endpointKey) {
+      if (!endpointsShareAuthorityIdentity(candidate.endpoint, input.endpoint)) {
         continue;
       }
       if (remoteSurfaceIds.has(candidate.surfaceId)) {
@@ -10459,7 +10506,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async runEndpointProbeWorker(probe: EndpointProbe): Promise<void> {
-    while (probe.autoRetryEnabled && !probe.stopRequested && this.endpointProbes.get(probe.endpointId) === probe) {
+    while (probe.autoRetryEnabled && !probe.stopRequested && this.endpointProbes.get(probe.registryKey) === probe) {
       let client: SurfAceWireClient | null = null;
       try {
         probe.connectionState = probe.unreachableFailures >= UNREACHABLE_AFTER_FAILURES
@@ -10976,7 +11023,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
 
-    if (this.endpointProbes.get(probe.endpointId) !== probe) {
+    if (this.endpointProbes.get(probe.registryKey) !== probe) {
       probe.stopRequested = true;
       return;
     }
@@ -12193,9 +12240,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.contentType = paneState.contentType;
     pane.contentValue = null;
     pane.currentRevision = paneState.currentRevision;
-    pane.display = null;
+    pane.display = paneState.display ? structuredClone(paneState.display) : null;
     pane.historyOwnerToken = null;
-    pane.ownerSessionKey = null;
+    pane.ownerSessionKey = pusherSessionKeyFromDisplay(pane.display);
     pane.historySummary.visibleContentId = paneState.currentContentId;
     pane.diagnosticContent = null;
     pane.nonDurableTargetDiagnostic = null;

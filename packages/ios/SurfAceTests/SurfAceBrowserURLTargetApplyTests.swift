@@ -56,7 +56,9 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
             "title": "Browser Pusher",
             "provenance": [
                 "displayName": "Browser Pusher",
+                "pushedAt": "2026-05-17T12:00:00.000Z",
                 "sessionKey": "agent:test:browser",
+                "source": "openclaw",
             ],
         ]
 
@@ -70,6 +72,9 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         XCTAssertEqual(surface.panes.first?.currentOwnerDisplayName(), "Browser Pusher")
         XCTAssertEqual(surface.panes.first?.currentProvenanceDisplayName(), "Browser Pusher")
         XCTAssertEqual(surface.panes.first?.currentChromeDisplayName(), "Browser Pusher")
+        XCTAssertEqual(surface.panes.first?.currentEntry.provenanceSessionKey, "agent:test:browser")
+        XCTAssertEqual(surface.panes.first?.currentEntry.provenanceSource, "openclaw")
+        XCTAssertEqual(surface.panes.first?.currentEntry.provenancePushedAt, "2026-05-17T12:00:00.000Z")
     }
 
     func testBrowserURLTargetApplyRecordsFailedNavigationEvidence() async throws {
