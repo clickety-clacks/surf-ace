@@ -11,8 +11,11 @@ import {
   isOverlayNativePaneLivenessFailure,
   nativePaneInstanceIdsForCompositor,
   nativePaneReleaseRequestForCompositor,
+  overlayLivePaneAuthorityFromCompositorResponse,
+  overlayLivePaneInstanceIdFromCompositorResponse,
   overlayRegionsClearRequestForCompositor,
   overlayRegionsSetRequestForCompositor,
+  overlayRegionsWithLivePaneInstanceAuthority,
   overlayRequestForCompositor,
   requestForCompositor,
   resolveCompositorControlSocketPath,
@@ -525,6 +528,38 @@ test("native pane bridge identifies transient overlay native-pane liveness failu
     false,
   );
   assert.equal(isOverlayNativePaneLivenessFailure({ ok: true }), false);
+});
+
+test("native pane bridge extracts live overlay pane-instance authority from compositor failures", () => {
+  const response = {
+    error: "invalid overlay region: pane PaneId(\"1\") pane instance 'stale' does not match live pane instance '1:target_racter_btop'",
+    ok: false,
+  };
+  assert.equal(
+    overlayLivePaneInstanceIdFromCompositorResponse(response),
+    "1:target_racter_btop",
+  );
+  assert.deepEqual(
+    overlayLivePaneAuthorityFromCompositorResponse(response),
+    { paneId: "1", paneInstanceId: "1:target_racter_btop" },
+  );
+  assert.equal(overlayLivePaneInstanceIdFromCompositorResponse({ ok: true }), null);
+});
+
+test("native pane bridge scopes live pane-instance authority to the failed overlay region", () => {
+  assert.deepEqual(
+    overlayRegionsWithLivePaneInstanceAuthority([
+      { paneId: "1", paneInstanceId: "stale-1" },
+      { paneId: "2", paneInstanceId: "still-live-2" },
+    ], {
+      error: "invalid overlay region: pane PaneId(\"1\") pane instance 'stale-1' does not match live pane instance 'live-1'",
+      ok: false,
+    }),
+    [
+      { paneId: "1", paneInstanceId: "live-1" },
+      { paneId: "2", paneInstanceId: "still-live-2" },
+    ],
+  );
 });
 
 test("native pane bridge sends newline-delimited compositor control requests", async () => {

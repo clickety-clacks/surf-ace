@@ -44,6 +44,7 @@ import {
   type NativePaneMaterialization,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
+  overlayRegionsWithLivePaneInstanceAuthority,
   overlayTopologyEpochFromCompositorResponse,
   requestForCompositor,
   resolveCompositorControlSocketPath,
@@ -1993,7 +1994,19 @@ export class SurfaceWsServer {
     }
     let currentRequest = request;
     let response = await sendCompositorControl(this.compositorSocketPath, currentRequest);
-    for (let attempt = 0; attempt < NATIVE_OVERLAY_LIVENESS_RETRY_COUNT && isOverlayNativePaneLivenessFailure(response); attempt += 1) {
+    for (let attempt = 0; attempt < NATIVE_OVERLAY_LIVENESS_RETRY_COUNT; attempt += 1) {
+      const liveRegions = overlayRegionsWithLivePaneInstanceAuthority(currentRequest.regions, response);
+      if (liveRegions) {
+        currentRequest = {
+          ...currentRequest,
+          regions: liveRegions,
+        };
+        response = await sendCompositorControl(this.compositorSocketPath, currentRequest);
+        continue;
+      }
+      if (!isOverlayNativePaneLivenessFailure(response)) {
+        break;
+      }
       await new Promise((resolve) => setTimeout(resolve, NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS));
       const status = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
       const topologyEpoch = overlayTopologyEpochFromCompositorResponse(status);
