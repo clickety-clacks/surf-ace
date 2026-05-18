@@ -479,21 +479,21 @@ private struct SurfAcePaneView: View {
 
                 if showsSpatialEmptyPaneChrome {
                     SurfAceSpatialEmptyPaneChrome()
-                } else {
-                    let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
-                    SurfAcePaneIdentityOverlay(
-                        displayId: identity.displayId,
-                        windowLabel: identity.windowLabel,
-                        provenanceLabel: identity.sessionName,
-                        paneSize: proxy.size,
-                        connectionState: surface.connectionBarState
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                    .padding(.trailing, 28)
-                    .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
                 }
+
+                let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
+                SurfAcePaneIdentityOverlay(
+                    displayId: identity.displayId,
+                    windowLabel: identity.windowLabel,
+                    provenanceLabel: identity.sessionName,
+                    paneSize: proxy.size,
+                    connectionState: surface.connectionBarState
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 28)
+                .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
 
                 if !showsSpatialEmptyPaneChrome, let toast = pane.toast {
                     VStack {
