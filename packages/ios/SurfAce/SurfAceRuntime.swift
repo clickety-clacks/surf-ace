@@ -20,15 +20,55 @@ private func surfAceDiagnosticFields(_ fields: [(String, CustomStringConvertible
     }.joined(separator: " ")
 }
 
+private func surfAceFlightRecorderLogPath() -> String {
+    let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return applicationSupport
+        .appendingPathComponent("SurfAce", isDirectory: true)
+        .appendingPathComponent("client-flight-recorder.log")
+        .path
+}
+
+private func surfAceSimulatorTailCommand() -> String {
+    "APPDATA=$(xcrun simctl get_app_container booted co.clicketyclacks.SurfAce data); tail -n 200 \"$APPDATA/Library/Application Support/SurfAce/client-flight-recorder.log\""
+}
+
+private func surfAceDeviceCollectCommand() -> String {
+    "Xcode Devices and Simulators > select device > SurfAce > Download Container; inspect AppData/Library/Application Support/SurfAce/client-flight-recorder.log"
+}
+
+private func surfAceRecordFlight(scope: String, message: String) {
+    let line = "\(ISO8601DateFormatter().string(from: Date())) [surf-ace:\(scope)] \(message)\n"
+    let url = URL(fileURLWithPath: surfAceFlightRecorderLogPath())
+    do {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: url.path),
+               let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } else {
+                try data.write(to: url, options: .atomic)
+            }
+        }
+    } catch {
+        // Diagnostics must never change Surf Ace runtime behavior.
+    }
+    print("[SurfAce-Client] \(message)")
+}
+
 private func surfAceServerRuntimeLog(_ message: String) {
+    surfAceRecordFlight(scope: "server", message: message)
     print("[SurfAce-Server] \(message)")
 }
 
 private func surfAceGatewayLog(_ message: String) {
+    surfAceRecordFlight(scope: "gateway", message: message)
     print("[SurfAce-Gateway] \(message)")
 }
 
 private func surfAceLifecycleLog(_ message: String) {
+    surfAceRecordFlight(scope: "lifecycle", message: message)
     print("[SurfAce-Lifecycle] \(message)")
 }
 
@@ -375,7 +415,7 @@ final class SurfAceRuntime {
         loadIdentityMapping()
         loadPersistedSurfaceTopologies()
         surfAceLifecycleLog(
-            "event=runtime_init \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
+            "event=runtime_init \(surfAceDiagnosticFields([("device_collect_command", surfAceDeviceCollectCommand()), ("fingerprint", fingerprint), ("log_path", surfAceFlightRecorderLogPath()), ("screen_name", screenName), ("simulator_tail_command", surfAceSimulatorTailCommand())]))"
         )
         bonjourPublisher.onPublishFailure = { [weak self] details in
             Task { @MainActor in
@@ -415,6 +455,9 @@ final class SurfAceRuntime {
             isStarted = true
             surfAceServerRuntimeLog(
                 "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", fixedServerPort), ("screen_name", screenName)]))"
+            )
+            surfAceServerRuntimeLog(
+                "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "0.0.0.0:\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
             )
             startHeartbeatWatchdog()
             publishBonjour()
@@ -1024,9 +1067,9 @@ final class SurfAceRuntime {
                 }
 
                 switch message {
-                case .close:
+                case .close(let code, let reason):
                     surfAceGatewayLog(
-                        "event=socket_close_frame \(surfAceDiagnosticFields([("connection_uuid", connectionUUID)]))"
+                        "event=socket_close_frame \(surfAceDiagnosticFields([("close_code", code), ("close_reason", reason ?? "nil"), ("connection_uuid", connectionUUID)]))"
                     )
                     await handleSocketTermination(connectionUUID: connectionUUID)
                     return
@@ -1588,6 +1631,9 @@ final class SurfAceRuntime {
     }
 
     private func handleTopologyApply(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        surfAceGatewayLog(
+            "event=topology_apply_receive \(surfAceDiagnosticFields([("connection_uuid", connectionUUID), ("pane_count", (payload["panes"] as? [[String: Any]])?.count), ("surface_id", payload["surfaceId"] as? String), ("topology_revision", payload["topologyRevision"] as? Int), ("window_label", payload["windowLabel"] as? String)]))"
+        )
         guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
               let topologyRevision = payload["topologyRevision"] as? Int,
               let windowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
@@ -1633,6 +1679,9 @@ final class SurfAceRuntime {
         surface.providerTopologyInitialized = topologyRevision > 0
         ensureActiveKeyboardPane(surface: surface)
         persistSurfaceTopology(surfaceId: surfaceId)
+        surfAceGatewayLog(
+            "event=topology_apply_applied \(surfAceDiagnosticFields([("active_pane_id", surface.activeKeyboardPaneId), ("pane_ids", layout.paneIDs.map(String.init).joined(separator: ",")), ("surface_id", surfaceId), ("topology_revision", topologyRevision), ("window_label", windowLabel)]))"
+        )
 
         return [
             "v": 1,
@@ -3017,6 +3066,9 @@ final class SurfAceRuntime {
         ensureActiveKeyboardPane(surface: surface)
         surface.providerTopologyInitialized = true
         persistSurfaceTopology(surfaceId: surface.surfaceId)
+        surfAceLifecycleLog(
+            "event=topology_restore_attempt \(surfAceDiagnosticFields([("initial_pane_id", initialPaneId), ("initial_pane_label", initialPaneLabel), ("pane_ids", surface.panes.map { String($0.paneId) }.joined(separator: ",")), ("surface_id", surface.surfaceId), ("window_label", windowLabel)]))"
+        )
     }
 
     private func applyProviderWindowLabel(surface: SurfAceSurfaceModel, windowLabel: String) {
@@ -3024,6 +3076,9 @@ final class SurfAceRuntime {
         surface.windowLabel = windowLabel
         surface.name = "\(screenName) \(windowLabel.uppercased())"
         persistSurfaceTopology(surfaceId: surface.surfaceId)
+        surfAceLifecycleLog(
+            "event=surface_identity_changed \(surfAceDiagnosticFields([("surface_id", surface.surfaceId), ("window_label", windowLabel)]))"
+        )
     }
 
     private func applyProviderAuthorityPaneIdentities(
@@ -3490,6 +3545,9 @@ final class SurfAceRuntime {
             return
         }
         persistedSurfaceTopologies = mapping
+        surfAceLifecycleLog(
+            "event=state_restore_read_ok \(surfAceDiagnosticFields([("surface_count", mapping.count), ("surface_ids", mapping.keys.sorted().joined(separator: ","))]))"
+        )
     }
 
     func persistSurfaceTopology(surfaceId: String) {

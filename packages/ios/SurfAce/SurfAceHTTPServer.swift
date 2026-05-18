@@ -2,7 +2,32 @@ import CryptoKit
 import Foundation
 import Network
 
+private func surfAceHTTPFlightRecorderLogPath() -> String {
+    let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return applicationSupport
+        .appendingPathComponent("SurfAce", isDirectory: true)
+        .appendingPathComponent("client-flight-recorder.log")
+        .path
+}
+
 private func surfAceServerLog(_ message: String) {
+    let url = URL(fileURLWithPath: surfAceHTTPFlightRecorderLogPath())
+    let line = "\(ISO8601DateFormatter().string(from: Date())) [surf-ace:http] \(message)\n"
+    do {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: url.path),
+               let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } else {
+                try data.write(to: url, options: .atomic)
+            }
+        }
+    } catch {
+        // Diagnostics must never change HTTP/WebSocket behavior.
+    }
     print("[SurfAce-Server] \(message)")
 }
 
