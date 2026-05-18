@@ -637,15 +637,21 @@ private func surfAceSplitBackdropColor() -> Color {
 
 private struct SurfAceSpatialEmptyPaneChrome: View {
     var body: some View {
-        Canvas { context, size in
-            let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
-                + SurfAceSpatialPaneChromeLayout.cornerRadius
-                + SurfAceSpatialPaneChromeLayout.lineWidth
-            drawFill(in: &context, size: size)
-            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topLeading)
-            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topTrailing)
-            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
-            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomTrailing)
+        ZStack {
+            Canvas { context, size in
+                drawFill(in: &context, size: size)
+            }
+
+            Canvas { context, size in
+                let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
+                    + SurfAceSpatialPaneChromeLayout.cornerRadius
+                    + SurfAceSpatialPaneChromeLayout.lineWidth
+                drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topLeading)
+                drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topTrailing)
+                drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
+                drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomTrailing)
+            }
+            .surfAceSpatialChromeDepthOffset()
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
