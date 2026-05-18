@@ -18,6 +18,7 @@ private enum SurfAceSpatialPaneChromeLayout {
     static let endpointTrimDegrees: Double = 14
     static let lineWidth: CGFloat = 3
     static let opacity: Double = 0.18
+    static let fillOpacity: Double = 0.05
 }
 
 private enum SurfAceSplitHandleLayout {
@@ -267,6 +268,11 @@ private enum SurfAceRajdhaniMetrics {
     static let identitySpacingRatio: CGFloat = 0.04
 }
 
+private enum SurfAceSpatialIdentityLayout {
+    static let depthOffset: CGFloat = 28
+    static let bundleIdentifier = "co.clicketyclacks.SurfAce.spatial"
+}
+
 private enum SurfAceIdentityBaseline: AlignmentID {
     static func defaultValue(in context: ViewDimensions) -> CGFloat {
         context[.bottom]
@@ -505,6 +511,7 @@ private struct SurfAcePaneView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, 28)
                 .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                .surfAceSpatialIdentityDepthOffset()
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
 
@@ -633,6 +640,7 @@ private struct SurfAceSpatialEmptyPaneChrome: View {
             let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
                 + SurfAceSpatialPaneChromeLayout.cornerRadius
                 + SurfAceSpatialPaneChromeLayout.lineWidth
+            drawFill(in: &context, size: size)
             drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topLeading)
             drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topTrailing)
             drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
@@ -647,6 +655,22 @@ private struct SurfAceSpatialEmptyPaneChrome: View {
         case topTrailing
         case bottomLeading
         case bottomTrailing
+    }
+
+    private func drawFill(in context: inout GraphicsContext, size: CGSize) {
+        let inset = SurfAceSpatialPaneChromeLayout.cornerInset + SurfAceSpatialPaneChromeLayout.lineWidth / 2
+        let rect = CGRect(
+            x: inset,
+            y: inset,
+            width: size.width - inset * 2,
+            height: size.height - inset * 2
+        )
+        guard rect.width > 0, rect.height > 0 else { return }
+
+        context.fill(
+            Path(roundedRect: rect, cornerRadius: SurfAceSpatialPaneChromeLayout.cornerRadius),
+            with: .color(.white.opacity(SurfAceSpatialPaneChromeLayout.fillOpacity))
+        )
     }
 
     private func drawCorner(in context: inout GraphicsContext, size: CGSize, markerSize: CGFloat, corner: Corner) {
@@ -793,6 +817,21 @@ private struct SurfAcePaneIdentityOverlay: View {
         case .disconnected:
             return Color(red: 0.94, green: 0.27, blue: 0.27)
         }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func surfAceSpatialIdentityDepthOffset() -> some View {
+        #if os(visionOS)
+        if Bundle.main.bundleIdentifier == SurfAceSpatialIdentityLayout.bundleIdentifier {
+            self.offset(z: SurfAceSpatialIdentityLayout.depthOffset)
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
     }
 }
 
