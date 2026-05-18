@@ -30,6 +30,7 @@ import {
   nativePaneReleaseRequestForCompositor,
   overlayRegionsClearRequestForCompositor,
   overlayRequestForCompositor,
+  overlayRegionsWithLivePaneInstanceAuthority,
   overlayRegionsSetRequestForCompositor,
   resolveCompositorControlSocketPath,
   resolvedOverlayRegionsForCompositor,
@@ -559,16 +560,13 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
         activeRequest = retryRequest;
         continue;
       }
-      const mismatchedLivePaneInstanceId = liveOverlayPaneInstanceId(response);
-      if (mismatchedLivePaneInstanceId) {
+      const liveRegions = overlayRegionsWithLivePaneInstanceAuthority(activeRequest.regions, response);
+      if (liveRegions) {
         activeRevision += 1;
         activeRequest = {
           ...activeRequest,
           revision: activeRevision,
-          regions: activeRequest.regions.map((region) => ({
-            ...region,
-            paneInstanceId: mismatchedLivePaneInstanceId,
-          })),
+          regions: liveRegions,
         };
         diagnostic.lifecycleRetryReason = compositorFailureMessage(response);
         diagnostic.lifecycleRetryRequest = activeRequest;
@@ -578,16 +576,13 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
       if (isOverlayNativePaneLivenessFailure(response)) {
         diagnostic.lifecycleRetryReason = compositorFailureMessage(response);
         diagnostic.lifecycleRetryAttempts = attempt + 1;
-        const livePaneInstanceId = liveOverlayPaneInstanceId(response);
-        if (livePaneInstanceId) {
+        const livenessRegions = overlayRegionsWithLivePaneInstanceAuthority(activeRequest.regions, response);
+        if (livenessRegions) {
           activeRevision += 1;
           activeRequest = {
             ...activeRequest,
             revision: activeRevision,
-            regions: activeRequest.regions.map((region) => ({
-              ...region,
-              paneInstanceId: livePaneInstanceId,
-            })),
+            regions: livenessRegions,
           };
           diagnostic.lifecycleRetryRequest = activeRequest;
           diagnostic.revision = activeRevision;
@@ -646,16 +641,6 @@ function staleOverlayTopologyEpoch(response: CompositorControlResponse): string 
     return null;
   }
   const match = /stale overlay topology epoch:\s*\S+\s*!=\s*(\S+)/.exec(message);
-  return match?.[1] ?? null;
-}
-
-
-function liveOverlayPaneInstanceId(response: CompositorControlResponse): string | null {
-  const message = compositorFailureMessage(response);
-  if (!message) {
-    return null;
-  }
-  const match = /does not match live pane instance '([^']+)'/.exec(message);
   return match?.[1] ?? null;
 }
 
@@ -1162,7 +1147,7 @@ function installIpc(): void {
     const state = core.getRendererWindowState(surfaceId);
     return {
       compositorHosted: Boolean(resolveCompositorControlSocketPath()),
-      overlayDebugBorders: Boolean(resolveCompositorControlSocketPath()),
+      overlayDebugBorders: false,
       state,
       surfaceId,
     };

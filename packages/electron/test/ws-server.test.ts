@@ -3304,6 +3304,78 @@ test("ws server retries native pane overlay until compositor reports the hosted 
   }
 });
 
+test("ws server retries native pane overlay with live compositor pane instance authority", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  let overlayAttempt = 0;
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      if (message.type === "get_status") {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            logical_surface_height: 800,
+            logical_surface_width: 1200,
+            overlay_regions: { topologyEpoch: "topology-live" },
+            pane_geometry_coordinate_space: "compositor_logical",
+          },
+        })}\n`);
+      } else if (message.type === "native_pane.host") {
+        socket.write(`${JSON.stringify({ ok: true, status: { overlay_regions: { topologyEpoch: "topology-hosted" }, panes: [{ id: "1" }] } })}\n`);
+      } else if (message.type === "overlay_regions.set") {
+        overlayAttempt += 1;
+        socket.write(`${JSON.stringify(overlayAttempt === 1
+          ? { error: "invalid overlay region: pane PaneId(\"1\") pane instance '1:target_top_118' does not match live pane instance 'live-native-pane-1'", ok: false }
+          : { ok: true, status: { overlay_regions: { regionCount: 1, topologyEpoch: "topology-hosted" } } })}\n`);
+      } else {
+        socket.write(`${JSON.stringify({ ok: true })}\n`);
+      }
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const applied = await request(socket, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(applied.payload.status, "applied");
+      assert.deepEqual(received.map((message) => (message as { type: string }).type), [
+        "get_status",
+        "native_pane.host",
+        "overlay_regions.set",
+        "overlay_regions.set",
+      ]);
+      assert.equal((received[2] as { regions: Array<{ paneInstanceId: string }> }).regions[0]?.paneInstanceId, "1:target_top_118");
+      assert.equal((received[3] as { regions: Array<{ paneInstanceId: string }> }).regions[0]?.paneInstanceId, "live-native-pane-1");
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
 test("ws server derives target.apply native pane geometry from resolved topology snapshot", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
