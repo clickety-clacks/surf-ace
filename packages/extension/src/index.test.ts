@@ -8,7 +8,10 @@ import {
   type SurfAceAnnotationIntentTurn,
   __test,
 } from "./annotation-intent-delivery.js";
-import { surfAceToolContextFromOpenClawContext } from "./openclaw-tool-context.js";
+import {
+  resolveSurfAceToolContextFromOpenClawContext,
+  surfAceToolContextFromOpenClawContext,
+} from "./openclaw-tool-context.js";
 import { evaluateProviderHostGuard } from "./provider-host-guard.js";
 import { SurfAceWireClient } from "./surf-ace-server.js";
 
@@ -50,6 +53,75 @@ test("Surf Ace plugin tool registration preserves OpenClaw session provenance", 
       streamLabel: "soak",
     },
   );
+});
+
+test("Surf Ace plugin tool context resolves Clawline chat display names from the chat DB", async () => {
+  const sqliteCalls: string[][] = [];
+  const resolved = await resolveSurfAceToolContextFromOpenClawContext(
+    {
+      sessionDisplayName: "Generic Tool Label",
+      sessionKey: "agent:main:clawline:flynn:main",
+    },
+    {
+      clawlineChatNames: {
+        dbPath: "/tmp/clawline.sqlite",
+        runSqlite: async (args) => {
+          sqliteCalls.push(args);
+          return "Personal\n";
+        },
+      },
+    },
+  );
+
+  assert.equal(resolved.sessionKey, "agent:main:clawline:flynn:main");
+  assert.equal(resolved.sessionDisplayName, "Personal");
+  assert.deepEqual(sqliteCalls, [
+    [
+      "/tmp/clawline.sqlite",
+      "SELECT displayName FROM stream_sessions WHERE sessionKey = 'agent:main:clawline:flynn:main' AND trim(displayName) <> '' ORDER BY updatedAt DESC LIMIT 1;",
+    ],
+  ]);
+});
+
+test("Surf Ace plugin tool context preserves raw session keys when Clawline chat lookup misses", async () => {
+  const resolved = await resolveSurfAceToolContextFromOpenClawContext(
+    {
+      sessionKey: "agent:external:session",
+    },
+    {
+      clawlineChatNames: {
+        dbPath: "/tmp/clawline.sqlite",
+        runSqlite: async () => "\n",
+      },
+    },
+  );
+
+  assert.equal(resolved.sessionKey, "agent:external:session");
+  assert.equal(resolved.sessionDisplayName, undefined);
+});
+
+test("Surf Ace plugin tool context resolves Clawline names from nested source provenance keys", async () => {
+  const sqliteCalls: string[][] = [];
+  const resolved = await resolveSurfAceToolContextFromOpenClawContext(
+    {
+      sourceProvenance: {
+        sessionKey: "agent:main:clawline:flynn:s_3d3b104a",
+      },
+    },
+    {
+      clawlineChatNames: {
+        dbPath: "/tmp/clawline.sqlite",
+        runSqlite: async (args) => {
+          sqliteCalls.push(args);
+          return "Surf Ace\n";
+        },
+      },
+    },
+  );
+
+  assert.equal(resolved.sessionDisplayName, "Surf Ace");
+  assert.equal(resolved.sourceProvenance?.sessionKey, "agent:main:clawline:flynn:s_3d3b104a");
+  assert.match(sqliteCalls[0]?.[1] ?? "", /agent:main:clawline:flynn:s_3d3b104a/);
 });
 
 test("Surf Ace provider host guard allows TARS aliases", () => {

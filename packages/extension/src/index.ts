@@ -1,7 +1,10 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { deliverSettledAnnotationIntentTurn } from "./annotation-intent-delivery.js";
-import { surfAceToolContextFromOpenClawContext } from "./openclaw-tool-context.js";
+import {
+  resolveSurfAceToolContextFromOpenClawContext,
+  surfAceToolContextFromOpenClawContext,
+} from "./openclaw-tool-context.js";
 import { assertProviderHostAllowed } from "./provider-host-guard.js";
 import { createSurfAceRuntime } from "./surf-ace-runtime.js";
 import { createSurfAceTools, type SurfAceToolContext } from "./surf-ace-tools.js";
@@ -51,12 +54,19 @@ const plugin = {
             description: tool.description,
             parameters: tool.inputSchema,
             execute: async (_id: string, params: unknown) => {
+              const resolvedToolContext = await resolveSurfAceToolContextFromOpenClawContext(
+                context,
+                {
+                  baseContext: toolContext,
+                  clawlineChatNames: { openClawStateDir },
+                },
+              );
               return {
                 content: [
                   {
                     type: "text" as const,
                     text: JSON.stringify(
-                      await tool.execute(params as never, toolContext),
+                      await tool.execute(params as never, resolvedToolContext),
                       null,
                       2,
                     ),
