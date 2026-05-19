@@ -323,6 +323,79 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testSpatialEmptyPaneMarkerFramesOffsetOutwardFromContentBounds() throws {
+        let paneSize = CGSize(width: 300, height: 200)
+        let markerSize: CGFloat = 58
+        let cornerInset: CGFloat = 10
+        let outwardOffset: CGFloat = 16
+        let lineWidth: CGFloat = 3
+
+        let topLeading = try XCTUnwrap(surfAceSpatialEmptyPaneMarkerFrame(
+            size: paneSize,
+            markerSize: markerSize,
+            cornerInset: cornerInset,
+            outwardOffset: outwardOffset,
+            lineWidth: lineWidth,
+            corner: .topLeading
+        ))
+        XCTAssertEqual(topLeading.origin, CGPoint(x: -6, y: -6))
+        XCTAssertTrue(CGRect(origin: .zero, size: paneSize).intersects(topLeading))
+
+        let topTrailing = try XCTUnwrap(surfAceSpatialEmptyPaneMarkerFrame(
+            size: paneSize,
+            markerSize: markerSize,
+            cornerInset: cornerInset,
+            outwardOffset: outwardOffset,
+            lineWidth: lineWidth,
+            corner: .topTrailing
+        ))
+        XCTAssertEqual(topTrailing.origin, CGPoint(x: 248, y: -6))
+        XCTAssertGreaterThan(topTrailing.maxX, paneSize.width)
+        XCTAssertTrue(CGRect(origin: .zero, size: paneSize).intersects(topTrailing))
+
+        let bottomLeading = try XCTUnwrap(surfAceSpatialEmptyPaneMarkerFrame(
+            size: paneSize,
+            markerSize: markerSize,
+            cornerInset: cornerInset,
+            outwardOffset: outwardOffset,
+            lineWidth: lineWidth,
+            corner: .bottomLeading
+        ))
+        XCTAssertEqual(bottomLeading.origin, CGPoint(x: -6, y: 148))
+        XCTAssertGreaterThan(bottomLeading.maxY, paneSize.height)
+        XCTAssertTrue(CGRect(origin: .zero, size: paneSize).intersects(bottomLeading))
+
+        let bottomTrailing = try XCTUnwrap(surfAceSpatialEmptyPaneMarkerFrame(
+            size: paneSize,
+            markerSize: markerSize,
+            cornerInset: cornerInset,
+            outwardOffset: outwardOffset,
+            lineWidth: lineWidth,
+            corner: .bottomTrailing
+        ))
+        XCTAssertEqual(bottomTrailing.origin, CGPoint(x: 248, y: 148))
+        XCTAssertGreaterThan(bottomTrailing.maxX, paneSize.width)
+        XCTAssertGreaterThan(bottomTrailing.maxY, paneSize.height)
+        XCTAssertTrue(CGRect(origin: .zero, size: paneSize).intersects(bottomTrailing))
+    }
+
+    func testSpatialEmptyPaneMarkerFrameStaysVisibleInSmallPanes() throws {
+        let paneSize = CGSize(width: 40, height: 32)
+        let paneBounds = CGRect(origin: .zero, size: paneSize)
+
+        for corner in SurfAceSpatialPaneChromeCorner.allCases {
+            let frame = try XCTUnwrap(surfAceSpatialEmptyPaneMarkerFrame(
+                size: paneSize,
+                markerSize: 58,
+                cornerInset: 10,
+                outwardOffset: 16,
+                lineWidth: 3,
+                corner: corner
+            ))
+            XCTAssertTrue(paneBounds.intersects(frame))
+        }
+    }
+
     func testClearAfterPushedContentRendersEmptyPaneState() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "pushed-clear-empty-pane")

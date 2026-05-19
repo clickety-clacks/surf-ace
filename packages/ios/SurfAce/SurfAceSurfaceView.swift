@@ -16,6 +16,7 @@ private enum SurfAceSpatialPaneChromeLayout {
     static let cornerInset: CGFloat = 10
     static let cornerRadius: CGFloat = 45
     static let endpointTrimDegrees: Double = 14
+    static let outwardOffset: CGFloat = 16
     static let lineWidth: CGFloat = 3
     static let opacity: Double = 0.18
     static let fillOpacity: Double = 0.01
@@ -674,6 +675,13 @@ struct SurfAceSpatialWindowContentCorners: Equatable {
     }
 }
 
+enum SurfAceSpatialPaneChromeCorner: CaseIterable {
+    case topLeading
+    case topTrailing
+    case bottomLeading
+    case bottomTrailing
+}
+
 func surfAceSpatialWindowContentCorners(
     paneFrame: CGRect,
     surfaceBounds: CGRect,
@@ -751,26 +759,18 @@ private struct SurfAceSpatialEmptyPaneMarkers: View {
         .accessibilityHidden(true)
     }
 
-    private enum Corner {
-        case topLeading
-        case topTrailing
-        case bottomLeading
-        case bottomTrailing
-    }
+    private func drawCorner(in context: inout GraphicsContext, size: CGSize, markerSize: CGFloat, corner: SurfAceSpatialPaneChromeCorner) {
+        guard let frame = surfAceSpatialEmptyPaneMarkerFrame(
+            size: size,
+            markerSize: markerSize,
+            cornerInset: SurfAceSpatialPaneChromeLayout.cornerInset,
+            outwardOffset: SurfAceSpatialPaneChromeLayout.outwardOffset,
+            lineWidth: SurfAceSpatialPaneChromeLayout.lineWidth,
+            corner: corner
+        ) else { return }
 
-    private func drawCorner(in context: inout GraphicsContext, size: CGSize, markerSize: CGFloat, corner: Corner) {
-        let width = min(markerSize, size.width)
-        let height = min(markerSize, size.height)
-        guard width > SurfAceSpatialPaneChromeLayout.lineWidth,
-              height > SurfAceSpatialPaneChromeLayout.lineWidth else { return }
-
-        let inset = min(SurfAceSpatialPaneChromeLayout.cornerInset, max(0, min(size.width - width, size.height - height)))
-        let origin = CGPoint(
-            x: corner == .topLeading || corner == .bottomLeading ? inset : size.width - width - inset,
-            y: corner == .topLeading || corner == .topTrailing ? inset : size.height - height - inset
-        )
-        var path = cornerPath(size: CGSize(width: width, height: height), corner: corner)
-        path = path.applying(CGAffineTransform(translationX: origin.x, y: origin.y))
+        var path = cornerPath(size: frame.size, corner: corner)
+        path = path.applying(CGAffineTransform(translationX: frame.minX, y: frame.minY))
         context.stroke(
             path,
             with: .color(.white.opacity(SurfAceSpatialPaneChromeLayout.opacity)),
@@ -782,7 +782,7 @@ private struct SurfAceSpatialEmptyPaneMarkers: View {
         )
     }
 
-    private func cornerPath(size: CGSize, corner: Corner) -> Path {
+    private func cornerPath(size: CGSize, corner: SurfAceSpatialPaneChromeCorner) -> Path {
         var path = Path()
         let strokeInset = SurfAceSpatialPaneChromeLayout.lineWidth / 2
         let minX = strokeInset
@@ -829,6 +829,33 @@ private struct SurfAceSpatialEmptyPaneMarkers: View {
 
         return path
     }
+}
+
+func surfAceSpatialEmptyPaneMarkerFrame(
+    size: CGSize,
+    markerSize: CGFloat,
+    cornerInset: CGFloat,
+    outwardOffset: CGFloat,
+    lineWidth: CGFloat,
+    corner: SurfAceSpatialPaneChromeCorner
+) -> CGRect? {
+    let width = min(markerSize, size.width)
+    let height = min(markerSize, size.height)
+    guard width > lineWidth, height > lineWidth else { return nil }
+
+    let inset = min(cornerInset, max(0, min(size.width - width, size.height - height)))
+    let offset = min(outwardOffset, inset + min(width, height) - lineWidth)
+    let leadingX = inset - offset
+    let trailingX = size.width - width - inset + offset
+    let topY = inset - offset
+    let bottomY = size.height - height - inset + offset
+
+    return CGRect(
+        x: corner == .topLeading || corner == .bottomLeading ? leadingX : trailingX,
+        y: corner == .topLeading || corner == .topTrailing ? topY : bottomY,
+        width: width,
+        height: height
+    )
 }
 
 struct SurfAcePaneChromeIdentityParts: Equatable {
