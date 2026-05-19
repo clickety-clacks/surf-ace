@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("surfAce", {
   },
   reportOverlayRegions: (payload: Record<string, unknown>) => ipcRenderer.send("surface:overlay-regions", payload),
   reportPage: (payload: Record<string, unknown>) => ipcRenderer.send("surface:page", payload),
+  reportRendererDiagnostic: (payload: Record<string, unknown>) => ipcRenderer.send("surface:renderer-diagnostic", payload),
   reportSnapshot: (payload: Record<string, unknown>) => ipcRenderer.send("surface:snapshot", payload),
 });
 
@@ -32,6 +33,7 @@ declare global {
       onState: (listener: (state: unknown) => void) => () => void;
       reportOverlayRegions: (payload: Record<string, unknown>) => void;
       reportPage: (payload: Record<string, unknown>) => void;
+      reportRendererDiagnostic: (payload: Record<string, unknown>) => void;
       reportSnapshot: (payload: Record<string, unknown>) => void;
     };
   }

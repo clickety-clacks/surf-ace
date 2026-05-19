@@ -332,6 +332,39 @@ function surfaceIdForSender(contents: WebContents): string | null {
   return null;
 }
 
+function rendererDiagnosticFields(
+  surfaceId: string | null,
+  senderId: number,
+  payload: Record<string, unknown>,
+): Record<string, boolean | number | string | null | undefined> {
+  const fields: Record<string, boolean | number | string | null | undefined> = {
+    routed_surface_id: surfaceId ?? "none",
+    sender_id: senderId,
+  };
+  const rendererEvent = payload.event;
+  if (typeof rendererEvent === "string" && rendererEvent.length > 0) {
+    fields.renderer_event = rendererEvent.slice(0, 80);
+  }
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === "event") {
+      continue;
+    }
+    const fieldKey = `renderer_${key}`;
+    if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      fields[fieldKey] = typeof value === "string" ? value.slice(0, 240) : value;
+      continue;
+    }
+    if (value !== undefined) {
+      try {
+        fields[fieldKey] = JSON.stringify(value).slice(0, 240);
+      } catch {
+        fields[fieldKey] = String(value).slice(0, 240);
+      }
+    }
+  }
+  return fields;
+}
+
 function flushPendingWindowState(surfaceId: string): void {
   const window = windows.get(surfaceId);
   if (!window || window.isDestroyed() || !readyWindows.has(surfaceId)) {
@@ -1205,15 +1238,43 @@ function installIpc(): void {
   ipcMain.handle("surface:get-bootstrap", async (event) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) {
+      clientWarn("renderer_bootstrap_unrouted", {
+        sender_id: event.sender.id,
+        window_count: windows.size,
+      });
       return null;
     }
     const state = core.getRendererWindowState(surfaceId);
+    clientInfo("renderer_bootstrap_routed", {
+      content_pane_count: state.panes.filter((pane) => Boolean(pane.content.contentType)).length,
+      has_layout: Boolean(state.layout),
+      pane_count: state.panes.length,
+      sender_id: event.sender.id,
+      surface_id: surfaceId,
+      window_label: state.windowLabel,
+    });
     return {
       compositorHosted: Boolean(resolveCompositorControlSocketPath()),
       overlayDebugBorders: false,
       state,
       surfaceId,
     };
+  });
+
+  ipcMain.on("surface:renderer-diagnostic", (event, payload) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!payload || typeof payload !== "object") {
+      clientWarn("renderer_diagnostic_invalid", {
+        routed_surface_id: surfaceId ?? "none",
+        sender_id: event.sender.id,
+      });
+      return;
+    }
+    clientInfo("renderer_diagnostic", rendererDiagnosticFields(
+      surfaceId,
+      event.sender.id,
+      payload as Record<string, unknown>,
+    ));
   });
 
   ipcMain.on("surface:snapshot", (event, payload) => {
