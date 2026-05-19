@@ -938,6 +938,52 @@ function wireWindowInputMenus(window: BrowserWindow): void {
   });
 }
 
+function wireWindowDiagnostics(surfaceId: string, window: BrowserWindow): void {
+  window.webContents.on("console-message", (_event, level, message, lineNumber, sourceId) => {
+    clientInfo("window_console_message", {
+      level,
+      line_number: lineNumber,
+      message: String(message).slice(0, 500),
+      source_id: String(sourceId ?? "").slice(0, 240),
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    clientWarn("window_load_failed", {
+      error_code: errorCode,
+      error_description: errorDescription,
+      is_main_frame: isMainFrame,
+      surface_id: surfaceId,
+      url: validatedURL,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+  window.webContents.on("dom-ready", () => {
+    clientInfo("window_dom_ready", {
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+  window.webContents.on("preload-error", (_event, preloadPath, error) => {
+    clientWarn("window_preload_error", {
+      error_message: error.message,
+      error_name: error.name,
+      preload_path: preloadPath,
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    clientWarn("window_render_process_gone", {
+      exit_code: details.exitCode,
+      reason: details.reason,
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+}
+
 async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow> {
   const existing = windows.get(surfaceId);
   if (existing && !existing.isDestroyed()) {
@@ -982,6 +1028,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   });
   readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);
+  wireWindowDiagnostics(surfaceId, window);
   wireWindowInputMenus(window);
   window.once("ready-to-show", () => {
     syncWindowViewport(surfaceId, window);
