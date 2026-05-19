@@ -9,24 +9,37 @@
 /* Begin PBXBuildFile section */
 		13C44D62BD51360ABEED9F46 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E130566A61C0DA77977D2E9C /* LaunchScreen.storyboard */; };
 		13EF6FFC169CB6EDFF47597E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2A8249A9765412039C07EDD5 /* Assets.xcassets */; };
+		1729F8015A06323F42ACB6FA /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E130566A61C0DA77977D2E9C /* LaunchScreen.storyboard */; };
 		193398127694B8E96D1688F5 /* SurfAceViewportPreservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */; };
 		1FFF04D1B747F5A964BC374B /* SurfAceANSI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */; };
+		2BCEA53CC04DAE493B9514BD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2A8249A9765412039C07EDD5 /* Assets.xcassets */; };
 		322439B6C590133D8A53E250 /* OFL-Rajdhani.txt in Resources */ = {isa = PBXBuildFile; fileRef = CC41BFBBD135B6784905872F /* OFL-Rajdhani.txt */; };
+		3B4E416E4A2D67F538AE5933 /* SurfAceHTTPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */; };
 		5964DDDD0A9B7A881AECDA0C /* SurfAceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C230CE2F392C57A940FD796E /* SurfAceModels.swift */; };
+		635FAD5F64688C7E33FF32C1 /* Rajdhani-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 7407D4BC544155CEC96E6A32 /* Rajdhani-Regular.ttf */; };
+		637AA14421D231B97792EEAA /* SurfAceANSI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */; };
 		6661F25504963451BE3CE25C /* SurfAceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */; };
 		68DC9BCC2BBCFA3ACA7A30AF /* SurfAceBrowserURLTargetApplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */; };
-		6C1D6C64A4F64DB79B5D85B5 /* SurfAceMarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20BB85B62CC04D418651F6BA /* SurfAceMarkdownRenderingTests.swift */; };
+		68F9D6A747EB7877AED1D73C /* SurfAceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C230CE2F392C57A940FD796E /* SurfAceModels.swift */; };
+		69E4A6C95D32B537DECECA46 /* SurfAceIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */; };
 		7440C200D139A9CDEB4071DA /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
+		753547CD61197747119287A7 /* SurfAceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */; };
 		78FE925CC623EE70BD36510C /* SurfAceSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */; };
+		8C4B9869FAB26DF1952F78FE /* Rajdhani-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = CDE40A8828491859D325E965 /* Rajdhani-Bold.ttf */; };
 		980E850E03917BE3AF575829 /* SurfAceBonjourPublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79E9224F46725D6F9372F987 /* SurfAceBonjourPublisherTests.swift */; };
 		A4FCB41CE20836A13C0BEEB9 /* Rajdhani-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = CDE40A8828491859D325E965 /* Rajdhani-Bold.ttf */; };
 		AB13C11EA76DDA755EEEED0A /* SurfAceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */; };
 		ABB31C3B4EA5BEFBECFC7AA5 /* Rajdhani-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 7407D4BC544155CEC96E6A32 /* Rajdhani-Regular.ttf */; };
+		B1C21A3DBBA7214CE8444348 /* SurfAceSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */; };
 		B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */; };
 		C9FCE1B6A4992A0D0FD5FB68 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ABD815F8B22D9C2095F8BCF /* SurfAceSurfaceTopologyPersistenceTests.swift */; };
+		D3F94E7A626464718A5F683C /* SurfAceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */; };
 		D615F803FC49278657471A62 /* SurfAceIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */; };
+		DE2D696D8BBC809006F83182 /* OFL-Rajdhani.txt in Resources */ = {isa = PBXBuildFile; fileRef = CC41BFBBD135B6784905872F /* OFL-Rajdhani.txt */; };
 		E2B2E9631F0835BD39E2B839 /* SurfAceHTTPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */; };
+		EB9119D84B8BF489E271FDCE /* SurfAceMarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 217B21E95FFA04F89F813157 /* SurfAceMarkdownRenderingTests.swift */; };
 		FA0FE771EA157D8D3EB6DCF9 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */; };
+		FF9BF16CA4591B19760A2246 /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,7 +56,7 @@
 		025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceRenderAndAnnotationDiagnosticsTests.swift; sourceTree = "<group>"; };
 		04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBrowserURLTargetApplyTests.swift; sourceTree = "<group>"; };
 		176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServerTests.swift; sourceTree = "<group>"; };
-		20BB85B62CC04D418651F6BA /* SurfAceMarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceMarkdownRenderingTests.swift; sourceTree = "<group>"; };
+		217B21E95FFA04F89F813157 /* SurfAceMarkdownRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceMarkdownRenderingTests.swift; sourceTree = "<group>"; };
 		2A8249A9765412039C07EDD5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceViewportPreservationTests.swift; sourceTree = "<group>"; };
 		314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
@@ -53,6 +66,7 @@
 		7407D4BC544155CEC96E6A32 /* Rajdhani-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Rajdhani-Regular.ttf"; sourceTree = "<group>"; };
 		7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisher.swift; sourceTree = "<group>"; };
 		79E9224F46725D6F9372F987 /* SurfAceBonjourPublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisherTests.swift; sourceTree = "<group>"; };
+		900E30042618968CF5054D9D /* SurfAceSpatial.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SurfAceSpatial.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServer.swift; sourceTree = "<group>"; };
 		C230CE2F392C57A940FD796E /* SurfAceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceModels.swift; sourceTree = "<group>"; };
 		CC41BFBBD135B6784905872F /* OFL-Rajdhani.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-Rajdhani.txt"; sourceTree = "<group>"; };
@@ -98,7 +112,7 @@
 				79E9224F46725D6F9372F987 /* SurfAceBonjourPublisherTests.swift */,
 				04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */,
 				176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */,
-				20BB85B62CC04D418651F6BA /* SurfAceMarkdownRenderingTests.swift */,
+				217B21E95FFA04F89F813157 /* SurfAceMarkdownRenderingTests.swift */,
 				025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */,
 				3ABD815F8B22D9C2095F8BCF /* SurfAceSurfaceTopologyPersistenceTests.swift */,
 				2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */,
@@ -120,6 +134,7 @@
 			isa = PBXGroup;
 			children = (
 				DA0B8CE0B10CC8BE7F94EC21 /* SurfAce.app */,
+				900E30042618968CF5054D9D /* SurfAceSpatial.app */,
 				E1026649686E370A8442CA40 /* SurfAceTests.xctest */,
 			);
 			name = Products;
@@ -145,6 +160,24 @@
 			productName = SurfAceTests;
 			productReference = E1026649686E370A8442CA40 /* SurfAceTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A3F82FD6C105A9FB434006D5 /* SurfAceSpatial */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 21BF11BCB941509D75778A40 /* Build configuration list for PBXNativeTarget "SurfAceSpatial" */;
+			buildPhases = (
+				597AD9D46613DED4CEA9AC66 /* Sources */,
+				615A72737808C2927D868BB1 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SurfAceSpatial;
+			packageProductDependencies = (
+			);
+			productName = SurfAceSpatial;
+			productReference = 900E30042618968CF5054D9D /* SurfAceSpatial.app */;
+			productType = "com.apple.product-type.application";
 		};
 		E78D6E7B48D8F200079A1C31 /* SurfAce */ = {
 			isa = PBXNativeTarget;
@@ -176,6 +209,10 @@
 					67A9D8D88698454C7C5A7802 = {
 						DevelopmentTeam = "";
 					};
+					A3F82FD6C105A9FB434006D5 = {
+						DevelopmentTeam = Z7R59J7QV8;
+						ProvisioningStyle = Automatic;
+					};
 					E78D6E7B48D8F200079A1C31 = {
 						DevelopmentTeam = Z7R59J7QV8;
 						ProvisioningStyle = Automatic;
@@ -197,6 +234,7 @@
 			projectRoot = "";
 			targets = (
 				E78D6E7B48D8F200079A1C31 /* SurfAce */,
+				A3F82FD6C105A9FB434006D5 /* SurfAceSpatial */,
 				67A9D8D88698454C7C5A7802 /* SurfAceTests */,
 			);
 		};
@@ -215,6 +253,18 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		615A72737808C2927D868BB1 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2BCEA53CC04DAE493B9514BD /* Assets.xcassets in Resources */,
+				1729F8015A06323F42ACB6FA /* LaunchScreen.storyboard in Resources */,
+				DE2D696D8BBC809006F83182 /* OFL-Rajdhani.txt in Resources */,
+				8C4B9869FAB26DF1952F78FE /* Rajdhani-Bold.ttf in Resources */,
+				635FAD5F64688C7E33FF32C1 /* Rajdhani-Regular.ttf in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -225,10 +275,25 @@
 				980E850E03917BE3AF575829 /* SurfAceBonjourPublisherTests.swift in Sources */,
 				68DC9BCC2BBCFA3ACA7A30AF /* SurfAceBrowserURLTargetApplyTests.swift in Sources */,
 				B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */,
-				6C1D6C64A4F64DB79B5D85B5 /* SurfAceMarkdownRenderingTests.swift in Sources */,
+				EB9119D84B8BF489E271FDCE /* SurfAceMarkdownRenderingTests.swift in Sources */,
 				FA0FE771EA157D8D3EB6DCF9 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift in Sources */,
 				C9FCE1B6A4992A0D0FD5FB68 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */,
 				193398127694B8E96D1688F5 /* SurfAceViewportPreservationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		597AD9D46613DED4CEA9AC66 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				637AA14421D231B97792EEAA /* SurfAceANSI.swift in Sources */,
+				D3F94E7A626464718A5F683C /* SurfAceApp.swift in Sources */,
+				FF9BF16CA4591B19760A2246 /* SurfAceBonjourPublisher.swift in Sources */,
+				3B4E416E4A2D67F538AE5933 /* SurfAceHTTPServer.swift in Sources */,
+				69E4A6C95D32B537DECECA46 /* SurfAceIdentityStore.swift in Sources */,
+				68F9D6A747EB7877AED1D73C /* SurfAceModels.swift in Sources */,
+				753547CD61197747119287A7 /* SurfAceRuntime.swift in Sources */,
+				B1C21A3DBBA7214CE8444348 /* SurfAceSurfaceView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -272,6 +337,27 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SurfAce.app/SurfAce";
+			};
+			name = Debug;
+		};
+		219570FE4B6A75CEAAFAEA1C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 17;
+				DEVELOPMENT_TEAM = Z7R59J7QV8;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SurfAceSpatial/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAce.spatial;
+				PRODUCT_NAME = SurfAce;
+				SDKROOT = xros;
+				TARGETED_DEVICE_FAMILY = 7;
 			};
 			name = Debug;
 		};
@@ -332,12 +418,12 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+				XROS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Debug;
 		};
@@ -413,12 +499,12 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+				XROS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Release;
 		};
@@ -436,6 +522,27 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SurfAce.app/SurfAce";
+			};
+			name = Release;
+		};
+		C1F235E3CC4B432B96311157 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 17;
+				DEVELOPMENT_TEAM = Z7R59J7QV8;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SurfAceSpatial/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAce.spatial;
+				PRODUCT_NAME = SurfAce;
+				SDKROOT = xros;
+				TARGETED_DEVICE_FAMILY = 7;
 			};
 			name = Release;
 		};
@@ -469,6 +576,15 @@
 			buildConfigurations = (
 				3369AE2D0B7D3366E43DA82B /* Debug */,
 				525D5BC0F761FF714D8B9655 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		21BF11BCB941509D75778A40 /* Build configuration list for PBXNativeTarget "SurfAceSpatial" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				219570FE4B6A75CEAAFAEA1C /* Debug */,
+				C1F235E3CC4B432B96311157 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
