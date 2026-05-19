@@ -21,6 +21,11 @@ private enum SurfAceSpatialPaneChromeLayout {
     static let fillOpacity: Double = 0.01
 }
 
+private enum SurfAceSpatialWindowContentLayout {
+    static let cornerRadius: CGFloat = 28
+    static let edgeTolerance: CGFloat = 0.5
+}
+
 private enum SurfAceSplitHandleLayout {
     static let visibleSize: CGFloat = 44
     static let iconSize: CGFloat = 17
@@ -331,8 +336,9 @@ private struct SurfAceWindowView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let surfaceBounds = CGRect(origin: .zero, size: proxy.size)
             ZStack {
-                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout)
+                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout, surfaceBounds: surfaceBounds)
                     .background(surfAceSurfaceBackdropColor())
                     .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
                     .onAppear {
@@ -350,6 +356,7 @@ private struct SurfAcePaneTreeView: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     let node: SurfAcePaneLayoutNode
+    let surfaceBounds: CGRect
     var path: [Int] = []
 
     var body: some View {
@@ -358,7 +365,7 @@ private struct SurfAcePaneTreeView: View {
             surfAceSurfaceBackdropColor()
         case .leaf(let paneId, _):
             if let pane = surface.panesById[paneId] {
-                SurfAcePaneView(runtime: runtime, surface: surface, pane: pane)
+                SurfAcePaneView(runtime: runtime, surface: surface, pane: pane, surfaceBounds: surfaceBounds)
             } else {
                 Color.clear
             }
@@ -369,7 +376,7 @@ private struct SurfAcePaneTreeView: View {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, path: path + [index])
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
                                     .frame(width: max(1, proxy.size.width * child.layoutWeight / totalWeight), height: proxy.size.height)
                             }
                         }
@@ -390,7 +397,7 @@ private struct SurfAcePaneTreeView: View {
                     ZStack(alignment: .topLeading) {
                         VStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, path: path + [index])
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
                                     .frame(width: proxy.size.width, height: max(1, proxy.size.height * child.layoutWeight / totalWeight))
                             }
                         }
@@ -482,22 +489,30 @@ private struct SurfAcePaneView: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
+    let surfaceBounds: CGRect
 
     var body: some View {
         GeometryReader { proxy in
             let paneFrame = proxy.frame(in: .named(surfAceSurfaceCoordinateSpaceName))
             let showsSpatialEmptyPaneChrome = surfAceShowsSpatialEmptyPaneChrome(entry: pane.currentEntry)
             ZStack {
-                SurfAcePaneRepresentable(
-                    runtime: runtime,
-                    surfaceId: surface.surfaceId,
-                    paneId: pane.paneId
-                )
-                .id("\(surface.surfaceId):\(pane.paneId)")
-                .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
+                ZStack {
+                    SurfAcePaneRepresentable(
+                        runtime: runtime,
+                        surfaceId: surface.surfaceId,
+                        paneId: pane.paneId
+                    )
+                    .id("\(surface.surfaceId):\(pane.paneId)")
+                    .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
+
+                    if showsSpatialEmptyPaneChrome {
+                        SurfAceSpatialEmptyPaneFill()
+                    }
+                }
+                .surfAceSpatialWindowContentClip(paneFrame: paneFrame, surfaceBounds: surfaceBounds)
 
                 if showsSpatialEmptyPaneChrome {
-                    SurfAceSpatialEmptyPaneChrome()
+                    SurfAceSpatialEmptyPaneMarkers()
                 }
 
                 let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
@@ -635,33 +650,72 @@ private func surfAceSplitBackdropColor() -> Color {
 #endif
 }
 
-private struct SurfAceSpatialEmptyPaneChrome: View {
-    var body: some View {
-        ZStack {
-            Canvas { context, size in
-                drawFill(in: &context, size: size)
-            }
+struct SurfAceSpatialWindowContentCorners: Equatable {
+    let topLeading: Bool
+    let topTrailing: Bool
+    let bottomLeading: Bool
+    let bottomTrailing: Bool
 
-            Canvas { context, size in
-                let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
-                    + SurfAceSpatialPaneChromeLayout.cornerRadius
-                    + SurfAceSpatialPaneChromeLayout.lineWidth
-                drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topLeading)
-                drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topTrailing)
-                drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
-                drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomTrailing)
-            }
-            .surfAceSpatialChromeDepthOffset()
+    var uiRectCorners: UIRectCorner {
+        var corners: UIRectCorner = []
+        if topLeading {
+            corners.insert(.topLeft)
+        }
+        if topTrailing {
+            corners.insert(.topRight)
+        }
+        if bottomLeading {
+            corners.insert(.bottomLeft)
+        }
+        if bottomTrailing {
+            corners.insert(.bottomRight)
+        }
+        return corners
+    }
+}
+
+func surfAceSpatialWindowContentCorners(
+    paneFrame: CGRect,
+    surfaceBounds: CGRect,
+    tolerance: CGFloat
+) -> SurfAceSpatialWindowContentCorners {
+    let touchesLeading = abs(paneFrame.minX - surfaceBounds.minX) <= tolerance
+    let touchesTrailing = abs(paneFrame.maxX - surfaceBounds.maxX) <= tolerance
+    let touchesTop = abs(paneFrame.minY - surfaceBounds.minY) <= tolerance
+    let touchesBottom = abs(paneFrame.maxY - surfaceBounds.maxY) <= tolerance
+
+    return SurfAceSpatialWindowContentCorners(
+        topLeading: touchesTop && touchesLeading,
+        topTrailing: touchesTop && touchesTrailing,
+        bottomLeading: touchesBottom && touchesLeading,
+        bottomTrailing: touchesBottom && touchesTrailing
+    )
+}
+
+private struct SurfAceSpatialWindowContentClipShape: Shape {
+    let corners: SurfAceSpatialWindowContentCorners
+    let cornerRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let radius = max(0, min(cornerRadius, rect.width / 2, rect.height / 2))
+        guard radius > 0, !corners.uiRectCorners.isEmpty else {
+            return Path(rect)
+        }
+        return Path(UIBezierPath(
+            roundedRect: rect,
+            byRoundingCorners: corners.uiRectCorners,
+            cornerRadii: CGSize(width: radius, height: radius)
+        ).cgPath)
+    }
+}
+
+private struct SurfAceSpatialEmptyPaneFill: View {
+    var body: some View {
+        Canvas { context, size in
+            drawFill(in: &context, size: size)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-    }
-
-    private enum Corner {
-        case topLeading
-        case topTrailing
-        case bottomLeading
-        case bottomTrailing
     }
 
     private func drawFill(in context: inout GraphicsContext, size: CGSize) {
@@ -678,6 +732,30 @@ private struct SurfAceSpatialEmptyPaneChrome: View {
             Path(roundedRect: rect, cornerRadius: SurfAceSpatialPaneChromeLayout.cornerRadius),
             with: .color(.white.opacity(SurfAceSpatialPaneChromeLayout.fillOpacity))
         )
+    }
+}
+
+private struct SurfAceSpatialEmptyPaneMarkers: View {
+    var body: some View {
+        Canvas { context, size in
+            let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
+                + SurfAceSpatialPaneChromeLayout.cornerRadius
+                + SurfAceSpatialPaneChromeLayout.lineWidth
+            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topLeading)
+            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topTrailing)
+            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
+            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomTrailing)
+        }
+        .surfAceSpatialChromeDepthOffset()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private enum Corner {
+        case topLeading
+        case topTrailing
+        case bottomLeading
+        case bottomTrailing
     }
 
     private func drawCorner(in context: inout GraphicsContext, size: CGSize, markerSize: CGFloat, corner: Corner) {
@@ -828,6 +906,22 @@ private struct SurfAcePaneIdentityOverlay: View {
 }
 
 private extension View {
+    @ViewBuilder
+    func surfAceSpatialWindowContentClip(paneFrame: CGRect, surfaceBounds: CGRect) -> some View {
+        #if os(visionOS)
+        self.clipShape(SurfAceSpatialWindowContentClipShape(
+            corners: surfAceSpatialWindowContentCorners(
+                paneFrame: paneFrame,
+                surfaceBounds: surfaceBounds,
+                tolerance: SurfAceSpatialWindowContentLayout.edgeTolerance
+            ),
+            cornerRadius: SurfAceSpatialWindowContentLayout.cornerRadius
+        ))
+        #else
+        self
+        #endif
+    }
+
     @ViewBuilder
     func surfAceSpatialChromeDepthOffset() -> some View {
         #if os(visionOS)

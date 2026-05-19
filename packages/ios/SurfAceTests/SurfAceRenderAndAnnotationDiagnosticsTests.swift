@@ -279,6 +279,50 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
 #endif
     }
 
+    func testSpatialWindowContentCornerMaskUsesResolvedPaneAndSurfaceGeometry() {
+        let surfaceBounds = CGRect(x: 0, y: 0, width: 1000, height: 700)
+
+        XCTAssertEqual(
+            surfAceSpatialWindowContentCorners(
+                paneFrame: CGRect(x: 0, y: 0, width: 400, height: 300),
+                surfaceBounds: surfaceBounds,
+                tolerance: 0.5
+            ),
+            SurfAceSpatialWindowContentCorners(
+                topLeading: true,
+                topTrailing: false,
+                bottomLeading: false,
+                bottomTrailing: false
+            )
+        )
+        XCTAssertEqual(
+            surfAceSpatialWindowContentCorners(
+                paneFrame: CGRect(x: 400, y: 0, width: 600, height: 700),
+                surfaceBounds: surfaceBounds,
+                tolerance: 0.5
+            ),
+            SurfAceSpatialWindowContentCorners(
+                topLeading: false,
+                topTrailing: true,
+                bottomLeading: false,
+                bottomTrailing: true
+            )
+        )
+        XCTAssertEqual(
+            surfAceSpatialWindowContentCorners(
+                paneFrame: CGRect(x: 100, y: 100, width: 500, height: 300),
+                surfaceBounds: surfaceBounds,
+                tolerance: 0.5
+            ),
+            SurfAceSpatialWindowContentCorners(
+                topLeading: false,
+                topTrailing: false,
+                bottomLeading: false,
+                bottomTrailing: false
+            )
+        )
+    }
+
     func testClearAfterPushedContentRendersEmptyPaneState() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "pushed-clear-empty-pane")
