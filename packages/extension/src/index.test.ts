@@ -38,6 +38,7 @@ test("Surf Ace plugin tool registration preserves OpenClaw session provenance", 
       agentId: "agent-1",
       displayName: "Session One",
       provenance: undefined,
+      pushedAt: undefined,
       pushedBy: {
         displayName: "Nested Agent",
         sessionKey: "agent:test:nested",

@@ -195,7 +195,11 @@ final class SurfAceViewportPreservationTests: XCTestCase {
                     "senderDisplayName": "Session One",
                     "title": "Document Title",
                     "provenance": [
+                        "agentId": "agent_one",
                         "displayName": "T231 Pusher",
+                        "pushedAt": "2026-05-18T00:00:00Z",
+                        "sessionKey": "agent:test:session-one",
+                        "source": "openclaw",
                         "streamLabel": "Pusher Stream",
                     ],
                 ],
@@ -203,7 +207,13 @@ final class SurfAceViewportPreservationTests: XCTestCase {
         )
 
         XCTAssertEqual(frame.title, "Document Title")
-        XCTAssertEqual(frame.provenanceDisplayName, "Session One")
+        XCTAssertEqual(frame.senderDisplayName, "Session One")
+        XCTAssertEqual(frame.provenanceDisplayName, "T231 Pusher")
+        XCTAssertEqual(frame.provenanceSessionKey, "agent:test:session-one")
+        XCTAssertEqual(frame.provenanceSource, "openclaw")
+        XCTAssertEqual(frame.provenanceAgentId, "agent_one")
+        XCTAssertEqual(frame.provenanceStreamLabel, "Pusher Stream")
+        XCTAssertEqual(frame.provenancePushedAt, "2026-05-18T00:00:00Z")
     }
 
     func testBrowserURLNavigationSuccessEvidenceIsApplied() {

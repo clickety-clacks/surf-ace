@@ -5,6 +5,7 @@ declare module "openclaw/plugin-sdk" {
     provenance?: {
       agentId?: string;
       displayName?: string;
+      pushedAt?: string;
       sessionKey?: string;
       source?: string;
       streamLabel?: string;
@@ -12,6 +13,7 @@ declare module "openclaw/plugin-sdk" {
     pushedBy?: {
       agentId?: string;
       displayName?: string;
+      pushedAt?: string;
       sessionKey?: string;
       source?: string;
       streamLabel?: string;
@@ -19,6 +21,7 @@ declare module "openclaw/plugin-sdk" {
     source?: string | {
       agentId?: string;
       displayName?: string;
+      pushedAt?: string;
       sessionKey?: string;
       source?: string;
       streamLabel?: string;
@@ -26,10 +29,12 @@ declare module "openclaw/plugin-sdk" {
     sourceProvenance?: {
       agentId?: string;
       displayName?: string;
+      pushedAt?: string;
       sessionKey?: string;
       source?: string;
       streamLabel?: string;
     };
+    pushedAt?: string;
     sessionDisplayName?: string;
     sessionKey?: string;
     streamLabel?: string;

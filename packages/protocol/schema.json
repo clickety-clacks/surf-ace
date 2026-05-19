@@ -356,6 +356,10 @@
           "type": "string",
           "minLength": 1
         },
+        "pushedAt": {
+          "type": "string",
+          "minLength": 1
+        },
         "sessionKey": {
           "type": "string",
           "minLength": 1
@@ -1939,16 +1943,19 @@
                       "contentType": {
                         "oneOf": [
                           {
-                            "$ref": "#/$defs/ContentType"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
+                        "$ref": "#/$defs/ContentType"
+                      },
+                      {
+                        "type": "null"
                       }
-                    }
+                    ]
+                  },
+                  "display": {
+                    "$ref": "#/$defs/ContentDisplay"
                   }
-                },
+                }
+              }
+            },
                 "layout": {
                   "$ref": "#/$defs/TopologyLayoutNode"
                 },
@@ -3426,6 +3433,9 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "display": {
+                    "$ref": "#/$defs/ContentDisplay"
                   },
                   "externalNative": {
                     "type": "boolean"

@@ -6,6 +6,7 @@ export function surfAceToolContextFromOpenClawContext(context: ToolContext): Sur
     agentId: context.agentId,
     displayName: context.displayName,
     provenance: context.provenance,
+    pushedAt: context.pushedAt,
     pushedBy: context.pushedBy,
     source: context.source ?? "openclaw-plugin",
     sourceProvenance: context.sourceProvenance,

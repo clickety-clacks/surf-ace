@@ -183,7 +183,17 @@ export type SurfAceProviderAuthorityProjection = {
 export type SurfAceHistorySummary = {
   backCount: number;
   forwardCount: number;
+  visibleProvenance?: SurfAceVisibleContentProvenance | null;
   visibleContentId: string | null;
+};
+
+export type SurfAceVisibleContentProvenance = {
+  agentId?: string;
+  displayName?: string;
+  pushedAt?: string;
+  sessionKey: string | null;
+  source?: string;
+  streamLabel?: string;
 };
 
 export type SurfAcePaneSummary = {
@@ -483,6 +493,7 @@ type SurfAceSessionContext = {
   agentId?: string;
   displayName?: string;
   provenance?: PusherProvenance;
+  pushedAt?: string;
   pushedBy?: PusherProvenance;
   source?: string | PusherProvenance;
   sourceProvenance?: PusherProvenance;
@@ -2111,6 +2122,7 @@ function mergeProvenance(
   return {
     agentId: cleanProvenanceString(record.agentId) ?? base.agentId,
     displayName: cleanProvenanceString(record.displayName) ?? base.displayName,
+    pushedAt: cleanProvenanceString(record.pushedAt) ?? base.pushedAt,
     sessionKey: cleanProvenanceString(record.sessionKey) ?? base.sessionKey,
     source: cleanProvenanceString(record.source) ?? base.source,
     streamLabel: cleanProvenanceString(record.streamLabel) ?? base.streamLabel,
@@ -2121,16 +2133,20 @@ function pusherProvenanceFromContext(context?: SurfAceSessionContext): PusherPro
   if (!context) {
     return null;
   }
-  let provenance: Partial<PusherProvenance> = mergeProvenance({}, context);
+  const contextSessionKey = cleanProvenanceString(context.sessionKey);
+  let provenance: Partial<PusherProvenance> = contextSessionKey ? {} : mergeProvenance({}, context.pushedBy);
+  provenance = mergeProvenance(provenance, context.sourceProvenance);
+  provenance = mergeProvenance(provenance, context.provenance);
   if (typeof context.source === "object") {
     provenance = mergeProvenance(provenance, context.source);
   } else {
-    provenance.source = cleanProvenanceString(context.source);
+    provenance.source = cleanProvenanceString(context.source) ?? provenance.source;
   }
-  provenance = mergeProvenance(provenance, context.sourceProvenance);
-  provenance = mergeProvenance(provenance, context.provenance);
-  provenance = mergeProvenance(provenance, context.pushedBy);
-  provenance.displayName ??= cleanProvenanceString(context.sessionDisplayName);
+  provenance.agentId = cleanProvenanceString(context.agentId) ?? provenance.agentId;
+  provenance.pushedAt = cleanProvenanceString(context.pushedAt) ?? provenance.pushedAt;
+  provenance.sessionKey = contextSessionKey ?? provenance.sessionKey;
+  provenance.streamLabel = cleanProvenanceString(context.streamLabel) ?? provenance.streamLabel;
+  provenance.displayName = cleanProvenanceString(context.sessionDisplayName) ?? provenance.displayName;
 
   const cleaned = Object.fromEntries(
     Object.entries(provenance).filter((entry): entry is [keyof PusherProvenance, string] =>
@@ -2151,9 +2167,33 @@ function displayForPusherProvenance(context?: SurfAceSessionContext): ContentDis
     return undefined;
   }
   return {
-    ...(senderDisplayName ? { senderDisplayName, title: senderDisplayName } : {}),
+    ...(senderDisplayName ? { senderDisplayName } : {}),
     ...(provenance ? { provenance } : {}),
   };
+}
+
+function pusherSessionKeyFromDisplay(display: ContentDisplay | null | undefined): string | null {
+  return cleanProvenanceString(display?.provenance?.sessionKey) ?? null;
+}
+
+function visibleContentProvenance(pane: ManagedPane): SurfAceVisibleContentProvenance | null {
+  if (!pane.activeContentId) {
+    return null;
+  }
+  const provenance = pane.display?.provenance;
+  const sessionKey = pusherSessionKeyFromDisplay(pane.display) ?? pane.ownerSessionKey ?? null;
+  const displayName = cleanProvenanceString(provenance?.displayName) ??
+    cleanProvenanceString(provenance?.streamLabel) ??
+    (pusherSessionKeyFromDisplay(pane.display) ? undefined : cleanProvenanceString(pane.display?.senderDisplayName));
+  const visible: SurfAceVisibleContentProvenance = {
+    ...(cleanProvenanceString(provenance?.agentId) ? { agentId: cleanProvenanceString(provenance?.agentId) } : {}),
+    ...(displayName ? { displayName } : {}),
+    ...(cleanProvenanceString(provenance?.pushedAt) ? { pushedAt: cleanProvenanceString(provenance?.pushedAt) } : {}),
+    sessionKey,
+    ...(cleanProvenanceString(provenance?.source) ? { source: cleanProvenanceString(provenance?.source) } : {}),
+    ...(cleanProvenanceString(provenance?.streamLabel) ? { streamLabel: cleanProvenanceString(provenance?.streamLabel) } : {}),
+  };
+  return sessionKey || Object.keys(visible).some((key) => key !== "sessionKey") ? visible : null;
 }
 
 function pusherSessionKeyFromContext(context?: SurfAceSessionContext): string | undefined {
@@ -8415,7 +8455,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 }
               : null,
             displayId: visiblePaneAddress(surface.windowLabel, paneLabel),
-            historySummary: structuredClone(pane.historySummary),
+            historySummary: {
+              ...structuredClone(pane.historySummary),
+              visibleProvenance: visibleContentProvenance(pane),
+            },
             name: pane.name,
             paneAddress: visiblePaneAddress(surface.windowLabel, paneLabel),
             paneId: pane.paneId,
@@ -11323,6 +11366,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
     this.assertProviderPaneLabelsUnique(surface, paneStates);
     let lineageChanged = false;
+    let contentStateChanged = false;
     const providerPaneLabels: Array<{ pane: ManagedPane; paneLabel: number; remotePaneId: RemotePaneId }> = [];
     const providerPaneIds: PaneId[] = [];
     for (const paneState of paneStates) {
@@ -11339,6 +11383,31 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (typeof paneState.paneLineageId === "string" && paneState.paneLineageId.length > 0) {
         lineageChanged = this.adoptPaneLineage(surface, pane, paneState.paneLineageId) || lineageChanged;
       }
+      const nextContentId = paneState.activeContentId;
+      const nextContentType = paneState.contentType;
+      if (nextContentId && nextContentType) {
+        const nextDisplay = paneState.display ? structuredClone(paneState.display) : null;
+        const nextOwnerSessionKey = pusherSessionKeyFromDisplay(nextDisplay);
+        const contentIdentityChanged =
+          pane.activeContentId !== nextContentId ||
+          pane.contentType !== nextContentType;
+        const displayChanged = JSON.stringify(pane.display) !== JSON.stringify(nextDisplay);
+        const ownerChanged = nextOwnerSessionKey !== null && pane.ownerSessionKey !== nextOwnerSessionKey;
+        if (contentIdentityChanged || displayChanged || ownerChanged) {
+          contentStateChanged = true;
+        }
+        pane.activeContentId = nextContentId;
+        pane.contentType = nextContentType;
+        if (contentIdentityChanged) {
+          pane.contentValue = null;
+          pane.snapshot = pane.snapshot?.contentId === nextContentId ? pane.snapshot : null;
+        }
+        pane.display = nextDisplay;
+        if (nextOwnerSessionKey !== null) {
+          pane.ownerSessionKey = nextOwnerSessionKey;
+        }
+        pane.historySummary.visibleContentId = nextContentId;
+      }
     }
     const topologyChanged = this.reconcilePreRevisionPaneListLayout(surface);
     const labelsChanged = this.adoptProviderPaneLabels(surface, providerPaneLabels);
@@ -11351,8 +11420,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (lineageChanged) {
       await this.persistSurfaceTargetState(surface, "pane list lineage repair");
     }
-    if (labelsChanged || topologyChanged) {
-      this.queuePersistScreenSnapshot(labelsChanged ? "pane list label repair" : "pane list topology repair");
+    if (labelsChanged || topologyChanged || contentStateChanged) {
+      this.queuePersistScreenSnapshot(
+        labelsChanged ? "pane list label repair" : contentStateChanged ? "pane list content repair" : "pane list topology repair",
+      );
     }
     return providerPaneIds;
   }
@@ -12288,9 +12359,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.contentType = paneState.contentType;
     pane.contentValue = null;
     pane.currentRevision = paneState.currentRevision;
-    pane.display = null;
+    pane.display = paneState.display ? structuredClone(paneState.display) : null;
     pane.historyOwnerToken = null;
-    pane.ownerSessionKey = null;
+    pane.ownerSessionKey = pusherSessionKeyFromDisplay(pane.display);
     pane.historySummary.visibleContentId = paneState.currentContentId;
     pane.diagnosticContent = null;
     pane.nonDurableTargetDiagnostic = null;

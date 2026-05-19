@@ -202,7 +202,13 @@ struct SurfAceFrame: Equatable {
     let payload: SurfAceFramePayload
     let reloadSource: SurfAceContentReloadSource?
     let title: String?
+    let senderDisplayName: String?
     let provenanceDisplayName: String?
+    let provenanceSessionKey: String?
+    let provenanceSource: String?
+    let provenanceAgentId: String?
+    let provenanceStreamLabel: String?
+    let provenancePushedAt: String?
     let scrollable: Bool
     let interactive: Bool
 
@@ -213,7 +219,13 @@ struct SurfAceFrame: Equatable {
         payload: SurfAceFramePayload,
         reloadSource: SurfAceContentReloadSource?,
         title: String?,
+        senderDisplayName: String? = nil,
         provenanceDisplayName: String? = nil,
+        provenanceSessionKey: String? = nil,
+        provenanceSource: String? = nil,
+        provenanceAgentId: String? = nil,
+        provenanceStreamLabel: String? = nil,
+        provenancePushedAt: String? = nil,
         scrollable: Bool,
         interactive: Bool
     ) {
@@ -223,7 +235,13 @@ struct SurfAceFrame: Equatable {
         self.payload = payload
         self.reloadSource = reloadSource
         self.title = title
+        self.senderDisplayName = senderDisplayName
         self.provenanceDisplayName = provenanceDisplayName
+        self.provenanceSessionKey = provenanceSessionKey
+        self.provenanceSource = provenanceSource
+        self.provenanceAgentId = provenanceAgentId
+        self.provenanceStreamLabel = provenanceStreamLabel
+        self.provenancePushedAt = provenancePushedAt
         self.scrollable = scrollable
         self.interactive = interactive
     }
@@ -300,6 +318,7 @@ struct SurfAceFrame: Equatable {
         }
 
         let display = jsonObject["display"] as? [String: Any]
+        let provenance = display?["provenance"] as? [String: Any]
         return SurfAceFrame(
             contentId: contentId,
             revision: revision,
@@ -307,27 +326,32 @@ struct SurfAceFrame: Equatable {
             payload: payload,
             reloadSource: SurfAceContentReloadSource.from(jsonObject["reloadSource"] as? [String: Any]),
             title: display?["title"] as? String,
+            senderDisplayName: SurfAceFrame.nonEmptyString(display?["senderDisplayName"]),
             provenanceDisplayName: SurfAceFrame.provenanceDisplayName(from: display),
+            provenanceSessionKey: SurfAceFrame.nonEmptyString(provenance?["sessionKey"]),
+            provenanceSource: SurfAceFrame.nonEmptyString(provenance?["source"]),
+            provenanceAgentId: SurfAceFrame.nonEmptyString(provenance?["agentId"]),
+            provenanceStreamLabel: SurfAceFrame.nonEmptyString(provenance?["streamLabel"]),
+            provenancePushedAt: SurfAceFrame.nonEmptyString(provenance?["pushedAt"]),
             scrollable: display?["scrollable"] as? Bool ?? true,
             interactive: display?["interactive"] as? Bool ?? true
         )
     }
 
     private static func provenanceDisplayName(from display: [String: Any]?) -> String? {
-        if let senderDisplayName = display?["senderDisplayName"] as? String,
-           !senderDisplayName.isEmpty {
-            return senderDisplayName
-        }
         guard let provenance = display?["provenance"] as? [String: Any] else { return nil }
-        if let displayName = provenance["displayName"] as? String,
-           !displayName.isEmpty {
+        if let displayName = nonEmptyString(provenance["displayName"]) {
             return displayName
         }
-        if let streamLabel = provenance["streamLabel"] as? String,
-           !streamLabel.isEmpty {
+        if let streamLabel = nonEmptyString(provenance["streamLabel"]) {
             return streamLabel
         }
         return nil
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String, !string.isEmpty else { return nil }
+        return string
     }
 }
 
@@ -418,7 +442,13 @@ struct SurfAcePaneEntry: Codable {
     var payload: SurfAceFramePayload?
     var reloadSource: SurfAceContentReloadSource?
     var title: String?
+    var senderDisplayName: String?
     var provenanceDisplayName: String?
+    var provenanceSessionKey: String?
+    var provenanceSource: String?
+    var provenanceAgentId: String?
+    var provenanceStreamLabel: String?
+    var provenancePushedAt: String?
     var scrollable: Bool
     var interactive: Bool
     var url: String?
@@ -433,7 +463,13 @@ struct SurfAcePaneEntry: Codable {
         payload: SurfAceFramePayload?,
         reloadSource: SurfAceContentReloadSource? = nil,
         title: String?,
+        senderDisplayName: String? = nil,
         provenanceDisplayName: String? = nil,
+        provenanceSessionKey: String? = nil,
+        provenanceSource: String? = nil,
+        provenanceAgentId: String? = nil,
+        provenanceStreamLabel: String? = nil,
+        provenancePushedAt: String? = nil,
         scrollable: Bool,
         interactive: Bool,
         url: String?,
@@ -447,7 +483,13 @@ struct SurfAcePaneEntry: Codable {
         self.payload = payload
         self.reloadSource = reloadSource
         self.title = title
+        self.senderDisplayName = senderDisplayName
         self.provenanceDisplayName = provenanceDisplayName
+        self.provenanceSessionKey = provenanceSessionKey
+        self.provenanceSource = provenanceSource
+        self.provenanceAgentId = provenanceAgentId
+        self.provenanceStreamLabel = provenanceStreamLabel
+        self.provenancePushedAt = provenancePushedAt
         self.scrollable = scrollable
         self.interactive = interactive
         self.url = url
@@ -464,7 +506,13 @@ struct SurfAcePaneEntry: Codable {
             payload: nil,
             reloadSource: nil,
             title: nil,
+            senderDisplayName: nil,
             provenanceDisplayName: nil,
+            provenanceSessionKey: nil,
+            provenanceSource: nil,
+            provenanceAgentId: nil,
+            provenanceStreamLabel: nil,
+            provenancePushedAt: nil,
             scrollable: true,
             interactive: true,
             url: nil,
@@ -482,7 +530,13 @@ struct SurfAcePaneEntry: Codable {
             payload: frame.payload,
             reloadSource: frame.reloadSource,
             title: frame.title,
+            senderDisplayName: frame.senderDisplayName,
             provenanceDisplayName: frame.provenanceDisplayName,
+            provenanceSessionKey: frame.provenanceSessionKey,
+            provenanceSource: frame.provenanceSource,
+            provenanceAgentId: frame.provenanceAgentId,
+            provenanceStreamLabel: frame.provenanceStreamLabel,
+            provenancePushedAt: frame.provenancePushedAt,
             scrollable: frame.scrollable,
             interactive: frame.interactive,
             url: nil,
@@ -511,7 +565,13 @@ struct SurfAcePaneEntry: Codable {
             ),
             reloadSource: nil,
             title: title,
+            senderDisplayName: nil,
             provenanceDisplayName: nil,
+            provenanceSessionKey: nil,
+            provenanceSource: nil,
+            provenanceAgentId: nil,
+            provenanceStreamLabel: nil,
+            provenancePushedAt: nil,
             scrollable: true,
             interactive: true,
             url: url,
@@ -1028,9 +1088,21 @@ final class SurfAcePaneModel {
     }
 
     func currentProvenanceDisplayName() -> String? {
+        if let senderDisplayName = currentEntry.senderDisplayName,
+           !senderDisplayName.isEmpty {
+            return senderDisplayName
+        }
         if let displayName = currentEntry.provenanceDisplayName,
            !displayName.isEmpty {
             return displayName
+        }
+        if let streamLabel = currentEntry.provenanceStreamLabel,
+           !streamLabel.isEmpty {
+            return streamLabel
+        }
+        if let sessionKey = currentEntry.provenanceSessionKey,
+           !sessionKey.isEmpty {
+            return sessionKey
         }
         return nil
     }

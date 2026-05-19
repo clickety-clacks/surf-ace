@@ -1530,7 +1530,7 @@ final class SurfAceRuntime {
                 ],
                 "state": [
                     "panes": surface.panes.map { pane in
-                        [
+                        var paneState: [String: Any] = [
                             "paneId": pane.paneId,
                             "paneLineageId": pane.paneLineageId,
                             "paneLabel": pane.paneLabel,
@@ -1538,6 +1538,10 @@ final class SurfAceRuntime {
                             "currentRevision": pane.currentEntry.revision,
                             "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
                         ]
+                        if let display = contentDisplayPayload(for: pane.currentEntry) {
+                            paneState["display"] = display
+                        }
+                        return paneState
                     },
                     "layout": topologyLayoutPayload(surface.paneLayout),
                     "topologyRevision": surface.topologyEpoch,
@@ -1614,7 +1618,7 @@ final class SurfAceRuntime {
             "sentAt": timestampNow(),
             "payload": [
                 "panes": surface.panes.map { pane in
-                    [
+                    var paneState: [String: Any] = [
                         "paneId": pane.paneId,
                         "paneLineageId": pane.paneLineageId,
                         "paneLabel": pane.paneLabel,
@@ -1625,6 +1629,10 @@ final class SurfAceRuntime {
                         "viewport": paneViewportPayload(surfaceId: surfaceId, paneId: pane.paneId),
                         "geometry": paneGeometryPayload(surfaceId: surfaceId, paneId: pane.paneId),
                     ]
+                    if let display = contentDisplayPayload(for: pane.currentEntry) {
+                        paneState["display"] = display
+                    }
+                    return paneState
                 },
             ],
         ]
@@ -1976,9 +1984,18 @@ final class SurfAceRuntime {
             allowedSnapshotFallback: targetPayload["allowedSnapshotFallback"] as? Bool,
             fallbackSnapshotTargetId: targetPayload["fallbackSnapshotTargetId"] as? String
         )
+        pane.currentEntry.senderDisplayName = SurfAceRuntime.senderDisplayName(
+            from: payload["display"] as? [String: Any]
+        )
         pane.currentEntry.provenanceDisplayName = SurfAceRuntime.provenanceDisplayName(
             from: payload["display"] as? [String: Any]
         )
+        let displayProvenance = (payload["display"] as? [String: Any])?["provenance"] as? [String: Any]
+        pane.currentEntry.provenanceSessionKey = SurfAceRuntime.nonEmptyString(displayProvenance?["sessionKey"])
+        pane.currentEntry.provenanceSource = SurfAceRuntime.nonEmptyString(displayProvenance?["source"])
+        pane.currentEntry.provenanceAgentId = SurfAceRuntime.nonEmptyString(displayProvenance?["agentId"])
+        pane.currentEntry.provenanceStreamLabel = SurfAceRuntime.nonEmptyString(displayProvenance?["streamLabel"])
+        pane.currentEntry.provenancePushedAt = SurfAceRuntime.nonEmptyString(displayProvenance?["pushedAt"])
         pane.pendingFlushStrokes.removeAll()
         pane.firstPendingStrokeAt = nil
         pane.lastPendingStrokeAt = nil
@@ -2706,6 +2723,40 @@ final class SurfAceRuntime {
             "sentAt": timestampNow(),
             "payload": payload,
         ]
+    }
+
+    private func contentDisplayPayload(for entry: SurfAcePaneEntry) -> [String: Any]? {
+        var display: [String: Any] = [:]
+        if let title = entry.title, !title.isEmpty {
+            display["title"] = title
+        }
+        if let senderDisplayName = entry.senderDisplayName, !senderDisplayName.isEmpty {
+            display["senderDisplayName"] = senderDisplayName
+        }
+
+        var provenance: [String: Any] = [:]
+        if let displayName = entry.provenanceDisplayName, !displayName.isEmpty {
+            provenance["displayName"] = displayName
+        }
+        if let sessionKey = entry.provenanceSessionKey, !sessionKey.isEmpty {
+            provenance["sessionKey"] = sessionKey
+        }
+        if let source = entry.provenanceSource, !source.isEmpty {
+            provenance["source"] = source
+        }
+        if let agentId = entry.provenanceAgentId, !agentId.isEmpty {
+            provenance["agentId"] = agentId
+        }
+        if let streamLabel = entry.provenanceStreamLabel, !streamLabel.isEmpty {
+            provenance["streamLabel"] = streamLabel
+        }
+        if let pushedAt = entry.provenancePushedAt, !pushedAt.isEmpty {
+            provenance["pushedAt"] = pushedAt
+        }
+        if !provenance.isEmpty {
+            display["provenance"] = provenance
+        }
+        return display.isEmpty ? nil : display
     }
 
     private func staleRevisionResponse(op: String, id: String, expectedRevision: Int) -> [String: Any] {
@@ -3615,20 +3666,23 @@ final class SurfAceRuntime {
     }
 
     private static func provenanceDisplayName(from display: [String: Any]?) -> String? {
-        if let senderDisplayName = display?["senderDisplayName"] as? String,
-           !senderDisplayName.isEmpty {
-            return senderDisplayName
-        }
         guard let provenance = display?["provenance"] as? [String: Any] else { return nil }
-        if let displayName = provenance["displayName"] as? String,
-           !displayName.isEmpty {
+        if let displayName = nonEmptyString(provenance["displayName"]) {
             return displayName
         }
-        if let streamLabel = provenance["streamLabel"] as? String,
-           !streamLabel.isEmpty {
+        if let streamLabel = nonEmptyString(provenance["streamLabel"]) {
             return streamLabel
         }
         return nil
+    }
+
+    private static func senderDisplayName(from display: [String: Any]?) -> String? {
+        nonEmptyString(display?["senderDisplayName"])
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String, !string.isEmpty else { return nil }
+        return string
     }
 }
 

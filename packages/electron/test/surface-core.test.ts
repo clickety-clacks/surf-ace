@@ -2186,7 +2186,7 @@ test("surface core reports the current history entry owner name for chrome", () 
       content: { markdown: "# First" },
       contentId: "ct_owner_a" as never,
       contentType: "markdown",
-      display: { title: "Session A" },
+      display: { senderDisplayName: "Session A", title: "Document A" },
       historyOwnerToken: "hot_session_a",
       paneId: paneId as never,
       revision: 1 as never,
@@ -2198,7 +2198,7 @@ test("surface core reports the current history entry owner name for chrome", () 
       content: { markdown: "# Second" },
       contentId: "ct_owner_b" as never,
       contentType: "markdown",
-      display: { title: "Session B" },
+      display: { senderDisplayName: "Session B", title: "Document B" },
       historyOwnerToken: "hot_session_b",
       paneId: paneId as never,
       revision: 2 as never,
@@ -2241,6 +2241,36 @@ test("surface core exposes provenance display name separately from content title
   assert.equal(visible?.provenanceName, "Session One");
   assert.equal(visible?.content.display?.title, "Document Title");
   assert.equal(visible?.content.display?.provenance?.displayName, "T231 Pusher");
+});
+
+test("surface core uses supplied provenance session key when display name is absent", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 32);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# Provenance" },
+    contentId: "ct_provn2" as never,
+    contentType: "markdown",
+    display: {
+      provenance: {
+        sessionKey: "agent:test:session-only",
+      },
+      title: "Document Title",
+    },
+    historyOwnerToken: "hot_provenance",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+
+  const visible = core.getRendererWindowState(surface.surfaceId).panes[0];
+  assert.equal(visible?.ownerName, "agent:test:session-only");
+  assert.equal(visible?.provenanceName, "agent:test:session-only");
+  assert.equal(visible?.content.display?.title, "Document Title");
 });
 
 test("surface core does not leak provider name as chrome owner fallback", () => {

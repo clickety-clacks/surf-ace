@@ -289,7 +289,11 @@ function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
 }
 
 function provenanceDisplayName(display: ContentDisplay | undefined): string | null {
-  return display?.senderDisplayName ?? display?.provenance?.displayName ?? display?.provenance?.streamLabel ?? null;
+  return display?.senderDisplayName ??
+    display?.provenance?.displayName ??
+    display?.provenance?.streamLabel ??
+    display?.provenance?.sessionKey ??
+    null;
 }
 
 const DEFAULT_VISIBLE_RECT = { height: 768, width: 1024, x: 0, y: 0 };
@@ -484,7 +488,7 @@ export class SurfaceCore {
           flushInFlight: pane.flushInFlight,
           label: pane.paneLabel > 0 ? String(pane.paneLabel) : "",
           name: pane.name,
-          ownerName: provenanceDisplayName(current.display) ?? current.display?.title ?? null,
+          ownerName: provenanceDisplayName(current.display),
           paneId,
           displayId: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
           provenanceName: provenanceDisplayName(current.display),

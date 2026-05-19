@@ -372,6 +372,36 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testPaneChromeIdentityUsesProviderSessionKeyWhenDisplayNameIsAbsent() {
+        let surface = SurfAceSurfaceModel(sceneKey: "scene-chrome-session-key", surfaceId: "sf_chrome_session_key", windowLabel: "f", name: "Surf Ace")
+        let pane = SurfAcePaneModel(paneId: 17, paneLabel: 100, name: "Right")
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_chrome_key",
+            revision: 1,
+            historyOwnerToken: "hot_chrome_key",
+            contentType: .markdown,
+            payload: .markdown(markdown: "# Chrome"),
+            title: "Document Title",
+            provenanceDisplayName: nil,
+            provenanceSessionKey: "agent:test:session-only",
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+
+        let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
+
+        XCTAssertEqual(identity.displayId, "100")
+        XCTAssertEqual(identity.windowLabel, "f")
+        XCTAssertEqual(identity.sessionName, "agent:test:session-only")
+        XCTAssertEqual(pane.currentOwnerDisplayName(), "Document Title")
+        XCTAssertEqual(pane.currentChromeDisplayName(), "agent:test:session-only")
+        XCTAssertNotEqual(identity.sessionName, "Document Title")
+    }
+
+    @MainActor
     func testRegisterSurfaceRestoresPersistedPaneTopologyAfterRelaunch() {
         let suiteName = "SurfAceSurfaceTopologyPersistenceTests.\(UUID().uuidString)"
         guard let userDefaults = UserDefaults(suiteName: suiteName) else {

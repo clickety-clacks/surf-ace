@@ -37,6 +37,7 @@ export type SurfAceToolContext = {
   agentId?: string;
   displayName?: string;
   provenance?: PusherProvenance;
+  pushedAt?: string;
   pushedBy?: PusherProvenance;
   source?: string | PusherProvenance;
   sourceProvenance?: PusherProvenance;
