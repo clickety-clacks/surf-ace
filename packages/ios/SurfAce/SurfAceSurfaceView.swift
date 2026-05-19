@@ -473,7 +473,6 @@ private struct SurfAcePaneView: View {
                 SurfAcePaneIdentityOverlay(
                     displayId: identity.displayId,
                     windowLabel: identity.windowLabel,
-                    provenanceLabel: identity.sessionName,
                     paneSize: proxy.size,
                     connectionState: surface.connectionBarState
                 )
@@ -571,22 +570,19 @@ func surfAceShowsAnnotationBorder(annotationMode: Bool) -> Bool {
 struct SurfAcePaneChromeIdentityParts: Equatable {
     let displayId: String
     let windowLabel: String
-    let sessionName: String?
 }
 
 @MainActor
 func surfAcePaneChromeIdentityParts(surface: SurfAceSurfaceModel, pane: SurfAcePaneModel) -> SurfAcePaneChromeIdentityParts {
     SurfAcePaneChromeIdentityParts(
         displayId: pane.displayId(windowLabel: surface.windowLabel),
-        windowLabel: surface.windowLabel,
-        sessionName: pane.currentProvenanceDisplayName()
+        windowLabel: surface.windowLabel
     )
 }
 
 private struct SurfAcePaneIdentityOverlay: View {
     let displayId: String
     let windowLabel: String
-    let provenanceLabel: String?
     let paneSize: CGSize
     let connectionState: SurfAceConnectionBarState
 
@@ -596,16 +592,6 @@ private struct SurfAcePaneIdentityOverlay: View {
 
     var body: some View {
         HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
-            if let provenanceLabel, !provenanceLabel.isEmpty {
-                Text(provenanceLabel)
-                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * 0.18))
-                    .foregroundStyle(.white.opacity(0.58))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: min(paneSize.width * 0.38, 320), alignment: .trailing)
-                    .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[VerticalAlignment.center] }
-            }
-
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
                     .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
