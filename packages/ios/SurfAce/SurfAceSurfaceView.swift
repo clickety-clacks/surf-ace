@@ -888,7 +888,7 @@ private struct SurfAcePaneIdentityOverlay: View {
         HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
             if let provenanceLabel, !provenanceLabel.isEmpty {
                 Text(provenanceLabel)
-                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * 0.18))
+                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * 0.18 + 3))
                     .foregroundStyle(.white.opacity(0.58))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -1013,7 +1013,7 @@ private struct SurfAcePaneControls: View {
 
                     if let ownerName {
                         Text(ownerName)
-                            .font(.custom(SurfAceChromeFont.regularName, size: 13))
+                            .font(.custom(SurfAceChromeFont.regularName, size: 16))
                             .foregroundStyle(.white.opacity(0.86))
                             .lineLimit(1)
                             .truncationMode(.tail)

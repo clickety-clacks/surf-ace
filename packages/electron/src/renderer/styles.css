@@ -267,7 +267,7 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   max-width: min(28vw, 320px);
   overflow: hidden;
   color: rgba(255, 255, 255, 0.58);
-  font-size: calc(var(--pane-number-size) * 0.18);
+  font-size: calc((var(--pane-number-size) * 0.18) + 3pt);
   font-family: var(--ui-font-family);
   font-weight: 400;
   letter-spacing: 0;
@@ -596,7 +596,7 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   padding: 0 10px 0 4px;
   color: rgba(238, 244, 255, 0.86);
   font-family: var(--ui-font-family);
-  font-size: 13px;
+  font-size: calc(13px + 3pt);
   font-weight: 550;
   letter-spacing: 0;
   line-height: 1;

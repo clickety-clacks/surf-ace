@@ -294,6 +294,8 @@ test("renderer chrome shows separate session, window, and global pane identity f
   assert.doesNotMatch(source, /visibleAddress:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
 
   assert.match(styles, /\.pane-label__sender\s*\{/);
+  assert.match(styles, /font-size:\s*calc\(\(var\(--pane-number-size\) \* 0\.18\) \+ 3pt\)/);
+  assert.match(styles, /\.navigation-pill__owner\s*\{[\s\S]*font-size:\s*calc\(13px \+ 3pt\)/);
 });
 
 test("renderer exposes split resize handles and reports resize-split commands", async () => {
