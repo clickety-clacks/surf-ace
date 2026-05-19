@@ -1,10 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
-import path from "node:path";
 
 contextBridge.exposeInMainWorld("surfAce", {
   clearToast: (paneId: number) => ipcRenderer.send("surface:clear-toast", { paneId }),
   command: (payload: Record<string, unknown>) => ipcRenderer.send("surface:command", payload),
-  guestPreloadPath: path.join(__dirname, "guest-preload.cjs"),
+  guestPreloadPath: `${__dirname}/guest-preload.cjs`,
   getBootstrap: () => ipcRenderer.invoke("surface:get-bootstrap"),
   onKeyboardIntent: (listener: (intent: unknown) => void) => {
     const wrapped = (_event: unknown, intent: unknown) => listener(intent);

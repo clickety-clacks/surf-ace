@@ -18,6 +18,10 @@ async function guestPreloadSource(): Promise<string> {
   return fs.readFile(new URL("../../src/guest-preload.ts", import.meta.url), "utf8");
 }
 
+async function preloadSource(): Promise<string> {
+  return fs.readFile(new URL("../../src/preload.ts", import.meta.url), "utf8");
+}
+
 test("browser_url webviews defer navigation until the pane has a measured frame", async () => {
   const source = await rendererSource();
   const deferIndex = source.indexOf("function deferUntilPaneFrameReady");
@@ -272,6 +276,7 @@ test("html content is loaded through the browser webview surface", async () => {
   const source = await rendererSource();
   const styles = await rendererStyles();
   const guestPreload = await guestPreloadSource();
+  const preload = await preloadSource();
 
   const htmlIndex = source.indexOf("if (pane.content.contentType === \"html\")");
   const browserUrlIndex = source.indexOf("if (pane.content.contentType === \"browser_url\")");
@@ -282,6 +287,8 @@ test("html content is loaded through the browser webview surface", async () => {
   assert.match(source.slice(htmlIndex, browserUrlIndex), /renderBrowserContent\(view, pane, renderToken, htmlUrl, \{ staticHtmlSourceUrl: htmlUrl \}\)/);
   assert.match(source, /document\.createElement\("webview"\)/);
   assert.match(source, /browserView\.setAttribute\("preload", window\.surfAce\.guestPreloadPath\)/);
+  assert.match(preload, /guestPreloadPath: `\$\{__dirname\}\/guest-preload\.cjs`/);
+  assert.doesNotMatch(preload, /from "node:/);
   assert.match(source, /if \(options\?\.allowPopups\)[\s\S]*browserView\.setAttribute\("allowpopups", "true"\)/);
   assert.match(source.slice(browserUrlIndex), /allowPopups: true/);
   assert.doesNotMatch(source.slice(htmlIndex, browserUrlIndex), /allowPopups: true/);
