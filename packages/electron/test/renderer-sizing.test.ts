@@ -287,7 +287,8 @@ test("html content is loaded through the browser webview surface", async () => {
   assert.match(source.slice(htmlIndex, browserUrlIndex), /renderBrowserContent\(view, pane, renderToken, htmlUrl, \{ staticHtmlSourceUrl: htmlUrl \}\)/);
   assert.match(source, /document\.createElement\("webview"\)/);
   assert.match(source, /browserView\.setAttribute\("preload", window\.surfAce\.guestPreloadPath\)/);
-  assert.match(preload, /guestPreloadPath: `\$\{__dirname\}\/guest-preload\.cjs`/);
+  assert.match(preload, /ipcRenderer\.sendSync\("surface:get-guest-preload-path"\)/);
+  assert.match(preload, /guestPreloadPath,/);
   assert.doesNotMatch(preload, /from "node:/);
   assert.match(source, /if \(options\?\.allowPopups\)[\s\S]*browserView\.setAttribute\("allowpopups", "true"\)/);
   assert.match(source.slice(browserUrlIndex), /allowPopups: true/);

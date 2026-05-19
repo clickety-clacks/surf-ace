@@ -1308,6 +1308,10 @@ function installIpc(): void {
     };
   });
 
+  ipcMain.on("surface:get-guest-preload-path", (event) => {
+    event.returnValue = path.join(distDir, "guest-preload.cjs");
+  });
+
   ipcMain.on("surface:renderer-diagnostic", (event, payload) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!payload || typeof payload !== "object") {
