@@ -127,6 +127,13 @@ type SurfAceProviderProcessBlockReason =
   | "provider_process_lease_mismatch"
   | "provider_process_missing";
 
+type SurfAceProviderAuthoritySnapshot = {
+  decisionsBySurfaceId: Map<string, SurfAceProviderAuthorityDecision>;
+  expectedProviderPid: number | null;
+  providerProcessBlockReason: SurfAceProviderProcessBlockReason | null;
+  providerProcessHealth: SurfAceProviderProcessHealth;
+};
+
 const SURF_ACE_CONTENT_TYPES = new Set<string>([
   "canvas",
   "html",
@@ -3366,9 +3373,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     const surface = await this.requireActionableSurface(input.fingerprint);
+    const surfaceAuthorityProof = this.authorityProofToken(surface);
     await this.reconcilePaneTopologyAuthority(surface, "capture");
+    this.assertAuthorityProofUnchanged(surface, undefined, surfaceAuthorityProof, "capture");
     this.repairLivePaneLabelInvariant("capture", surface);
     const pane = this.requirePane(input.fingerprint, input.paneId);
+    const paneAuthorityProof = this.authorityProofToken(surface, pane);
     const capturedAt = this.now();
     let payload: SnapshotResponse["payload"] | null = null;
     let failureReason: string | null = null;
@@ -3402,6 +3412,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       failureReason = error instanceof Error ? error.message : String(error);
     }
 
+    this.assertAuthorityProofUnchanged(surface, pane, paneAuthorityProof, "capture");
     const viewport = payload?.viewport ?? pane.snapshot?.viewport;
     const visibleRect = viewport?.visibleRect;
     const imageBytes = payload?.image && payload.image.length > 0 ? payload.image : null;
@@ -7991,9 +8002,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return [...this.surfaces.values()].filter((surface) => this.providerAuthorityForSurface(surface).admitted);
   }
 
-  private listVisibleSurfaces(): ManagedSurface[] {
+  private listVisibleSurfaces(authoritySnapshot?: SurfAceProviderAuthoritySnapshot): ManagedSurface[] {
     return [...this.surfaces.values()].filter((surface) => {
-      const authority = this.providerAuthorityForSurface(surface);
+      const authority = authoritySnapshot?.decisionsBySurfaceId.get(surface.surfaceId) ??
+        this.providerAuthorityForSurface(surface);
       return authority.admitted || this.hasVisibleConnectionDiagnostic(surface);
     });
   }
@@ -8111,6 +8123,29 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return null;
   }
 
+  private captureProviderAuthoritySnapshot(
+    expectedProviderPid: number | null = process.pid,
+  ): SurfAceProviderAuthoritySnapshot {
+    const providerProcessHealth = this.currentProviderProcessHealth(expectedProviderPid);
+    const providerProcessBlockReason = this.providerProcessAuthorityBlockReason(
+      expectedProviderPid,
+      providerProcessHealth,
+    );
+    const decisionsBySurfaceId = new Map<string, SurfAceProviderAuthorityDecision>();
+    for (const surface of this.surfaces.values()) {
+      decisionsBySurfaceId.set(
+        surface.surfaceId,
+        this.providerAuthorityForSurface(surface, expectedProviderPid, providerProcessHealth),
+      );
+    }
+    return {
+      decisionsBySurfaceId,
+      expectedProviderPid,
+      providerProcessBlockReason,
+      providerProcessHealth,
+    };
+  }
+
   private authorityIdentityKey(surface: ManagedSurface): string {
     const panes = this.visiblePanes(surface).map((pane) =>
       `${Number(pane.remotePaneId)}:${pane.paneLabel}:${pane.paneLineageId}`
@@ -8123,6 +8158,45 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.windowLabel,
       ...panes,
     ].join("|");
+  }
+
+  private authorityProofToken(surface: ManagedSurface, pane?: ManagedPane): string {
+    const authority = pane
+      ? this.providerAuthorityForPane(surface, pane.paneId)
+      : this.providerAuthorityForSurface(surface);
+    return JSON.stringify({
+      authority,
+      authorityIdentityKey: this.authorityIdentityKey(surface),
+      connectionState: surface.connectionState,
+      pane: pane
+        ? {
+            paneId: pane.paneId,
+            paneLabel: pane.paneLabel,
+            paneLineageId: pane.paneLineageId,
+            remotePaneId: Number(pane.remotePaneId),
+          }
+        : null,
+      sessionId: surface.sessionId,
+      surfaceId: surface.surfaceId,
+      topologyRevision: surface.topologyRevision,
+      visiblePaneIds: this.visiblePanes(surface).map((visiblePane) => visiblePane.paneId),
+      wsOpen: surface.client?.isOpen() ?? false,
+    });
+  }
+
+  private assertAuthorityProofUnchanged(
+    surface: ManagedSurface,
+    pane: ManagedPane | undefined,
+    proofToken: string,
+    reason: string,
+  ): void {
+    if (this.authorityProofToken(surface, pane) === proofToken) {
+      return;
+    }
+    throw new SurfAceToolError(
+      "not_connected",
+      `Surf Ace authority changed during ${reason}; refresh surf_ace_list and retry.`,
+    );
   }
 
   private invalidateClientAuthority(surface: ManagedSurface, reason: string): void {
@@ -8269,9 +8343,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.pruneStaleAcceptedSurfaces("screen summary");
     this.repairLiveWindowLabelInvariant("screen summary");
     this.repairLivePaneLabelInvariant("screen summary");
-    return this.listVisibleSurfaces()
+    const authoritySnapshot = this.captureProviderAuthoritySnapshot();
+    const providerAuthorityProjection = this.buildProviderAuthorityProjection(
+      this.persistentState,
+      this.persistedRuntimeScreenIds,
+      undefined,
+      process.pid,
+      authoritySnapshot,
+    );
+    return this.listVisibleSurfaces(authoritySnapshot)
       .sort((left, right) => this.screenSummarySortKey(left).localeCompare(this.screenSummarySortKey(right), "en"))
-      .map((surface) => this.buildScreenSummary(surface));
+      .map((surface) => this.buildScreenSummary(surface, {
+        authoritySnapshot,
+        providerAuthorityProjection,
+      }));
   }
 
   private screenSummarySortKey(surface: ManagedSurface): string {
@@ -8280,10 +8365,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private buildScreenSummary(
     surface: ManagedSurface,
-    options: { exposeTopology?: boolean } = {},
+    options: {
+      authoritySnapshot?: SurfAceProviderAuthoritySnapshot;
+      exposeTopology?: boolean;
+      providerAuthorityProjection?: SurfAceProviderAuthorityProjection;
+    } = {},
   ): SurfAceScreenSummary {
-    const authority = this.providerAuthorityForSurface(surface);
-    const providerAuthorityProjection = this.buildProviderAuthorityProjection();
+    const authority = options.authoritySnapshot?.decisionsBySurfaceId.get(surface.surfaceId) ??
+      this.providerAuthorityForSurface(surface);
+    const providerAuthorityProjection = options.providerAuthorityProjection ??
+      this.buildProviderAuthorityProjection(
+        this.persistentState,
+        this.persistedRuntimeScreenIds,
+        undefined,
+        process.pid,
+        options.authoritySnapshot,
+      );
     const exposeTopology = options.exposeTopology ?? (
       !authority.blockers.includes("authority_state_unsupported") &&
       !authority.blockers.includes("surface_tombstoned") &&
@@ -8363,12 +8460,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     runtimeScreenIdsInput: Set<string> = this.persistedRuntimeScreenIds,
     ownerStatusOverride?: "active" | "passive" | "stopped",
     expectedProviderPid: number | null = process.pid,
+    authoritySnapshot?: SurfAceProviderAuthoritySnapshot,
   ): SurfAceProviderAuthorityProjection {
-    const providerProcessHealth = this.currentProviderProcessHealth(expectedProviderPid);
-    const providerProcessBlockReason = this.providerProcessAuthorityBlockReason(
-      expectedProviderPid,
-      providerProcessHealth,
-    );
+    const snapshot = authoritySnapshot?.expectedProviderPid === expectedProviderPid
+      ? authoritySnapshot
+      : this.captureProviderAuthoritySnapshot(expectedProviderPid);
+    const providerProcessHealth = snapshot.providerProcessHealth;
+    const providerProcessBlockReason = snapshot.providerProcessBlockReason;
     const liveSurfaceIds = [...this.surfaces.keys()].sort();
     const persistedSelfOwnedSurfaceIds = Object.keys(state.selfOwnedSurfaceIds ?? {}).sort();
     const targetStateSurfaceIds = Object.keys(state.targetStateBySurfaceId ?? {}).sort();
@@ -8387,11 +8485,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const authorityBlockersBySurfaceId: Record<string, string[]> = {};
     const authorityBlockedSurfaceIds: string[] = [];
     for (const surface of this.surfaces.values()) {
-      const authority = this.providerAuthorityForSurface(
-        surface,
-        expectedProviderPid,
-        providerProcessHealth,
-      );
+      const authority = snapshot.decisionsBySurfaceId.get(surface.surfaceId) ??
+        this.providerAuthorityForSurface(surface, expectedProviderPid, providerProcessHealth);
       authorityBlockersBySurfaceId[surface.surfaceId] = authority.blockers;
       if (!authority.admitted) {
         authorityBlockedSurfaceIds.push(surface.surfaceId);

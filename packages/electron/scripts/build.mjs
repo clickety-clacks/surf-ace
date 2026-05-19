@@ -54,6 +54,7 @@ await build({
   ...shared,
   entryPoints: [
     path.join(rootDir, "test", "bonjour-advertiser.test.ts"),
+    path.join(rootDir, "test", "client-flight-recorder.test.ts"),
     path.join(rootDir, "test", "identity.test.ts"),
     path.join(rootDir, "test", "native-pane-bridge.test.ts"),
     path.join(rootDir, "test", "overlay-rects.test.ts"),
