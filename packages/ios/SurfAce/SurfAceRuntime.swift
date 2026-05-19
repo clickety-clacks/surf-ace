@@ -881,7 +881,7 @@ final class SurfAceRuntime {
         }
 
         let previousEntry = pane.currentEntry
-        if !isVisibleEmptyEntry(previousEntry) {
+        if !surfAceEntryIsVisibleEmpty(previousEntry) {
             pane.backStack.append(previousEntry)
             trimVisibleHistory(pane)
         }
@@ -1735,7 +1735,7 @@ final class SurfAceRuntime {
                 pane.toast = "Finish annotation (Done) to navigate"
                 return makeErrorResponse(op: "content.apply", id: id, code: "invalid_operation", message: "annotation mode is active")
             }
-            if !isVisibleEmptyEntry(pane.currentEntry) {
+            if !surfAceEntryIsVisibleEmpty(pane.currentEntry) {
                 pane.backStack.append(pane.currentEntry)
                 trimVisibleHistory(pane)
             }
@@ -1971,7 +1971,7 @@ final class SurfAceRuntime {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "unsafe_payload", message: "browser_url targetPayload.url must be http or https")
         }
 
-        if !isVisibleEmptyEntry(pane.currentEntry) {
+        if !surfAceEntryIsVisibleEmpty(pane.currentEntry) {
             pane.backStack.append(pane.currentEntry)
             trimVisibleHistory(pane)
         }
@@ -2362,7 +2362,7 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "content.clear", id: id, code: "invalid_operation", message: "annotation mode is active")
         }
 
-        if !isVisibleEmptyEntry(pane.currentEntry) {
+        if !surfAceEntryIsVisibleEmpty(pane.currentEntry) {
             pane.backStack.append(pane.currentEntry)
             trimVisibleHistory(pane)
         }
@@ -3047,7 +3047,7 @@ final class SurfAceRuntime {
 
     private func applyContentSet(frame: SurfAceFrame, to pane: SurfAcePaneModel, historyOwnerToken: String) -> [String: Any]? {
         let nextEntry = SurfAcePaneEntry.from(frame: frame, historyOwnerToken: historyOwnerToken)
-        let shouldReplaceInPlace = !isVisibleEmptyEntry(pane.currentEntry)
+        let shouldReplaceInPlace = !surfAceEntryIsVisibleEmpty(pane.currentEntry)
             && pane.currentEntry.historyOwnerToken == historyOwnerToken
 
         if shouldReplaceInPlace {
@@ -3056,7 +3056,7 @@ final class SurfAceRuntime {
         }
 
         var historyInfo: [String: Any]?
-        if !isVisibleEmptyEntry(pane.currentEntry) {
+        if !surfAceEntryIsVisibleEmpty(pane.currentEntry) {
             let displacedEntry = pane.currentEntry
             pane.backStack.append(displacedEntry)
             trimVisibleHistory(pane)
@@ -3427,12 +3427,8 @@ final class SurfAceRuntime {
         return components.string ?? trimmed
     }
 
-    private func isVisibleEmptyEntry(_ entry: SurfAcePaneEntry) -> Bool {
-        entry.contentId == nil && entry.contentType == nil && entry.payload == nil && entry.url == nil
-    }
-
     private func renderableEntry(_ entry: SurfAcePaneEntry) -> SurfAcePaneEntry? {
-        isVisibleEmptyEntry(entry) ? nil : entry
+        surfAceEntryIsVisibleEmpty(entry) ? nil : entry
     }
 
     private func trimVisibleHistory(_ pane: SurfAcePaneModel) {

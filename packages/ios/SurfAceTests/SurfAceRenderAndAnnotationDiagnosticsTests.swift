@@ -214,6 +214,147 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertFalse(surfAceShowsAnnotationBorder(annotationMode: false))
     }
 
+    func testVisibleEmptyEntryTracksPushedBrowserAndClearedStates() {
+        let emptyEntry = SurfAcePaneEntry.empty()
+        XCTAssertTrue(surfAceEntryIsVisibleEmpty(emptyEntry))
+
+        let pushedEntry = SurfAcePaneEntry.from(
+            frame: SurfAceFrame(
+                contentId: "ct_visible",
+                revision: 1,
+                contentType: .html,
+                payload: .html(html: "<p>Visible</p>", baseURL: nil),
+                reloadSource: nil,
+                title: nil,
+                scrollable: true,
+                interactive: true
+            ),
+            historyOwnerToken: "hot_visible"
+        )
+        XCTAssertFalse(surfAceEntryIsVisibleEmpty(pushedEntry))
+
+        let browserEntry = SurfAcePaneEntry.browserURL(
+            targetId: "target-browser",
+            targetEpoch: 2,
+            url: "https://example.com"
+        )
+        XCTAssertFalse(surfAceEntryIsVisibleEmpty(browserEntry))
+
+        let clearedEntry = SurfAcePaneEntry.empty(revision: 3)
+        XCTAssertTrue(surfAceEntryIsVisibleEmpty(clearedEntry))
+    }
+
+    func testSpatialEmptyPaneChromeGateTracksVisibleEmptyState() {
+        let emptyEntry = SurfAcePaneEntry.empty()
+        let pushedEntry = SurfAcePaneEntry.from(
+            frame: SurfAceFrame(
+                contentId: "ct_visible",
+                revision: 1,
+                contentType: .html,
+                payload: .html(html: "<p>Visible</p>", baseURL: nil),
+                reloadSource: nil,
+                title: nil,
+                scrollable: true,
+                interactive: true
+            ),
+            historyOwnerToken: "hot_visible"
+        )
+        let browserEntry = SurfAcePaneEntry.browserURL(
+            targetId: "target-browser",
+            targetEpoch: 2,
+            url: "https://example.com"
+        )
+        let clearedEntry = SurfAcePaneEntry.empty(revision: 3)
+
+#if os(visionOS)
+        XCTAssertTrue(surfAceShowsSpatialEmptyPaneChrome(entry: emptyEntry))
+        XCTAssertFalse(surfAceShowsSpatialEmptyPaneChrome(entry: pushedEntry))
+        XCTAssertFalse(surfAceShowsSpatialEmptyPaneChrome(entry: browserEntry))
+        XCTAssertTrue(surfAceShowsSpatialEmptyPaneChrome(entry: clearedEntry))
+#else
+        XCTAssertFalse(surfAceShowsSpatialEmptyPaneChrome(entry: emptyEntry))
+        XCTAssertFalse(surfAceShowsSpatialEmptyPaneChrome(entry: pushedEntry))
+        XCTAssertFalse(surfAceShowsSpatialEmptyPaneChrome(entry: browserEntry))
+        XCTAssertFalse(surfAceShowsSpatialEmptyPaneChrome(entry: clearedEntry))
+#endif
+    }
+
+    func testSpatialWindowContentCornerMaskUsesResolvedPaneAndSurfaceGeometry() {
+        let surfaceBounds = CGRect(x: 0, y: 0, width: 1000, height: 700)
+
+        XCTAssertEqual(
+            surfAceSpatialWindowContentCorners(
+                paneFrame: CGRect(x: 0, y: 0, width: 400, height: 300),
+                surfaceBounds: surfaceBounds,
+                tolerance: 0.5
+            ),
+            SurfAceSpatialWindowContentCorners(
+                topLeading: true,
+                topTrailing: false,
+                bottomLeading: false,
+                bottomTrailing: false
+            )
+        )
+        XCTAssertEqual(
+            surfAceSpatialWindowContentCorners(
+                paneFrame: CGRect(x: 400, y: 0, width: 600, height: 700),
+                surfaceBounds: surfaceBounds,
+                tolerance: 0.5
+            ),
+            SurfAceSpatialWindowContentCorners(
+                topLeading: false,
+                topTrailing: true,
+                bottomLeading: false,
+                bottomTrailing: true
+            )
+        )
+        XCTAssertEqual(
+            surfAceSpatialWindowContentCorners(
+                paneFrame: CGRect(x: 100, y: 100, width: 500, height: 300),
+                surfaceBounds: surfaceBounds,
+                tolerance: 0.5
+            ),
+            SurfAceSpatialWindowContentCorners(
+                topLeading: false,
+                topTrailing: false,
+                bottomLeading: false,
+                bottomTrailing: false
+            )
+        )
+    }
+
+    func testClearAfterPushedContentRendersEmptyPaneState() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "pushed-clear-empty-pane")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let bridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        let pushResponse = await runtime.contentApplyForTesting(
+            id: "rq_push_then_clear",
+            payload: htmlApplyPayload(paneId: pane.paneId, revision: 1),
+            surfaceId: surface.surfaceId
+        )
+        XCTAssertEqual(pushResponse["ok"] as? Bool, true)
+        XCTAssertFalse(surfAceEntryIsVisibleEmpty(pane.currentEntry))
+        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd"])
+
+        let clearResponse = await runtime.contentApplyForTesting(
+            id: "rq_clear_after_push",
+            payload: [
+                "clear": true,
+                "paneId": pane.paneId,
+                "revision": 2,
+            ],
+            surfaceId: surface.surfaceId
+        )
+        XCTAssertEqual(clearResponse["ok"] as? Bool, true)
+        XCTAssertTrue(surfAceEntryIsVisibleEmpty(pane.currentEntry))
+        XCTAssertTrue(bridge.renderCallEntries.contains { $0?.contentId == "ct_1234abcd" })
+        let lastRenderCall = try XCTUnwrap(bridge.renderCallEntries.last)
+        XCTAssertNil(lastRenderCall)
+    }
+
     private func isolatedUserDefaults() -> UserDefaults {
         let suiteName = "SurfAceRenderAndAnnotationDiagnosticsTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -254,9 +395,11 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
 @MainActor
 private final class RecordingPaneBridge: SurfAcePaneBridging {
     var renderedEntries: [SurfAcePaneEntry] = []
+    var renderCallEntries: [SurfAcePaneEntry?] = []
     var interactionStates: [(annotationMode: Bool, fingerDrawEnabled: Bool)] = []
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
+        renderCallEntries.append(entry)
         if let entry {
             renderedEntries.append(entry)
         }

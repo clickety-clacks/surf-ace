@@ -12,6 +12,25 @@ private enum SurfAcePaneChromeLayout {
     static let bottomInset: CGFloat = 28
 }
 
+private enum SurfAceSpatialPaneChromeLayout {
+    static let cornerInset: CGFloat = 10
+    static let cornerRadius: CGFloat = 45
+    static let endpointTrimDegrees: Double = 14
+    static let lineWidth: CGFloat = 3
+    static let opacity: Double = 0.18
+    static let fillOpacity: Double = 0.01
+}
+
+private enum SurfAceSpatialWindowContentLayout {
+    static let cornerRadius: CGFloat = 28
+    static let edgeTolerance: CGFloat = 0.5
+}
+
+private enum SurfAceSplitHandleLayout {
+    static let visibleSize: CGFloat = 44
+    static let iconSize: CGFloat = 17
+}
+
 func surfAceEscapeHTML(_ string: String) -> String {
     string
         .replacingOccurrences(of: "&", with: "&amp;")
@@ -254,6 +273,11 @@ private enum SurfAceRajdhaniMetrics {
     static let identitySpacingRatio: CGFloat = 0.04
 }
 
+private enum SurfAceSpatialIdentityLayout {
+    static let depthOffset: CGFloat = 56
+    static let bundleIdentifier = "co.clicketyclacks.SurfAce.spatial"
+}
+
 private enum SurfAceIdentityBaseline: AlignmentID {
     static func defaultValue(in context: ViewDimensions) -> CGFloat {
         context[.bottom]
@@ -312,9 +336,10 @@ private struct SurfAceWindowView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let surfaceBounds = CGRect(origin: .zero, size: proxy.size)
             ZStack {
-                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout)
-                    .background(Color.black.opacity(0.94))
+                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout, surfaceBounds: surfaceBounds)
+                    .background(surfAceSurfaceBackdropColor())
                     .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
                     .onAppear {
                         runtime.updateViewport(surfaceId: surface.surfaceId, size: proxy.size, scale: displayScale)
@@ -331,15 +356,16 @@ private struct SurfAcePaneTreeView: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     let node: SurfAcePaneLayoutNode
+    let surfaceBounds: CGRect
     var path: [Int] = []
 
     var body: some View {
         switch node {
         case .empty:
-            Color.black.opacity(0.94)
+            surfAceSurfaceBackdropColor()
         case .leaf(let paneId, _):
             if let pane = surface.panesById[paneId] {
-                SurfAcePaneView(runtime: runtime, surface: surface, pane: pane)
+                SurfAcePaneView(runtime: runtime, surface: surface, pane: pane, surfaceBounds: surfaceBounds)
             } else {
                 Color.clear
             }
@@ -350,7 +376,7 @@ private struct SurfAcePaneTreeView: View {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, path: path + [index])
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
                                     .frame(width: max(1, proxy.size.width * child.layoutWeight / totalWeight), height: proxy.size.height)
                             }
                         }
@@ -371,7 +397,7 @@ private struct SurfAcePaneTreeView: View {
                     ZStack(alignment: .topLeading) {
                         VStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, path: path + [index])
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
                                     .frame(width: proxy.size.width, height: max(1, proxy.size.height * child.layoutWeight / totalWeight))
                             }
                         }
@@ -390,7 +416,7 @@ private struct SurfAcePaneTreeView: View {
                     }
                 }
             }
-            .background(Color.white.opacity(0.12))
+            .background(surfAceSplitBackdropColor())
         }
     }
 }
@@ -405,12 +431,19 @@ private struct SurfAceSplitResizeHandle: View {
     @State private var dragStartWeights: [Double]?
 
     var body: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.18))
-            .frame(
-                width: direction == .vertical ? 10 : nil,
-                height: direction == .horizontal ? 10 : nil
-            )
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: SurfAceSplitHandleLayout.iconSize, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.86))
+            .rotationEffect(direction == .vertical ? .degrees(90) : .zero)
+            .frame(width: SurfAceSplitHandleLayout.visibleSize, height: SurfAceSplitHandleLayout.visibleSize)
+            .background {
+                Circle()
+                    .fill(.regularMaterial)
+            }
+            .overlay {
+                Circle()
+                    .stroke(.white.opacity(0.18), lineWidth: 1)
+            }
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
@@ -456,18 +489,31 @@ private struct SurfAcePaneView: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
+    let surfaceBounds: CGRect
 
     var body: some View {
         GeometryReader { proxy in
             let paneFrame = proxy.frame(in: .named(surfAceSurfaceCoordinateSpaceName))
+            let showsSpatialEmptyPaneChrome = surfAceShowsSpatialEmptyPaneChrome(entry: pane.currentEntry)
             ZStack {
-                SurfAcePaneRepresentable(
-                    runtime: runtime,
-                    surfaceId: surface.surfaceId,
-                    paneId: pane.paneId
-                )
-                .id("\(surface.surfaceId):\(pane.paneId)")
-                .background(Color.black.opacity(0.92))
+                ZStack {
+                    SurfAcePaneRepresentable(
+                        runtime: runtime,
+                        surfaceId: surface.surfaceId,
+                        paneId: pane.paneId
+                    )
+                    .id("\(surface.surfaceId):\(pane.paneId)")
+                    .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
+
+                    if showsSpatialEmptyPaneChrome {
+                        SurfAceSpatialEmptyPaneFill()
+                    }
+                }
+                .surfAceSpatialWindowContentClip(paneFrame: paneFrame, surfaceBounds: surfaceBounds)
+
+                if showsSpatialEmptyPaneChrome {
+                    SurfAceSpatialEmptyPaneMarkers()
+                }
 
                 let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
                 SurfAcePaneIdentityOverlay(
@@ -480,10 +526,11 @@ private struct SurfAcePaneView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, 28)
                 .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                .surfAceSpatialChromeDepthOffset()
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
 
-                if let toast = pane.toast {
+                if !showsSpatialEmptyPaneChrome, let toast = pane.toast {
                     VStack {
                         Spacer()
                         Text(toast)
@@ -501,21 +548,24 @@ private struct SurfAcePaneView: View {
                     }
                 }
 
-                VStack {
-                    Spacer()
-                    SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
-                        .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                if !showsSpatialEmptyPaneChrome {
+                    VStack {
+                        Spacer()
+                        SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
+                            .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                            .surfAceSpatialChromeDepthOffset()
+                    }
                 }
             }
             .overlay {
                 SurfAceAnnotationBorder(
-                    active: surfAceShowsAnnotationBorder(annotationMode: pane.annotationMode),
+                    active: !showsSpatialEmptyPaneChrome && surfAceShowsAnnotationBorder(annotationMode: pane.annotationMode),
                     pulsing: pane.isDrawingFlushSending
                 )
             }
             .overlay {
                 SurfAceKeyboardActiveBorder(
-                    active: surfAceShowsKeyboardFocusOutline(
+                    active: !showsSpatialEmptyPaneChrome && surfAceShowsKeyboardFocusOutline(
                         activePaneId: surface.activeKeyboardPaneId,
                         paneId: pane.paneId,
                         paneCount: surface.panes.count
@@ -566,6 +616,219 @@ func surfAceShowsKeyboardFocusOutline(activePaneId: Int?, paneId: Int, paneCount
 
 func surfAceShowsAnnotationBorder(annotationMode: Bool) -> Bool {
     annotationMode
+}
+
+func surfAceShowsSpatialEmptyPaneChrome(entry: SurfAcePaneEntry) -> Bool {
+#if os(visionOS)
+    surfAceEntryIsVisibleEmpty(entry)
+#else
+    false
+#endif
+}
+
+private func surfAceSurfaceBackdropColor() -> Color {
+#if os(visionOS)
+    Color.clear
+#else
+    Color.black.opacity(0.94)
+#endif
+}
+
+private func surfAcePaneBackdropColor(isEmpty: Bool) -> Color {
+#if os(visionOS)
+    isEmpty ? Color.clear : Color.black.opacity(0.92)
+#else
+    Color.black.opacity(0.92)
+#endif
+}
+
+private func surfAceSplitBackdropColor() -> Color {
+#if os(visionOS)
+    Color.clear
+#else
+    Color.white.opacity(0.12)
+#endif
+}
+
+struct SurfAceSpatialWindowContentCorners: Equatable {
+    let topLeading: Bool
+    let topTrailing: Bool
+    let bottomLeading: Bool
+    let bottomTrailing: Bool
+
+    var uiRectCorners: UIRectCorner {
+        var corners: UIRectCorner = []
+        if topLeading {
+            corners.insert(.topLeft)
+        }
+        if topTrailing {
+            corners.insert(.topRight)
+        }
+        if bottomLeading {
+            corners.insert(.bottomLeft)
+        }
+        if bottomTrailing {
+            corners.insert(.bottomRight)
+        }
+        return corners
+    }
+}
+
+func surfAceSpatialWindowContentCorners(
+    paneFrame: CGRect,
+    surfaceBounds: CGRect,
+    tolerance: CGFloat
+) -> SurfAceSpatialWindowContentCorners {
+    let touchesLeading = abs(paneFrame.minX - surfaceBounds.minX) <= tolerance
+    let touchesTrailing = abs(paneFrame.maxX - surfaceBounds.maxX) <= tolerance
+    let touchesTop = abs(paneFrame.minY - surfaceBounds.minY) <= tolerance
+    let touchesBottom = abs(paneFrame.maxY - surfaceBounds.maxY) <= tolerance
+
+    return SurfAceSpatialWindowContentCorners(
+        topLeading: touchesTop && touchesLeading,
+        topTrailing: touchesTop && touchesTrailing,
+        bottomLeading: touchesBottom && touchesLeading,
+        bottomTrailing: touchesBottom && touchesTrailing
+    )
+}
+
+private struct SurfAceSpatialWindowContentClipShape: Shape {
+    let corners: SurfAceSpatialWindowContentCorners
+    let cornerRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let radius = max(0, min(cornerRadius, rect.width / 2, rect.height / 2))
+        guard radius > 0, !corners.uiRectCorners.isEmpty else {
+            return Path(rect)
+        }
+        return Path(UIBezierPath(
+            roundedRect: rect,
+            byRoundingCorners: corners.uiRectCorners,
+            cornerRadii: CGSize(width: radius, height: radius)
+        ).cgPath)
+    }
+}
+
+private struct SurfAceSpatialEmptyPaneFill: View {
+    var body: some View {
+        Canvas { context, size in
+            drawFill(in: &context, size: size)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func drawFill(in context: inout GraphicsContext, size: CGSize) {
+        let inset = SurfAceSpatialPaneChromeLayout.cornerInset + SurfAceSpatialPaneChromeLayout.lineWidth / 2
+        let rect = CGRect(
+            x: inset,
+            y: inset,
+            width: size.width - inset * 2,
+            height: size.height - inset * 2
+        )
+        guard rect.width > 0, rect.height > 0 else { return }
+
+        context.fill(
+            Path(roundedRect: rect, cornerRadius: SurfAceSpatialPaneChromeLayout.cornerRadius),
+            with: .color(.white.opacity(SurfAceSpatialPaneChromeLayout.fillOpacity))
+        )
+    }
+}
+
+private struct SurfAceSpatialEmptyPaneMarkers: View {
+    var body: some View {
+        Canvas { context, size in
+            let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
+                + SurfAceSpatialPaneChromeLayout.cornerRadius
+                + SurfAceSpatialPaneChromeLayout.lineWidth
+            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topLeading)
+            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topTrailing)
+            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
+            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomTrailing)
+        }
+        .surfAceSpatialChromeDepthOffset()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private enum Corner {
+        case topLeading
+        case topTrailing
+        case bottomLeading
+        case bottomTrailing
+    }
+
+    private func drawCorner(in context: inout GraphicsContext, size: CGSize, markerSize: CGFloat, corner: Corner) {
+        let width = min(markerSize, size.width)
+        let height = min(markerSize, size.height)
+        guard width > SurfAceSpatialPaneChromeLayout.lineWidth,
+              height > SurfAceSpatialPaneChromeLayout.lineWidth else { return }
+
+        let inset = min(SurfAceSpatialPaneChromeLayout.cornerInset, max(0, min(size.width - width, size.height - height)))
+        let origin = CGPoint(
+            x: corner == .topLeading || corner == .bottomLeading ? inset : size.width - width - inset,
+            y: corner == .topLeading || corner == .topTrailing ? inset : size.height - height - inset
+        )
+        var path = cornerPath(size: CGSize(width: width, height: height), corner: corner)
+        path = path.applying(CGAffineTransform(translationX: origin.x, y: origin.y))
+        context.stroke(
+            path,
+            with: .color(.white.opacity(SurfAceSpatialPaneChromeLayout.opacity)),
+            style: StrokeStyle(
+                lineWidth: SurfAceSpatialPaneChromeLayout.lineWidth,
+                lineCap: .round,
+                lineJoin: .round
+            )
+        )
+    }
+
+    private func cornerPath(size: CGSize, corner: Corner) -> Path {
+        var path = Path()
+        let strokeInset = SurfAceSpatialPaneChromeLayout.lineWidth / 2
+        let minX = strokeInset
+        let maxX = size.width - strokeInset
+        let minY = strokeInset
+        let maxY = size.height - strokeInset
+        let radius = min(SurfAceSpatialPaneChromeLayout.cornerRadius, size.width - SurfAceSpatialPaneChromeLayout.lineWidth, size.height - SurfAceSpatialPaneChromeLayout.lineWidth)
+        let trim = SurfAceSpatialPaneChromeLayout.endpointTrimDegrees
+
+        switch corner {
+        case .topLeading:
+            path.addArc(
+                center: CGPoint(x: minX + radius, y: minY + radius),
+                radius: radius,
+                startAngle: .degrees(180 + trim),
+                endAngle: .degrees(270 - trim),
+                clockwise: false
+            )
+        case .topTrailing:
+            path.addArc(
+                center: CGPoint(x: maxX - radius, y: minY + radius),
+                radius: radius,
+                startAngle: .degrees(360 - trim),
+                endAngle: .degrees(270 + trim),
+                clockwise: true
+            )
+        case .bottomLeading:
+            path.addArc(
+                center: CGPoint(x: minX + radius, y: maxY - radius),
+                radius: radius,
+                startAngle: .degrees(180 - trim),
+                endAngle: .degrees(90 + trim),
+                clockwise: true
+            )
+        case .bottomTrailing:
+            path.addArc(
+                center: CGPoint(x: maxX - radius, y: maxY - radius),
+                radius: radius,
+                startAngle: .degrees(trim),
+                endAngle: .degrees(90 - trim),
+                clockwise: false
+            )
+        }
+
+        return path
+    }
 }
 
 struct SurfAcePaneChromeIdentityParts: Equatable {
@@ -639,6 +902,37 @@ private struct SurfAcePaneIdentityOverlay: View {
         case .disconnected:
             return Color(red: 0.94, green: 0.27, blue: 0.27)
         }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func surfAceSpatialWindowContentClip(paneFrame: CGRect, surfaceBounds: CGRect) -> some View {
+        #if os(visionOS)
+        self.clipShape(SurfAceSpatialWindowContentClipShape(
+            corners: surfAceSpatialWindowContentCorners(
+                paneFrame: paneFrame,
+                surfaceBounds: surfaceBounds,
+                tolerance: SurfAceSpatialWindowContentLayout.edgeTolerance
+            ),
+            cornerRadius: SurfAceSpatialWindowContentLayout.cornerRadius
+        ))
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func surfAceSpatialChromeDepthOffset() -> some View {
+        #if os(visionOS)
+        if Bundle.main.bundleIdentifier == SurfAceSpatialIdentityLayout.bundleIdentifier {
+            self.offset(z: SurfAceSpatialIdentityLayout.depthOffset)
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
     }
 }
 
@@ -760,7 +1054,7 @@ private struct SurfAceGlassButtonStyle: ButtonStyle {
             .foregroundStyle(.white)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .surfAceGlassBackground(interactive: true)
             .overlay {
                 Capsule()
                     .strokeBorder(.white.opacity(configuration.isPressed ? 0.32 : 0.18), lineWidth: 1)
@@ -774,7 +1068,7 @@ private struct SurfAceControlPillChrome: ViewModifier {
     func body(content: Content) -> some View {
         content
             .padding(6)
-            .glassEffect(.regular, in: Capsule())
+            .surfAceGlassBackground(interactive: false)
             .overlay {
                 Capsule()
                     .strokeBorder(.white.opacity(0.18), lineWidth: 1)
@@ -785,6 +1079,19 @@ private struct SurfAceControlPillChrome: ViewModifier {
 private extension View {
     func surfAceControlPillChrome() -> some View {
         modifier(SurfAceControlPillChrome())
+    }
+
+    @ViewBuilder
+    func surfAceGlassBackground(interactive: Bool) -> some View {
+        #if os(visionOS)
+        self.background(.regularMaterial, in: Capsule())
+        #else
+        if interactive {
+            self.glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            self.glassEffect(.regular, in: Capsule())
+        }
+        #endif
     }
 }
 
@@ -1222,16 +1529,28 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 applyCurrentInteractionState()
                 return
             case nil:
+#if os(visionOS)
+                showEmptyPane()
+                applyCurrentInteractionState()
+                return
+#else
                 beginPendingHTMLRender()
                 html = standbyHTML()
                 baseURL = nil
                 showWebView()
+#endif
             }
         } else {
+#if os(visionOS)
+            showEmptyPane()
+            applyCurrentInteractionState()
+            return
+#else
             beginPendingHTMLRender()
             html = standbyHTML()
             baseURL = nil
             showWebView()
+#endif
         }
 
         webView.loadHTMLString(html, baseURL: baseURL)
@@ -1465,13 +1784,19 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     }
 
     private func setupViewHierarchy() {
+#if os(visionOS)
+        backgroundColor = .clear
+#else
         backgroundColor = .black
+#endif
 
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+        #if !os(visionOS)
         webView.scrollView.keyboardDismissMode = .onDrag
+        #endif
 
         pdfView.translatesAutoresizingMaskIntoConstraints = false
         pdfView.backgroundColor = .black
@@ -1606,6 +1931,15 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         pdfView.document = nil
         pdfView.isHidden = true
         webView.isHidden = false
+    }
+
+    private func showEmptyPane() {
+        finishPendingHTMLRender()
+        pdfView.document = nil
+        pdfView.isHidden = true
+        webView.stopLoading()
+        webView.loadHTMLString(standbyHTML(), baseURL: nil)
+        webView.isHidden = true
     }
 
     private func renderPDF(_ base64Data: String) {

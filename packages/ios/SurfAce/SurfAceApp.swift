@@ -96,12 +96,134 @@ struct SurfAceApp: App {
     var body: some Scene {
         WindowGroup(id: SurfAceSceneID.mainWindow) {
             SurfAceRootView(runtime: runtime)
+                .surfAceSpatialWindowContentSizing()
+                .surfAceSpatialWindowTransparency()
+                .surfAceSpatialWindowOrnament()
                 .task {
                     await runtime.start()
                 }
         }
+        .surfAceSpatialWindowSizing()
         .commands {
             SurfAceWindowCommands()
         }
     }
 }
+
+private extension View {
+    @ViewBuilder
+    func surfAceSpatialWindowContentSizing() -> some View {
+        #if os(visionOS)
+        self.frame(minWidth: 480, minHeight: 320)
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func surfAceSpatialWindowTransparency() -> some View {
+        #if os(visionOS)
+        self.background(SurfAceSpatialWindowTransparencyProbe())
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func surfAceSpatialWindowOrnament() -> some View {
+        #if os(visionOS)
+        self.modifier(SurfAceSpatialWindowOrnament())
+        #else
+        self
+        #endif
+    }
+}
+
+private extension Scene {
+    @SceneBuilder
+    func surfAceSpatialWindowSizing() -> some Scene {
+        #if os(visionOS)
+        self
+            .defaultSize(width: 1200, height: 800)
+            .windowResizability(.contentMinSize)
+            .windowStyle(.plain)
+        #else
+        self
+        #endif
+    }
+}
+
+#if os(visionOS)
+private struct SurfAceSpatialWindowOrnament: ViewModifier {
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content
+            .ornament(visibility: .visible, attachmentAnchor: .scene(.top)) {
+                Button {
+                    SurfAceSceneActivation.requestNewWindow(source: "spatial_ornament_plus", openWindow: openWindow)
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("New Window")
+            }
+    }
+}
+
+@MainActor
+private struct SurfAceSpatialWindowTransparencyProbe: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        clearHostingBackgrounds(near: view)
+        scheduleDeferredClear(from: view)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        uiView.backgroundColor = .clear
+        clearHostingBackgrounds(near: uiView)
+        scheduleDeferredClear(from: uiView)
+    }
+
+    private func scheduleDeferredClear(from view: UIView) {
+        DispatchQueue.main.async {
+            clearHostingBackgrounds(near: view)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            clearHostingBackgrounds(near: view)
+        }
+    }
+
+    private func clearHostingBackgrounds(near view: UIView) {
+        if let window = view.window {
+            setHostingBackgroundsClear(in: window)
+            return
+        }
+
+        var root = view
+        while let superview = root.superview {
+            root = superview
+        }
+        setHostingBackgroundsClear(in: root)
+    }
+
+    private func setHostingBackgroundsClear(in view: UIView) {
+        if String(describing: type(of: view)).contains("UIHostingView") {
+            view.backgroundColor = .clear
+        }
+        for subview in view.subviews {
+            setHostingBackgroundsClear(in: subview)
+        }
+    }
+}
+#else
+private struct SurfAceSpatialWindowTransparencyProbe: View {
+    var body: some View {
+        EmptyView()
+    }
+}
+#endif
