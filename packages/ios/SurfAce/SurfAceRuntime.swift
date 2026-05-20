@@ -567,10 +567,6 @@ final class SurfAceRuntime {
             pane.pendingFlushTask = nil
         }
         surfaces.removeAll { $0.surfaceId == surfaceId }
-        identityMapping.surfacesBySceneKey.removeValue(forKey: sceneKey)
-        persistIdentityMapping()
-        persistedSurfaceTopologies.removeValue(forKey: surfaceId)
-        persistSurfaceTopologies()
 
         broadcastLifecycleEvent(
             op: "event.surface_removed",

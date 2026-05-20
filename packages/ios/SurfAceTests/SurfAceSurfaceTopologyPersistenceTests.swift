@@ -502,7 +502,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
-    func testUnregisterSurfaceRetiresSceneIdentityInsteadOfRestoringTombstonedSurface() {
+    func testUnregisterSurfacePreservesSceneIdentityAndContentForPlatformRestore() {
         let suiteName = "SurfAceSurfaceTopologyPersistenceTests.\(UUID().uuidString)"
         guard let userDefaults = UserDefaults(suiteName: suiteName) else {
             XCTFail("Expected isolated UserDefaults suite")
@@ -514,17 +514,50 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         }
 
         let firstRuntime = SurfAceRuntime(userDefaults: userDefaults)
-        let firstSurface = firstRuntime.registerSurface(sceneKey: "scene-closed")
+        let firstSurface = firstRuntime.registerSurface(sceneKey: "scene-restored")
+        let pane = SurfAcePaneModel(paneId: 1, paneLineageId: "pl_restore", paneLabel: 1, name: "Restored")
+        pane.currentEntry = SurfAcePaneEntry(
+            contentId: "ct_restore",
+            revision: 4,
+            historyOwnerToken: "hot_restore",
+            contentType: .html,
+            payload: .html(html: "<main><p>Restored body</p></main>", baseURL: nil),
+            title: "Restored HTML",
+            scrollable: true,
+            interactive: true,
+            url: nil,
+            drawingData: Data(),
+            strokesById: [:]
+        )
+        pane.currentTarget = SurfAcePaneTargetState(
+            targetId: "ct_restore",
+            targetKind: "html",
+            paneLineageId: "pl_restore",
+            targetEpoch: 4,
+            restorePolicy: "auto",
+            currentState: "applied"
+        )
         firstSurface.windowLabel = "a"
+        firstSurface.panesById = [1: pane]
+        firstSurface.paneLayout = .leaf(1)
+        firstSurface.providerTopologyInitialized = true
         firstRuntime.persistSurfaceTopology(surfaceId: firstSurface.surfaceId)
-        firstRuntime.unregisterSurface(sceneKey: "scene-closed")
+        firstRuntime.unregisterSurface(sceneKey: "scene-restored")
+        XCTAssertTrue(firstRuntime.surfaces.isEmpty)
 
         let relaunchedRuntime = SurfAceRuntime(userDefaults: userDefaults)
-        let reopenedSurface = relaunchedRuntime.registerSurface(sceneKey: "scene-closed")
+        let reopenedSurface = relaunchedRuntime.registerSurface(sceneKey: "scene-restored")
+        let reopenedPane = reopenedSurface.panes.first
 
-        XCTAssertNotEqual(reopenedSurface.surfaceId, firstSurface.surfaceId)
-        XCTAssertEqual(reopenedSurface.windowLabel, "")
-        XCTAssertFalse(reopenedSurface.providerTopologyInitialized)
+        XCTAssertEqual(reopenedSurface.surfaceId, firstSurface.surfaceId)
+        XCTAssertEqual(reopenedSurface.windowLabel, "a")
+        XCTAssertTrue(reopenedSurface.providerTopologyInitialized)
+        XCTAssertEqual(reopenedPane?.paneLineageId, "pl_restore")
+        XCTAssertEqual(reopenedPane?.currentEntry.contentType, .html)
+        XCTAssertEqual(reopenedPane?.currentEntry.title, "Restored HTML")
+        XCTAssertEqual(reopenedPane?.currentEntry.revision, 4)
+        XCTAssertEqual(reopenedPane?.currentTarget?.targetId, "ct_restore")
+        XCTAssertEqual(reopenedPane?.currentTarget?.targetKind, "html")
     }
 
     @MainActor
