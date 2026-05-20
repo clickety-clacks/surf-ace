@@ -326,14 +326,15 @@ test("split flex children do not force every pane to full window height", async 
   assert.match(splitChildRule, /min-height:\s*0;/);
 });
 
-test("renderer chrome keeps session names in navigation chrome, not pane identity overlay", async () => {
+test("renderer chrome keeps session provenance out of floating pane chrome", async () => {
   const source = await rendererSource();
   const styles = await rendererStyles();
 
   assert.match(source, /provenanceName: string \| null/);
-  assert.match(source, /const navigationOwnerName = pane\.provenanceName/);
-  assert.doesNotMatch(source, /const navigationOwnerName = pane\.provenanceName \?\? pane\.ownerName/);
-  assert.match(source, /ownerName\.textContent = navigationOwnerName/);
+  assert.match(source, /ownerName: string \| null/);
+  assert.doesNotMatch(source, /const navigationOwnerName = pane\.provenanceName/);
+  assert.doesNotMatch(source, /ownerName\.textContent/);
+  assert.doesNotMatch(source, /navigation-pill__owner/);
   assert.doesNotMatch(source, /pane-label__sender/);
   assert.doesNotMatch(source, /provenanceLabelEl/);
   assert.match(source, /labelEl\.append\(windowLabelEl, labelTextEl\)/);
@@ -347,7 +348,7 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.doesNotMatch(source, /visibleAddress:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
 
   assert.doesNotMatch(styles, /\.pane-label__sender\s*\{/);
-  assert.match(styles, /\.navigation-pill__owner\s*\{[\s\S]*font-size:\s*calc\(13px \+ 3pt\)/);
+  assert.doesNotMatch(styles, /\.navigation-pill__owner\s*\{/);
 });
 
 test("renderer exposes split resize handles and reports resize-split commands", async () => {

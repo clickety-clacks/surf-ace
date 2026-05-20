@@ -571,20 +571,6 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   backdrop-filter: blur(14px);
 }
 
-.navigation-pill__owner {
-  max-width: min(34vw, 340px);
-  overflow: hidden;
-  padding: 0 10px 0 4px;
-  color: rgba(238, 244, 255, 0.86);
-  font-family: var(--ui-font-family);
-  font-size: calc(13px + 3pt);
-  font-weight: 550;
-  letter-spacing: 0;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .control-button {
   appearance: none;
   display: inline-flex;
