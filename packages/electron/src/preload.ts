@@ -1,8 +1,11 @@
 import { contextBridge, ipcRenderer } from "electron";
 
+const guestPreloadPath = String(ipcRenderer.sendSync("surface:get-guest-preload-path"));
+
 contextBridge.exposeInMainWorld("surfAce", {
   clearToast: (paneId: number) => ipcRenderer.send("surface:clear-toast", { paneId }),
   command: (payload: Record<string, unknown>) => ipcRenderer.send("surface:command", payload),
+  guestPreloadPath,
   getBootstrap: () => ipcRenderer.invoke("surface:get-bootstrap"),
   onKeyboardIntent: (listener: (intent: unknown) => void) => {
     const wrapped = (_event: unknown, intent: unknown) => listener(intent);
@@ -16,6 +19,7 @@ contextBridge.exposeInMainWorld("surfAce", {
   },
   reportOverlayRegions: (payload: Record<string, unknown>) => ipcRenderer.send("surface:overlay-regions", payload),
   reportPage: (payload: Record<string, unknown>) => ipcRenderer.send("surface:page", payload),
+  reportRendererDiagnostic: (payload: Record<string, unknown>) => ipcRenderer.send("surface:renderer-diagnostic", payload),
   reportSnapshot: (payload: Record<string, unknown>) => ipcRenderer.send("surface:snapshot", payload),
 });
 
@@ -24,11 +28,13 @@ declare global {
     surfAce: {
       clearToast: (paneId: number) => void;
       command: (payload: Record<string, unknown>) => void;
+      guestPreloadPath: string;
       getBootstrap: () => Promise<unknown>;
       onKeyboardIntent: (listener: (intent: unknown) => void) => () => void;
       onState: (listener: (state: unknown) => void) => () => void;
       reportOverlayRegions: (payload: Record<string, unknown>) => void;
       reportPage: (payload: Record<string, unknown>) => void;
+      reportRendererDiagnostic: (payload: Record<string, unknown>) => void;
       reportSnapshot: (payload: Record<string, unknown>) => void;
     };
   }

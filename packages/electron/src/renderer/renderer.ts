@@ -57,6 +57,15 @@ type BrowserUrlWebViewElement = HTMLElement & {
   getWebContentsId?: () => number;
   reload?: () => void;
   src: string;
+  stop?: () => void;
+};
+type BrowserContentIpcEvent = Event & {
+  args?: unknown[];
+  channel?: string;
+};
+type BrowserContentNavigationEvent = Event & {
+  isMainFrame?: boolean;
+  url?: string;
 };
 type BrowserUrlWebViewErrorEvent = Event & {
   errorDescription?: string;
@@ -238,6 +247,42 @@ type SurfAceOverlayKind =
   | "pane-handle"
   | "reload";
 
+function errorDiagnosticFields(error: unknown): Record<string, string> {
+  if (error instanceof Error) {
+    return {
+      errorMessage: error.message,
+      errorName: error.name,
+      errorStack: error.stack?.slice(0, 600) ?? "",
+    };
+  }
+  return { errorMessage: String(error) };
+}
+
+function rendererDiagnostic(event: string, fields: Record<string, unknown> = {}): void {
+  try {
+    window.surfAce.reportRendererDiagnostic({
+      ...fields,
+      event,
+    });
+  } catch (error) {
+    console.warn(`[surf-ace] renderer diagnostic failed: ${error}`);
+  }
+}
+
+window.addEventListener("error", (event) => {
+  rendererDiagnostic("window_error", {
+    colno: event.colno,
+    filename: event.filename,
+    lineno: event.lineno,
+    message: event.message,
+    ...errorDiagnosticFields(event.error),
+  });
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  rendererDiagnostic("unhandled_rejection", errorDiagnosticFields(event.reason));
+});
+
 function contentKey(pane: RendererPaneState): string {
   return `${pane.externalNative ? "native" : "renderer"}:${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}:${pane.content.renderVersion}`;
 }
@@ -299,6 +344,14 @@ function paneBounds(view: PaneView) {
 }
 
 function reportPaneSnapshot(view: PaneView): void {
+  const frame = currentPaneFrameElement(view);
+  if (frame?.matches("webview.content-browser-url-frame")) {
+    window.surfAce.reportSnapshot({
+      bounds: paneBounds(view),
+      paneId: view.paneId,
+    });
+    return;
+  }
   const visibleText = currentVisibleText(view);
   const selection = currentSelectionWithin(view);
   const viewport = currentViewport(view);
@@ -486,20 +539,10 @@ function currentVisiblePdfPage(view: PaneView): HTMLElement | null {
   return bestPage;
 }
 
-function currentHtmlVisibleText(view: PaneView): string | null {
-  const frame = view.contentEl.querySelector<HTMLIFrameElement>(".content-html-frame");
-  const text = frame?.contentDocument?.body?.innerText?.trim();
-  return text ? text.slice(0, 4096) : null;
-}
-
 function currentVisibleText(view: PaneView): string {
   const currentPdfPage = currentVisiblePdfPage(view);
   if (currentPdfPage) {
     return (currentPdfPage.dataset.pageText ?? "").slice(0, 4096);
-  }
-  const currentHtmlText = currentHtmlVisibleText(view);
-  if (currentHtmlText) {
-    return currentHtmlText;
   }
   return (view.contentEl.textContent ?? "").slice(0, 4096);
 }
@@ -755,6 +798,9 @@ function ensurePaneView(paneId: number): PaneView {
   if (existing) {
     return existing;
   }
+  rendererDiagnostic("pane_view_create", {
+    paneId,
+  });
   const rootEl = document.createElement("div");
   rootEl.className = "pane-shell";
   const scrollEl = document.createElement("div");
@@ -912,207 +958,6 @@ function sendNavigationIntent(view: PaneView, paneId: number, url: string): void
   }
   view.lastNavigation = { at: now, url };
   window.surfAce.command({ paneId, type: "navigation", url });
-}
-
-function htmlFrameBridgeScript(): string {
-  return `
-<script>
-(() => {
-  const MAX_VISIBLE_TEXT_BYTES = 4096;
-  let longPressTimer = null;
-  let scrollTimer = null;
-  let resizeTimer = null;
-
-  const emit = (payload) => {
-    window.parent.postMessage({ channel: "surf-ace-content", payload }, "*");
-  };
-
-  const visibleText = () => (document.body?.innerText ?? "").slice(0, MAX_VISIBLE_TEXT_BYTES);
-  const currentViewport = () => {
-    const scrolling = document.scrollingElement ?? document.documentElement;
-    return {
-      contentSize: { height: scrolling.scrollHeight, width: scrolling.scrollWidth },
-      scrollOffset: { x: scrolling.scrollLeft, y: scrolling.scrollTop },
-      visibleRect: {
-        height: window.innerHeight,
-        width: window.innerWidth,
-        x: scrolling.scrollLeft,
-        y: scrolling.scrollTop,
-      },
-      zoomLevel: window.visualViewport?.scale ?? 1,
-    };
-  };
-  const currentSelection = () => {
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) {
-      return null;
-    }
-    const text = selection.toString().trim();
-    if (!text) {
-      return null;
-    }
-    const rect = selection.getRangeAt(0).getBoundingClientRect();
-    return {
-      boundingRect: { height: rect.height, width: rect.width, x: rect.x, y: rect.y },
-      kind: "text",
-      text: text.slice(0, MAX_VISIBLE_TEXT_BYTES),
-    };
-  };
-  const nearestText = (target) => {
-    if (!(target instanceof HTMLElement)) {
-      return undefined;
-    }
-    const text = (target.innerText || target.textContent || "").trim();
-    return text ? text.slice(0, 240) : undefined;
-  };
-  const navigationTarget = (target) => {
-    if (!(target instanceof HTMLElement)) {
-      return null;
-    }
-    return target.closest("a[href],button,[role='button'],input[type='button'],input[type='submit'],summary");
-  };
-  const linkTarget = (target) => {
-    if (!(target instanceof HTMLElement)) {
-      return null;
-    }
-    const match = target.closest("a[href]");
-    return match instanceof HTMLAnchorElement ? match : null;
-  };
-
-  window.addEventListener("scroll", () => {
-    if (scrollTimer) {
-      clearTimeout(scrollTimer);
-    }
-    scrollTimer = setTimeout(() => {
-      emit({ type: "scroll", viewport: currentViewport(), visibleText: visibleText() });
-    }, 120);
-  }, { passive: true });
-
-  window.addEventListener("resize", () => {
-    if (resizeTimer) {
-      clearTimeout(resizeTimer);
-    }
-    resizeTimer = setTimeout(() => {
-      emit({ type: "scroll", viewport: currentViewport(), visibleText: visibleText() });
-    }, 120);
-  });
-
-  document.addEventListener("selectionchange", () => {
-    emit({ selection: currentSelection(), type: "selection" });
-  });
-
-  document.addEventListener("pointerdown", (event) => {
-    emit({ type: "focus" });
-    if (navigationTarget(event.target)) {
-      return;
-    }
-    longPressTimer = setTimeout(() => {
-      emit({
-        kind: "long_press",
-        nearestContent: nearestText(event.target),
-        position: { x: event.clientX, y: event.clientY },
-        type: "tap",
-      });
-      longPressTimer = null;
-    }, 500);
-  });
-
-  document.addEventListener("pointerup", (event) => {
-    if (navigationTarget(event.target)) {
-      if (longPressTimer) {
-        clearTimeout(longPressTimer);
-        longPressTimer = null;
-      }
-      return;
-    }
-    if (longPressTimer) {
-      clearTimeout(longPressTimer);
-      longPressTimer = null;
-      emit({
-        kind: "tap",
-        nearestContent: nearestText(event.target),
-        position: { x: event.clientX, y: event.clientY },
-        type: "tap",
-      });
-    }
-  });
-
-  document.addEventListener("pointercancel", () => {
-    if (longPressTimer) {
-      clearTimeout(longPressTimer);
-      longPressTimer = null;
-    }
-  });
-
-  document.addEventListener("click", (event) => {
-    const link = linkTarget(event.target);
-    if (!link?.href) {
-      return;
-    }
-    emit({ type: "navigation", url: link.href });
-  }, { capture: true });
-
-  document.addEventListener("submit", (event) => {
-    if (!(event.target instanceof HTMLFormElement)) {
-      return;
-    }
-    emit({ type: "navigation", url: event.target.action || window.location.href });
-  }, { capture: true });
-
-  window.addEventListener("DOMContentLoaded", () => {
-    emit({ type: "ready", viewport: currentViewport(), visibleText: visibleText() });
-  });
-
-  window.addEventListener("message", (event) => {
-    const data = event.data;
-    if (!data || typeof data !== "object" || data.channel !== "surf-ace-host-relay") {
-      return;
-    }
-    const payload = data.payload;
-    if (!payload || typeof payload !== "object") {
-      return;
-    }
-    if (payload.type === "pointer") {
-      const target = document.elementFromPoint(payload.clientX, payload.clientY) ?? document.body ?? document.documentElement;
-      target?.dispatchEvent(new PointerEvent(payload.eventType, {
-        bubbles: true,
-        button: payload.button ?? 0,
-        buttons: payload.buttons ?? 0,
-        cancelable: true,
-        clientX: payload.clientX,
-        clientY: payload.clientY,
-        composed: true,
-        pointerId: payload.pointerId ?? 1,
-        pointerType: payload.pointerType ?? "mouse",
-        pressure: payload.pressure ?? 0,
-      }));
-    } else if (payload.type === "wheel") {
-      const target = document.elementFromPoint(payload.clientX, payload.clientY) ?? document.body ?? document.documentElement;
-      target?.dispatchEvent(new WheelEvent("wheel", {
-        bubbles: true,
-        cancelable: true,
-        clientX: payload.clientX,
-        clientY: payload.clientY,
-        deltaMode: payload.deltaMode ?? 0,
-        deltaX: payload.deltaX ?? 0,
-        deltaY: payload.deltaY ?? 0,
-        deltaZ: payload.deltaZ ?? 0,
-      }));
-    }
-  });
-})();
-</script>`;
-}
-
-function injectHtmlFrameBridge(html: string): string {
-  const bridge = htmlFrameBridgeScript();
-  if (/<\/body>/i.test(html)) {
-    return html.replace(/<\/body>/i, `${bridge}</body>`);
-  }
-  if (/<\/html>/i.test(html)) {
-    return html.replace(/<\/html>/i, `${bridge}</html>`);
-  }
-  return `${html}${bridge}`;
 }
 
 function clearWebViewSizer(view: PaneView): void {
@@ -1275,11 +1120,6 @@ function scrollPaneByKeyboard(intent: KeyboardScrollIntent): void {
         reportPaneSnapshot(view);
       })
       .catch(() => {});
-    return;
-  }
-  if (frame instanceof HTMLIFrameElement && frame.contentWindow) {
-    frame.contentWindow.scrollBy({ behavior: "auto", left: delta.left, top: delta.top });
-    window.setTimeout(() => reportPaneSnapshot(view), 0);
     return;
   }
   view.scrollEl.scrollBy({ behavior: "auto", left: delta.left, top: delta.top });
@@ -1621,15 +1461,27 @@ function deferUntilPaneFrameReady(
   window.requestAnimationFrame(tick);
 }
 
-function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement): void {
-  const onMessage = (event: MessageEvent) => {
-    if (event.source !== frame.contentWindow) {
+function htmlDocumentForBrowser(html: HtmlContent): string {
+  const isFullDocument = /^\s*<!doctype\s+html/i.test(html.html) || /^\s*<html[\s>]/i.test(html.html);
+  if (isFullDocument) {
+    return html.html;
+  }
+  return `<!doctype html><html><head>${
+    html.baseUrl ? `<base href="${html.baseUrl}">` : ""
+  }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${html.html}</body></html>`;
+}
+
+function htmlDocumentDataUrl(html: HtmlContent): string {
+  return `data:text/html;charset=utf-8,${encodeURIComponent(htmlDocumentForBrowser(html))}`;
+}
+
+function wireBrowserContentEvents(view: PaneView, paneId: number, webview: BrowserUrlWebViewElement): void {
+  const onIpcMessage = (event: Event) => {
+    const message = event as BrowserContentIpcEvent;
+    if (message.channel !== "surf-ace-content") {
       return;
     }
-    if (!event.data || typeof event.data !== "object" || event.data.channel !== "surf-ace-content") {
-      return;
-    }
-    const payload = event.data.payload as Record<string, unknown> | undefined;
+    const payload = message.args?.[0] as Record<string, unknown> | undefined;
     if (!payload) {
       return;
     }
@@ -1676,77 +1528,10 @@ function wireHtmlFrame(view: PaneView, paneId: number, frame: HTMLIFrameElement)
     }
   };
 
-  window.addEventListener("message", onMessage);
+  webview.addEventListener("ipc-message", onIpcMessage);
   view.currentHtmlFrameCleanup = () => {
-    window.removeEventListener("message", onMessage);
+    webview.removeEventListener("ipc-message", onIpcMessage);
   };
-}
-
-function relayHtmlFramePointerEvents(view: PaneView, frame: HTMLIFrameElement): void {
-  const framePoint = (event: MouseEvent) => {
-    const rect = frame.getBoundingClientRect();
-    return {
-      x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
-      y: Math.max(0, Math.min(rect.height, event.clientY - rect.top)),
-    };
-  };
-  const post = (payload: Record<string, unknown>) => {
-    frame.contentWindow?.postMessage({ channel: "surf-ace-host-relay", payload }, "*");
-  };
-  const onPointer = (event: PointerEvent) => {
-    const point = framePoint(event);
-    if (event.type === "pointerdown") {
-      rememberPaneContext(view.paneId);
-    }
-    post({
-      button: event.button,
-      buttons: event.buttons,
-      clientX: point.x,
-      clientY: point.y,
-      eventType: event.type,
-      pointerId: event.pointerId,
-      pointerType: event.pointerType,
-      pressure: event.pressure,
-      type: "pointer",
-    });
-  };
-  const onWheel = (event: WheelEvent) => {
-    const point = framePoint(event);
-    post({
-      clientX: point.x,
-      clientY: point.y,
-      deltaMode: event.deltaMode,
-      deltaX: event.deltaX,
-      deltaY: event.deltaY,
-      deltaZ: event.deltaZ,
-      type: "wheel",
-    });
-  };
-
-  for (const eventType of ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const) {
-    view.scrollEl.addEventListener(eventType, onPointer, { passive: true });
-  }
-  view.scrollEl.addEventListener("wheel", onWheel, { passive: true });
-  const previousCleanup = view.currentHtmlFrameCleanup;
-  view.currentHtmlFrameCleanup = () => {
-    previousCleanup?.();
-    for (const eventType of ["pointerdown", "pointermove", "pointerup", "pointercancel"] as const) {
-      view.scrollEl.removeEventListener(eventType, onPointer);
-    }
-    view.scrollEl.removeEventListener("wheel", onWheel);
-  };
-}
-
-function scheduleHtmlSnapshotRefresh(view: PaneView, renderToken: number): void {
-  const delays = [0, 50, 200, 500];
-  for (const delay of delays) {
-    window.setTimeout(() => {
-      if (renderToken !== view.currentRenderToken) {
-        return;
-      }
-      reportPaneSnapshot(view);
-    }, delay);
-  }
 }
 
 function renderCenteredState(view: PaneView, title: string, detail?: string): void {
@@ -1880,6 +1665,148 @@ function resetDynamicContent(view: PaneView): number {
   return view.currentRenderToken;
 }
 
+function renderBrowserContent(
+  view: PaneView,
+  pane: RendererPaneState,
+  renderToken: number,
+  url: string,
+  options?: { allowPopups?: boolean; navigationReport?: { targetId: string | null; url: string }; staticHtmlSourceUrl?: string },
+): void {
+  rendererDiagnostic("browser_content_create", {
+    contentType: pane.content.contentType,
+    paneId: pane.paneId,
+    urlPrefix: url.slice(0, 80),
+  });
+  const browserView = document.createElement("webview") as BrowserUrlWebViewElement;
+  browserView.className = "content-html-frame content-browser-url-frame";
+  if (options?.allowPopups) {
+    browserView.setAttribute("allowpopups", "true");
+  }
+  browserView.setAttribute("preload", window.surfAce.guestPreloadPath);
+  wireBrowserContentEvents(view, pane.paneId, browserView);
+  view.contentEl.appendChild(browserView);
+  sizeWebViewToPane(view, browserView);
+  reportBrowserUrlDiagnostics(view, browserView, "pre-navigation");
+  let reported = false;
+  const reportNavigation = (status: "applied" | "failed", errorMessage?: string) => {
+    const navigationReport = options?.navigationReport;
+    if (!navigationReport || reported || renderToken !== view.currentRenderToken) {
+      return;
+    }
+    reported = true;
+    window.surfAce.command({
+      ...(errorMessage ? { errorMessage } : {}),
+      paneId: pane.paneId,
+      status,
+      targetId: navigationReport.targetId,
+      type: "browser-url-navigation",
+      url: navigationReport.url,
+    });
+  };
+  const blockStaticHtmlNavigation = (event: Event) => {
+    if (!options?.staticHtmlSourceUrl) {
+      return;
+    }
+    const navigation = event as BrowserContentNavigationEvent;
+    if (navigation.isMainFrame === false) {
+      return;
+    }
+    const nextUrl = String(navigation.url ?? "");
+    if (!nextUrl || nextUrl === options.staticHtmlSourceUrl) {
+      return;
+    }
+    event.preventDefault();
+    sendNavigationIntent(view, pane.paneId, nextUrl);
+    window.setTimeout(() => {
+      if (renderToken === view.currentRenderToken && currentPaneFrameElement(view) === browserView) {
+        browserView.stop?.();
+        browserView.src = options.staticHtmlSourceUrl ?? url;
+      }
+    }, 0);
+  };
+  const verifyAndReportNavigation = (reason: BrowserUrlDiagnosticReason) => {
+    void resetBrowserUrlGuestScroll(browserView).finally(() => {
+      const eventReason = reason === "dom-ready:guest-viewport" ? "dom-ready" : "did-finish-load";
+      reportBrowserUrlDiagnostics(view, browserView, eventReason);
+      void verifyBrowserUrlGuestViewport(view, browserView, reason).then(({ mismatch }) => {
+        if (renderToken !== view.currentRenderToken) {
+          return;
+        }
+        if (mismatch) {
+          reportNavigation(
+            "failed",
+            `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
+          );
+          return;
+        }
+        reportNavigation("applied");
+        window.setTimeout(() => {
+          reportPaneSnapshot(view);
+        }, 0);
+      });
+    });
+  };
+  browserView.addEventListener(
+    "did-attach",
+    () => {
+      rendererDiagnostic("browser_content_did_attach", {
+        paneId: pane.paneId,
+        webContentsId: browserUrlWebContentsId(browserView),
+      });
+      reportBrowserUrlDiagnostics(view, browserView, "did-attach");
+    },
+  );
+  browserView.addEventListener(
+    "dom-ready",
+    () => {
+      rendererDiagnostic("browser_content_dom_ready", {
+        paneId: pane.paneId,
+        webContentsId: browserUrlWebContentsId(browserView),
+      });
+      verifyAndReportNavigation("dom-ready:guest-viewport");
+    },
+  );
+  browserView.addEventListener(
+    "did-finish-load",
+    () => {
+      rendererDiagnostic("browser_content_did_finish_load", {
+        paneId: pane.paneId,
+        webContentsId: browserUrlWebContentsId(browserView),
+      });
+      verifyAndReportNavigation("did-finish-load:guest-viewport");
+    },
+    { once: true },
+  );
+  browserView.addEventListener("will-navigate", blockStaticHtmlNavigation);
+  browserView.addEventListener("will-frame-navigate", blockStaticHtmlNavigation);
+  browserView.addEventListener(
+    "did-fail-load",
+    (event) => {
+      const failure = event as BrowserUrlWebViewErrorEvent;
+      if (failure.isMainFrame === false) {
+        return;
+      }
+      rendererDiagnostic("browser_content_did_fail_load", {
+        errorCode: failure.errorDescription ?? "",
+        paneId: pane.paneId,
+        webContentsId: browserUrlWebContentsId(browserView),
+      });
+      reportBrowserUrlDiagnostics(view, browserView, "did-fail-load");
+      const description = failure.errorDescription ? `: ${failure.errorDescription}` : "";
+      reportNavigation("failed", `webview navigation failed${description}`);
+    },
+    { once: true },
+  );
+  deferUntilPaneFrameReady(view, browserView, renderToken, () => {
+    browserView.src = url;
+    rendererDiagnostic("browser_content_navigation_assigned", {
+      paneId: pane.paneId,
+      webContentsId: browserUrlWebContentsId(browserView),
+    });
+    reportBrowserUrlDiagnostics(view, browserView, "navigation-assigned");
+  });
+}
+
 function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   const key = contentKey(pane);
   if (key === view.currentContentKey) {
@@ -1889,6 +1816,12 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   view.currentContentKey = key;
   const renderToken = resetDynamicContent(view);
   view.contentEl.className = `pane-content type-${pane.content.contentType ?? "empty"}`;
+  rendererDiagnostic("pane_content_render", {
+    contentType: pane.content.contentType ?? "empty",
+    hasContent: pane.content.content !== null,
+    paneId: pane.paneId,
+    renderVersion: pane.content.renderVersion,
+  });
 
   if (pane.externalNative && (!pane.content.contentType || pane.content.content === null)) {
     reportPaneSnapshot(view);
@@ -1901,126 +1834,19 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   }
 
   if (pane.content.contentType === "html") {
-    const html = pane.content.content as HtmlContent;
-    const frame = document.createElement("iframe");
-    frame.className = "content-html-frame content-html-frame--host-relay";
-    frame.setAttribute("sandbox", "allow-forms allow-popups-to-escape-sandbox allow-same-origin allow-scripts");
-    const isFullDocument = /^\s*<!doctype\s+html/i.test(html.html) || /^\s*<html[\s>]/i.test(html.html);
-    const finalHtml = isFullDocument
-      ? html.html
-      : `<!doctype html><html><head>${
-          html.baseUrl ? `<base href="${html.baseUrl}">` : ""
-        }<style>html,body{margin:0;padding:0;font-family:"Avenir Next","Segoe UI",sans-serif;background:#fff;color:#111;}</style></head><body>${html.html}</body></html>`;
-    wireHtmlFrame(view, pane.paneId, frame);
-    relayHtmlFramePointerEvents(view, frame);
-    view.contentEl.appendChild(frame);
-    sizeWebViewToPane(view, frame);
-    frame.addEventListener(
-      "load",
-      () => {
-        window.setTimeout(() => {
-          reportPaneSnapshot(view);
-        }, 0);
-      },
-      { once: true },
-    );
-    const assignSrcdoc = () => {
-      if (renderToken !== view.currentRenderToken) {
-        return;
-      }
-      frame.srcdoc = injectHtmlFrameBridge(finalHtml);
-      scheduleHtmlSnapshotRefresh(view, renderToken);
-    };
-    if (view.rootEl.isConnected) {
-      assignSrcdoc();
-    } else {
-      window.requestAnimationFrame(() => {
-        assignSrcdoc();
-      });
-    }
+    const htmlUrl = htmlDocumentDataUrl(pane.content.content as HtmlContent);
+    renderBrowserContent(view, pane, renderToken, htmlUrl, { staticHtmlSourceUrl: htmlUrl });
     return;
   }
 
   if (pane.content.contentType === "browser_url") {
     const browserUrl = pane.content.content as BrowserUrlContent;
-    const browserView = document.createElement("webview") as BrowserUrlWebViewElement;
-    browserView.className = "content-html-frame content-browser-url-frame";
-    browserView.setAttribute("allowpopups", "true");
-    view.contentEl.appendChild(browserView);
-    sizeWebViewToPane(view, browserView);
-    reportBrowserUrlDiagnostics(view, browserView, "pre-navigation");
-    let reported = false;
-    const reportNavigation = (status: "applied" | "failed", errorMessage?: string) => {
-      if (reported || renderToken !== view.currentRenderToken) {
-        return;
-      }
-      reported = true;
-      window.surfAce.command({
-        ...(errorMessage ? { errorMessage } : {}),
-        paneId: pane.paneId,
-        status,
+    renderBrowserContent(view, pane, renderToken, browserUrl.url, {
+      allowPopups: true,
+      navigationReport: {
         targetId: pane.content.contentId,
-        type: "browser-url-navigation",
         url: browserUrl.url,
-      });
-    };
-    const verifyAndReportNavigation = (reason: BrowserUrlDiagnosticReason) => {
-      void resetBrowserUrlGuestScroll(browserView).finally(() => {
-        const eventReason = reason === "dom-ready:guest-viewport" ? "dom-ready" : "did-finish-load";
-        reportBrowserUrlDiagnostics(view, browserView, eventReason);
-        void verifyBrowserUrlGuestViewport(view, browserView, reason).then(({ mismatch }) => {
-          if (renderToken !== view.currentRenderToken) {
-            return;
-          }
-          if (mismatch) {
-            reportNavigation(
-              "failed",
-              `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
-            );
-            return;
-          }
-          reportNavigation("applied");
-          window.setTimeout(() => {
-            reportPaneSnapshot(view);
-          }, 0);
-        });
-      });
-    };
-    browserView.addEventListener(
-      "did-attach",
-      () => {
-        reportBrowserUrlDiagnostics(view, browserView, "did-attach");
       },
-    );
-    browserView.addEventListener(
-      "dom-ready",
-      () => {
-        verifyAndReportNavigation("dom-ready:guest-viewport");
-      },
-    );
-    browserView.addEventListener(
-      "did-finish-load",
-      () => {
-        verifyAndReportNavigation("did-finish-load:guest-viewport");
-      },
-      { once: true },
-    );
-    browserView.addEventListener(
-      "did-fail-load",
-      (event) => {
-        const failure = event as BrowserUrlWebViewErrorEvent;
-        if (failure.isMainFrame === false) {
-          return;
-        }
-        reportBrowserUrlDiagnostics(view, browserView, "did-fail-load");
-        const description = failure.errorDescription ? `: ${failure.errorDescription}` : "";
-        reportNavigation("failed", `webview navigation failed${description}`);
-      },
-      { once: true },
-    );
-    deferUntilPaneFrameReady(view, browserView, renderToken, () => {
-      browserView.src = browserUrl.url;
-      reportBrowserUrlDiagnostics(view, browserView, "navigation-assigned");
     });
     return;
   }
@@ -2240,6 +2066,13 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
 }
 
 function renderWindow(state: RendererWindowState): void {
+  rendererDiagnostic("render_window_start", {
+    hasAppRoot: Boolean(appRoot),
+    hasLayout: Boolean(state.layout),
+    paneCount: state.panes.length,
+    surfaceId: state.surfaceId,
+    windowLabel: state.windowLabel,
+  });
   const previousState = latestState;
   if (previousState) {
     latestState = state;
@@ -2260,6 +2093,13 @@ function renderWindow(state: RendererWindowState): void {
   }
   wrapper.append(layoutRoot);
   appRoot.replaceChildren(wrapper);
+  rendererDiagnostic("render_window_committed", {
+    appChildCount: appRoot.childElementCount,
+    contentHostCount: appRoot.querySelectorAll(".pane-content").length,
+    paneShellCount: appRoot.querySelectorAll(".pane-shell").length,
+    surfaceWindowCount: appRoot.querySelectorAll(".surface-window").length,
+    webviewCount: appRoot.querySelectorAll("webview").length,
+  });
   setAllPaneChromeMetrics();
   refreshDynamicPaneFrames();
   reportAllPaneSnapshots();
@@ -2272,12 +2112,35 @@ function renderWindow(state: RendererWindowState): void {
 }
 
 async function init(): Promise<void> {
-  bootstrap = (await window.surfAce.getBootstrap()) as Bootstrap;
-  document.documentElement.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
-  document.body.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
-  document.body.classList.toggle("overlay-debug-borders", Boolean(bootstrap.overlayDebugBorders));
-  latestState = bootstrap.state;
-  renderWindow(bootstrap.state);
+  rendererDiagnostic("bootstrap_start", {
+    appRootPresent: Boolean(appRoot),
+    bodyChildCount: document.body.childElementCount,
+    locationSearch: window.location.search,
+  });
+  try {
+    bootstrap = (await window.surfAce.getBootstrap()) as Bootstrap | null;
+    if (!bootstrap?.state) {
+      rendererDiagnostic("bootstrap_invalid", {
+        bootstrapType: bootstrap === null ? "null" : typeof bootstrap,
+      });
+      return;
+    }
+    rendererDiagnostic("bootstrap_received", {
+      compositorHosted: Boolean(bootstrap.compositorHosted),
+      hasLayout: Boolean(bootstrap.state.layout),
+      paneCount: bootstrap.state.panes.length,
+      surfaceId: bootstrap.surfaceId,
+      windowLabel: bootstrap.state.windowLabel,
+    });
+    document.documentElement.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
+    document.body.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
+    document.body.classList.toggle("overlay-debug-borders", Boolean(bootstrap.overlayDebugBorders));
+    latestState = bootstrap.state;
+    renderWindow(bootstrap.state);
+  } catch (error) {
+    rendererDiagnostic("bootstrap_error", errorDiagnosticFields(error));
+    throw error;
+  }
 
   window.surfAce.onState((nextState) => {
     renderWindow(nextState as RendererWindowState);

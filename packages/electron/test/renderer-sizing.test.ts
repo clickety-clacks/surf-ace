@@ -14,16 +14,27 @@ async function mainSource(): Promise<string> {
   return fs.readFile(new URL("../../src/main.ts", import.meta.url), "utf8");
 }
 
+async function guestPreloadSource(): Promise<string> {
+  return fs.readFile(new URL("../../src/guest-preload.ts", import.meta.url), "utf8");
+}
+
+async function preloadSource(): Promise<string> {
+  return fs.readFile(new URL("../../src/preload.ts", import.meta.url), "utf8");
+}
+
 test("browser_url webviews defer navigation until the pane has a measured frame", async () => {
   const source = await rendererSource();
   const deferIndex = source.indexOf("function deferUntilPaneFrameReady");
+  const renderBrowserIndex = source.indexOf("function renderBrowserContent");
   const browserUrlIndex = source.indexOf("if (pane.content.contentType === \"browser_url\")");
-  const srcAssignmentIndex = source.indexOf("browserView.src = browserUrl.url", browserUrlIndex);
+  const srcAssignmentIndex = source.indexOf("browserView.src = url", renderBrowserIndex);
 
   assert.ok(deferIndex > -1);
+  assert.ok(renderBrowserIndex > -1);
   assert.ok(browserUrlIndex > -1);
-  assert.ok(srcAssignmentIndex > browserUrlIndex);
-  assert.match(source.slice(browserUrlIndex, srcAssignmentIndex), /deferUntilPaneFrameReady/);
+  assert.ok(srcAssignmentIndex > renderBrowserIndex);
+  assert.match(source.slice(renderBrowserIndex, srcAssignmentIndex), /deferUntilPaneFrameReady/);
+  assert.match(source.slice(browserUrlIndex), /renderBrowserContent\(view, pane, renderToken, browserUrl\.url/);
   assert.match(source.slice(deferIndex, srcAssignmentIndex), /applyPaneFrameSize\(view, element\)/);
 });
 
@@ -66,6 +77,22 @@ test("renderer reports pane snapshots after layout commits", async () => {
   assert.ok(rafReportIndex > rafIndex);
 });
 
+test("main preserves omitted browser-hosted snapshot fields", async () => {
+  const source = await mainSource();
+  const snapshotIndex = source.indexOf("ipcMain.on(\"surface:snapshot\"");
+  const pageIndex = source.indexOf("ipcMain.on(\"surface:page\"", snapshotIndex);
+  const handlerSource = source.slice(snapshotIndex, pageIndex);
+
+  assert.ok(snapshotIndex > -1);
+  assert.ok(pageIndex > snapshotIndex);
+  assert.match(handlerSource, /const snapshot: Parameters<SurfaceCore\["updatePaneSnapshot"\]>\[2\] = \{\};/);
+  for (const key of ["bounds", "selection", "viewport", "visibleText"]) {
+    assert.match(handlerSource, new RegExp(`if \\("${key}" in payload\\)`));
+  }
+  assert.doesNotMatch(handlerSource, /selection:\s*\(payload\.selection \?\? null\)/);
+  assert.doesNotMatch(handlerSource, /visibleText:\s*String\(payload\.visibleText \?\? ""\)/);
+});
+
 test("content replacement resets the pane scroll origin before browser_url mounts", async () => {
   const source = await rendererSource();
   const resetIndex = source.indexOf("function resetDynamicContent");
@@ -91,48 +118,48 @@ test("browser_url webviews constrain Electron guest bounds to the measured pane"
 test("browser_url diagnostics report host and guest sizing through surface commands", async () => {
   const source = await rendererSource();
   const diagnosticsIndex = source.indexOf("function reportBrowserUrlDiagnostics");
-  const browserUrlIndex = source.indexOf("if (pane.content.contentType === \"browser_url\")");
+  const renderBrowserIndex = source.indexOf("function renderBrowserContent");
 
   assert.ok(diagnosticsIndex > -1);
-  assert.match(source.slice(diagnosticsIndex, browserUrlIndex), /pane: elementDiagnostics\(view\.rootEl\)/);
-  assert.match(source.slice(diagnosticsIndex, browserUrlIndex), /scroll: elementDiagnostics\(view\.scrollEl\)/);
-  assert.match(source.slice(diagnosticsIndex, browserUrlIndex), /webview: elementDiagnostics\(webview\)/);
-  assert.match(source.slice(diagnosticsIndex, browserUrlIndex), /browserUrlGuestDiagnostics\(webview\)/);
-  assert.match(source.slice(browserUrlIndex), /reason === "dom-ready:guest-viewport" \? "dom-ready" : "did-finish-load"/);
-  assert.match(source.slice(browserUrlIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /pane: elementDiagnostics\(view\.rootEl\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /scroll: elementDiagnostics\(view\.scrollEl\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webview: elementDiagnostics\(webview\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /browserUrlGuestDiagnostics\(webview\)/);
+  assert.match(source.slice(renderBrowserIndex), /reason === "dom-ready:guest-viewport" \? "dom-ready" : "did-finish-load"/);
+  assert.match(source.slice(renderBrowserIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\)/);
 });
 
 test("browser_url render resets guest scroll before verification", async () => {
   const source = await rendererSource();
   const diagnosticsIndex = source.indexOf("async function browserUrlGuestDiagnostics");
   const resetGuestIndex = source.indexOf("function resetBrowserUrlGuestScroll");
-  const browserUrlIndex = source.indexOf("if (pane.content.contentType === \"browser_url\")");
+  const renderBrowserIndex = source.indexOf("function renderBrowserContent");
 
   assert.ok(diagnosticsIndex > -1);
   assert.ok(resetGuestIndex > -1);
   assert.ok(resetGuestIndex > diagnosticsIndex);
-  assert.match(source.slice(resetGuestIndex, browserUrlIndex), /window\.history\.scrollRestoration = "manual"/);
-  assert.match(source.slice(resetGuestIndex, browserUrlIndex), /window\.scrollTo\(0, 0\)/);
+  assert.match(source.slice(resetGuestIndex, renderBrowserIndex), /window\.history\.scrollRestoration = "manual"/);
+  assert.match(source.slice(resetGuestIndex, renderBrowserIndex), /window\.scrollTo\(0, 0\)/);
   assert.match(source.slice(diagnosticsIndex, resetGuestIndex), /scrollY: Math\.round\(window\.scrollY\)/);
-  assert.match(source.slice(browserUrlIndex), /resetBrowserUrlGuestScroll\(browserView\)[\s\S]*verifyBrowserUrlGuestViewport\(view, browserView, reason\)/);
+  assert.match(source.slice(renderBrowserIndex), /resetBrowserUrlGuestScroll\(browserView\)[\s\S]*verifyBrowserUrlGuestViewport\(view, browserView, reason\)/);
 });
 
 test("browser_url navigation verifies the guest viewport before reporting success", async () => {
   const source = await rendererSource();
   const mismatchIndex = source.indexOf("function browserUrlViewportMismatch");
   const verifierIndex = source.indexOf("function verifyBrowserUrlGuestViewport");
-  const browserUrlIndex = source.indexOf("if (pane.content.contentType === \"browser_url\")");
-  const helperIndex = source.indexOf("const verifyAndReportNavigation", browserUrlIndex);
-  const domReadyIndex = source.indexOf("\"dom-ready\"", browserUrlIndex);
-  const finishIndex = source.indexOf("\"did-finish-load\"", browserUrlIndex);
+  const renderBrowserIndex = source.indexOf("function renderBrowserContent");
+  const helperIndex = source.indexOf("const verifyAndReportNavigation", renderBrowserIndex);
+  const domReadyIndex = source.indexOf("\"dom-ready\"", renderBrowserIndex);
+  const finishIndex = source.indexOf("\"did-finish-load\"", renderBrowserIndex);
 
   assert.ok(mismatchIndex > -1);
   assert.ok(verifierIndex > -1);
   assert.ok(helperIndex > -1);
   assert.match(source.slice(mismatchIndex, verifierIndex), /Math\.abs\(guest\.innerHeight - hostHeight\)/);
   assert.match(source.slice(mismatchIndex, verifierIndex), /Math\.abs\(guest\.innerWidth - hostWidth\)/);
-  assert.match(source.slice(verifierIndex, browserUrlIndex), /browserUrlViewportMismatch\(webview, guest\)/);
-  assert.match(source.slice(verifierIndex, browserUrlIndex), /nudgeBrowserUrlWebViewResize\(view, webview\)/);
+  assert.match(source.slice(verifierIndex, renderBrowserIndex), /browserUrlViewportMismatch\(webview, guest\)/);
+  assert.match(source.slice(verifierIndex, renderBrowserIndex), /nudgeBrowserUrlWebViewResize\(view, webview\)/);
   assert.match(source.slice(helperIndex), /verifyBrowserUrlGuestViewport\(view, browserView, reason\)/);
   assert.match(source.slice(helperIndex), /webview guest viewport stuck at/);
   assert.match(source.slice(helperIndex), /reportNavigation\("applied"\)/);
@@ -221,7 +248,7 @@ test("editable contexts show native text input context menu in renderer and brow
   assert.match(createWindowSource, /wireWindowInputMenus\(window\)/);
 });
 
-test("renderer applies keyboard scroll intents to regular, html, and browser_url pane content", async () => {
+test("renderer applies keyboard scroll intents to regular and browser-hosted pane content", async () => {
   const source = await rendererSource();
   const intentIndex = source.indexOf("function scrollPaneByKeyboard");
   const initIndex = source.indexOf("async function init");
@@ -231,7 +258,7 @@ test("renderer applies keyboard scroll intents to regular, html, and browser_url
   assert.match(source.slice(intentIndex, initIndex), /paneStateFor\(view\)\?\.annotationBorderVisible/);
   assert.match(source.slice(intentIndex, initIndex), /reportBrowserUrlKeyboardScroll\(view, result\)/);
   assert.match(source.slice(intentIndex, initIndex), /scrollPromise[\s\S]*\.catch\(\(\) => \{\}\)/);
-  assert.match(source.slice(intentIndex, initIndex), /frame\.contentWindow\.scrollBy/);
+  assert.doesNotMatch(source.slice(intentIndex, initIndex), /frame\.contentWindow\.scrollBy/);
   assert.match(source.slice(intentIndex, initIndex), /view\.scrollEl\.scrollBy/);
   assert.match(source.slice(initIndex), /window\.surfAce\.onKeyboardIntent/);
 });
@@ -245,15 +272,40 @@ test("html and browser_url frames have a non-auto CSS height fallback", async ()
   assert.doesNotMatch(frameRule, /height:\s*auto;/);
 });
 
-test("html frames relay host pointer events into iframe content", async () => {
+test("html content is loaded through the browser webview surface", async () => {
   const source = await rendererSource();
   const styles = await rendererStyles();
+  const guestPreload = await guestPreloadSource();
+  const preload = await preloadSource();
 
-  assert.match(source, /function relayHtmlFramePointerEvents/);
-  assert.match(source, /channel: "surf-ace-host-relay"/);
-  assert.match(source, /new PointerEvent\(payload\.eventType/);
-  assert.match(source, /frame\.className = "content-html-frame content-html-frame--host-relay"/);
-  assert.match(styles, /\.content-html-frame--host-relay\s*\{[\s\S]*pointer-events:\s*none;/);
+  const htmlIndex = source.indexOf("if (pane.content.contentType === \"html\")");
+  const browserUrlIndex = source.indexOf("if (pane.content.contentType === \"browser_url\")");
+
+  assert.ok(htmlIndex > -1);
+  assert.ok(browserUrlIndex > htmlIndex);
+  assert.match(source.slice(htmlIndex, browserUrlIndex), /const htmlUrl = htmlDocumentDataUrl/);
+  assert.match(source.slice(htmlIndex, browserUrlIndex), /renderBrowserContent\(view, pane, renderToken, htmlUrl, \{ staticHtmlSourceUrl: htmlUrl \}\)/);
+  assert.match(source, /document\.createElement\("webview"\)/);
+  assert.match(source, /browserView\.setAttribute\("preload", window\.surfAce\.guestPreloadPath\)/);
+  assert.match(preload, /ipcRenderer\.sendSync\("surface:get-guest-preload-path"\)/);
+  assert.match(preload, /guestPreloadPath,/);
+  assert.doesNotMatch(preload, /from "node:/);
+  assert.match(source, /if \(options\?\.allowPopups\)[\s\S]*browserView\.setAttribute\("allowpopups", "true"\)/);
+  assert.match(source.slice(browserUrlIndex), /allowPopups: true/);
+  assert.doesNotMatch(source.slice(htmlIndex, browserUrlIndex), /allowPopups: true/);
+  assert.match(source, /const blockStaticHtmlNavigation = \(event: Event\) =>[\s\S]*sendNavigationIntent\(view, pane\.paneId, nextUrl\)/);
+  assert.match(source, /window\.surfAce\.reportSnapshot\(\{\s*bounds: paneBounds\(view\),\s*paneId: view\.paneId,\s*\}\)/);
+  assert.match(source, /webview\.addEventListener\("ipc-message", onIpcMessage\)/);
+  assert.match(guestPreload, /ipcRenderer\.sendToHost\("surf-ace-content", payload\)/);
+  assert.match(guestPreload, /if \(window\.location\.protocol === "data:"\)[\s\S]*event\.preventDefault\(\)/);
+  assert.doesNotMatch(source, /document\.createElement\("iframe"\)/);
+  assert.doesNotMatch(source, /\.srcdoc\b/);
+  assert.doesNotMatch(source, /HTMLIFrameElement/);
+  assert.doesNotMatch(source, /function relayHtmlFramePointerEvents/);
+  assert.doesNotMatch(source, /channel: "surf-ace-host-relay"/);
+  assert.doesNotMatch(source, /new PointerEvent\(payload\.eventType/);
+  assert.doesNotMatch(source, /content-html-frame--host-relay/);
+  assert.doesNotMatch(styles, /\.content-html-frame--host-relay/);
 });
 
 test("browser_url webviews preserve Electron's flex display for the OOPIF child", async () => {
@@ -279,8 +331,9 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   const styles = await rendererStyles();
 
   assert.match(source, /provenanceName: string \| null/);
+  assert.match(source, /ownerName: string \| null/);
   assert.match(source, /const navigationOwnerName = pane\.provenanceName/);
-  assert.doesNotMatch(source, /const navigationOwnerName = pane\.provenanceName \?\? pane\.ownerName/);
+  assert.match(source, /ownerName\.className = "navigation-pill__owner"/);
   assert.match(source, /ownerName\.textContent = navigationOwnerName/);
   assert.doesNotMatch(source, /pane-label__sender/);
   assert.doesNotMatch(source, /provenanceLabelEl/);

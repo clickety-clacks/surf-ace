@@ -332,6 +332,39 @@ function surfaceIdForSender(contents: WebContents): string | null {
   return null;
 }
 
+function rendererDiagnosticFields(
+  surfaceId: string | null,
+  senderId: number,
+  payload: Record<string, unknown>,
+): Record<string, boolean | number | string | null | undefined> {
+  const fields: Record<string, boolean | number | string | null | undefined> = {
+    routed_surface_id: surfaceId ?? "none",
+    sender_id: senderId,
+  };
+  const rendererEvent = payload.event;
+  if (typeof rendererEvent === "string" && rendererEvent.length > 0) {
+    fields.renderer_event = rendererEvent.slice(0, 80);
+  }
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === "event") {
+      continue;
+    }
+    const fieldKey = `renderer_${key}`;
+    if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      fields[fieldKey] = typeof value === "string" ? value.slice(0, 240) : value;
+      continue;
+    }
+    if (value !== undefined) {
+      try {
+        fields[fieldKey] = JSON.stringify(value).slice(0, 240);
+      } catch {
+        fields[fieldKey] = String(value).slice(0, 240);
+      }
+    }
+  }
+  return fields;
+}
+
 function flushPendingWindowState(surfaceId: string): void {
   const window = windows.get(surfaceId);
   if (!window || window.isDestroyed() || !readyWindows.has(surfaceId)) {
@@ -905,6 +938,52 @@ function wireWindowInputMenus(window: BrowserWindow): void {
   });
 }
 
+function wireWindowDiagnostics(surfaceId: string, window: BrowserWindow): void {
+  window.webContents.on("console-message", (_event, level, message, lineNumber, sourceId) => {
+    clientInfo("window_console_message", {
+      level,
+      line_number: lineNumber,
+      message: String(message).slice(0, 500),
+      source_id: String(sourceId ?? "").slice(0, 240),
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    clientWarn("window_load_failed", {
+      error_code: errorCode,
+      error_description: errorDescription,
+      is_main_frame: isMainFrame,
+      surface_id: surfaceId,
+      url: validatedURL,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+  window.webContents.on("dom-ready", () => {
+    clientInfo("window_dom_ready", {
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+  window.webContents.on("preload-error", (_event, preloadPath, error) => {
+    clientWarn("window_preload_error", {
+      error_message: error.message,
+      error_name: error.name,
+      preload_path: preloadPath,
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    clientWarn("window_render_process_gone", {
+      exit_code: details.exitCode,
+      reason: details.reason,
+      surface_id: surfaceId,
+      window_label: core.surfaceWindowLabel(surfaceId),
+    });
+  });
+}
+
 async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow> {
   const existing = windows.get(surfaceId);
   if (existing && !existing.isDestroyed()) {
@@ -949,6 +1028,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   });
   readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);
+  wireWindowDiagnostics(surfaceId, window);
   wireWindowInputMenus(window);
   window.once("ready-to-show", () => {
     syncWindowViewport(surfaceId, window);
@@ -1205,9 +1285,21 @@ function installIpc(): void {
   ipcMain.handle("surface:get-bootstrap", async (event) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) {
+      clientWarn("renderer_bootstrap_unrouted", {
+        sender_id: event.sender.id,
+        window_count: windows.size,
+      });
       return null;
     }
     const state = core.getRendererWindowState(surfaceId);
+    clientInfo("renderer_bootstrap_routed", {
+      content_pane_count: state.panes.filter((pane) => Boolean(pane.content.contentType)).length,
+      has_layout: Boolean(state.layout),
+      pane_count: state.panes.length,
+      sender_id: event.sender.id,
+      surface_id: surfaceId,
+      window_label: state.windowLabel,
+    });
     return {
       compositorHosted: Boolean(resolveCompositorControlSocketPath()),
       overlayDebugBorders: false,
@@ -1216,18 +1308,46 @@ function installIpc(): void {
     };
   });
 
+  ipcMain.on("surface:get-guest-preload-path", (event) => {
+    event.returnValue = path.join(distDir, "guest-preload.cjs");
+  });
+
+  ipcMain.on("surface:renderer-diagnostic", (event, payload) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!payload || typeof payload !== "object") {
+      clientWarn("renderer_diagnostic_invalid", {
+        routed_surface_id: surfaceId ?? "none",
+        sender_id: event.sender.id,
+      });
+      return;
+    }
+    clientInfo("renderer_diagnostic", rendererDiagnosticFields(
+      surfaceId,
+      event.sender.id,
+      payload as Record<string, unknown>,
+    ));
+  });
+
   ipcMain.on("surface:snapshot", (event, payload) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId || !payload || typeof payload !== "object") {
       return;
     }
     try {
-      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), {
-        bounds: payload.bounds as { height: number; width: number; x: number; y: number } | null,
-        selection: (payload.selection ?? null) as never,
-        viewport: payload.viewport as never,
-        visibleText: String(payload.visibleText ?? ""),
-      });
+      const snapshot: Parameters<SurfaceCore["updatePaneSnapshot"]>[2] = {};
+      if ("bounds" in payload) {
+        snapshot.bounds = payload.bounds as { height: number; width: number; x: number; y: number } | null;
+      }
+      if ("selection" in payload) {
+        snapshot.selection = (payload.selection ?? null) as never;
+      }
+      if ("viewport" in payload) {
+        snapshot.viewport = payload.viewport as never;
+      }
+      if ("visibleText" in payload) {
+        snapshot.visibleText = String(payload.visibleText ?? "");
+      }
+      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot);
     } catch {
       // Renderer snapshot updates are best-effort; stale pane ids should not crash the app.
     }
