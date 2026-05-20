@@ -276,7 +276,19 @@ private enum SurfAceRajdhaniMetrics {
 
 private enum SurfAceSpatialIdentityLayout {
     static let depthOffset: CGFloat = 56
+    static let edgeInset = SurfAcePaneChromeLayout.bottomInset
     static let bundleIdentifier = "co.clicketyclacks.SurfAce.spatial"
+}
+
+func surfAcePaneIdentityChromeInset(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> CGFloat {
+    if bundleIdentifier == SurfAceSpatialIdentityLayout.bundleIdentifier {
+        return SurfAceSpatialIdentityLayout.edgeInset
+    }
+    return SurfAcePaneChromeLayout.bottomInset
+}
+
+func surfAcePaneIdentityAlignsToVisualBottom(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> Bool {
+    bundleIdentifier == SurfAceSpatialIdentityLayout.bundleIdentifier
 }
 
 private enum SurfAceIdentityBaseline: AlignmentID {
@@ -521,11 +533,12 @@ private struct SurfAcePaneView: View {
                     displayId: identity.displayId,
                     windowLabel: identity.windowLabel,
                     paneSize: proxy.size,
-                    connectionState: surface.connectionBarState
+                    connectionState: surface.connectionBarState,
+                    alignsToVisualBottom: surfAcePaneIdentityAlignsToVisualBottom()
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .padding(.trailing, 28)
-                .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                .padding(.trailing, surfAcePaneIdentityChromeInset())
+                .padding(.bottom, surfAcePaneIdentityChromeInset())
                 .surfAceSpatialChromeDepthOffset()
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
@@ -875,13 +888,25 @@ private struct SurfAcePaneIdentityOverlay: View {
     let windowLabel: String
     let paneSize: CGSize
     let connectionState: SurfAceConnectionBarState
+    let alignsToVisualBottom: Bool
 
     private var fontSize: CGFloat {
         max(1, min(paneSize.width, paneSize.height) / 4)
     }
 
+    private var verticalAlignment: VerticalAlignment {
+        alignsToVisualBottom ? .bottom : .surfAceIdentityBaseline
+    }
+
     var body: some View {
-        HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
+        identityContent
+            .alignmentGuide(.bottom) { dimensions in
+                alignsToVisualBottom ? dimensions[.bottom] : dimensions[.surfAceIdentityBaseline]
+            }
+    }
+
+    private var identityContent: some View {
+        HStack(alignment: verticalAlignment, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
                     .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
@@ -903,7 +928,6 @@ private struct SurfAcePaneIdentityOverlay: View {
                 .minimumScaleFactor(0.35)
                 .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
         }
-        .alignmentGuide(.bottom) { dimensions in dimensions[.surfAceIdentityBaseline] }
     }
 
     private var connectionColor: Color {

@@ -342,6 +342,16 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testSpatialPaneIdentityUsesSharedInsetAndVisualBottomAlignment() {
+        XCTAssertEqual(
+            surfAcePaneIdentityChromeInset(bundleIdentifier: "co.clicketyclacks.SurfAce.spatial"),
+            surfAcePaneIdentityChromeInset(bundleIdentifier: "co.clicketyclacks.SurfAce")
+        )
+        XCTAssertTrue(surfAcePaneIdentityAlignsToVisualBottom(bundleIdentifier: "co.clicketyclacks.SurfAce.spatial"))
+        XCTAssertFalse(surfAcePaneIdentityAlignsToVisualBottom(bundleIdentifier: "co.clicketyclacks.SurfAce"))
+    }
+
+    @MainActor
     func testPaneChromeIdentityDoesNotUseContentTitleAsSessionName() {
         let surface = SurfAceSurfaceModel(sceneKey: "scene-chrome-title", surfaceId: "sf_chrome_title", windowLabel: "e", name: "Surf Ace")
         let pane = SurfAcePaneModel(paneId: 16, paneLabel: 99, name: "Right")
