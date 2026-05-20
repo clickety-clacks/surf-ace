@@ -916,6 +916,13 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
       });
       navigationPill.appendChild(forward);
     }
+    const navigationOwnerName = pane.provenanceName;
+    if (navigationOwnerName) {
+      const ownerName = document.createElement("span");
+      ownerName.className = "navigation-pill__owner";
+      ownerName.textContent = navigationOwnerName;
+      navigationPill.appendChild(ownerName);
+    }
     if (navigationPill.childElementCount > 0) {
       view.controlsEl.appendChild(navigationPill);
     }
