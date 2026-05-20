@@ -342,13 +342,12 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
-    func testSpatialPaneIdentityUsesSharedInsetAndVisualBottomAlignment() {
+    func testSpatialPaneIdentityUsesSharedInsetAndBaselineAlignment() {
         XCTAssertEqual(
             surfAcePaneIdentityChromeInset(bundleIdentifier: "co.clicketyclacks.SurfAce.spatial"),
             surfAcePaneIdentityChromeInset(bundleIdentifier: "co.clicketyclacks.SurfAce")
         )
-        XCTAssertTrue(surfAcePaneIdentityAlignsToVisualBottom(bundleIdentifier: "co.clicketyclacks.SurfAce.spatial"))
-        XCTAssertFalse(surfAcePaneIdentityAlignsToVisualBottom(bundleIdentifier: "co.clicketyclacks.SurfAce"))
+        XCTAssertEqual(surfAceSpatialChromeDepthOffsetValue(), 0)
     }
 
     @MainActor

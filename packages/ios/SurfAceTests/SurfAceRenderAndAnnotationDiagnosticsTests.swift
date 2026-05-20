@@ -325,8 +325,8 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
 
     func testSpatialEmptyPaneMarkerFramesOffsetOutwardFromContentBounds() throws {
         let paneSize = CGSize(width: 300, height: 200)
-        let markerSize: CGFloat = 58
-        let cornerInset: CGFloat = 10
+        let markerSize: CGFloat = 48
+        let cornerInset = surfAceSpatialEmptyPaneCornerInset()
         let outwardOffset: CGFloat = 16
         let lineWidth: CGFloat = 3
 
@@ -338,7 +338,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             lineWidth: lineWidth,
             corner: .topLeading
         ))
-        XCTAssertEqual(topLeading.origin, CGPoint(x: -6, y: -6))
+        XCTAssertEqual(topLeading.origin, CGPoint(x: -16, y: -16))
         XCTAssertTrue(CGRect(origin: .zero, size: paneSize).intersects(topLeading))
 
         let topTrailing = try XCTUnwrap(surfAceSpatialEmptyPaneMarkerFrame(
@@ -349,7 +349,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             lineWidth: lineWidth,
             corner: .topTrailing
         ))
-        XCTAssertEqual(topTrailing.origin, CGPoint(x: 248, y: -6))
+        XCTAssertEqual(topTrailing.origin, CGPoint(x: 268, y: -16))
         XCTAssertGreaterThan(topTrailing.maxX, paneSize.width)
         XCTAssertTrue(CGRect(origin: .zero, size: paneSize).intersects(topTrailing))
 
@@ -361,7 +361,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             lineWidth: lineWidth,
             corner: .bottomLeading
         ))
-        XCTAssertEqual(bottomLeading.origin, CGPoint(x: -6, y: 148))
+        XCTAssertEqual(bottomLeading.origin, CGPoint(x: -16, y: 168))
         XCTAssertGreaterThan(bottomLeading.maxY, paneSize.height)
         XCTAssertTrue(CGRect(origin: .zero, size: paneSize).intersects(bottomLeading))
 
@@ -373,7 +373,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             lineWidth: lineWidth,
             corner: .bottomTrailing
         ))
-        XCTAssertEqual(bottomTrailing.origin, CGPoint(x: 248, y: 148))
+        XCTAssertEqual(bottomTrailing.origin, CGPoint(x: 268, y: 168))
         XCTAssertGreaterThan(bottomTrailing.maxX, paneSize.width)
         XCTAssertGreaterThan(bottomTrailing.maxY, paneSize.height)
         XCTAssertTrue(CGRect(origin: .zero, size: paneSize).intersects(bottomTrailing))
@@ -387,7 +387,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             let frame = try XCTUnwrap(surfAceSpatialEmptyPaneMarkerFrame(
                 size: paneSize,
                 markerSize: 58,
-                cornerInset: 10,
+                cornerInset: surfAceSpatialEmptyPaneCornerInset(),
                 outwardOffset: 16,
                 lineWidth: 3,
                 corner: corner

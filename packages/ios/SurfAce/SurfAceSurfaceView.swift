@@ -13,13 +13,17 @@ private enum SurfAcePaneChromeLayout {
 }
 
 private enum SurfAceSpatialPaneChromeLayout {
-    static let cornerInset: CGFloat = 10
+    static let cornerInset: CGFloat = 0
     static let cornerRadius: CGFloat = 45
     static let endpointTrimDegrees: Double = 14
     static let outwardOffset: CGFloat = 16
     static let lineWidth: CGFloat = 3
     static let opacity: Double = 0.18
     static let fillOpacity: Double = 0.01
+}
+
+func surfAceSpatialEmptyPaneCornerInset() -> CGFloat {
+    SurfAceSpatialPaneChromeLayout.cornerInset
 }
 
 private enum SurfAceSpatialWindowContentLayout {
@@ -275,9 +279,13 @@ private enum SurfAceRajdhaniMetrics {
 }
 
 private enum SurfAceSpatialIdentityLayout {
-    static let depthOffset: CGFloat = 56
+    static let depthOffset: CGFloat = 0
     static let edgeInset = SurfAcePaneChromeLayout.bottomInset
     static let bundleIdentifier = "co.clicketyclacks.SurfAce.spatial"
+}
+
+func surfAceSpatialChromeDepthOffsetValue() -> CGFloat {
+    SurfAceSpatialIdentityLayout.depthOffset
 }
 
 func surfAcePaneIdentityChromeInset(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> CGFloat {
@@ -285,10 +293,6 @@ func surfAcePaneIdentityChromeInset(bundleIdentifier: String? = Bundle.main.bund
         return SurfAceSpatialIdentityLayout.edgeInset
     }
     return SurfAcePaneChromeLayout.bottomInset
-}
-
-func surfAcePaneIdentityAlignsToVisualBottom(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> Bool {
-    bundleIdentifier == SurfAceSpatialIdentityLayout.bundleIdentifier
 }
 
 private enum SurfAceIdentityBaseline: AlignmentID {
@@ -533,8 +537,7 @@ private struct SurfAcePaneView: View {
                     displayId: identity.displayId,
                     windowLabel: identity.windowLabel,
                     paneSize: proxy.size,
-                    connectionState: surface.connectionBarState,
-                    alignsToVisualBottom: surfAcePaneIdentityAlignsToVisualBottom()
+                    connectionState: surface.connectionBarState
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, surfAcePaneIdentityChromeInset())
@@ -888,25 +891,13 @@ private struct SurfAcePaneIdentityOverlay: View {
     let windowLabel: String
     let paneSize: CGSize
     let connectionState: SurfAceConnectionBarState
-    let alignsToVisualBottom: Bool
 
     private var fontSize: CGFloat {
         max(1, min(paneSize.width, paneSize.height) / 4)
     }
 
-    private var verticalAlignment: VerticalAlignment {
-        alignsToVisualBottom ? .bottom : .surfAceIdentityBaseline
-    }
-
     var body: some View {
-        identityContent
-            .alignmentGuide(.bottom) { dimensions in
-                alignsToVisualBottom ? dimensions[.bottom] : dimensions[.surfAceIdentityBaseline]
-            }
-    }
-
-    private var identityContent: some View {
-        HStack(alignment: verticalAlignment, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
+        HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
             if !windowLabel.isEmpty {
                 Text(windowLabel.uppercased())
                     .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
@@ -928,6 +919,7 @@ private struct SurfAcePaneIdentityOverlay: View {
                 .minimumScaleFactor(0.35)
                 .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
         }
+        .alignmentGuide(.bottom) { dimensions in dimensions[.surfAceIdentityBaseline] }
     }
 
     private var connectionColor: Color {
