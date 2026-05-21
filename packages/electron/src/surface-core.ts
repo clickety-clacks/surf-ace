@@ -141,7 +141,10 @@ type BrowserUrlTargetValidation =
     };
 
 const TERMINAL_HOST_EXECUTABLES = new Set(["alacritty", "foot", "ghostty", "kitty", "wezterm"]);
-const DIRECT_NATIVE_PANE_EXECUTABLES = new Set(["galculator", "weston-simple-egl"]);
+const DIRECT_NATIVE_PANE_EXECUTABLES = new Set(["galculator", "kolourpaint", "weston-simple-egl"]);
+const DIRECT_NATIVE_PANE_EXECUTABLE_ENV = new Map<string, Record<string, string>>([
+  ["kolourpaint", { QT_QPA_PLATFORM: "wayland" }],
+]);
 
 export type PaneNavigationDirection = "down" | "left" | "right" | "up";
 
@@ -703,12 +706,17 @@ export class SurfaceCore {
         const executableName = command.split(/[\\/]/).pop() ?? command;
         const launchesDirectNativePaneProcess = DIRECT_NATIVE_PANE_EXECUTABLES.has(executableName);
         const isTerminalHost = TERMINAL_HOST_EXECUTABLES.has(executableName);
+        const directNativeEnv = launchesDirectNativePaneProcess ? DIRECT_NATIVE_PANE_EXECUTABLE_ENV.get(executableName) : undefined;
+        const processEnv = {
+          ...(directNativeEnv ?? {}),
+          ...(isPlainRecord(env) && isStringRecord(env) ? env : {}),
+        };
         paneEntry.target = "terminal";
         paneEntry.process = {
           args: isTerminalHost || launchesDirectNativePaneProcess ? commandArgs : ["-e", command, ...commandArgs],
           command: isTerminalHost || launchesDirectNativePaneProcess ? command : "foot",
           ...(typeof cwd === "string" ? { cwd } : {}),
-          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
+          ...(Object.keys(processEnv).length > 0 ? { env: processEnv } : {}),
         };
       }
     }

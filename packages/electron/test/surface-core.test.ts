@@ -1920,7 +1920,11 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
 });
 
-for (const command of ["/usr/bin/galculator", "/usr/bin/weston-simple-egl"]) {
+for (const { command, processEnv } of [
+  { command: "/usr/bin/galculator", processEnv: undefined },
+  { command: "/usr/bin/kolourpaint", processEnv: { QT_QPA_PLATFORM: "wayland" } },
+  { command: "/usr/bin/weston-simple-egl", processEnv: undefined },
+]) {
   test(`surface core materializes allowlisted Wayland GUI terminal_app command ${command} as a direct native pane process`, () => {
     const core = new SurfaceCore({
       persistentState: {
@@ -1961,7 +1965,11 @@ for (const command of ["/usr/bin/galculator", "/usr/bin/weston-simple-egl"]) {
     });
 
     assert.equal(materialization.op, "native_pane.host");
-    assert.deepEqual(materialization.panes[0]?.process, { args: [], command });
+    assert.deepEqual(materialization.panes[0]?.process, {
+      args: [],
+      command,
+      ...(processEnv ? { env: processEnv } : {}),
+    });
     assert.equal(materialization.panes[0]?.target, "terminal");
     assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
     assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
