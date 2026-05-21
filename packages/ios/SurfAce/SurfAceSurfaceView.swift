@@ -16,7 +16,8 @@ private enum SurfAceSpatialPaneChromeLayout {
     static let cornerInset: CGFloat = 0
     static let cornerRadius: CGFloat = 45
     static let endpointTrimDegrees: Double = 14
-    static let outwardOffset: CGFloat = 16
+    static let outwardOffset: CGFloat = 32
+    static let minimumVisibleMarkerSpan: CGFloat = 16
     static let lineWidth: CGFloat = 3
     static let opacity: Double = 0.18
     static let fillOpacity: Double = 0.01
@@ -514,81 +515,85 @@ private struct SurfAcePaneView: View {
             let showsSpatialEmptyPaneChrome = surfAceShowsSpatialEmptyPaneChrome(entry: pane.currentEntry)
             ZStack {
                 ZStack {
-                    SurfAcePaneRepresentable(
-                        runtime: runtime,
-                        surfaceId: surface.surfaceId,
-                        paneId: pane.paneId
+                    ZStack {
+                        SurfAcePaneRepresentable(
+                            runtime: runtime,
+                            surfaceId: surface.surfaceId,
+                            paneId: pane.paneId
+                        )
+                        .id("\(surface.surfaceId):\(pane.paneId)")
+                        .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
+
+                        if showsSpatialEmptyPaneChrome {
+                            SurfAceSpatialEmptyPaneFill()
+                        }
+                    }
+                    .surfAceSpatialWindowContentClip(paneFrame: paneFrame, surfaceBounds: surfaceBounds)
+
+                    let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
+                    SurfAcePaneIdentityOverlay(
+                        displayId: identity.displayId,
+                        windowLabel: identity.windowLabel,
+                        paneSize: proxy.size,
+                        connectionState: surface.connectionBarState
                     )
-                    .id("\(surface.surfaceId):\(pane.paneId)")
-                    .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(.trailing, surfAcePaneIdentityChromeInset())
+                    .padding(.bottom, surfAcePaneIdentityChromeInset())
+                    .surfAceSpatialChromeDepthOffset()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
 
-                    if showsSpatialEmptyPaneChrome {
-                        SurfAceSpatialEmptyPaneFill()
+                    if !showsSpatialEmptyPaneChrome, let toast = pane.toast {
+                        VStack {
+                            Spacer()
+                            Text(toast)
+                                .font(.custom(SurfAceChromeFont.regularName, size: 13))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(.black.opacity(0.74), in: Capsule())
+                                .padding(.bottom, 96)
+                        }
+                        .onAppear {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                runtime.clearToast(surfaceId: surface.surfaceId, paneId: pane.paneId)
+                            }
+                        }
                     }
-                }
-                .surfAceSpatialWindowContentClip(paneFrame: paneFrame, surfaceBounds: surfaceBounds)
 
-                if showsSpatialEmptyPaneChrome {
-                    SurfAceSpatialEmptyPaneMarkers()
-                }
-
-                let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
-                SurfAcePaneIdentityOverlay(
-                    displayId: identity.displayId,
-                    windowLabel: identity.windowLabel,
-                    paneSize: proxy.size,
-                    connectionState: surface.connectionBarState
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .padding(.trailing, surfAcePaneIdentityChromeInset())
-                .padding(.bottom, surfAcePaneIdentityChromeInset())
-                .surfAceSpatialChromeDepthOffset()
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-
-                if !showsSpatialEmptyPaneChrome, let toast = pane.toast {
-                    VStack {
-                        Spacer()
-                        Text(toast)
-                            .font(.custom(SurfAceChromeFont.regularName, size: 13))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(.black.opacity(0.74), in: Capsule())
-                            .padding(.bottom, 96)
-                    }
-                    .onAppear {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                            runtime.clearToast(surfaceId: surface.surfaceId, paneId: pane.paneId)
+                    if !showsSpatialEmptyPaneChrome {
+                        VStack {
+                            Spacer()
+                            SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
+                                .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                                .surfAceSpatialChromeDepthOffset()
                         }
                     }
                 }
-
-                if !showsSpatialEmptyPaneChrome {
-                    VStack {
-                        Spacer()
-                        SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
-                            .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
-                            .surfAceSpatialChromeDepthOffset()
-                    }
-                }
-            }
-            .overlay {
-                SurfAceAnnotationBorder(
-                    active: !showsSpatialEmptyPaneChrome && surfAceShowsAnnotationBorder(annotationMode: pane.annotationMode),
-                    pulsing: pane.isDrawingFlushSending
-                )
-            }
-            .overlay {
-                SurfAceKeyboardActiveBorder(
-                    active: !showsSpatialEmptyPaneChrome && surfAceShowsKeyboardFocusOutline(
-                        activePaneId: surface.activeKeyboardPaneId,
-                        paneId: pane.paneId,
-                        paneCount: surface.panes.count
+                .overlay {
+                    SurfAceAnnotationBorder(
+                        active: !showsSpatialEmptyPaneChrome && surfAceShowsAnnotationBorder(annotationMode: pane.annotationMode),
+                        pulsing: pane.isDrawingFlushSending
                     )
-                )
-                    .allowsHitTesting(false)
-                    .zIndex(10_000)
+                }
+                .overlay {
+                    SurfAceKeyboardActiveBorder(
+                        active: !showsSpatialEmptyPaneChrome && surfAceShowsKeyboardFocusOutline(
+                            activePaneId: surface.activeKeyboardPaneId,
+                            paneId: pane.paneId,
+                            paneCount: surface.panes.count
+                        )
+                    )
+                        .allowsHitTesting(false)
+                        .zIndex(10_000)
+                }
+                .clipped()
+
+                if showsSpatialEmptyPaneChrome {
+                    SurfAceSpatialEmptyPaneMarkers()
+                        .zIndex(1)
+                }
             }
             .onChange(of: proxy.size) { _, newSize in
                 pane.lastMeasuredSize = newSize
@@ -612,7 +617,6 @@ private struct SurfAcePaneView: View {
                 runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
             }
         )
-        .clipped()
     }
 
     private func publishGeometrySnapshot(paneFrame: CGRect) {
@@ -760,14 +764,23 @@ private struct SurfAceSpatialEmptyPaneFill: View {
 
 private struct SurfAceSpatialEmptyPaneMarkers: View {
     var body: some View {
-        Canvas { context, size in
-            let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
-                + SurfAceSpatialPaneChromeLayout.cornerRadius
-                + SurfAceSpatialPaneChromeLayout.lineWidth
-            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topLeading)
-            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .topTrailing)
-            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
-            drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomTrailing)
+        GeometryReader { proxy in
+            let contentSize = proxy.size
+            let chromeOutset = SurfAceSpatialPaneChromeLayout.outwardOffset
+
+            Canvas { context, _ in
+                context.translateBy(x: chromeOutset, y: chromeOutset)
+
+                let markerSize = SurfAceSpatialPaneChromeLayout.cornerInset
+                    + SurfAceSpatialPaneChromeLayout.cornerRadius
+                    + SurfAceSpatialPaneChromeLayout.lineWidth
+                drawCorner(in: &context, size: contentSize, markerSize: markerSize, corner: .topLeading)
+                drawCorner(in: &context, size: contentSize, markerSize: markerSize, corner: .topTrailing)
+                drawCorner(in: &context, size: contentSize, markerSize: markerSize, corner: .bottomLeading)
+                drawCorner(in: &context, size: contentSize, markerSize: markerSize, corner: .bottomTrailing)
+            }
+            .frame(width: contentSize.width + chromeOutset * 2, height: contentSize.height + chromeOutset * 2)
+            .offset(x: -chromeOutset, y: -chromeOutset)
         }
         .surfAceSpatialChromeDepthOffset()
         .allowsHitTesting(false)
@@ -859,7 +872,8 @@ func surfAceSpatialEmptyPaneMarkerFrame(
     guard width > lineWidth, height > lineWidth else { return nil }
 
     let inset = min(cornerInset, max(0, min(size.width - width, size.height - height)))
-    let offset = min(outwardOffset, inset + min(width, height) - lineWidth)
+    let minimumVisibleSpan = min(SurfAceSpatialPaneChromeLayout.minimumVisibleMarkerSpan, min(width, height))
+    let offset = min(outwardOffset, max(0, inset + min(width, height) - minimumVisibleSpan))
     let leadingX = inset - offset
     let trailingX = size.width - width - inset + offset
     let topY = inset - offset
