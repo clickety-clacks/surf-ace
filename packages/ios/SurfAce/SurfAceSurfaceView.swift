@@ -279,13 +279,21 @@ private enum SurfAceRajdhaniMetrics {
 }
 
 private enum SurfAceSpatialIdentityLayout {
-    static let depthOffset: CGFloat = 0
+    static let depthOffset: CGFloat = 56
     static let edgeInset = SurfAcePaneChromeLayout.bottomInset
     static let bundleIdentifier = "co.clicketyclacks.SurfAce.spatial"
 }
 
-func surfAceSpatialChromeDepthOffsetValue() -> CGFloat {
+private enum SurfAceSpatialChromeDepthLayout {
+    static let depthOffset: CGFloat = 0
+}
+
+func surfAceSpatialIdentityDepthOffsetValue() -> CGFloat {
     SurfAceSpatialIdentityLayout.depthOffset
+}
+
+func surfAceSpatialChromeDepthOffsetValue() -> CGFloat {
+    SurfAceSpatialChromeDepthLayout.depthOffset
 }
 
 func surfAcePaneIdentityChromeInset(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> CGFloat {
@@ -542,7 +550,7 @@ private struct SurfAcePaneView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 .padding(.trailing, surfAcePaneIdentityChromeInset())
                 .padding(.bottom, surfAcePaneIdentityChromeInset())
-                .surfAceSpatialChromeDepthOffset()
+                .surfAceSpatialIdentityDepthOffset()
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
 
@@ -769,7 +777,6 @@ private struct SurfAceSpatialEmptyPaneMarkers: View {
             drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomLeading)
             drawCorner(in: &context, size: size, markerSize: markerSize, corner: .bottomTrailing)
         }
-        .surfAceSpatialChromeDepthOffset()
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
@@ -952,10 +959,23 @@ private extension View {
     }
 
     @ViewBuilder
-    func surfAceSpatialChromeDepthOffset() -> some View {
+    func surfAceSpatialIdentityDepthOffset() -> some View {
         #if os(visionOS)
         if Bundle.main.bundleIdentifier == SurfAceSpatialIdentityLayout.bundleIdentifier {
             self.offset(z: SurfAceSpatialIdentityLayout.depthOffset)
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func surfAceSpatialChromeDepthOffset() -> some View {
+        #if os(visionOS)
+        if Bundle.main.bundleIdentifier == SurfAceSpatialIdentityLayout.bundleIdentifier {
+            self.offset(z: SurfAceSpatialChromeDepthLayout.depthOffset)
         } else {
             self
         }
