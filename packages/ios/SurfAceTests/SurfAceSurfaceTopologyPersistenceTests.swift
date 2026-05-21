@@ -347,6 +347,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             surfAcePaneIdentityChromeInset(bundleIdentifier: "co.clicketyclacks.SurfAce.spatial"),
             surfAcePaneIdentityChromeInset(bundleIdentifier: "co.clicketyclacks.SurfAce")
         )
+        XCTAssertEqual(surfAceSpatialIdentityDepthOffsetValue(), 56)
         XCTAssertEqual(surfAceSpatialChromeDepthOffsetValue(), 0)
     }
 
