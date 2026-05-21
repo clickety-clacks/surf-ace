@@ -141,7 +141,7 @@ type BrowserUrlTargetValidation =
     };
 
 const TERMINAL_HOST_EXECUTABLES = new Set(["alacritty", "foot", "ghostty", "kitty", "wezterm"]);
-const DIRECT_NATIVE_PANE_EXECUTABLES = new Set(["weston-simple-egl"]);
+const DIRECT_NATIVE_PANE_EXECUTABLES = new Set(["galculator", "weston-simple-egl"]);
 
 export type PaneNavigationDirection = "down" | "left" | "right" | "up";
 
