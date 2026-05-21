@@ -188,17 +188,27 @@ type NavigationMemo = {
   url: string;
 };
 
+type DuplicateRepushKind = "HTML" | "URL";
+
+type DuplicateRepushSignature = {
+  kind: DuplicateRepushKind;
+  value: string;
+};
+
 type PaneView = {
   annotationCanvas: HTMLCanvasElement;
   annotationShield: HTMLDivElement;
   contentEl: HTMLElement;
   controlsEl: HTMLDivElement;
   currentContentKey: string;
+  currentContentSignature: DuplicateRepushSignature | null;
   currentDrawingsKey: string;
   currentHtmlFrameCleanup: (() => void) | null;
   currentRenderToken: number;
   currentScrollHandler: (() => void) | null;
   currentWebViewResizeObserver: ResizeObserver | null;
+  duplicateRepushEl: HTMLDivElement;
+  dismissedDuplicateRepushKey: string | null;
   lastNavigation: NavigationMemo | null;
   paneId: number;
   rootEl: HTMLDivElement;
@@ -245,7 +255,8 @@ type SurfAceOverlayKind =
   | "history-forward"
   | "pane-label"
   | "pane-handle"
-  | "reload";
+  | "reload"
+  | "duplicate-repush-close";
 
 function errorDiagnosticFields(error: unknown): Record<string, string> {
   if (error instanceof Error) {
@@ -285,6 +296,32 @@ window.addEventListener("unhandledrejection", (event) => {
 
 function contentKey(pane: RendererPaneState): string {
   return `${pane.externalNative ? "native" : "renderer"}:${pane.content.contentType ?? "empty"}:${pane.content.contentId ?? "none"}:${pane.content.revision}:${pane.content.renderVersion}`;
+}
+
+function duplicateRepushSignature(pane: RendererPaneState): DuplicateRepushSignature | null {
+  if (pane.content.contentType === "browser_url" && pane.content.content && "url" in pane.content.content) {
+    return {
+      kind: "URL",
+      value: String(pane.content.content.url ?? ""),
+    };
+  }
+  if (pane.content.contentType === "html" && pane.content.content && "html" in pane.content.content) {
+    const html = pane.content.content as HtmlContent;
+    return {
+      kind: "HTML",
+      value: JSON.stringify({ baseUrl: html.baseUrl ?? null, html: html.html }),
+    };
+  }
+  return null;
+}
+
+function isDuplicateRepush(view: PaneView, pane: RendererPaneState, nextSignature: DuplicateRepushSignature | null): boolean {
+  if (!nextSignature || !view.currentContentSignature) {
+    return false;
+  }
+  return view.currentContentSignature.kind === nextSignature.kind &&
+    view.currentContentSignature.value === nextSignature.value &&
+    view.currentContentKey !== contentKey(pane);
 }
 
 function paneRenderKey(state: RendererWindowState, pane: RendererPaneState): string {
@@ -412,6 +449,8 @@ function overlayMetadataForMarker(
       return { captures: OVERLAY_CAPTURES, kind: "history_forward", suffix: marker, zIndex: 20 };
     case "reload":
       return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker, zIndex: 20 };
+    case "duplicate-repush-close":
+      return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker, zIndex: 30 };
     case "keyboard-focus-edge":
       return { captures: ["pointer_hover"], kind: "other", suffix: marker, zIndex: 25 };
     case "pane-label":
@@ -622,7 +661,7 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   return button;
 }
 
-function createLucideIcon(name: "pen-line" | "rotate-cw"): SVGSVGElement {
+function createLucideIcon(name: "pen-line" | "rotate-cw" | "x"): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("class", `lucide lucide-${name}`);
@@ -643,6 +682,10 @@ function createLucideIcon(name: "pen-line" | "rotate-cw"): SVGSVGElement {
       "M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1.06 6.63 2.92",
       "M21 3v6h-6",
     ],
+    x: [
+      "M18 6 6 18",
+      "m6 6 12 12",
+    ],
   };
   for (const pathData of pathsByIcon[name]) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
@@ -652,7 +695,7 @@ function createLucideIcon(name: "pen-line" | "rotate-cw"): SVGSVGElement {
   return svg;
 }
 
-function createIconButton(iconName: "pen-line" | "rotate-cw", accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
+function createIconButton(iconName: "pen-line" | "rotate-cw" | "x", accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
   const button = document.createElement("button");
   button.className = `control-button icon-button ${className}`;
   button.disabled = disabled;
@@ -660,6 +703,64 @@ function createIconButton(iconName: "pen-line" | "rotate-cw", accessibleLabel: s
   button.title = accessibleLabel;
   button.appendChild(createLucideIcon(iconName));
   return button;
+}
+
+function duplicateRepushCulpritLines(pane: RendererPaneState): string[] {
+  const provenance = pane.content.display?.provenance;
+  const lines = [
+    pane.provenanceName ? `Sender: ${pane.provenanceName}` : null,
+    provenance?.source ? `Source: ${provenance.source}` : null,
+    provenance?.sessionKey ? `Session: ${provenance.sessionKey}` : null,
+    provenance?.agentId ? `Agent: ${provenance.agentId}` : null,
+    provenance?.streamLabel ? `Stream: ${provenance.streamLabel}` : null,
+    pane.content.contentId ? `Content: ${pane.content.contentId} r${pane.content.revision}` : null,
+  ];
+  return lines.filter((line): line is string => Boolean(line));
+}
+
+function hideDuplicateRepushOverlay(view: PaneView): void {
+  view.duplicateRepushEl.hidden = true;
+  view.duplicateRepushEl.replaceChildren();
+  scheduleCompositorOverlayRegionReport("visibility");
+}
+
+function showDuplicateRepushOverlay(view: PaneView, pane: RendererPaneState, signature: DuplicateRepushSignature): void {
+  const duplicateKey = `${contentKey(pane)}:${signature.kind}:${signature.value}`;
+  if (view.dismissedDuplicateRepushKey === duplicateKey) {
+    return;
+  }
+
+  const title = document.createElement("strong");
+  title.textContent = "Unnecessary re-push";
+  const message = document.createElement("span");
+  message.textContent = `Same ${signature.kind === "URL" ? "URL" : "HTML"} pushed again. Scroll position preserved.`;
+  const culprit = document.createElement("span");
+  culprit.className = "duplicate-repush-overlay__culprit";
+  const culpritLines = duplicateRepushCulpritLines(pane);
+  culprit.textContent = culpritLines.length > 0 ? culpritLines.join(" · ") : "Source unavailable";
+  const close = surfAceOverlay(createIconButton("x", "Dismiss duplicate re-push notice", "duplicate-repush-overlay__close"), "duplicate-repush-close");
+  close.addEventListener("click", () => {
+    view.dismissedDuplicateRepushKey = duplicateKey;
+    hideDuplicateRepushOverlay(view);
+  });
+
+  view.duplicateRepushEl.replaceChildren(title, message, culprit, close);
+  view.duplicateRepushEl.hidden = false;
+  scheduleCompositorOverlayRegionReport("visibility");
+}
+
+function reportDuplicateBrowserUrlNavigation(pane: RendererPaneState): void {
+  if (pane.content.contentType !== "browser_url" || !pane.content.content) {
+    return;
+  }
+  const browserUrl = pane.content.content as BrowserUrlContent;
+  window.surfAce.command({
+    paneId: pane.paneId,
+    status: "applied",
+    targetId: pane.content.contentId,
+    type: "browser-url-navigation",
+    url: browserUrl.url,
+  });
 }
 
 function setPaneChromeMetrics(view: PaneView): void {
@@ -834,8 +935,11 @@ function ensurePaneView(paneId: number): PaneView {
   const toastEl = document.createElement("div");
   toastEl.className = "pane-toast";
   toastEl.hidden = true;
+  const duplicateRepushEl = document.createElement("div");
+  duplicateRepushEl.className = "duplicate-repush-overlay";
+  duplicateRepushEl.hidden = true;
 
-  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, toastEl);
+  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, toastEl, duplicateRepushEl);
 
   const view: PaneView = {
     annotationCanvas: canvas,
@@ -843,11 +947,14 @@ function ensurePaneView(paneId: number): PaneView {
     contentEl,
     controlsEl,
     currentContentKey: "",
+    currentContentSignature: null,
     currentDrawingsKey: "",
     currentHtmlFrameCleanup: null,
     currentRenderToken: 0,
     currentScrollHandler: null,
     currentWebViewResizeObserver: null,
+    dismissedDuplicateRepushKey: null,
+    duplicateRepushEl,
     lastNavigation: null,
     paneId,
     rootEl,
@@ -1813,7 +1920,19 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     return;
   }
 
+  const nextSignature = duplicateRepushSignature(pane);
+  if (isDuplicateRepush(view, pane, nextSignature)) {
+    view.currentContentKey = key;
+    view.currentContentSignature = nextSignature;
+    showDuplicateRepushOverlay(view, pane, nextSignature!);
+    reportDuplicateBrowserUrlNavigation(pane);
+    reportPaneSnapshot(view);
+    return;
+  }
+
   view.currentContentKey = key;
+  view.currentContentSignature = nextSignature;
+  hideDuplicateRepushOverlay(view);
   const renderToken = resetDynamicContent(view);
   view.contentEl.className = `pane-content type-${pane.content.contentType ?? "empty"}`;
   rendererDiagnostic("pane_content_render", {

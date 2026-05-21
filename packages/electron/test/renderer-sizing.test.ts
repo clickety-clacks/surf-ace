@@ -93,15 +93,20 @@ test("main preserves omitted browser-hosted snapshot fields", async () => {
   assert.doesNotMatch(handlerSource, /visibleText:\s*String\(payload\.visibleText \?\? ""\)/);
 });
 
-test("content replacement resets the pane scroll origin before browser_url mounts", async () => {
+test("changed content replacement resets the pane scroll origin before browser_url mounts", async () => {
   const source = await rendererSource();
   const resetIndex = source.indexOf("function resetDynamicContent");
   const renderIndex = source.indexOf("function renderPaneContent");
+  const duplicateIndex = source.indexOf("isDuplicateRepush(view, pane, nextSignature)", renderIndex);
 
   assert.ok(resetIndex > -1);
   assert.ok(renderIndex > resetIndex);
+  assert.ok(duplicateIndex > renderIndex);
   assert.match(source.slice(resetIndex, renderIndex), /view\.scrollEl\.scrollLeft = 0;/);
   assert.match(source.slice(resetIndex, renderIndex), /view\.scrollEl\.scrollTop = 0;/);
+  assert.match(source.slice(duplicateIndex), /showDuplicateRepushOverlay\(view, pane, nextSignature!\)/);
+  assert.match(source.slice(duplicateIndex), /return;/);
+  assert.match(source.slice(duplicateIndex), /const renderToken = resetDynamicContent\(view\)/);
 });
 
 test("browser_url webviews constrain Electron guest bounds to the measured pane", async () => {
@@ -306,6 +311,44 @@ test("html content is loaded through the browser webview surface", async () => {
   assert.doesNotMatch(source, /new PointerEvent\(payload\.eventType/);
   assert.doesNotMatch(source, /content-html-frame--host-relay/);
   assert.doesNotMatch(styles, /\.content-html-frame--host-relay/);
+});
+
+test("duplicate html and browser_url pushes preserve the mounted guest and show culprit overlay", async () => {
+  const source = await rendererSource();
+  const styles = await rendererStyles();
+  const signatureIndex = source.indexOf("function duplicateRepushSignature");
+  const duplicateIndex = source.indexOf("function isDuplicateRepush");
+  const culpritIndex = source.indexOf("function duplicateRepushCulpritLines");
+  const overlayIndex = source.indexOf("function showDuplicateRepushOverlay");
+  const renderIndex = source.indexOf("function renderPaneContent");
+  const resetIndex = source.indexOf("const renderToken = resetDynamicContent(view)", renderIndex);
+
+  assert.ok(signatureIndex > -1);
+  assert.ok(duplicateIndex > signatureIndex);
+  assert.ok(culpritIndex > duplicateIndex);
+  assert.ok(overlayIndex > culpritIndex);
+  assert.ok(renderIndex > overlayIndex);
+  assert.ok(resetIndex > renderIndex);
+  assert.match(source.slice(signatureIndex, duplicateIndex), /pane\.content\.contentType === "browser_url"[\s\S]*url/);
+  assert.match(source.slice(signatureIndex, duplicateIndex), /pane\.content\.contentType === "html"[\s\S]*baseUrl[\s\S]*html\.html/);
+  assert.match(source.slice(duplicateIndex, overlayIndex), /view\.currentContentSignature\.kind === nextSignature\.kind/);
+  assert.match(source.slice(duplicateIndex, overlayIndex), /view\.currentContentSignature\.value === nextSignature\.value/);
+  assert.match(
+    source.slice(renderIndex, resetIndex),
+    /view\.currentContentKey = key;[\s\S]*showDuplicateRepushOverlay\(view, pane, nextSignature!\)[\s\S]*reportDuplicateBrowserUrlNavigation\(pane\)[\s\S]*return;/,
+  );
+  assert.doesNotMatch(source.slice(renderIndex, resetIndex), /resetDynamicContent\(view\)/);
+  assert.match(source.slice(overlayIndex, renderIndex), /type: "browser-url-navigation"/);
+  assert.match(source.slice(overlayIndex, renderIndex), /status: "applied"/);
+  assert.match(source.slice(overlayIndex, renderIndex), /targetId: pane\.content\.contentId/);
+  assert.match(source.slice(culpritIndex, overlayIndex), /provenance\?\.sessionKey/);
+  assert.match(source.slice(culpritIndex, overlayIndex), /provenance\?\.source/);
+  assert.match(source.slice(culpritIndex, overlayIndex), /provenance\?\.agentId/);
+  assert.match(source.slice(culpritIndex, overlayIndex), /provenance\?\.streamLabel/);
+  assert.doesNotMatch(source.slice(overlayIndex, renderIndex), /duplicate_repush_preserved_scroll/);
+  assert.match(source.slice(overlayIndex, renderIndex), /createIconButton\("x", "Dismiss duplicate re-push notice"/);
+  assert.match(styles, /\.duplicate-repush-overlay\s*\{/);
+  assert.match(styles, /\.duplicate-repush-overlay__close\s*\{/);
 });
 
 test("browser_url webviews preserve Electron's flex display for the OOPIF child", async () => {
