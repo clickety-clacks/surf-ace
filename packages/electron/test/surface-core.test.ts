@@ -1920,6 +1920,52 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
 });
 
+test("surface core materializes allowlisted Wayland GUI terminal_app commands as direct native pane processes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const pane = core.pairState(surface.surfaceId).panes[0]!;
+
+  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+    ownershipEpoch: 1,
+    ownershipSessionId: "sa_test" as never,
+    paneLineageId: pane.paneLineageId,
+    requestId: "restore_weston_simple_egl",
+    restoreReason: "resume_restore",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 3,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.terminal_app.v1"],
+      safeToLogFields: ["command", "args"],
+      safetyClass: "process",
+      summary: "/usr/bin/weston-simple-egl",
+    },
+    targetId: "target_weston_simple_egl",
+    targetKind: "terminal_app",
+    targetPayload: {
+      args: [],
+      command: "/usr/bin/weston-simple-egl",
+      envPolicy: "surface_default",
+      pty: true,
+      restartPolicy: "manual_only",
+    },
+  });
+
+  assert.equal(materialization.op, "native_pane.host");
+  assert.deepEqual(materialization.panes[0]?.process, { args: [], command: "/usr/bin/weston-simple-egl" });
+  assert.equal(materialization.panes[0]?.target, "terminal");
+  assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
+  assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
+});
+
 test("surface core snaps terminal native geometry to compositor integer bounds", () => {
   const core = new SurfaceCore({
     persistentState: {

@@ -80,6 +80,12 @@ export type CompositorOverlayUpdateReason =
   | "update"
   | "visibility";
 
+type NativePaneOverlaySetRequest = Omit<NativePaneOverlaySet, "regions"> & {
+  regions: CompositorOverlayRegion[];
+  type: "overlay_regions.set";
+  updateReason: "initial" | "update";
+};
+
 export type CompositorControlRequest =
   | {
     panes: NativePaneMaterialization["panes"];
@@ -92,10 +98,7 @@ export type CompositorControlRequest =
   | {
     type: "get_status";
   }
-  | (NonNullable<NativePaneMaterialization["overlaySet"]> & {
-    type: "overlay_regions.set";
-    updateReason: "initial" | "update";
-  })
+  | NativePaneOverlaySetRequest
   | {
     coordinateSpace: "surface_logical";
     regions: CompositorOverlayRegion[];
@@ -179,6 +182,7 @@ export function overlayRequestForCompositor(
       }
       return {
         ...region,
+        kind: "other",
         paneInstanceId: nativePaneInstanceIdForCompositor(pane),
         rect: {
           height: pane.geometry.height,

@@ -98,6 +98,7 @@ test("native pane bridge serializes host and overlay requests from protocol mate
     regions: [
       {
         ...input.overlaySet!.regions[0]!,
+        kind: "other",
         paneInstanceId: "118:target_top",
       },
     ],
@@ -157,6 +158,7 @@ test("native pane bridge derives native overlay rectangles from pane geometry", 
     regions: [
       {
         ...input.overlaySet!.regions[0]!,
+        kind: "other",
         paneInstanceId: "118:target_top",
         rect: { height: 384, width: 512, x: 512, y: 0 },
       },

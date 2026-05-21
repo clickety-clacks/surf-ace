@@ -140,6 +140,9 @@ type BrowserUrlTargetValidation =
       result: TargetApplyResponse["payload"];
     };
 
+const TERMINAL_HOST_EXECUTABLES = new Set(["alacritty", "foot", "ghostty", "kitty", "wezterm"]);
+const DIRECT_NATIVE_PANE_EXECUTABLES = new Set(["weston-simple-egl"]);
+
 export type PaneNavigationDirection = "down" | "left" | "right" | "up";
 
 export type PersistentSurfaceState = {
@@ -698,11 +701,12 @@ export class SurfaceCore {
       if (typeof command === "string") {
         const commandArgs = Array.isArray(args) && args.every((arg) => typeof arg === "string") ? [...args] : [];
         const executableName = command.split(/[\\/]/).pop() ?? command;
-        const isTerminalHost = ["alacritty", "foot", "ghostty", "kitty", "wezterm"].includes(executableName);
+        const launchesDirectNativePaneProcess = DIRECT_NATIVE_PANE_EXECUTABLES.has(executableName);
+        const isTerminalHost = TERMINAL_HOST_EXECUTABLES.has(executableName);
         paneEntry.target = "terminal";
         paneEntry.process = {
-          args: isTerminalHost ? commandArgs : ["-e", command, ...commandArgs],
-          command: isTerminalHost ? command : "foot",
+          args: isTerminalHost || launchesDirectNativePaneProcess ? commandArgs : ["-e", command, ...commandArgs],
+          command: isTerminalHost || launchesDirectNativePaneProcess ? command : "foot",
           ...(typeof cwd === "string" ? { cwd } : {}),
           ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
         };
