@@ -2626,6 +2626,9 @@ fingerprint       string    Stable screen identity (window-scoped; mapped from `
 windowLabel       string    Provider-assigned visible window label (`a`, `b`, `aa`, ...)
 name              string    Human-readable screen name
 connectionState   enum      "connected" | "connecting" | "unreachable"
+appearance        object    { appearance: "light" | "dark" | "unknown",
+                               appearanceSource: "manual" | "sun_schedule" | "unknown",
+                               updatedAt: epochMs | null }
 lastSeenAt        epochMs   When screen was last seen in mDNS or active
 viewport          object    { width, height, scale }
 panes             array     Full current pane topology: [{ paneId, name, activeContent, historySummary }]
@@ -2706,6 +2709,34 @@ summary           string?   Optional human-readable target summary for diagnosti
 **Product proof gate:** Native GUI/app materialization is production-proven only when this official Surf Ace provider/tool path owns the target apply. A valid proof starts from `surf_ace_list` showing the target pane admitted/actionable, launches through `surf_ace_launch_terminal` or a future provider-owned target tool, receives target apply evidence for the same pane with `nativeHost: "applied"` and `overlayRegions: "applied"`, and captures visible rendering in that Surf Ace pane. Direct compositor/native-pane calls such as `native_pane.host`, manually hosted windows, demo fixtures, fake WS servers, mocked compositor status, or lower-layer logs are diagnostic evidence only. They may explain a failure inside the Electron/compositor seam, but they cannot satisfy Surf Ace spec/product verification by themselves.
 
 **Errors:** `not_connected`, `screen_not_found`, `invalid_operation`, `materialization_failed`
+
+---
+
+#### `surf_ace_set_appearance`
+
+Apply explicit environment appearance state to a managed screen through the Surf Ace provider path. Write.
+
+**Params:**
+```
+fingerprint    string   Target screen
+appearance     enum     "light" | "dark" | "unknown"
+```
+
+**Returns:**
+```
+fingerprint        string
+appearance         enum     "light" | "dark" | "unknown"
+appearanceSource   enum     "manual" | "sun_schedule" | "unknown"
+updatedAt          epochMs | null
+status             enum     "applied" | "failed"
+message            string?  Failure detail when status is "failed"
+```
+
+**Behavior:** The provider sends an `appearance.apply` request to the paired Surf Ace surface. The surface applies the state through its configured compositor control socket, stores the compositor-reported environment appearance readback, and exposes it in `panes.list`; the provider mirrors that readback into `surf_ace_list`. This path publishes environment appearance only. Surf Ace apps remain responsible for toolbar colors, CSS, and application theme rendering.
+
+**Product proof gate:** Appearance policy is production-proven only when CLU uses this Surf Ace provider/tool path and then reads the resulting `appearance` field from `surf_ace_list` for the same managed surface. Direct compositor status/control calls are diagnostic evidence only.
+
+**Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
 
 ---
 

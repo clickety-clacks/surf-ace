@@ -16,6 +16,14 @@ function createStubRuntime(): SurfAceRuntime {
       remainingStrokeCount: 0,
       removedStrokeIds: [],
     }),
+    applyAppearance: async (input) => ({
+      appearance: input.appearance,
+      appearanceSource: "manual",
+      fingerprint: input.fingerprint,
+      ok: true,
+      status: "applied",
+      updatedAt: Date.now() as never,
+    }),
     capturePane: async () => ({
       capture: {
         bytesBase64: "iVBORw0KGgo=",
@@ -146,6 +154,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.deepEqual(surfAceToolNames, [
     "surf_ace_list",
     "surf_ace_authority_diagnostics",
+    "surf_ace_set_appearance",
     "surf_ace_push",
     "surf_ace_launch_terminal",
     "surf_ace_clear",
@@ -162,6 +171,19 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.deepEqual(
     tools.map((tool) => tool.name),
     [...surfAceToolNames],
+  );
+
+  const appearanceTool = tools.find((tool) => tool.name === "surf_ace_set_appearance");
+  assert.ok(appearanceTool);
+  assert.deepEqual(
+    Object.keys(appearanceTool.inputSchema.properties as Record<string, unknown>).sort(),
+    ["appearance", "fingerprint"].sort(),
+  );
+  assert.deepEqual(appearanceTool.inputSchema.required, ["fingerprint", "appearance"]);
+  assert.equal(appearanceTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(
+    (appearanceTool.inputSchema.properties as { appearance: { enum: string[] } }).appearance.enum,
+    ["light", "dark", "unknown"],
   );
 
   const pushTool = tools.find((tool) => tool.name === "surf_ace_push");
@@ -312,4 +334,36 @@ test("surf_ace_push forwards markdown content through the first-class push path"
     paneId: 1,
   });
   assert.equal(result.contentId, "ct_markdown");
+});
+
+test("surf_ace_set_appearance forwards through the provider appearance path", async () => {
+  let captured: unknown;
+  const runtime = {
+    ...createStubRuntime(),
+    applyAppearance: async (args: unknown) => {
+      captured = args;
+      return {
+        appearance: "dark",
+        appearanceSource: "manual",
+        fingerprint: "sf_1",
+        ok: true,
+        status: "applied",
+        updatedAt: 123 as never,
+      };
+    },
+  } as SurfAceRuntime;
+  const appearanceTool = createSurfAceTools(runtime).find((tool) => tool.name === "surf_ace_set_appearance");
+
+  assert.ok(appearanceTool);
+  const result = await appearanceTool.execute({
+    appearance: "dark",
+    fingerprint: "sf_1",
+  });
+
+  assert.deepEqual(captured, {
+    appearance: "dark",
+    fingerprint: "sf_1",
+  });
+  assert.equal(result.appearance, "dark");
+  assert.equal(result.appearanceSource, "manual");
 });

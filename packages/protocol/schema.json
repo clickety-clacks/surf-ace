@@ -17,6 +17,9 @@
       "$ref": "#/$defs/TargetApplyRequest"
     },
     {
+      "$ref": "#/$defs/AppearanceApplyRequest"
+    },
+    {
       "$ref": "#/$defs/TargetRegisterRequest"
     },
     {
@@ -54,6 +57,9 @@
     },
     {
       "$ref": "#/$defs/TargetApplyResponse"
+    },
+    {
+      "$ref": "#/$defs/AppearanceApplyResponse"
     },
     {
       "$ref": "#/$defs/TargetRegisteredResponse"
@@ -880,6 +886,91 @@
           }
         }
       ]
+    },
+    "SurfaceAppearanceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["appearance", "appearanceSource", "updatedAt"],
+      "properties": {
+        "appearance": {
+          "type": "string",
+          "enum": ["light", "dark", "unknown"]
+        },
+        "appearanceSource": {
+          "type": "string",
+          "enum": ["manual", "sun_schedule", "unknown"]
+        },
+        "updatedAt": {
+          "oneOf": [
+            { "$ref": "#/$defs/EpochMs" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "AppearanceApplyRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "appearance.apply" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId", "appearance"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "appearance": {
+              "type": "string",
+              "enum": ["light", "dark", "unknown"]
+            }
+          }
+        }
+      }
+    },
+    "AppearanceApplyResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "appearance.apply.result" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["appearance", "appearanceSource", "updatedAt", "surfaceId", "status"],
+          "properties": {
+            "appearance": {
+              "type": "string",
+              "enum": ["light", "dark", "unknown"]
+            },
+            "appearanceSource": {
+              "type": "string",
+              "enum": ["manual", "sun_schedule", "unknown"]
+            },
+            "updatedAt": {
+              "oneOf": [
+                { "$ref": "#/$defs/EpochMs" },
+                { "type": "null" }
+              ]
+            },
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "status": {
+              "type": "string",
+              "enum": ["applied", "failed"]
+            },
+            "message": { "type": "string" }
+          }
+        }
+      }
     },
     "SurfacesListRequest": {
       "type": "object",
@@ -1902,6 +1993,9 @@
                 "topologyRevision"
               ],
               "properties": {
+                "appearance": {
+                  "$ref": "#/$defs/SurfaceAppearanceState"
+                },
                 "panes": {
                   "type": "array",
                   "minItems": 1,
@@ -2608,6 +2702,7 @@
             "surfaces.list",
             "pair.request",
             "ownership.relinquish",
+            "appearance.apply",
             "target.apply",
             "target.register",
             "content.set",
@@ -3383,6 +3478,9 @@
             "panes"
           ],
           "properties": {
+            "appearance": {
+              "$ref": "#/$defs/SurfaceAppearanceState"
+            },
                 "panes": {
                   "type": "array",
                   "minItems": 1,

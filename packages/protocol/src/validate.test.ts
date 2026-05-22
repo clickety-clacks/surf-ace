@@ -84,6 +84,38 @@ test("validateEnvelopeType accepts provider authority state envelopes", () => {
   assert.deepEqual(response, { ok: true });
 });
 
+test("validateEnvelopeType accepts appearance apply envelopes", () => {
+  const request = validateEnvelopeType("appearance.apply", {
+    id: "req_appearance_1",
+    op: "appearance.apply",
+    payload: {
+      appearance: "dark",
+      surfaceId: "sf_1",
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+  assert.deepEqual(request, { ok: true });
+
+  const response = validateEnvelopeType("appearance.apply", {
+    id: "req_appearance_1",
+    ok: true,
+    op: "appearance.apply.result",
+    payload: {
+      appearance: "dark",
+      appearanceSource: "manual",
+      status: "applied",
+      surfaceId: "sf_1",
+      updatedAt: Date.now(),
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(response, { ok: true });
+});
+
 test("validateEnvelopeType accepts weighted topology change events", () => {
   const result = validateEnvelopeType("event.topology_changed", {
     eventId: "ev_topology_resize",

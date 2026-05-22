@@ -2,6 +2,7 @@ import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
 import type { PusherProvenance } from "../../protocol/src/index.js";
 import {
   type SurfAceAnnotateRemoveInput,
+  type SurfAceAppearanceInput,
   type SurfAceLaunchTerminalInput,
   type PaneId,
   type SurfAceRealizeTopologyInput,
@@ -17,6 +18,7 @@ import {
 export const surfAceToolNames = [
   "surf_ace_list",
   "surf_ace_authority_diagnostics",
+  "surf_ace_set_appearance",
   "surf_ace_push",
   "surf_ace_launch_terminal",
   "surf_ace_clear",
@@ -198,6 +200,23 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_authority_diagnostics",
+    },
+    {
+      description: "Apply an explicit light/dark/unknown environment appearance state to a managed Surf Ace surface through the Surf Ace provider path and return provider-readable appearance status.",
+      execute: async (args: SurfAceAppearanceInput) => await runtime.applyAppearance(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          appearance: {
+            enum: ["light", "dark", "unknown"],
+            type: "string",
+          },
+          fingerprint: fingerprintParam,
+        },
+        required: ["fingerprint", "appearance"],
+        type: "object",
+      },
+      name: "surf_ace_set_appearance",
     },
     {
       description: "Push content or a live browser URL target to a Surf Ace pane, replacing whatever is currently visible.",

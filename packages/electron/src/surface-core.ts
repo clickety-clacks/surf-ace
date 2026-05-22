@@ -33,6 +33,7 @@ import type {
   SnapshotResponse,
   Stroke,
   StrokeId,
+  SurfaceAppearanceState,
   SurfaceId,
   SurfaceViewport,
   TargetApplyRequest,
@@ -115,6 +116,7 @@ type LayoutNode =
 
 type SurfaceState = {
   activeKeyboardPaneId: number | null;
+  appearance: SurfaceAppearanceState;
   connectionBar: "connected" | "connecting" | "disconnected";
   geometryRevision: number;
   layout: LayoutNode | null;
@@ -628,6 +630,7 @@ export class SurfaceCore {
     const surface = this.getSurface(surfaceId);
     const paneGeometry = resolvePaneGeometrySnapshots(surface);
     return {
+      appearance: structuredClone(surface.appearance),
       panes: surface.paneOrder.map((paneId) => {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
@@ -1197,6 +1200,7 @@ export class SurfaceCore {
   pairState(surfaceId: string): PairResponse["payload"]["state"] {
     const surface = this.getSurface(surfaceId);
     return {
+      appearance: structuredClone(surface.appearance),
       layout: surfaceLayoutToTopologyLayout(collapseLayout(surface.layout)),
       panes: surface.paneOrder.map((paneId) => {
         const pane = surface.panes.get(paneId)!;
@@ -2240,6 +2244,11 @@ export class SurfaceCore {
     const bootstrapPane = createPaneState(BOOTSTRAP_PANE_ID, 0, this.now());
     const surface: SurfaceState = {
       activeKeyboardPaneId: BOOTSTRAP_PANE_ID,
+      appearance: {
+        appearance: "unknown",
+        appearanceSource: "unknown",
+        updatedAt: null,
+      },
       connectionBar: "disconnected",
       geometryRevision: 1,
       layout: { paneId: BOOTSTRAP_PANE_ID, type: "pane" },
@@ -2259,6 +2268,20 @@ export class SurfaceCore {
     this.emit({ surfaceId, type: "surface-created" });
     this.emit({ surfaceId, type: "surface-changed" });
     return surface;
+  }
+
+  setAppearance(surfaceId: string, appearance: SurfaceAppearanceState): void {
+    const surface = this.getSurface(surfaceId);
+    const previous = surface.appearance;
+    if (
+      previous.appearance === appearance.appearance &&
+      previous.appearanceSource === appearance.appearanceSource &&
+      previous.updatedAt === appearance.updatedAt
+    ) {
+      return;
+    }
+    surface.appearance = structuredClone(appearance);
+    this.emit({ surfaceId, type: "surface-changed" });
   }
 
   private ensureInitialPane(surface: SurfaceState, initialPaneId: number, initialPaneLabel: number): boolean {

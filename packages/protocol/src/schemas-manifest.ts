@@ -1,5 +1,7 @@
 import {
   annotationCommittedEventSchema,
+  appearanceApplyRequestSchema,
+  appearanceApplyResponseSchema,
   annotationsRemoveRequestSchema,
   annotationsRemoveResponseSchema,
   authorityStateRequestSchema,
@@ -63,6 +65,11 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "ownership.relinquish": {
     request: relinquishRequestSchema,
     response: relinquishResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "appearance.apply": {
+    request: appearanceApplyRequestSchema,
+    response: appearanceApplyResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "target.apply": {

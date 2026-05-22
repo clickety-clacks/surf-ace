@@ -98,6 +98,10 @@ export type CompositorControlRequest =
   | {
     type: "get_status";
   }
+  | {
+    appearance: "dark" | "light" | "unknown";
+    type: "set_appearance";
+  }
   | NativePaneOverlaySetRequest
   | {
     coordinateSpace: "surface_logical";

@@ -527,6 +527,23 @@ export type TargetApplyRequest = RequestBase<"target.apply"> & {
   };
 };
 
+export type SurfaceAppearance = "dark" | "light" | "unknown";
+
+export type SurfaceAppearanceSource = "manual" | "sun_schedule" | "unknown";
+
+export type SurfaceAppearanceState = {
+  appearance: SurfaceAppearance;
+  appearanceSource: SurfaceAppearanceSource;
+  updatedAt: EpochMs | null;
+};
+
+export type AppearanceApplyRequest = RequestBase<"appearance.apply"> & {
+  payload: {
+    appearance: SurfaceAppearance;
+    surfaceId: SurfaceId;
+  };
+};
+
 export type TargetRegisterRequest = RequestBase<"target.register"> & {
   payload: {
     idempotencyKey: string;
@@ -617,6 +634,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
       resumeGraceMs: number;
     };
     state: {
+      appearance?: SurfaceAppearanceState;
       panes: Array<{
         paneId: PaneId;
         paneLabel: number;
@@ -712,6 +730,7 @@ export type HeartbeatPongResponse = ResponseBase<"heartbeat.ping"> & {
 
 export type PanesListResponse = ResponseBase<"panes.list"> & {
   payload: {
+    appearance?: SurfaceAppearanceState;
     panes: Array<{
       paneId: PaneId;
       paneLabel: number;
@@ -748,6 +767,14 @@ export type ContentApplyResponse = ResponseBase<"content.apply"> & {
 
 export type TargetApplyResponse = ResponseBase<"target.apply.result"> & {
   payload: ApplyEvidence;
+};
+
+export type AppearanceApplyResponse = ResponseBase<"appearance.apply.result"> & {
+  payload: SurfaceAppearanceState & {
+    surfaceId: SurfaceId;
+    status: "applied" | "failed";
+    message?: string;
+  };
 };
 
 export type TargetRegisteredResponse = ResponseBase<"target.registered"> & {
@@ -800,6 +827,7 @@ export type ErrorResponse = {
     | "ownership.relinquish"
     | "topology.apply"
     | "content.apply"
+    | "appearance.apply"
     | "target.apply"
     | "content.set"
     | "content.append"
@@ -992,6 +1020,7 @@ export type Request =
   | RelinquishRequest
   | TopologyApplyRequest
   | ContentApplyRequest
+  | AppearanceApplyRequest
   | TargetApplyRequest
   | TargetRegisterRequest
   | ContentSetRequest
@@ -1013,6 +1042,7 @@ export type Response =
   | RelinquishResponse
   | TopologyApplyResponse
   | ContentApplyResponse
+  | AppearanceApplyResponse
   | TargetApplyResponse
   | TargetRegisteredResponse
   | TargetRegisterRejectedResponse

@@ -11,6 +11,7 @@ import type {
   AnnotationsRemoveRequest,
   AnnotationsRemoveResponse,
   AnnotationCommittedEvent,
+  AppearanceApplyResponse,
   AuthorityStateRequest,
   ConnectionId,
   ContentApplyRequest,
@@ -58,6 +59,8 @@ import type {
   Stroke,
   StrokeId,
   SurfaceAppearedEvent,
+  SurfaceAppearance,
+  SurfaceAppearanceState,
   SurfaceId,
   SurfaceRemovedEvent,
   SurfaceResumedEvent,
@@ -228,7 +231,20 @@ export type SurfAceTopologySummaryNode =
       weight?: number;
     };
 
+export type SurfAceAppearanceInput = {
+  appearance: SurfaceAppearance;
+  fingerprint: string;
+};
+
+export type SurfAceAppearanceResult = SurfaceAppearanceState & {
+  fingerprint: string;
+  ok: boolean;
+  status: "applied" | "failed";
+  message?: string;
+};
+
 export type SurfAceScreenSummary = {
+  appearance: SurfaceAppearanceState;
   authority: SurfAceProviderAuthorityDecision;
   connectionDiagnostics: SurfAceConnectionDiagnostics;
   connectionState: SurfAceConnectionState;
@@ -765,6 +781,7 @@ export type SurfAceRuntimeOptions = {
 
 export interface SurfAceRuntime {
   annotateRemove(input: SurfAceAnnotateRemoveInput): Promise<SurfAceAnnotateRemoveResult>;
+  applyAppearance(input: SurfAceAppearanceInput): Promise<SurfAceAppearanceResult>;
   capturePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAcePaneCaptureResult>;
   clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult>;
   closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult>;
@@ -863,6 +880,7 @@ type ManagedPane = {
 type ManagedSurface = {
   alertFired: boolean;
   alertFiredAt: number | null;
+  appearance: SurfaceAppearanceState;
   authorityAcceptedAt: number | null;
   authorityAcceptedIdentityKey: string | null;
   authorityRejectedReason: string | null;
@@ -1247,6 +1265,10 @@ export class SurfAceToolError extends Error {
 
 type OwnerControlCommand =
   | {
+      input: SurfAceAppearanceInput;
+      op: "applyAppearance";
+    }
+  | {
       context?: SurfAceSessionContext;
       input: SurfAcePushInput;
       op: "push";
@@ -1483,6 +1505,11 @@ function createManagedSurface(
   return {
     alertFired: false,
     alertFiredAt: null,
+    appearance: {
+      appearance: "unknown",
+      appearanceSource: "unknown",
+      updatedAt: null,
+    },
     authorityAcceptedAt: null,
     authorityAcceptedIdentityKey: null,
     authorityRejectedReason: null,
@@ -2541,6 +2568,10 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+function isSurfaceAppearance(value: unknown): value is SurfaceAppearance {
+  return value === "dark" || value === "light" || value === "unknown";
+}
+
 function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: string[]): boolean {
   const allowed = new Set(allowedKeys);
   return Object.keys(value).every((key) => allowed.has(key));
@@ -3080,6 +3111,48 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       undefined,
       typeof ownerLease.pid === "number" ? ownerLease.pid : process.pid,
     );
+  }
+
+  async applyAppearance(input: SurfAceAppearanceInput): Promise<SurfAceAppearanceResult> {
+    await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceAppearanceResult>({
+        input,
+        op: "applyAppearance",
+      });
+    }
+    if (!isSurfaceAppearance(input.appearance)) {
+      throw new SurfAceToolError("invalid_operation", "Appearance must be light, dark, or unknown.");
+    }
+    const surface = await this.requireActionableSurface(input.fingerprint);
+    const response = await this.sendRequest(
+      surface,
+      this.requestEnvelope("appearance.apply", {
+        appearance: input.appearance,
+        surfaceId: surface.surfaceId,
+      }),
+    );
+    if (isErrorResponse(response)) {
+      throw new SurfAceToolError(
+        mutationErrorCode(response.error.code),
+        response.error.message,
+      );
+    }
+    const payload = (response as AppearanceApplyResponse).payload;
+    const appearance: SurfaceAppearanceState = {
+      appearance: payload.appearance,
+      appearanceSource: payload.appearanceSource,
+      updatedAt: payload.updatedAt,
+    };
+    surface.appearance = appearance;
+    this.queuePersistScreenSnapshot("appearance apply");
+    return {
+      ...appearance,
+      fingerprint: surface.surfaceId,
+      message: payload.message,
+      ok: payload.status === "applied",
+      status: payload.status,
+    };
   }
 
   async push(
@@ -8437,6 +8510,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           ? surface.autoRetryEnabled ? "connecting" : "unreachable"
           : surface.connectionState;
     return {
+      appearance: structuredClone(surface.appearance),
       connectionDiagnostics: this.surfaceConnectionDiagnostics(surface),
       authority,
       connectionState,
@@ -9394,6 +9468,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     switch (command.op) {
       case "annotateRemove":
         return await this.annotateRemove(command.input);
+      case "applyAppearance":
+        return await this.applyAppearance(command.input);
       case "capturePane":
         return await this.capturePane(command.input);
       case "clear":
@@ -11359,6 +11435,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return null;
     }
 
+    const appearance = (response as PanesListResponse).payload.appearance;
+    if (appearance) {
+      surface.appearance = structuredClone(appearance);
+    }
     const providerOwnedRemotePaneIds =
       surface.topologyRevision > 0 ? this.layoutRemotePaneIds(surface) : null;
     const paneStates = (response as PanesListResponse).payload.panes.filter((paneState) =>
@@ -12084,6 +12164,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.viewport = cloneViewport(response.payload.viewport);
     surface.protocolFeatures = new Set(response.payload.capabilities.protocolFeatures ?? []);
     surface.targetCapabilities = this.targetCapabilitiesForPair(response);
+    if (response.payload.state.appearance) {
+      surface.appearance = structuredClone(response.payload.state.appearance);
+    }
     try {
       const pairImportedRemotePaneIds = new Set<number>();
       const pairResponseRemotePaneIds = new Set<number>();

@@ -5,6 +5,8 @@ import { WebSocket, WebSocketServer } from "ws";
 
 import type {
   AnnotationsRemoveRequest,
+  AppearanceApplyRequest,
+  AppearanceApplyResponse,
   AuthorityStateRequest,
   ContentApplyRequest,
   ContentAppendRequest,
@@ -28,6 +30,7 @@ import type {
   SnapshotGetRequest,
   SnapshotHintEvent,
   SurfaceViewport,
+  SurfaceAppearanceState,
   SurfacesListRequest,
   TargetApplyRequest,
   TargetApplyResponse,
@@ -172,6 +175,22 @@ function persistentServerDiagnostic(
   fields: ServerDiagnosticFields = {},
 ): void {
   recordClientDiagnostic(level, "server", event, fields);
+}
+
+function appearanceStateFromCompositorResponse(
+  response: CompositorControlResponse,
+  fallbackUpdatedAt: SurfaceAppearanceState["updatedAt"],
+): SurfaceAppearanceState {
+  const runtime = response && typeof response === "object" && "status" in response
+    ? (response as { status?: { runtime?: Record<string, unknown> } }).status?.runtime
+    : undefined;
+  const appearance = runtime?.appearance;
+  const appearanceSource = runtime?.appearance_source;
+  return {
+    appearance: appearance === "dark" || appearance === "light" ? appearance : "unknown",
+    appearanceSource: appearanceSource === "manual" || appearanceSource === "sun_schedule" ? appearanceSource : "unknown",
+    updatedAt: fallbackUpdatedAt,
+  };
 }
 
 export class SurfaceWsServer {
@@ -901,10 +920,12 @@ export class SurfaceWsServer {
         return await this.handleTopologyApply(socket, request);
       case "content.apply":
         return await this.handleContentApply(socket, request);
+      case "appearance.apply":
+        return await this.handleAppearanceApply(socket, request);
       case "target.apply":
         return await this.handleTargetApply(socket, request);
       case "panes.list":
-        return this.handlePanesList(socket, request);
+        return await this.handlePanesList(socket, request);
       case "pane.split":
         return await this.handlePaneSplit(socket, request);
       case "pane.rename":
@@ -1303,8 +1324,9 @@ export class SurfaceWsServer {
     };
   }
 
-  private handlePanesList(socket: WebSocket, request: PanesListRequest): Response {
+  private async handlePanesList(socket: WebSocket, request: PanesListRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
+    await this.refreshSurfaceAppearanceFromCompositor(surfaceId, "panes.list");
     return {
       id: request.id,
       ok: true,
@@ -1314,6 +1336,103 @@ export class SurfaceWsServer {
       type: "response",
       v: 1,
     };
+  }
+
+  private async handleAppearanceApply(socket: WebSocket, request: AppearanceApplyRequest): Promise<Response> {
+    const surfaceId = this.requirePairedSurfaceId(socket);
+    if (request.payload.surfaceId !== surfaceId) {
+      throw new SurfaceCoreError("invalid_payload", "appearance.apply surfaceId does not match paired surface");
+    }
+    if (!this.compositorSocketPath) {
+      const payload: AppearanceApplyResponse["payload"] = {
+        appearance: "unknown",
+        appearanceSource: "unknown",
+        message: "Compositor control socket is not configured for this surface.",
+        status: "failed",
+        surfaceId,
+        updatedAt: Date.now() as never,
+      };
+      return {
+        id: request.id,
+        ok: true,
+        op: "appearance.apply.result",
+        payload,
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+    const appliedAt = Date.now() as never;
+    try {
+      const response = await sendCompositorControl(this.compositorSocketPath, {
+        appearance: request.payload.appearance,
+        type: "set_appearance",
+      });
+      const failure = compositorFailureMessage(response);
+      if (failure) {
+        throw new Error(failure);
+      }
+      const appearance = appearanceStateFromCompositorResponse(response, appliedAt);
+      this.core.setAppearance(surfaceId, appearance);
+      return {
+        id: request.id,
+        ok: true,
+        op: "appearance.apply.result",
+        payload: {
+          ...appearance,
+          status: "applied",
+          surfaceId,
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const appearance: SurfaceAppearanceState = {
+        appearance: "unknown",
+        appearanceSource: "unknown",
+        updatedAt: appliedAt,
+      };
+      this.core.setAppearance(surfaceId, appearance);
+      return {
+        id: request.id,
+        ok: true,
+        op: "appearance.apply.result",
+        payload: {
+          ...appearance,
+          message,
+          status: "failed",
+          surfaceId,
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      };
+    }
+  }
+
+  private async refreshSurfaceAppearanceFromCompositor(surfaceId: string, reason: string): Promise<void> {
+    if (!this.compositorSocketPath) {
+      return;
+    }
+    try {
+      const response = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      const failure = compositorFailureMessage(response);
+      if (failure) {
+        throw new Error(failure);
+      }
+      this.core.setAppearance(
+        surfaceId,
+        appearanceStateFromCompositorResponse(response, Date.now() as never),
+      );
+    } catch (error) {
+      persistentServerDiagnostic("warn", "appearance_status_refresh_failed", {
+        error_message: error instanceof Error ? error.message : String(error),
+        reason,
+        surface_id: surfaceId,
+      });
+    }
   }
 
   private async runSurfaceMutation<T>(surfaceId: string, operation: () => Promise<T> | T): Promise<T> {

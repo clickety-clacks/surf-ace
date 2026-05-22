@@ -471,6 +471,23 @@ function authorityStateRequest(
   };
 }
 
+function appearanceApplyRequest(
+  paired: Extract<Response, { op: "pair.request"; ok: true }>,
+  appearance: "dark" | "light" | "unknown",
+): Request {
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "appearance.apply",
+    payload: {
+      appearance,
+      surfaceId: paired.payload.surfaceId,
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
 function overlayDiagnosticsRequest(): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
@@ -1372,6 +1389,80 @@ test("ws server advertises terminal targets when compositor bridge is configured
 
     await closeSocket(socket);
   }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
+});
+
+test("ws server applies and reports appearance through compositor-backed product path", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-appearance-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  let currentAppearance: "dark" | "light" | "unknown" = "unknown";
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as { appearance?: typeof currentAppearance; type?: string };
+      received.push(message);
+      if (message.type === "set_appearance") {
+        currentAppearance = message.appearance ?? "unknown";
+      }
+      socket.write(`${JSON.stringify({
+        ok: true,
+        status: {
+          runtime: {
+            appearance: currentAppearance,
+            appearance_source: currentAppearance === "unknown" ? "unknown" : "manual",
+          },
+        },
+      })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+      assert.equal(paired.payload.state.appearance?.appearance, "unknown");
+
+      const applied = await request(socket, appearanceApplyRequest(paired, "dark"));
+      assert.equal(applied.ok, true);
+      assert.equal(applied.op, "appearance.apply.result");
+      assert.equal(applied.payload.appearance, "dark");
+      assert.equal(applied.payload.appearanceSource, "manual");
+      assert.equal(applied.payload.status, "applied");
+
+      const panes = await request(socket, {
+        id: "rq_panes_after_appearance" as never,
+        op: "panes.list",
+        payload: {},
+        sentAt: Date.now() as never,
+        type: "request",
+        v: 1,
+      });
+      assert.equal(panes.ok, true);
+      assert.equal(panes.op, "panes.list");
+      assert.equal(panes.payload.appearance?.appearance, "dark");
+      assert.equal(panes.payload.appearance?.appearanceSource, "manual");
+      assert.deepEqual(
+        received.map((message) => (message as { type?: string }).type),
+        ["set_appearance", "get_status"],
+      );
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    compositor.close();
+    await rm(tempDir, { force: true, recursive: true });
+  }
 });
 
 test("ws server rejects target.apply with stale ownership epoch", async () => {

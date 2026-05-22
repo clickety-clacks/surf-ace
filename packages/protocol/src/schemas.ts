@@ -9,6 +9,8 @@ type ProtocolSchemaDefName =
   | "PairResponse"
   | "RelinquishRequest"
   | "RelinquishResponse"
+  | "AppearanceApplyRequest"
+  | "AppearanceApplyResponse"
   | "TargetApplyRequest"
   | "TargetApplyResponse"
   | "TargetRegisterRequest"
@@ -70,6 +72,8 @@ export const pairRequestSchema = getSchemaDef("PairRequest");
 export const pairResponseSchema = getSchemaDef("PairResponse");
 export const relinquishRequestSchema = getSchemaDef("RelinquishRequest");
 export const relinquishResponseSchema = getSchemaDef("RelinquishResponse");
+export const appearanceApplyRequestSchema = getSchemaDef("AppearanceApplyRequest");
+export const appearanceApplyResponseSchema = getSchemaDef("AppearanceApplyResponse");
 export const targetApplyRequestSchema = getSchemaDef("TargetApplyRequest");
 export const targetApplyResponseSchema = getSchemaDef("TargetApplyResponse");
 export const targetRegisterRequestSchema = getSchemaDef("TargetRegisterRequest");
