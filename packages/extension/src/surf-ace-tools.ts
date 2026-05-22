@@ -247,7 +247,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_push",
     },
     {
-      description: "Launch a provider-owned process-backed terminal target in a pane through Surf Ace native hosting, applying Surf Ace chrome/overlay regions. Requires confirmed:true.",
+      description: "Launch a provider-owned process-backed terminal target in a pane through Surf Ace native hosting, applying Surf Ace chrome/overlay regions. Requires confirmed:true. Native GUI/app product proof must use this provider path; direct compositor/native-pane hosting is diagnostic only.",
       execute: async (args: SurfAceLaunchTerminalInput, context?: SurfAceToolContext) =>
         await runtime.launchTerminal(args, {
           agentId: context?.agentId,

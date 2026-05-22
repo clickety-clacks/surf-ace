@@ -16,6 +16,7 @@ test("Racter native pane demo cannot register production-trusted Surf Ace surfac
 
   assert.match(source, /racter-native-pane-demo is disabled/);
   assert.match(source, /must not pair with production-trusted Surf Ace surfaces/);
+  assert.match(source, /Direct compositor\/native-pane hosting is lower-layer diagnostic evidence only/);
   assert.doesNotMatch(source, /new WebSocket|connectWebSocket|pair\.request|topology\.apply|target\.apply|content\.apply/);
 });
 

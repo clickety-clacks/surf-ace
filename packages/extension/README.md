@@ -43,3 +43,9 @@ Verification must happen through the official tool surface: a normal OpenClaw se
 Topology soak reports must cite the governing procedure in `/Users/mike/shared-workspace/surf-ace/specs/fleet-soak-procedure.md` and cannot pass on pane count alone. A normal CLU session must declare the official `surf_ace_*` tools, harmless `surf_ace_list` must succeed through that tool path, and the returned recursive topology must be cross-checked against independent rendered/provider truth such as `surf_ace_capture_pane` metadata/pixels plus `surf_ace_read` for the same `fingerprint` + opaque `paneId` tuple.
 
 Direct runtime calls, logs, DNS-SD, screenshots, local state files, and debug JSON are diagnostic-only. They may explain a mismatch, but they do not replace the official tool-surface admission gate or the rendered/provider topology cross-check.
+
+## Native GUI Materialization Proof Gate
+
+Native GUI/app proof must also use the official provider path. A passing proof starts with `surf_ace_list` returning the target surface/pane as connected, admitted, and actionable, launches with `surf_ace_launch_terminal` and `confirmed:true`, and verifies the returned target apply evidence for that same pane. `nativeHost` and `overlayRegions` must both be `applied`, and a Surf Ace pane capture or equivalent approved product capture must show the app visibly rendered in the pane.
+
+Direct compositor calls, `native_pane.host`, disabled demo fixtures, fake WS servers, mocked compositor status, and manually hosted windows are lower-layer diagnostics only. They may be used to isolate failures inside Electron/compositor materialization, but they must not be reported as Surf Ace production proof or offered as a user-facing escape hatch.

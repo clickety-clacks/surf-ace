@@ -3,6 +3,8 @@ export function buildSurfAceAgentInstructions(): string {
     "Surf Ace is pane-scoped. Always call `surf_ace_list` first, resolve the intended `{ fingerprint, windowLabel, paneLabel }`, then use the returned internal `paneId` for subsequent pane-scoped calls.",
     "Use `surf_ace_push` for full pane replacements; `contentType:\"browser_url\"` is a live URL target, not static HTML.",
     "Use `surf_ace_launch_terminal` with `confirmed:true` when a pane must host a real process-backed terminal app through Surf Ace native hosting and overlay ownership.",
+    "Treat native GUI/app materialization as product-proven only through the official Surf Ace provider path: `surf_ace_list` must show an actionable pane, the launch must return target apply evidence for that pane with `nativeHost` and `overlayRegions` applied, and product-approved capture must show visible rendering.",
+    "Do not use direct compositor/native-pane hosting, manually hosted windows, demo fixtures, fake WS servers, or mocked compositor status as Surf Ace product proof; those are diagnostics only.",
     "Use `surf_ace_clear` to clear the currently visible content in a pane.",
     "Use `surf_ace_relinquish` to voluntarily release a surface lock; after that, the provider will not auto-reconnect until it is explicitly claimed again.",
     "Use `surf_ace_realize_topology` for one-window root/subtree layout changes after reading `topology` and `topologyRevision` from `surf_ace_list`.",

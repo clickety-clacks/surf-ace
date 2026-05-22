@@ -2703,6 +2703,8 @@ summary           string?   Optional human-readable target summary for diagnosti
 
 **Behavior:** The provider registers a `terminal_app` pane target and applies it with the current provider authority, pane lineage, and client-resolved pane geometry. The client/compositor receives resolved native-host and overlay regions; it must not infer layout intent from the target payload. Without `confirmed:true`, without an actionable provider-admitted pane, or without `target.terminal_app.v1`, the operation fails closed and does not launch a process.
 
+**Product proof gate:** Native GUI/app materialization is production-proven only when this official Surf Ace provider/tool path owns the target apply. A valid proof starts from `surf_ace_list` showing the target pane admitted/actionable, launches through `surf_ace_launch_terminal` or a future provider-owned target tool, receives target apply evidence for the same pane with `nativeHost: "applied"` and `overlayRegions: "applied"`, and captures visible rendering in that Surf Ace pane. Direct compositor/native-pane calls such as `native_pane.host`, manually hosted windows, demo fixtures, fake WS servers, mocked compositor status, or lower-layer logs are diagnostic evidence only. They may explain a failure inside the Electron/compositor seam, but they cannot satisfy Surf Ace spec/product verification by themselves.
+
 **Errors:** `not_connected`, `screen_not_found`, `invalid_operation`, `materialization_failed`
 
 ---
@@ -3348,7 +3350,7 @@ Racter tall-logical-surface remains a required fixture: Surf Ace receives a logi
 
 ### 16.4 Native Host Special Cases
 
-Native hosted targets may be special-cased only inside Surf Ace's Electron-to-compositor implementation seam. The external/provider `target.apply` contract remains pane-targeted for every target kind: callers provide target identity, ownership/session authority, and pane lineage, but never native pane rectangles, coordinate spaces, pane instance ids, topology epochs, surface epochs, or geometry revisions.
+Native hosted targets may be special-cased only inside Surf Ace's Electron-to-compositor implementation seam. The external/provider `target.apply` contract remains pane-targeted for every target kind: callers provide target identity, ownership/session authority, and pane lineage, but never native pane rectangles, coordinate spaces, pane instance ids, topology epochs, surface epochs, or geometry revisions. Direct compositor/native-pane success is not an alternate Surf Ace product path: it is an implementation diagnostic for this seam and must not be exposed or accepted as user-facing proof that Surf Ace materialization works.
 
 Allowed internal native-host special cases are:
 
@@ -3360,6 +3362,8 @@ Allowed internal native-host special cases are:
 - Hosting state: Electron may track whether the current visible entry is externally native-hosted so reload, history, snapshot, and release paths do not treat a compositor-hosted process as renderer HTML. This is necessary to avoid applying renderer-only operations to native content. It remains internal state or diagnostic status, not a provider geometry contract. Targetability remains the Surf Ace pane coordinate.
 
 Any additional native special case must defend the same three properties: why native behavior is necessary, why the behavior stays behind the Surf Ace/compositor seam, and why pane-targeted API parity with web/content targets is preserved.
+
+Verification for native-hosted targets must preserve that boundary. A passing implementation test may assert that Surf Ace projected a valid internal `native_pane.host` request, but a product/status gate must also exercise the provider-owned target flow and its CLU-facing result. A direct compositor-hosted window, even when visible and correctly sized, is not a Surf Ace materialization proof unless it is the consequence of a live provider-authorized `target.apply` for the same admitted/actionable pane.
 
 ### 16.5 iOS requirement
 

@@ -126,6 +126,8 @@ export type SurfaceWsServerOptions = {
   hostName: string;
   compositorSocketPath?: string | null;
   getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
+  nativeOverlayLivenessRetryCount?: number;
+  nativeOverlayLivenessRetryDelayMs?: number;
   onBusyChanged?: () => void;
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
@@ -148,7 +150,7 @@ const DEFAULT_LIMITS = {
 };
 const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
 const PANE_GEOMETRY_READY_TIMEOUT_MS = 8_000;
-const NATIVE_OVERLAY_LIVENESS_RETRY_COUNT = 10;
+const NATIVE_OVERLAY_LIVENESS_RETRY_COUNT = 80;
 const NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS = 100;
 type ServerDiagnosticFields = ClientDiagnosticFields;
 
@@ -179,6 +181,8 @@ export class SurfaceWsServer {
   private readonly endpointName: string;
   private readonly hostName: string;
   private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
+  private readonly nativeOverlayLivenessRetryCount: number;
+  private readonly nativeOverlayLivenessRetryDelayMs: number;
   private readonly onBusyChanged?: () => void;
   private readonly onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   private readonly onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
@@ -208,6 +212,8 @@ export class SurfaceWsServer {
     this.endpointName = options.endpointName;
     this.getOverlayDiagnostics = options.getOverlayDiagnostics;
     this.hostName = options.hostName;
+    this.nativeOverlayLivenessRetryCount = options.nativeOverlayLivenessRetryCount ?? NATIVE_OVERLAY_LIVENESS_RETRY_COUNT;
+    this.nativeOverlayLivenessRetryDelayMs = options.nativeOverlayLivenessRetryDelayMs ?? NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS;
     this.onBusyChanged = options.onBusyChanged;
     this.onNativeMaterialized = options.onNativeMaterialized;
     this.onNativeReleased = options.onNativeReleased;
@@ -1899,6 +1905,21 @@ export class SurfaceWsServer {
           this.core.markNativePaneMaterialized(surfaceId, materialization);
           this.onNativeMaterialized?.(surfaceId, materialization);
         }
+        persistentServerDiagnostic(
+          "warn",
+          "target_apply_native_materialization_failed",
+          {
+            error_message: error instanceof Error ? error.message : String(error),
+            host_applied: hostApplied,
+            native_host: releasedAfterFailure ? "released_after_failure" : hostApplied ? "applied" : "not_applied",
+            overlay_applied: overlayApplied,
+            overlay_regions: overlayRequest ? overlayApplied ? "applied" : "not_applied" : "not_requested",
+            pane_lineage_id: request.payload.paneLineageId,
+            request_id: request.payload.requestId,
+            surface_id: surfaceId,
+            target_id: request.payload.targetId,
+          },
+        );
         const payload: TargetApplyResponse["payload"] = {
           appliedAt,
           errorCode: "materialization_failed",
@@ -1984,7 +2005,7 @@ export class SurfaceWsServer {
     }
     let currentRequest = request;
     let response = await sendCompositorControl(this.compositorSocketPath, currentRequest);
-    for (let attempt = 0; attempt < NATIVE_OVERLAY_LIVENESS_RETRY_COUNT; attempt += 1) {
+    for (let attempt = 0; attempt < this.nativeOverlayLivenessRetryCount; attempt += 1) {
       const liveRegions = overlayRegionsWithLivePaneInstanceAuthority(currentRequest.regions, response);
       if (liveRegions) {
         currentRequest = {
@@ -1997,7 +2018,7 @@ export class SurfaceWsServer {
       if (!isOverlayNativePaneLivenessFailure(response)) {
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS));
+      await new Promise((resolve) => setTimeout(resolve, this.nativeOverlayLivenessRetryDelayMs));
       const status = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
       const topologyEpoch = overlayTopologyEpochFromCompositorResponse(status);
       currentRequest = topologyEpoch === null
