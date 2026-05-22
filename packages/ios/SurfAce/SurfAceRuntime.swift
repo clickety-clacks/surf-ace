@@ -1413,37 +1413,35 @@ final class SurfAceRuntime {
         var supersededSession: SurfAceSessionState? = nil
 
         if let ownershipLock {
-            if takeover {
+            if ownershipLock.providerId == providerId {
+                if resumeSessionId == ownershipLock.sessionId {
+                    resumed = true
+                    sessionId = ownershipLock.sessionId
+                    ownershipEpoch = ownershipLock.ownershipEpoch
+                    surfAceGatewayLog(
+                        "event=\(takeover ? "pair_request_takeover_resumed" : "pair_request_resumed") \(surfAceDiagnosticFields([("provider_id", providerId), ("session_id", sessionId), ("surface_id", surfaceId)]))"
+                    )
+                    if let activeSession, activeSession.connectionUUID != connectionUUID {
+                        supersededSession = activeSession
+                    }
+                } else {
+                    resumed = false
+                    sessionId = randomHex(prefix: "sa", byteCount: 12)
+                    ownershipEpoch = ownershipLock.ownershipEpoch + 1
+                    surfAceGatewayLog(
+                        "event=\(takeover ? "pair_request_explicit_takeover" : "pair_request_same_provider_fresh_admission") \(surfAceDiagnosticFields([("active_session", activeSession != nil), ("previous_provider_id", ownershipLock.providerId), ("previous_session_id", ownershipLock.sessionId), ("provider_id", providerId), ("received_session_id", resumeSessionId ?? "nil"), ("same_provider", true), ("surface_id", surfaceId)]))"
+                    )
+                    if let activeSession, activeSession.connectionUUID != connectionUUID {
+                        supersededSession = activeSession
+                    }
+                }
+            } else if takeover {
                 surfAceGatewayLog(
-                    "event=pair_request_explicit_takeover \(surfAceDiagnosticFields([("active_session", activeSession != nil), ("previous_provider_id", ownershipLock.providerId), ("previous_session_id", ownershipLock.sessionId), ("provider_id", providerId), ("same_provider", ownershipLock.providerId == providerId), ("surface_id", surfaceId)]))"
+                    "event=pair_request_explicit_takeover \(surfAceDiagnosticFields([("active_session", activeSession != nil), ("previous_provider_id", ownershipLock.providerId), ("previous_session_id", ownershipLock.sessionId), ("provider_id", providerId), ("same_provider", false), ("surface_id", surfaceId)]))"
                 )
                 resumed = false
                 sessionId = randomHex(prefix: "sa", byteCount: 12)
                 ownershipEpoch = ownershipLock.ownershipEpoch + 1
-                if let activeSession, activeSession.connectionUUID != connectionUUID {
-                    supersededSession = activeSession
-                }
-            } else if ownershipLock.providerId == providerId {
-                guard resumeSessionId == ownershipLock.sessionId else {
-                    surfAceGatewayLog(
-                        "event=pair_request_invalid_resume \(surfAceDiagnosticFields([("expected_session_id", ownershipLock.sessionId), ("provider_id", providerId), ("received_session_id", resumeSessionId ?? "nil"), ("surface_id", surfaceId)]))"
-                    )
-                    return SurfAceProcessedRequestResult(
-                        responseObject: makeErrorResponse(
-                            op: "pair.request",
-                            id: id,
-                            code: "invalid_resume",
-                            message: "Resume session did not match active ownership lock"
-                        ),
-                        postSendPairCommit: nil
-                    )
-                }
-                resumed = true
-                sessionId = ownershipLock.sessionId
-                ownershipEpoch = ownershipLock.ownershipEpoch
-                surfAceGatewayLog(
-                    "event=pair_request_resumed \(surfAceDiagnosticFields([("provider_id", providerId), ("session_id", sessionId), ("surface_id", surfaceId)]))"
-                )
                 if let activeSession, activeSession.connectionUUID != connectionUUID {
                     supersededSession = activeSession
                 }
@@ -1467,6 +1465,15 @@ final class SurfAceRuntime {
             ownershipEpoch = 1
             surfAceGatewayLog(
                 "event=pair_request_new_session \(surfAceDiagnosticFields([("provider_id", providerId), ("session_id", sessionId), ("surface_id", surfaceId)]))"
+            )
+        }
+
+        if !resumed {
+            resetProviderBootstrapTopology(
+                surface: surface,
+                windowLabel: providerWindowLabel,
+                initialPaneId: providerInitialPaneId,
+                initialPaneLabel: providerInitialPaneLabel
             )
         }
 
@@ -1568,13 +1575,6 @@ final class SurfAceRuntime {
         )
         if plan.resumed {
             applyProviderWindowLabel(surface: surface, windowLabel: plan.providerWindowLabel)
-        } else {
-            applyProviderBootstrapTopology(
-                surface: surface,
-                windowLabel: plan.providerWindowLabel,
-                initialPaneId: plan.providerInitialPaneId,
-                initialPaneLabel: plan.providerInitialPaneLabel
-            )
         }
         activeSessions[plan.surfaceId] = plan.session
         surface.providerName = plan.providerName
@@ -2500,18 +2500,23 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "authority.state", id: id, code: "not_paired", message: "pair.request required")
         }
 
-        let sessionIdentityMatches = payload["surfaceId"] as? String == surfaceId &&
+        let providerMatches = payload["surfaceId"] as? String == surfaceId &&
             payload["providerId"] as? String == session.providerId &&
-            payload["sessionId"] as? String == session.sessionId &&
-            payload["ownershipEpoch"] as? Int == session.ownershipEpoch &&
-            ownershipLock.providerId == session.providerId &&
-            ownershipLock.sessionId == session.sessionId
-        if sessionIdentityMatches,
+            ownershipLock.providerId == session.providerId
+        if providerMatches,
+           ((payload["sessionId"] as? String) != session.sessionId ||
+            (payload["ownershipEpoch"] as? Int) != session.ownershipEpoch ||
+            ownershipLock.sessionId != session.sessionId) {
+            surfAceGatewayLog(
+                "event=authority_state_same_provider_session_metadata_mismatch \(surfAceDiagnosticFields([("active_ownership_epoch", session.ownershipEpoch), ("active_session_id", session.sessionId), ("provider_id", session.providerId), ("received_ownership_epoch", payload["ownershipEpoch"] as? Int), ("received_session_id", payload["sessionId"] as? String), ("surface_id", surfaceId)]))"
+            )
+        }
+        if providerMatches,
            let providerWindowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
            providerWindowLabel != surface.windowLabel {
             applyProviderWindowLabel(surface: surface, windowLabel: providerWindowLabel)
         }
-        if sessionIdentityMatches,
+        if providerMatches,
            let providerPaneIdentities = surfAceProviderAuthorityPaneIdentityMap(
             from: payload,
             matching: surface.panes.map {
@@ -2523,25 +2528,26 @@ final class SurfAceRuntime {
             }
            ) {
             applyProviderAuthorityPaneIdentities(surface: surface, providerPaneIdentities: providerPaneIdentities)
+        } else if providerMatches {
+            let paneCount = (payload["panes"] as? [[String: Any]])?.count
+            surfAceGatewayLog(
+                "event=authority_state_provider_topology_pending \(surfAceDiagnosticFields([("pane_count", paneCount), ("provider_id", session.providerId), ("surface_id", surfaceId)]))"
+            )
         }
 
-        let reason = surfAceAuthorityStateRejectionReason(
-            payload: payload,
-            surfaceId: surfaceId,
-            providerId: session.providerId,
-            sessionId: session.sessionId,
-            ownershipEpoch: session.ownershipEpoch,
-            lockProviderId: ownershipLock.providerId,
-            lockSessionId: ownershipLock.sessionId,
-            windowLabel: surface.windowLabel,
-            panes: surface.panes.map {
-                SurfAceAuthorityPaneIdentity(
-                    paneId: $0.paneId,
-                    paneLabel: $0.paneLabel,
-                    paneLineageId: $0.paneLineageId
-                )
-            }
-        )
+        let reason: String?
+        if payload["surfaceId"] as? String != surfaceId {
+            reason = "surface_id_mismatch"
+        } else if payload["providerId"] as? String != session.providerId ||
+                    ownershipLock.providerId != session.providerId {
+            reason = "session_identity_mismatch"
+        } else if surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]) == nil {
+            reason = "window_label_mismatch"
+        } else if payload["actionable"] as? Bool != true {
+            reason = payload["reason"] as? String ?? "provider_not_actionable"
+        } else {
+            reason = nil
+        }
         let accepted = reason == nil
 
         if accepted {
@@ -3115,6 +3121,46 @@ final class SurfAceRuntime {
         persistSurfaceTopology(surfaceId: surface.surfaceId)
         surfAceLifecycleLog(
             "event=topology_restore_attempt \(surfAceDiagnosticFields([("initial_pane_id", initialPaneId), ("initial_pane_label", initialPaneLabel), ("pane_ids", surface.panes.map { String($0.paneId) }.joined(separator: ",")), ("surface_id", surface.surfaceId), ("window_label", windowLabel)]))"
+        )
+    }
+
+    private func resetProviderBootstrapTopology(
+        surface: SurfAceSurfaceModel,
+        windowLabel: String,
+        initialPaneId: Int,
+        initialPaneLabel: Int
+    ) {
+        applyProviderWindowLabel(surface: surface, windowLabel: windowLabel)
+        guard initialPaneId > 0, initialPaneLabel > 0 else {
+            return
+        }
+        if surface.panesById.count == 1,
+           case .leaf(let currentPaneId, _) = surface.paneLayout,
+           let currentPane = surface.panesById[currentPaneId],
+           surfAcePaneIsPristineProviderBootstrap(currentPane) {
+            if currentPaneId != initialPaneId {
+                surface.panesById.removeValue(forKey: currentPaneId)
+                currentPane.paneId = initialPaneId
+                surface.panesById[initialPaneId] = currentPane
+                surface.paneLayout = .leaf(initialPaneId)
+                surface.activeKeyboardPaneId = initialPaneId
+            }
+            currentPane.paneLabel = initialPaneLabel
+            surface.providerTopologyInitialized = true
+            persistSurfaceTopology(surfaceId: surface.surfaceId)
+            return
+        }
+        surface.panesById = [
+            initialPaneId: SurfAcePaneModel(paneId: initialPaneId, paneLabel: initialPaneLabel)
+        ]
+        surface.paneLayout = .leaf(initialPaneId)
+        surface.activeKeyboardPaneId = initialPaneId
+        surface.providerTopologyInitialized = true
+        surface.topologyEpoch += 1
+        surface.geometryRevision += 1
+        persistSurfaceTopology(surfaceId: surface.surfaceId)
+        surfAceLifecycleLog(
+            "event=provider_bootstrap_topology_reset \(surfAceDiagnosticFields([("initial_pane_id", initialPaneId), ("initial_pane_label", initialPaneLabel), ("surface_id", surface.surfaceId), ("window_label", windowLabel)]))"
         )
     }
 

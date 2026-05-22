@@ -381,6 +381,9 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.doesNotMatch(source, /pane-label__sender/);
   assert.doesNotMatch(source, /provenanceLabelEl/);
   assert.match(source, /labelEl\.append\(windowLabelEl, labelTextEl\)/);
+  assert.match(source, /connectionBar: state\.connectionBar/);
+  assert.match(source, /const showProviderIdentity = latestState\?\.connectionBar === "connected"/);
+  assert.match(source, /const visibleAddress = showProviderIdentity \? pane\.displayId \|\| pane\.visibleAddress \|\| pane\.label : ""/);
   assert.match(source, /windowLabel\.hidden = !visibleWindowLabel/);
   assert.doesNotMatch(source, /windowLabel\.hidden = true/);
   assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);

@@ -585,6 +585,31 @@ func surfAceEntryIsVisibleEmpty(_ entry: SurfAcePaneEntry) -> Bool {
     entry.contentId == nil && entry.contentType == nil && entry.payload == nil && entry.url == nil
 }
 
+@MainActor
+func surfAcePaneIsPristineProviderBootstrap(_ pane: SurfAcePaneModel) -> Bool {
+    surfAceEntryIsVisibleEmpty(pane.currentEntry) &&
+        pane.currentEntry.revision == 0 &&
+        pane.currentEntry.drawingData.isEmpty &&
+        pane.currentEntry.strokesById.isEmpty &&
+        pane.backStack.isEmpty &&
+        pane.forwardStack.isEmpty &&
+        pane.annotationMode == false &&
+        pane.fingerDrawEnabled == false &&
+        pane.isDrawingFlushSending == false &&
+        pane.drawingRestoreWarningVisible == false &&
+        pane.toast == nil &&
+        pane.lastVisibleText.isEmpty &&
+        pane.lastSelection == nil &&
+        pane.pendingSnapshotHintReason == nil &&
+        pane.lastNavigationURL == nil &&
+        pane.lastPage == nil &&
+        pane.pendingFlushStrokes.isEmpty &&
+        pane.firstPendingStrokeAt == nil &&
+        pane.lastPendingStrokeAt == nil &&
+        pane.pendingAnnotationCommit == false &&
+        pane.currentTarget == nil
+}
+
 struct SurfAcePaneTargetState: Codable, Equatable {
     var targetId: String
     var targetKind: String

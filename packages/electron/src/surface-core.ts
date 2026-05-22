@@ -1311,6 +1311,41 @@ export class SurfaceCore {
     }
   }
 
+  resetProviderBootstrapTopology(
+    surfaceId: string,
+    payload: { initialPaneId: number; initialPaneLabel: number; windowLabel: string },
+  ): void {
+    assertValidWindowLabel(payload.windowLabel);
+    this.assertWindowLabelAvailable(surfaceId, payload.windowLabel);
+    if (payload.initialPaneId < 1 || payload.initialPaneLabel < 1) {
+      return;
+    }
+    const surface = this.getSurface(surfaceId);
+    const currentPaneId = surface.paneOrder[0];
+    const currentPane = currentPaneId === undefined ? null : surface.panes.get(currentPaneId) ?? null;
+    const canBootstrapReplace =
+      surface.panes.size === 1 &&
+      surface.layout?.type === "pane" &&
+      currentPane !== null &&
+      isPristineProviderBootstrapPane(currentPane);
+    surface.windowLabel = payload.windowLabel;
+    if (canBootstrapReplace) {
+      if (this.ensureInitialPane(surface, payload.initialPaneId, payload.initialPaneLabel)) {
+        bumpGeometryRevision(surface);
+      }
+      this.emit({ surfaceId, type: "surface-changed" });
+      return;
+    }
+    const pane = createPaneState(payload.initialPaneId, payload.initialPaneLabel, this.now());
+    surface.panes = new Map([[payload.initialPaneId, pane]]);
+    surface.paneOrder = [payload.initialPaneId];
+    surface.layout = { paneId: payload.initialPaneId, type: "pane" };
+    surface.activeKeyboardPaneId = payload.initialPaneId;
+    surface.topologyRevision += 1;
+    bumpGeometryRevision(surface);
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
   topologyApply(
     surfaceId: string,
     payload: TopologyApplyRequest["payload"],
@@ -2513,6 +2548,32 @@ function assertSingleSurfacePaneLabelPayload(panes: Array<{ paneLabel: number }>
 
 function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
+}
+
+function isPristineProviderBootstrapPane(pane: PaneState): boolean {
+  const entry = currentEntry(pane);
+  return pane.history.length === 1 &&
+    pane.historyIndex === 0 &&
+    !pane.annotating &&
+    !pane.annotationFrameOpen &&
+    pane.dirtyStrokeIds.length === 0 &&
+    !pane.externalNative &&
+    !pane.flushInFlight &&
+    pane.firstDirtyStrokeAt === null &&
+    pane.lastDirtyStrokeAt === null &&
+    pane.name === null &&
+    pane.nativeHost === null &&
+    !pane.pendingAnnotationCommit &&
+    pane.snapshot.bounds === null &&
+    pane.snapshot.selection === null &&
+    pane.snapshot.visibleText === "" &&
+    pane.toast === null &&
+    entry.annotations.length === 0 &&
+    entry.content === null &&
+    entry.contentId === null &&
+    entry.contentType === null &&
+    entry.ownerToken === null &&
+    entry.revision === 0;
 }
 
 function paneForLineage(surface: SurfaceState, lineageId: string): PaneState | null {

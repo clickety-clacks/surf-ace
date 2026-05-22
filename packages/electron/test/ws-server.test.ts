@@ -826,11 +826,18 @@ test("ws server allows the lock owner to resume after disconnect", async () => {
   });
 });
 
-test("ws server rejects owner reconnect with an invalid resume token", async () => {
-  await withServer(async ({ surfaceId, url }) => {
+test("ws server re-admits same-provider reconnect with an invalid resume token", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
     const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    const content = await request(owner, contentApplyRequest(2, 1));
+    assert.equal(content.ok, true);
     await closeSocket(owner, 1000, "provider_shutdown");
 
     await new Promise((resolve) => {
@@ -840,18 +847,121 @@ test("ws server rejects owner reconnect with an invalid resume token", async () 
     const resumedSocket = await connect(url);
     const invalid = await request(
       resumedSocket,
-      pairRequest(surfaceId, "pv_alpha", { resumeSessionId: `sa_invalid` as never }),
+      pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: `sa_invalid` as never,
+      }),
     );
 
-    assert.equal(invalid.ok, false);
+    assert.equal(invalid.ok, true);
     assert.equal(invalid.op, "pair.request");
-    assert.equal(invalid.error.code, "invalid_resume");
+    assert.equal(invalid.payload.resumed, false);
+    assert.notEqual(invalid.payload.sessionId, first.payload.sessionId);
+    assert.equal(invalid.payload.ownershipEpoch, first.payload.ownershipEpoch + 1);
+    assert.deepEqual(invalid.payload.state.layout, { paneId: 7, type: "pane" });
+    assert.equal(invalid.payload.state.panes.length, 1);
+    assert.equal(invalid.payload.state.panes[0]?.paneId, 7);
+    assert.equal(invalid.payload.state.panes[0]?.paneLabel, 77);
+    assert.equal(invalid.payload.state.panes[0]?.currentContentId, null);
+    assert.deepEqual(core.pairState(surfaceId).layout, { paneId: 7, type: "pane" });
 
     await closeSocket(resumedSocket);
   });
 });
 
-test("ws server rejects same-provider reconnects without a resume token after disconnect", async () => {
+test("ws server fresh same-provider admission clears native-hosted state for the same initial pane", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      if (message.type === "get_status") {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            logical_surface_height: 3840,
+            logical_surface_width: 2160,
+            pane_geometry_coordinate_space: "compositor_logical",
+          },
+        })}\n`);
+      } else {
+        socket.write(`${JSON.stringify({ ok: true })}\n`);
+      }
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ core, surfaceId, url }) => {
+      const owner = await connect(url);
+      const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(first.ok, true);
+      const pane = first.payload.state.panes[0]!;
+      const nativeApplied = await request(owner, targetApplyRequest({
+        ownershipSessionId: first.payload.sessionId,
+        paneLineageId: pane.paneLineageId,
+        surfaceId: first.payload.surfaceId,
+      }));
+      assert.equal(nativeApplied.payload.status, "applied");
+      assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
+      await closeSocket(owner, 1000, "provider_shutdown");
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 25);
+      });
+
+      const replacement = await connect(url);
+      const admitted = await request(
+        replacement,
+        pairRequest(surfaceId, "pv_alpha", {
+          initialPaneId: Number(pane.paneId),
+          initialPaneLabel: 42,
+          resumeSessionId: `sa_invalid` as never,
+        }),
+      );
+
+      assert.equal(admitted.ok, true);
+      assert.equal(admitted.payload.resumed, false);
+      assert.equal(admitted.payload.state.panes.length, 1);
+      assert.equal(admitted.payload.state.panes[0]?.paneId, pane.paneId);
+      assert.equal(admitted.payload.state.panes[0]?.paneLabel, 42);
+      assert.equal(admitted.payload.state.panes[0]?.currentContentId, null);
+      const rendererPane = core.getRendererWindowState(surfaceId).panes[0]!;
+      assert.equal(rendererPane.externalNative, false);
+      assert.equal(rendererPane.content.contentType, null);
+      assert.deepEqual(received.map((message) => (message as { type: string }).type), [
+        "get_status",
+        "native_pane.host",
+        "overlay_regions.set",
+        "native_pane.release",
+      ]);
+      assert.deepEqual(received[3], {
+        pane_ids: [String(pane.paneId)],
+        type: "native_pane.release",
+      });
+
+      await closeSocket(replacement);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server re-admits same-provider reconnects without a resume token after disconnect", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const owner = await connect(url);
     const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
@@ -868,9 +978,11 @@ test("ws server rejects same-provider reconnects without a resume token after di
       pairRequest(surfaceId, "pv_alpha"),
     );
 
-    assert.equal(resumed.ok, false);
+    assert.equal(resumed.ok, true);
     assert.equal(resumed.op, "pair.request");
-    assert.equal(resumed.error.code, "invalid_resume");
+    assert.equal(resumed.payload.resumed, false);
+    assert.notEqual(resumed.payload.sessionId, first.payload.sessionId);
+    assert.equal(resumed.payload.ownershipEpoch, first.payload.ownershipEpoch + 1);
 
     await closeSocket(replacement);
   });
@@ -931,21 +1043,24 @@ test("ws server allows explicit same-provider takeover without the old resume se
   });
 });
 
-test("ws server rejects duplicate same-provider pair requests without resume while the active socket is still open", async () => {
+test("ws server lets same-provider reconnect without resume supersede an active socket", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const owner = await connect(url);
     const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
     assert.equal(first.ok, true);
 
     const duplicate = await connect(url);
-    const rejected = await request(duplicate, pairRequest(surfaceId, "pv_alpha"));
+    const ownerClosed = waitForSocketClose(owner);
+    const admitted = await request(duplicate, pairRequest(surfaceId, "pv_alpha"));
 
-    assert.equal(rejected.ok, false);
-    assert.equal(rejected.op, "pair.request");
-    assert.equal(rejected.error.code, "invalid_resume");
-    assert.equal(owner.readyState, WebSocket.OPEN);
+    assert.equal(admitted.ok, true);
+    assert.equal(admitted.op, "pair.request");
+    assert.equal(admitted.payload.resumed, false);
+    assert.notEqual(admitted.payload.sessionId, first.payload.sessionId);
+    assert.equal(admitted.payload.ownershipEpoch, first.payload.ownershipEpoch + 1);
+    assert.deepEqual(await ownerClosed, { code: 1000, reason: "superseded" });
 
-    const panes = await request(owner, {
+    const panes = await request(duplicate, {
       id: `rq_${Math.random().toString(16).slice(2)}` as never,
       op: "panes.list",
       payload: {},
@@ -957,7 +1072,6 @@ test("ws server rejects duplicate same-provider pair requests without resume whi
     assert.equal(panes.op, "panes.list");
 
     await closeSocket(duplicate);
-    await closeSocket(owner);
   });
 });
 
@@ -1249,9 +1363,9 @@ test("ws server accepts provider authority panes independent of order", async ()
     ));
     assert.equal(duplicateAuthority.ok, true);
     assert.equal(duplicateAuthority.op, "authority.state");
-    assert.equal(duplicateAuthority.payload.accepted, false);
-    assert.equal(duplicateAuthority.payload.reason, "pane_identity_mismatch");
-    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+    assert.equal(duplicateAuthority.payload.accepted, true);
+    assert.equal(duplicateAuthority.payload.reason, null);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     const providerOrderedPanes = [...pairStatePanes].reverse().map((pane) => ({
       paneId: Number(pane.paneId),
@@ -1289,6 +1403,27 @@ test("ws server repairs same-session provider window label disagreement at autho
     assert.equal(authority.payload.accepted, true);
     assert.equal(authority.payload.reason, null);
     assert.equal(core.getRendererWindowState(surfaceId).windowLabel, "a");
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server accepts same-provider authority when session metadata is stale", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const staleAuthority = authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>);
+    staleAuthority.payload.sessionId = `sa_stale` as never;
+    staleAuthority.payload.ownershipEpoch = 0 as never;
+    const accepted = await request(owner, staleAuthority);
+
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.op, "authority.state");
+    assert.equal(accepted.payload.accepted, true);
+    assert.equal(accepted.payload.reason, null);
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
 
     await closeSocket(owner);
@@ -2247,7 +2382,11 @@ test("ws server rolls back retained native topology geometry when overlay update
         })}\n`);
       } else if (message.type === "overlay_regions.set") {
         overlayRequests += 1;
-        socket.write(`${JSON.stringify(overlayRequests === 2 ? { error: "overlay denied", ok: false } : { ok: true })}\n`);
+        socket.write(`${JSON.stringify(
+          overlayRequests === 2
+            ? { error: "failed to parse request: missing field `target`", ok: false }
+            : { ok: true },
+        )}\n`);
       } else {
         socket.write(`${JSON.stringify({ ok: true })}\n`);
       }
@@ -2299,7 +2438,7 @@ test("ws server rolls back retained native topology geometry when overlay update
   }
 });
 
-test("ws server rolls back native resume relabel geometry when overlay update fails", async () => {
+test("ws server re-admits same-provider resume when native relabel overlay update fails", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
@@ -2359,7 +2498,7 @@ test("ws server rolls back native resume relabel geometry when overlay update fa
       });
 
       const resumedSocket = await connect(url);
-      const rejected = await request(
+      const admitted = await request(
         resumedSocket,
         pairRequest(surfaceId, "pv_alpha", {
           resumeSessionId: paired.payload.sessionId,
@@ -2367,8 +2506,10 @@ test("ws server rolls back native resume relabel geometry when overlay update fa
         }),
       );
 
-      assert.equal(rejected.ok, false);
-      assert.equal(rejected.error.code, "render_failed");
+      assert.equal(admitted.ok, true);
+      assert.equal(admitted.op, "pair.request");
+      assert.equal(admitted.payload.resumed, true);
+      assert.equal(admitted.payload.sessionId, paired.payload.sessionId);
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
         "native_pane.host",
@@ -2381,7 +2522,7 @@ test("ws server rolls back native resume relabel geometry when overlay update fa
         "overlay_regions.set",
       ]);
       const state = core.getRendererWindowState(surfaceId);
-      assert.equal(state.windowLabel, "h");
+      assert.equal(state.windowLabel, "a");
       assert.equal(state.panes.length, 1);
       assert.equal(state.panes[0]!.externalNative, true);
 

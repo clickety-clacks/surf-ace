@@ -330,6 +330,7 @@ function paneRenderKey(state: RendererWindowState, pane: RendererPaneState): str
     annotationBorderVisible: pane.annotationBorderVisible,
     canGoBack: pane.canGoBack,
     canGoForward: pane.canGoForward,
+    connectionBar: state.connectionBar,
     content: contentKey(pane),
     displayId: pane.displayId,
     drawings: drawingsKey(pane.drawings),
@@ -2025,8 +2026,9 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement;
   const windowLabel = labelWrap.querySelector(".pane-label__window") as HTMLSpanElement;
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
-  const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
-  const visibleWindowLabel = latestState?.windowLabel ?? "";
+  const showProviderIdentity = latestState?.connectionBar === "connected";
+  const visibleAddress = showProviderIdentity ? pane.displayId || pane.visibleAddress || pane.label : "";
+  const visibleWindowLabel = showProviderIdentity ? latestState?.windowLabel ?? "" : "";
   windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
   windowLabel.hidden = !visibleWindowLabel;
   label.textContent = visibleAddress.toUpperCase();
