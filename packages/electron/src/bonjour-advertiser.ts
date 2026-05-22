@@ -1,7 +1,13 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import os from "node:os";
 
-import { Bonjour, type Service } from "bonjour-service";
+import bonjourServiceModule, { type Service } from "bonjour-service";
+
+type BonjourConstructor = typeof import("bonjour-service").Bonjour;
+type BonjourServiceModule = { Bonjour?: BonjourConstructor; default?: BonjourConstructor };
+const bonjourService = bonjourServiceModule as unknown as BonjourServiceModule;
+const Bonjour: BonjourConstructor =
+  bonjourService.Bonjour ?? bonjourService.default ?? (bonjourServiceModule as unknown as BonjourConstructor);
 
 type BonjourError = Error & {
   code?: string;

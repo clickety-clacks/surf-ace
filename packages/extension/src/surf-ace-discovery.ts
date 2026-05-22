@@ -1,4 +1,4 @@
-import { Bonjour, type Browser, type Service } from "bonjour-service";
+import bonjourServiceModule, { type Browser, type Service } from "bonjour-service";
 import { spawn } from "node:child_process";
 import type { SurfaceViewport } from "../../protocol/src/index.js";
 
@@ -6,6 +6,12 @@ const SURF_ACE_SERVICE_TYPE = "surf-ace";
 const DEFAULT_WS_PATH = "/ws";
 const DEFAULT_REFRESH_INTERVAL_MS = 5_000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 1_500;
+type BonjourConstructor = typeof import("bonjour-service").Bonjour;
+type BonjourInstance = InstanceType<BonjourConstructor>;
+type BonjourServiceModule = { Bonjour?: BonjourConstructor; default?: BonjourConstructor };
+const bonjourService = bonjourServiceModule as unknown as BonjourServiceModule;
+const Bonjour: BonjourConstructor =
+  bonjourService.Bonjour ?? bonjourService.default ?? (bonjourServiceModule as unknown as BonjourConstructor);
 
 export type SurfAceLogger = {
   info?: (message: string, ...args: unknown[]) => void;
@@ -292,7 +298,7 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
   private readonly listeners = new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void>();
   private readonly snapshot = new Map<string, SurfAceDiscoveryEndpoint>();
   private started = false;
-  private bonjour: Bonjour | null = null;
+  private bonjour: BonjourInstance | null = null;
   private browser: Browser | null = null;
   private refreshInterval: ReturnType<typeof setInterval> | null = null;
 
