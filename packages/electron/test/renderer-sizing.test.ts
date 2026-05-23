@@ -394,6 +394,34 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.match(styles, /\.navigation-pill__owner\s*\{[\s\S]*font-size:\s*calc\(13px \+ 3pt\)/);
 });
 
+test("renderer fits pane identity labels inside pane bounds for native and renderer panes", async () => {
+  const source = await rendererSource();
+  const styles = await rendererStyles();
+  const metricsIndex = source.indexOf("function setPaneChromeMetrics");
+  const fitIndex = source.indexOf("function fitPaneLabelToVisibleBounds");
+  const updateIndex = source.indexOf("function updatePane");
+  const textIndex = source.indexOf("label.textContent = visibleAddress.toUpperCase()", updateIndex);
+  const fitCallIndex = source.indexOf("fitPaneLabelToVisibleBounds(view)", textIndex);
+  const nativeToggleIndex = source.indexOf("view.rootEl.classList.toggle(\"native-backed\"", updateIndex);
+  const allMetricsIndex = source.indexOf("function setAllPaneChromeMetrics");
+
+  assert.ok(metricsIndex > -1);
+  assert.ok(fitIndex > metricsIndex);
+  assert.ok(allMetricsIndex > fitIndex);
+  assert.ok(updateIndex > fitIndex);
+  assert.ok(nativeToggleIndex > updateIndex);
+  assert.ok(textIndex > nativeToggleIndex);
+  assert.ok(fitCallIndex > textIndex);
+  assert.match(source.slice(allMetricsIndex, updateIndex), /setPaneChromeMetrics\(view\);[\s\S]*fitPaneLabelToVisibleBounds\(view\);/);
+  assert.match(source.slice(fitIndex, updateIndex), /basePaneNumberSize/);
+  assert.match(source.slice(fitIndex, updateIndex), /availableWidth/);
+  assert.match(source.slice(fitIndex, updateIndex), /availableHeight/);
+  assert.match(source.slice(fitIndex, updateIndex), /labelWrap\.getBoundingClientRect\(\)/);
+  assert.match(source.slice(fitIndex, updateIndex), /--pane-number-size/);
+  assert.doesNotMatch(source.slice(fitIndex, updateIndex), /native-backed/);
+  assert.match(styles, /\.pane-label__number\s*\{[\s\S]*letter-spacing:\s*0;/);
+});
+
 test("renderer exposes split resize handles and reports resize-split commands", async () => {
   const source = await rendererSource();
   const styles = await rendererStyles();
