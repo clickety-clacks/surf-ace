@@ -279,7 +279,7 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   font-size: var(--pane-number-size);
   font-family: var(--ui-font-family);
   font-weight: 700;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
   line-height: var(--rajdhani-line-height);
   text-transform: uppercase;
   transform: translateY(calc(var(--pane-number-size) * var(--rajdhani-descent)));
