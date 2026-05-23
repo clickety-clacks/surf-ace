@@ -1920,6 +1920,61 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
 });
 
+test("surface core materializes native_app as the native process launch primitive", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const pane = core.pairState(surface.surfaceId).panes[0]!;
+
+  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+    ownershipEpoch: 1,
+    ownershipSessionId: "sa_test" as never,
+    paneLineageId: pane.paneLineageId,
+    requestId: "restore_native",
+    restoreReason: "confirmed_restore",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 3,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.native_app.v1"],
+      safeToLogFields: ["appId", "args", "cwd", "launchMode"],
+      safetyClass: "process",
+      summary: "Native App",
+    },
+    targetId: "target_native",
+    targetKind: "native_app",
+    targetPayload: {
+      appId: "com.example.NativeApp",
+      args: ["--pane"],
+      cwd: "/tmp",
+      env: { SURF_ACE_TEST: "1" },
+      launchMode: "attach_or_launch",
+    },
+  });
+
+  assert.equal(materialization.op, "native_pane.host");
+  assert.equal(materialization.panes[0]?.target, "native_app");
+  assert.deepEqual(materialization.panes[0]?.nativeApp, {
+    appId: "com.example.NativeApp",
+    args: ["--pane"],
+    launchMode: "attach_or_launch",
+  });
+  assert.deepEqual(materialization.panes[0]?.process, {
+    args: ["--pane"],
+    command: "com.example.NativeApp",
+    cwd: "/tmp",
+    env: { SURF_ACE_TEST: "1" },
+  });
+  assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
+});
+
 test("surface core snaps terminal native geometry to compositor integer bounds", () => {
   const core = new SurfaceCore({
     persistentState: {

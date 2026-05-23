@@ -1,6 +1,7 @@
 import net from "node:net";
 
 import type { Rect, Revision, SurfaceId, TopologyRevision } from "../../protocol/src/index.js";
+import type { CompositorAppBindingRequest } from "./runtime-identity.js";
 
 export type NativePaneGeometry = Rect & {
   coordinateSpace: "compositor_logical";
@@ -16,7 +17,12 @@ export type NativePaneMaterializationPane = {
   binding_id?: string;
   revision: Revision;
   geometry: NativePaneGeometry;
-  target?: "terminal";
+  nativeApp?: {
+    appId: string;
+    args: string[];
+    launchMode: "new_instance" | "attach_or_launch";
+  };
+  target?: "native_app" | "terminal";
   process?: {
     command: string;
     args: string[];
@@ -81,6 +87,10 @@ export type CompositorOverlayUpdateReason =
   | "visibility";
 
 export type CompositorControlRequest =
+  | CompositorAppBindingRequest
+  | {
+    type: "get_status";
+  }
   | {
     panes: NativePaneMaterialization["panes"];
     type: NativePaneMaterialization["op"];
@@ -88,9 +98,6 @@ export type CompositorControlRequest =
   | {
     pane_ids: string[];
     type: "native_pane.release";
-  }
-  | {
-    type: "get_status";
   }
   | (NonNullable<NativePaneMaterialization["overlaySet"]> & {
     type: "overlay_regions.set";

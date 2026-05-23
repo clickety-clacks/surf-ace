@@ -49,6 +49,16 @@ function createStubRuntime(): SurfAceRuntime {
       paneId: 1,
       paneLabel: 1,
     }),
+    launchNativeApp: async () => ({
+      contentId: null,
+      displayId: "1",
+      fingerprint: "sf_1",
+      paneAddress: "1",
+      paneId: 1,
+      paneLabel: 1,
+      revision: 1,
+      targetKind: "native_app",
+    }),
     listScreens: async () => [],
     providerAuthorityDiagnostics: async () => ({
       activeTargetRecordCount: 0,
@@ -63,6 +73,7 @@ function createStubRuntime(): SurfAceRuntime {
       persistedSurfaceIds: [],
       processId: process.pid,
       providerId: "pv_test",
+      runtimeAppBindingBySurfaceId: {},
       runtimeScreenIds: [],
       started: true,
       surfaceTombstones: {},
@@ -147,7 +158,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_list",
     "surf_ace_authority_diagnostics",
     "surf_ace_push",
-    "surf_ace_launch_terminal",
+    "surf_ace_launch_native_app",
     "surf_ace_clear",
     "surf_ace_relinquish",
     "surf_ace_reattempt_connections",
@@ -185,6 +196,15 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(captureTool.inputSchema.required, ["fingerprint", "paneId"]);
   assert.equal(captureTool.inputSchema.additionalProperties, false);
+
+  const launchNativeAppTool = tools.find((tool) => tool.name === "surf_ace_launch_native_app");
+  assert.ok(launchNativeAppTool);
+  assert.deepEqual(
+    Object.keys(launchNativeAppTool.inputSchema.properties as Record<string, unknown>).sort(),
+    ["appId", "args", "confirmed", "cwd", "env", "fingerprint", "idempotencyKey", "launchMode", "paneId", "summary"].sort(),
+  );
+  assert.deepEqual(launchNativeAppTool.inputSchema.required, ["fingerprint", "paneId", "appId", "confirmed"]);
+  assert.equal(launchNativeAppTool.inputSchema.additionalProperties, false);
 
   const splitTool = tools.find((tool) => tool.name === "surf_ace_split");
   assert.ok(splitTool);
