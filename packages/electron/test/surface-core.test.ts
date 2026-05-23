@@ -1920,7 +1920,7 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
 });
 
-test("surface core materializes allowlisted Wayland GUI terminal_app commands as direct native pane processes", () => {
+test("surface core materializes native_app as the native process launch primitive", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -1936,34 +1936,43 @@ test("surface core materializes allowlisted Wayland GUI terminal_app commands as
     ownershipEpoch: 1,
     ownershipSessionId: "sa_test" as never,
     paneLineageId: pane.paneLineageId,
-    requestId: "restore_weston_simple_egl",
-    restoreReason: "resume_restore",
+    requestId: "restore_native",
+    restoreReason: "confirmed_restore",
     surfaceId: surface.surfaceId as never,
     targetEpoch: 3,
     targetHeader: {
       payloadSchemaVersion: 1,
       replaySemantics: "launch_equivalent",
-      requiredCapabilities: ["target.terminal_app.v1"],
-      safeToLogFields: ["command", "args"],
+      requiredCapabilities: ["target.native_app.v1"],
+      safeToLogFields: ["appId", "args", "cwd", "launchMode"],
       safetyClass: "process",
-      summary: "/usr/bin/weston-simple-egl",
+      summary: "Native App",
     },
-    targetId: "target_weston_simple_egl",
-    targetKind: "terminal_app",
+    targetId: "target_native",
+    targetKind: "native_app",
     targetPayload: {
-      args: [],
-      command: "/usr/bin/weston-simple-egl",
-      envPolicy: "surface_default",
-      pty: true,
-      restartPolicy: "manual_only",
+      appId: "com.example.NativeApp",
+      args: ["--pane"],
+      cwd: "/tmp",
+      env: { SURF_ACE_TEST: "1" },
+      launchMode: "attach_or_launch",
     },
   });
 
   assert.equal(materialization.op, "native_pane.host");
-  assert.deepEqual(materialization.panes[0]?.process, { args: [], command: "/usr/bin/weston-simple-egl" });
-  assert.equal(materialization.panes[0]?.target, "terminal");
+  assert.equal(materialization.panes[0]?.target, "native_app");
+  assert.deepEqual(materialization.panes[0]?.nativeApp, {
+    appId: "com.example.NativeApp",
+    args: ["--pane"],
+    launchMode: "attach_or_launch",
+  });
+  assert.deepEqual(materialization.panes[0]?.process, {
+    args: ["--pane"],
+    command: "com.example.NativeApp",
+    cwd: "/tmp",
+    env: { SURF_ACE_TEST: "1" },
+  });
   assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
-  assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
 });
 
 test("surface core snaps terminal native geometry to compositor integer bounds", () => {

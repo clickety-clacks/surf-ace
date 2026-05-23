@@ -62,6 +62,7 @@ await build({
     path.join(rootDir, "test", "racter-pointer-fixture.test.ts"),
     path.join(rootDir, "test", "markdown-rendering.test.ts"),
     path.join(rootDir, "test", "renderer-sizing.test.ts"),
+    path.join(rootDir, "test", "runtime-identity.test.ts"),
     path.join(rootDir, "test", "surface-core.test.ts"),
     path.join(rootDir, "test", "tars-autostart-guard.test.ts"),
     path.join(rootDir, "test", "webauthn-support.test.ts"),

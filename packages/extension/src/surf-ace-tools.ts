@@ -2,7 +2,7 @@ import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
 import type { PusherProvenance } from "../../protocol/src/index.js";
 import {
   type SurfAceAnnotateRemoveInput,
-  type SurfAceLaunchTerminalInput,
+  type SurfAceLaunchNativeAppInput,
   type PaneId,
   type SurfAceRealizeTopologyInput,
   type SurfAceRealizeTopologiesInput,
@@ -18,7 +18,7 @@ export const surfAceToolNames = [
   "surf_ace_list",
   "surf_ace_authority_diagnostics",
   "surf_ace_push",
-  "surf_ace_launch_terminal",
+  "surf_ace_launch_native_app",
   "surf_ace_clear",
   "surf_ace_relinquish",
   "surf_ace_reattempt_connections",
@@ -247,9 +247,9 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_push",
     },
     {
-      description: "Launch a provider-owned process-backed terminal target in a pane through Surf Ace native hosting, applying Surf Ace chrome/overlay regions. Requires confirmed:true. Native GUI/app product proof must use this provider path; direct compositor/native-pane hosting is diagnostic only.",
-      execute: async (args: SurfAceLaunchTerminalInput, context?: SurfAceToolContext) =>
-        await runtime.launchTerminal(args, {
+      description: "Launch a provider-owned native app/process target in a pane through Surf Ace native hosting, applying Surf Ace chrome/overlay regions. This is the primitive process launch surface. Requires confirmed:true. Native GUI/app product proof must use this provider path; direct compositor/native-pane hosting is diagnostic only.",
+      execute: async (args: SurfAceLaunchNativeAppInput, context?: SurfAceToolContext) =>
+        await runtime.launchNativeApp(args, {
           agentId: context?.agentId,
           displayName: context?.displayName,
           provenance: context?.provenance,
@@ -263,43 +263,49 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       inputSchema: {
         additionalProperties: false,
         properties: {
-          args: {
-            items: { type: "string" },
-            type: "array",
-          },
-          command: {
-            description: "Executable command to launch inside the Surf Ace-owned terminal pane.",
+          appId: {
+            description: "Canonical target app/process identity for the native hosted app.",
             minLength: 1,
             type: "string",
           },
+          args: {
+            description: "Optional argv entries for launch-capable native app hosts.",
+            items: { type: "string" },
+            type: "array",
+          },
           confirmed: {
-            description: "Must be true to apply a process-backed terminal target.",
+            description: "Must be true to apply a process-backed native app target.",
             enum: [true],
             type: "boolean",
           },
           cwd: {
-            type: ["string", "null"],
+            type: "string",
+          },
+          env: {
+            additionalProperties: { type: "string" },
+            description: "Optional explicit environment variables for launch-capable native app hosts.",
+            type: "object",
           },
           fingerprint: fingerprintParam,
           idempotencyKey: {
-            description: "Optional stable caller key used to make repeated launches idempotent for the same pane/command.",
+            description: "Optional stable caller key used to make repeated launches idempotent for the same pane/app.",
+            type: "string",
+          },
+          launchMode: {
+            default: "new_instance",
+            enum: ["new_instance", "attach_or_launch"],
             type: "string",
           },
           paneId: paneIdParam,
-          restartPolicy: {
-            default: "manual_only",
-            enum: ["restore_new_process", "manual_only"],
-            type: "string",
-          },
           summary: {
             description: "Optional human-readable target summary shown in diagnostics.",
             type: "string",
           },
         },
-        required: ["fingerprint", "paneId", "command", "confirmed"],
+        required: ["fingerprint", "paneId", "appId", "confirmed"],
         type: "object",
       },
-      name: "surf_ace_launch_terminal",
+      name: "surf_ace_launch_native_app",
     },
     {
       description: "Clear the currently visible content in a pane.",

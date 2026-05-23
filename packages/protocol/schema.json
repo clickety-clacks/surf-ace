@@ -11,6 +11,9 @@
       "$ref": "#/$defs/PairRequest"
     },
     {
+      "$ref": "#/$defs/RuntimeAppBindingRequest"
+    },
+    {
       "$ref": "#/$defs/RelinquishRequest"
     },
     {
@@ -48,6 +51,9 @@
     },
     {
       "$ref": "#/$defs/PairResponse"
+    },
+    {
+      "$ref": "#/$defs/RuntimeAppBindingResponse"
     },
     {
       "$ref": "#/$defs/RelinquishResponse"
@@ -332,6 +338,51 @@
           "additionalProperties": false,
           "required": ["nativeHost", "overlayRegions"],
           "properties": {
+            "authority": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ownershipEpoch", "ownershipSessionId", "paneLineageId", "surfaceId", "targetEpoch"],
+              "properties": {
+                "ownershipEpoch": { "type": "integer" },
+                "ownershipSessionId": { "type": "string" },
+                "paneLineageId": { "type": "string" },
+                "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+                "targetEpoch": { "type": "integer" }
+              }
+            },
+            "diagnostics": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "inputFocus": {
+              "type": "string",
+              "enum": ["ready", "not_ready", "unknown"]
+            },
+            "lifecycle": {
+              "type": "string",
+              "enum": ["launch_requested", "running", "exited", "unknown"]
+            },
+            "nativeTarget": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["targetKind"],
+              "properties": {
+                "appId": { "type": "string" },
+                "args": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "command": { "type": "string" },
+                "cwd": { "type": "string" },
+                "envDigest": { "type": "string" },
+                "envKeys": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "launchMode": { "type": "string" },
+                "targetKind": { "$ref": "#/$defs/TargetKind" }
+              }
+            },
             "nativeHost": {
               "type": "string",
               "enum": ["applied", "not_applied", "released_after_failure"]
@@ -339,10 +390,119 @@
             "overlayRegions": {
               "type": "string",
               "enum": ["applied", "not_applied", "not_requested"]
+            },
+            "paneGeometry": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["coordinateSpace", "geometryRevision", "height", "paneInstanceId", "surfaceEpoch", "topologyEpoch", "width", "x", "y"],
+              "properties": {
+                "coordinateSpace": { "const": "compositor_logical" },
+                "geometryRevision": { "$ref": "#/$defs/Revision" },
+                "height": { "type": "number" },
+                "paneInstanceId": { "type": "string" },
+                "surfaceEpoch": { "type": "string" },
+                "topologyEpoch": { "$ref": "#/$defs/TopologyRevision" },
+                "width": { "type": "number" },
+                "x": { "type": "number" },
+                "y": { "type": "number" }
+              }
+            },
+            "proof": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["paneId"],
+              "properties": {
+                "appId": { "type": "string" },
+                "args": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "bindingId": { "type": "string" },
+                "contentId": { "type": "string" },
+                "cwd": { "type": "string" },
+                "envDigest": { "type": "string" },
+                "launchMode": { "type": "string" },
+                "paneId": { "type": "string" }
+              }
             }
           }
         }
       ]
+    },
+    "RuntimeAppBindingDiagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acknowledgement",
+        "bindingAuthority",
+        "bindingDegradedReasons",
+        "diagnosticDrift",
+        "expectedBundleId",
+        "expectedPackageName",
+        "expectedRuntimeId",
+        "launchTokenStatus",
+        "observedUiLabel",
+        "observedWaylandAppId",
+        "observedWindowTitle",
+        "processLineageStatus",
+        "ready",
+        "reportedBundleId",
+        "reportedPackageName",
+        "reportedRuntimeId"
+      ],
+      "properties": {
+        "acknowledgement": {
+          "type": "string",
+          "enum": ["accepted", "failed", "not_configured", "pending"]
+        },
+        "bindingAuthority": {
+          "type": "string",
+          "enum": ["trusted", "degraded", "blocked"]
+        },
+        "bindingBlockReason": { "type": "string" },
+        "bindingDegradedReasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "checkedAt": { "$ref": "#/$defs/EpochMs" },
+        "diagnosticDrift": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "expectedBundleId": {
+          "type": ["string", "null"]
+        },
+        "expectedPackageName": {
+          "type": ["string", "null"]
+        },
+        "expectedRuntimeId": { "type": "string" },
+        "failureMessage": { "type": "string" },
+        "launchTokenStatus": {
+          "type": "string",
+          "enum": ["matched", "missing", "mismatched"]
+        },
+        "observedUiLabel": {
+          "type": ["string", "null"]
+        },
+        "observedWaylandAppId": {
+          "type": ["string", "null"]
+        },
+        "observedWindowTitle": {
+          "type": ["string", "null"]
+        },
+        "processLineageStatus": {
+          "type": "string",
+          "enum": ["matched", "missing", "mismatched"]
+        },
+        "ready": { "type": "boolean" },
+        "reportedBundleId": {
+          "type": ["string", "null"]
+        },
+        "reportedPackageName": {
+          "type": ["string", "null"]
+        },
+        "reportedRuntimeId": { "type": "string" }
+      }
     },
     "PusherProvenance": {
       "type": "object",
@@ -1101,6 +1261,80 @@
         }
       }
     },
+    "RuntimeAppBindingRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "op",
+        "id",
+        "sentAt"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "op": {
+          "const": "runtime.app_binding"
+        },
+        "id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "sentAt": {
+          "$ref": "#/$defs/EpochMs"
+        }
+      }
+    },
+    "RuntimeAppBindingResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "op",
+        "id",
+        "ok",
+        "sentAt",
+        "payload"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "response"
+        },
+        "op": {
+          "const": "runtime.app_binding"
+        },
+        "id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "sentAt": {
+          "$ref": "#/$defs/EpochMs"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runtimeAppBinding"],
+          "properties": {
+            "runtimeAppBinding": {
+              "oneOf": [
+                { "$ref": "#/$defs/RuntimeAppBindingDiagnostics" },
+                { "type": "null" }
+              ]
+            }
+          }
+        }
+      }
+    },
     "ContentSetRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -1817,6 +2051,9 @@
                     "minLength": 1
                   },
                   "uniqueItems": true
+                },
+                "runtimeAppBinding": {
+                  "$ref": "#/$defs/RuntimeAppBindingDiagnostics"
                 },
                 "targetCapabilities": {
                   "type": "array",
@@ -2607,6 +2844,7 @@
           "enum": [
             "surfaces.list",
             "pair.request",
+            "runtime.app_binding",
             "ownership.relinquish",
             "target.apply",
             "target.register",

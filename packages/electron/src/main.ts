@@ -15,7 +15,7 @@ import {
   type WebContents,
 } from "electron";
 
-import type { ContentSetRequest, Stroke } from "../../protocol/src/index.js";
+import type { ContentSetRequest, RuntimeAppBindingDiagnostics, Stroke } from "../../protocol/src/index.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import {
   CLIENT_FLIGHT_RECORDER_LOG_PATH,
@@ -50,6 +50,12 @@ import {
   type ReloadEntryIdentity,
   type RendererWindowState,
 } from "./surface-core.js";
+import {
+  buildCompositorAppBindingRequest,
+  pendingRuntimeAppBindingDiagnostics,
+  runtimeAppBindingDiagnosticsFromCompositorError,
+  runtimeAppBindingDiagnosticsFromCompositorResponse,
+} from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
@@ -60,6 +66,7 @@ const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const EXPLICIT_WS_PORT = process.env.SURF_ACE_PORT != null;
 const STATE_FILE_NAME = "surface-core-state.json";
 const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
+let runtimeAppBindingDiagnostics: RuntimeAppBindingDiagnostics | null = null;
 const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
 
@@ -163,6 +170,7 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
       hostName: shortHostName(),
       onBusyChanged: scheduleAdvertiserTxtRefresh,
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
+      getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
       onNativeMaterialized: (surfaceId, materialization) => {
         recordNativePaneInstances(surfaceId, materialization);
         broadcastSurfaceState(surfaceId);
@@ -249,6 +257,36 @@ function displayViewport() {
 function endpointName(): string {
   const hostname = os.hostname().replace(/\..*$/, "");
   return process.env.SURF_ACE_NAME?.trim() || `${hostname} Surf Ace`;
+}
+
+async function acknowledgeCompositorMainAppBinding(): Promise<void> {
+  await refreshRuntimeAppBindingDiagnostics();
+}
+
+async function refreshRuntimeAppBindingDiagnostics(): Promise<RuntimeAppBindingDiagnostics | null> {
+  const socketPath = resolveCompositorControlSocketPath();
+  if (!socketPath) {
+    runtimeAppBindingDiagnostics = null;
+    return runtimeAppBindingDiagnostics;
+  }
+  const label = endpointName();
+  const request = buildCompositorAppBindingRequest({
+    uiLabel: label,
+    windowTitle: label,
+  });
+  runtimeAppBindingDiagnostics = pendingRuntimeAppBindingDiagnostics(request);
+  try {
+    const response = await sendCompositorControl(socketPath, request);
+    runtimeAppBindingDiagnostics = runtimeAppBindingDiagnosticsFromCompositorResponse(request, response);
+    const failure = compositorFailureMessage(response);
+    if (failure) {
+      console.warn(`[surf-ace] compositor main app binding acknowledgment failed: ${failure}`);
+    }
+  } catch (error) {
+    runtimeAppBindingDiagnostics = runtimeAppBindingDiagnosticsFromCompositorError(request, error);
+    console.warn(`[surf-ace] compositor main app binding acknowledgment failed: ${error}`);
+  }
+  return runtimeAppBindingDiagnostics;
 }
 
 function shortHostName(): string {
@@ -1535,6 +1573,7 @@ async function boot(): Promise<void> {
   installMenu();
   installIpc();
   installWebAuthnAccountSelection();
+  await acknowledgeCompositorMainAppBinding();
 
   if (!advertisingDisabled()) {
     advertiser = new BonjourAdvertiser({

@@ -48,6 +48,7 @@ import type {
   Rect,
   Response,
   Revision,
+  RuntimeAppBindingDiagnostics,
   ScrollEvent,
   Selection,
   SelectionEvent,
@@ -167,6 +168,7 @@ export type SurfAceProviderAuthorityProjection = {
   providerProcessBlockReason: SurfAceProviderProcessBlockReason | null;
   providerProcessHealth: SurfAceProviderProcessHealth;
   providerId: string;
+  runtimeAppBindingBySurfaceId: Record<string, RuntimeAppBindingDiagnostics | null>;
   runtimeScreenIds: string[];
   started: boolean;
   surfaceTombstones: Record<string, {
@@ -244,6 +246,7 @@ export type SurfAceScreenSummary = {
   _debug?: {
     providerAuthority: SurfAceProviderAuthorityDecision;
     providerAuthorityProjection: SurfAceProviderAuthorityProjection;
+    runtimeAppBinding: RuntimeAppBindingDiagnostics | null;
     autoRetryEnabled: boolean;
     connectionCircuit?: SurfAceConnectionDiagnostics;
     endpointId: string;
@@ -454,7 +457,7 @@ export type SurfAcePushInput = {
 type SurfAceContentPushInput = SurfAcePushInput & { contentType: ContentType };
 type SurfAceBrowserUrlPushInput = SurfAcePushInput & { contentType: "browser_url" };
 
-export type SurfAceLaunchTerminalInput = {
+type SurfAceLaunchTerminalInput = {
   args?: string[];
   command: string;
   confirmed: boolean;
@@ -463,6 +466,19 @@ export type SurfAceLaunchTerminalInput = {
   idempotencyKey?: string;
   paneId: PaneId;
   restartPolicy?: "restore_new_process" | "manual_only";
+  summary?: string;
+};
+
+export type SurfAceLaunchNativeAppInput = {
+  appId: string;
+  args?: string[];
+  confirmed: boolean;
+  cwd?: string;
+  env?: Record<string, string>;
+  fingerprint: string;
+  idempotencyKey?: string;
+  launchMode?: "new_instance" | "attach_or_launch";
+  paneId: PaneId;
   summary?: string;
 };
 
@@ -769,7 +785,7 @@ export interface SurfAceRuntime {
   clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult>;
   closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult>;
   listScreens(): Promise<SurfAceScreenSummary[]>;
-  launchTerminal(input: SurfAceLaunchTerminalInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
+  launchNativeApp(input: SurfAceLaunchNativeAppInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   providerAuthorityDiagnostics(): Promise<SurfAceProviderAuthorityProjection>;
   push(input: SurfAcePushInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
@@ -895,6 +911,7 @@ type ManagedSurface = {
   remoteListedAt: number | null;
   remotePaired: boolean;
   restartOwnershipPendingPair: boolean;
+  runtimeAppBinding: RuntimeAppBindingDiagnostics | null;
   retryDelayResolver: (() => void) | null;
   selfOwnershipReclaimAttempted: boolean;
   sessionId: SessionId | null;
@@ -1253,6 +1270,11 @@ type OwnerControlCommand =
     }
   | {
       context?: SurfAceSessionContext;
+      input: SurfAceLaunchNativeAppInput;
+      op: "launchNativeApp";
+    }
+  | {
+      context?: SurfAceSessionContext;
       input: SurfAceLaunchTerminalInput;
       op: "launchTerminal";
     }
@@ -1515,6 +1537,7 @@ function createManagedSurface(
     remoteListedAt: null,
     remotePaired: false,
     restartOwnershipPendingPair: false,
+    runtimeAppBinding: null,
     retryDelayResolver: null,
     selfOwnershipReclaimAttempted: false,
     sessionId: null,
@@ -2541,6 +2564,10 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+function stringArraysEqual(left: string[] | undefined, right: string[]): boolean {
+  return Boolean(left) && left!.length === right.length && left!.every((entry, index) => entry === right[index]);
+}
+
 function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: string[]): boolean {
   const allowed = new Set(allowedKeys);
   return Object.keys(value).every((key) => allowed.has(key));
@@ -2637,9 +2664,11 @@ function validateTargetPayload(targetKind: TargetKind, targetPayload: unknown): 
         ? null
         : "unsafe_payload";
     case "native_app":
-      return hasOnlyKeys(targetPayload, ["appId", "args", "launchMode", "approvalTokenId", "clientOptions"]) &&
+      return hasOnlyKeys(targetPayload, ["appId", "args", "cwd", "env", "launchMode", "approvalTokenId", "clientOptions"]) &&
         typeof targetPayload.appId === "string" &&
         (targetPayload.args === undefined || isStringArray(targetPayload.args)) &&
+        (targetPayload.cwd === undefined || targetPayload.cwd === null || typeof targetPayload.cwd === "string") &&
+        (targetPayload.env === undefined || isStringRecord(targetPayload.env)) &&
         (targetPayload.launchMode === "new_instance" || targetPayload.launchMode === "attach_or_launch") &&
         (targetPayload.approvalTokenId === undefined || typeof targetPayload.approvalTokenId === "string") &&
         (targetPayload.clientOptions === undefined || (
@@ -2763,6 +2792,17 @@ function safeDiagnosticTargetPayload(
     }
   }
   return Object.keys(safePayload).length > 0 ? safePayload : null;
+}
+
+function stableStringMapDigest(value: Record<string, string> | undefined): string {
+  const stableValue = JSON.stringify(
+    Object.fromEntries(Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right))),
+  );
+  return createHash("sha256").update(stableValue).digest("hex");
+}
+
+function optionalStringFingerprint(value: string | null | undefined): string {
+  return value === undefined ? "<undefined>" : JSON.stringify(value);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -3104,7 +3144,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     throw new SurfAceToolError("unsupported_content_type", `Unsupported content type: ${String(input.contentType)}`);
   }
 
-  async launchTerminal(
+  private async launchTerminal(
     input: SurfAceLaunchTerminalInput,
     context?: SurfAceSessionContext,
   ): Promise<SurfAcePushResult> {
@@ -3124,6 +3164,28 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const surface = await this.requireActionableSurface(input.fingerprint);
     return await this.terminalAppTargetSet(surface, input, context);
+  }
+
+  async launchNativeApp(
+    input: SurfAceLaunchNativeAppInput,
+    context?: SurfAceSessionContext,
+  ): Promise<SurfAcePushResult> {
+    await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAcePushResult>({
+        context,
+        input,
+        op: "launchNativeApp",
+      });
+    }
+    if (input.confirmed !== true) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        "Process-backed native app targets require confirmed:true.",
+      );
+    }
+    const surface = await this.requireActionableSurface(input.fingerprint);
+    return await this.nativeAppTargetSet(surface, input, context);
   }
 
   async clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult> {
@@ -4182,7 +4244,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const registered = await this.registerTarget({
       expectedPreviousTargetEpoch: previousTargetEpoch,
       fingerprint: surface.surfaceId,
-      idempotencyKey: input.idempotencyKey ?? `terminal_app:${pane.paneId}:${command}:${JSON.stringify(args)}`,
+      idempotencyKey: input.idempotencyKey ??
+        `terminal_app:${pane.paneId}:${command}:${JSON.stringify(args)}:${optionalStringFingerprint(input.cwd)}`,
       launchedAt: new Date(this.now()).toISOString(),
       ownershipEpoch: surface.ownershipEpoch,
       ownershipSessionId: surface.sessionId ?? "",
@@ -4223,6 +4286,206 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       targetId: registered.targetId,
       targetKind: "terminal_app",
     };
+  }
+
+  private async nativeAppTargetSet(
+    surface: ManagedSurface,
+    input: SurfAceLaunchNativeAppInput,
+    _context?: SurfAceSessionContext,
+  ): Promise<SurfAcePushResult> {
+    const appId = input.appId.trim();
+    if (!appId) {
+      throw new SurfAceToolError("invalid_operation", "Native app id must be non-empty.");
+    }
+    const args = input.args ?? [];
+    if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) {
+      throw new SurfAceToolError("invalid_operation", "Native app args must be strings.");
+    }
+    if (input.env && !isStringRecord(input.env)) {
+      throw new SurfAceToolError("invalid_operation", "Native app env must be a string map.");
+    }
+    if (input.cwd !== undefined && typeof input.cwd !== "string") {
+      throw new SurfAceToolError("invalid_operation", "Native app cwd must be a string.");
+    }
+    const requiredCapability = requiredCapabilityForTargetKind("native_app");
+    if (!surface.targetCapabilities.has(requiredCapability)) {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Surface ${surface.surfaceId} does not advertise ${requiredCapability}`,
+      );
+    }
+    await this.refreshRuntimeAppBinding(surface);
+    this.requireTrustedRuntimeAppBinding(surface);
+    await this.reconcilePaneTopologyAuthority(surface, "native app target launch");
+    const pane = this.requirePane(surface.surfaceId, input.paneId);
+    await this.ensureCurrentPaneLineage(surface, pane);
+    this.finalizeLiveFrame(surface, pane);
+
+    const targetHeader: TargetHeader = {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: [requiredCapability],
+      safeToLogFields: ["appId", "args", "cwd", "launchMode"],
+      safetyClass: "process",
+      summary: input.summary?.trim() || [appId, ...args].join(" "),
+    };
+    const launchMode = input.launchMode ?? "new_instance";
+    const targetPayload = {
+      appId,
+      ...(args.length > 0 ? { args } : {}),
+      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+      ...(input.env ? { env: input.env } : {}),
+      launchMode,
+    };
+    const previousTargetEpoch = pane.targetEpoch === 0 ? null : pane.targetEpoch;
+    const registered = await this.registerTarget({
+      expectedPreviousTargetEpoch: previousTargetEpoch,
+      fingerprint: surface.surfaceId,
+      idempotencyKey: input.idempotencyKey ??
+        `native_app:${pane.paneId}:${appId}:${JSON.stringify(args)}:${optionalStringFingerprint(input.cwd)}:${stableStringMapDigest(input.env)}:${launchMode}`,
+      launchedAt: new Date(this.now()).toISOString(),
+      ownershipEpoch: surface.ownershipEpoch,
+      ownershipSessionId: surface.sessionId ?? "",
+      paneId: pane.paneId,
+      paneLineageId: pane.paneLineageId,
+      registrationState: "attached",
+      restorePolicy: "manual",
+      targetHeader,
+      targetKind: "native_app",
+      targetPayload,
+    });
+    if (registered.status === "rejected") {
+      throw new SurfAceToolError(
+        "invalid_operation",
+        `Native app target registration rejected: ${registered.message}`,
+      );
+    }
+
+    const restored = await this.restoreTarget({
+      confirmed: true,
+      fingerprint: surface.surfaceId,
+      paneId: pane.paneId,
+      targetId: registered.targetId,
+    });
+    const readinessBlockedReason = this.nativeAppReadinessBlockedReason(
+      restored.evidence ?? undefined,
+      pane,
+      registered.targetId,
+      surface.targetRecords.get(registered.targetId) ?? null,
+    );
+    if (readinessBlockedReason) {
+      pane.lastRestoreBlockedReason = readinessBlockedReason;
+      await this.persistSurfaceTargetState(surface, "native app readiness not proven");
+    }
+    this.repairLivePaneLabelInvariant("native app target launch", surface);
+    const paneLabel = this.projectedPaneLabel(surface, pane);
+    const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
+    return {
+      blockedReason: restored.blockedReason ?? readinessBlockedReason,
+      contentId: null,
+      displayId,
+      fingerprint: surface.surfaceId,
+      paneAddress: displayId,
+      paneId: pane.paneId,
+      paneLabel,
+      revision: pane.currentRevision,
+      targetApplyEvidence: restored.evidence ?? undefined,
+      targetId: registered.targetId,
+      targetKind: "native_app",
+    };
+  }
+
+  private nativeAppReadinessBlockedReason(
+    evidence: ApplyEvidence | undefined,
+    pane: ManagedPane,
+    targetId: string,
+    target: PaneTargetRecord | null,
+  ): TargetErrorCode | null {
+    if (!evidence || evidence.status !== "applied") {
+      return evidence?.errorCode ?? "materialization_failed";
+    }
+    const materializedState = evidence.materializedState;
+    if (!materializedState || !("nativeHost" in materializedState)) {
+      return "materialization_failed";
+    }
+    if (
+      materializedState.nativeHost !== "applied" ||
+      materializedState.lifecycle !== "running" ||
+      materializedState.inputFocus !== "ready" ||
+      materializedState.proof?.paneId !== String(pane.remotePaneId) ||
+      materializedState.proof?.contentId !== targetId ||
+      !this.nativeAppProofMatchesTarget(materializedState.proof, target)
+    ) {
+      return "materialization_failed";
+    }
+    return null;
+  }
+
+  private nativeAppProofMatchesTarget(
+    proof: NonNullable<Extract<TargetMaterializedState, { nativeHost: unknown }>["proof"]> | undefined,
+    target: PaneTargetRecord | null,
+  ): boolean {
+    if (!proof) {
+      return false;
+    }
+    const targetPayload = target && isPlainRecord(target.targetPayload) ? target.targetPayload : null;
+    if (!targetPayload || typeof targetPayload.appId !== "string") {
+      return false;
+    }
+    const args = isStringArray(targetPayload.args) ? targetPayload.args : [];
+    const cwd = typeof targetPayload.cwd === "string" ? targetPayload.cwd : "";
+    const env = isStringRecord(targetPayload.env) ? targetPayload.env : undefined;
+    const launchMode = targetPayload.launchMode === "attach_or_launch" ? "attach_or_launch" : "new_instance";
+    return proof.appId === targetPayload.appId &&
+      stringArraysEqual(proof.args, args) &&
+      (proof.cwd ?? "") === cwd &&
+      proof.envDigest === stableStringMapDigest(env) &&
+      proof.launchMode === launchMode;
+  }
+
+  private requireTrustedRuntimeAppBinding(surface: ManagedSurface): void {
+    const binding = surface.runtimeAppBinding;
+    if (!binding) {
+      throw new SurfAceToolError(
+        "not_connected",
+        `Surf Ace native app launch is not ready on ${surface.surfaceId} (runtime_binding_missing)`,
+      );
+    }
+    if (!binding.ready) {
+      throw new SurfAceToolError(
+        "not_connected",
+        `Surf Ace native app launch is not ready on ${surface.surfaceId} (${
+          binding.bindingAuthority === "blocked" ? "runtime_binding_blocked" : "runtime_binding_degraded"
+        })`,
+      );
+    }
+  }
+
+  private async refreshRuntimeAppBinding(surface: ManagedSurface): Promise<void> {
+    const response = await this.sendRequest(surface, this.requestEnvelope("runtime.app_binding"));
+    if (isErrorResponse(response)) {
+      surface.runtimeAppBinding = null;
+      this.logger.warn?.(
+        runtimeDiagnostic("runtime_app_binding_refresh_failed", {
+          error_code: response.error.code,
+          surface_id: surface.surfaceId,
+        }),
+      );
+      return;
+    }
+    if (response.op !== "runtime.app_binding") {
+      surface.runtimeAppBinding = null;
+      this.logger.warn?.(
+        runtimeDiagnostic("runtime_app_binding_refresh_unexpected_response", {
+          response_op: response.op,
+          surface_id: surface.surfaceId,
+        }),
+      );
+      return;
+    }
+    surface.runtimeAppBinding = response.payload.runtimeAppBinding
+      ? structuredClone(response.payload.runtimeAppBinding)
+      : null;
   }
 
   private emit(event: SurfAceLocalEvent): void {
@@ -8494,6 +8757,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         wsOpen: surface.client?.isOpen() ?? false,
         providerAuthority: authority,
         providerAuthorityProjection,
+        runtimeAppBinding: surface.runtimeAppBinding ? structuredClone(surface.runtimeAppBinding) : null,
       },
     };
   }
@@ -8527,10 +8791,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const authorityBlockersBySurfaceId: Record<string, string[]> = {};
     const authorityBlockedSurfaceIds: string[] = [];
+    const runtimeAppBindingBySurfaceId: Record<string, RuntimeAppBindingDiagnostics | null> = {};
     for (const surface of this.surfaces.values()) {
       const authority = snapshot.decisionsBySurfaceId.get(surface.surfaceId) ??
         this.providerAuthorityForSurface(surface, expectedProviderPid, providerProcessHealth);
       authorityBlockersBySurfaceId[surface.surfaceId] = authority.blockers;
+      runtimeAppBindingBySurfaceId[surface.surfaceId] = surface.runtimeAppBinding
+        ? structuredClone(surface.runtimeAppBinding)
+        : null;
       if (!authority.admitted) {
         authorityBlockedSurfaceIds.push(surface.surfaceId);
       }
@@ -8551,6 +8819,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       providerProcessBlockReason,
       providerProcessHealth,
       providerId: state.providerId,
+      runtimeAppBindingBySurfaceId,
       runtimeScreenIds,
       started: this.started,
       surfaceTombstones: structuredClone(state.surfaceTombstones ?? {}),
@@ -9402,6 +9671,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.closePane(command.input);
       case "listScreens":
         return await this.listScreens();
+      case "launchNativeApp":
+        return await this.launchNativeApp(command.input, command.context);
       case "launchTerminal":
         return await this.launchTerminal(command.input, command.context);
       case "push":
@@ -12083,6 +12354,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.name = response.payload.surfaceName;
     surface.viewport = cloneViewport(response.payload.viewport);
     surface.protocolFeatures = new Set(response.payload.capabilities.protocolFeatures ?? []);
+    surface.runtimeAppBinding = response.payload.capabilities.runtimeAppBinding
+      ? structuredClone(response.payload.capabilities.runtimeAppBinding)
+      : null;
     surface.targetCapabilities = this.targetCapabilitiesForPair(response);
     try {
       const pairImportedRemotePaneIds = new Set<number>();

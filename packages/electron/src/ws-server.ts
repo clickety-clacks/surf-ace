@@ -1,5 +1,8 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -17,6 +20,7 @@ import type {
   HeartbeatPingRequest,
   HistoryNavigatedEvent,
   RelinquishRequest,
+  RuntimeAppBindingDiagnostics,
   PaneCloseRequest,
   PaneRenameRequest,
   PaneSplitRequest,
@@ -31,6 +35,7 @@ import type {
   SurfacesListRequest,
   TargetApplyRequest,
   TargetApplyResponse,
+  type NativeHostMaterializedState,
   TargetMaterializedState,
   TopologyApplyRequest,
   Viewport,
@@ -128,6 +133,7 @@ export type SurfaceWsServerOptions = {
   getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   nativeOverlayLivenessRetryCount?: number;
   nativeOverlayLivenessRetryDelayMs?: number;
+  getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
   onBusyChanged?: () => void;
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
@@ -183,6 +189,7 @@ export class SurfaceWsServer {
   private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
   private readonly nativeOverlayLivenessRetryCount: number;
   private readonly nativeOverlayLivenessRetryDelayMs: number;
+  private readonly getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
   private readonly onBusyChanged?: () => void;
   private readonly onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   private readonly onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
@@ -211,6 +218,7 @@ export class SurfaceWsServer {
     this.core = options.core;
     this.endpointName = options.endpointName;
     this.getOverlayDiagnostics = options.getOverlayDiagnostics;
+    this.getRuntimeAppBinding = options.getRuntimeAppBinding;
     this.hostName = options.hostName;
     this.nativeOverlayLivenessRetryCount = options.nativeOverlayLivenessRetryCount ?? NATIVE_OVERLAY_LIVENESS_RETRY_COUNT;
     this.nativeOverlayLivenessRetryDelayMs = options.nativeOverlayLivenessRetryDelayMs ?? NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS;
@@ -895,6 +903,8 @@ export class SurfaceWsServer {
         return this.handleSurfacesList(request);
       case "pair.request":
         return await this.handlePairRequest(socket, request);
+      case "runtime.app_binding":
+        return await this.handleRuntimeAppBinding(request);
       case "ownership.relinquish":
         return this.handleRelinquish(socket, request);
       case "topology.apply":
@@ -960,6 +970,20 @@ export class SurfaceWsServer {
         })),
       },
       sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    };
+  }
+
+  private async handleRuntimeAppBinding(request: Request): Promise<Response> {
+    return {
+      id: request.id,
+      ok: true,
+      op: "runtime.app_binding",
+      payload: {
+        runtimeAppBinding: await this.currentRuntimeAppBinding(),
+      },
+      sentAt: Date.now() as never,
       type: "response",
       v: 1,
     };
@@ -1222,7 +1246,7 @@ export class SurfaceWsServer {
       ok: true,
       op: "pair.request",
       payload: {
-        capabilities: this.capabilities(),
+        capabilities: await this.capabilities(),
         eventConfig: {
           activeEvents: activeEventsForProfile(requestedProfile),
           drawingFlushConfig,
@@ -1809,6 +1833,41 @@ export class SurfaceWsServer {
         };
       }
 
+      if (request.payload.targetKind === "native_app") {
+        const runtimeAppBinding = await this.currentRuntimeAppBinding();
+        if (!runtimeAppBinding?.ready) {
+          const diagnostic = runtimeAppBinding
+            ? runtimeAppBinding.bindingAuthority === "blocked"
+              ? runtimeAppBinding.bindingBlockReason ?? "runtime_binding_blocked"
+              : runtimeAppBinding.bindingDegradedReasons[0] ?? "runtime_binding_degraded"
+            : "runtime_binding_missing";
+          const payload: TargetApplyResponse["payload"] = {
+            appliedAt,
+            errorCode: "materialization_failed",
+            materializedState: nativeHostMaterializedState(request.payload, materialization, {
+              diagnostics: [diagnostic],
+              nativeHost: "not_applied",
+              overlayRegions: "not_requested",
+            }),
+            message: publicTargetApplyMessage("materialization_failed"),
+            paneLineageId: request.payload.paneLineageId,
+            requestId: request.payload.requestId,
+            status: "failed",
+            targetEpoch: request.payload.targetEpoch,
+            targetId: request.payload.targetId,
+          };
+          return {
+            id: request.id,
+            ok: true,
+            op: "target.apply.result",
+            payload,
+            sentAt: Date.now(),
+            type: "response",
+            v: 1,
+          };
+        }
+      }
+
       let hostRequest: CompositorControlRequest | null = null;
       let preflightStatus: CompositorControlResponse | null = null;
       let hostApplied = false;
@@ -1877,8 +1936,11 @@ export class SurfaceWsServer {
         const payload: TargetApplyResponse["payload"] = {
           appliedAt,
           materializedState: {
-            nativeHost: "applied",
-            overlayRegions: overlayRequest ? "applied" : "not_requested",
+            ...nativeHostMaterializedState(request.payload, materialization, {
+              ...nativePaneReadinessFromCompositor(hostResponse, materialization),
+              nativeHost: "applied",
+              overlayRegions: overlayRequest ? "applied" : "not_requested",
+            }),
           },
           paneLineageId: request.payload.paneLineageId,
           requestId: request.payload.requestId,
@@ -1923,14 +1985,15 @@ export class SurfaceWsServer {
         const payload: TargetApplyResponse["payload"] = {
           appliedAt,
           errorCode: "materialization_failed",
-          materializedState: {
+          materializedState: nativeHostMaterializedState(request.payload, materialization, {
+            diagnostics: [error instanceof Error ? error.message : "native host materialization failed"],
             nativeHost: releasedAfterFailure ? "released_after_failure" : hostApplied ? "applied" : "not_applied",
             overlayRegions: overlayRequest
               ? overlayApplied
                 ? "applied"
                 : "not_applied"
               : "not_requested",
-          },
+          }),
           message: publicTargetApplyMessage("materialization_failed"),
           paneLineageId: request.payload.paneLineageId,
           requestId: request.payload.requestId,
@@ -2753,15 +2816,21 @@ export class SurfaceWsServer {
     return created;
   }
 
-  private capabilities() {
+  private async capabilities() {
     const capabilities = this.core.capabilities();
+    const runtimeAppBinding = await this.currentRuntimeAppBinding();
     return {
       ...capabilities,
       protocolFeatures: ["authority.state.v1"],
+      ...(runtimeAppBinding ? { runtimeAppBinding } : {}),
       targetCapabilities: this.compositorSocketPath
-        ? [...capabilities.targetCapabilities, "target.terminal_app.v1"]
+        ? [...capabilities.targetCapabilities, "target.native_app.v1"]
         : capabilities.targetCapabilities,
     };
+  }
+
+  private async currentRuntimeAppBinding(): Promise<RuntimeAppBindingDiagnostics | null> {
+    return await this.getRuntimeAppBinding?.() ?? null;
   }
 
   private activeSession(surfaceId: string): ActiveSession | null {
@@ -3166,6 +3235,267 @@ function browserUrlApplyKey(surfaceId: string, paneId: number): string {
 
 function isNativeHostTargetKind(targetKind: TargetApplyRequest["payload"]["targetKind"]): boolean {
   return targetKind === "terminal_app" || targetKind === "native_app" || targetKind === "compositor_app";
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nativeHostMaterializedState(
+  payload: TargetApplyRequest["payload"],
+  materialization: NativePaneMaterialization,
+  state: {
+    diagnostics?: string[];
+    inputFocus?: "ready" | "not_ready" | "unknown";
+    lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+    nativeHost: "applied" | "not_applied" | "released_after_failure";
+    overlayRegions: "applied" | "not_applied" | "not_requested";
+    proof?: NativeHostMaterializedState["proof"];
+  },
+): TargetMaterializedState {
+  const pane = materialization.panes[0];
+  const targetPayload = isPlainRecord(payload.targetPayload) ? payload.targetPayload : {};
+  const args = Array.isArray(targetPayload.args) && targetPayload.args.every((arg) => typeof arg === "string")
+    ? [...targetPayload.args]
+    : undefined;
+  const env = isPlainRecord(targetPayload.env)
+    ? Object.keys(targetPayload.env).filter((key) => typeof targetPayload.env[key] === "string").sort()
+    : undefined;
+  const envDigest = isPlainRecord(targetPayload.env) ? stableStringRecordDigest(targetPayload.env) : undefined;
+  const appId = typeof targetPayload.appId === "string" ? targetPayload.appId : undefined;
+  const command = typeof targetPayload.command === "string" ? targetPayload.command : undefined;
+  const cwd = typeof targetPayload.cwd === "string" ? targetPayload.cwd : undefined;
+  const launchMode = typeof targetPayload.launchMode === "string" ? targetPayload.launchMode : undefined;
+  return {
+    authority: {
+      ownershipEpoch: payload.ownershipEpoch,
+      ownershipSessionId: payload.ownershipSessionId,
+      paneLineageId: payload.paneLineageId,
+      surfaceId: payload.surfaceId,
+      targetEpoch: payload.targetEpoch,
+    },
+    ...(state.diagnostics && state.diagnostics.length > 0 ? { diagnostics: state.diagnostics } : {}),
+    inputFocus: state.inputFocus ?? "unknown",
+    lifecycle: state.lifecycle ?? (state.nativeHost === "applied" ? "launch_requested" : "unknown"),
+    nativeHost: state.nativeHost,
+    nativeTarget: {
+      ...(appId ? { appId } : {}),
+      ...(args ? { args } : {}),
+      ...(command ? { command } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(envDigest ? { envDigest } : {}),
+      ...(env && env.length > 0 ? { envKeys: env } : {}),
+      ...(launchMode ? { launchMode } : {}),
+      targetKind: payload.targetKind,
+    },
+    overlayRegions: state.overlayRegions,
+    ...(pane
+      ? {
+        paneGeometry: { ...pane.geometry },
+      }
+      : {}),
+    ...(state.proof ? { proof: state.proof } : {}),
+  };
+}
+
+function nativePaneReadinessFromCompositor(
+  response: CompositorControlResponse,
+  materialization: NativePaneMaterialization,
+): {
+  diagnostics?: string[];
+  inputFocus?: "ready" | "not_ready" | "unknown";
+  lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+  proof?: NativeHostMaterializedState["proof"];
+} {
+  const status = response.status;
+  if (!isPlainRecord(status)) {
+    return {};
+  }
+  const pane = materialization.panes[0];
+  const panes = Array.isArray(status.panes) ? status.panes : [];
+  const paneStatus = panes.find((candidate) => {
+    if (!isPlainRecord(candidate) || !pane) {
+      return false;
+    }
+    return String(candidate.id ?? "") === String(pane.id) ||
+      (pane.binding_id ? String(candidate.binding_id ?? "") === String(pane.binding_id) : false);
+  });
+  const source = isPlainRecord(paneStatus) ? paneStatus : status;
+  const paneStatusId = isPlainRecord(paneStatus) && (typeof paneStatus.id === "string" || typeof paneStatus.id === "number")
+    ? String(paneStatus.id)
+    : null;
+  const paneStatusBindingId = isPlainRecord(paneStatus) && typeof paneStatus.binding_id === "string"
+    ? paneStatus.binding_id
+    : null;
+  const paneStatusContentId = isPlainRecord(paneStatus) && typeof paneStatus.content_id === "string"
+    ? paneStatus.content_id
+    : null;
+  const nativeAppStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.nativeApp) ? paneStatus.nativeApp : null;
+  const processStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.process) ? paneStatus.process : null;
+  const proof = paneProofFromCompositorStatus({
+    nativeAppStatus,
+    pane,
+    paneStatus: isPlainRecord(paneStatus) ? paneStatus : null,
+    paneStatusBindingId,
+    paneStatusContentId,
+    paneStatusId,
+    processStatus,
+  });
+  const diagnostics = nativePaneDiagnosticsFromCompositorStatus(status, isPlainRecord(paneStatus) ? paneStatus : null);
+  return {
+    ...(diagnostics.length > 0 ? { diagnostics } : {}),
+    inputFocus: normalizeNativeInputFocus(source.inputFocus ?? source.input_focus),
+    lifecycle: normalizeNativeLifecycle(source.lifecycle),
+    ...(proof ? { proof } : {}),
+  };
+}
+
+function nativePaneDiagnosticsFromCompositorStatus(
+  status: Record<string, unknown>,
+  paneStatus: Record<string, unknown> | null,
+): string[] {
+  const diagnostics = new Set<string>();
+  appendDiagnosticValues(diagnostics, status.diagnostics);
+  appendDiagnosticValues(diagnostics, status.diagnostic);
+  appendDiagnosticValues(diagnostics, status.reason);
+  appendDiagnosticValues(diagnostics, status.message);
+  if (paneStatus) {
+    appendDiagnosticValues(diagnostics, paneStatus.diagnostics);
+    appendDiagnosticValues(diagnostics, paneStatus.diagnostic);
+    appendDiagnosticValues(diagnostics, paneStatus.reason);
+    appendDiagnosticValues(diagnostics, paneStatus.message);
+    if (isPlainRecord(paneStatus.nativeApp)) {
+      appendDiagnosticValues(diagnostics, paneStatus.nativeApp.diagnostics);
+      appendDiagnosticValues(diagnostics, paneStatus.nativeApp.diagnostic);
+      appendDiagnosticValues(diagnostics, paneStatus.nativeApp.reason);
+      appendDiagnosticValues(diagnostics, paneStatus.nativeApp.message);
+    }
+    if (isPlainRecord(paneStatus.process)) {
+      appendDiagnosticValues(diagnostics, paneStatus.process.diagnostics);
+      appendDiagnosticValues(diagnostics, paneStatus.process.diagnostic);
+      appendDiagnosticValues(diagnostics, paneStatus.process.reason);
+      appendDiagnosticValues(diagnostics, paneStatus.process.message);
+    }
+  }
+  return [...diagnostics];
+}
+
+function appendDiagnosticValues(target: Set<string>, value: unknown): void {
+  if (typeof value === "string" && value.trim().length > 0) {
+    target.add(value.trim());
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      appendDiagnosticValues(target, entry);
+    }
+  }
+}
+
+function paneProofFromCompositorStatus(input: {
+  nativeAppStatus: Record<string, unknown> | null;
+  pane: NativePaneMaterialization["panes"][number] | undefined;
+  paneStatus: Record<string, unknown> | null;
+  paneStatusBindingId: string | null;
+  paneStatusContentId: string | null;
+  paneStatusId: string | null;
+  processStatus: Record<string, unknown> | null;
+}): NativeHostMaterializedState["proof"] | undefined {
+  const {
+    nativeAppStatus,
+    pane,
+    paneStatus,
+    paneStatusBindingId,
+    paneStatusContentId,
+    paneStatusId,
+    processStatus,
+  } = input;
+  if (
+    !pane ||
+    !paneStatus ||
+    paneStatusId !== String(pane.id) ||
+    !((pane.binding_id && paneStatusBindingId === pane.binding_id) ||
+      (pane.content_id && paneStatusContentId === pane.content_id))
+  ) {
+    return undefined;
+  }
+
+  if (pane.nativeApp) {
+    const appId = stringProperty(nativeAppStatus, "appId") ?? stringProperty(nativeAppStatus, "app_id") ??
+      stringProperty(paneStatus, "appId") ?? stringProperty(paneStatus, "app_id");
+    const args = stringArrayProperty(nativeAppStatus, "args") ?? stringArrayProperty(processStatus, "args") ??
+      stringArrayProperty(paneStatus, "args");
+    const launchMode = stringProperty(nativeAppStatus, "launchMode") ?? stringProperty(nativeAppStatus, "launch_mode") ??
+      stringProperty(paneStatus, "launchMode") ?? stringProperty(paneStatus, "launch_mode");
+    const cwd = stringProperty(processStatus, "cwd") ?? stringProperty(paneStatus, "cwd");
+    const expectedCwd = pane.process?.cwd;
+    const envDigest = stringProperty(processStatus, "envDigest") ?? stringProperty(processStatus, "env_digest") ??
+      stringProperty(paneStatus, "envDigest") ?? stringProperty(paneStatus, "env_digest");
+    const expectedEnvDigest = stableStringRecordDigest(pane.process?.env ?? {});
+
+    if (
+      appId !== pane.nativeApp.appId ||
+      !stringArraysEqual(args, pane.nativeApp.args) ||
+      launchMode !== pane.nativeApp.launchMode ||
+      (cwd ?? "") !== (expectedCwd ?? "") ||
+      envDigest !== expectedEnvDigest
+    ) {
+      return undefined;
+    }
+
+    return {
+      appId,
+      args,
+      ...(paneStatusBindingId ? { bindingId: paneStatusBindingId } : {}),
+      ...(paneStatusContentId ? { contentId: paneStatusContentId } : {}),
+      ...(cwd ? { cwd } : {}),
+      envDigest,
+      launchMode,
+      paneId: paneStatusId,
+    };
+  }
+
+  return {
+    ...(paneStatusBindingId ? { bindingId: paneStatusBindingId } : {}),
+    ...(paneStatusContentId ? { contentId: paneStatusContentId } : {}),
+    paneId: paneStatusId,
+  };
+}
+
+function normalizeNativeInputFocus(value: unknown): "ready" | "not_ready" | "unknown" | undefined {
+  if (value === "ready" || value === "not_ready" || value === "unknown") {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeNativeLifecycle(value: unknown): "launch_requested" | "running" | "exited" | "unknown" | undefined {
+  if (value === "launch_requested" || value === "running" || value === "exited" || value === "unknown") {
+    return value;
+  }
+  return undefined;
+}
+
+function stringProperty(record: Record<string, unknown> | null, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function stringArrayProperty(record: Record<string, unknown> | null, key: string): string[] | undefined {
+  const value = record?.[key];
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? [...value] : undefined;
+}
+
+function stringArraysEqual(left: string[] | undefined, right: string[]): boolean {
+  return Boolean(left) && left!.length === right.length && left!.every((entry, index) => entry === right[index]);
+}
+
+function stableStringRecordDigest(value: Record<string, unknown>): string {
+  const stableValue = Object.fromEntries(Object.keys(value)
+    .filter((key) => typeof value[key] === "string")
+    .sort()
+    .map((key) => [key, value[key]]));
+  return createHash("sha256").update(JSON.stringify(stableValue)).digest("hex");
 }
 
 function publicTargetApplyMessage(

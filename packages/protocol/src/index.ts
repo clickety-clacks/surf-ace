@@ -55,8 +55,71 @@ export type BrowserUrlMaterializedState = {
 };
 
 export type NativeHostMaterializedState = {
+  authority?: {
+    ownershipEpoch: number;
+    ownershipSessionId: string;
+    paneLineageId: string;
+    surfaceId: SurfaceId;
+    targetEpoch: number;
+  };
+  diagnostics?: string[];
+  inputFocus?: "ready" | "not_ready" | "unknown";
+  lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+  nativeTarget?: {
+    appId?: string;
+    args?: string[];
+    command?: string;
+    cwd?: string;
+    envDigest?: string;
+    envKeys?: string[];
+    launchMode?: string;
+    targetKind: TargetKind;
+  };
   nativeHost: "applied" | "not_applied" | "released_after_failure";
   overlayRegions: "applied" | "not_applied" | "not_requested";
+  paneGeometry?: {
+    coordinateSpace: "compositor_logical";
+    geometryRevision: Revision;
+    height: number;
+    paneInstanceId: string;
+    surfaceEpoch: string;
+    topologyEpoch: TopologyRevision;
+    width: number;
+    x: number;
+    y: number;
+  };
+  proof?: {
+    appId?: string;
+    args?: string[];
+    bindingId?: string;
+    contentId?: string;
+    cwd?: string;
+    envDigest?: string;
+    launchMode?: string;
+    paneId: string;
+  };
+};
+
+export type RuntimeAppBindingDiagnostics = {
+  acknowledgement: "accepted" | "failed" | "not_configured" | "pending";
+  bindingAuthority: "trusted" | "degraded" | "blocked";
+  bindingBlockReason?: string;
+  bindingDegradedReasons: string[];
+  checkedAt?: EpochMs;
+  diagnosticDrift: string[];
+  expectedBundleId: string | null;
+  expectedPackageName: string | null;
+  expectedRuntimeId: string;
+  failureMessage?: string;
+  launchTokenStatus: "matched" | "missing" | "mismatched";
+  observedUiLabel: string | null;
+  observedWaylandAppId: string | null;
+  observedWindowTitle: string | null;
+  processLineageStatus: "matched" | "missing" | "mismatched";
+  ready: boolean;
+  reportedBundleId: string | null;
+  reportedPackageName: string | null;
+  reportedRuntimeId: string;
 };
 
 export type ContentMaterializedState = {
@@ -592,6 +655,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
       contentTypes: ContentType[];
       eventTypes: Event["op"][];
       protocolFeatures?: string[];
+      runtimeAppBinding?: RuntimeAppBindingDiagnostics;
       targetCapabilities?: string[];
     };
     eventConfig: {
@@ -629,6 +693,14 @@ export type PairResponse = ResponseBase<"pair.request"> & {
       layout: TopologyLayoutNode;
       topologyRevision: TopologyRevision;
     };
+  };
+};
+
+export type RuntimeAppBindingRequest = RequestBase<"runtime.app_binding">;
+
+export type RuntimeAppBindingResponse = ResponseBase<"runtime.app_binding"> & {
+  payload: {
+    runtimeAppBinding: RuntimeAppBindingDiagnostics | null;
   };
 };
 
@@ -989,6 +1061,7 @@ export type PaneRenamedEvent = EventBase<"event.pane_renamed"> & {
 export type Request =
   | SurfacesListRequest
   | PairRequest
+  | RuntimeAppBindingRequest
   | RelinquishRequest
   | TopologyApplyRequest
   | ContentApplyRequest
@@ -1010,6 +1083,7 @@ export type Request =
 export type Response =
   | SurfacesListResponse
   | PairResponse
+  | RuntimeAppBindingResponse
   | RelinquishResponse
   | TopologyApplyResponse
   | ContentApplyResponse

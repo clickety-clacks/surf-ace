@@ -711,6 +711,24 @@ export class SurfaceCore {
           ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
         };
       }
+    } else if (payload.targetKind === "native_app" && isPlainRecord(payload.targetPayload)) {
+      const { appId, args, cwd, env, launchMode } = payload.targetPayload;
+      if (typeof appId === "string") {
+        const appArgs = Array.isArray(args) && args.every((arg) => typeof arg === "string") ? [...args] : [];
+        const appLaunchMode = launchMode === "attach_or_launch" ? "attach_or_launch" : "new_instance";
+        paneEntry.target = "native_app";
+        paneEntry.nativeApp = {
+          appId,
+          args: appArgs,
+          launchMode: appLaunchMode,
+        };
+        paneEntry.process = {
+          args: appArgs,
+          command: appId,
+          ...(typeof cwd === "string" ? { cwd } : {}),
+          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
+        };
+      }
     }
     const overlayRect = {
       height: compositorViewport.height,

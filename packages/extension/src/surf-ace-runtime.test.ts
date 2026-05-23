@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 import type WebSocket from "ws";
 
+import type { RuntimeAppBindingDiagnostics } from "../../protocol/src/index.js";
 import type { SurfAceDiscoveryEndpoint, SurfAceDiscoveryService } from "./surf-ace-discovery.js";
 import { SurfAceOwnershipRecoveryPolicy } from "./surf-ace-ownership-recovery-policy.js";
 import {
@@ -63,6 +65,42 @@ type TestPane = {
     width: number;
   };
 };
+
+function trustedRuntimeAppBinding(): RuntimeAppBindingDiagnostics {
+  return {
+    acknowledgement: "accepted",
+    bindingAuthority: "trusted",
+    bindingDegradedReasons: [],
+    diagnosticDrift: ["wayland_app_id_mismatch"],
+    expectedBundleId: "ai.surf-ace.electron",
+    expectedPackageName: "@surf-ace/electron",
+    expectedRuntimeId: "surf-ace.runtime.electron",
+    launchTokenStatus: "matched",
+    observedUiLabel: "Test Surface",
+    observedWaylandAppId: "surf-ace-electron",
+    observedWindowTitle: "Test Surface",
+    processLineageStatus: "matched",
+    ready: true,
+    reportedBundleId: "ai.surf-ace.electron",
+    reportedPackageName: "@surf-ace/electron",
+    reportedRuntimeId: "surf-ace.runtime.electron",
+  };
+}
+
+function stableStringRecordDigest(value: Record<string, unknown> | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const stableValue = Object.fromEntries(Object.keys(value)
+    .filter((key) => typeof value[key] === "string")
+    .sort()
+    .map((key) => [key, value[key]]));
+  return createHash("sha256").update(JSON.stringify(stableValue)).digest("hex");
+}
+
+async function launchInternalTerminal(runtime: unknown, input: Record<string, unknown>, context?: Record<string, unknown>) {
+  return await (runtime as any).launchTerminal(input, context);
+}
 
 type TestSurfaceState = {
   name: string;
@@ -261,6 +299,8 @@ class FakeSurfAceWsServer {
     "target.compositor_app.v1",
   ];
   protocolFeatures = ["authority.state.v1"];
+  runtimeAppBinding: RuntimeAppBindingDiagnostics | null = null;
+  runtimeAppBindingRequests = 0;
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
   addPaneAfterPairResponse: {
@@ -285,6 +325,8 @@ class FakeSurfAceWsServer {
   omitPairPaneLabel = false;
   omitPanesListPaneLabel = false;
   omitTopologyApplyResponsePaneLabel = false;
+  nativeTargetProofContentIdOverride: string | null | undefined = undefined;
+  nativeTargetProofPaneIdOverride: string | null | undefined = undefined;
   surfacesListErrorCode: string | null = null;
   surfacesListRequests = 0;
 
@@ -740,6 +782,16 @@ class FakeSurfAceWsServer {
           ),
         );
         return;
+      case "runtime.app_binding":
+        this.runtimeAppBindingRequests += 1;
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "runtime.app_binding", {
+              runtimeAppBinding: this.runtimeAppBinding,
+            }),
+          ),
+        );
+        return;
       case "pair.request":
         this.pairRequestSurfaceIds.push(String(message.payload?.surfaceId ?? this.surfaceId));
         this.pairRequests.push({
@@ -955,6 +1007,7 @@ class FakeSurfAceWsServer {
                   "event.snapshot_hint",
                 ],
                 protocolFeatures: [...this.protocolFeatures],
+                ...(this.runtimeAppBinding ? { runtimeAppBinding: this.runtimeAppBinding } : {}),
                 targetCapabilities: [...this.targetCapabilities],
               },
               eventConfig: {
@@ -1242,22 +1295,60 @@ class FakeSurfAceWsServer {
           );
           return;
         }
+        let nativeHostPaneId: number | undefined;
         if (isNativeHostTargetKind(String(message.payload?.targetKind ?? ""))) {
           const targetSurface = this.requirePairedSurface(socket);
           const pane = [...targetSurface.panes.values()].find((candidate) =>
             candidate.paneLineageId === message.payload?.paneLineageId
           );
           if (pane) {
+            nativeHostPaneId = [...targetSurface.panes.entries()].find(([, candidate]) => candidate === pane)?.[0];
             pane.contentId = null;
             pane.contentType = null;
             pane.externalNative = true;
           }
         }
+        const targetPayload = message.payload?.targetPayload && typeof message.payload.targetPayload === "object"
+          ? message.payload.targetPayload as Record<string, unknown>
+          : {};
+        const targetKind = String(message.payload?.targetKind ?? "");
+        const env = targetPayload.env && typeof targetPayload.env === "object" && !Array.isArray(targetPayload.env)
+          ? targetPayload.env as Record<string, unknown>
+          : undefined;
         socket.send(
           JSON.stringify(
             this.response(message.id, "target.apply.result", {
               appliedAt: new Date().toISOString(),
-              materializedState: { paneLineageId: String(message.payload?.paneLineageId ?? "") },
+              materializedState: isNativeHostTargetKind(targetKind)
+                ? {
+                    inputFocus: "ready",
+                    lifecycle: "running",
+                    nativeHost: "applied",
+                    nativeTarget: {
+                      ...(typeof targetPayload.appId === "string" ? { appId: targetPayload.appId } : {}),
+                      ...(Array.isArray(targetPayload.args) ? { args: targetPayload.args } : {}),
+                      ...(typeof targetPayload.command === "string" ? { command: targetPayload.command } : {}),
+                      ...(typeof targetPayload.cwd === "string" ? { cwd: targetPayload.cwd } : {}),
+                      ...(env ? { envDigest: stableStringRecordDigest(env), envKeys: Object.keys(env).sort() } : {}),
+                      ...(typeof targetPayload.launchMode === "string" ? { launchMode: targetPayload.launchMode } : {}),
+                      targetKind,
+                    },
+                    overlayRegions: "applied",
+                    proof: {
+                      ...(typeof targetPayload.appId === "string" ? { appId: targetPayload.appId } : {}),
+                      ...(Array.isArray(targetPayload.args) ? { args: targetPayload.args } : { args: [] }),
+                      contentId: this.nativeTargetProofContentIdOverride === undefined
+                        ? String(message.payload?.targetId ?? "")
+                        : this.nativeTargetProofContentIdOverride,
+                      ...(typeof targetPayload.cwd === "string" ? { cwd: targetPayload.cwd } : {}),
+                      envDigest: stableStringRecordDigest(env) ?? stableStringRecordDigest({})!,
+                      launchMode: typeof targetPayload.launchMode === "string" ? targetPayload.launchMode : "new_instance",
+                      paneId: this.nativeTargetProofPaneIdOverride === undefined
+                        ? String(nativeHostPaneId ?? "")
+                        : this.nativeTargetProofPaneIdOverride,
+                    },
+                  }
+                : { paneLineageId: String(message.payload?.paneLineageId ?? "") },
               paneLineageId: String(message.payload?.paneLineageId ?? ""),
               requestId: String(message.payload?.requestId ?? message.id),
               status: "applied",
@@ -3575,10 +3666,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("provider actionability requires accepted client authority state", async () => {
-	    await withRuntimeHarness({
-	      configureServer: (server) => {
-	        server.rejectAuthorityState = true;
+	  await t.test("provider actionability requires accepted client authority state", async () => {
+		    await withRuntimeHarness({
+		      configureServer: (server) => {
+		        server.rejectAuthorityState = true;
       },
       waitForAuthority: false,
       run: async ({ runtime, server }) => {
@@ -3599,8 +3690,67 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         );
         assert.equal(server.contentSetRequests.length, 0);
       },
-	    });
-	  });
+		    });
+		  });
+
+  await t.test("runtime app binding degraded diagnostics block native app launch readiness without changing provider ownership", async () => {
+    const runtimeAppBinding: RuntimeAppBindingDiagnostics = {
+      acknowledgement: "failed",
+      bindingAuthority: "degraded",
+      bindingDegradedReasons: ["launch_token_missing", "process_lineage_missing"],
+      checkedAt: 123 as never,
+      diagnosticDrift: ["wayland_app_id_mismatch"],
+      expectedBundleId: "ai.surf-ace.electron",
+      expectedPackageName: "@surf-ace/electron",
+      expectedRuntimeId: "surf-ace.runtime.electron",
+      failureMessage: "missing launch token",
+      launchTokenStatus: "missing",
+      observedUiLabel: "Test Surface",
+      observedWaylandAppId: "surf-ace-electron",
+      observedWindowTitle: "Test Surface",
+      processLineageStatus: "missing",
+      ready: false,
+      reportedBundleId: "ai.surf-ace.electron",
+      reportedPackageName: "@surf-ace/electron",
+      reportedRuntimeId: "surf-ace.runtime.electron",
+    };
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.runtimeAppBinding = runtimeAppBinding;
+      },
+      waitForAuthority: false,
+      run: async ({ runtime, server }) => {
+        await waitFor(async () => {
+          const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+          return screen?._debug?.runtimeAppBinding?.bindingAuthority === "degraded";
+        }, 12_000);
+
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        assert.equal(screen.connectionState, "connected");
+        assert.equal(screen.authority.actionable, true);
+        assert.equal(screen.authority.reason, null);
+        assert.deepEqual(screen._debug?.runtimeAppBinding, runtimeAppBinding);
+        assert.deepEqual(
+          screen._debug?.providerAuthorityProjection.runtimeAppBindingBySurfaceId[server.surfaceId],
+          runtimeAppBinding,
+        );
+        assert.deepEqual(
+          screen._debug?.providerAuthorityProjection.authorityBlockersBySurfaceId[server.surfaceId],
+          [],
+        );
+        await assert.rejects(
+          runtime.launchNativeApp({
+            appId: "com.example.NativeApp",
+            confirmed: true,
+            fingerprint: server.surfaceId,
+            paneId: screen.panes[0]!.paneId,
+          }),
+          /runtime_binding_degraded/,
+        );
+      },
+    });
+  });
 
   await t.test("provider process inventory recognizes in-process owner and stale plugin siblings", () => {
     const inProcessHealth = providerProcessHealthFromProcessList(
@@ -6838,7 +6988,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("surf_ace_launch_terminal applies a provider-owned process target with opaque geometry", async () => {
+  await t.test("internal terminal_app target applies a provider-owned process target with opaque geometry", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const split = await runtime.split({
@@ -6850,7 +7000,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const [, secondPane] = split;
       assert.ok(secondPane);
 
-      const launched = await runtime.launchTerminal(
+      const launched = await launchInternalTerminal(runtime,
         {
           args: ["--utf-force"],
           command: "btop",
@@ -6920,7 +7070,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const [, secondPane] = split;
       assert.ok(secondPane);
 
-      await runtime.launchTerminal({
+      await launchInternalTerminal(runtime, {
         command: "btop",
         confirmed: true,
         fingerprint: server.surfaceId,
@@ -6966,7 +7116,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const [, secondPane] = split;
       assert.ok(secondPane);
 
-      await runtime.launchTerminal({
+      await launchInternalTerminal(runtime, {
         command: "btop",
         confirmed: true,
         fingerprint: server.surfaceId,
@@ -7018,7 +7168,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const [, secondPane] = split;
       assert.ok(secondPane);
 
-      await runtime.launchTerminal({
+      await launchInternalTerminal(runtime, {
         command: "btop",
         confirmed: true,
         fingerprint: server.surfaceId,
@@ -7060,7 +7210,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const [, secondPane] = split;
       assert.ok(secondPane);
 
-      await runtime.launchTerminal({
+      await launchInternalTerminal(runtime, {
         command: "btop",
         confirmed: true,
         fingerprint: server.surfaceId,
@@ -7103,7 +7253,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const [, secondPane] = split;
       assert.ok(secondPane);
 
-      await runtime.launchTerminal({
+      await launchInternalTerminal(runtime, {
         command: "btop",
         confirmed: true,
         fingerprint: server.surfaceId,
@@ -7145,7 +7295,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const [, secondPane] = split;
       assert.ok(secondPane);
 
-      await runtime.launchTerminal({
+      await launchInternalTerminal(runtime, {
         command: "btop",
         confirmed: true,
         fingerprint: server.surfaceId,
@@ -7182,7 +7332,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
   await t.test("provider resume replay still blocks manual-only terminal targets", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
-      await runtime.launchTerminal({
+      await launchInternalTerminal(runtime, {
         command: "btop",
         confirmed: true,
         fingerprint: server.surfaceId,
@@ -7204,12 +7354,200 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("surf_ace_launch_terminal fails closed without explicit confirmation", async () => {
+  await t.test("surf_ace_launch_native_app applies the primitive native app process target with opaque geometry", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.runtimeAppBinding = trustedRuntimeAppBinding();
+      },
+      run: async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const launched = await runtime.launchNativeApp({
+        appId: "com.example.NativeApp",
+        args: ["--pane", "main"],
+        confirmed: true,
+        cwd: "/tmp",
+        env: { SURF_ACE_TEST: "1" },
+        fingerprint: server.surfaceId,
+        launchMode: "attach_or_launch",
+        paneId: firstPaneId,
+        summary: "Native App",
+      });
+
+      assert.equal(launched.blockedReason, null);
+      assert.equal(launched.contentId, null);
+      assert.equal(launched.targetKind, "native_app");
+      assert.equal(launched.targetApplyEvidence?.status, "applied");
+      assert.equal(server.contentSetRequests.length, 0);
+      assert.equal(server.targetApplyRequests.length, 1);
+      const [applyRequest] = server.targetApplyRequests;
+      assert.ok(applyRequest);
+      assert.equal("materialization" in applyRequest, false);
+      assert.equal(applyRequest.targetKind, "native_app");
+      assert.deepEqual(applyRequest.targetHeader, {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.native_app.v1"],
+        safeToLogFields: ["appId", "args", "cwd", "launchMode"],
+        safetyClass: "process",
+        summary: "Native App",
+      });
+      assert.deepEqual(applyRequest.targetPayload, {
+        appId: "com.example.NativeApp",
+        args: ["--pane", "main"],
+        cwd: "/tmp",
+        env: { SURF_ACE_TEST: "1" },
+        launchMode: "attach_or_launch",
+      });
+
+      const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
+      assert.equal(screenPane?.target?.targetKind, "native_app");
+      assert.equal(screenPane?.target?.blockedReason, null);
+      assert.equal(screenPane?.target?.lastApplyEvidence?.status, "applied");
+      },
+    });
+  });
+
+  await t.test("surf_ace_launch_native_app default idempotency includes cwd and env digest", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.runtimeAppBinding = trustedRuntimeAppBinding();
+      },
+      run: async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+      await runtime.launchNativeApp({
+        appId: "com.example.NativeApp",
+        args: ["--pane"],
+        confirmed: true,
+        cwd: "/tmp/one",
+        env: { SURF_ACE_TEST: "1" },
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      await runtime.launchNativeApp({
+        appId: "com.example.NativeApp",
+        args: ["--pane"],
+        confirmed: true,
+        cwd: "/tmp/two",
+        env: { SURF_ACE_TEST: "2" },
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+
+      assert.equal(server.targetApplyRequests.length, 2);
+      assert.equal(server.targetApplyRequests[0]?.targetPayload.cwd, "/tmp/one");
+      assert.deepEqual(server.targetApplyRequests[0]?.targetPayload.env, { SURF_ACE_TEST: "1" });
+      assert.equal(server.targetApplyRequests[1]?.targetPayload.cwd, "/tmp/two");
+      assert.deepEqual(server.targetApplyRequests[1]?.targetPayload.env, { SURF_ACE_TEST: "2" });
+      },
+    });
+  });
+
+  await t.test("surf_ace_launch_native_app accepts empty-env compositor proof", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.runtimeAppBinding = trustedRuntimeAppBinding();
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const launched = await runtime.launchNativeApp({
+          appId: "com.example.NativeApp",
+          confirmed: true,
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(launched.blockedReason, null);
+        assert.equal(launched.targetApplyEvidence?.status, "applied");
+        assert.equal(launched.targetApplyEvidence?.materializedState?.proof?.envDigest, stableStringRecordDigest({}));
+        const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
+        assert.equal(screenPane?.target?.blockedReason, null);
+      },
+    });
+  });
+
+  await t.test("surf_ace_launch_native_app does not claim readiness without matching pane and target proof", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.runtimeAppBinding = trustedRuntimeAppBinding();
+        server.nativeTargetProofContentIdOverride = "target_other";
+        server.nativeTargetProofPaneIdOverride = String(server.initialRemotePaneId);
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const launched = await runtime.launchNativeApp({
+          appId: "com.example.NativeApp",
+          confirmed: true,
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(launched.blockedReason, "materialization_failed");
+        assert.equal(launched.targetApplyEvidence?.status, "applied");
+        const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
+        assert.equal(screenPane?.target?.targetKind, "native_app");
+        assert.equal(screenPane?.target?.blockedReason, "materialization_failed");
+      },
+    });
+  });
+
+  await t.test("surf_ace_launch_native_app fails closed when runtime app binding is missing", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await assert.rejects(
+        runtime.launchNativeApp({
+          appId: "com.example.NativeApp",
+          confirmed: true,
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        }),
+        /runtime_binding_missing/,
+      );
+      assert.equal(server.targetApplyRequests.length, 0);
+    });
+  });
+
+  await t.test("surf_ace_launch_native_app refreshes runtime app binding before claiming readiness", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.runtimeAppBinding = trustedRuntimeAppBinding();
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        server.runtimeAppBinding = {
+          ...trustedRuntimeAppBinding(),
+          acknowledgement: "failed",
+          bindingAuthority: "degraded",
+          bindingDegradedReasons: ["process_lineage_missing"],
+          failureMessage: "process lineage missing at launch",
+          processLineageStatus: "missing",
+          ready: false,
+        };
+
+        await assert.rejects(
+          runtime.launchNativeApp({
+            appId: "com.example.NativeApp",
+            confirmed: true,
+            fingerprint: server.surfaceId,
+            paneId: firstPaneId,
+          }),
+          /runtime_binding_degraded/,
+        );
+
+        assert.equal(server.runtimeAppBindingRequests, 1);
+        assert.equal(server.targetApplyRequests.length, 0);
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.equal(screen?._debug?.runtimeAppBinding?.processLineageStatus, "missing");
+      },
+    });
+  });
+
+  await t.test("internal terminal_app target fails closed without explicit confirmation", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
 
       await assert.rejects(
-        async () => await runtime.launchTerminal({
+        async () => await launchInternalTerminal(runtime, {
           command: "btop",
           confirmed: false,
           fingerprint: server.surfaceId,
