@@ -1005,6 +1005,7 @@ private struct SurfAcePaneControls: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1052,7 +1053,7 @@ private struct SurfAcePaneControls: View {
                     if let ownerName {
                         Text(ownerName)
                             .font(.custom(SurfAceChromeFont.regularName, size: 16))
-                            .foregroundStyle(.white.opacity(0.86))
+                            .foregroundStyle(surfAceToolbarForegroundColor(for: colorScheme).opacity(0.86))
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .padding(.leading, 4)
@@ -1113,20 +1114,28 @@ private struct SurfAceWarningIndicator: View {
 }
 
 private struct SurfAceGlassButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
+
     func makeBody(configuration: Configuration) -> some View {
+        let foregroundColor = surfAceToolbarForegroundColor(for: colorScheme)
+
         configuration.label
             .font(.custom(SurfAceChromeFont.regularName, size: 18))
-            .foregroundStyle(.white)
+            .foregroundStyle(foregroundColor)
             .frame(minWidth: 44, minHeight: 44)
             .padding(.horizontal, 10)
             .surfAceGlassBackground(interactive: true)
             .overlay {
                 Capsule()
-                    .strokeBorder(.white.opacity(configuration.isPressed ? 0.32 : 0.18), lineWidth: 1)
+                    .strokeBorder(foregroundColor.opacity(configuration.isPressed ? 0.32 : 0.18), lineWidth: 1)
             }
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
+}
+
+func surfAceToolbarForegroundColor(for colorScheme: ColorScheme) -> Color {
+    colorScheme == .dark ? .white : .black
 }
 
 private struct SurfAceControlPillChrome: ViewModifier {
