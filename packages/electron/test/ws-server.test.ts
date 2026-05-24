@@ -830,6 +830,235 @@ test("ws server allows the lock owner to resume after disconnect", async () => {
   });
 });
 
+test("ws server recovers a resume-bearing admission after relaunch without clearing restored topology", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    const content = await request(owner, contentApplyRequest(2, 1));
+    assert.equal(content.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    server.disconnectSurface(surfaceId, "test_relaunch");
+
+    const resumedSocket = await connect(url);
+    const resumed = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: first.payload.sessionId,
+      }),
+    );
+
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.op, "pair.request");
+    assert.equal(resumed.payload.resumed, true);
+    assert.equal(resumed.payload.sessionId, first.payload.sessionId);
+    assert.deepEqual(
+      resumed.payload.state.panes.map((pane) => pane.paneId),
+      [1, 2],
+    );
+    assert.equal(resumed.payload.state.panes[1]?.currentContentId, "ct_applied");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+
+    await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server rejects lockless invalid resume without clearing restored topology", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    server.disconnectSurface(surfaceId, "test_relaunch");
+
+    const resumedSocket = await connect(url);
+    const rejected = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: "sa_invalid",
+      }),
+    );
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "invalid_resume");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+
+    await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server rejects lockless same-provider admission without resume before clearing restored topology", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    server.disconnectSurface(surfaceId, "test_relaunch");
+
+    const replacement = await connect(url);
+    const rejected = await request(
+      replacement,
+      pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+      }),
+    );
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "invalid_resume");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+
+    await closeSocket(replacement);
+  });
+});
+
+test("ws server rejects lockless foreign provider resume without clearing restored topology", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    server.disconnectSurface(surfaceId, "test_relaunch");
+
+    const resumedSocket = await connect(url);
+    const rejected = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_bravo", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: first.payload.sessionId,
+      }),
+    );
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "busy");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+
+    await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server recovers persisted provider ownership after serialized relaunch restore", async () => {
+  let persistedState: ReturnType<SurfaceCore["getPersistentState"]> | null = null;
+  let restoredSurfaceId = "";
+  let restoredSessionId = "";
+
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    restoredSurfaceId = surfaceId;
+    restoredSessionId = first.payload.sessionId;
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    const content = await request(owner, contentApplyRequest(2, 1));
+    assert.equal(content.ok, true);
+    persistedState = core.getPersistentState();
+    await closeSocket(owner, 1000, "provider_shutdown");
+  });
+
+  assert.ok(persistedState);
+  const restoredCore = new SurfaceCore({ persistentState: persistedState });
+  const restoredSurfaces = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  assert.equal(restoredSurfaces.some((surface) => surface.surfaceId === restoredSurfaceId), true);
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    core: restoredCore,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    compositorSocketPath: null,
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+
+  await server.start();
+  try {
+    const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    const resumed = await request(
+      socket,
+      pairRequest(restoredSurfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: restoredSessionId,
+      }),
+    );
+
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.payload.resumed, true);
+    assert.equal(resumed.payload.sessionId, restoredSessionId);
+    assert.deepEqual(
+      resumed.payload.state.panes.map((pane) => pane.paneId),
+      [1, 2],
+    );
+    assert.equal(resumed.payload.state.panes[1]?.currentContentId, "ct_applied");
+
+    await closeSocket(socket);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("ws server re-admits same-provider reconnect with an invalid resume token", async () => {
   await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);

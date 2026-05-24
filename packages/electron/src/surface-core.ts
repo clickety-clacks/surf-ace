@@ -121,6 +121,7 @@ type SurfaceState = {
   name: string;
   paneOrder: number[];
   panes: Map<number, PaneState>;
+  providerOwnership: PersistentProviderOwnership | null;
   providerName: string | null;
   surfaceId: string;
   surfaceEpoch: string;
@@ -129,6 +130,12 @@ type SurfaceState = {
   viewport: SurfaceViewport;
   windowPlacement: WindowPlacement | null;
   windowLabel: string;
+};
+
+export type PersistentProviderOwnership = {
+  ownershipEpoch: number;
+  providerId: string;
+  sessionId: string;
 };
 
 type BrowserUrlTargetValidation =
@@ -158,6 +165,7 @@ type PersistentSurfaceRecord = {
   name: string;
   paneOrder: number[];
   panes: PersistentPaneRecord[];
+  providerOwnership?: PersistentProviderOwnership | null;
   surfaceEpochRevision: number;
   surfaceId: string;
   topologyRevision: number;
@@ -349,6 +357,30 @@ export class SurfaceCore {
 
   getWindowPlacement(surfaceId: string): WindowPlacement | null {
     return cloneWindowPlacement(this.getSurface(surfaceId).windowPlacement);
+  }
+
+  getProviderOwnership(surfaceId: string): PersistentProviderOwnership | null {
+    const ownership = this.getSurface(surfaceId).providerOwnership;
+    return ownership ? structuredClone(ownership) : null;
+  }
+
+  setProviderOwnership(surfaceId: string, ownership: PersistentProviderOwnership): void {
+    const surface = this.getSurface(surfaceId);
+    surface.providerOwnership = {
+      ownershipEpoch: Math.max(1, Math.trunc(Number(ownership.ownershipEpoch))),
+      providerId: ownership.providerId,
+      sessionId: ownership.sessionId,
+    };
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  clearProviderOwnership(surfaceId: string): void {
+    const surface = this.getSurface(surfaceId);
+    if (surface.providerOwnership === null) {
+      return;
+    }
+    surface.providerOwnership = null;
+    this.emit({ surfaceId, type: "surface-changed" });
   }
 
   setWindowPlacement(surfaceId: string, placement: WindowPlacement | null): void {
@@ -2273,6 +2305,7 @@ export class SurfaceCore {
       name,
       paneOrder: [BOOTSTRAP_PANE_ID],
       panes: new Map([[BOOTSTRAP_PANE_ID, bootstrapPane]]),
+      providerOwnership: null,
       providerName: null,
       surfaceId,
       surfaceEpoch: `${surfaceId}:1`,
@@ -2451,6 +2484,7 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         snapshot: structuredClone(pane.snapshot),
         toast: pane.toast,
       })),
+    providerOwnership: surface.providerOwnership ? structuredClone(surface.providerOwnership) : null,
     surfaceEpochRevision: surface.surfaceEpochRevision,
     surfaceId: surface.surfaceId,
     topologyRevision: surface.topologyRevision,
@@ -2522,6 +2556,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     name: typeof record.name === "string" && record.name.length > 0 ? record.name : "Surf Ace",
     paneOrder: finalPaneOrder,
     panes,
+    providerOwnership: deserializeProviderOwnership(record.providerOwnership),
     providerName: null,
     surfaceEpoch: `${record.surfaceId}:${surfaceEpochRevision}`,
     surfaceEpochRevision,
@@ -2534,6 +2569,27 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     },
     windowPlacement: cloneWindowPlacement(record.windowPlacement),
     windowLabel: isValidWindowLabel(record.windowLabel) ? record.windowLabel : "",
+  };
+}
+
+function deserializeProviderOwnership(input: unknown): PersistentProviderOwnership | null {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const record = input as Partial<PersistentProviderOwnership>;
+  if (
+    typeof record.providerId !== "string" ||
+    record.providerId.length === 0 ||
+    typeof record.sessionId !== "string" ||
+    record.sessionId.length === 0 ||
+    !Number.isFinite(record.ownershipEpoch)
+  ) {
+    return null;
+  }
+  return {
+    ownershipEpoch: Math.max(1, Math.trunc(Number(record.ownershipEpoch))),
+    providerId: record.providerId,
+    sessionId: record.sessionId,
   };
 }
 

@@ -160,6 +160,32 @@ test("surface core persists and restores local window placement without changing
   });
 });
 
+test("surface core persists provider ownership for relaunch resume recovery", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 3);
+
+  core.setProviderOwnership(surface.surfaceId, {
+    ownershipEpoch: 4,
+    providerId: "pv_alpha",
+    sessionId: "sa_restore",
+  });
+
+  const restoredCore = new SurfaceCore({ persistentState: core.getPersistentState() });
+  restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  assert.deepEqual(restoredCore.getProviderOwnership(surface.surfaceId), {
+    ownershipEpoch: 4,
+    providerId: "pv_alpha",
+    sessionId: "sa_restore",
+  });
+});
+
 test("surface core does not restore a closed stale primary over remaining windows", () => {
   const core = new SurfaceCore({
     persistentState: {
