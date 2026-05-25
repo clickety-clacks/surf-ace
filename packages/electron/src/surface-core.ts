@@ -18,6 +18,7 @@ import type {
   EpochMs,
   HistoryNavigatedEvent,
   MutationAckResponse,
+  NativePaneWindowGroupDiagnostic,
   PaneCloseResponse,
   PaneCreatedEvent,
   PaneId,
@@ -43,6 +44,7 @@ import type {
   TopologyRevision,
 } from "../../protocol/src/index.js";
 import type { NativePaneMaterialization } from "./native-pane-bridge.js";
+import type { NativePaneWindowGroupStatus } from "./native-pane-bridge.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
@@ -90,8 +92,10 @@ type PaneState = {
   nativeHost: {
     bindingId?: string;
     contentId?: string;
+    launchToken?: string;
     revision: Revision;
   } | null;
+  nativeWindowGroup: NativePaneWindowGroupDiagnostic | null;
   paneId: number;
   paneLabel: number;
   paneLineageId: string;
@@ -148,7 +152,10 @@ type BrowserUrlTargetValidation =
     };
 
 const TERMINAL_HOST_EXECUTABLES = new Set(["alacritty", "foot", "ghostty", "kitty", "wezterm"]);
-const DIRECT_NATIVE_PANE_EXECUTABLES = new Set(["weston-simple-egl"]);
+const DIRECT_NATIVE_PANE_EXECUTABLES = new Set(["galculator", "kolourpaint", "weston-simple-egl"]);
+const DIRECT_NATIVE_PANE_EXECUTABLE_ENV = new Map<string, Record<string, string>>([
+  ["kolourpaint", { QT_QPA_PLATFORM: "wayland" }],
+]);
 
 export type PaneNavigationDirection = "down" | "left" | "right" | "up";
 
@@ -629,6 +636,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.externalNative = false;
     pane.nativeHost = null;
+    pane.nativeWindowGroup = null;
     clearDirtyState(pane);
     bumpGeometryRevision(this.getSurface(surfaceId));
     this.emit({ surfaceId, type: "surface-changed" });
@@ -670,6 +678,9 @@ export class SurfaceCore {
           externalNative: pane.externalNative,
           geometry,
           name: pane.name,
+          ...(pane.externalNative && pane.nativeHost
+            ? { nativeWindowGroup: pane.nativeWindowGroup ?? nativePaneWindowGroupDiagnosticForPane(pane, geometry) }
+            : {}),
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
           paneLineageId: pane.paneLineageId,
@@ -711,6 +722,7 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_payload", `native pane ${lineagePane.paneId} is not present in the resolved Surf Ace layout`);
     }
     const compositorViewport = compositorResolvedRect(geometry.contentViewport);
+    const launchToken = nativePaneLaunchToken(surface.surfaceId, lineagePane.paneId, payload.targetId, payload.targetEpoch);
     const paneEntry: NativePaneMaterialization["panes"][number] = {
       binding_id: `${lineagePane.paneId}:${payload.targetId}`,
       content_id: payload.targetId,
@@ -727,6 +739,21 @@ export class SurfaceCore {
       },
       id: String(lineagePane.paneId),
       revision: payload.targetEpoch as Revision,
+      windowGroup: {
+        launchIdentity: {
+          launchToken,
+          paneId: String(lineagePane.paneId),
+          paneInstanceId: geometry.paneInstanceId,
+          surfaceId: surface.surfaceId as SurfaceId,
+          targetId: payload.targetId,
+        },
+        policy: {
+          clipToPane: true,
+          constrainToPane: true,
+          denyForeignToplevels: true,
+          sameLaunchSecondaryToplevels: "accept",
+        },
+      },
     };
     if (payload.targetKind === "terminal_app" && isPlainRecord(payload.targetPayload)) {
       const { args, command, cwd, env } = payload.targetPayload;
@@ -735,12 +762,17 @@ export class SurfaceCore {
         const executableName = command.split(/[\\/]/).pop() ?? command;
         const launchesDirectNativePaneProcess = DIRECT_NATIVE_PANE_EXECUTABLES.has(executableName);
         const isTerminalHost = TERMINAL_HOST_EXECUTABLES.has(executableName);
+        const directNativeEnv = launchesDirectNativePaneProcess ? DIRECT_NATIVE_PANE_EXECUTABLE_ENV.get(executableName) : undefined;
+        const processEnv = {
+          ...(directNativeEnv ?? {}),
+          ...(isPlainRecord(env) && isStringRecord(env) ? env : {}),
+        };
         paneEntry.target = "terminal";
         paneEntry.process = {
           args: isTerminalHost || launchesDirectNativePaneProcess ? commandArgs : ["-e", command, ...commandArgs],
           command: isTerminalHost || launchesDirectNativePaneProcess ? command : "foot",
           ...(typeof cwd === "string" ? { cwd } : {}),
-          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
+          ...(Object.keys(processEnv).length > 0 ? { env: processEnv } : {}),
         };
       }
     }
@@ -946,10 +978,47 @@ export class SurfaceCore {
       pane.nativeHost = {
         ...(materializedPane.binding_id ? { bindingId: materializedPane.binding_id } : {}),
         ...(materializedPane.content_id ? { contentId: materializedPane.content_id } : {}),
+        ...(materializedPane.windowGroup?.launchIdentity.launchToken ? { launchToken: materializedPane.windowGroup.launchIdentity.launchToken } : {}),
         revision: materializedPane.revision,
       };
+      pane.nativeWindowGroup = null;
       if (!pane.externalNative) {
         pane.externalNative = true;
+        didChange = true;
+      }
+    }
+    if (didChange) {
+      this.emit({ surfaceId, type: "surface-changed" });
+    }
+  }
+
+  markNativePaneWindowGroups(surfaceId: string, groups: NativePaneWindowGroupStatus[]): void {
+    const surface = this.getSurface(surfaceId);
+    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    let didChange = false;
+    const trustedGroups = new Map<number, NativePaneWindowGroupStatus>();
+    for (const group of groups) {
+      const paneId = Number(group.paneId);
+      const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
+      if (!pane || !pane.nativeHost?.launchToken || group.launchToken !== pane.nativeHost.launchToken) {
+        continue;
+      }
+      trustedGroups.set(paneId, group);
+    }
+    for (const [paneId, pane] of surface.panes) {
+      if (!pane.externalNative || !pane.nativeHost?.launchToken) {
+        continue;
+      }
+      const geometry = paneGeometry.get(paneId);
+      if (!geometry) {
+        continue;
+      }
+      const trustedGroup = trustedGroups.get(paneId);
+      const nextDiagnostic = trustedGroup
+        ? nativePaneWindowGroupDiagnosticFromStatus(pane, geometry, trustedGroup)
+        : null;
+      if (!sameNativePaneWindowGroupDiagnostic(pane.nativeWindowGroup, nextDiagnostic)) {
+        pane.nativeWindowGroup = nextDiagnostic;
         didChange = true;
       }
     }
@@ -995,6 +1064,20 @@ export class SurfaceCore {
         },
         id: String(pane.paneId),
         revision: pane.nativeHost?.revision ?? revision.geometryRevision as Revision,
+        ...(pane.nativeHost?.launchToken
+          ? {
+              windowGroup: {
+                launchIdentity: {
+                  launchToken: pane.nativeHost.launchToken,
+                  paneId: String(pane.paneId),
+                  paneInstanceId: pane.paneLineageId,
+                  surfaceId: surface.surfaceId as SurfaceId,
+                  ...(pane.nativeHost.contentId ? { targetId: pane.nativeHost.contentId } : {}),
+                },
+                policy: nativePaneWindowGroupPolicy(),
+              },
+            }
+          : {}),
       };
     });
     return nativePaneMaterializationFromProjectedPanes(surface, panes, layoutOrder, revision);
@@ -1038,6 +1121,20 @@ export class SurfaceCore {
         },
         id: String(pane.paneId),
         revision: pane.nativeHost?.revision ?? revision.geometryRevision as Revision,
+        ...(pane.nativeHost?.launchToken
+          ? {
+              windowGroup: {
+                launchIdentity: {
+                  launchToken: pane.nativeHost.launchToken,
+                  paneId: String(pane.paneId),
+                  paneInstanceId: pane.paneLineageId,
+                  surfaceId: surface.surfaceId as SurfaceId,
+                  ...(pane.nativeHost.contentId ? { targetId: pane.nativeHost.contentId } : {}),
+                },
+                policy: nativePaneWindowGroupPolicy(),
+              },
+            }
+          : {}),
       };
     });
     return nativePaneMaterializationFromProjectedPanes(surface, panes, layoutOrder, revision);
@@ -1211,6 +1308,7 @@ export class SurfaceCore {
       }
       pane.externalNative = false;
       pane.nativeHost = null;
+      pane.nativeWindowGroup = null;
       didChange = true;
     }
     if (didChange) {
@@ -1486,6 +1584,7 @@ export class SurfaceCore {
       pane.toast = null;
       pane.externalNative = false;
       pane.nativeHost = null;
+      pane.nativeWindowGroup = null;
       pane.latestContentEventAt = this.now();
       clearDirtyState(pane);
       this.emit({ surfaceId, type: "surface-changed" });
@@ -1527,6 +1626,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.externalNative = false;
     pane.nativeHost = null;
+    pane.nativeWindowGroup = null;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
@@ -1566,6 +1666,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.externalNative = false;
     pane.nativeHost = null;
+    pane.nativeWindowGroup = null;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
@@ -1804,6 +1905,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.externalNative = false;
     pane.nativeHost = null;
+    pane.nativeWindowGroup = null;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     bumpGeometryRevision(surface);
@@ -1839,6 +1941,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.externalNative = false;
     pane.nativeHost = null;
+    pane.nativeWindowGroup = null;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     bumpGeometryRevision(surface);
@@ -2084,6 +2187,7 @@ export class SurfaceCore {
     pane.toast = null;
     pane.externalNative = false;
     pane.nativeHost = null;
+    pane.nativeWindowGroup = null;
     pane.latestContentEventAt = this.now();
     clearDirtyState(pane);
     this.emit({ surfaceId, type: "surface-changed" });
@@ -2434,6 +2538,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     latestContentEventAt: now,
     name: null,
     nativeHost: null,
+    nativeWindowGroup: null,
     paneId,
     paneLabel,
     paneLineageId: `pl_${randomUUID().replaceAll("-", "")}`,
@@ -2528,6 +2633,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     pane.latestContentEventAt = typeof paneRecord.latestContentEventAt === "number" ? paneRecord.latestContentEventAt : now;
     pane.name = typeof paneRecord.name === "string" ? paneRecord.name : null;
     pane.nativeHost = null;
+    pane.nativeWindowGroup = null;
     pane.paneLineageId = typeof paneRecord.paneLineageId === "string" && paneRecord.paneLineageId.length > 0
       ? paneRecord.paneLineageId
       : pane.paneLineageId;
@@ -3028,6 +3134,81 @@ function nativePaneMaterializationFromProjectedPanes(
       windowId: revision.windowLabel,
     },
     panes,
+  };
+}
+
+function nativePaneWindowGroupDiagnosticForPane(
+  pane: PaneState,
+  geometry: PaneGeometryProjection,
+): NativePaneWindowGroupDiagnostic {
+  const bounds = compositorResolvedRect(geometry.contentViewport);
+  const primaryWindowId = pane.nativeHost?.bindingId ?? pane.nativeHost?.contentId ?? String(pane.paneId);
+  return {
+    acceptedSecondaryCount: 0,
+    clippingStatus: "unknown",
+    deniedReasons: [],
+    deniedToplevelCount: 0,
+    focusedWindowId: null,
+    launchToken: pane.nativeHost?.launchToken ?? null,
+    members: [{
+      bounds,
+      clippedToPane: null,
+      focused: false,
+      id: primaryWindowId,
+      lifecycle: "live",
+      role: "primary",
+    }],
+    paneId: pane.paneId as PaneId,
+    paneInstanceId: geometry.paneInstanceId,
+    paneLocalBounds: bounds,
+    primaryWindowId,
+  };
+}
+
+function nativePaneWindowGroupDiagnosticFromStatus(
+  pane: PaneState,
+  geometry: PaneGeometryProjection,
+  group: NativePaneWindowGroupStatus,
+): NativePaneWindowGroupDiagnostic {
+  return {
+    acceptedSecondaryCount: group.acceptedSecondaryCount,
+    clippingStatus: group.clippingStatus,
+    deniedReasons: [...group.deniedReasons],
+    deniedToplevelCount: group.deniedToplevelCount,
+    focusedWindowId: group.focusedWindowId,
+    launchToken: group.launchToken,
+    members: group.members.map((member) => ({
+      bounds: member.bounds ? structuredClone(member.bounds) : null,
+      clippedToPane: member.clippedToPane,
+      focused: member.focused,
+      id: member.id,
+      lifecycle: member.lifecycle,
+      role: member.role,
+    })),
+    paneId: pane.paneId as PaneId,
+    paneInstanceId: group.paneInstanceId ?? geometry.paneInstanceId,
+    paneLocalBounds: group.paneLocalBounds ?? compositorResolvedRect(geometry.contentViewport),
+    primaryWindowId: group.primaryWindowId,
+  };
+}
+
+function sameNativePaneWindowGroupDiagnostic(
+  a: NativePaneWindowGroupDiagnostic | null,
+  b: NativePaneWindowGroupDiagnostic | null,
+): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function nativePaneLaunchToken(surfaceId: string, paneId: number, targetId: string, targetEpoch: number): string {
+  return `${surfaceId}:${paneId}:${targetId}:${targetEpoch}`;
+}
+
+function nativePaneWindowGroupPolicy(): NonNullable<NativePaneMaterialization["panes"][number]["windowGroup"]>["policy"] {
+  return {
+    clipToPane: true,
+    constrainToPane: true,
+    denyForeignToplevels: true,
+    sameLaunchSecondaryToplevels: "accept",
   };
 }
 

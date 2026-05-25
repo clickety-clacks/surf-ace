@@ -10,6 +10,7 @@ import {
   compositorFailureMessage,
   isOverlayNativePaneLivenessFailure,
   nativePaneInstanceIdsForCompositor,
+  nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
   overlayLivePaneAuthorityFromCompositorResponse,
   overlayLivePaneInstanceIdFromCompositorResponse,
@@ -120,6 +121,7 @@ test("native pane bridge names compositor panes as native materialized panes, no
     }),
     {
       nativeMaterializedPaneCount: 0,
+      nativePaneWindowGroups: [],
       topologyPaneCount: null,
       topologyPaneSource: "surf_ace_pair_or_panes_list",
     },
@@ -133,9 +135,91 @@ test("native pane bridge names compositor panes as native materialized panes, no
     }),
     {
       nativeMaterializedPaneCount: 2,
+      nativePaneWindowGroups: [],
       topologyPaneCount: null,
       topologyPaneSource: "surf_ace_pair_or_panes_list",
     },
+  );
+});
+
+test("native pane bridge extracts pane-local window group diagnostics from compositor status", () => {
+  const response = {
+    ok: true,
+    status: {
+      native_pane_window_groups: [
+        {
+          accepted_secondary_count: 2,
+          clipping_status: "clipped",
+          denied_reasons: ["foreign_launch_token"],
+          denied_toplevel_count: 1,
+          focused_window_id: "dialog-1",
+          launch_token: "sf:7:target:3",
+          members: [
+            {
+              bounds: { height: 200, width: 300, x: 0, y: 0 },
+              clipped_to_pane: true,
+              focused: false,
+              id: "primary-1",
+              lifecycle: "live",
+              role: "primary",
+            },
+            {
+              bounds: { height: 80, width: 120, x: 32, y: 40 },
+              clipped_to_pane: true,
+              focused: true,
+              id: "dialog-1",
+              lifecycle: "live",
+              role: "dialog",
+            },
+          ],
+          pane_id: "7",
+          pane_instance_id: "pl_7",
+          pane_local_bounds: { height: 200, width: 300, x: 0, y: 0 },
+          primary_window_id: "primary-1",
+        },
+      ],
+      panes: [{ id: "7" }],
+    },
+  };
+
+  assert.deepEqual(nativePaneWindowGroupsFromCompositorStatus(response), [{
+    acceptedSecondaryCount: 2,
+    clippingStatus: "clipped",
+    deniedReasons: ["foreign_launch_token"],
+    deniedToplevelCount: 1,
+    focusedWindowId: "dialog-1",
+    launchToken: "sf:7:target:3",
+    members: [
+      {
+        bounds: { height: 200, width: 300, x: 0, y: 0 },
+        clippedToPane: true,
+        focused: false,
+        id: "primary-1",
+        lifecycle: "live",
+        role: "primary",
+      },
+      {
+        bounds: { height: 80, width: 120, x: 32, y: 40 },
+        clippedToPane: true,
+        focused: true,
+        id: "dialog-1",
+        lifecycle: "live",
+        role: "dialog",
+      },
+    ],
+    paneId: "7",
+    paneInstanceId: "pl_7",
+    paneLocalBounds: { height: 200, width: 300, x: 0, y: 0 },
+    primaryWindowId: "primary-1",
+  }]);
+  assert.equal(compositorNativePaneStatusSummary(response).nativePaneWindowGroups[0]?.acceptedSecondaryCount, 2);
+  assert.equal(
+    nativePaneWindowGroupsFromCompositorStatus({
+      ...response,
+      native_pane_window_groups: response.status.native_pane_window_groups,
+      status: { panes: [{ id: "7" }] },
+    })[0]?.paneId,
+    "7",
   );
 });
 

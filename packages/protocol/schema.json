@@ -3440,6 +3440,64 @@
                   "externalNative": {
                     "type": "boolean"
                   },
+                  "nativeWindowGroup": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "paneId",
+                      "paneInstanceId",
+                      "launchToken",
+                      "primaryWindowId",
+                      "focusedWindowId",
+                      "acceptedSecondaryCount",
+                      "deniedToplevelCount",
+                      "deniedReasons",
+                      "paneLocalBounds",
+                      "clippingStatus",
+                      "members"
+                    ],
+                    "properties": {
+                      "paneId": { "$ref": "#/$defs/PaneId" },
+                      "paneInstanceId": { "type": "string", "minLength": 1 },
+                      "launchToken": {
+                        "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+                      },
+                      "primaryWindowId": {
+                        "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+                      },
+                      "focusedWindowId": {
+                        "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+                      },
+                      "acceptedSecondaryCount": { "type": "integer", "minimum": 0 },
+                      "deniedToplevelCount": { "type": "integer", "minimum": 0 },
+                      "deniedReasons": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 }
+                      },
+                      "paneLocalBounds": { "$ref": "#/$defs/Rect" },
+                      "clippingStatus": { "enum": ["clipped", "unclipped", "unknown"] },
+                      "members": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": ["id", "role", "bounds", "focused", "lifecycle", "clippedToPane"],
+                          "properties": {
+                            "id": { "type": "string", "minLength": 1 },
+                            "role": { "enum": ["primary", "dialog", "palette", "popup", "secondary", "unknown"] },
+                            "bounds": {
+                              "oneOf": [{ "$ref": "#/$defs/Rect" }, { "type": "null" }]
+                            },
+                            "focused": { "type": "boolean" },
+                            "lifecycle": { "enum": ["live", "closing", "closed", "unknown"] },
+                            "clippedToPane": {
+                              "oneOf": [{ "type": "boolean" }, { "type": "null" }]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
                   "viewport": { "$ref": "#/$defs/SurfaceViewport" },
                   "geometry": { "$ref": "#/$defs/PaneGeometryProjection" }
                 }
