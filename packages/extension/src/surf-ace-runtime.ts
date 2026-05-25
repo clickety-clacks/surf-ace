@@ -4410,8 +4410,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     if (
       materializedState.nativeHost !== "applied" ||
-      materializedState.lifecycle !== "running" ||
-      materializedState.inputFocus !== "ready" ||
       materializedState.proof?.paneId !== String(pane.remotePaneId) ||
       materializedState.proof?.contentId !== targetId ||
       !this.nativeAppProofMatchesTarget(materializedState.proof, target)
