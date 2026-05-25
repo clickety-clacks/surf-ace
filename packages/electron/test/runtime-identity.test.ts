@@ -219,7 +219,7 @@ test("unsupported compositor bind request falls back to launch-token readiness",
   });
 
   const diagnostics = runtimeAppBindingDiagnosticsFromCompositorResponse(request, {
-    message: "failed to parse request: unknown variant `main_app.bind`",
+    error: { message: "failed to parse request: unknown variant `main_app.bind`" },
     ok: false,
   }, 999);
 

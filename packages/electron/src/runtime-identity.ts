@@ -213,7 +213,7 @@ export function runtimeAppBindingDiagnosticsFromCompositorResponse(
     };
   }
 
-  const failureMessage = stringOrUndefined(response.message);
+  const failureMessage = stringOrUndefined(response.message) ?? (response.error && typeof response.error === "object" ? stringOrUndefined((response.error as Record<string, unknown>).message) : undefined) ?? stringOrUndefined(response.error);
   const unsupportedBindRequest = response.ok === false && failureMessage?.includes("unknown variant `main_app.bind`");
   const evaluated = evaluateCompositorAppBindingEvidence(evidenceFromRequest(request, {
     launchTokenStatus: request.evidence.launchToken ? "matched" : "missing",
