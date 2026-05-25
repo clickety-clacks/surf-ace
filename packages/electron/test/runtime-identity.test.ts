@@ -208,6 +208,27 @@ test("explicit trusted compositor bind diagnostics become ready", () => {
   assert.deepEqual(diagnostics.diagnosticDrift, ["wayland_app_id_mismatch"]);
 });
 
+
+test("unsupported compositor bind request falls back to launch-token readiness", () => {
+  const request = buildCompositorAppBindingRequest({
+    env: { SURF_ACE_COMPOSITOR_LAUNCH_TOKEN: "ctok_456" },
+    pid: 4101,
+    ppid: 4100,
+    uiLabel: "racter Surf Ace",
+    windowTitle: "racter Surf Ace",
+  });
+
+  const diagnostics = runtimeAppBindingDiagnosticsFromCompositorResponse(request, {
+    message: "failed to parse request: unknown variant `main_app.bind`",
+    ok: false,
+  }, 999);
+
+  assert.equal(diagnostics.acknowledgement, "accepted");
+  assert.equal(diagnostics.bindingAuthority, "trusted");
+  assert.equal(diagnostics.launchTokenStatus, "matched");
+  assert.equal(diagnostics.processLineageStatus, "matched");
+  assert.equal(diagnostics.ready, true);
+});
 test("failed compositor bind response is degraded and visible to readiness", () => {
   const request = buildCompositorAppBindingRequest({
     env: { SURF_ACE_LAUNCH_TOKEN: "ltok_123" },

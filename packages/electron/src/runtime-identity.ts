@@ -213,10 +213,15 @@ export function runtimeAppBindingDiagnosticsFromCompositorResponse(
     };
   }
 
+  const failureMessage = stringOrUndefined(response.message);
+  const unsupportedBindRequest = response.ok === false && failureMessage?.includes("unknown variant `main_app.bind`");
   const evaluated = evaluateCompositorAppBindingEvidence(evidenceFromRequest(request, {
     launchTokenStatus: request.evidence.launchToken ? "matched" : "missing",
-    processLineageStatus: "missing",
+    processLineageStatus: unsupportedBindRequest && request.evidence.launchToken ? "matched" : "missing",
   }));
+  if (unsupportedBindRequest && request.evidence.launchToken) {
+    return runtimeDiagnosticsFromEvaluated("accepted", evaluated, checkedAt, failureMessage);
+  }
   if (response.ok === false && !evaluated.bindingDegradedReasons.includes("binding_ack_failed")) {
     evaluated.bindingDegradedReasons.push("binding_ack_failed");
   }
@@ -224,7 +229,7 @@ export function runtimeAppBindingDiagnosticsFromCompositorResponse(
     response.ok === false ? "failed" : "accepted",
     evaluated,
     checkedAt,
-    stringOrUndefined(response.message),
+    failureMessage,
   );
 }
 
