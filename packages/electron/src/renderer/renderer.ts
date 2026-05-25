@@ -248,6 +248,10 @@ let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 
 const OVERLAY_CAPTURES: OverlayCapture[] = ["pointer_hover", "pointer_button", "pointer_axis"];
 const OVERLAY_MARKER_ATTRIBUTE = "data-surf-ace-overlay";
+const PANE_LABEL_EDGE_MARGIN_RATIO = 0.04;
+const PANE_LABEL_MAX_EDGE_MARGIN_PX = 24;
+const PANE_LABEL_MIN_EDGE_MARGIN_PX = 8;
+const PANE_LABEL_MIN_NUMBER_SIZE_PX = 10;
 type SurfAceOverlayKind =
   | "annotation-control"
   | "history-back"
@@ -770,9 +774,45 @@ function setPaneChromeMetrics(view: PaneView): void {
   view.rootEl.style.setProperty("--pane-number-size", `${paneNumberSize}px`);
 }
 
+function fitPaneLabelToVisibleBounds(view: PaneView): void {
+  const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement | null;
+  if (!labelWrap || labelWrap.hidden) {
+    return;
+  }
+  const paneRect = view.rootEl.getBoundingClientRect();
+  if (paneRect.width <= 0 || paneRect.height <= 0) {
+    return;
+  }
+
+  const basePaneNumberSize = Math.max(1, Math.min(paneRect.width, paneRect.height) / 4);
+  view.rootEl.style.setProperty("--pane-number-size", `${basePaneNumberSize}px`);
+
+  const edgeMargin = Math.min(
+    PANE_LABEL_MAX_EDGE_MARGIN_PX,
+    Math.max(PANE_LABEL_MIN_EDGE_MARGIN_PX, Math.min(paneRect.width, paneRect.height) * PANE_LABEL_EDGE_MARGIN_RATIO),
+  );
+  const availableWidth = Math.max(1, paneRect.width - edgeMargin * 2);
+  const availableHeight = Math.max(1, paneRect.height - edgeMargin * 2);
+  const labelRect = labelWrap.getBoundingClientRect();
+  if (labelRect.width <= 0 || labelRect.height <= 0) {
+    return;
+  }
+
+  const widthScale = labelRect.width > availableWidth ? availableWidth / labelRect.width : 1;
+  const heightScale = labelRect.height > availableHeight ? availableHeight / labelRect.height : 1;
+  const scale = Math.min(widthScale, heightScale);
+  if (scale >= 1) {
+    return;
+  }
+
+  const fittedPaneNumberSize = Math.max(PANE_LABEL_MIN_NUMBER_SIZE_PX, Math.floor(basePaneNumberSize * scale));
+  view.rootEl.style.setProperty("--pane-number-size", `${fittedPaneNumberSize}px`);
+}
+
 function setAllPaneChromeMetrics(): void {
   for (const view of paneViews.values()) {
     setPaneChromeMetrics(view);
+    fitPaneLabelToVisibleBounds(view);
   }
 }
 
@@ -2042,6 +2082,7 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
       ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}`
       : "",
   );
+  fitPaneLabelToVisibleBounds(view);
   buildControls(view, pane);
   renderPaneContent(view, pane);
 
