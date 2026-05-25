@@ -511,6 +511,29 @@ export type HeartbeatPingRequest = RequestBase<"heartbeat.ping"> & {
 
 export type PanesListRequest = RequestBase<"panes.list">;
 
+export type NativePaneWindowGroupMember = {
+  id: string;
+  role: "primary" | "dialog" | "palette" | "popup" | "secondary" | "unknown";
+  bounds: Rect | null;
+  focused: boolean;
+  lifecycle: "live" | "closing" | "closed" | "unknown";
+  clippedToPane: boolean | null;
+};
+
+export type NativePaneWindowGroupDiagnostic = {
+  paneId: PaneId;
+  paneInstanceId: string;
+  launchToken: string | null;
+  primaryWindowId: string | null;
+  focusedWindowId: string | null;
+  acceptedSecondaryCount: number;
+  deniedToplevelCount: number;
+  deniedReasons: string[];
+  paneLocalBounds: Rect;
+  clippingStatus: "clipped" | "unclipped" | "unknown";
+  members: NativePaneWindowGroupMember[];
+};
+
 export type AuthorityPaneIdentity = {
   paneId: PaneId;
   paneLabel: number;
@@ -793,6 +816,7 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
       contentType: ContentType | null;
       display?: ContentDisplay;
       externalNative?: boolean;
+      nativeWindowGroup?: NativePaneWindowGroupDiagnostic;
       viewport: SurfaceViewport;
       geometry: PaneGeometryProjection;
     }>;

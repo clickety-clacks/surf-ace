@@ -44,6 +44,7 @@ import {
   compositorFailureMessage,
   isOverlayNativePaneLivenessFailure,
   type NativePaneMaterialization,
+  nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
   overlayRegionsWithLivePaneInstanceAuthority,
@@ -914,7 +915,7 @@ export class SurfaceWsServer {
       case "target.apply":
         return await this.handleTargetApply(socket, request);
       case "panes.list":
-        return this.handlePanesList(socket, request);
+        return await this.handlePanesList(socket, request);
       case "pane.split":
         return await this.handlePaneSplit(socket, request);
       case "pane.rename":
@@ -1103,19 +1104,89 @@ export class SurfaceWsServer {
     let supersededSession: ActiveSession | null = null;
 
     if (!lock) {
-      sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-      ownershipEpoch = 1;
-      persistentServerDiagnostic(
-        "info",
-        "pair_request_new_session",
-        {
-          provider_id: providerId,
-          request_id: request.id,
-          session_id: sessionId,
-          socket_id: meta?.socketId,
-          surface_id: surfaceId,
-        },
-      );
+      const persistedOwnership = this.core.getProviderOwnership(surfaceId);
+      if (
+        persistedOwnership &&
+        resumeSessionId &&
+        resumeSessionId === persistedOwnership.sessionId &&
+        providerId === persistedOwnership.providerId &&
+        this.hasRecoverablePairState(surfaceId)
+      ) {
+        resumed = true;
+        sessionId = resumeSessionId;
+        ownershipEpoch = persistedOwnership.ownershipEpoch;
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_lockless_resume_recovered",
+          {
+            provider_id: providerId,
+            request_id: request.id,
+            session_id: sessionId,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+      } else if (persistedOwnership && providerId !== persistedOwnership.providerId && !request.payload.takeover) {
+        persistentServerDiagnostic(
+          "warn",
+          "pair_request_busy",
+          {
+            lock_provider_id: persistedOwnership.providerId,
+            requested_provider_id: providerId,
+            request_id: request.id,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+        throw new SurfaceCoreError("busy", "Surface ownership lock is held by another provider");
+      } else if (persistedOwnership && resumeSessionId && resumeSessionId !== persistedOwnership.sessionId) {
+        persistentServerDiagnostic(
+          "warn",
+          "pair_request_invalid_resume",
+          {
+            expected_session_id: persistedOwnership.sessionId,
+            provider_id: providerId,
+            received_session_id: resumeSessionId,
+            request_id: request.id,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+        throw new SurfaceCoreError("invalid_resume", "Resume session did not match active ownership lock");
+      } else if (
+        persistedOwnership &&
+        !resumeSessionId &&
+        !request.payload.takeover &&
+        this.hasRecoverablePairState(surfaceId)
+      ) {
+        persistentServerDiagnostic(
+          "warn",
+          "pair_request_invalid_resume",
+          {
+            expected_session_id: persistedOwnership.sessionId,
+            provider_id: providerId,
+            received_session_id: "nil",
+            request_id: request.id,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+        throw new SurfaceCoreError("invalid_resume", "Resume session did not match active ownership lock");
+      } else {
+        sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+        ownershipEpoch = persistedOwnership ? persistedOwnership.ownershipEpoch + 1 : 1;
+        persistentServerDiagnostic(
+          "info",
+          persistedOwnership ? "pair_request_same_provider_fresh_admission" : "pair_request_new_session",
+          {
+            provider_id: providerId,
+            request_id: request.id,
+            session_id: sessionId,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
+        );
+      }
     } else if (lock.providerId === providerId) {
       if (resumeSessionId === lock.sessionId) {
         resumed = true;
@@ -1291,6 +1362,13 @@ export class SurfaceWsServer {
     return response;
   }
 
+  private hasRecoverablePairState(surfaceId: string): boolean {
+    const state = this.core.pairState(surfaceId);
+    return state.topologyRevision > 0 ||
+      state.panes.length > 1 ||
+      state.panes.some((pane) => pane.currentContentId !== null || pane.contentType !== null);
+  }
+
   private async admitProviderWindowLabel(
     surfaceId: string,
     windowLabel: string,
@@ -1327,6 +1405,7 @@ export class SurfaceWsServer {
     }
 
     transport.lock = null;
+    this.core.clearProviderOwnership(surfaceId);
     this.core.setConnectionBar(surfaceId, "disconnected");
     this.onBusyChanged?.();
 
@@ -1341,8 +1420,9 @@ export class SurfaceWsServer {
     };
   }
 
-  private handlePanesList(socket: WebSocket, request: PanesListRequest): Response {
+  private async handlePanesList(socket: WebSocket, request: PanesListRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
+    await this.refreshNativePaneWindowGroups(surfaceId);
     return {
       id: request.id,
       ok: true,
@@ -1352,6 +1432,30 @@ export class SurfaceWsServer {
       type: "response",
       v: 1,
     };
+  }
+
+  private async refreshNativePaneWindowGroups(surfaceId: string): Promise<void> {
+    if (!this.compositorSocketPath) {
+      return;
+    }
+    try {
+      const status = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      const failure = compositorFailureMessage(status);
+      if (failure) {
+        persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
+          error_message: failure,
+          surface_id: surfaceId,
+        });
+        return;
+      }
+      const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(status);
+      this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
+    } catch (error) {
+      persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
+        error_message: error instanceof Error ? error.message : String(error),
+        surface_id: surfaceId,
+      });
+    }
   }
 
   private async runSurfaceMutation<T>(surfaceId: string, operation: () => Promise<T> | T): Promise<T> {
@@ -1949,6 +2053,10 @@ export class SurfaceWsServer {
           targetId: request.payload.targetId,
         };
         this.core.markNativePaneMaterialized(surfaceId, materialization);
+        const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(overlayResponse ?? hostResponse);
+        if (observedWindowGroups.length > 0) {
+          this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
+        }
         this.onNativeMaterialized?.(surfaceId, materialization);
         return {
           id: request.id,
@@ -2889,6 +2997,11 @@ export class SurfaceWsServer {
       providerId: plan.session.providerId,
       sessionId: plan.session.sessionId,
     };
+    this.core.setProviderOwnership(plan.surfaceId, {
+      ownershipEpoch: plan.session.ownershipEpoch,
+      providerId: plan.session.providerId,
+      sessionId: plan.session.sessionId,
+    });
     const meta = this.socketMeta.get(plan.session.socket);
     if (meta) {
       meta.pairedSurfaceId = plan.surfaceId;

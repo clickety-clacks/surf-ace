@@ -160,6 +160,32 @@ test("surface core persists and restores local window placement without changing
   });
 });
 
+test("surface core persists provider ownership for relaunch resume recovery", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 3);
+
+  core.setProviderOwnership(surface.surfaceId, {
+    ownershipEpoch: 4,
+    providerId: "pv_alpha",
+    sessionId: "sa_restore",
+  });
+
+  const restoredCore = new SurfaceCore({ persistentState: core.getPersistentState() });
+  restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  assert.deepEqual(restoredCore.getProviderOwnership(surface.surfaceId), {
+    ownershipEpoch: 4,
+    providerId: "pv_alpha",
+    sessionId: "sa_restore",
+  });
+});
+
 test("surface core does not restore a closed stale primary over remaining windows", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -913,6 +939,7 @@ test("surface core rejects browser_url targets while the pane is native-hosted",
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {
     op: "native_pane.host",
     panes: [
@@ -980,6 +1007,7 @@ test("surface core rejects stale native materialization identity after geometry 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {
     op: "native_pane.host",
     panes: [
@@ -1916,64 +1944,80 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   assert.equal(materialization.op, "native_pane.host");
   assert.deepEqual(materialization.panes[0]?.process, { args: ["-e", "btop"], command: "foot" });
   assert.equal(materialization.panes[0]?.target, "terminal");
+  assert.deepEqual(materialization.panes[0]?.windowGroup, {
+    launchIdentity: {
+      launchToken: `${surface.surfaceId}:${pane.paneId}:target_btop:3`,
+      paneId: String(pane.paneId),
+      paneInstanceId: pane.paneLineageId,
+      surfaceId: surface.surfaceId,
+      targetId: "target_btop",
+    },
+    policy: {
+      clipToPane: true,
+      constrainToPane: true,
+      denyForeignToplevels: true,
+      sameLaunchSecondaryToplevels: "accept",
+    },
+  });
   assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
   assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
 });
 
-test("surface core materializes native_app as the native process launch primitive", () => {
-  const core = new SurfaceCore({
-    persistentState: {
-      primarySurfaceId: null,
-      version: 1,
-    },
-  });
+for (const { command, processEnv } of [
+  { command: "/usr/bin/galculator", processEnv: undefined },
+  { command: "/usr/bin/kolourpaint", processEnv: { QT_QPA_PLATFORM: "wayland" } },
+  { command: "/usr/bin/weston-simple-egl", processEnv: undefined },
+]) {
+  test(`surface core materializes allowlisted Wayland GUI terminal_app command ${command} as a direct native pane process`, () => {
+    const core = new SurfaceCore({
+      persistentState: {
+        primarySurfaceId: null,
+        version: 1,
+      },
+    });
 
-  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
-  const pane = core.pairState(surface.surfaceId).panes[0]!;
+    const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+    applyProviderBootstrap(core, surface.surfaceId, 7);
+    const pane = core.pairState(surface.surfaceId).panes[0]!;
 
-  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
-    ownershipEpoch: 1,
-    ownershipSessionId: "sa_test" as never,
-    paneLineageId: pane.paneLineageId,
-    requestId: "restore_native",
-    restoreReason: "confirmed_restore",
-    surfaceId: surface.surfaceId as never,
-    targetEpoch: 3,
-    targetHeader: {
-      payloadSchemaVersion: 1,
-      replaySemantics: "launch_equivalent",
-      requiredCapabilities: ["target.native_app.v1"],
-      safeToLogFields: ["appId", "args", "cwd", "launchMode"],
-      safetyClass: "process",
-      summary: "Native App",
-    },
-    targetId: "target_native",
-    targetKind: "native_app",
-    targetPayload: {
-      appId: "com.example.NativeApp",
-      args: ["--pane"],
-      cwd: "/tmp",
-      env: { SURF_ACE_TEST: "1" },
-      launchMode: "attach_or_launch",
-    },
-  });
+    const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+      ownershipEpoch: 1,
+      ownershipSessionId: "sa_test" as never,
+      paneLineageId: pane.paneLineageId,
+      requestId: "restore_weston_simple_egl",
+      restoreReason: "resume_restore",
+      surfaceId: surface.surfaceId as never,
+      targetEpoch: 3,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.terminal_app.v1"],
+        safeToLogFields: ["command", "args"],
+        safetyClass: "process",
+        summary: command,
+      },
+      targetId: "target_wayland_gui",
+      targetKind: "terminal_app",
+      targetPayload: {
+        args: [],
+        command,
+        envPolicy: "surface_default",
+        pty: true,
+        restartPolicy: "manual_only",
+      },
+    });
 
-  assert.equal(materialization.op, "native_pane.host");
-  assert.equal(materialization.panes[0]?.target, "native_app");
-  assert.deepEqual(materialization.panes[0]?.nativeApp, {
-    appId: "com.example.NativeApp",
-    args: ["--pane"],
-    launchMode: "attach_or_launch",
+    assert.equal(materialization.op, "native_pane.host");
+    assert.deepEqual(materialization.panes[0]?.process, {
+      args: [],
+      command,
+      ...(processEnv ? { env: processEnv } : {}),
+    });
+    assert.equal(materialization.panes[0]?.target, "terminal");
+    assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
+    assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
   });
-  assert.deepEqual(materialization.panes[0]?.process, {
-    args: ["--pane"],
-    command: "com.example.NativeApp",
-    cwd: "/tmp",
-    env: { SURF_ACE_TEST: "1" },
-  });
-  assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
-});
+}
 
 test("surface core snaps terminal native geometry to compositor integer bounds", () => {
   const core = new SurfaceCore({
@@ -2040,6 +2084,7 @@ test("surface core exposes native materialized panes to the renderer until conte
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+  const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {
     op: "native_pane.host",
     panes: [
@@ -2061,12 +2106,84 @@ test("surface core exposes native materialized panes to the renderer until conte
         process: { args: ["top"], command: "btop" },
         revision: 1 as Revision,
         target: "terminal",
+        windowGroup: {
+          launchIdentity: {
+            launchToken,
+            paneId: String(paneId),
+            paneInstanceId: listedPane.geometry.paneInstanceId,
+            surfaceId: surface.surfaceId,
+            targetId: "target_top",
+          },
+          policy: {
+            clipToPane: true,
+            constrainToPane: true,
+            denyForeignToplevels: true,
+            sameLaunchSecondaryToplevels: "accept",
+          },
+        },
       },
     ],
   };
 
   core.markNativePaneMaterialized(surface.surfaceId, materialization);
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.externalNative, true);
+  assert.deepEqual(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, {
+    acceptedSecondaryCount: 0,
+    clippingStatus: "unknown",
+    deniedReasons: [],
+    deniedToplevelCount: 0,
+    focusedWindowId: null,
+    launchToken,
+    members: [{
+      bounds: listedPane.geometry.contentViewport,
+      clippedToPane: null,
+      focused: false,
+      id: `${paneId}:target_top`,
+      lifecycle: "live",
+      role: "primary",
+    }],
+    paneId,
+    paneInstanceId: listedPane.geometry.paneInstanceId,
+    paneLocalBounds: listedPane.geometry.contentViewport,
+    primaryWindowId: `${paneId}:target_top`,
+  });
+  core.markNativePaneWindowGroups(surface.surfaceId, [{
+    acceptedSecondaryCount: 1,
+    clippingStatus: "clipped",
+    deniedReasons: ["foreign_launch_token"],
+    deniedToplevelCount: 1,
+    focusedWindowId: "dialog-1",
+    launchToken,
+    members: [{
+      bounds: { height: 120, width: 160, x: 8, y: 12 },
+      clippedToPane: true,
+      focused: true,
+      id: "dialog-1",
+      lifecycle: "live",
+      role: "dialog",
+    }],
+    paneId: String(paneId),
+    paneInstanceId: listedPane.geometry.paneInstanceId,
+    paneLocalBounds: listedPane.geometry.contentViewport,
+    primaryWindowId: `${paneId}:target_top`,
+  }]);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 1);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.focusedWindowId, "dialog-1");
+  core.markNativePaneWindowGroups(surface.surfaceId, [{
+    acceptedSecondaryCount: 99,
+    clippingStatus: "unclipped",
+    deniedReasons: [],
+    deniedToplevelCount: 0,
+    focusedWindowId: "foreign-dialog",
+    launchToken: "foreign-launch-token",
+    members: [],
+    paneId: String(paneId),
+    paneInstanceId: listedPane.geometry.paneInstanceId,
+    paneLocalBounds: listedPane.geometry.contentViewport,
+    primaryWindowId: "foreign-primary",
+  }]);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 0);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.launchToken, launchToken);
 
   core.contentClear(surface.surfaceId, {
     paneId: paneId as never,

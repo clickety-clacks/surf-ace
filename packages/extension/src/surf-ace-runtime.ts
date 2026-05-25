@@ -76,6 +76,7 @@ import type {
   TopologyApplyResponse,
   Viewport,
   MutationAckResponse,
+  NativePaneWindowGroupDiagnostic,
   PaneGeometryProjection,
   RestorePolicy,
   PageEvent,
@@ -204,6 +205,7 @@ export type SurfAcePaneSummary = {
   paneId: PaneId;
   paneLabel: number;
   name: string | null;
+  nativeWindowGroup?: NativePaneWindowGroupDiagnostic;
   activeContent:
     | {
         contentId: string;
@@ -860,6 +862,7 @@ type ManagedPane = {
   historyOwnerToken: string | null;
   lastRestoreBlockedReason: TargetErrorCode | null;
   name: string | null;
+  nativeWindowGroup: NativePaneWindowGroupDiagnostic | null;
   nonDurableTargetDiagnostic: SurfAcePaneTargetDiagnostic | null;
   ownerSessionKey: string | null;
   paneId: PaneId;
@@ -1478,6 +1481,7 @@ function createPane(
     historyOwnerToken: null,
     lastRestoreBlockedReason: null,
     name: null,
+    nativeWindowGroup: null,
     nonDurableTargetDiagnostic: null,
     ownerSessionKey: null,
     paneId,
@@ -8721,6 +8725,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               visibleProvenance: visibleContentProvenance(pane),
             },
             name: pane.name,
+            ...(pane.nativeWindowGroup ? { nativeWindowGroup: structuredClone(pane.nativeWindowGroup) } : {}),
             paneAddress: visiblePaneAddress(surface.windowLabel, paneLabel),
             paneId: pane.paneId,
             paneLabel,
@@ -11644,6 +11649,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       providerPaneIds.push(pane.paneId);
       providerPaneLabels.push({ pane, paneLabel: paneState.paneLabel, remotePaneId: paneState.paneId });
       pane.externalNative = paneState.externalNative === true;
+      pane.nativeWindowGroup = paneState.nativeWindowGroup ? structuredClone(paneState.nativeWindowGroup) : null;
       pane.viewport = cloneViewport(paneState.viewport);
       pane.geometry = structuredClone(paneState.geometry);
       if (pane.externalNative) {

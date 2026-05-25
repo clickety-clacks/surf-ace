@@ -7,7 +7,7 @@ import test from "node:test";
 
 import WebSocket from "ws";
 
-import type { PairRequest, Request, Response, RuntimeAppBindingDiagnostics } from "../../protocol/src/index.js";
+import type { PairRequest, Request, Response } from "../../protocol/src/index.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { SurfaceWsServer, __test } from "../src/ws-server.js";
 
@@ -179,16 +179,6 @@ function relinquishRequest(): Request {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "ownership.relinquish",
     payload: {},
-    sentAt: Date.now() as never,
-    type: "request",
-    v: 1,
-  };
-}
-
-function runtimeAppBindingRequest(): Request {
-  return {
-    id: `rq_${Math.random().toString(16).slice(2)}` as never,
-    op: "runtime.app_binding",
     sentAt: Date.now() as never,
     type: "request",
     v: 1,
@@ -500,7 +490,6 @@ async function withServer(
     getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
     nativeOverlayLivenessRetryCount?: number;
     nativeOverlayLivenessRetryDelayMs?: number;
-    getRuntimeAppBinding?: () => RuntimeAppBindingDiagnostics | null;
     onNativeMaterialized?: (surfaceId: string) => void;
     onNativeReleased?: (surfaceId: string, paneIds: string[]) => void;
   } = {},
@@ -518,7 +507,6 @@ async function withServer(
     core,
     endpointName: "Surf Ace",
     getOverlayDiagnostics: options.getOverlayDiagnostics,
-    getRuntimeAppBinding: options.getRuntimeAppBinding,
     hostName: "localhost",
     compositorSocketPath: options.compositorSocketPath ?? null,
     nativeOverlayLivenessRetryCount: options.nativeOverlayLivenessRetryCount,
@@ -840,6 +828,235 @@ test("ws server allows the lock owner to resume after disconnect", async () => {
 
     await closeSocket(resumedSocket);
   });
+});
+
+test("ws server recovers a resume-bearing admission after relaunch without clearing restored topology", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    const content = await request(owner, contentApplyRequest(2, 1));
+    assert.equal(content.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    server.disconnectSurface(surfaceId, "test_relaunch");
+
+    const resumedSocket = await connect(url);
+    const resumed = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: first.payload.sessionId,
+      }),
+    );
+
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.op, "pair.request");
+    assert.equal(resumed.payload.resumed, true);
+    assert.equal(resumed.payload.sessionId, first.payload.sessionId);
+    assert.deepEqual(
+      resumed.payload.state.panes.map((pane) => pane.paneId),
+      [1, 2],
+    );
+    assert.equal(resumed.payload.state.panes[1]?.currentContentId, "ct_applied");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+
+    await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server rejects lockless invalid resume without clearing restored topology", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    server.disconnectSurface(surfaceId, "test_relaunch");
+
+    const resumedSocket = await connect(url);
+    const rejected = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: "sa_invalid",
+      }),
+    );
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "invalid_resume");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+
+    await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server rejects lockless same-provider admission without resume before clearing restored topology", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    server.disconnectSurface(surfaceId, "test_relaunch");
+
+    const replacement = await connect(url);
+    const rejected = await request(
+      replacement,
+      pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+      }),
+    );
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "invalid_resume");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+
+    await closeSocket(replacement);
+  });
+});
+
+test("ws server rejects lockless foreign provider resume without clearing restored topology", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    await closeSocket(owner, 1000, "provider_shutdown");
+
+    server.disconnectSurface(surfaceId, "test_relaunch");
+
+    const resumedSocket = await connect(url);
+    const rejected = await request(
+      resumedSocket,
+      pairRequest(surfaceId, "pv_bravo", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: first.payload.sessionId,
+      }),
+    );
+
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, "busy");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+
+    await closeSocket(resumedSocket);
+  });
+});
+
+test("ws server recovers persisted provider ownership after serialized relaunch restore", async () => {
+  let persistedState: ReturnType<SurfaceCore["getPersistentState"]> | null = null;
+  let restoredSurfaceId = "";
+  let restoredSessionId = "";
+
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    restoredSurfaceId = surfaceId;
+    restoredSessionId = first.payload.sessionId;
+    const topologyPromise = request(owner, topologyApplyRequest());
+    await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+    seedHorizontalSplitSnapshots(core, surfaceId, 1, 2);
+    const topology = await topologyPromise;
+    assert.equal(topology.ok, true);
+    const content = await request(owner, contentApplyRequest(2, 1));
+    assert.equal(content.ok, true);
+    persistedState = core.getPersistentState();
+    await closeSocket(owner, 1000, "provider_shutdown");
+  });
+
+  assert.ok(persistedState);
+  const restoredCore = new SurfaceCore({ persistentState: persistedState });
+  const restoredSurfaces = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  assert.equal(restoredSurfaces.some((surface) => surface.surfaceId === restoredSurfaceId), true);
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    core: restoredCore,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    compositorSocketPath: null,
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+
+  await server.start();
+  try {
+    const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    const resumed = await request(
+      socket,
+      pairRequest(restoredSurfaceId, "pv_alpha", {
+        initialPaneId: 7,
+        initialPaneLabel: 77,
+        resumeSessionId: restoredSessionId,
+      }),
+    );
+
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.payload.resumed, true);
+    assert.equal(resumed.payload.sessionId, restoredSessionId);
+    assert.deepEqual(
+      resumed.payload.state.panes.map((pane) => pane.paneId),
+      [1, 2],
+    );
+    assert.equal(resumed.payload.state.panes[1]?.currentContentId, "ct_applied");
+
+    await closeSocket(socket);
+  } finally {
+    await server.stop();
+  }
 });
 
 test("ws server re-admits same-provider reconnect with an invalid resume token", async () => {
@@ -1508,139 +1725,14 @@ test("ws server rejects pair requests without providerName", async () => {
   });
 });
 
-test("ws server advertises native app targets when compositor bridge is configured", async () => {
+test("ws server advertises terminal targets when compositor bridge is configured", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const socket = await connect(url);
     const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
 
     assert.equal(paired.ok, true);
     assert.deepEqual(paired.payload.capabilities.protocolFeatures, ["authority.state.v1"]);
-    assert.deepEqual(paired.payload.capabilities.targetCapabilities, [
-      "target.browser_url.v1",
-      "target.native_app.v1",
-    ]);
-
-    await closeSocket(socket);
-  }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
-});
-
-test("ws server exposes runtime app binding readiness diagnostics in pair capabilities", async () => {
-  const runtimeAppBinding: RuntimeAppBindingDiagnostics = {
-    acknowledgement: "failed",
-    bindingAuthority: "degraded",
-    bindingDegradedReasons: ["launch_token_missing", "process_lineage_missing"],
-    checkedAt: 123 as never,
-    diagnosticDrift: ["wayland_app_id_mismatch"],
-    expectedBundleId: "ai.surf-ace.electron",
-    expectedPackageName: "@surf-ace/electron",
-    expectedRuntimeId: "surf-ace.runtime.electron",
-    failureMessage: "missing token",
-    launchTokenStatus: "missing",
-    observedUiLabel: "Test Surface",
-    observedWaylandAppId: "surf-ace-electron",
-    observedWindowTitle: "Test Surface",
-    processLineageStatus: "missing",
-    ready: false,
-    reportedBundleId: "ai.surf-ace.electron",
-    reportedPackageName: "@surf-ace/electron",
-    reportedRuntimeId: "surf-ace.runtime.electron",
-  };
-  await withServer(async ({ surfaceId, url }) => {
-    const socket = await connect(url);
-    const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
-
-    assert.equal(paired.ok, true);
-    assert.deepEqual(paired.payload.capabilities.runtimeAppBinding, runtimeAppBinding);
-
-    await closeSocket(socket);
-  }, {
-    compositorSocketPath: "/tmp/surf-ace-compositor-test.sock",
-    getRuntimeAppBinding: () => runtimeAppBinding,
-  });
-});
-
-test("ws server refreshes runtime app binding readiness diagnostics on request", async () => {
-  const trusted: RuntimeAppBindingDiagnostics = {
-    acknowledgement: "accepted",
-    bindingAuthority: "trusted",
-    bindingDegradedReasons: [],
-    checkedAt: 123 as never,
-    diagnosticDrift: ["wayland_app_id_mismatch"],
-    expectedBundleId: "ai.surf-ace.electron",
-    expectedPackageName: "@surf-ace/electron",
-    expectedRuntimeId: "surf-ace.runtime.electron",
-    launchTokenStatus: "matched",
-    observedUiLabel: "Test Surface",
-    observedWaylandAppId: "surf-ace-electron",
-    observedWindowTitle: "Test Surface",
-    processLineageStatus: "matched",
-    ready: true,
-    reportedBundleId: "ai.surf-ace.electron",
-    reportedPackageName: "@surf-ace/electron",
-    reportedRuntimeId: "surf-ace.runtime.electron",
-  };
-  const degraded: RuntimeAppBindingDiagnostics = {
-    ...trusted,
-    acknowledgement: "failed",
-    bindingAuthority: "degraded",
-    bindingDegradedReasons: ["process_lineage_missing"],
-    failureMessage: "lineage missing",
-    processLineageStatus: "missing",
-    ready: false,
-  };
-  let current: RuntimeAppBindingDiagnostics | null = trusted;
-  await withServer(async ({ url }) => {
-    const socket = await connect(url);
-    let response = await request(socket, runtimeAppBindingRequest());
-    assert.equal(response.ok, true);
-    assert.equal(response.op, "runtime.app_binding");
-    assert.deepEqual(response.payload.runtimeAppBinding, trusted);
-
-    current = degraded;
-    response = await request(socket, runtimeAppBindingRequest());
-    assert.equal(response.ok, true);
-    assert.equal(response.op, "runtime.app_binding");
-    assert.deepEqual(response.payload.runtimeAppBinding, degraded);
-
-    await closeSocket(socket);
-  }, {
-    compositorSocketPath: "/tmp/surf-ace-compositor-test.sock",
-    getRuntimeAppBinding: () => current,
-  });
-});
-
-test("ws server fails native app target.apply closed without trusted runtime app binding", async () => {
-  await withServer(async ({ surfaceId, url }) => {
-    const socket = await connect(url);
-    const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
-    assert.equal(paired.ok, true);
-
-    const applyRequest = targetApplyRequest({
-      ownershipSessionId: paired.payload.sessionId,
-      paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
-      surfaceId: paired.payload.surfaceId,
-    });
-    Object.assign(applyRequest.payload, {
-      targetHeader: {
-        payloadSchemaVersion: 1,
-        replaySemantics: "launch_equivalent",
-        requiredCapabilities: ["target.native_app.v1"],
-        safeToLogFields: ["appId", "args"],
-        safetyClass: "process",
-        summary: "Native App",
-      },
-      targetKind: "native_app",
-      targetPayload: { appId: "com.example.NativeApp", args: ["--pane"] },
-    });
-
-    const failed = await request(socket, applyRequest);
-    assert.equal(failed.ok, true);
-    assert.equal(failed.op, "target.apply.result");
-    assert.equal(failed.payload.status, "failed");
-    assert.equal(failed.payload.errorCode, "materialization_failed");
-    assert.equal(failed.payload.materializedState?.nativeHost, "not_applied");
-    assert.equal(failed.payload.materializedState?.overlayRegions, "not_requested");
-    assert.deepEqual(failed.payload.materializedState?.diagnostics, ["runtime_binding_missing"]);
+    assert.deepEqual(paired.payload.capabilities.targetCapabilities, ["target.browser_url.v1", "target.native_app.v1"]);
 
     await closeSocket(socket);
   }, { compositorSocketPath: "/tmp/surf-ace-compositor-test.sock" });
@@ -3417,6 +3509,28 @@ test("ws server derives target.apply native pane host materialization for compos
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
+  let observedLaunchToken = "";
+  let statusRequestCount = 0;
+  const windowGroupStatus = (acceptedSecondaryCount: number) => ({
+    accepted_secondary_count: acceptedSecondaryCount,
+    clipping_status: "clipped",
+    denied_reasons: ["foreign_launch_token"],
+    denied_toplevel_count: 1,
+    focused_window_id: "dialog-1",
+    launch_token: observedLaunchToken,
+    members: [{
+      bounds: { height: 120, width: 160, x: 24, y: 32 },
+      clipped_to_pane: true,
+      focused: true,
+      id: "dialog-1",
+      lifecycle: "live",
+      role: "dialog",
+    }],
+    pane_id: "1",
+    pane_instance_id: "live-native-pane-1",
+    pane_local_bounds: { height: 800, width: 1200, x: 0, y: 0 },
+    primary_window_id: "primary-1",
+  });
   const compositor = net.createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -3430,32 +3544,31 @@ test("ws server derives target.apply native pane host materialization for compos
       const message = JSON.parse(line) as Record<string, unknown>;
       received.push(message);
       if (message.type === "get_status") {
+        statusRequestCount += 1;
         socket.write(`${JSON.stringify({
           ok: true,
           status: {
             logical_surface_height: 3840,
             logical_surface_width: 2160,
+            ...(observedLaunchToken && statusRequestCount === 2 ? { native_pane_window_groups: [windowGroupStatus(2)] } : {}),
             pane_geometry_coordinate_space: "compositor_logical",
             physical_output_height: 2160,
             physical_output_width: 3840,
           },
         })}\n`);
       } else if (message.type === "native_pane.host") {
+        const panes = Array.isArray(message.panes) ? message.panes : [];
+        const firstPane = panes[0] as { windowGroup?: { launchIdentity?: { launchToken?: string } } } | undefined;
+        observedLaunchToken = firstPane?.windowGroup?.launchIdentity?.launchToken ?? "";
+        socket.write(`${JSON.stringify({ ok: true, status: { overlay_regions: { topologyEpoch: "topology-hosted" }, panes: [{ id: "1" }] } })}\n`);
+      } else {
         socket.write(`${JSON.stringify({
           ok: true,
           status: {
-            overlay_regions: { topologyEpoch: "topology-hosted" },
-            panes: [{
-              binding_id: "1:target_top_118",
-              content_id: "target_top_118",
-              diagnostics: ["host_launch_pending"],
-              id: "1",
-              process: { diagnostics: ["focus_not_ready"] },
-            }],
+            native_pane_window_groups: [windowGroupStatus(1)],
+            panes: [{ id: "1" }],
           },
         })}\n`);
-      } else {
-        socket.write(`${JSON.stringify({ ok: true, status: { panes: [{ id: "1" }] } })}\n`);
       }
       socket.end();
     });
@@ -3506,26 +3619,53 @@ test("ws server derives target.apply native pane host materialization for compos
         process: { args: ["top"], command: "foot" },
         revision: 3,
         target: "terminal",
+        windowGroup: {
+          launchIdentity: {
+            launchToken: `${surfaceId}:1:target_top_118:3`,
+            paneId: "1",
+            paneInstanceId: hostPane.geometry && (hostPane.geometry as Record<string, unknown>).paneInstanceId,
+            surfaceId,
+            targetId: "target_top_118",
+          },
+          policy: {
+            clipToPane: true,
+            constrainToPane: true,
+            denyForeignToplevels: true,
+            sameLaunchSecondaryToplevels: "accept",
+          },
+        },
       });
       assert.match(String((hostPane.geometry as Record<string, unknown>).paneInstanceId), /^pl_/);
       assert.equal(applied.payload.materializedState?.nativeHost, "applied");
       assert.equal(applied.payload.materializedState?.overlayRegions, "applied");
-      assert.deepEqual(applied.payload.materializedState?.nativeTarget, {
-        args: ["top"],
-        command: "foot",
-        targetKind: "terminal_app",
-      });
-      assert.equal(applied.payload.materializedState?.paneGeometry?.coordinateSpace, "compositor_logical");
-      assert.equal(applied.payload.materializedState?.authority?.surfaceId, surfaceId);
-      assert.equal(applied.payload.materializedState?.authority?.paneLineageId, paired.payload.state.panes[0]!.paneLineageId);
-      assert.equal(applied.payload.materializedState?.proof?.bindingId, "1:target_top_118");
-      assert.deepEqual(applied.payload.materializedState?.diagnostics, ["host_launch_pending", "focus_not_ready"]);
-      assert.equal(applied.payload.materializedState?.inputFocus, "unknown");
-      assert.equal(applied.payload.materializedState?.lifecycle, "launch_requested");
       assert.equal("hostRequest" in applied.payload.materializedState!, false);
       assert.equal("preflightStatus" in applied.payload.materializedState!, false);
       assert.equal("preflightStatusSummary" in applied.payload.materializedState!, false);
       assert.deepEqual(nativeMaterializedSurfaces, [surfaceId]);
+      assert.equal(core.panesList(surfaceId).panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 1);
+      assert.equal(core.panesList(surfaceId).panes[0]?.nativeWindowGroup?.focusedWindowId, "dialog-1");
+      const refreshed = await request(socket, {
+        id: `rq_${Math.random().toString(16).slice(2)}` as never,
+        op: "panes.list",
+        payload: {},
+        sentAt: Date.now() as never,
+        type: "request",
+        v: 1,
+      });
+      assert.equal(refreshed.ok, true);
+      assert.equal(refreshed.op, "panes.list");
+      assert.equal(refreshed.payload.panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 2);
+      const cleared = await request(socket, {
+        id: `rq_${Math.random().toString(16).slice(2)}` as never,
+        op: "panes.list",
+        payload: {},
+        sentAt: Date.now() as never,
+        type: "request",
+        v: 1,
+      });
+      assert.equal(cleared.ok, true);
+      assert.equal(cleared.op, "panes.list");
+      assert.equal(cleared.payload.panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 0);
 
       await closeSocket(socket);
     }, {
@@ -4063,9 +4203,6 @@ test("ws server rejects and releases stale native host plan after async geometry
       ]);
       assert.equal(failed.payload.materializedState?.nativeHost, "released_after_failure");
       assert.equal(failed.payload.materializedState?.overlayRegions, "not_requested");
-      assert.equal(failed.payload.materializedState?.authority?.surfaceId, surfaceId);
-      assert.equal(failed.payload.materializedState?.nativeTarget?.targetKind, "terminal_app");
-      assert.equal(failed.payload.materializedState?.paneGeometry?.coordinateSpace, "compositor_logical");
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, false);
 
       await closeSocket(socket);
@@ -4148,9 +4285,6 @@ test("ws server reports compositor target.apply rejection as materialization fai
       assert.deepEqual(received.map((message) => (message as { type: string }).type), ["get_status", "native_pane.host"]);
       assert.equal(failed.payload.materializedState?.nativeHost, "not_applied");
       assert.equal(failed.payload.materializedState?.overlayRegions, "not_requested");
-      assert.deepEqual(failed.payload.materializedState?.diagnostics, ["invalid pane 1"]);
-      assert.equal(failed.payload.materializedState?.authority?.surfaceId, surfaceId);
-      assert.equal(failed.payload.materializedState?.nativeTarget?.targetKind, "terminal_app");
 
       await closeSocket(socket);
     }, { compositorSocketPath: socketPath });
@@ -4211,10 +4345,6 @@ test("ws server rejects target.apply geometry outside compositor logical status 
       assert.deepEqual(received, [{ type: "get_status" }]);
       assert.equal(failed.payload.materializedState?.nativeHost, "not_applied");
       assert.equal(failed.payload.materializedState?.overlayRegions, "not_requested");
-      assert.deepEqual(failed.payload.materializedState?.diagnostics, [
-        "native pane 1 geometry is outside compositor logical surface 1100x700",
-      ]);
-      assert.equal(failed.payload.materializedState?.authority?.surfaceId, surfaceId);
 
       await closeSocket(socket);
     }, { compositorSocketPath: socketPath });
