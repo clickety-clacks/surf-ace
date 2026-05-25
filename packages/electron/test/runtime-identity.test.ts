@@ -58,6 +58,21 @@ test("Wayland app_id package drift is diagnostic when runtime id, token, and lin
     reportedRuntimeId: SURF_ACE_ELECTRON_RUNTIME_ID,
   });
 
+
+test("runtime identity binding request accepts compositor-provided launch token env", () => {
+  const request = buildCompositorAppBindingRequest({
+    env: {
+      SURF_ACE_COMPOSITOR_LAUNCH_TOKEN: "ctok_456",
+      SURF_ACE_WAYLAND_APP_ID: "surf-ace-main-app",
+    },
+    pid: 5101,
+    ppid: 5100,
+    uiLabel: "racter Surf Ace",
+    windowTitle: "racter Surf Ace",
+  });
+
+  assert.equal(request.evidence.launchToken, "ctok_456");
+});
   assert.equal(diagnostics.bindingAuthority, "trusted");
   assert.deepEqual(diagnostics.bindingDegradedReasons, []);
   assert.equal(diagnostics.bindingBlockReason, undefined);

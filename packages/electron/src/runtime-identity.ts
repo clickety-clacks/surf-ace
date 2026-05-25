@@ -6,6 +6,7 @@ export const SURF_ACE_ELECTRON_BUNDLE_ID = "ai.surf-ace.electron";
 
 export const SURF_ACE_EXPECTED_RUNTIME_ID_ENV = "SURF_ACE_EXPECTED_RUNTIME_ID";
 export const SURF_ACE_LAUNCH_TOKEN_ENV = "SURF_ACE_LAUNCH_TOKEN";
+export const SURF_ACE_COMPOSITOR_LAUNCH_TOKEN_ENV = "SURF_ACE_COMPOSITOR_LAUNCH_TOKEN";
 export const SURF_ACE_WAYLAND_APP_ID_ENV = "SURF_ACE_WAYLAND_APP_ID";
 
 export type CompositorBindingAuthority = "trusted" | "degraded" | "blocked";
@@ -99,7 +100,7 @@ export function buildCompositorAppBindingRequest(params: {
   windowTitle: string;
 }): CompositorAppBindingRequest {
   const env = params.env ?? process.env;
-  const launchToken = trimToUndefined(env[SURF_ACE_LAUNCH_TOKEN_ENV]);
+  const launchToken = trimToUndefined(env[SURF_ACE_LAUNCH_TOKEN_ENV]) ?? trimToUndefined(env[SURF_ACE_COMPOSITOR_LAUNCH_TOKEN_ENV]);
   const observedWaylandAppId = trimToUndefined(env[SURF_ACE_WAYLAND_APP_ID_ENV]);
   return {
     evidence: {
