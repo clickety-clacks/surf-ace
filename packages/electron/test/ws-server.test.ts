@@ -3139,6 +3139,28 @@ test("ws server derives target.apply native pane host materialization for compos
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
+  let observedLaunchToken = "";
+  let statusRequestCount = 0;
+  const windowGroupStatus = (acceptedSecondaryCount: number) => ({
+    accepted_secondary_count: acceptedSecondaryCount,
+    clipping_status: "clipped",
+    denied_reasons: ["foreign_launch_token"],
+    denied_toplevel_count: 1,
+    focused_window_id: "dialog-1",
+    launch_token: observedLaunchToken,
+    members: [{
+      bounds: { height: 120, width: 160, x: 24, y: 32 },
+      clipped_to_pane: true,
+      focused: true,
+      id: "dialog-1",
+      lifecycle: "live",
+      role: "dialog",
+    }],
+    pane_id: "1",
+    pane_instance_id: "live-native-pane-1",
+    pane_local_bounds: { height: 800, width: 1200, x: 0, y: 0 },
+    primary_window_id: "primary-1",
+  });
   const compositor = net.createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -3152,20 +3174,31 @@ test("ws server derives target.apply native pane host materialization for compos
       const message = JSON.parse(line) as Record<string, unknown>;
       received.push(message);
       if (message.type === "get_status") {
+        statusRequestCount += 1;
         socket.write(`${JSON.stringify({
           ok: true,
           status: {
             logical_surface_height: 3840,
             logical_surface_width: 2160,
+            ...(observedLaunchToken && statusRequestCount === 2 ? { native_pane_window_groups: [windowGroupStatus(2)] } : {}),
             pane_geometry_coordinate_space: "compositor_logical",
             physical_output_height: 2160,
             physical_output_width: 3840,
           },
         })}\n`);
       } else if (message.type === "native_pane.host") {
+        const panes = Array.isArray(message.panes) ? message.panes : [];
+        const firstPane = panes[0] as { windowGroup?: { launchIdentity?: { launchToken?: string } } } | undefined;
+        observedLaunchToken = firstPane?.windowGroup?.launchIdentity?.launchToken ?? "";
         socket.write(`${JSON.stringify({ ok: true, status: { overlay_regions: { topologyEpoch: "topology-hosted" }, panes: [{ id: "1" }] } })}\n`);
       } else {
-        socket.write(`${JSON.stringify({ ok: true, status: { panes: [{ id: "1" }] } })}\n`);
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            native_pane_window_groups: [windowGroupStatus(1)],
+            panes: [{ id: "1" }],
+          },
+        })}\n`);
       }
       socket.end();
     });
@@ -3216,6 +3249,21 @@ test("ws server derives target.apply native pane host materialization for compos
         process: { args: ["top"], command: "foot" },
         revision: 3,
         target: "terminal",
+        windowGroup: {
+          launchIdentity: {
+            launchToken: `${surfaceId}:1:target_top_118:3`,
+            paneId: "1",
+            paneInstanceId: hostPane.geometry && (hostPane.geometry as Record<string, unknown>).paneInstanceId,
+            surfaceId,
+            targetId: "target_top_118",
+          },
+          policy: {
+            clipToPane: true,
+            constrainToPane: true,
+            denyForeignToplevels: true,
+            sameLaunchSecondaryToplevels: "accept",
+          },
+        },
       });
       assert.match(String((hostPane.geometry as Record<string, unknown>).paneInstanceId), /^pl_/);
       assert.equal(applied.payload.materializedState?.nativeHost, "applied");
@@ -3224,6 +3272,30 @@ test("ws server derives target.apply native pane host materialization for compos
       assert.equal("preflightStatus" in applied.payload.materializedState!, false);
       assert.equal("preflightStatusSummary" in applied.payload.materializedState!, false);
       assert.deepEqual(nativeMaterializedSurfaces, [surfaceId]);
+      assert.equal(core.panesList(surfaceId).panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 1);
+      assert.equal(core.panesList(surfaceId).panes[0]?.nativeWindowGroup?.focusedWindowId, "dialog-1");
+      const refreshed = await request(socket, {
+        id: `rq_${Math.random().toString(16).slice(2)}` as never,
+        op: "panes.list",
+        payload: {},
+        sentAt: Date.now() as never,
+        type: "request",
+        v: 1,
+      });
+      assert.equal(refreshed.ok, true);
+      assert.equal(refreshed.op, "panes.list");
+      assert.equal(refreshed.payload.panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 2);
+      const cleared = await request(socket, {
+        id: `rq_${Math.random().toString(16).slice(2)}` as never,
+        op: "panes.list",
+        payload: {},
+        sentAt: Date.now() as never,
+        type: "request",
+        v: 1,
+      });
+      assert.equal(cleared.ok, true);
+      assert.equal(cleared.op, "panes.list");
+      assert.equal(cleared.payload.panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 0);
 
       await closeSocket(socket);
     }, {

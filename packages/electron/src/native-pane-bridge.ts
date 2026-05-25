@@ -16,6 +16,7 @@ export type NativePaneMaterializationPane = {
   binding_id?: string;
   revision: Revision;
   geometry: NativePaneGeometry;
+  windowGroup?: NativePaneWindowGroupRequest;
   target?: "terminal";
   process?: {
     command: string;
@@ -23,6 +24,49 @@ export type NativePaneMaterializationPane = {
     cwd?: string;
     env?: Record<string, string>;
   };
+};
+
+export type NativePaneLaunchIdentity = {
+  launchToken: string;
+  paneId: string;
+  paneInstanceId: string;
+  surfaceId: SurfaceId | string;
+  targetId?: string;
+};
+
+export type NativePaneWindowGroupRequest = {
+  launchIdentity: NativePaneLaunchIdentity;
+  policy: {
+    clipToPane: true;
+    constrainToPane: true;
+    denyForeignToplevels: true;
+    sameLaunchSecondaryToplevels: "accept";
+  };
+};
+
+export type NativePaneWindowGroupMemberRole = "primary" | "dialog" | "palette" | "popup" | "secondary" | "unknown";
+
+export type NativePaneWindowGroupMember = {
+  id: string;
+  role: NativePaneWindowGroupMemberRole;
+  bounds: Rect | null;
+  focused: boolean;
+  lifecycle: "live" | "closing" | "closed" | "unknown";
+  clippedToPane: boolean | null;
+};
+
+export type NativePaneWindowGroupStatus = {
+  paneId: string;
+  paneInstanceId: string | null;
+  launchToken: string | null;
+  primaryWindowId: string | null;
+  focusedWindowId: string | null;
+  acceptedSecondaryCount: number;
+  deniedToplevelCount: number;
+  deniedReasons: string[];
+  paneLocalBounds: Rect | null;
+  clippingStatus: "clipped" | "unclipped" | "unknown";
+  members: NativePaneWindowGroupMember[];
 };
 
 export type NativePaneOverlaySet = {
@@ -119,6 +163,7 @@ export type CompositorControlResponse = Record<string, unknown>;
 
 export type CompositorNativePaneStatusSummary = {
   nativeMaterializedPaneCount: number | null;
+  nativePaneWindowGroups: NativePaneWindowGroupStatus[];
   topologyPaneCount: null;
   topologyPaneSource: "surf_ace_pair_or_panes_list";
 };
@@ -438,9 +483,106 @@ export function compositorNativePaneStatusSummary(
     : response.panes;
   return {
     nativeMaterializedPaneCount: Array.isArray(panes) ? panes.length : null,
+    nativePaneWindowGroups: nativePaneWindowGroupsFromCompositorStatus(response),
     topologyPaneCount: null,
     topologyPaneSource: "surf_ace_pair_or_panes_list",
   };
+}
+
+export function nativePaneWindowGroupsFromCompositorStatus(
+  response: CompositorControlResponse,
+): NativePaneWindowGroupStatus[] {
+  const status = response.status;
+  const nestedSource = status && typeof status === "object"
+    ? (status as Record<string, unknown>).native_pane_window_groups
+    : undefined;
+  const source = nestedSource ?? response.native_pane_window_groups;
+  if (!Array.isArray(source)) {
+    return [];
+  }
+  return source.flatMap((group) => {
+    if (!group || typeof group !== "object") {
+      return [];
+    }
+    const record = group as Record<string, unknown>;
+    const paneId = statusText(record, "pane_id") ?? statusText(record, "paneId");
+    if (!paneId) {
+      return [];
+    }
+    const deniedReasonsValue = record.denied_reasons ?? record.deniedReasons;
+    const membersValue = record.members;
+    return [{
+      acceptedSecondaryCount: statusCount(record, "accepted_secondary_count") ?? statusCount(record, "acceptedSecondaryCount") ?? 0,
+      clippingStatus: statusClipping(record.clipping_status ?? record.clippingStatus),
+      deniedReasons: Array.isArray(deniedReasonsValue) ? deniedReasonsValue.filter((reason): reason is string => typeof reason === "string") : [],
+      deniedToplevelCount: statusCount(record, "denied_toplevel_count") ?? statusCount(record, "deniedToplevelCount") ?? 0,
+      focusedWindowId: statusText(record, "focused_window_id") ?? statusText(record, "focusedWindowId"),
+      launchToken: statusText(record, "launch_token") ?? statusText(record, "launchToken"),
+      members: Array.isArray(membersValue) ? membersValue.flatMap(nativePaneWindowGroupMemberFromStatus) : [],
+      paneId,
+      paneInstanceId: statusText(record, "pane_instance_id") ?? statusText(record, "paneInstanceId"),
+      paneLocalBounds: statusRect(record.pane_local_bounds ?? record.paneLocalBounds),
+      primaryWindowId: statusText(record, "primary_window_id") ?? statusText(record, "primaryWindowId"),
+    }];
+  });
+}
+
+function nativePaneWindowGroupMemberFromStatus(member: unknown): NativePaneWindowGroupMember[] {
+  if (!member || typeof member !== "object") {
+    return [];
+  }
+  const record = member as Record<string, unknown>;
+  const id = statusText(record, "id");
+  if (!id) {
+    return [];
+  }
+  return [{
+    bounds: statusRect(record.bounds),
+    clippedToPane: typeof record.clipped_to_pane === "boolean"
+      ? record.clipped_to_pane
+      : typeof record.clippedToPane === "boolean"
+        ? record.clippedToPane
+        : null,
+    focused: record.focused === true,
+    id,
+    lifecycle: statusLifecycle(record.lifecycle),
+    role: statusMemberRole(record.role),
+  }];
+}
+
+function statusText(record: Record<string, unknown>, field: string): string | null {
+  const value = record[field];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function statusCount(record: Record<string, unknown>, field: string): number | null {
+  const value = record[field];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function statusRect(value: unknown): Rect | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const { height, width, x, y } = record;
+  return typeof height === "number" && typeof width === "number" && typeof x === "number" && typeof y === "number"
+    ? { height, width, x, y }
+    : null;
+}
+
+function statusClipping(value: unknown): NativePaneWindowGroupStatus["clippingStatus"] {
+  return value === "clipped" || value === "unclipped" ? value : "unknown";
+}
+
+function statusLifecycle(value: unknown): NativePaneWindowGroupMember["lifecycle"] {
+  return value === "live" || value === "closing" || value === "closed" ? value : "unknown";
+}
+
+function statusMemberRole(value: unknown): NativePaneWindowGroupMemberRole {
+  return value === "primary" || value === "dialog" || value === "palette" || value === "popup" || value === "secondary"
+    ? value
+    : "unknown";
 }
 
 export function validateMaterializationAgainstCompositorStatus(

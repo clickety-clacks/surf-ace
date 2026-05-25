@@ -39,6 +39,7 @@ import {
   compositorFailureMessage,
   isOverlayNativePaneLivenessFailure,
   type NativePaneMaterialization,
+  nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
   overlayRegionsWithLivePaneInstanceAuthority,
@@ -904,7 +905,7 @@ export class SurfaceWsServer {
       case "target.apply":
         return await this.handleTargetApply(socket, request);
       case "panes.list":
-        return this.handlePanesList(socket, request);
+        return await this.handlePanesList(socket, request);
       case "pane.split":
         return await this.handlePaneSplit(socket, request);
       case "pane.rename":
@@ -1303,8 +1304,9 @@ export class SurfaceWsServer {
     };
   }
 
-  private handlePanesList(socket: WebSocket, request: PanesListRequest): Response {
+  private async handlePanesList(socket: WebSocket, request: PanesListRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
+    await this.refreshNativePaneWindowGroups(surfaceId);
     return {
       id: request.id,
       ok: true,
@@ -1314,6 +1316,30 @@ export class SurfaceWsServer {
       type: "response",
       v: 1,
     };
+  }
+
+  private async refreshNativePaneWindowGroups(surfaceId: string): Promise<void> {
+    if (!this.compositorSocketPath) {
+      return;
+    }
+    try {
+      const status = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      const failure = compositorFailureMessage(status);
+      if (failure) {
+        persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
+          error_message: failure,
+          surface_id: surfaceId,
+        });
+        return;
+      }
+      const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(status);
+      this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
+    } catch (error) {
+      persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
+        error_message: error instanceof Error ? error.message : String(error),
+        surface_id: surfaceId,
+      });
+    }
   }
 
   private async runSurfaceMutation<T>(surfaceId: string, operation: () => Promise<T> | T): Promise<T> {
@@ -1873,6 +1899,10 @@ export class SurfaceWsServer {
           targetId: request.payload.targetId,
         };
         this.core.markNativePaneMaterialized(surfaceId, materialization);
+        const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(overlayResponse ?? hostResponse);
+        if (observedWindowGroups.length > 0) {
+          this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
+        }
         this.onNativeMaterialized?.(surfaceId, materialization);
         return {
           id: request.id,
