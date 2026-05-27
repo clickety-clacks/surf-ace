@@ -59,7 +59,103 @@ function createStubRuntime(): SurfAceRuntime {
       revision: 1,
       targetKind: "native_app",
     }),
-    listScreens: async () => [],
+    listScreens: async () => [
+      {
+        _debug: {
+          autoRetryEnabled: true,
+          endpointId: "endpoint-1",
+          hasPairedInGatewaySession: true,
+          localOwnership: null,
+          ownershipRecovery: "active",
+          providerAuthority: {
+            actionable: true,
+            admitted: true,
+            blockers: [],
+            reason: null,
+          },
+          providerAuthorityProjection: {
+            activeTargetRecordCount: 0,
+            authorityBlockedSurfaceIds: [],
+            authorityBlockersBySurfaceId: {},
+            disabled: false,
+            liveSurfaceIds: ["sf_1"],
+            nextRemotePaneId: 2,
+            ownerStatus: "active",
+            ownsRuntimeLease: true,
+            persistedSelfOwnedSurfaceIds: [],
+            persistedSurfaceIds: ["sf_1"],
+            processId: process.pid,
+            providerId: "pv_test",
+            runtimeAppBindingBySurfaceId: {},
+            runtimeScreenIds: ["sf_1"],
+            started: true,
+            surfaceTombstones: {},
+            targetStateSurfaceIds: [],
+            windowLabelSurfaceIds: ["sf_1"],
+          },
+          reconnectAttempt: 0,
+          remoteOwnership: null,
+          sessionId: "sa_1",
+          unreachableFailures: 0,
+          wsOpen: true,
+        },
+        authority: {
+          actionable: true,
+          admitted: true,
+          blockers: [],
+          reason: null,
+        },
+        connectionDiagnostics: {
+          circuitOpen: false,
+          circuitState: "closed",
+          failureCount: 0,
+          givenUp: false,
+          openedAt: null,
+          reason: null,
+          reconnectAttempt: 0,
+        },
+        connectionState: "connected",
+        fingerprint: "sf_1",
+        lastSeenAt: Date.now(),
+        name: "Surf Ace A",
+        panes: [
+          {
+            activeContent: null,
+            displayId: "b4",
+            historySummary: [],
+            name: null,
+            paneAddress: "b4",
+            paneId: 4,
+            paneLabel: 4,
+            target: null,
+            viewport: { height: 768, scale: 2, width: 1024 },
+          },
+          {
+            activeContent: null,
+            displayId: "b9",
+            historySummary: [],
+            name: null,
+            paneAddress: "b9",
+            paneId: 9,
+            paneLabel: 9,
+            target: null,
+            viewport: { height: 768, scale: 2, width: 1024 },
+          },
+        ],
+        pendingEvents: 0,
+        topology: {
+          children: [
+            { paneId: 4, type: "pane" },
+            { paneId: 9, type: "pane" },
+          ],
+          direction: "vertical",
+          type: "split",
+        },
+        topologyRevision: 2,
+        viewport: { height: 768, scale: 2, width: 1024 },
+        windowLabel: "b",
+      },
+    ],
     providerAuthorityDiagnostics: async () => ({
       activeTargetRecordCount: 0,
       authorityBlockedSurfaceIds: [],
@@ -299,6 +395,41 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(reattemptTool.inputSchema.required, undefined);
   assert.equal(reattemptTool.inputSchema.additionalProperties, false);
+});
+
+test("surf_ace_list returns compact actionable surfaces and keeps authority projection diagnostic-only", async () => {
+  const tools = createSurfAceTools(createStubRuntime());
+  const listTool = tools.find((tool) => tool.name === "surf_ace_list");
+  const diagnosticsTool = tools.find((tool) => tool.name === "surf_ace_authority_diagnostics");
+
+  assert.ok(listTool);
+  assert.ok(diagnosticsTool);
+
+  const listResult = await listTool.execute({});
+  const diagnosticsResult = await diagnosticsTool.execute({});
+  const listJson = JSON.stringify(listResult);
+  const diagnosticsJson = JSON.stringify(diagnosticsResult);
+
+  assert.equal(Array.isArray(listResult), true);
+  assert.deepEqual(Object.keys(listResult[0] ?? {}).sort(), [
+    "authority",
+    "connectionDiagnostics",
+    "connectionState",
+    "fingerprint",
+    "lastSeenAt",
+    "name",
+    "panes",
+    "pendingEvents",
+    "topology",
+    "topologyRevision",
+    "viewport",
+    "windowLabel",
+  ]);
+  assert.equal(listResult[0]?.panes.some((pane) => pane.displayId === "b4" && pane.paneId === 4), true);
+  assert.equal(listResult[0]?.panes.some((pane) => pane.displayId === "b9" && pane.paneId === 9), true);
+  assert.equal("_debug" in listResult[0], false);
+  assert.equal(listJson.includes("providerAuthorityProjection"), false);
+  assert.equal(diagnosticsJson.includes("providerId"), true);
 });
 
 test("surf_ace_push forwards markdown content through the first-class push path", async () => {
