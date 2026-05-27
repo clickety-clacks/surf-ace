@@ -9,6 +9,7 @@ import {
   type SurfAceReattemptConnectionsInput,
   type SurfAceSplitInput,
   type SurfAcePushInput,
+  type SurfAceScreenSummary,
   type SurfAceRuntime,
   type SurfAceRuntimeOptions,
   createSurfAceRuntime,
@@ -68,6 +69,12 @@ const paneIdParam = {
   description: "Required internal opaque pane id returned by `surf_ace_list` after resolving the visible `paneLabel`.",
   type: "string",
 };
+
+type PublicSurfAceScreenSummary = Omit<SurfAceScreenSummary, "_debug">;
+
+function compactSurfAceListOutput(screens: SurfAceScreenSummary[]): PublicSurfAceScreenSummary[] {
+  return screens.map(({ _debug, ...screen }) => screen);
+}
 
 const realizeTopologyTargetSchema = {
   anyOf: [
@@ -181,7 +188,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
   return [
     {
       description: "List all discovered Surf Ace surfaces, including the unique user-facing `displayId` / `paneAddress`, `windowLabel` / `paneLabel`, and internal pane ids for subsequent pane-scoped calls.",
-      execute: async () => await runtime.listScreens(),
+      execute: async () => compactSurfAceListOutput(await runtime.listScreens()),
       inputSchema: {
         additionalProperties: false,
         properties: {},
