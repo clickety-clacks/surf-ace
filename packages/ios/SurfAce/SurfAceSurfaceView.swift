@@ -335,7 +335,7 @@ struct SurfAceRootView: View {
                     }
             }
         }
-        .ignoresSafeArea()
+        .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
         .background {
             SurfAceSceneProbeRepresentable(
                 onConnect: { key, scene in
