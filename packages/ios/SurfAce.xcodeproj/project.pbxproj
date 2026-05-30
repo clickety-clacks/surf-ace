@@ -38,6 +38,7 @@
 		DE2D696D8BBC809006F83182 /* OFL-Rajdhani.txt in Resources */ = {isa = PBXBuildFile; fileRef = CC41BFBBD135B6784905872F /* OFL-Rajdhani.txt */; };
 		E2B2E9631F0835BD39E2B839 /* SurfAceHTTPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */; };
 		EB9119D84B8BF489E271FDCE /* SurfAceMarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 217B21E95FFA04F89F813157 /* SurfAceMarkdownRenderingTests.swift */; };
+		ED1033C3D8877CE7B2A73009 /* SurfAceToolbarThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 547C46683532D8BF824676BD /* SurfAceToolbarThemeTests.swift */; };
 		FA0FE771EA157D8D3EB6DCF9 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */; };
 		FF9BF16CA4591B19760A2246 /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
 /* End PBXBuildFile section */
@@ -62,6 +63,7 @@
 		314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
 		3ABD815F8B22D9C2095F8BCF /* SurfAceSurfaceTopologyPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceSurfaceTopologyPersistenceTests.swift; sourceTree = "<group>"; };
 		4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceSurfaceView.swift; sourceTree = "<group>"; };
+		547C46683532D8BF824676BD /* SurfAceToolbarThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceToolbarThemeTests.swift; sourceTree = "<group>"; };
 		71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceANSI.swift; sourceTree = "<group>"; };
 		7407D4BC544155CEC96E6A32 /* Rajdhani-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Rajdhani-Regular.ttf"; sourceTree = "<group>"; };
 		7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisher.swift; sourceTree = "<group>"; };
@@ -115,6 +117,7 @@
 				217B21E95FFA04F89F813157 /* SurfAceMarkdownRenderingTests.swift */,
 				025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */,
 				3ABD815F8B22D9C2095F8BCF /* SurfAceSurfaceTopologyPersistenceTests.swift */,
+				547C46683532D8BF824676BD /* SurfAceToolbarThemeTests.swift */,
 				2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */,
 			);
 			path = SurfAceTests;
@@ -278,6 +281,7 @@
 				EB9119D84B8BF489E271FDCE /* SurfAceMarkdownRenderingTests.swift in Sources */,
 				FA0FE771EA157D8D3EB6DCF9 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift in Sources */,
 				C9FCE1B6A4992A0D0FD5FB68 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */,
+				ED1033C3D8877CE7B2A73009 /* SurfAceToolbarThemeTests.swift in Sources */,
 				193398127694B8E96D1688F5 /* SurfAceViewportPreservationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

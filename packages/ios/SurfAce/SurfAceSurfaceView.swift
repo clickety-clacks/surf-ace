@@ -1138,14 +1138,20 @@ func surfAceToolbarForegroundColor(for colorScheme: ColorScheme) -> Color {
     colorScheme == .dark ? .white : .black
 }
 
+func surfAceToolbarChromeStrokeColor(for colorScheme: ColorScheme) -> Color {
+    surfAceToolbarForegroundColor(for: colorScheme).opacity(0.18)
+}
+
 private struct SurfAceControlPillChrome: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
     func body(content: Content) -> some View {
         content
             .padding(6)
             .surfAceGlassBackground(interactive: false)
             .overlay {
                 Capsule()
-                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                    .strokeBorder(surfAceToolbarChromeStrokeColor(for: colorScheme), lineWidth: 1)
             }
     }
 }

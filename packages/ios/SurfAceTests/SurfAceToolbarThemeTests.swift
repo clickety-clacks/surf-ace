@@ -10,6 +10,14 @@ final class SurfAceToolbarThemeTests: XCTestCase {
     func testToolbarForegroundUsesDarkThemeContrast() {
         XCTAssertTrue(surfAceToolbarForegroundColor(for: .dark).surfAceIsLightForTesting)
     }
+
+    func testToolbarChromeStrokeUsesLightThemeContrast() {
+        XCTAssertTrue(surfAceToolbarChromeStrokeColor(for: .light).surfAceIsDarkForTesting)
+    }
+
+    func testToolbarChromeStrokeUsesDarkThemeContrast() {
+        XCTAssertTrue(surfAceToolbarChromeStrokeColor(for: .dark).surfAceIsLightForTesting)
+    }
 }
 
 private extension Color {
