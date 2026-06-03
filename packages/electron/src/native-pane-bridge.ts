@@ -40,9 +40,17 @@ export type NativePaneLaunchIdentity = {
   targetId?: string;
 };
 
+export type NativePaneChromeInsets = {
+  bottom: number;
+  left: number;
+  right: number;
+  top: number;
+};
+
 export type NativePaneWindowGroupRequest = {
   launchIdentity: NativePaneLaunchIdentity;
   policy: {
+    chromeInsets: NativePaneChromeInsets;
     clipToPane: true;
     constrainToPane: true;
     denyForeignToplevels: true;

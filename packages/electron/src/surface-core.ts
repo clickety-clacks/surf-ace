@@ -43,7 +43,7 @@ import type {
   TopologyApplyResponse,
   TopologyRevision,
 } from "../../protocol/src/index.js";
-import type { NativePaneMaterialization } from "./native-pane-bridge.js";
+import type { NativePaneChromeInsets, NativePaneMaterialization } from "./native-pane-bridge.js";
 import type { NativePaneWindowGroupStatus } from "./native-pane-bridge.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
 
@@ -102,6 +102,13 @@ type PaneState = {
   pendingAnnotationCommit: boolean;
   snapshot: PaneSnapshot;
   toast: string | null;
+};
+
+const NATIVE_PANE_CHROME_REACHABILITY_INSETS: NativePaneChromeInsets = {
+  bottom: 44,
+  left: 44,
+  right: 44,
+  top: 44,
 };
 
 type LayoutNode =
@@ -748,6 +755,7 @@ export class SurfaceCore {
           targetId: payload.targetId,
         },
         policy: {
+          chromeInsets: NATIVE_PANE_CHROME_REACHABILITY_INSETS,
           clipToPane: true,
           constrainToPane: true,
           denyForeignToplevels: true,
@@ -3223,6 +3231,7 @@ function nativePaneLaunchToken(surfaceId: string, paneId: number, targetId: stri
 
 function nativePaneWindowGroupPolicy(): NonNullable<NativePaneMaterialization["panes"][number]["windowGroup"]>["policy"] {
   return {
+    chromeInsets: NATIVE_PANE_CHROME_REACHABILITY_INSETS,
     clipToPane: true,
     constrainToPane: true,
     denyForeignToplevels: true,

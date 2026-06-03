@@ -3657,6 +3657,7 @@ test("ws server derives target.apply native pane host materialization for compos
             targetId: "target_top_118",
           },
           policy: {
+            chromeInsets: { bottom: 44, left: 44, right: 44, top: 44 },
             clipToPane: true,
             constrainToPane: true,
             denyForeignToplevels: true,

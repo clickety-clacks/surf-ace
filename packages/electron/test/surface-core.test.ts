@@ -1953,6 +1953,7 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
       targetId: "target_btop",
     },
     policy: {
+      chromeInsets: { bottom: 44, left: 44, right: 44, top: 44 },
       clipToPane: true,
       constrainToPane: true,
       denyForeignToplevels: true,
@@ -2115,6 +2116,7 @@ test("surface core exposes native materialized panes to the renderer until conte
             targetId: "target_top",
           },
           policy: {
+            chromeInsets: { bottom: 44, left: 44, right: 44, top: 44 },
             clipToPane: true,
             constrainToPane: true,
             denyForeignToplevels: true,
