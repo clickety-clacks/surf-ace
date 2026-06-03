@@ -117,6 +117,13 @@ type PendingBrowserUrlApply = {
   timeout: NodeJS.Timeout;
 };
 
+type BrowserUrlNavigationEvidence = {
+  errorMessage?: string;
+  status: "applied" | "failed";
+  targetId: string;
+  url: string;
+};
+
 type SocketMeta = {
   cache: Map<string, SocketCacheEntry>;
   pairedSurfaceId: string | null;
@@ -199,6 +206,7 @@ export class SurfaceWsServer {
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
   private readonly pendingBrowserUrlApplies = new Map<string, PendingBrowserUrlApply>();
+  private readonly earlyBrowserUrlNavigationEvidence = new Map<string, BrowserUrlNavigationEvidence>();
   readonly wsPath: string;
 
   private readonly httpServer: http.Server;
@@ -2125,47 +2133,17 @@ export class SurfaceWsServer {
   resolveBrowserUrlNavigation(
     surfaceId: string,
     paneId: number,
-    evidence: { errorMessage?: string; status: "applied" | "failed"; targetId: string; url: string },
+    evidence: BrowserUrlNavigationEvidence,
   ): void {
     const key = browserUrlApplyKey(surfaceId, paneId);
     const pending = this.pendingBrowserUrlApplies.get(key);
     if (!pending || pending.request.payload.targetId !== evidence.targetId) {
+      this.earlyBrowserUrlNavigationEvidence.set(`${key}:${evidence.targetId}`, evidence);
       return;
     }
     this.pendingBrowserUrlApplies.delete(key);
     clearTimeout(pending.timeout);
-    const sessionFailure = this.targetApplySessionFailurePayload(
-      surfaceId,
-      pending.socket,
-      pending.request,
-      pending.appliedAt,
-    );
-    if (sessionFailure) {
-      pending.resolve(sessionFailure);
-      return;
-    }
-    let payload = browserUrlApplyResult(
-      pending.request.payload,
-      evidence.status,
-      evidence.status === "failed" ? "materialization_failed" : undefined,
-      evidence.status === "applied" ? "browser_url navigation loaded" : evidence.errorMessage ?? "browser_url navigation failed",
-      {
-        navigationStatus: evidence.status === "applied" ? "loaded" : "failed",
-        replaySemantics: "navigate",
-        url: evidence.url,
-      },
-    );
-    const completed = this.core.completeBrowserUrlNavigation(surfaceId, paneId, evidence, payload);
-    if (!completed) {
-      payload = browserUrlApplyResult(
-        pending.request.payload,
-        "failed",
-        "materialization_failed",
-        "browser_url navigation was superseded before verification",
-        { navigationStatus: "failed", replaySemantics: "navigate", url: evidence.url },
-      );
-    }
-    pending.resolve(payload);
+    pending.resolve(this.browserUrlNavigationPayload(surfaceId, paneId, pending, evidence));
   }
 
   private async sendNativeOverlayRequestWithLivenessRetry(
@@ -2237,8 +2215,21 @@ export class SurfaceWsServer {
       }
       const payload = request.payload;
       const targetUrl = String((payload.targetPayload as { url?: unknown }).url ?? "");
+      const evidenceKey = `${key}:${payload.targetId}`;
+      const earlyEvidence = this.earlyBrowserUrlNavigationEvidence.get(evidenceKey);
+      if (earlyEvidence) {
+        this.earlyBrowserUrlNavigationEvidence.delete(evidenceKey);
+        resolve(this.browserUrlNavigationPayload(surfaceId, paneId, {
+          appliedAt,
+          request,
+          resolve,
+          socket,
+        }, earlyEvidence));
+        return;
+      }
       const timeout = setTimeout(() => {
         this.pendingBrowserUrlApplies.delete(key);
+        this.earlyBrowserUrlNavigationEvidence.delete(evidenceKey);
         const sessionFailure = this.targetApplySessionFailurePayload(surfaceId, socket, request, appliedAt);
         if (sessionFailure) {
           resolve(sessionFailure);
@@ -2267,6 +2258,45 @@ export class SurfaceWsServer {
         timeout,
       });
     });
+  }
+
+  private browserUrlNavigationPayload(
+    surfaceId: string,
+    paneId: number,
+    pending: Omit<PendingBrowserUrlApply, "timeout">,
+    evidence: BrowserUrlNavigationEvidence,
+  ): TargetApplyResponse["payload"] {
+    const sessionFailure = this.targetApplySessionFailurePayload(
+      surfaceId,
+      pending.socket,
+      pending.request,
+      pending.appliedAt,
+    );
+    if (sessionFailure) {
+      return sessionFailure;
+    }
+    let payload = browserUrlApplyResult(
+      pending.request.payload,
+      evidence.status,
+      evidence.status === "failed" ? "materialization_failed" : undefined,
+      evidence.status === "applied" ? "browser_url navigation loaded" : evidence.errorMessage ?? "browser_url navigation failed",
+      {
+        navigationStatus: evidence.status === "applied" ? "loaded" : "failed",
+        replaySemantics: "navigate",
+        url: evidence.url,
+      },
+    );
+    const completed = this.core.completeBrowserUrlNavigation(surfaceId, paneId, evidence, payload);
+    if (!completed) {
+      payload = browserUrlApplyResult(
+        pending.request.payload,
+        "failed",
+        "materialization_failed",
+        "browser_url navigation was superseded before verification",
+        { navigationStatus: "failed", replaySemantics: "navigate", url: evidence.url },
+      );
+    }
+    return payload;
   }
 
   private async releaseNativePanesBeforeRendererContent(

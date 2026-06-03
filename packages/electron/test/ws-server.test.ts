@@ -1799,6 +1799,35 @@ test("ws server returns browser_url applied only after renderer load confirmatio
   });
 });
 
+test("ws server accepts browser_url navigation evidence that arrives before apply wait registration", async () => {
+  await withServer(async ({ server, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    const pane = paired.payload.state.panes[0]!;
+
+    server.resolveBrowserUrlNavigation(surfaceId, Number(pane.paneId), {
+      status: "applied",
+      targetId: "target_fast",
+      url: "http://127.0.0.1:19139/t338-browser-url.html",
+    });
+
+    const response = await request(owner, browserUrlTargetApplyRequest({
+      ownershipSessionId: paired.payload.sessionId,
+      paneLineageId: pane.paneLineageId,
+      surfaceId: paired.payload.surfaceId,
+      targetId: "target_fast",
+      url: "http://127.0.0.1:19139/t338-browser-url.html",
+    }));
+
+    assert.equal(response.ok, true);
+    assert.equal(response.op, "target.apply.result");
+    assert.equal(response.payload.status, "applied");
+    assert.equal(response.payload.materializedState?.navigationStatus, "loaded");
+    await closeSocket(owner);
+  });
+});
+
 test("ws server rejects browser_url load confirmation after ownership changes", async () => {
   await withServer(async ({ core, server, surfaceId, url }) => {
     const owner = await connect(url);
