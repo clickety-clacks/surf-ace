@@ -47,6 +47,7 @@ import {
   nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
+  overlayActiveRevisionFromCompositorResponse,
   overlayRegionsWithLivePaneInstanceAuthority,
   overlayTopologyEpochFromCompositorResponse,
   requestForCompositor,
@@ -1689,7 +1690,18 @@ export class SurfaceWsServer {
       }
       const result = this.core.topologyApply(surfaceId, request.payload);
       this.recordProviderWindowRelabel(surfaceId, previousWindowLabel, request.payload.windowLabel, "topology.apply", request.id);
-      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      try {
+        this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("does not match resolved Surf Ace pane geometry") || previousWindowLabel !== request.payload.windowLabel) {
+          throw error;
+        }
+        const refreshedNativeGeometry = nativeGeometryUpdate
+          ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+          : null;
+        this.markUpdatedNativePaneGeometry(surfaceId, refreshedNativeGeometry);
+      }
       if (previousWindowLabel === request.payload.windowLabel) {
         await this.waitForResolvedPaneGeometry(
           surfaceId,
@@ -2363,7 +2375,11 @@ export class SurfaceWsServer {
     if (updateFailure) {
       return { failure: updateFailure, updated: false };
     }
-    const overlayRequest = overlayRequestForCompositor(materialization);
+    const activeOverlayRevision = overlayActiveRevisionFromCompositorResponse(updateResponse);
+    const overlayRequest = overlayRequestForCompositor(materialization, {
+      topologyEpoch: overlayTopologyEpochFromCompositorResponse(updateResponse) ?? undefined,
+      revision: activeOverlayRevision === null ? undefined : activeOverlayRevision + 1,
+    });
     if (!overlayRequest) {
       return { failure: null, updated: true };
     }
@@ -2475,6 +2491,26 @@ export class SurfaceWsServer {
     this.core.applyWindowLabelOnly(surfaceId, windowLabel);
     this.markUpdatedNativePaneGeometry(surfaceId, nativeOverlayUpdate);
   }
+
+  private async waitForNativePaneMaterializationLayout(
+    surfaceId: string,
+    materialization: NativePaneMaterialization | null,
+    operation: string,
+  ): Promise<void> {
+    if (!materialization) {
+      return;
+    }
+    const deadline = Date.now() + 1000;
+    let failure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+    while (failure && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      failure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+    }
+    if (failure) {
+      throw new SurfaceCoreError("render_failed", `${operation} timed out waiting for native pane geometry to resolve: ${failure}`);
+    }
+  }
+
 
   private recordProviderWindowRelabel(
     surfaceId: string,
@@ -2664,7 +2700,18 @@ export class SurfaceWsServer {
         throw new SurfaceCoreError("render_failed", releaseFailure);
       }
       const result = this.core.paneClose(surfaceId, paneId);
-      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      try {
+        this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("does not match resolved Surf Ace pane geometry")) {
+          throw error;
+        }
+        const refreshedNativeGeometry = nativeGeometryUpdate
+          ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+          : null;
+        this.markUpdatedNativePaneGeometry(surfaceId, refreshedNativeGeometry);
+      }
       await this.waitForResolvedPaneGeometry(
         surfaceId,
         this.core.getRendererWindowState(surfaceId).panes.map((pane) => pane.paneId),

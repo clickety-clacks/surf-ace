@@ -58,6 +58,11 @@ test("Wayland app_id package drift is diagnostic when runtime id, token, and lin
     reportedRuntimeId: SURF_ACE_ELECTRON_RUNTIME_ID,
   });
 
+  assert.equal(diagnostics.bindingAuthority, "trusted");
+  assert.deepEqual(diagnostics.bindingDegradedReasons, []);
+  assert.equal(diagnostics.bindingBlockReason, undefined);
+  assert.deepEqual(diagnostics.diagnosticDrift, ["wayland_app_id_mismatch"]);
+});
 
 test("runtime identity binding request accepts compositor-provided launch token env", () => {
   const request = buildCompositorAppBindingRequest({
@@ -72,11 +77,6 @@ test("runtime identity binding request accepts compositor-provided launch token 
   });
 
   assert.equal(request.evidence.launchToken, "ctok_456");
-});
-  assert.equal(diagnostics.bindingAuthority, "trusted");
-  assert.deepEqual(diagnostics.bindingDegradedReasons, []);
-  assert.equal(diagnostics.bindingBlockReason, undefined);
-  assert.deepEqual(diagnostics.diagnosticDrift, ["wayland_app_id_mismatch"]);
 });
 
 test("missing launch token is degraded and named without trusting diagnostic labels", () => {

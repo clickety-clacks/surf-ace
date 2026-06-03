@@ -1042,9 +1042,9 @@ test("surface core rejects stale native materialization identity after geometry 
     revision: 1 as never,
   });
 
-  assert.equal(
-    core.validateNativePaneMaterializationLayout(surface.surfaceId, materialization),
-    `native pane ${paneId} geometry identity does not match resolved Surf Ace pane geometry`,
+  assert.match(
+    core.validateNativePaneMaterializationLayout(surface.surfaceId, materialization) ?? "",
+    new RegExp(`native pane ${paneId} geometry identity does not match resolved Surf Ace pane geometry: projected=.*expected=`),
   );
 });
 

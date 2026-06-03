@@ -93,7 +93,10 @@ type PaneState = {
     bindingId?: string;
     contentId?: string;
     launchToken?: string;
+    nativeApp?: NativePaneMaterializationPane["nativeApp"];
+    process?: NativePaneMaterializationPane["process"];
     revision: Revision;
+    target?: NativePaneMaterializationPane["target"];
   } | null;
   nativeWindowGroup: NativePaneWindowGroupDiagnostic | null;
   paneId: number;
@@ -970,7 +973,7 @@ export class SurfaceCore {
         pane.geometry.surfaceEpoch !== expectedSnapshot.surfaceEpoch ||
         pane.geometry.geometryRevision !== expectedSnapshot.geometryRevision
       ) {
-        return `native pane ${pane.id} geometry identity does not match resolved Surf Ace pane geometry`;
+        return `native pane ${pane.id} geometry identity does not match resolved Surf Ace pane geometry: projected=${JSON.stringify({ coordinateSpace: pane.geometry.coordinateSpace, geometryRevision: pane.geometry.geometryRevision, paneInstanceId: pane.geometry.paneInstanceId, surfaceEpoch: pane.geometry.surfaceEpoch, topologyEpoch: pane.geometry.topologyEpoch })} expected=${JSON.stringify({ geometryRevision: expectedSnapshot.geometryRevision, paneInstanceId: expectedSnapshot.paneInstanceId, surfaceEpoch: expectedSnapshot.surfaceEpoch, topologyEpoch: expectedSnapshot.topologyEpoch })}`;
       }
       const expectedCompositorRect = compositorResolvedRect(expected);
       if (!sameRect(pane.geometry, expectedCompositorRect)) {
@@ -997,6 +1000,9 @@ export class SurfaceCore {
         ...(materializedPane.binding_id ? { bindingId: materializedPane.binding_id } : {}),
         ...(materializedPane.content_id ? { contentId: materializedPane.content_id } : {}),
         ...(materializedPane.windowGroup?.launchIdentity.launchToken ? { launchToken: materializedPane.windowGroup.launchIdentity.launchToken } : {}),
+        ...(materializedPane.target ? { target: materializedPane.target } : {}),
+        ...(materializedPane.nativeApp ? { nativeApp: structuredClone(materializedPane.nativeApp) } : {}),
+        ...(materializedPane.process ? { process: structuredClone(materializedPane.process) } : {}),
         revision: materializedPane.revision,
       };
       pane.nativeWindowGroup = null;
@@ -1069,6 +1075,9 @@ export class SurfaceCore {
       return {
         ...(pane.nativeHost?.bindingId ? { binding_id: pane.nativeHost.bindingId } : {}),
         ...(pane.nativeHost?.contentId ? { content_id: pane.nativeHost.contentId } : {}),
+        ...(pane.nativeHost?.target ? { target: pane.nativeHost.target } : {}),
+        ...(pane.nativeHost?.nativeApp ? { nativeApp: structuredClone(pane.nativeHost.nativeApp) } : {}),
+        ...(pane.nativeHost?.process ? { process: structuredClone(pane.nativeHost.process) } : {}),
         geometry: {
           coordinateSpace: "compositor_logical" as const,
           geometryRevision: revision.geometryRevision as Revision,
@@ -1126,6 +1135,9 @@ export class SurfaceCore {
       return {
         ...(pane.nativeHost?.bindingId ? { binding_id: pane.nativeHost.bindingId } : {}),
         ...(pane.nativeHost?.contentId ? { content_id: pane.nativeHost.contentId } : {}),
+        ...(pane.nativeHost?.target ? { target: pane.nativeHost.target } : {}),
+        ...(pane.nativeHost?.nativeApp ? { nativeApp: structuredClone(pane.nativeHost.nativeApp) } : {}),
+        ...(pane.nativeHost?.process ? { process: structuredClone(pane.nativeHost.process) } : {}),
         geometry: {
           coordinateSpace: "compositor_logical" as const,
           geometryRevision: revision.geometryRevision as Revision,

@@ -219,7 +219,7 @@ export function requestForCompositor(
 
 export function overlayRequestForCompositor(
   materialization: NativePaneMaterialization,
-  options: { topologyEpoch?: number | string } = {},
+  options: { revision?: number; topologyEpoch?: number | string } = {},
 ): CompositorControlRequest | null {
   if (!materialization.overlaySet) {
     return null;
@@ -244,10 +244,10 @@ export function overlayRequestForCompositor(
         },
       };
     }),
-    revision: materialization.panes[0]?.geometry.geometryRevision ?? materialization.overlaySet.revision,
-    topologyEpoch: options.topologyEpoch ?? materialization.panes[0]?.geometry.topologyEpoch ?? materialization.overlaySet.topologyEpoch,
+    revision: options.revision ?? materialization.panes[0]?.geometry.geometryRevision ?? materialization.overlaySet.revision,
+    topologyEpoch: String(options.topologyEpoch ?? materialization.panes[0]?.geometry.topologyEpoch ?? materialization.overlaySet.topologyEpoch),
     type: "overlay_regions.set",
-    updateReason: materialization.op === "native_pane.host" ? "initial" : "update",
+    updateReason: materialization.op === "native_pane.host" ? "initial" : "layout",
   };
 }
 
@@ -262,6 +262,19 @@ export function overlayTopologyEpochFromCompositorResponse(response: CompositorC
   }
   const topologyEpoch = (overlayRegions as Record<string, unknown>).topologyEpoch;
   return typeof topologyEpoch === "string" || typeof topologyEpoch === "number" ? topologyEpoch : null;
+}
+
+export function overlayActiveRevisionFromCompositorResponse(response: CompositorControlResponse): number | null {
+  const status = response.status;
+  if (!status || typeof status !== "object") {
+    return null;
+  }
+  const overlayRegions = (status as Record<string, unknown>).overlay_regions;
+  if (!overlayRegions || typeof overlayRegions !== "object") {
+    return null;
+  }
+  const activeRevision = (overlayRegions as Record<string, unknown>).activeRevision ?? (overlayRegions as Record<string, unknown>).active_revision;
+  return typeof activeRevision === "number" && Number.isFinite(activeRevision) ? activeRevision : null;
 }
 
 export function overlayRegionsSetRequestForCompositor(snapshot: {

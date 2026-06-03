@@ -47,7 +47,7 @@ function materialization(
       ],
       revision: 3 as never,
       surfaceId: "sf_test" as never,
-      topologyEpoch: 2 as never,
+      topologyEpoch: "2" as never,
       windowId: "a",
     },
     panes: [
@@ -60,7 +60,7 @@ function materialization(
           height: 384,
           paneInstanceId: "pl_118",
           surfaceEpoch: "sf_test:1",
-          topologyEpoch: 2 as never,
+          topologyEpoch: "2" as never,
           width: 512,
           x: 512,
           y: 0,
@@ -106,7 +106,7 @@ test("native pane bridge serializes host and overlay requests from protocol mate
     type: "overlay_regions.set",
     updateReason: "initial",
   });
-  assert.equal(overlayRequestForCompositor(materialization({ op: "native_pane.update" }))?.updateReason, "update");
+  assert.equal(overlayRequestForCompositor(materialization({ op: "native_pane.update" }))?.updateReason, "layout");
   assert.equal(overlayRequestForCompositor(materialization({ overlaySet: undefined })), null);
 });
 
