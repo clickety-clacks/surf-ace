@@ -5074,11 +5074,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surfaceId: SurfaceId,
     reason: "surface_removed_event" | "surfaces_list_absent" | "discovery_endpoint_absent" | "unowned_unreachable",
   ): void {
-    this.recordSurfaceTombstone(surfaceId, reason);
-    this.clearClosedSurfacePersistentState(surfaceId, reason);
     const surface = this.surfaces.get(surfaceId);
+    const preserveDurableSurfaceState = Boolean(
+      surface &&
+        this.hasAcceptedSurfaceTopology(surface) &&
+        reason !== "surface_removed_event" &&
+        reason !== "surfaces_list_absent",
+    );
+    if (!preserveDurableSurfaceState) {
+      this.recordSurfaceTombstone(surfaceId, reason);
+      this.clearClosedSurfacePersistentState(surfaceId, reason);
+    }
     if (!surface) {
       return;
+    }
+    if (preserveDurableSurfaceState) {
+      this.restartSnapshots.set(surfaceId, structuredClone(this.buildScreenSummary(surface)));
+      const restartContent = this.captureRestartContentEntries(surface);
+      if (restartContent.length > 0) {
+        this.restartContentBySurface.set(surfaceId, structuredClone(restartContent));
+      }
     }
     const surfaceEndpointKey = endpointProbeKey(surface.endpoint);
     const lastSurfaceForEndpoint = ![...this.surfaces.values()].some(
@@ -9549,7 +9564,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
     const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
-    const screens = this.buildScreenSummaries();
+    const liveScreens = this.buildScreenSummaries();
+    const screens = [
+      ...liveScreens,
+      ...this.retainedRestartScreens(liveScreens),
+    ];
     this.persistedRuntimeScreenIds = new Set(screens.map((screen) => screen.fingerprint));
     const payload: PersistedScreenSnapshotFile = {
       contentContinuity: this.buildContentContinuitySnapshot(),
@@ -9565,31 +9584,49 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private buildContentContinuitySnapshot(): Record<string, PersistedRestartContentEntry[]> {
     const contentContinuity: Record<string, PersistedRestartContentEntry[]> = {};
+    const retainedContent = new Map(this.restartContentBySurface);
     for (const surface of this.canonicalVisibleSurfaces()) {
-      const entries = this.visiblePanes(surface)
-        .map((pane): PersistedRestartContentEntry | null => {
-          const entry = this.visibleHistoryEntry(pane);
-          if (!entry) {
-            return null;
-          }
-          return {
-            contentId: entry.contentId,
-            contentType: entry.contentType,
-            contentValue: denormalizeContent(entry.contentType, entry.contentValue),
-            display: entry.display ? structuredClone(entry.display) : null,
-            historyOwnerToken: entry.historyOwnerToken,
-            paneLabel: this.projectedPaneLabel(surface, pane),
-            remotePaneId: Number(pane.remotePaneId),
-            revision: entry.revision,
-            sessionKey: entry.sessionKey,
-          };
-        })
-        .filter((entry): entry is PersistedRestartContentEntry => entry !== null);
+      const entries = this.captureRestartContentEntries(surface);
       if (entries.length > 0) {
         contentContinuity[surface.surfaceId] = entries;
       }
+      retainedContent.delete(surface.surfaceId);
+    }
+    for (const [surfaceId, entries] of retainedContent) {
+      if (entries.length > 0) {
+        contentContinuity[surfaceId] = structuredClone(entries);
+      }
     }
     return contentContinuity;
+  }
+
+  private captureRestartContentEntries(surface: ManagedSurface): PersistedRestartContentEntry[] {
+    return this.visiblePanes(surface)
+      .map((pane): PersistedRestartContentEntry | null => {
+        const entry = this.visibleHistoryEntry(pane);
+        if (!entry) {
+          return null;
+        }
+        return {
+          contentId: entry.contentId,
+          contentType: entry.contentType,
+          contentValue: denormalizeContent(entry.contentType, entry.contentValue),
+          display: entry.display ? structuredClone(entry.display) : null,
+          historyOwnerToken: entry.historyOwnerToken,
+          paneLabel: this.projectedPaneLabel(surface, pane),
+          remotePaneId: Number(pane.remotePaneId),
+          revision: entry.revision,
+          sessionKey: entry.sessionKey,
+        };
+      })
+      .filter((entry): entry is PersistedRestartContentEntry => entry !== null);
+  }
+
+  private retainedRestartScreens(screens: SurfAceScreenSummary[]): SurfAceScreenSummary[] {
+    const liveSurfaceIds = new Set(screens.map((screen) => screen.fingerprint));
+    return [...this.restartSnapshots.entries()]
+      .filter(([surfaceId]) => !liveSurfaceIds.has(surfaceId))
+      .map(([, screen]) => structuredClone(screen));
   }
 
   private providerId(): ProviderId {
@@ -10453,6 +10490,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     ) {
       this.clearSurfaceLocalTopologyState(surface, {
         preserveRestartContent: hasRestartOwnershipPendingPair,
+        preserveRestartSnapshot: hasRestartOwnershipPendingPair,
         preserveTargetState: true,
       });
     }
@@ -11170,6 +11208,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               this.clearSurfaceLocalTopologyState(surface, {
                 preservePaneLabels: hadRestartOwnershipPendingPair,
                 preserveRestartContent: hadRestartOwnershipPendingPair,
+                preserveRestartSnapshot: hadRestartOwnershipPendingPair,
                 preserveTargetState: this.hasSurfaceTargetState(surface),
               });
           }
@@ -12212,10 +12251,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     options: {
       preservePaneLabels?: boolean;
       preserveRestartContent?: boolean;
+      preserveRestartSnapshot?: boolean;
       preserveTargetState?: boolean;
     } = {},
   ): void {
-    this.restartSnapshots.delete(surface.surfaceId);
+    if (options.preserveRestartSnapshot !== true) {
+      this.restartSnapshots.delete(surface.surfaceId);
+    }
     if (options.preserveRestartContent !== true) {
       this.restartContentBySurface.delete(surface.surfaceId);
     }

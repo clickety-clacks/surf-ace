@@ -9278,6 +9278,115 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("discovery endpoint absence preserves provider-owned topology targets and content for blank reconnect", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ discovery, infos, runtime, server, stateDir }) => {
+        const initialEndpoints = discovery.getSnapshot();
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const split = await runtime.split({
+          count: 2,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+        const htmlPush = await runtime.push(
+          {
+            content: "<main>Cyberbrain Kanban</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: paneIds[0]!,
+          },
+          { sessionKey: "agent:test:cyberbrain-html" },
+        );
+        const browserPush = await runtime.push({
+          content: "https://example.com/cyberbrain-kanban",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: paneIds[1]!,
+        });
+        assert.equal(browserPush.blockedReason, null);
+
+        const initialContentApplyCount = server.contentSetRequests.length;
+        const initialTargetApplyCount = server.targetApplyRequests.length;
+        const initialTopologyApplyCount = server.topologyApplyRequests.length;
+        const internalRuntime = runtime as any;
+        await internalRuntime.persistScreenSnapshot();
+
+        const pairedSocket = server.pairedSocket;
+        assert.ok(pairedSocket);
+        pairedSocket.terminate();
+        await waitFor(() => server.activeSocketCount === 0);
+        discovery.setEndpoints([]);
+        await discovery.refreshNow();
+        internalRuntime.removeClosedSurface(server.surfaceId, "discovery_endpoint_absent");
+        assert.equal(internalRuntime.surfaces.has(server.surfaceId), false);
+        assert.ok(internalRuntime.persistentState.targetStateBySurfaceId[server.surfaceId]);
+        assert.equal(internalRuntime.persistentState.surfaceTombstones?.[server.surfaceId], undefined);
+
+        let persistedScreens: {
+          contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown; paneLabel?: number }>>;
+          screens?: Array<{ fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
+        } = {};
+        await waitFor(async () => {
+          persistedScreens = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8"),
+          );
+          return Boolean(
+            persistedScreens.screens?.some((screen) =>
+              screen.fingerprint === server.surfaceId &&
+              screen.panes?.map((pane) => pane.paneLabel).join(",") === "1,2"
+            ) &&
+            persistedScreens.contentContinuity?.[server.surfaceId]?.some((entry) =>
+              entry.contentId === htmlPush.contentId &&
+              entry.paneLabel === 1 &&
+              entry.contentValue === "<main>Cyberbrain Kanban</main>"
+            ),
+          );
+        });
+        assert.equal(
+          infos.some((info) =>
+            info.includes("event=surface_removed_target_state") &&
+            info.includes("reason=discovery_endpoint_absent")
+          ),
+          false,
+        );
+
+        server.resetToSinglePane(server.initialRemotePaneId);
+        discovery.setEndpoints(initialEndpoints);
+        await discovery.refreshNow();
+        await waitFor(() => {
+          const surface = internalRuntime.surfaces.get(server.surfaceId);
+          return surface?.connectionState === "connected";
+        }, 12_000);
+        await waitFor(() =>
+          server.topologyApplyRequests
+            .slice(initialTopologyApplyCount)
+            .some((request) => request.paneIds.length === 2),
+        );
+        await waitFor(() => server.contentSetRequests.length > initialContentApplyCount);
+        await waitFor(() => server.targetApplyRequests.length > initialTargetApplyCount);
+
+        const screens = await runtime.listScreens();
+        const screen = screens.find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        assertPaneLabelsWithOpaqueIds(screen.panes, [1, 2]);
+        const htmlPane = screen.panes.find((pane) => pane.paneLabel === 1);
+        const browserPane = screen.panes.find((pane) => pane.paneLabel === 2);
+        assert.equal(htmlPane?.activeContent?.contentId, htmlPush.contentId);
+        assert.equal(browserPane?.target?.targetId, browserPush.targetId);
+        assert.equal(browserPane?.target?.targetKind, "browser_url");
+        assert.equal(browserPane?.target?.blockedReason, null);
+      },
+    });
+  });
+
   await t.test("fresh pair import marks lineage-only persisted target records stale", async () => {
     const port = nextPort++;
     const surfaceId = "sf_fresh_pair_lineage_only_target";
