@@ -9192,6 +9192,92 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("provider restart restores durable multi-pane topology targets and content after blank pair", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ discovery, runtime, server, stateDir }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const split = await runtime.split({
+          count: 2,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+        const htmlPush = await runtime.push(
+          {
+            content: "<main>restored html</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: paneIds[0]!,
+          },
+          { sessionKey: "agent:test:restart-html" },
+        );
+        const browserPush = await runtime.push({
+          content: "https://example.com/restart-target",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: paneIds[1]!,
+        });
+        assert.equal(browserPush.blockedReason, null);
+
+        const initialContentApplyCount = server.contentSetRequests.length;
+        const initialTargetApplyCount = server.targetApplyRequests.length;
+        const initialTopologyApplyCount = server.topologyApplyRequests.length;
+        const internalRuntime = runtime as any;
+        await internalRuntime.persistScreenSnapshot();
+        const preBounceSnapshot = await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8");
+        await runtime.stop();
+        await fs.writeFile(path.join(stateDir, "surf-ace-runtime-screens.json"), preBounceSnapshot);
+
+        server.resetToSinglePane(server.initialRemotePaneId);
+        const restartedRuntime = createSurfAceRuntime({ discovery, stateDir });
+        try {
+          await restartedRuntime.start();
+          const restartedInternal = restartedRuntime as any;
+          await waitFor(() => {
+            const surface = restartedInternal.surfaces.get(server.surfaceId);
+            return surface?.connectionState === "connected";
+          }, 12_000);
+
+          await waitFor(() =>
+            server.topologyApplyRequests
+              .slice(initialTopologyApplyCount)
+              .some((request) => request.paneIds.length === 2),
+          );
+          await waitFor(() => server.contentSetRequests.length > initialContentApplyCount);
+          await waitFor(() => server.targetApplyRequests.length > initialTargetApplyCount);
+
+          const screens = await restartedRuntime.listScreens();
+          const screen = screens.find((candidate) => candidate.fingerprint === server.surfaceId);
+          assert.ok(screen);
+          assertPaneLabelsWithOpaqueIds(screen.panes, [1, 2]);
+          const htmlPane = screen.panes.find((pane) => pane.paneLabel === 1);
+          const browserPane = screen.panes.find((pane) => pane.paneLabel === 2);
+          assert.equal(htmlPane?.activeContent?.contentId, htmlPush.contentId);
+          assert.equal(browserPane?.target?.targetKind, "browser_url");
+          assert.equal(browserPane?.target?.blockedReason, null);
+
+          const targetState = restartedInternal.persistentState.targetStateBySurfaceId[server.surfaceId];
+          assert.ok(targetState);
+          assert.equal(
+            targetState.targetRecords.some(
+              (record: any) => record.targetId === browserPush.targetId && record.currentState === "current",
+            ),
+            true,
+          );
+        } finally {
+          await restartedRuntime.stop();
+        }
+      },
+    });
+  });
+
   await t.test("fresh pair import marks lineage-only persisted target records stale", async () => {
     const port = nextPort++;
     const surfaceId = "sf_fresh_pair_lineage_only_target";
