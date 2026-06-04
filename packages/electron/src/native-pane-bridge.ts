@@ -172,6 +172,10 @@ export type CompositorControlRequest =
     surfaceId: string;
     type: "overlay_regions.clear";
     windowId?: string;
+  }
+  | {
+    output_path: string;
+    type: "capture_screen";
   };
 
 export type CompositorControlResponse = Record<string, unknown>;
