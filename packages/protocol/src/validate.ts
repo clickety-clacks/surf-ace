@@ -2,6 +2,7 @@ import {
   SURF_ACE_PROTOCOL_SCHEMAS,
   type SurfAceSchemaName,
 } from "./schemas-manifest.js";
+import { protocolSchemaDefs } from "./schemas.js";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -28,21 +29,48 @@ function validateForbiddenRequiredKeys(
   return null;
 }
 
+function resolveLocalSchemaRef(schema: Record<string, unknown>): Record<string, unknown> {
+  const ref = typeof schema.$ref === "string" ? schema.$ref : "";
+  if (!ref.startsWith("#/$defs/")) {
+    return schema;
+  }
+  const refName = ref.slice("#/$defs/".length);
+  const resolved = protocolSchemaDefs[refName];
+  return isObject(resolved) ? resolved : schema;
+}
+
 function validateObjectAgainstSchema(
   schema: Record<string, unknown>,
   value: unknown,
 ): string | null {
+  const resolvedSchema = resolveLocalSchemaRef(schema);
+  const oneOf = Array.isArray(resolvedSchema.oneOf) ? resolvedSchema.oneOf : null;
+  if (oneOf) {
+    let lastFailure: string | null = "schema_mismatch";
+    for (const entry of oneOf) {
+      if (!isObject(entry)) {
+        continue;
+      }
+      const failure = validateObjectAgainstSchema(entry, value);
+      if (!failure) {
+        return null;
+      }
+      lastFailure = failure;
+    }
+    return lastFailure;
+  }
+
   if (!isObject(value)) {
     return "payload_not_object";
   }
 
-  const forbiddenFailure = validateForbiddenRequiredKeys(schema, value);
+  const forbiddenFailure = validateForbiddenRequiredKeys(resolvedSchema, value);
   if (forbiddenFailure) {
     return forbiddenFailure;
   }
 
-  const required = Array.isArray(schema.required)
-    ? schema.required.filter((entry): entry is string => typeof entry === "string")
+  const required = Array.isArray(resolvedSchema.required)
+    ? resolvedSchema.required.filter((entry): entry is string => typeof entry === "string")
     : [];
   for (const key of required) {
     if (!(key in value)) {
@@ -50,12 +78,12 @@ function validateObjectAgainstSchema(
     }
   }
 
-  const properties = isObject(schema.properties) ? schema.properties : null;
+  const properties = isObject(resolvedSchema.properties) ? resolvedSchema.properties : null;
   if (!properties) {
     return null;
   }
 
-  if (schema.additionalProperties === false) {
+  if (resolvedSchema.additionalProperties === false) {
     for (const key of Object.keys(value)) {
       if (!(key in properties)) {
         return `unknown_property:${key}`;
@@ -68,19 +96,27 @@ function validateObjectAgainstSchema(
       continue;
     }
     const propertyValue = value[key];
-    const propertyForbiddenFailure = validateForbiddenRequiredKeys(propertySchemaValue, propertyValue);
+    const propertySchema = resolveLocalSchemaRef(propertySchemaValue);
+    if (Array.isArray(propertySchema.oneOf) && isObject(propertyValue)) {
+      const nestedReason = validateObjectAgainstSchema(propertySchema, propertyValue);
+      if (nestedReason) {
+        return nestedReason;
+      }
+      continue;
+    }
+    const propertyForbiddenFailure = validateForbiddenRequiredKeys(propertySchema, propertyValue);
     if (propertyForbiddenFailure) {
       return propertyForbiddenFailure;
     }
-    const propertyType = typeof propertySchemaValue.type === "string"
-      ? propertySchemaValue.type
+    const propertyType = typeof propertySchema.type === "string"
+      ? propertySchema.type
       : null;
     if (propertyType === "string") {
       if (typeof propertyValue !== "string") {
         return `invalid_type:${key}`;
       }
-      const minLength = typeof propertySchemaValue.minLength === "number"
-        ? propertySchemaValue.minLength
+      const minLength = typeof propertySchema.minLength === "number"
+        ? propertySchema.minLength
         : null;
       if (minLength !== null && propertyValue.length < minLength) {
         return `min_length:${key}`;
@@ -88,7 +124,7 @@ function validateObjectAgainstSchema(
       continue;
     }
     if (propertyType === "object") {
-      const nestedReason = validateObjectAgainstSchema(propertySchemaValue, propertyValue);
+      const nestedReason = validateObjectAgainstSchema(propertySchema, propertyValue);
       if (nestedReason) {
         return nestedReason;
       }
@@ -98,8 +134,8 @@ function validateObjectAgainstSchema(
       if (!Array.isArray(propertyValue)) {
         return `invalid_type:${key}`;
       }
-      const minItems = typeof propertySchemaValue.minItems === "number"
-        ? propertySchemaValue.minItems
+      const minItems = typeof propertySchema.minItems === "number"
+        ? propertySchema.minItems
         : null;
       if (minItems !== null && propertyValue.length < minItems) {
         return `min_items:${key}`;
