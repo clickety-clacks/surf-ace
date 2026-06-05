@@ -1660,6 +1660,7 @@ function isValidPairResponsePaneState(node: unknown): node is PairResponse["payl
     "contentType",
     "currentContentId",
     "currentRevision",
+    "display",
     "paneId",
     "paneLabel",
     "paneLineageId",
@@ -1690,6 +1691,29 @@ function isValidPairResponsePaneState(node: unknown): node is PairResponse["payl
   }
   return record.paneLineageId === undefined ||
     (typeof record.paneLineageId === "string" && record.paneLineageId.length > 0);
+}
+
+function recoverPairResponsePaneTopologyState(node: unknown): PairResponse["payload"]["state"]["panes"][number] | null {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return null;
+  }
+  const record = node as Record<string, unknown>;
+  if (!Number.isInteger(record.paneId) || Number(record.paneId) < 1) {
+    return null;
+  }
+  if (!Number.isInteger(record.paneLabel) || Number(record.paneLabel) < 1) {
+    return null;
+  }
+  return {
+    contentType: null,
+    currentContentId: null,
+    currentRevision: 0 as Revision,
+    paneId: record.paneId as RemotePaneId,
+    paneLabel: record.paneLabel as number,
+    ...(typeof record.paneLineageId === "string" && record.paneLineageId.length > 0
+      ? { paneLineageId: record.paneLineageId }
+      : {}),
+  };
 }
 
 function splitManagedLayoutNode(
@@ -10641,6 +10665,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
+    response = this.quarantineMalformedPairResponsePaneState(surface, response);
     const validation = validateEnvelopeType("pair.request", response);
     if (!validation.ok) {
       throw new SurfAceToolError(
@@ -10650,6 +10675,51 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     return { response: response as PairResponse, requestedWindowLabel: windowLabel };
+  }
+
+  private quarantineMalformedPairResponsePaneState(surface: ManagedSurface, response: Response): Response {
+    if (
+      isErrorResponse(response) ||
+      response.op !== "pair.request" ||
+      !isPlainRecord(response.payload) ||
+      !isPlainRecord(response.payload.state) ||
+      !Array.isArray(response.payload.state.panes)
+    ) {
+      return response;
+    }
+
+    let quarantinedPaneCount = 0;
+    const panes = response.payload.state.panes.map((paneState) => {
+      if (isValidPairResponsePaneState(paneState)) {
+        return paneState;
+      }
+      const recovered = recoverPairResponsePaneTopologyState(paneState);
+      if (!recovered) {
+        return paneState;
+      }
+      quarantinedPaneCount += 1;
+      return recovered;
+    });
+    if (quarantinedPaneCount === 0) {
+      return response;
+    }
+
+    this.logger.warn?.(
+      runtimeDiagnostic("pair_response_pane_state_quarantined", {
+        pane_count: quarantinedPaneCount,
+        surface_id: surface.surfaceId,
+      }),
+    );
+    return {
+      ...response,
+      payload: {
+        ...response.payload,
+        state: {
+          ...response.payload.state,
+          panes,
+        },
+      },
+    } as Response;
   }
 
   private assertPairResponseHasTopologyPanes(surface: ManagedSurface, response: PairResponse): void {

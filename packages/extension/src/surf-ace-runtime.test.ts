@@ -272,6 +272,7 @@ class FakeSurfAceWsServer {
   panesListErrorCode: string | null = null;
   panesListRequests = 0;
   pairResponseOwnershipEpoch = 1;
+  pairPaneStateMutator: ((paneState: Record<string, unknown>) => Record<string, unknown>) | null = null;
   readonly panes: Map<number, TestPane>;
   readonly splitRequests: Array<{
     count: number;
@@ -981,7 +982,7 @@ class FakeSurfAceWsServer {
               if (!this.omitPairPaneLabel) {
                 paneState.paneLabel = pane.paneLabel;
 	              }
-	              return paneState;
+	              return this.pairPaneStateMutator ? this.pairPaneStateMutator(paneState) : paneState;
 	            });
         const pairStateLayout = this.topologyLayoutMatchesPairPanes(requestedSurface.topologyLayout, pairResponsePanes)
           ? requestedSurface.topologyLayout
@@ -6452,6 +6453,42 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           paneId: firstPaneId,
         });
         assert.equal(server.contentSetRequests.at(-1)?.revision, pushed.revision + 1);
+      },
+    });
+  });
+
+  await t.test("malformed pair pane target payload is quarantined before browser_url recovery push", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+        server.pairPaneStateMutator = (paneState) => ({
+          ...paneState,
+          targetPayload: {
+            html: "file-backed scrollable T338 current-docket wall card",
+          },
+        });
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const screens = await runtime.listScreens();
+        assert.equal(screens[0]?.authority.actionable, true);
+
+        await runtime.push({
+          content: "https://tars.tail4105e8.ts.net:19443/tracker.html?id=T338",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(server.contentSetRequests.length, 0);
+        assert.equal(server.targetApplyRequests.length, 1);
+        assert.equal(server.targetApplyRequests[0]?.targetKind, "browser_url");
+        assert.deepEqual(server.targetApplyRequests[0]?.targetPayload, {
+          url: "https://tars.tail4105e8.ts.net:19443/tracker.html?id=T338",
+        });
       },
     });
   });
