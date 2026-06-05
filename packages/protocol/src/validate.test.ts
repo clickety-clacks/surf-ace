@@ -481,6 +481,61 @@ test("validateEnvelopeType accepts target.apply.result responses", () => {
   assert.deepEqual(result, { ok: true });
 });
 
+test("validateEnvelopeType accepts target.apply.result native app proof state", () => {
+  const result = validateEnvelopeType("target.apply", {
+    id: "req_target",
+    ok: true,
+    op: "target.apply.result",
+    payload: {
+      appliedAt: new Date().toISOString(),
+      materializedState: {
+        authority: {
+          ownershipEpoch: 1,
+          ownershipSessionId: "sa_1",
+          paneLineageId: "pl_1",
+          surfaceId: "sf_1",
+          targetEpoch: 1,
+        },
+        nativeHost: "applied",
+        nativeTarget: {
+          appId: "com.example.App",
+          args: ["--new-window"],
+          targetKind: "native_app",
+        },
+        overlayRegions: "applied",
+        paneGeometry: {
+          coordinateSpace: "compositor_logical",
+          geometryRevision: 1,
+          height: 100,
+          paneInstanceId: "pi_1",
+          surfaceEpoch: "se_1",
+          topologyEpoch: 1,
+          width: 100,
+          x: 0,
+          y: 0,
+        },
+        proof: {
+          appId: "com.example.App",
+          args: ["--new-window"],
+          contentId: "tg_1",
+          envDigest: "env_digest",
+          launchMode: "new_instance",
+          paneId: "1",
+        },
+      },
+      paneLineageId: "pl_1",
+      requestId: "tr_1",
+      status: "applied",
+      targetEpoch: 1,
+      targetId: "tg_1",
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(result, { ok: true });
+});
+
 test("validateEnvelopeType rejects compositor fields in target.apply result materializedState", () => {
   const result = validateEnvelopeType("target.apply", {
     id: "req_target",

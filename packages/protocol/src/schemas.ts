@@ -53,7 +53,7 @@ type ProtocolSchemaDefName =
   | "PaneRenamedEvent";
 
 type ProtocolSchemaDocument = {
-  $defs: Record<ProtocolSchemaDefName, JsonSchema>;
+  $defs: Record<string, JsonSchema>;
 };
 
 const protocolSchemaDocument = JSON.parse(
@@ -63,6 +63,8 @@ const protocolSchemaDocument = JSON.parse(
 function getSchemaDef(name: ProtocolSchemaDefName): JsonSchema {
   return protocolSchemaDocument.$defs[name];
 }
+
+export const protocolSchemaDefs = protocolSchemaDocument.$defs;
 
 export const surfacesListRequestSchema = getSchemaDef("SurfacesListRequest");
 export const surfacesListResponseSchema = getSchemaDef("SurfacesListResponse");

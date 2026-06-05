@@ -2436,31 +2436,7 @@
               "type": "string"
             },
             "materializedState": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "navigationStatus": {
-                  "type": "string"
-                },
-                "replaySemantics": {
-                  "type": "string"
-                },
-                "url": {
-                  "type": "string"
-                },
-                "nativeHost": {
-                  "type": "string"
-                },
-                "overlayRegions": {
-                  "type": "string"
-                },
-                "contentType": {
-                  "type": "string"
-                },
-                "paneId": {
-                  "type": "integer"
-                }
-              }
+              "$ref": "#/$defs/TargetMaterializedState"
             },
             "appliedAt": {
               "type": "string",
