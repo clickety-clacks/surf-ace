@@ -1,10 +1,20 @@
 import Foundation
+import SwiftUI
 import UIKit
 import XCTest
 @testable import SurfAce
 
 @MainActor
 final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
+    func testRootContentFillIgnoresBottomSafeAreaButKeepsTopStatusBarSafeArea() {
+        let ignoredEdges = surfAceRootContentIgnoredSafeAreaEdges()
+
+        XCTAssertTrue(ignoredEdges.contains(.bottom))
+        XCTAssertTrue(ignoredEdges.contains(.leading))
+        XCTAssertTrue(ignoredEdges.contains(.trailing))
+        XCTAssertFalse(ignoredEdges.contains(.top))
+    }
+
     func testContentApplyReportsPendingRendererAndRendersOnAttach() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "render-pending")

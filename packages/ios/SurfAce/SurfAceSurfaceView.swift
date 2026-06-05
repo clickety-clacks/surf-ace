@@ -12,6 +12,10 @@ private enum SurfAcePaneChromeLayout {
     static let bottomInset: CGFloat = 28
 }
 
+func surfAceRootContentIgnoredSafeAreaEdges() -> Edge.Set {
+    [.horizontal, .bottom]
+}
+
 private enum SurfAceSpatialPaneChromeLayout {
     static let cornerInset: CGFloat = 0
     static let cornerRadius: CGFloat = 45
@@ -335,7 +339,7 @@ struct SurfAceRootView: View {
                     }
             }
         }
-        .ignoresSafeArea()
+        .ignoresSafeArea(.container, edges: surfAceRootContentIgnoredSafeAreaEdges())
         .background {
             SurfAceSceneProbeRepresentable(
                 onConnect: { key, scene in
