@@ -4,3 +4,7 @@ dist/
 *.log
 scratch/
 .engram/
+
+# Local Xcode build output
+.derived-data*/
+DerivedData/
