@@ -650,6 +650,10 @@ func surfAceShowsAnnotationBorder(annotationMode: Bool) -> Bool {
     annotationMode
 }
 
+func surfAceKeyboardFocusBandWidth() -> CGFloat {
+    20
+}
+
 func surfAceShowsSpatialEmptyPaneChrome(entry: SurfAcePaneEntry) -> Bool {
 #if os(visionOS)
     surfAceEntryIsVisibleEmpty(entry)
@@ -1207,10 +1211,29 @@ private struct SurfAceKeyboardActiveBorder: View {
     let active: Bool
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 0, style: .continuous)
-            .strokeBorder(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(active ? 0.25 : 0), lineWidth: 10)
-            .allowsHitTesting(false)
-            .animation(.easeOut(duration: 0.12), value: active)
+        let edgeColor = Color(red: 0.5, green: 0.5, blue: 0.5).opacity(active ? 0.25 : 0)
+        let clearColor = Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0)
+        let bandWidth = surfAceKeyboardFocusBandWidth()
+
+        ZStack {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [edgeColor, clearColor], startPoint: .top, endPoint: .bottom)
+                    .frame(height: bandWidth)
+                Spacer(minLength: 0)
+                LinearGradient(colors: [clearColor, edgeColor], startPoint: .top, endPoint: .bottom)
+                    .frame(height: bandWidth)
+            }
+
+            HStack(spacing: 0) {
+                LinearGradient(colors: [edgeColor, clearColor], startPoint: .leading, endPoint: .trailing)
+                    .frame(width: bandWidth)
+                Spacer(minLength: 0)
+                LinearGradient(colors: [clearColor, edgeColor], startPoint: .leading, endPoint: .trailing)
+                    .frame(width: bandWidth)
+            }
+        }
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.12), value: active)
     }
 }
 

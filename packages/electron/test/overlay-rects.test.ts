@@ -10,11 +10,15 @@ async function rendererStyles(): Promise<string> {
   return fs.readFile(new URL("../renderer/styles.css", import.meta.url), "utf8");
 }
 
+async function rendererSource(): Promise<string> {
+  return fs.readFile(new URL("../renderer/renderer.js", import.meta.url), "utf8");
+}
+
 function declarationBlock(css: string, selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = css.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`));
-  assert.ok(match, `missing ${selector} rule`);
-  return match[1]!;
+  const matches = [...css.matchAll(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, "g"))];
+  assert.ok(matches.length > 0, `missing ${selector} rule`);
+  return matches[matches.length - 1]![1]!;
 }
 
 function installDOM() {
@@ -158,7 +162,29 @@ test("keyboard focus outline stays visible over light and dark pane content", as
   const css = await rendererStyles();
   const activeRule = declarationBlock(css, ".pane-shell.keyboard-active .keyboard-focus-overlay");
   const edgeRule = declarationBlock(css, ".keyboard-focus-edge");
+  const topRule = declarationBlock(css, ".keyboard-focus-edge--top");
+  const bottomRule = declarationBlock(css, ".keyboard-focus-edge--bottom");
+  const leftRule = declarationBlock(css, ".keyboard-focus-edge--left");
+  const rightRule = declarationBlock(css, ".keyboard-focus-edge--right");
+  const horizontalRule = declarationBlock(css, ".keyboard-focus-edge--top,\n.keyboard-focus-edge--bottom");
+  const verticalRule = declarationBlock(css, ".keyboard-focus-edge--left,\n.keyboard-focus-edge--right");
 
   assert.match(activeRule, /opacity:\s*1\s*;/);
-  assert.match(edgeRule, /background:\s*rgb\(128,\s*128,\s*128\)\s*;/);
+  assert.match(edgeRule, /--keyboard-focus-edge-color:\s*rgba\(128,\s*128,\s*128,\s*0\.25\)\s*;/);
+  assert.match(edgeRule, /--keyboard-focus-clear-color:\s*rgba\(128,\s*128,\s*128,\s*0\)\s*;/);
+  assert.match(horizontalRule, /height:\s*20px\s*;/);
+  assert.match(verticalRule, /width:\s*20px\s*;/);
+  assert.match(topRule, /linear-gradient\(to bottom,\s*var\(--keyboard-focus-edge-color\),\s*var\(--keyboard-focus-clear-color\)\)/);
+  assert.match(bottomRule, /linear-gradient\(to top,\s*var\(--keyboard-focus-edge-color\),\s*var\(--keyboard-focus-clear-color\)\)/);
+  assert.match(leftRule, /linear-gradient\(to right,\s*var\(--keyboard-focus-edge-color\),\s*var\(--keyboard-focus-clear-color\)\)/);
+  assert.match(rightRule, /linear-gradient\(to left,\s*var\(--keyboard-focus-edge-color\),\s*var\(--keyboard-focus-clear-color\)\)/);
+});
+
+test("keyboard focus band is not reported as a compositor input overlay", async () => {
+  const source = await rendererSource();
+  const focusEdgeClassIndex = source.indexOf("keyboard-focus-edge keyboard-focus-edge--");
+
+  assert.notEqual(focusEdgeClassIndex, -1);
+  assert.doesNotMatch(source.slice(focusEdgeClassIndex, focusEdgeClassIndex + 240), /surfAceOverlay/);
+  assert.doesNotMatch(source, /case "keyboard-focus-edge"/);
 });
