@@ -985,6 +985,7 @@ type RuntimeStateFile = {
     reason: string;
     tombstonedAt: number;
   }>;
+  targetLifecycleEventsBySurfaceId?: Record<string, PersistedTargetLifecycleEvent[]>;
   targetStateBySurfaceId?: Record<string, PersistedSurfaceTargetState>;
   tombstonedEndpointIds?: string[];
   version: 1;
@@ -1018,7 +1019,16 @@ type PersistedPaneTargetState = {
   targetEpoch: number;
 };
 
+type PersistedTargetLifecycleEvent = {
+  event: "create" | "persist" | "hydrate" | "stale" | "remove" | "tombstone";
+  paneLineageId?: string;
+  reason: string;
+  recordedAt: number;
+  targetId?: string;
+};
+
 type PersistedSurfaceTargetState = {
+  lifecycleEvents?: PersistedTargetLifecycleEvent[];
   ownershipEpoch?: number;
   paneTargets: Record<string, PersistedPaneTargetState>;
   registeredTargetIdsByIdempotencyKey: Record<string, string>;
@@ -2966,6 +2976,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     providerLineage: [],
     selfOwnedSurfaceIds: {},
     surfaceTombstones: {},
+    targetLifecycleEventsBySurfaceId: {},
     targetStateBySurfaceId: {},
     tombstonedEndpointIds: [],
     version: 1,
@@ -5188,6 +5199,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const hadTargetState = Boolean(this.persistentState.targetStateBySurfaceId?.[surfaceId]);
     if (this.persistentState.targetStateBySurfaceId) {
       if (this.persistentState.targetStateBySurfaceId[surfaceId]) {
+        this.recordTargetLifecycleEventForSurfaceId(surfaceId, {
+          event: "remove",
+          reason,
+        });
+        this.logger.info?.(
+          runtimeDiagnostic("target_lifecycle_remove", {
+            reason,
+            surface_id: surfaceId,
+          }),
+        );
         delete this.persistentState.targetStateBySurfaceId[surfaceId];
         changed = true;
       }
@@ -6317,6 +6338,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       display: input.display ? structuredClone(input.display) : null,
     };
     surface.targetRecords.set(targetId, record);
+    this.recordTargetLifecycleEvent(surface, {
+      event: "create",
+      paneLineageId: pane.paneLineageId,
+      reason: "target record",
+      targetId,
+    });
+    this.logger.info?.(
+      runtimeDiagnostic("target_lifecycle_create", {
+        pane_lineage_id: pane.paneLineageId,
+        surface_id: surface.surfaceId,
+        target_id: targetId,
+      }),
+    );
     pane.currentTargetId = targetId;
     pane.staleTargetId = null;
     pane.nonDurableTargetDiagnostic = null;
@@ -6404,6 +6438,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
     target.currentState = "tombstoned";
+    this.recordTargetLifecycleEvent(surface, {
+      event: "tombstone",
+      paneLineageId: pane.paneLineageId,
+      reason: "target tombstone",
+      targetId: target.targetId,
+    });
+    this.logger.info?.(
+      runtimeDiagnostic("target_lifecycle_tombstone", {
+        pane_lineage_id: pane.paneLineageId,
+        reason: "target tombstone",
+        surface_id: surface.surfaceId,
+        target_id: target.targetId,
+      }),
+    );
     pane.currentTargetId = null;
     pane.staleTargetId = null;
     await this.persistSurfaceTargetState(surface, "target tombstone");
@@ -6422,6 +6470,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       delete target.supersededByTargetId;
       changed = true;
     }
+    this.recordTargetLifecycleEvent(surface, {
+      event: "stale",
+      paneLineageId: target.paneLineageId,
+      reason,
+      targetId: target.targetId,
+    });
+    this.logger.info?.(
+      runtimeDiagnostic("target_lifecycle_stale", {
+        pane_lineage_id: target.paneLineageId,
+        reason,
+        surface_id: surface.surfaceId,
+        target_id: target.targetId,
+      }),
+    );
     const panes = pane ? [pane] : [...surface.panes.values()];
     for (const candidate of panes) {
       if (candidate.currentTargetId === target.targetId) {
@@ -7846,6 +7908,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         providerLineage: parsed.providerLineage ?? [],
         selfOwnedSurfaceIds: parsed.selfOwnedSurfaceIds ?? {},
         surfaceTombstones: parsed.surfaceTombstones ?? {},
+        targetLifecycleEventsBySurfaceId: parsed.targetLifecycleEventsBySurfaceId ?? {},
         targetStateBySurfaceId: parsed.targetStateBySurfaceId ?? {},
         tombstonedEndpointIds: parsed.tombstonedEndpointIds ?? [],
         version: 1,
@@ -8944,6 +9007,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private captureSurfaceTargetState(surface: ManagedSurface): void {
     this.persistentState.targetStateBySurfaceId ??= {};
+    const lifecycleEvents =
+      this.persistentState.targetStateBySurfaceId[surface.surfaceId]?.lifecycleEvents ?? [];
     const retainedTargetIds = new Set<string>();
     for (const target of surface.targetRecords.values()) {
       if (target.currentState === "current" || target.currentState === "stale") {
@@ -8967,6 +9032,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       retainedTargetIds.add(targetId);
     }
     this.persistentState.targetStateBySurfaceId[surface.surfaceId] = {
+      lifecycleEvents: lifecycleEvents.slice(-100),
       ownershipEpoch: surface.ownershipEpoch,
       paneTargets: Object.fromEntries(
         [...surface.panes.values()].map((pane) => [
@@ -8993,14 +9059,59 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private async persistSurfaceTargetState(surface: ManagedSurface, reason: string): Promise<void> {
     this.captureSurfaceTargetState(surface);
+    this.recordTargetLifecycleEvent(surface, { event: "persist", reason });
+    this.logger.info?.(
+      runtimeDiagnostic("target_lifecycle_persist", {
+        reason,
+        surface_id: surface.surfaceId,
+        target_record_count: surface.targetRecords.size,
+      }),
+    );
     await this.persistState();
     this.queuePersistScreenSnapshot(`target state (${reason})`);
   }
 
   private async persistSurfaceTargetStateImmediately(surface: ManagedSurface, reason: string): Promise<void> {
     this.captureSurfaceTargetState(surface);
+    this.recordTargetLifecycleEvent(surface, { event: "persist", reason });
+    this.logger.info?.(
+      runtimeDiagnostic("target_lifecycle_persist", {
+        reason,
+        surface_id: surface.surfaceId,
+        target_record_count: surface.targetRecords.size,
+      }),
+    );
     await this.persistState();
     this.queuePersistScreenSnapshot(`target state (${reason})`);
+  }
+
+  private recordTargetLifecycleEvent(
+    surface: ManagedSurface,
+    event: Omit<PersistedTargetLifecycleEvent, "recordedAt">,
+  ): void {
+    this.persistentState.targetStateBySurfaceId ??= {};
+    const recordedEvent = this.recordTargetLifecycleEventForSurfaceId(surface.surfaceId, event);
+    const persisted = this.persistentState.targetStateBySurfaceId[surface.surfaceId] ?? {
+      paneTargets: {},
+      registeredTargetIdsByIdempotencyKey: {},
+      targetRecords: [],
+    };
+    const lifecycleEvents = persisted.lifecycleEvents ?? [];
+    lifecycleEvents.push(recordedEvent);
+    persisted.lifecycleEvents = lifecycleEvents.slice(-100);
+    this.persistentState.targetStateBySurfaceId[surface.surfaceId] = persisted;
+  }
+
+  private recordTargetLifecycleEventForSurfaceId(
+    surfaceId: SurfaceId | string,
+    event: Omit<PersistedTargetLifecycleEvent, "recordedAt">,
+  ): PersistedTargetLifecycleEvent {
+    this.persistentState.targetLifecycleEventsBySurfaceId ??= {};
+    const recordedEvent = { ...event, recordedAt: this.now() };
+    const lifecycleEvents = this.persistentState.targetLifecycleEventsBySurfaceId[surfaceId] ?? [];
+    lifecycleEvents.push(recordedEvent);
+    this.persistentState.targetLifecycleEventsBySurfaceId[surfaceId] = lifecycleEvents.slice(-100);
+    return recordedEvent;
   }
 
   private hydrateSurfaceTargetState(
@@ -9016,6 +9127,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!persisted) {
       return;
     }
+    this.recordTargetLifecycleEvent(surface, {
+      event: "hydrate",
+      reason: pairImportedRemotePaneIds.size > 0 ? "pair response import" : "surface target hydrate",
+    });
+    this.logger.info?.(
+      runtimeDiagnostic("target_lifecycle_hydrate", {
+        pair_imported_pane_count: pairImportedRemotePaneIds.size,
+        surface_id: surface.surfaceId,
+        target_record_count: persisted.targetRecords.length,
+      }),
+    );
     surface.targetRecords = new Map(
       persisted.targetRecords.map((record) => {
         const hydrated = structuredClone(record);
@@ -10516,6 +10638,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         preserveRestartContent: hasRestartOwnershipPendingPair,
         preserveRestartSnapshot: hasRestartOwnershipPendingPair,
         preserveTargetState: true,
+        targetLifecycleReason: "pair request topology reset",
       });
     }
     const initialPaneId = this.ensureInitialPairPane(surface);
@@ -11280,6 +11403,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 preserveRestartContent: hadRestartOwnershipPendingPair,
                 preserveRestartSnapshot: hadRestartOwnershipPendingPair,
                 preserveTargetState: this.hasSurfaceTargetState(surface),
+                targetLifecycleReason: "pair response topology reset",
               });
           }
           this.applyPairState(surface, pairResponse, {
@@ -11978,6 +12102,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     this.clearVisiblePaneContent(pane, pane.currentRevision);
     target.currentState = "tombstoned";
+    this.recordTargetLifecycleEvent(surface, {
+      event: "tombstone",
+      paneLineageId: pane.paneLineageId,
+      reason: "native pane superseded browser_url target",
+      targetId: target.targetId,
+    });
+    this.logger.info?.(
+      runtimeDiagnostic("target_lifecycle_tombstone", {
+        pane_lineage_id: pane.paneLineageId,
+        reason: "native pane superseded browser_url target",
+        surface_id: surface.surfaceId,
+        target_id: target.targetId,
+      }),
+    );
     pane.currentTargetId = null;
     pane.staleTargetId = null;
     pane.lastRestoreBlockedReason = null;
@@ -12323,6 +12461,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       preserveRestartContent?: boolean;
       preserveRestartSnapshot?: boolean;
       preserveTargetState?: boolean;
+      targetLifecycleReason?: string;
     } = {},
   ): void {
     if (options.preserveRestartSnapshot !== true) {
@@ -12354,6 +12493,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.targetRecords.clear();
     }
     if (options.preserveTargetState !== true && this.persistentState.targetStateBySurfaceId) {
+      if (this.persistentState.targetStateBySurfaceId[surface.surfaceId]) {
+        const reason = options.targetLifecycleReason ?? "clear local topology state";
+        this.recordTargetLifecycleEventForSurfaceId(surface.surfaceId, {
+          event: "remove",
+          reason,
+        });
+        this.logger.info?.(
+          runtimeDiagnostic("target_lifecycle_remove", {
+            reason,
+            surface_id: surface.surfaceId,
+          }),
+        );
+      }
       delete this.persistentState.targetStateBySurfaceId[surface.surfaceId];
     }
   }
@@ -12364,7 +12516,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.prunePassiveForeignTargetState(surface);
     }
     this.clearSurfaceResumeState(surface);
-    this.clearSurfaceLocalTopologyState(surface, { preserveTargetState });
+    this.clearSurfaceLocalTopologyState(surface, {
+      preserveTargetState,
+      targetLifecycleReason: "foreign ownership state clear",
+    });
     this.runBackgroundTask("persist foreign ownership state clear", async () => {
       await this.persistState();
     });

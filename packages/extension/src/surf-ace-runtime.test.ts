@@ -9516,6 +9516,44 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(pane);
       assert.equal(pane.currentTargetId, null);
       assert.equal(surface.targetRecords.get(targetId)?.currentState, "stale");
+      await waitFor(async () => {
+        const persisted = JSON.parse(
+          await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+        );
+        return persisted.targetStateBySurfaceId?.[surfaceId]?.targetRecords?.some(
+          (record: any) => record.targetId === targetId && record.currentState === "stale",
+        );
+      }, 12_000);
+      const persisted = JSON.parse(
+        await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+      );
+      const persistedTargetState = persisted.targetStateBySurfaceId?.[surfaceId];
+      assert.ok(
+        persistedTargetState?.targetRecords?.some(
+          (record: any) => record.targetId === targetId && record.currentState === "stale",
+        ),
+      );
+      assert.ok(
+        persistedTargetState?.lifecycleEvents?.some(
+          (event: any) =>
+            event.event === "stale" &&
+            event.targetId === targetId &&
+            event.reason === "restore_blocked_stale_target",
+        ),
+      );
+      assert.ok(
+        persistedTargetState?.lifecycleEvents?.some(
+          (event: any) => event.event === "persist" && event.reason === "stale target hydrate",
+        ),
+      );
+      assert.ok(
+        persisted.targetLifecycleEventsBySurfaceId?.[surfaceId]?.some(
+          (event: any) =>
+            event.event === "stale" &&
+            event.targetId === targetId &&
+            event.reason === "restore_blocked_stale_target",
+        ),
+      );
     } finally {
       await runtime.stop();
       await server.close();
