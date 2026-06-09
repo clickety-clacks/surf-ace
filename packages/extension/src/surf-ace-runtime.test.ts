@@ -4380,6 +4380,580 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("capture projects provider content when stale snapshot reports blank content", async () => {
+    await withRuntimeHarness({
+      now: () => 1_777_050,
+      run: async ({ runtime, server }) => {
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        const paneId = paneByLabel(screen, 1).paneId;
+        const pushed = await runtime.push(
+          {
+            content: "<main>provider-owned capture content</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId,
+          },
+          { sessionKey: "agent:test:blank-snapshot-capture" },
+        );
+        const remotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(remotePane);
+        remotePane.contentId = null;
+        remotePane.contentType = null;
+        remotePane.revision += 1;
+        server.snapshotImage = "Ymxhbmstc25hcHNob3QtZnJhbWU=";
+
+        const captured = await runtime.capturePane({ fingerprint: server.surfaceId, paneId });
+        assert.equal(captured.capture.visibleContentId, pushed.contentId);
+        assert.equal(captured.capture.contentType, "html");
+        assert.equal(captured.capture.failureReason, null);
+
+        const listed = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        const listedPane = listed?.panes.find((candidate) => candidate.paneId === paneId);
+        assert.equal(listedPane?.activeContent?.contentId, pushed.contentId);
+        assert.equal(listedPane?.historySummary.visibleContentId, pushed.contentId);
+
+        const read = await runtime.read({ fingerprint: server.surfaceId, paneId });
+        assert.equal(read.contentSnapshot?.contentId, pushed.contentId);
+        assert.deepEqual(read.contentSnapshot?.content, { html: "<main>provider-owned capture content</main>" });
+      },
+    });
+  });
+
+  await t.test("provider pane authority adopts unambiguous current target by pane lineage for list read capture and restore", async () => {
+    await withRuntimeHarness({
+      now: () => 1_777_100,
+      run: async ({ runtime, server, stateDir }) => {
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        const paneId = paneByLabel(screen, 1).paneId;
+        const pushed = await runtime.push(
+          {
+            content: "<main>lineage authority content</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId,
+          },
+          { sessionKey: "agent:test:lineage-authority" },
+        );
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneId);
+        assert.ok(pane);
+        const target = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(target);
+
+        pane.currentTargetId = null;
+        pane.staleTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        await internalRuntime.persistSurfaceTargetState(surface, "test dropped pane current target pointer");
+
+        const listed = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        const listedPane = listed?.panes.find((candidate) => candidate.paneId === paneId);
+        assert.equal(listedPane?.target?.targetId, target.targetId);
+        assert.equal(listedPane?.target?.blockedReason, null);
+        assert.equal(pane.currentTargetId, target.targetId);
+
+        const read = await runtime.read({ fingerprint: server.surfaceId, paneId });
+        assert.equal(read.contentSnapshot?.contentId, pushed.contentId);
+        assert.deepEqual(read.contentSnapshot?.content, { html: "<main>lineage authority content</main>" });
+
+        server.snapshotImage = "bGluZWFnZS1mcmFtZQ==";
+        const captured = await runtime.capturePane({ fingerprint: server.surfaceId, paneId });
+        assert.equal(captured.capture.visibleContentId, pushed.contentId);
+        assert.equal(captured.capture.failureReason, null);
+
+        const restored = await runtime.restoreTarget({ fingerprint: server.surfaceId, paneId });
+        assert.equal(restored.targetId, target.targetId);
+        assert.equal(restored.blockedReason, null);
+        assert.equal(restored.evidence?.status, "applied");
+
+        await waitFor(async () => {
+          const persisted = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+          );
+          return persisted.targetStateBySurfaceId?.[server.surfaceId]?.paneTargets?.[pane.paneLineageId]
+            ?.currentTargetId === target.targetId;
+        });
+      },
+    });
+  });
+
+  await t.test("destructive clear tombstones lineage-only current provider target authority", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      now: () => 1_777_150,
+      run: async ({ runtime, server, stateDir }) => {
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        const paneId = paneByLabel(screen, 1).paneId;
+        await runtime.push({
+          content: "https://example.com/clear-lineage-only-target",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId,
+        });
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneId);
+        assert.ok(pane);
+        const target = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(target);
+
+        pane.currentTargetId = null;
+        pane.staleTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        await internalRuntime.persistSurfaceTargetState(surface, "test clear lineage-only current target");
+
+        await runtime.clear({ fingerprint: server.surfaceId, paneId });
+
+        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "tombstoned");
+        assert.equal(pane.currentTargetId, null);
+        await waitFor(async () => {
+          const persisted = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+          );
+          return persisted.targetStateBySurfaceId?.[server.surfaceId]?.lifecycleEvents?.some(
+            (event: any) =>
+              event.event === "tombstone" &&
+              event.targetId === target.targetId,
+          );
+        });
+      },
+    });
+  });
+
+  await t.test("destructive close tombstones lineage-only current provider target authority", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      now: () => 1_777_175,
+      run: async ({ runtime, server, stateDir }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        await runtime.split({
+          count: 2,
+          direction: "horizontal",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        const splitScreen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(splitScreen);
+        const paneId = paneByLabel(splitScreen, 2).paneId;
+        await runtime.push({
+          content: "https://example.com/close-lineage-only-target",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId,
+        });
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneId);
+        assert.ok(pane);
+        const target = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(target);
+
+        pane.currentTargetId = null;
+        pane.staleTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        await internalRuntime.persistSurfaceTargetState(surface, "test close lineage-only current target");
+
+        await runtime.closePane({ fingerprint: server.surfaceId, paneId });
+
+        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "tombstoned");
+        assert.equal(surface.panes.has(paneId), false);
+        await waitFor(async () => {
+          const persisted = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+          );
+          return persisted.targetStateBySurfaceId?.[server.surfaceId]?.lifecycleEvents?.some(
+            (event: any) =>
+              event.event === "tombstone" &&
+              event.targetId === target.targetId,
+          );
+        });
+      },
+    });
+  });
+
+  await t.test("provider pane authority makes ambiguous lineage targets stale instead of projecting null", async () => {
+    await withRuntimeHarness({
+      now: () => 1_777_200,
+      run: async ({ runtime, server, stateDir }) => {
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        const paneId = paneByLabel(screen, 1).paneId;
+        await runtime.push(
+          {
+            content: "<main>ambiguous lineage authority</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId,
+          },
+          { sessionKey: "agent:test:ambiguous-lineage-authority" },
+        );
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneId);
+        assert.ok(pane);
+        const firstTarget = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(firstTarget);
+        const secondTargetId = "tg_ambiguous_lineage_second_current";
+        surface.targetRecords.set(secondTargetId, {
+          ...structuredClone(firstTarget),
+          appliedAt: new Date(1_777_201).toISOString(),
+          targetId: secondTargetId,
+          targetEpoch: firstTarget.targetEpoch + 1,
+        });
+        pane.currentTargetId = null;
+        pane.staleTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        await internalRuntime.persistSurfaceTargetState(surface, "test ambiguous current target records");
+
+        const listed = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        const listedPane = listed?.panes.find((candidate) => candidate.paneId === paneId);
+        assert.equal(listedPane?.target?.blockedReason, "pane_lineage_ambiguous");
+        assert.notEqual(listedPane?.target?.targetId, undefined);
+        assert.equal(firstTarget.currentState, "stale");
+        assert.equal(surface.targetRecords.get(secondTargetId)?.currentState, "stale");
+        assert.equal(pane.currentTargetId, null);
+        assert.equal(pane.lastRestoreBlockedReason, "pane_lineage_ambiguous");
+
+        await waitFor(async () => {
+          const persisted = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+          );
+          const targetState = persisted.targetStateBySurfaceId?.[server.surfaceId];
+          return targetState?.targetRecords?.filter(
+            (record: any) =>
+              (record.targetId === firstTarget.targetId || record.targetId === secondTargetId) &&
+              record.currentState === "stale",
+          ).length === 2 &&
+            targetState?.lifecycleEvents?.some(
+              (event: any) =>
+                event.event === "stale" &&
+                event.reason === "pane_lineage_ambiguous",
+            );
+        });
+      },
+    });
+  });
+
+  await t.test("provider pane authority rejects duplicate current lineage targets even when a pane pointer exists", async () => {
+    await withRuntimeHarness({
+      now: () => 1_777_300,
+      run: async ({ runtime, server, stateDir }) => {
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        const paneId = paneByLabel(screen, 1).paneId;
+        await runtime.push(
+          {
+            content: "<main>duplicate pointer lineage authority</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId,
+          },
+          { sessionKey: "agent:test:duplicate-pointer-lineage" },
+        );
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneId);
+        assert.ok(pane);
+        const firstTarget = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(firstTarget);
+        const secondTargetId = "tg_duplicate_pointer_lineage_current";
+        surface.targetRecords.set(secondTargetId, {
+          ...structuredClone(firstTarget),
+          appliedAt: new Date(1_777_301).toISOString(),
+          targetId: secondTargetId,
+          targetEpoch: firstTarget.targetEpoch + 1,
+        });
+        await internalRuntime.persistSurfaceTargetState(surface, "test duplicate current target records with pointer");
+
+        const listed = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        const listedPane = listed?.panes.find((candidate) => candidate.paneId === paneId);
+        assert.equal(listedPane?.target?.blockedReason, "pane_lineage_ambiguous");
+        assert.equal(firstTarget.currentState, "stale");
+        assert.equal(surface.targetRecords.get(secondTargetId)?.currentState, "stale");
+        assert.equal(pane.currentTargetId, null);
+        assert.equal(pane.lastRestoreBlockedReason, "pane_lineage_ambiguous");
+
+        await waitFor(async () => {
+          const persisted = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+          );
+          const targetState = persisted.targetStateBySurfaceId?.[server.surfaceId];
+          return targetState?.targetRecords?.filter(
+            (record: any) =>
+              (record.targetId === firstTarget.targetId || record.targetId === secondTargetId) &&
+              record.currentState === "stale",
+          ).length === 2 &&
+            targetState?.paneTargets?.[pane.paneLineageId]?.currentTargetId === null;
+        });
+      },
+    });
+  });
+
+  await t.test("empty pair observation with mismatched lineage does not stale lineage-only provider target authority", async () => {
+    await withRuntimeHarness({
+      now: () => 1_777_400,
+      run: async ({ runtime, server, stateDir }) => {
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        const paneId = paneByLabel(screen, 1).paneId;
+        await runtime.push(
+          {
+            content: "<main>lineage-only provider target</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId,
+          },
+          { sessionKey: "agent:test:mismatched-empty-pair-lineage" },
+        );
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneId);
+        assert.ok(pane);
+        const target = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(target);
+        const originalLineageId = pane.paneLineageId;
+        const originalPaneLabel = pane.paneLabel;
+        pane.currentTargetId = null;
+        pane.staleTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        await internalRuntime.persistSurfaceTargetState(surface, "test lineage-only target before empty pair");
+
+        internalRuntime.applyPairState(surface, {
+          id: "rq_empty_pair_label_authority",
+          op: "pair.response",
+          payload: {
+            capabilities: {
+              contentTypes: ["html", "markdown"],
+              eventTypes: [],
+              protocolFeatures: ["authority.state.v1"],
+              targetCapabilities: server.targetCapabilities,
+            },
+            ownershipEpoch: surface.ownershipEpoch,
+            resumed: false,
+            sessionId: surface.sessionId ?? "sa_test_session",
+            state: {
+              layout: { paneId: Number(pane.remotePaneId), type: "pane" },
+              panes: [{
+                contentType: null,
+                currentContentId: null,
+                currentRevision: pane.currentRevision,
+                paneId: pane.remotePaneId,
+                paneLabel: 99,
+                paneLineageId: "pl_client_empty_pair_observation",
+              }],
+              topologyRevision: surface.topologyRevision,
+            },
+            surfaceName: surface.name,
+            viewport: surface.viewport,
+          },
+          type: "response",
+          v: 1,
+        }, {
+          ignoreEmptyPairContentAuthority: false,
+          prunePairClearedPaneTargets: false,
+          pruneStalePanes: false,
+        });
+        assert.equal(pane.paneLineageId, originalLineageId);
+        assert.equal(pane.paneLabel, originalPaneLabel);
+        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "current");
+
+        server.pairPaneStateMutator = (paneState) => ({
+          ...paneState,
+          contentType: null,
+          currentContentId: null,
+          paneLabel: 99,
+          paneLineageId: "pl_client_empty_pair_observation",
+        });
+        await surface.client.close(1000, "test_mismatched_empty_pair_lineage");
+
+        await waitFor(() => server.pairRequests.length >= 2, 12_000);
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+        const listed = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        const listedPane = listed?.panes.find((candidate) => candidate.paneId === paneId);
+        assert.equal(pane.paneLineageId, originalLineageId);
+        assert.equal(pane.paneLabel, originalPaneLabel);
+        assert.equal(listedPane?.paneLabel, originalPaneLabel);
+        assert.equal(listedPane?.target?.targetId, target.targetId);
+        assert.equal(listedPane?.target?.blockedReason, null);
+        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "current");
+        assert.equal(pane.currentTargetId, target.targetId);
+
+        await waitFor(async () => {
+          const persisted = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+          );
+          return persisted.targetStateBySurfaceId?.[server.surfaceId]?.targetRecords?.some(
+            (record: any) => record.targetId === target.targetId && record.currentState === "current",
+          ) &&
+            persisted.targetStateBySurfaceId?.[server.surfaceId]?.paneTargets?.[originalLineageId]?.currentTargetId === target.targetId;
+        });
+      },
+    });
+  });
+
+  await t.test("empty pair observation does not rewrite provider-owned empty topology pane identity", async () => {
+    await withRuntimeHarness({
+      now: () => 1_777_450,
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const split = await runtime.split({
+          count: 2,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneIds[1]!);
+        assert.ok(pane);
+        assert.equal(pane.activeContentId, null);
+        assert.equal(pane.currentTargetId, null);
+        assert.equal(pane.snapshot, null);
+        const originalLineageId = pane.paneLineageId;
+        const originalPaneLabel = pane.paneLabel;
+
+        internalRuntime.applyPairState(surface, {
+          id: "rq_empty_pair_topology_identity",
+          op: "pair.response",
+          payload: {
+            capabilities: {
+              contentTypes: ["html", "markdown"],
+              eventTypes: [],
+              protocolFeatures: ["authority.state.v1"],
+              targetCapabilities: server.targetCapabilities,
+            },
+            ownershipEpoch: surface.ownershipEpoch,
+            resumed: false,
+            sessionId: surface.sessionId ?? "sa_test_session",
+            state: {
+              layout: { paneId: Number(pane.remotePaneId), type: "pane" },
+              panes: [{
+                contentType: null,
+                currentContentId: null,
+                currentRevision: pane.currentRevision,
+                paneId: pane.remotePaneId,
+                paneLabel: 99,
+                paneLineageId: "pl_client_empty_pair_topology_observation",
+              }],
+              topologyRevision: surface.topologyRevision,
+            },
+            surfaceName: surface.name,
+            viewport: surface.viewport,
+          },
+          type: "response",
+          v: 1,
+        }, {
+          ignoreEmptyPairContentAuthority: false,
+          prunePairClearedPaneTargets: false,
+          pruneStalePanes: false,
+        });
+
+        assert.equal(pane.paneLineageId, originalLineageId);
+        assert.equal(pane.paneLabel, originalPaneLabel);
+        assert.equal(pane.activeContentId, null);
+        assert.equal(pane.currentTargetId, null);
+      },
+    });
+  });
+
+  await t.test("hydrate makes ambiguous lineage-only current targets stale before ownership rebind chooses a winner", async () => {
+    await withRuntimeHarness({
+      now: () => 1_777_500,
+      run: async ({ discovery, runtime, server, stateDir }) => {
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(screen);
+        const paneId = paneByLabel(screen, 1).paneId;
+        await runtime.push(
+          {
+            content: "<main>ambiguous persisted lineage authority</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId,
+          },
+          { sessionKey: "agent:test:hydrate-ambiguous-lineage" },
+        );
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneId);
+        assert.ok(pane);
+        const firstTarget = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(firstTarget);
+        const secondTargetId = "tg_hydrate_ambiguous_lineage_current";
+        surface.targetRecords.set(secondTargetId, {
+          ...structuredClone(firstTarget),
+          appliedAt: new Date(1_777_501).toISOString(),
+          targetId: secondTargetId,
+          targetEpoch: firstTarget.targetEpoch + 1,
+        });
+        pane.currentTargetId = null;
+        pane.staleTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        await internalRuntime.persistSurfaceTargetState(surface, "test ambiguous lineage-only hydrate records");
+
+        surface.targetRecords.clear();
+        pane.currentTargetId = null;
+        pane.staleTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        internalRuntime.hydrateSurfaceTargetState(surface, true, {
+          ownershipEpoch: surface.ownershipEpoch - 1,
+          sessionId: "sa_previous_hydrate_session",
+        });
+
+        const listed = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        assert.ok(listed);
+        assert.equal(listed.panes.find((candidate) => candidate.paneId === paneId)?.target?.blockedReason, "pane_lineage_ambiguous");
+        assert.equal(surface.targetRecords.get(firstTarget.targetId)?.currentState, "stale");
+        assert.equal(surface.targetRecords.get(secondTargetId)?.currentState, "stale");
+        assert.equal(pane.currentTargetId, null);
+
+        await waitFor(async () => {
+          let persisted: any;
+          try {
+            persisted = JSON.parse(
+              await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+            );
+          } catch {
+            return false;
+          }
+          const targetState = persisted.targetStateBySurfaceId?.[server.surfaceId];
+          return targetState?.targetRecords?.filter(
+            (record: any) =>
+              (record.targetId === firstTarget.targetId || record.targetId === secondTargetId) &&
+              record.currentState === "stale",
+          ).length === 2 &&
+            targetState?.lifecycleEvents?.some(
+              (event: any) =>
+                event.event === "stale" &&
+                event.reason === "pane_lineage_ambiguous",
+            );
+        }, 12_000);
+      },
+    });
+  });
+
   await t.test("ambiguous provider pane labels reject content push before applied-looking success", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
@@ -4573,7 +5147,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("same-session preserved topology adopts pair.response content clears", async () => {
+  await t.test("same-session preserved topology records empty pair.response without clearing provider authority", async () => {
     await withRuntimeHarness(async ({ runtime, server, stateDir }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       await runtime.split({
@@ -4614,10 +5188,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         { pruneStalePanes: false },
       );
 
-      assert.equal(pane.activeContentId, null);
-      assert.equal(pane.contentType, null);
+      assert.equal(pane.activeContentId, "ct_preserve_topology_stale");
+      assert.equal(pane.contentType, "markdown");
       assert.equal(pane.contentValue, null);
-      assert.equal(pane.diagnosticContent, null);
+      assert.ok(pane.diagnosticContent);
       const snapshotPath = path.join(stateDir, "surf-ace-runtime-screens.json");
       await waitFor(async () => {
         const snapshot = JSON.parse(await fs.readFile(snapshotPath, "utf8"));
@@ -4627,7 +5201,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const persistedPane = persistedScreen?.panes?.find(
           (candidate: { paneId?: string }) => candidate.paneId === pane.paneId,
         );
-        return persistedPane?.activeContent === null;
+        return persistedPane?.activeContent?.contentId === "ct_preserve_topology_stale";
       });
     });
   });
@@ -6540,7 +7114,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           "target.browser_url.v1",
         ];
       },
-      run: async ({ runtime, server }) => {
+      run: async ({ runtime, server, stateDir }) => {
         const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
 
         await runtime.push({
@@ -6549,20 +7123,40 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           fingerprint: server.surfaceId,
           paneId: firstPaneId,
         });
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(firstPaneId);
+        assert.ok(pane);
+        const target = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(target);
+        pane.currentTargetId = null;
+        pane.staleTargetId = null;
+        pane.lastRestoreBlockedReason = null;
+        await internalRuntime.persistSurfaceTargetState(surface, "test native takeover lineage-only browser target");
 
         const remotePane = server.panes.get(server.initialRemotePaneId);
         assert.ok(remotePane);
         remotePane.contentId = null;
         remotePane.contentType = null;
         remotePane.externalNative = true;
-        const internalRuntime = runtime as any;
-        const surface = internalRuntime.surfaces.get(server.surfaceId);
-        assert.ok(surface);
         await internalRuntime.syncRemotePaneList(surface);
 
+        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "tombstoned");
         const screensAfterNative = await runtime.listScreens();
         assert.equal(screensAfterNative[0]?.panes[0]?.activeContent, null);
         assert.equal(screensAfterNative[0]?.panes[0]?.target, null);
+        await waitFor(async () => {
+          const persisted = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+          );
+          return persisted.targetStateBySurfaceId?.[server.surfaceId]?.lifecycleEvents?.some(
+            (event: any) =>
+              event.event === "tombstone" &&
+              event.reason === "native pane superseded browser_url target" &&
+              event.targetId === target.targetId,
+          );
+        });
       },
     });
   });
@@ -8897,7 +9491,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("pair reconnect imports authoritative provider topology instead of replaying stale local split", async () => {
+  await t.test("pair reconnect restores provider-owned topology and content after blank pair observation", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const split = await runtime.split({
@@ -8956,11 +9550,11 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         server.topologyApplyRequests
           .slice(initialTopologyApplyCount)
           .some((request) => request.paneIds.length > 1),
-        false,
+        true,
       );
       assert.equal(
-        server.contentSetRequests.length,
-        initialContentApplyCount,
+        server.contentSetRequests.length > initialContentApplyCount,
+        true,
         JSON.stringify(server.contentSetRequests.map((request) => ({
           contentId: request.contentId,
           contentType: request.contentType,
@@ -8969,14 +9563,13 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       );
 
       const screens = await runtime.listScreens();
-      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1]);
-      assert.equal(screens[0]?.topologyRevision, 9);
-      assert.notEqual(screens[0]?.panes[0]?.activeContent?.contentId, firstPush.contentId);
-      assert.notEqual(screens[0]?.panes[0]?.activeContent?.contentId, secondPush.contentId);
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 2, 3]);
+      assert.equal(screens[0]?.panes.find((pane) => pane.paneLabel === 1)?.activeContent?.contentId, firstPush.contentId);
+      assert.equal(screens[0]?.panes.find((pane) => pane.paneLabel === 2)?.activeContent?.contentId, secondPush.contentId);
     });
   });
 
-  await t.test("pair reconnect does not replay stale target or restart content over provider-cleared panes", async () => {
+  await t.test("pair reconnect restores durable target and drops stale restart content after blank pair observation", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
         server.targetCapabilities = [
@@ -9037,18 +9630,18 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         await waitFor(() => server.pairRequests.length >= 2, 12_000);
         await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
 
-        assert.equal(server.targetApplyRequests.length, initialTargetApplyCount);
+        assert.equal(server.targetApplyRequests.length > initialTargetApplyCount, true);
         assert.equal(server.contentSetRequests.length, initialContentApplyCount);
         assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), false);
         const importedPane = [...surface.panes.values()].find((candidate: any) => Number(candidate.remotePaneId) === server.initialRemotePaneId);
         assert.ok(importedPane);
-        assert.equal(importedPane.currentTargetId, null);
-        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "stale");
+        assert.equal(importedPane.currentTargetId, target.targetId);
+        assert.equal(surface.targetRecords.get(target.targetId)?.currentState, "current");
       },
     });
   });
 
-  await t.test("pair reconnect drops restart content for provider-pruned local panes", async () => {
+  await t.test("pair reconnect preserves provider-owned topology while dropping stale restart content", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const split = await runtime.split({
@@ -9096,6 +9689,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       server.setTopologyLayout({ paneId: server.initialRemotePaneId, type: "pane" }, 12);
 
       const initialContentApplyCount = server.contentSetRequests.length;
+      const initialTopologyApplyCount = server.topologyApplyRequests.length;
       await surface.client.close(1000, "test_no_pruned_restart_replay_after_pair_import");
 
       await waitFor(() => server.pairRequests.length >= 2, 12_000);
@@ -9111,14 +9705,20 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         }))),
       );
       assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), false);
+      assert.equal(
+        server.topologyApplyRequests
+          .slice(initialTopologyApplyCount)
+          .some((request) => request.paneIds.length === 2),
+        true,
+      );
       const screens = await runtime.listScreens();
-      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1]);
-      assert.equal(screens[0]?.topologyRevision, 12);
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 2]);
       assert.equal(screens[0]?.panes[0]?.activeContent, null);
+      assert.equal(screens[0]?.panes[1]?.activeContent, null);
     });
   });
 
-  await t.test("fresh pair import prunes persisted target state before replay", async () => {
+  await t.test("fresh empty pair import preserves persisted provider target authority before replay", async () => {
     const port = nextPort++;
     const surfaceId = "sf_fresh_pair_stale_target";
     const providerId = "pv_fresh_pair_stale_target";
@@ -9211,17 +9811,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         return surface?.connectionState === "connected";
       }, 12_000);
 
-      assert.equal(server.targetApplyRequests.length, 0);
+      assert.equal(server.targetApplyRequests.length > 0, true);
       assert.equal(server.contentSetRequests.length, 0);
       const surface = internalRuntime.surfaces.get(surfaceId);
       assert.ok(surface);
       const pane = internalRuntime.findPaneByRemoteId(surface, remotePaneId);
       assert.ok(pane);
-      assert.equal(pane.currentTargetId, null);
-      assert.equal(surface.targetRecords.get(targetId)?.currentState, "stale");
+      assert.equal(pane.currentTargetId, targetId);
+      assert.equal(surface.targetRecords.get(targetId)?.currentState, "current");
       const screen = (await runtime.listScreens())[0];
       assert.equal(screen?.panes[0]?.target?.targetId, targetId);
-      assert.equal(screen?.panes[0]?.target?.blockedReason, "restore_blocked_stale_target");
+      assert.equal(screen?.panes[0]?.target?.blockedReason, null);
     } finally {
       await runtime.stop();
       await server.close();
@@ -9424,7 +10024,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("fresh pair import marks lineage-only persisted target records stale", async () => {
+  await t.test("fresh pair import adopts lineage-only persisted target records", async () => {
     const port = nextPort++;
     const surfaceId = "sf_fresh_pair_lineage_only_target";
     const providerId = "pv_fresh_pair_lineage_only_target";
@@ -9514,14 +10114,14 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(surface);
       const pane = internalRuntime.findPaneByRemoteId(surface, remotePaneId);
       assert.ok(pane);
-      assert.equal(pane.currentTargetId, null);
-      assert.equal(surface.targetRecords.get(targetId)?.currentState, "stale");
+      assert.equal(pane.currentTargetId, targetId);
+      assert.equal(surface.targetRecords.get(targetId)?.currentState, "current");
       await waitFor(async () => {
         const persisted = JSON.parse(
           await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
         );
         return persisted.targetStateBySurfaceId?.[surfaceId]?.targetRecords?.some(
-          (record: any) => record.targetId === targetId && record.currentState === "stale",
+          (record: any) => record.targetId === targetId && record.currentState === "current",
         );
       }, 12_000);
       const persisted = JSON.parse(
@@ -9530,28 +10130,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const persistedTargetState = persisted.targetStateBySurfaceId?.[surfaceId];
       assert.ok(
         persistedTargetState?.targetRecords?.some(
-          (record: any) => record.targetId === targetId && record.currentState === "stale",
+          (record: any) => record.targetId === targetId && record.currentState === "current",
         ),
+      );
+      assert.ok(
+        persistedTargetState?.paneTargets?.[paneLineageId]?.currentTargetId === targetId,
       );
       assert.ok(
         persistedTargetState?.lifecycleEvents?.some(
           (event: any) =>
-            event.event === "stale" &&
-            event.targetId === targetId &&
-            event.reason === "restore_blocked_stale_target",
-        ),
-      );
-      assert.ok(
-        persistedTargetState?.lifecycleEvents?.some(
-          (event: any) => event.event === "persist" && event.reason === "stale target hydrate",
-        ),
-      );
-      assert.ok(
-        persisted.targetLifecycleEventsBySurfaceId?.[surfaceId]?.some(
-          (event: any) =>
-            event.event === "stale" &&
-            event.targetId === targetId &&
-            event.reason === "restore_blocked_stale_target",
+            event.event === "persist" &&
+            event.reason === "stale target hydrate",
         ),
       );
     } finally {
@@ -9561,7 +10150,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("post-pair lineage repair does not resurrect stale imported target records", async () => {
+  await t.test("post-pair lineage repair does not resurrect explicitly stale target records", async () => {
     const port = nextPort++;
     const surfaceId = "sf_pair_lineage_repair_stale_target";
     const providerId = "pv_pair_lineage_repair_stale_target";
@@ -9652,8 +10241,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(pane);
       const targetBeforeRepair = surface.targetRecords.get(targetId);
       assert.ok(targetBeforeRepair);
-      assert.equal(targetBeforeRepair.currentState, "stale");
-      assert.equal(pane.currentTargetId, null);
+      targetBeforeRepair.currentState = "stale";
+      pane.currentTargetId = null;
       const previousLineageId = pane.paneLineageId;
       targetBeforeRepair.paneLineageId = previousLineageId;
       pane.staleTargetId = targetId;
@@ -9723,7 +10312,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           targetPayload: { url: "https://example.com/current-target-pair-content" },
         });
 
-        internalRuntime.applyPairPaneContentState(pane, {
+        internalRuntime.applyPairPaneContentState(surface, pane, {
           contentType: "html",
           currentContentId: contentId,
           currentRevision: 7,
