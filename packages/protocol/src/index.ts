@@ -381,8 +381,8 @@ export type PairRequest = RequestBase<"pair.request"> & {
 
 export type RelinquishRequest = RequestBase<"ownership.relinquish">;
 
-export type ContentSetPayload =
-  | {
+export type ContentSetPayload = (
+  {
       paneId: PaneId;
       contentId: ContentId;
       historyOwnerToken: string;
@@ -451,7 +451,10 @@ export type ContentSetPayload =
       content: CanvasContent;
       display?: ContentDisplay;
       reloadSource?: ContentReloadSource;
-    };
+    }
+) & {
+  restoredDrawings?: Stroke[];
+};
 
 export type ContentSetRequest = RequestBase<"content.set"> & {
   payload: ContentSetPayload;

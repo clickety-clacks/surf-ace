@@ -951,6 +951,7 @@ protocol SurfAcePaneBridging: AnyObject {
     func renderBrowserURL(entry: SurfAcePaneEntry) async -> SurfAceBrowserNavigationResult
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool)
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool
+    func restoreDrawingStrokes(_ strokes: [SurfAceStroke]) -> Bool
     func captureDrawingData() -> Data
     func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot?
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult

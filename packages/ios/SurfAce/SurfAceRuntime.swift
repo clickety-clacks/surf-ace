@@ -1808,6 +1808,7 @@ final class SurfAceRuntime {
             restoreViewport = nil
         }
         let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
+        applyRestoredDrawingsPayload(payload["restoredDrawings"], to: pane)
         pane.currentTarget = nil
 
         pane.pendingFlushStrokes.removeAll()
@@ -2235,6 +2236,7 @@ final class SurfAceRuntime {
             restoreViewport = nil
         }
         let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
+        applyRestoredDrawingsPayload(payload["restoredDrawings"], to: pane)
         pane.currentTarget = nil
 
         pane.pendingFlushStrokes.removeAll()
@@ -2905,12 +2907,25 @@ final class SurfAceRuntime {
 
     private func restorePaneDrawing(surfaceId: String, pane: SurfAcePaneModel) {
         guard let bridge = pane.bridge else { return }
-        let restored = bridge.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
-        let hasPersistedDrawing = !pane.currentEntry.drawingData.isEmpty
+        let restored = pane.currentEntry.drawingData.isEmpty && !pane.activeStrokes.isEmpty
+            ? bridge.restoreDrawingStrokes(pane.activeStrokes)
+            : bridge.restoreDrawing(from: pane.currentEntry.drawingData, strokes: pane.activeStrokes)
+        let hasPersistedDrawing = !pane.currentEntry.drawingData.isEmpty || !pane.activeStrokes.isEmpty
         pane.drawingRestoreWarningVisible = hasPersistedDrawing && !restored
         if pane.drawingRestoreWarningVisible {
             pane.toast = "Annotation restore failed"
         }
+    }
+
+    private func applyRestoredDrawingsPayload(_ restoredDrawings: Any?, to pane: SurfAcePaneModel) {
+        guard let restoredDrawings else { return }
+        guard JSONSerialization.isValidJSONObject(restoredDrawings),
+              let data = try? JSONSerialization.data(withJSONObject: restoredDrawings),
+              let strokes = try? JSONDecoder().decode([SurfAceStroke].self, from: data) else {
+            return
+        }
+        pane.currentEntry.strokesById = Dictionary(uniqueKeysWithValues: strokes.map { ($0.strokeId, $0) })
+        pane.currentEntry.drawingData = Data()
     }
 
     private func scheduleDrawingFlush(surfaceId: String, paneId: Int) {

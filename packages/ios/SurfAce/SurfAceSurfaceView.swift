@@ -1354,6 +1354,10 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             hostView?.restoreDrawing(from: drawingData, strokes: strokes) ?? drawingData.isEmpty
         }
 
+        func restoreDrawingStrokes(_ strokes: [SurfAceStroke]) -> Bool {
+            hostView?.restoreDrawingStrokes(strokes) ?? strokes.isEmpty
+        }
+
         func captureDrawingData() -> Data {
             hostView?.captureDrawingData() ?? Data()
         }
@@ -1701,6 +1705,42 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
         canvasView.drawing = drawing
         trackedStrokes = zip(drawing.strokes, strokes).map { stroke, serialized in
+            TrackedStroke(strokeId: serialized.strokeId, stroke: stroke, signature: strokeSignature(stroke))
+        }
+        return true
+    }
+
+    func restoreDrawingStrokes(_ strokes: [SurfAceStroke]) -> Bool {
+        isApplyingProgrammaticDrawingChange = true
+        defer { isApplyingProgrammaticDrawingChange = false }
+
+        guard !strokes.isEmpty else {
+            canvasView.drawing = PKDrawing()
+            trackedStrokes = []
+            return true
+        }
+
+        let creationDate = Date()
+        let pkStrokes = strokes.map { serialized in
+            let firstTimestamp = serialized.points.first?.timestamp ?? 0
+            let controlPoints = serialized.points.map { point in
+                PKStrokePoint(
+                    location: CGPoint(x: point.x, y: point.y),
+                    timeOffset: TimeInterval(point.timestamp - firstTimestamp) / 1000.0,
+                    size: CGSize(width: 4, height: 4),
+                    opacity: 1,
+                    force: CGFloat(point.pressure ?? 1),
+                    azimuth: 0,
+                    altitude: .pi / 2
+                )
+            }
+            return PKStroke(
+                ink: PKInk(.pen, color: .systemOrange),
+                path: PKStrokePath(controlPoints: controlPoints, creationDate: creationDate)
+            )
+        }
+        canvasView.drawing = PKDrawing(strokes: pkStrokes)
+        trackedStrokes = zip(pkStrokes, strokes).map { stroke, serialized in
             TrackedStroke(strokeId: serialized.strokeId, stroke: stroke, signature: strokeSignature(stroke))
         }
         return true

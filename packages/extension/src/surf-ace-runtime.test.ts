@@ -226,6 +226,7 @@ class FakeSurfAceWsServer {
     historyOwnerToken: string;
     paneId: number;
     revision: number;
+    restoredDrawings?: unknown;
   }> = [];
   readonly targetApplyRequests: Array<{
     ownershipEpoch: number;
@@ -1207,7 +1208,11 @@ class FakeSurfAceWsServer {
         pane.contentId = nextContentId;
         pane.contentType = String(message.payload?.contentType);
         pane.revision = Number(message.payload?.revision ?? pane.revision + 1);
-        if (previousContentId !== pane.contentId) {
+        if (Array.isArray(message.payload?.restoredDrawings)) {
+          pane.drawings = message.payload.restoredDrawings
+            .map((stroke: any) => String(stroke?.strokeId ?? ""))
+            .filter((strokeId: string) => strokeId.length > 0);
+        } else if (previousContentId !== pane.contentId) {
           pane.drawings = [];
         }
         this.contentSetRequests.push({
@@ -1220,6 +1225,7 @@ class FakeSurfAceWsServer {
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
           paneId,
           revision: pane.revision,
+          restoredDrawings: structuredClone(message.payload?.restoredDrawings),
         });
         const renderStatus = this.nextContentApplyRenderStatus;
         this.nextContentApplyRenderStatus = null;
@@ -9867,6 +9873,33 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const initialTargetApplyCount = server.targetApplyRequests.length;
         const initialTopologyApplyCount = server.topologyApplyRequests.length;
         const internalRuntime = runtime as any;
+        const preBounceSurface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(preBounceSurface);
+        const preBounceHtmlPane = preBounceSurface.panes.get(paneIds[0]!);
+        assert.ok(preBounceHtmlPane);
+        preBounceHtmlPane.buffer.liveFrame = {
+          contentId: htmlPush.contentId,
+          contextKey: htmlPush.contentId,
+          frameId: "fr_restart_paint",
+          image: "cmVzdGFydC1wYWludA==",
+          openedAt: 1_700_000_000_000,
+          scrollOffset: { x: 0, y: 0 },
+          strokes: [
+            {
+              bbox: { height: 20, width: 20, x: 10, y: 10 },
+              endedAt: 1_700_000_000_010,
+              points: [
+                { pressure: 0.5, x: 10, y: 10 },
+                { pressure: 0.6, x: 30, y: 30 },
+              ],
+              startedAt: 1_700_000_000_000,
+              strokeId: "stroke_restart_paint",
+            },
+          ],
+          updatedAt: 1_700_000_000_010,
+          viewport: { height: 768, scale: 2, width: 512 },
+        };
+        preBounceHtmlPane.buffer.liveDirtyStrokeIds = ["stroke_restart_paint"];
         await internalRuntime.persistScreenSnapshot();
         const preBounceSnapshot = await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8");
         await runtime.stop();
@@ -9899,6 +9932,16 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           assert.equal(htmlPane?.activeContent?.contentId, htmlPush.contentId);
           assert.equal(browserPane?.target?.targetKind, "browser_url");
           assert.equal(browserPane?.target?.blockedReason, null);
+          const restoredHtmlApply = server.contentSetRequests
+            .slice(initialContentApplyCount)
+            .find((request) => request.contentId === htmlPush.contentId);
+          assert.deepEqual(
+            (restoredHtmlApply?.restoredDrawings as Array<{ strokeId: string }> | undefined)?.map((stroke) => stroke.strokeId),
+            ["stroke_restart_paint"],
+          );
+          const restoredRead = await restartedRuntime.read({ fingerprint: server.surfaceId, paneId: htmlPane!.paneId });
+          assert.deepEqual(restoredRead.liveFrame?.strokes.map((stroke) => stroke.strokeId), ["stroke_restart_paint"]);
+          assert.deepEqual(restoredRead.liveDirtyStrokeIds, ["stroke_restart_paint"]);
 
           const targetState = restartedInternal.persistentState.targetStateBySurfaceId[server.surfaceId];
           assert.ok(targetState);

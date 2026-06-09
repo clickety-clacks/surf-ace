@@ -1625,7 +1625,7 @@ export class SurfaceCore {
       pane.history = pane.history.slice(0, pane.historyIndex + 1);
     }
     const nextEntry: HistoryEntry = {
-      annotations: [],
+      annotations: payload.restoredDrawings ? structuredClone(payload.restoredDrawings) : [],
       content: cloneContent(payload.content),
       contentId: payload.contentId,
       contentType: payload.contentType,

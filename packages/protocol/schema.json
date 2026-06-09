@@ -1431,6 +1431,12 @@
                       "minLength": 1
                     }
                   }
+                },
+                "restoredDrawings": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Stroke"
+                  }
                 }
               }
             },

@@ -1010,6 +1010,8 @@ type PersistedRestartContentEntry = {
   contentValue: unknown;
   display: ContentDisplay | null;
   historyOwnerToken: string | null;
+  liveDirtyStrokeIds?: string[];
+  liveFrame?: SurfAceFrame | null;
   paneLabel: number;
   remotePaneId?: number;
   revision: number;
@@ -2182,6 +2184,22 @@ function convertStrokeToFrameStroke(
     startedAt: firstPoint?.timestamp ?? fallbackTimestamp,
     strokeId: stroke.strokeId,
   };
+}
+
+function restoredDrawingsFromFrame(frame: SurfAceFrame | null): Stroke[] | undefined {
+  if (!frame || frame.strokes.length === 0) {
+    return undefined;
+  }
+  return frame.strokes.map((stroke) => ({
+    points: stroke.points.map((point, index) => ({
+      pressure: point.pressure,
+      timestamp: (index === 0 ? stroke.startedAt : index === stroke.points.length - 1 ? stroke.endedAt : frame.updatedAt) as EpochMs,
+      x: point.x,
+      y: point.y,
+    })),
+    strokeId: stroke.strokeId as StrokeId,
+    tool: "pencil",
+  }));
 }
 
 function ensureDirectory(dirPath: string): Promise<void> {
@@ -7156,6 +7174,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             contentId: pane.activeContentId,
             contentType: pane.contentType,
             ...(pane.display ? { display: structuredClone(pane.display) } : {}),
+            ...(restoredDrawingsFromFrame(pane.buffer.liveFrame)
+              ? { restoredDrawings: restoredDrawingsFromFrame(pane.buffer.liveFrame) }
+              : {}),
             historyOwnerToken:
               pane.historyOwnerToken ??
               historyOwnerTokenForSession(pane.ownerSessionKey ?? undefined),
@@ -7480,6 +7501,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           contentId: reuseExistingContentIdentity ? pane.activeContentId! : makeContentId(),
           contentType: contentTarget.contentType,
           ...(targetDisplay ? { display: targetDisplay } : {}),
+          ...(restoredDrawingsFromFrame(pane.buffer.liveFrame)
+            ? { restoredDrawings: restoredDrawingsFromFrame(pane.buffer.liveFrame) }
+            : {}),
           historyOwnerToken: historyOwnerTokenForSession(pane.ownerSessionKey ?? undefined),
           paneId: pane.remotePaneId,
           revision: asRevision(
@@ -9943,6 +9967,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         sessionKey: entry.sessionKey,
         targetId: null,
       });
+      pane.buffer.liveFrame = entry.liveFrame ? structuredClone(entry.liveFrame) : null;
+      pane.buffer.liveDirtyStrokeIds = entry.liveDirtyStrokeIds ? [...entry.liveDirtyStrokeIds] : [];
     }
     this.restartContentBySurface.delete(surface.surfaceId);
   }
@@ -10013,6 +10039,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           contentValue: denormalizeContent(entry.contentType, entry.contentValue),
           display: entry.display ? structuredClone(entry.display) : null,
           historyOwnerToken: entry.historyOwnerToken,
+          liveDirtyStrokeIds: [...pane.buffer.liveDirtyStrokeIds],
+          liveFrame: cloneFrame(pane.buffer.liveFrame),
           paneLabel: this.projectedPaneLabel(surface, pane),
           remotePaneId: Number(pane.remotePaneId),
           revision: entry.revision,
