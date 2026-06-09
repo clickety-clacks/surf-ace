@@ -9873,6 +9873,27 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const initialTargetApplyCount = server.targetApplyRequests.length;
         const initialTopologyApplyCount = server.topologyApplyRequests.length;
         const internalRuntime = runtime as any;
+        const persistedAfterOfficialSetup = JSON.parse(
+          await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8"),
+        ) as {
+          contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown; paneLabel?: number }>>;
+          screens?: Array<{ fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
+        };
+        assert.equal(
+          persistedAfterOfficialSetup.screens?.some((screen) =>
+            screen.fingerprint === server.surfaceId &&
+            screen.panes?.map((pane) => pane.paneLabel).join(",") === "1,2"
+          ),
+          true,
+        );
+        assert.equal(
+          persistedAfterOfficialSetup.contentContinuity?.[server.surfaceId]?.some((entry) =>
+            entry.contentId === htmlPush.contentId &&
+            entry.paneLabel === 1 &&
+            entry.contentValue === "<main>restored html</main>"
+          ),
+          true,
+        );
         const preBounceSurface = internalRuntime.surfaces.get(server.surfaceId);
         assert.ok(preBounceSurface);
         const preBounceHtmlPane = preBounceSurface.panes.get(paneIds[0]!);

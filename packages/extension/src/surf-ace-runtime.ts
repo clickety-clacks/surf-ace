@@ -4106,7 +4106,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       nextPanes,
     });
 
-    this.queuePersistScreenSnapshot("topology realization");
+    await this.persistScreenSnapshot();
     const topology = managedLayoutToSummary(collapseManagedLayout(surface.layout))!;
     return {
       createdPaneIds,
@@ -4168,7 +4168,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.tombstonePaneTarget(surface, pane);
     this.repairLivePaneLabelInvariant("pane close", surface);
 
-    this.queuePersistScreenSnapshot("pane close");
+    await this.persistScreenSnapshot();
     const displayId = visiblePaneAddress(surface.windowLabel, pane.paneLabel);
     return {
       displayId,
@@ -4243,6 +4243,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         waitForVisibleTextChangeFrom: previousVisibleText,
       });
     }
+    await this.persistScreenSnapshot();
     return result;
   }
 
@@ -7078,7 +7079,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
       surface.topologyApplyInFlight = false;
       await this.publishAuthorityState(surface);
-      this.queuePersistScreenSnapshot("topology apply");
+      await this.persistScreenSnapshot();
     } catch (error) {
       surface.topologyApplyInFlight = false;
       await this.republishAuthorityAfterFailedTopology(surface);
@@ -9343,7 +9344,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }),
     );
     await this.persistState();
-    this.queuePersistScreenSnapshot(`target state (${reason})`);
+    await this.persistScreenSnapshot();
   }
 
   private async persistSurfaceTargetStateImmediately(surface: ManagedSurface, reason: string): Promise<void> {
@@ -9357,7 +9358,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }),
     );
     await this.persistState();
-    this.queuePersistScreenSnapshot(`target state (${reason})`);
+    await this.persistScreenSnapshot();
   }
 
   private recordTargetLifecycleEvent(
