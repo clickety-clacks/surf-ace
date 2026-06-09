@@ -9843,7 +9843,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           "target.browser_url.v1",
         ];
       },
-      run: async ({ discovery, runtime, server, stateDir }) => {
+      run: async ({ discovery, infos, runtime, server, stateDir }) => {
         const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
         const split = await runtime.split({
           count: 2,
@@ -9923,11 +9923,35 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         preBounceHtmlPane.buffer.liveDirtyStrokeIds = ["stroke_restart_paint"];
         await internalRuntime.persistScreenSnapshot();
         const preBounceSnapshot = await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8");
+        const trustedRestartSnapshot = internalRuntime.buildScreenSummary(preBounceSurface);
+        const bootstrapPane = structuredClone(preBounceHtmlPane);
+        preBounceSurface.panes = new Map([[bootstrapPane.paneId, bootstrapPane]]);
+        preBounceSurface.layout = { paneId: bootstrapPane.paneId, type: "pane" };
+        internalRuntime.restoreRestartTopology(preBounceSurface, trustedRestartSnapshot);
+        assert.deepEqual(
+          [...preBounceSurface.panes.values()].map((pane: any) => pane.paneLabel).sort((left: number, right: number) => left - right),
+          [1, 2],
+        );
+        assert.ok(
+          infos.some((info) =>
+            info.includes("event=restart_topology_restore_applied") &&
+            info.includes("bootstrap_pane_count=1") &&
+            info.includes("restored_pane_count=2") &&
+            info.includes("target_lineage_match_count=")),
+        );
         await runtime.stop();
         await fs.writeFile(path.join(stateDir, "surf-ace-runtime-screens.json"), preBounceSnapshot);
 
         server.resetToSinglePane(server.initialRemotePaneId);
-        const restartedRuntime = createSurfAceRuntime({ discovery, stateDir });
+        const restartInfos: string[] = [];
+        const restartedRuntime = createSurfAceRuntime({
+          discovery,
+          logger: {
+            info: (message: string) => restartInfos.push(message),
+            warn: () => {},
+          },
+          stateDir,
+        });
         try {
           await restartedRuntime.start();
           const restartedInternal = restartedRuntime as any;
@@ -9971,6 +9995,30 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
               (record: any) => record.targetId === browserPush.targetId && record.currentState === "current",
             ),
             true,
+          );
+          assert.ok(
+            restartInfos.some((info) =>
+              info.includes("event=restart_restore_begin") &&
+              info.includes("snapshot_pane_count=2") &&
+              info.includes("content_continuity_count=1")),
+          );
+          assert.ok(
+            restartInfos.some((info) =>
+              info.includes("event=restart_topology_restore_applied") &&
+              info.includes("restored_pane_count=2") &&
+              info.includes("target_lineage_match_count=")),
+          );
+          assert.ok(
+            restartInfos.some((info) =>
+              info.includes("event=target_lifecycle_hydrate_result") &&
+              info.includes("target_record_count=") &&
+              info.includes("current_target_count=") &&
+              info.includes("stale_target_count=")),
+          );
+          assert.ok(
+            restartInfos.some((info) =>
+              info.includes("event=restart_content_restore_result") &&
+              info.includes("applied_count=1")),
           );
         } finally {
           await restartedRuntime.stop();
