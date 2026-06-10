@@ -11127,6 +11127,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             }
             return;
           }
+          // Ensure any trusted restart ownership/topology is applied before the first pair
+          // attempt so that preserve-on-blank-pair can trigger on the initial pair.
+          this.restoreRestartOwnership(surface);
           this.logger.info?.(
             runtimeDiagnostic("pair_request_begin", {
               resume: Boolean(this.shouldAttemptResume(surface)),
