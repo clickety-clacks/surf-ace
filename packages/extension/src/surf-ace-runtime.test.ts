@@ -3612,6 +3612,77 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("startup defers stale self-owned tombstone when contentContinuity hints exist", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-continuity-deferral-"));
+    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+    try {
+      const surfaceId = "sf_continuity_hint";
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 2,
+            nextRemotePaneId: 96363,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId: "pv_continuity_deferral",
+            selfOwnedSurfaceIds: {
+              [surfaceId]: {
+                observedAt: Date.now() - 60_000,
+                providerId: "pv_continuity_deferral",
+                source: "current_local_ownership",
+              },
+            },
+            targetStateBySurfaceId: {},
+            tombstonedEndpointIds: [],
+            version: 1,
+            windowLabels: {},
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify(
+          {
+            contentContinuity: {
+              [surfaceId]: [
+                {
+                  contentId: "ct_deferral",
+                  contentType: "html",
+                  contentValue: "<main>restore me</main>",
+                  display: null,
+                  historyOwnerToken: null,
+                  paneLabel: 1,
+                  remotePaneId: 1,
+                  revision: 1,
+                  sessionKey: "agent:test:deferral",
+                },
+              ],
+            },
+            screens: [],
+            updatedAt: Date.now(),
+            version: 1,
+          },
+          null,
+          2,
+        ),
+      );
+
+      const discovery = new StaticDiscoveryService([]);
+      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+      assert.deepEqual(await runtime.listScreens(), []);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.equal(diagnostics.surfaceTombstones[surfaceId], undefined);
+    } finally {
+      await runtime?.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("startup tombstones stale legacy-root target imports without refreshing ownership age", async () => {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-current-"));
     const legacyStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-root-"));
@@ -12809,6 +12880,50 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         direction: "vertical",
         type: "split",
       });
+    });
+  });
+
+  await t.test("blank single-pane pair does not collapse trusted multi-pane local topology", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      // Create a local trusted multi-pane topology (revision > 0 and >1 visible panes)
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({ count: 2, direction: "vertical", fingerprint: server.surfaceId, paneId: firstPaneId });
+      const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+      // Mark as accepted topology with a non-zero revision
+      surface.topologyRevision = 5;
+
+      // Simulate an incoming blank single-pane pair import with pruning enabled
+      internalRuntime.applyPairPaneState(
+        surface,
+        [
+          {
+            contentType: null,
+            currentContentId: null,
+            currentRevision: 0,
+            paneId: server.initialRemotePaneId,
+            paneLabel: 1,
+          },
+        ],
+        false,
+        {
+          pairStateLayout: { type: "pane", paneId: paneIds[0]! } as any,
+          pairStateTopologyRevision: 100,
+          pruneStalePanes: true,
+          // Even if empty content authority is ignored, the guard must prevent collapse
+          ignoreEmptyPairContentAuthority: true,
+        },
+      );
+
+      // Expect the local multi-pane topology to be preserved (no collapse to single pane)
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      assert.ok(screen);
+      assertPaneLabelsWithOpaqueIds(screen.panes, [1, 2]);
+      assert.equal(surface.topologyRevision, 5);
+      assert.equal(surface.layout?.type, "split");
     });
   });
 
