@@ -11171,6 +11171,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId) &&
               pairResponse.payload.state.panes.length === 1 &&
               pairResponse.payload.state.panes[0]?.currentContentId === null;
+          const pairIsBlankSinglePane =
+            pairResponse.payload.state.panes.length === 1 &&
+            (pairResponse.payload.state.panes[0]?.currentContentId === null);
+          const treatPairAsBootstrap = preserveRestartPairState || (hadAcceptedLocalTopology && pairIsBlankSinglePane);
           this.logger.info?.(
             runtimeDiagnostic("pair_restart_preserve_decision", {
               had_accepted_local_topology: hadAcceptedLocalTopology,
@@ -11180,6 +11184,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 pairResponse.payload.state.panes.length === 1 &&
                 (pairResponse.payload.state.panes[0]?.currentContentId === null),
               preserve_restart_pair_state: preserveRestartPairState,
+              treat_pair_as_bootstrap: treatPairAsBootstrap,
               surface_id: surface.surfaceId,
             }),
           );
@@ -11211,11 +11216,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               }
           }
           this.applyPairState(surface, pairResponse, {
-            ignoreEmptyPairContentAuthority: preserveRestartPairState,
+            ignoreEmptyPairContentAuthority: treatPairAsBootstrap,
             previousOwnership,
-            prunePairClearedPaneTargets: !preserveRestartPairState,
-            pruneStalePanes: !preserveRestartPairState,
-            skipPairPaneState: preserveRestartPairState,
+            prunePairClearedPaneTargets: !treatPairAsBootstrap,
+            pruneStalePanes: !treatPairAsBootstrap,
+            skipPairPaneState: treatPairAsBootstrap,
           });
           this.markPairConnected(
             surface,
@@ -11223,7 +11228,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             pairResponse.payload.ownershipEpoch,
             pairResponse.payload.resumed,
           );
-          if (preserveRestartPairState && this.hasAcceptedSurfaceTopology(surface)) {
+          if (treatPairAsBootstrap && this.hasAcceptedSurfaceTopology(surface)) {
             await this.pushTopology(surface);
           }
           this.restartTopologyRestoredSurfaceIds.delete(surface.surfaceId);
