@@ -9404,6 +9404,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       Object.entries(snapshotFile?.contentContinuity ?? {})
         .filter(([surfaceId]) => trustedSurfaceIds.has(surfaceId)),
     );
+    this.logger.info?.(
+      runtimeDiagnostic("restart_snapshots_loaded", {
+        trusted_count: trustedRestartScreens.length,
+        surface_ids: [...trustedSurfaceIds].slice(0, 8).join(","),
+      }),
+    );
   }
 
   private isTrustedRestartScreen(screen: SurfAceScreenSummary): boolean {
@@ -9439,10 +9445,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private restoreRestartOwnership(surface: ManagedSurface): void {
     if (surface.hasPairedInGatewaySession || surface.sessionId) {
+      this.logger.info?.(
+        runtimeDiagnostic("restart_restore_skipped", {
+          reason: "already_paired_or_has_session",
+          surface_id: surface.surfaceId,
+        }),
+      );
       return;
     }
     const snapshot = this.restartSnapshots.get(surface.surfaceId);
     if (!snapshot || !this.hasTrustedLocalOwnershipProvenanceForProvider(snapshot, this.persistentState.providerId)) {
+      this.logger.info?.(
+        runtimeDiagnostic("restart_restore_skipped", {
+          reason: !snapshot ? "no_trusted_snapshot" : "untrusted_local_ownership",
+          surface_id: surface.surfaceId,
+        }),
+      );
       return;
     }
     const sessionId = snapshot._debug?.sessionId as string;
