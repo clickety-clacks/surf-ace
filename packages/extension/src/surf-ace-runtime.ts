@@ -11144,9 +11144,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             const hadAcceptedLocalTopology =
               this.hasAcceptedSurfaceTopology(surface) &&
               surface.panes.size > 0;
-            const hadRestartOwnershipPendingPair =
-              surface.restartOwnershipPendingPair &&
-              this.hasValidResumeSession(surface);
+            // Preserve pending restart state even before a valid resume session exists.
+            // Requiring hasValidResumeSession here caused provider restarts with a blank
+            // single-pane pair response to clear locally restored multi-pane topology
+            // and snapshots. That led to the visible collapse/blank even though we had
+            // trusted local restart context. Pending restart ownership is explicitly the
+            // pre-pair window; do not gate on hasValidResumeSession.
+            const hadRestartOwnershipPendingPair = surface.restartOwnershipPendingPair;
             const previousOwnership = {
               ownershipEpoch: surface.ownershipEpoch,
               sessionId: surface.sessionId,
@@ -11156,6 +11160,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId) &&
               pairResponse.payload.state.panes.length === 1 &&
               pairResponse.payload.state.panes[0]?.currentContentId === null;
+          this.logger.info?.(
+            runtimeDiagnostic("pair_restart_preserve_decision", {
+              had_accepted_local_topology: hadAcceptedLocalTopology,
+              had_restart_pending_pair: hadRestartOwnershipPendingPair,
+              restart_topology_restored: this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId),
+              pair_blank_single_pane:
+                pairResponse.payload.state.panes.length === 1 &&
+                (pairResponse.payload.state.panes[0]?.currentContentId === null),
+              preserve_restart_pair_state: preserveRestartPairState,
+              surface_id: surface.surfaceId,
+            }),
+          );
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
               panes: pairResponse.payload.state.panes.length,
