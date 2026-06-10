@@ -1278,33 +1278,51 @@ export class SurfaceWsServer {
         await this.admitProviderWindowLabel(surfaceId, request.payload.windowLabel, "pair.resume", request.id);
       });
     } else {
-      const nativeHostedPaneIds = this.core.nativeHostedPaneIdsExcluding(surfaceId, []);
-      if (nativeHostedPaneIds.length > 0) {
-        const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
-          surfaceId,
-          nativeHostedPaneIds,
-          "pair.request fresh admission",
+      const hasRecoverable = this.hasRecoverablePairState(surfaceId);
+      if (hasRecoverable) {
+        // Client visual continuity (T1206): keep last-visible topology/content
+        // while the provider is reconnecting. Only adopt the provider window
+        // label; defer any native releases until an explicit provider mutation.
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_fresh_admission_preserve_local_state",
+          {
+            provider_id: providerId,
+            request_id: request.id,
+            socket_id: meta?.socketId,
+            surface_id: surfaceId,
+          },
         );
-        if (releaseFailure) {
-          persistentServerDiagnostic(
-            "warn",
-            "pair_request_fresh_admission_native_release_failed",
-            {
-              error: releaseFailure,
-              pane_ids: nativeHostedPaneIds.map((paneId) => String(paneId)),
-              provider_id: providerId,
-              request_id: request.id,
-              socket_id: meta?.socketId,
-              surface_id: surfaceId,
-            },
+        this.core.applyWindowLabelOnly(surfaceId, request.payload.windowLabel);
+      } else {
+        const nativeHostedPaneIds = this.core.nativeHostedPaneIdsExcluding(surfaceId, []);
+        if (nativeHostedPaneIds.length > 0) {
+          const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
+            surfaceId,
+            nativeHostedPaneIds,
+            "pair.request fresh admission",
           );
+          if (releaseFailure) {
+            persistentServerDiagnostic(
+              "warn",
+              "pair_request_fresh_admission_native_release_failed",
+              {
+                error: releaseFailure,
+                pane_ids: nativeHostedPaneIds.map((paneId) => String(paneId)),
+                provider_id: providerId,
+                request_id: request.id,
+                socket_id: meta?.socketId,
+                surface_id: surfaceId,
+              },
+            );
+          }
         }
+        this.core.resetProviderBootstrapTopology(surfaceId, {
+          initialPaneId: Number(request.payload.initialPaneId),
+          initialPaneLabel: Number(request.payload.initialPaneLabel),
+          windowLabel: request.payload.windowLabel,
+        });
       }
-      this.core.resetProviderBootstrapTopology(surfaceId, {
-        initialPaneId: Number(request.payload.initialPaneId),
-        initialPaneLabel: Number(request.payload.initialPaneLabel),
-        windowLabel: request.payload.windowLabel,
-      });
     }
 
     const session: ActiveSession = {
@@ -1371,8 +1389,13 @@ export class SurfaceWsServer {
   }
 
   private hasRecoverablePairState(surfaceId: string): boolean {
+    // Treat any locally-visible state as recoverable continuity, including
+    // native-hosted panes whose visible content is not represented in the
+    // pairState history (contentId/contentType are null when externalNative).
     const state = this.core.pairState(surfaceId);
-    return state.topologyRevision > 0 ||
+    const hasNativeVisible = this.core.nativeHostedPaneIdsExcluding(surfaceId, []).length > 0;
+    return hasNativeVisible ||
+      state.topologyRevision > 0 ||
       state.panes.length > 1 ||
       state.panes.some((pane) => pane.currentContentId !== null || pane.contentType !== null);
   }

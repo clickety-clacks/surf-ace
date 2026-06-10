@@ -516,6 +516,10 @@ class FakeSurfAceWsServer {
     return this.pairedSocketsBySurfaceId.get(surfaceId) ?? null;
   }
 
+  visiblePanesFor(surfaceId = this.surfaceId): TestPane[] {
+    return [...this.requireSurface(surfaceId).panes.values()].map((pane) => structuredClone(pane));
+  }
+
   markSurfacePairedForList(surfaceId: string): void {
     this.pairedSocketsBySurfaceId.set(surfaceId, {} as import("ws").WebSocket);
   }
@@ -1306,6 +1310,17 @@ class FakeSurfAceWsServer {
             pane.contentId = null;
             pane.contentType = null;
             pane.externalNative = true;
+          }
+        }
+        if (String(message.payload?.targetKind ?? "") === "browser_url") {
+          const targetSurface = this.requirePairedSurface(socket);
+          const pane = [...targetSurface.panes.values()].find((candidate) =>
+            candidate.paneLineageId === message.payload?.paneLineageId
+          );
+          if (pane) {
+            pane.contentId = String(message.payload?.targetId ?? "");
+            pane.contentType = "browser_url";
+            pane.externalNative = false;
           }
         }
         const targetPayload = message.payload?.targetPayload && typeof message.payload.targetPayload === "object"
@@ -9262,6 +9277,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           assert.equal(htmlPane?.activeContent?.contentId, htmlPush.contentId);
           assert.equal(browserPane?.target?.targetKind, "browser_url");
           assert.equal(browserPane?.target?.blockedReason, null);
+
+          const providerVisiblePanes = server.visiblePanesFor();
+          assert.equal(providerVisiblePanes.length, 2);
+          const providerHtmlPane = providerVisiblePanes.find((pane) => pane.paneLabel === 1);
+          const providerBrowserPane = providerVisiblePanes.find((pane) => pane.paneLabel === 2);
+          assert.equal(providerHtmlPane?.contentId, htmlPush.contentId);
+          assert.equal(providerHtmlPane?.contentType, "html");
+          assert.equal(providerBrowserPane?.contentId, browserPush.targetId);
+          assert.equal(providerBrowserPane?.contentType, "browser_url");
 
           const targetState = restartedInternal.persistentState.targetStateBySurfaceId[server.surfaceId];
           assert.ok(targetState);

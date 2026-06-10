@@ -11146,8 +11146,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               surface.panes.size > 0;
             const hadRestartOwnershipPendingPair =
               surface.restartOwnershipPendingPair &&
-              surface.hasPairedInGatewaySession &&
-              surface.sessionId !== null;
+              this.hasValidResumeSession(surface);
             const previousOwnership = {
               ownershipEpoch: surface.ownershipEpoch,
               sessionId: surface.sessionId,
@@ -11172,6 +11171,17 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
                 preserveRestartContent: hadRestartOwnershipPendingPair,
                 preserveTargetState: this.hasSurfaceTargetState(surface),
               });
+              if (pairResponse.payload.state.panes.length === 1) {
+                this.logger.warn?.(
+                  runtimeDiagnostic("restart_preserve_skipped_on_blank_pair", {
+                    reason: hadRestartOwnershipPendingPair
+                      ? "topology_not_restored_locally"
+                      : "no_trusted_restart_context",
+                    resumed: pairResponse.payload.resumed,
+                    surface_id: surface.surfaceId,
+                  }),
+                );
+              }
           }
           this.applyPairState(surface, pairResponse, {
             ignoreEmptyPairContentAuthority: preserveRestartPairState,

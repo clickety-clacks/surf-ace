@@ -1092,18 +1092,27 @@ test("ws server re-admits same-provider reconnect with an invalid resume token",
     assert.equal(invalid.payload.resumed, false);
     assert.notEqual(invalid.payload.sessionId, first.payload.sessionId);
     assert.equal(invalid.payload.ownershipEpoch, first.payload.ownershipEpoch + 1);
-    assert.deepEqual(invalid.payload.state.layout, { paneId: 7, type: "pane" });
-    assert.equal(invalid.payload.state.panes.length, 1);
-    assert.equal(invalid.payload.state.panes[0]?.paneId, 7);
-    assert.equal(invalid.payload.state.panes[0]?.paneLabel, 77);
-    assert.equal(invalid.payload.state.panes[0]?.currentContentId, null);
-    assert.deepEqual(core.pairState(surfaceId).layout, { paneId: 7, type: "pane" });
+    // Client continuity invariant (T1206): preserve visible topology/content on fresh admission
+    // when recoverable state exists, even if resume token is invalid.
+    assert.deepEqual(
+      invalid.payload.state.panes.map((pane) => pane.paneId),
+      [1, 2],
+    );
+    assert.equal(invalid.payload.state.panes[1]?.currentContentId, "ct_applied");
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
 
     await closeSocket(resumedSocket);
   });
 });
 
-test("ws server fresh same-provider admission clears native-hosted state for the same initial pane", async () => {
+test("ws server fresh same-provider admission preserves native-hosted state until provider replaces it", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
@@ -1168,23 +1177,18 @@ test("ws server fresh same-provider admission clears native-hosted state for the
 
       assert.equal(admitted.ok, true);
       assert.equal(admitted.payload.resumed, false);
-      assert.equal(admitted.payload.state.panes.length, 1);
-      assert.equal(admitted.payload.state.panes[0]?.paneId, pane.paneId);
-      assert.equal(admitted.payload.state.panes[0]?.paneLabel, 42);
-      assert.equal(admitted.payload.state.panes[0]?.currentContentId, null);
+      // Continuity: preserve existing topology and native-hosted content until an explicit mutation.
+      assert.deepEqual(
+        admitted.payload.state.panes.map((p) => p.paneId),
+        [Number(pane.paneId)],
+      );
       const rendererPane = core.getRendererWindowState(surfaceId).panes[0]!;
-      assert.equal(rendererPane.externalNative, false);
-      assert.equal(rendererPane.content.contentType, null);
-      assert.deepEqual(received.map((message) => (message as { type: string }).type), [
-        "get_status",
-        "native_pane.host",
-        "overlay_regions.set",
-        "native_pane.release",
-      ]);
-      assert.deepEqual(received[3], {
-        pane_ids: [String(pane.paneId)],
-        type: "native_pane.release",
-      });
+      assert.equal(rendererPane.externalNative, true);
+      // No immediate native release on pair; provider will command replacement later.
+      assert.deepEqual(
+        received.map((message) => (message as { type?: string }).type).filter(Boolean),
+        ["get_status", "native_pane.host", "overlay_regions.set"],
+      );
 
       await closeSocket(replacement);
     }, { compositorSocketPath: socketPath });
