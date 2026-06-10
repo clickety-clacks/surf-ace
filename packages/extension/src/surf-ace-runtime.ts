@@ -2931,6 +2931,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly tombstonedSurfaceIds = new Set<SurfaceId>();
   private readonly livePairedSelfRediscoveredSurfaceIds = new Set<string>();
   private readonly startupImportedOwnershipSurfaceIds = new Set<string>();
+  private readonly pendingGuardTopologyPublishSurfaceIds = new Set<string>();
   private lastDiscoveryUpdateLogAt = 0;
   private lastDiscoveryUpdateLogKey = "";
   private persistentState: RuntimeStateFile = {
@@ -11304,6 +11305,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             pruneStalePanes: !treatPairAsBootstrap,
             skipPairPaneState: treatPairAsBootstrap,
           });
+          if (this.pendingGuardTopologyPublishSurfaceIds.delete(surface.surfaceId)) {
+            try {
+              await this.pushTopology(surface, { increment: true });
+              this.logger.info?.(
+                runtimeDiagnostic("pair_import_guard_topology_published", {
+                  pane_count: this.visiblePanes(surface).length,
+                  surface_id: surface.surfaceId,
+                }),
+              );
+            } catch (error) {
+              this.logger.warn?.(
+                runtimeDiagnostic("pair_import_guard_topology_publish_failed", {
+                  error: String(error),
+                  surface_id: surface.surfaceId,
+                }),
+              );
+            }
+          }
           this.markPairConnected(
             surface,
             asSessionId(pairResponse.payload.sessionId),
@@ -12730,6 +12749,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             topology_revision: surface.topologyRevision,
           }),
         );
+        // Request a follow-up provider topology publish after pair completes.
+        this.pendingGuardTopologyPublishSurfaceIds.add(surface.surfaceId);
         // Intentionally do not mutate panes/layout/revision or apply empty content authority.
         // Still queue a screen snapshot to record the observation without destructive changes.
         this.queuePersistScreenSnapshot("pair import guard");
