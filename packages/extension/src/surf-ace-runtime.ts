@@ -11152,6 +11152,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           if (canonicalSurface !== surface) {
             surface = canonicalSurface;
           }
+          // Now that we have the canonical provider-assigned surface id,
+          // attempt restart restoration again keyed by this id so the very
+          // first blank single-pane pair can be preserved in-flight.
+          this.restoreRestartOwnership(surface);
             const hadAcceptedLocalTopology =
               this.hasAcceptedSurfaceTopology(surface) &&
               surface.panes.size > 0;
