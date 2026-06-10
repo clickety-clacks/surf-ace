@@ -10443,14 +10443,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         `Surf Ace surface is not connected: ${surface.surfaceId}`,
       );
     }
-    const hasRestartOwnershipPendingPair =
-      surface.restartOwnershipPendingPair &&
-      this.hasValidResumeSession(surface);
+    // Treat pending restart as sufficient to preserve locally restored topology/content
+    // before the first successful resume. Gating on hasValidResumeSession here causes
+    // us to clear trusted local restart state just before pair, which collapses panes.
+    const hasRestartOwnershipPendingPair = surface.restartOwnershipPendingPair;
     if (
       !this.hasAcceptedSurfaceTopology(surface) &&
       surface.panes.size > 0 &&
       !hasRestartOwnershipPendingPair
     ) {
+      this.logger.warn?.(
+        runtimeDiagnostic("pre_pair_clear_local_topology", {
+          had_restart_pending_pair: hasRestartOwnershipPendingPair,
+          panes: surface.panes.size,
+          surface_id: surface.surfaceId,
+        }),
+      );
       this.clearSurfaceLocalTopologyState(surface, {
         preserveRestartContent: hasRestartOwnershipPendingPair,
         preserveTargetState: true,
