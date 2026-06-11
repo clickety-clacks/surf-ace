@@ -2990,6 +2990,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly tombstonedSurfaceIds = new Set<SurfaceId>();
   private readonly livePairedSelfRediscoveredSurfaceIds = new Set<string>();
   private readonly startupImportedOwnershipSurfaceIds = new Set<string>();
+  private readonly pendingGuardTopologyPublishSurfaceIds = new Set<string>();
   private lastDiscoveryUpdateLogAt = 0;
   private lastDiscoveryUpdateLogKey = "";
   private persistentState: RuntimeStateFile = {
@@ -8380,6 +8381,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 	        .filter((screen) => this.hasTrustedLocalOwnershipProvenanceForProvider(screen, this.persistentState.providerId))
 	        .map((screen) => screen.fingerprint),
     );
+    const continuitySurfaceIds = new Set(
+      Object.keys((currentSnapshot?.contentContinuity ?? {}) as Record<string, unknown>),
+    );
     const persistedSurfaceIds = new Set([
       ...Object.keys(this.persistentState.selfOwnedSurfaceIds ?? {}),
       ...Object.keys(this.persistentState.targetStateBySurfaceId ?? {}),
@@ -8394,6 +8398,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         !this.ownershipRecoveryPolicy.isTrustedProviderLineageId(this.persistentState, ownership.providerId) ||
         persistedRuntimeSurfaceIds.has(surfaceId) ||
         recoverableSurfaceIds.has(surfaceId) ||
+        continuitySurfaceIds.has(surfaceId) ||
         this.hasBoundedStartupSelfOwnershipRecovery(surfaceId, ownership) ||
         this.hasRecoverableStartupOwnershipPath(surfaceId)
       ) {
@@ -8974,6 +8979,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.hasPairedInGatewaySession &&
       surface.sessionId !== null &&
       !surface.restartOwnershipPendingPair
+    );
+  }
+
+  private hasProviderAuthorityContinuityOutsideRemotePanes(
+    surface: ManagedSurface,
+    pairRemotePaneIds: ReadonlySet<number>,
+  ): boolean {
+    const hasVisibleContinuity = this.visiblePanes(surface).some((pane) =>
+      isBoundRemotePaneId(pane.remotePaneId) &&
+      !pairRemotePaneIds.has(Number(pane.remotePaneId)) &&
+      this.visibleHistoryEntry(pane) !== null
+    );
+    if (hasVisibleContinuity) {
+      return true;
+    }
+    const restartContent = this.restartContentBySurface.get(surface.surfaceId) ?? [];
+    return restartContent.some((entry) =>
+      typeof entry.remotePaneId === "number" && !pairRemotePaneIds.has(entry.remotePaneId)
     );
   }
 
@@ -11799,6 +11822,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             pruneStalePanes: !preserveProviderAuthorityPairState,
             skipPairPaneState: preserveProviderAuthorityPairState && !adoptEmptyPairProviderPaneState,
           });
+          if (this.pendingGuardTopologyPublishSurfaceIds.delete(surface.surfaceId)) {
+            try {
+              await this.pushTopology(surface, { increment: true });
+              this.logger.info?.(
+                runtimeDiagnostic("pair_import_guard_topology_published", {
+                  pane_count: this.visiblePanes(surface).length,
+                  surface_id: surface.surfaceId,
+                }),
+              );
+            } catch (error) {
+              this.logger.warn?.(
+                runtimeDiagnostic("pair_import_guard_topology_publish_failed", {
+                  error: String(error),
+                  surface_id: surface.surfaceId,
+                }),
+              );
+            }
+          }
           this.markPairConnected(
             surface,
             asSessionId(pairResponse.payload.sessionId),
@@ -13328,6 +13369,34 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         }
         this.adoptProviderPaneLabels(surface, providerPaneLabels);
         this.queuePersistScreenSnapshot("apply pair state");
+        return;
+      }
+
+      const pairIsBlankSinglePane =
+        paneStates.length === 1 && paneStates[0]?.currentContentId === null;
+      const pairRemotePaneIds = new Set(paneStates.map((paneState) => Number(paneState.paneId)));
+      const localVisibleCount = this.visiblePanes(surface).length;
+      const hasTrustedLocalMultiPane =
+        this.hasAcceptedSurfaceTopology(surface) &&
+        this.hasProviderAuthorityContinuityOutsideRemotePanes(surface, pairRemotePaneIds) &&
+        surface.topologyRevision > 0 &&
+        localVisibleCount > 1;
+      if (
+        (options.pruneStalePanes ?? true) &&
+        options.ignoreEmptyPairContentAuthority === true &&
+        pairIsBlankSinglePane &&
+        hasTrustedLocalMultiPane
+      ) {
+        this.logger.info?.(
+          runtimeDiagnostic("pair_import_guard_preserved_local_topology", {
+            local_visible_panes: localVisibleCount,
+            pair_panes: paneStates.length,
+            surface_id: surface.surfaceId,
+            topology_revision: surface.topologyRevision,
+          }),
+        );
+        this.pendingGuardTopologyPublishSurfaceIds.add(surface.surfaceId);
+        this.queuePersistScreenSnapshot("pair import guard");
         return;
       }
 

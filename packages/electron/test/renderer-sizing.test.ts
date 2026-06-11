@@ -129,9 +129,30 @@ test("browser_url diagnostics report host and guest sizing through surface comma
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /pane: elementDiagnostics\(view\.rootEl\)/);
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /scroll: elementDiagnostics\(view\.scrollEl\)/);
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webview: elementDiagnostics\(webview\)/);
-  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /browserUrlGuestDiagnostics\(webview\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /browserUrlGuestDiagnosticsWithTimeout\(webview\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webviewCurrentUrl: browserUrlElementCurrentUrl\(webview\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webviewTitle: browserUrlElementTitle\(webview\)/);
   assert.match(source.slice(renderBrowserIndex), /reason === "dom-ready:guest-viewport" \? "dom-ready" : "did-finish-load"/);
   assert.match(source.slice(renderBrowserIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\)/);
+});
+
+test("browser_url diagnostics report URL scheme, load errors, and readback result", async () => {
+  const source = await rendererSource();
+  const renderBrowserIndex = source.indexOf("function renderBrowserContent");
+
+  assert.ok(renderBrowserIndex > -1);
+  assert.match(source.slice(renderBrowserIndex), /browserUrlDiagnosticFields\(url\)/);
+  assert.match(source.slice(renderBrowserIndex), /browser_content_did_start_loading/);
+  assert.match(source.slice(renderBrowserIndex), /browser_content_page_title_updated/);
+  assert.match(source.slice(renderBrowserIndex), /browser_content_console_message/);
+  assert.match(source.slice(renderBrowserIndex), /browserUrlGuestDiagnosticsWithTimeout\(browserView\)\.catch/);
+  assert.match(source, /BROWSER_URL_DIAGNOSTIC_READBACK_TIMEOUT_MS = 500/);
+  assert.match(source.slice(renderBrowserIndex), /errorCode: failure\.errorCode/);
+  assert.match(source.slice(renderBrowserIndex), /failedUrl: failure\.validatedURL/);
+  assert.match(source.slice(renderBrowserIndex), /isMainFrame: failure\.isMainFrame/);
+  assert.match(source.slice(renderBrowserIndex), /currentUrl: browserUrlElementCurrentUrl\(browserView\)/);
+  assert.match(source.slice(renderBrowserIndex), /pageTitle: browserUrlElementTitle\(browserView\)/);
+  assert.match(source.slice(renderBrowserIndex), /readbackResult/);
 });
 
 test("browser_url render resets guest scroll before verification", async () => {
@@ -183,6 +204,17 @@ test("browser_url diagnostics do not change the active keyboard pane", async () 
   assert.ok(focusIndex > diagnosticsIndex);
   assert.match(source.slice(diagnosticsIndex, focusIndex), /recordBrowserUrlDiagnostics\(surfaceId, paneId/);
   assert.match(source.slice(diagnosticsIndex, focusIndex), /return;/);
+});
+
+test("browser_url navigation command forwards renderer readback evidence", async () => {
+  const source = await mainSource();
+  const navigationIndex = source.indexOf("case \"browser-url-navigation\"");
+  const drawIndex = source.indexOf("case \"draw-stroke\"", navigationIndex);
+
+  assert.ok(navigationIndex > -1);
+  assert.match(source.slice(navigationIndex, drawIndex), /currentUrl: payload\.currentUrl/);
+  assert.match(source.slice(navigationIndex, drawIndex), /pageTitle: payload\.pageTitle/);
+  assert.match(source.slice(navigationIndex, drawIndex), /readbackResult: payload\.readbackResult/);
 });
 
 test("keyboard shortcuts route pane navigation and focused pane scroll intents", async () => {

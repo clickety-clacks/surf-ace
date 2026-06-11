@@ -613,6 +613,27 @@ test("ws server diagnostics format concise structured fields", () => {
   );
 });
 
+test("ws server browser_url diagnostics expose scheme host and port", () => {
+  assert.deepEqual(
+    __test.browserUrlDiagnosticFields("http://tars.tail4105e8.ts.net:18800/www/smoke-alarm/index.html"),
+    {
+      url: "http://tars.tail4105e8.ts.net:18800/www/smoke-alarm/index.html",
+      url_host: "tars.tail4105e8.ts.net",
+      url_port: "18800",
+      url_scheme: "http",
+    },
+  );
+  assert.deepEqual(
+    __test.browserUrlDiagnosticFields("https://tars.tail4105e8.ts.net:19443/www/smoke-alarm/index.html"),
+    {
+      url: "https://tars.tail4105e8.ts.net:19443/www/smoke-alarm/index.html",
+      url_host: "tars.tail4105e8.ts.net",
+      url_port: "19443",
+      url_scheme: "https",
+    },
+  );
+});
+
 test("ws server rejects human strings as provider-supplied visible window IDs", async () => {
   await withServer(async ({ surfaceId, url }) => {
     const socket = await connect(url);
@@ -917,7 +938,7 @@ test("ws server rejects lockless invalid resume without clearing restored topolo
   });
 });
 
-test("ws server rejects lockless same-provider admission without resume before clearing restored topology", async () => {
+test("ws server admits lockless same-provider admission without clearing restored topology", async () => {
   await withServer(async ({ core, server, surfaceId, url }) => {
     const owner = await connect(url);
     const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
@@ -932,7 +953,7 @@ test("ws server rejects lockless same-provider admission without resume before c
     server.disconnectSurface(surfaceId, "test_relaunch");
 
     const replacement = await connect(url);
-    const rejected = await request(
+    const replacementResponse = await request(
       replacement,
       pairRequest(surfaceId, "pv_alpha", {
         initialPaneId: 7,
@@ -940,8 +961,15 @@ test("ws server rejects lockless same-provider admission without resume before c
       }),
     );
 
-    assert.equal(rejected.ok, false);
-    assert.equal(rejected.error.code, "invalid_resume");
+    assert.equal(replacementResponse.ok, true);
+    assert.equal(replacementResponse.op, "pair.request");
+    assert.equal(replacementResponse.payload.resumed, false);
+    assert.notEqual(replacementResponse.payload.sessionId, first.payload.sessionId);
+    assert.equal(replacementResponse.payload.ownershipEpoch, first.payload.ownershipEpoch + 1);
+    assert.deepEqual(
+      replacementResponse.payload.state.panes.map((pane) => pane.paneId),
+      [1, 2],
+    );
     assert.deepEqual(core.pairState(surfaceId).layout, {
       children: [
         { paneId: 1, type: "pane" },
@@ -1092,12 +1120,27 @@ test("ws server re-admits same-provider reconnect with an invalid resume token",
     assert.equal(invalid.payload.resumed, false);
     assert.notEqual(invalid.payload.sessionId, first.payload.sessionId);
     assert.equal(invalid.payload.ownershipEpoch, first.payload.ownershipEpoch + 1);
-    assert.deepEqual(invalid.payload.state.layout, { paneId: 7, type: "pane" });
-    assert.equal(invalid.payload.state.panes.length, 1);
-    assert.equal(invalid.payload.state.panes[0]?.paneId, 7);
-    assert.equal(invalid.payload.state.panes[0]?.paneLabel, 77);
-    assert.equal(invalid.payload.state.panes[0]?.currentContentId, null);
-    assert.deepEqual(core.pairState(surfaceId).layout, { paneId: 7, type: "pane" });
+    assert.deepEqual(
+      invalid.payload.state.panes.map((pane) => pane.paneId),
+      [1, 2],
+    );
+    assert.equal(invalid.payload.state.panes[1]?.currentContentId, "ct_applied");
+    assert.deepEqual(invalid.payload.state.layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
+    assert.deepEqual(core.pairState(surfaceId).layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
 
     await closeSocket(resumedSocket);
   });

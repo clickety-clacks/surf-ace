@@ -118,7 +118,10 @@ type PendingBrowserUrlApply = {
 };
 
 type BrowserUrlNavigationEvidence = {
+  currentUrl?: string;
   errorMessage?: string;
+  pageTitle?: string;
+  readbackResult?: string;
   status: "applied" | "failed";
   targetId: string;
   url: string;
@@ -177,6 +180,25 @@ function diagnosticJson(value: unknown): string {
     return JSON.stringify(value);
   } catch {
     return JSON.stringify(String(value));
+  }
+}
+
+function browserUrlDiagnosticFields(url: string): ServerDiagnosticFields {
+  try {
+    const parsed = new URL(url);
+    return {
+      url,
+      url_host: parsed.hostname,
+      url_port: parsed.port || (parsed.protocol === "https:" ? "443" : parsed.protocol === "http:" ? "80" : ""),
+      url_scheme: parsed.protocol.replace(/:$/, ""),
+    };
+  } catch {
+    return {
+      url,
+      url_host: "invalid",
+      url_port: "",
+      url_scheme: "invalid",
+    };
   }
 }
 
@@ -1167,25 +1189,27 @@ export class SurfaceWsServer {
         !request.payload.takeover &&
         this.hasRecoverablePairState(surfaceId)
       ) {
+        // Allow fresh admission without resetting topology when recoverable state exists.
+        sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+        ownershipEpoch = persistedOwnership.ownershipEpoch + 1;
         persistentServerDiagnostic(
-          "warn",
-          "pair_request_invalid_resume",
+          "info",
+          "pair_request_same_provider_preserve_recovered_state",
           {
-            expected_session_id: persistedOwnership.sessionId,
             provider_id: providerId,
-            received_session_id: "nil",
             request_id: request.id,
+            session_id: sessionId,
             socket_id: meta?.socketId,
             surface_id: surfaceId,
           },
         );
-        throw new SurfaceCoreError("invalid_resume", "Resume session did not match active ownership lock");
       } else {
         sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
         ownershipEpoch = persistedOwnership ? persistedOwnership.ownershipEpoch + 1 : 1;
+        const event = persistedOwnership ? "pair_request_same_provider_fresh_admission" : "pair_request_new_session";
         persistentServerDiagnostic(
           "info",
-          persistedOwnership ? "pair_request_same_provider_fresh_admission" : "pair_request_new_session",
+          event,
           {
             provider_id: providerId,
             request_id: request.id,
@@ -1300,11 +1324,25 @@ export class SurfaceWsServer {
           );
         }
       }
-      this.core.resetProviderBootstrapTopology(surfaceId, {
-        initialPaneId: Number(request.payload.initialPaneId),
-        initialPaneLabel: Number(request.payload.initialPaneLabel),
-        windowLabel: request.payload.windowLabel,
-      });
+      // Preserve provider-persisted topology/content across provider restart when recoverable state exists.
+      // Only reset to a single bootstrap pane if we truly have no recoverable state.
+      if (!this.hasRecoverablePairState(surfaceId)) {
+        this.core.resetProviderBootstrapTopology(surfaceId, {
+          initialPaneId: Number(request.payload.initialPaneId),
+          initialPaneLabel: Number(request.payload.initialPaneLabel),
+          windowLabel: request.payload.windowLabel,
+        });
+      } else {
+        persistentServerDiagnostic(
+          "info",
+          "pair_request_preserve_persisted_topology",
+          {
+            pane_count: this.core.pairState(surfaceId).panes.length,
+            request_id: request.id,
+            surface_id: surfaceId,
+          },
+        );
+      }
     }
 
     const session: ActiveSession = {
@@ -1819,8 +1857,35 @@ export class SurfaceWsServer {
     }
 
     if (request.payload.targetKind === "browser_url") {
+      const targetUrl = String((request.payload.targetPayload as { url?: unknown }).url ?? "");
+      persistentServerDiagnostic(
+        "info",
+        "target_apply_browser_url_begin",
+        {
+          pane_lineage_id: request.payload.paneLineageId,
+          request_id: request.payload.requestId,
+          surface_id: surfaceId,
+          target_id: request.payload.targetId,
+          ...browserUrlDiagnosticFields(targetUrl),
+        },
+      );
       const preflightFailure = this.core.browserUrlTargetPreflight(surfaceId, request.payload);
       if (preflightFailure) {
+        persistentServerDiagnostic(
+          "info",
+          "target_apply_browser_url_result",
+          {
+            error_code: preflightFailure.errorCode,
+            materialized_navigation_status: preflightFailure.materializedState?.navigationStatus,
+            message: preflightFailure.message,
+            pane_lineage_id: request.payload.paneLineageId,
+            request_id: request.payload.requestId,
+            status: preflightFailure.status,
+            surface_id: surfaceId,
+            target_id: request.payload.targetId,
+            ...browserUrlDiagnosticFields(targetUrl),
+          },
+        );
         return {
           id: request.id,
           ok: true,
@@ -1861,6 +1926,20 @@ export class SurfaceWsServer {
         return releaseResult.response;
       }
       if ("failure" in releaseResult) {
+        persistentServerDiagnostic(
+          "info",
+          "target_apply_browser_url_result",
+          {
+            error_code: "materialization_failed",
+            message: releaseResult.failure,
+            pane_lineage_id: request.payload.paneLineageId,
+            request_id: request.payload.requestId,
+            status: "failed",
+            surface_id: surfaceId,
+            target_id: request.payload.targetId,
+            ...browserUrlDiagnosticFields(targetUrl),
+          },
+        );
         return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", releaseResult.failure);
       }
       const result = releaseResult.payload;
@@ -1875,6 +1954,23 @@ export class SurfaceWsServer {
       const payload = shouldWaitForBrowserUrl
         ? await this.waitForBrowserUrlNavigation(surfaceId, Number(paneId), request, socket, appliedAt)
         : result;
+      persistentServerDiagnostic(
+        "info",
+        "target_apply_browser_url_result",
+        {
+          current_url: payload.materializedState?.url,
+          error_code: payload.errorCode,
+          materialized_navigation_status: payload.materializedState?.navigationStatus,
+          message: payload.message,
+          pane_id: paneId,
+          pane_lineage_id: request.payload.paneLineageId,
+          request_id: request.payload.requestId,
+          status: payload.status,
+          surface_id: surfaceId,
+          target_id: request.payload.targetId,
+          ...browserUrlDiagnosticFields(targetUrl),
+        },
+      );
       return {
         id: request.id,
         ok: true,
@@ -2138,11 +2234,42 @@ export class SurfaceWsServer {
     const key = browserUrlApplyKey(surfaceId, paneId);
     const pending = this.pendingBrowserUrlApplies.get(key);
     if (!pending || pending.request.payload.targetId !== evidence.targetId) {
+      persistentServerDiagnostic(
+        "info",
+        "target_apply_browser_url_renderer_evidence_early",
+        {
+          current_url: evidence.currentUrl,
+          error_message: evidence.errorMessage,
+          page_title: evidence.pageTitle,
+          pane_id: paneId,
+          readback_result: evidence.readbackResult,
+          status: evidence.status,
+          surface_id: surfaceId,
+          target_id: evidence.targetId,
+          ...browserUrlDiagnosticFields(evidence.url),
+        },
+      );
       this.earlyBrowserUrlNavigationEvidence.set(`${key}:${evidence.targetId}`, evidence);
       return;
     }
     this.pendingBrowserUrlApplies.delete(key);
     clearTimeout(pending.timeout);
+    persistentServerDiagnostic(
+      "info",
+      "target_apply_browser_url_renderer_evidence",
+      {
+        current_url: evidence.currentUrl,
+        error_message: evidence.errorMessage,
+        page_title: evidence.pageTitle,
+        pane_id: paneId,
+        readback_result: evidence.readbackResult,
+        request_id: pending.request.payload.requestId,
+        status: evidence.status,
+        surface_id: surfaceId,
+        target_id: evidence.targetId,
+        ...browserUrlDiagnosticFields(evidence.url),
+      },
+    );
     pending.resolve(this.browserUrlNavigationPayload(surfaceId, paneId, pending, evidence));
   }
 
@@ -3293,6 +3420,7 @@ export class SurfaceWsServer {
 }
 
 export const __test = {
+  browserUrlDiagnosticFields,
   serverDiagnostic,
 };
 

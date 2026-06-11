@@ -1508,7 +1508,10 @@ function installIpc(): void {
       case "browser-url-navigation": {
         const status = payload.status === "applied" ? "applied" : "failed";
         server.resolveBrowserUrlNavigation(surfaceId, paneId, {
+          currentUrl: payload.currentUrl ? String(payload.currentUrl) : undefined,
           errorMessage: payload.errorMessage ? String(payload.errorMessage) : undefined,
+          pageTitle: payload.pageTitle ? String(payload.pageTitle) : undefined,
+          readbackResult: payload.readbackResult ? String(payload.readbackResult) : undefined,
           status,
           targetId: String(payload.targetId ?? ""),
           url: String(payload.url ?? ""),

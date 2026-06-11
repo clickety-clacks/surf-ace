@@ -54,6 +54,8 @@ type BrowserUrlContent = { url: string };
 type ContentReloadSource = { kind: "file"; path: string };
 type BrowserUrlWebViewElement = HTMLElement & {
   executeJavaScript?: (code: string) => Promise<unknown>;
+  getTitle?: () => string;
+  getURL?: () => string;
   getWebContentsId?: () => number;
   reload?: () => void;
   src: string;
@@ -68,8 +70,10 @@ type BrowserContentNavigationEvent = Event & {
   url?: string;
 };
 type BrowserUrlWebViewErrorEvent = Event & {
+  errorCode?: number;
   errorDescription?: string;
   isMainFrame?: boolean;
+  validatedURL?: string;
 };
 type BrowserUrlDiagnosticReason =
   | "did-attach"
@@ -96,6 +100,7 @@ type BrowserUrlGuestMetrics = {
   rootScrollWidth: number | null;
   visualViewport: { height: number; scale: number; width: number } | null;
 };
+const BROWSER_URL_DIAGNOSTIC_READBACK_TIMEOUT_MS = 500;
 type PaneContentValue =
   | null
   | BrowserUrlContent
@@ -1410,6 +1415,24 @@ async function browserUrlGuestDiagnostics(webview: BrowserUrlWebViewElement): Pr
   }
 }
 
+async function browserUrlGuestDiagnosticsWithTimeout(webview: BrowserUrlWebViewElement): Promise<unknown> {
+  let timeoutId = 0;
+  try {
+    return await Promise.race([
+      browserUrlGuestDiagnostics(webview),
+      new Promise<unknown>((resolve) => {
+        timeoutId = window.setTimeout(() => {
+          resolve({ error: "timeout" });
+        }, BROWSER_URL_DIAGNOSTIC_READBACK_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
 async function resetBrowserUrlGuestScroll(webview: BrowserUrlWebViewElement): Promise<void> {
   if (!webview.executeJavaScript) {
     return;
@@ -1441,6 +1464,41 @@ function browserUrlWebContentsId(webview: BrowserUrlWebViewElement): number | nu
     return webview.getWebContentsId?.() ?? null;
   } catch {
     return null;
+  }
+}
+
+function browserUrlDiagnosticFields(url: string): Record<string, string> {
+  try {
+    const parsed = new URL(url);
+    return {
+      url,
+      urlHost: parsed.hostname,
+      urlPort: parsed.port || (parsed.protocol === "https:" ? "443" : parsed.protocol === "http:" ? "80" : ""),
+      urlScheme: parsed.protocol.replace(/:$/, ""),
+    };
+  } catch {
+    return {
+      url,
+      urlHost: "invalid",
+      urlPort: "",
+      urlScheme: "invalid",
+    };
+  }
+}
+
+function browserUrlElementCurrentUrl(webview: BrowserUrlWebViewElement): string {
+  try {
+    return String(webview.getURL?.() ?? webview.src ?? "");
+  } catch {
+    return "";
+  }
+}
+
+function browserUrlElementTitle(webview: BrowserUrlWebViewElement): string {
+  try {
+    return String(webview.getTitle?.() ?? "");
+  } catch {
+    return "";
   }
 }
 
@@ -1505,7 +1563,7 @@ async function verifyBrowserUrlGuestViewport(
       return { guest, mismatch: null };
     }
     applyPaneFrameSize(view, webview);
-    guest = await browserUrlGuestDiagnostics(webview);
+    guest = await browserUrlGuestDiagnosticsWithTimeout(webview);
     mismatch = browserUrlViewportMismatch(webview, guest);
     reportBrowserUrlDiagnostics(view, webview, delay === 0 ? reason : "guest-viewport-retry", guest, mismatch);
     if (!mismatch) {
@@ -1542,6 +1600,8 @@ function reportBrowserUrlDiagnostics(
     reason,
     scroll: elementDiagnostics(view.scrollEl),
     type: "browser-url-diagnostics",
+    webviewCurrentUrl: browserUrlElementCurrentUrl(webview),
+    webviewTitle: browserUrlElementTitle(webview),
     visualViewport: window.visualViewport
       ? {
           height: Math.round(window.visualViewport.height),
@@ -1556,7 +1616,7 @@ function reportBrowserUrlDiagnostics(
   };
   window.surfAce.command(payload);
   if (reason === "dom-ready" || reason === "did-finish-load") {
-    void browserUrlGuestDiagnostics(webview).then((guest) => {
+      void browserUrlGuestDiagnosticsWithTimeout(webview).then((guest) => {
       if (!webview.isConnected || currentPaneFrameElement(view) !== webview) {
         return;
       }
@@ -1823,7 +1883,8 @@ function renderBrowserContent(
   rendererDiagnostic("browser_content_create", {
     contentType: pane.content.contentType,
     paneId: pane.paneId,
-    urlPrefix: url.slice(0, 80),
+    targetId: options?.navigationReport?.targetId ?? "",
+    ...browserUrlDiagnosticFields(url),
   });
   const browserView = document.createElement("webview") as BrowserUrlWebViewElement;
   browserView.className = "content-html-frame content-browser-url-frame";
@@ -1842,13 +1903,24 @@ function renderBrowserContent(
       return;
     }
     reported = true;
-    window.surfAce.command({
-      ...(errorMessage ? { errorMessage } : {}),
-      paneId: pane.paneId,
-      status,
-      targetId: navigationReport.targetId,
-      type: "browser-url-navigation",
-      url: navigationReport.url,
+    void browserUrlGuestDiagnosticsWithTimeout(browserView).catch((error) => ({
+      error: error instanceof Error ? error.message : String(error),
+    })).then((guest) => {
+      const readbackResult = guest && typeof guest === "object" && "error" in guest
+        ? `error:${String((guest as { error?: unknown }).error ?? "")}`
+        : "ok";
+      window.surfAce.command({
+        ...(errorMessage ? { errorMessage } : {}),
+        currentUrl: browserUrlElementCurrentUrl(browserView),
+        pageTitle: browserUrlElementTitle(browserView),
+        paneId: pane.paneId,
+        readbackResult,
+        status,
+        targetId: navigationReport.targetId,
+        type: "browser-url-navigation",
+        url: navigationReport.url,
+        ...browserUrlDiagnosticFields(navigationReport.url),
+      });
     });
   };
   const blockStaticHtmlNavigation = (event: Event) => {
@@ -1899,16 +1971,62 @@ function renderBrowserContent(
     () => {
       rendererDiagnostic("browser_content_did_attach", {
         paneId: pane.paneId,
+        targetId: options?.navigationReport?.targetId ?? "",
+        ...browserUrlDiagnosticFields(url),
         webContentsId: browserUrlWebContentsId(browserView),
       });
       reportBrowserUrlDiagnostics(view, browserView, "did-attach");
     },
   );
   browserView.addEventListener(
+    "did-start-loading",
+    () => {
+      rendererDiagnostic("browser_content_did_start_loading", {
+        currentUrl: browserUrlElementCurrentUrl(browserView),
+        paneId: pane.paneId,
+        targetId: options?.navigationReport?.targetId ?? "",
+        ...browserUrlDiagnosticFields(url),
+        webContentsId: browserUrlWebContentsId(browserView),
+      });
+    },
+  );
+  browserView.addEventListener(
+    "page-title-updated",
+    (event) => {
+      rendererDiagnostic("browser_content_page_title_updated", {
+        currentUrl: browserUrlElementCurrentUrl(browserView),
+        paneId: pane.paneId,
+        targetId: options?.navigationReport?.targetId ?? "",
+        title: String((event as { title?: unknown }).title ?? "").slice(0, 160),
+        ...browserUrlDiagnosticFields(url),
+        webContentsId: browserUrlWebContentsId(browserView),
+      });
+    },
+  );
+  browserView.addEventListener(
+    "console-message",
+    (event) => {
+      rendererDiagnostic("browser_content_console_message", {
+        currentUrl: browserUrlElementCurrentUrl(browserView),
+        level: String((event as { level?: unknown }).level ?? ""),
+        message: String((event as { message?: unknown }).message ?? "").slice(0, 240),
+        paneId: pane.paneId,
+        sourceId: String((event as { sourceId?: unknown }).sourceId ?? "").slice(0, 160),
+        targetId: options?.navigationReport?.targetId ?? "",
+        ...browserUrlDiagnosticFields(url),
+        webContentsId: browserUrlWebContentsId(browserView),
+      });
+    },
+  );
+  browserView.addEventListener(
     "dom-ready",
     () => {
       rendererDiagnostic("browser_content_dom_ready", {
+        currentUrl: browserUrlElementCurrentUrl(browserView),
         paneId: pane.paneId,
+        targetId: options?.navigationReport?.targetId ?? "",
+        title: browserUrlElementTitle(browserView),
+        ...browserUrlDiagnosticFields(url),
         webContentsId: browserUrlWebContentsId(browserView),
       });
       verifyAndReportNavigation("dom-ready:guest-viewport");
@@ -1918,7 +2036,11 @@ function renderBrowserContent(
     "did-finish-load",
     () => {
       rendererDiagnostic("browser_content_did_finish_load", {
+        currentUrl: browserUrlElementCurrentUrl(browserView),
         paneId: pane.paneId,
+        targetId: options?.navigationReport?.targetId ?? "",
+        title: browserUrlElementTitle(browserView),
+        ...browserUrlDiagnosticFields(url),
         webContentsId: browserUrlWebContentsId(browserView),
       });
       verifyAndReportNavigation("did-finish-load:guest-viewport");
@@ -1935,8 +2057,15 @@ function renderBrowserContent(
         return;
       }
       rendererDiagnostic("browser_content_did_fail_load", {
-        errorCode: failure.errorDescription ?? "",
+        currentUrl: browserUrlElementCurrentUrl(browserView),
+        errorCode: failure.errorCode ?? "",
+        errorDescription: failure.errorDescription ?? "",
+        failedUrl: failure.validatedURL ?? "",
+        isMainFrame: failure.isMainFrame ?? true,
         paneId: pane.paneId,
+        targetId: options?.navigationReport?.targetId ?? "",
+        title: browserUrlElementTitle(browserView),
+        ...browserUrlDiagnosticFields(url),
         webContentsId: browserUrlWebContentsId(browserView),
       });
       reportBrowserUrlDiagnostics(view, browserView, "did-fail-load");
@@ -1948,7 +2077,10 @@ function renderBrowserContent(
   deferUntilPaneFrameReady(view, browserView, renderToken, () => {
     browserView.src = url;
     rendererDiagnostic("browser_content_navigation_assigned", {
+      currentUrl: browserUrlElementCurrentUrl(browserView),
       paneId: pane.paneId,
+      targetId: options?.navigationReport?.targetId ?? "",
+      ...browserUrlDiagnosticFields(url),
       webContentsId: browserUrlWebContentsId(browserView),
     });
     reportBrowserUrlDiagnostics(view, browserView, "navigation-assigned");
