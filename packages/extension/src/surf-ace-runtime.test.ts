@@ -14878,6 +14878,37 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("canonical restart continuity migration preserves restored topology marker", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const previousSurfaceId = "sf_restart_previous_canonical";
+      internalRuntime.restartSnapshots.set(previousSurfaceId, internalRuntime.buildScreenSummary(surface));
+      internalRuntime.restartContentBySurface.set(previousSurfaceId, [
+        {
+          contentId: "ct_restart_previous_canonical",
+          contentType: "html",
+          contentValue: "<main>restart previous canonical</main>",
+          historyOwnerToken: "hot_restart_previous_canonical",
+          paneLabel: 1,
+          revision: 1,
+          sessionKey: "agent:test:restart-previous-canonical",
+        },
+      ]);
+      internalRuntime.restartTopologyRestoredSurfaceIds.add(previousSurfaceId);
+
+      internalRuntime.migrateRestartContinuity(previousSurfaceId, server.surfaceId, true);
+
+      assert.equal(internalRuntime.restartSnapshots.has(previousSurfaceId), false);
+      assert.equal(internalRuntime.restartSnapshots.has(server.surfaceId), true);
+      assert.equal(internalRuntime.restartContentBySurface.has(previousSurfaceId), false);
+      assert.equal(internalRuntime.restartContentBySurface.has(server.surfaceId), true);
+      assert.equal(internalRuntime.restartTopologyRestoredSurfaceIds.has(previousSurfaceId), false);
+      assert.equal(internalRuntime.restartTopologyRestoredSurfaceIds.has(server.surfaceId), true);
+    });
+  });
+
   await t.test("pair.response remap transfers a live paired client when existing canonical has no client", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
