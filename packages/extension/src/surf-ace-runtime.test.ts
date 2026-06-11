@@ -15276,7 +15276,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
                   [paneLineageId]: {
                     currentTargetId: targetId,
                     diagnosticContent: null,
-                    lastRestoreBlockedReason: null,
+                    lastRestoreBlockedReason: "restore_blocked_stale_target",
                     nonDurableTargetDiagnostic: null,
                     paneLineageId,
                     staleTargetId: null,

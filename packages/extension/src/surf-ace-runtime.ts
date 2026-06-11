@@ -12370,7 +12370,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     if (
       pane.lastRestoreBlockedReason === "ownership_epoch_mismatch" ||
-      pane.lastRestoreBlockedReason === "ownership_session_mismatch"
+      pane.lastRestoreBlockedReason === "ownership_session_mismatch" ||
+      pane.lastRestoreBlockedReason === "restore_blocked_stale_target"
     ) {
       pane.lastRestoreBlockedReason = null;
       changed = true;
