@@ -32,6 +32,27 @@ async function closeSocket(socket: WebSocket, code = 1000, reason = "test_done")
   });
 }
 
+async function captureInfoLines(run: () => Promise<void>): Promise<string[]> {
+  const originalInfo = console.info;
+  const originalWarn = console.warn;
+  const lines: string[] = [];
+  console.info = (...args: unknown[]) => {
+    lines.push(args.map((arg) => String(arg)).join(" "));
+    originalInfo(...args);
+  };
+  console.warn = (...args: unknown[]) => {
+    lines.push(args.map((arg) => String(arg)).join(" "));
+    originalWarn(...args);
+  };
+  try {
+    await run();
+  } finally {
+    console.info = originalInfo;
+    console.warn = originalWarn;
+  }
+  return lines;
+}
+
 function waitForSocketClose(socket: WebSocket): Promise<{ code: number; reason: string }> {
   return new Promise((resolve) => {
     socket.once("close", (code, reason) => {
@@ -1062,17 +1083,32 @@ test("ws server recovers persisted provider ownership after serialized relaunch 
 
   await server.start();
   try {
-    const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
-    const resumed = await request(
-      socket,
-      pairRequest(restoredSurfaceId, "pv_alpha", {
-        initialPaneId: 7,
-        initialPaneLabel: 77,
-        resumeSessionId: restoredSessionId,
-      }),
-    );
+    let socket: WebSocket | null = null;
+    let resumed: Response | null = null;
+    let listed: Response | null = null;
+    const lines = await captureInfoLines(async () => {
+      socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+      resumed = await request(
+        socket,
+        pairRequest(restoredSurfaceId, "pv_alpha", {
+          initialPaneId: 7,
+          initialPaneLabel: 77,
+          resumeSessionId: restoredSessionId,
+        }),
+      );
+      listed = await request(socket, {
+        id: "rq_panes_after_relaunch" as never,
+        op: "panes.list",
+        payload: {},
+        sentAt: Date.now() as never,
+        type: "request",
+        v: 1,
+      });
+    });
 
+    assert.ok(resumed);
     assert.equal(resumed.ok, true);
+    assert.equal(resumed.op, "pair.request");
     assert.equal(resumed.payload.resumed, true);
     assert.equal(resumed.payload.sessionId, restoredSessionId);
     assert.deepEqual(
@@ -1080,8 +1116,51 @@ test("ws server recovers persisted provider ownership after serialized relaunch 
       [1, 2],
     );
     assert.equal(resumed.payload.state.panes[1]?.currentContentId, "ct_applied");
+    assert.deepEqual(
+      resumed.payload.state.panes.map((pane) => pane.paneLabel),
+      [41, 42],
+    );
+    assert.deepEqual(resumed.payload.state.layout, {
+      children: [
+        { paneId: 1, type: "pane" },
+        { paneId: 2, type: "pane" },
+      ],
+      direction: "horizontal",
+      type: "split",
+    });
 
-    await closeSocket(socket);
+    assert.ok(listed);
+    assert.equal(listed.ok, true);
+    assert.equal(listed.op, "panes.list");
+    assert.deepEqual(
+      listed.payload.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.activeContentId]),
+      [[1, 41, null], [2, 42, "ct_applied"]],
+    );
+    assert.ok(lines.some((line) =>
+      line.includes("event=pair_recoverable_state_decision") &&
+      line.includes("result=true") &&
+      line.includes("pane_count=2") &&
+      line.includes("pair_state=") &&
+      line.includes("2:42:ct_applied")
+    ));
+    assert.ok(lines.some((line) =>
+      line.includes("event=pair_response_ok") &&
+      line.includes("pane_count=2") &&
+      line.includes("pane_ids=1,2") &&
+      line.includes("pane_labels=41,42") &&
+      line.includes("pair_state=")
+    ));
+    assert.ok(lines.some((line) =>
+      line.includes("event=panes_list_summary") &&
+      line.includes("pane_count=2") &&
+      line.includes("pane_ids=1,2") &&
+      line.includes("pane_labels=41,42") &&
+      line.includes("pane_content_ids=nil,ct_applied")
+    ));
+
+    if (socket) {
+      await closeSocket(socket);
+    }
   } finally {
     await server.stop();
   }
@@ -4441,6 +4520,47 @@ test("ws server ignores reply races when the requester closes before the respons
     assert.equal(response.ok, true);
     assert.equal(response.op, "surfaces.list");
     await closeSocket(stable);
+  });
+});
+
+test("ws server logs recoverability, bootstrap reset, pair response, and panes.list summaries", async () => {
+  await withServer(async ({ surfaceId, url }) => {
+    const lines = await captureInfoLines(async () => {
+      const socket = await connect(url);
+      const paired = await request(
+        socket,
+        pairRequest(surfaceId, "pv_alpha", {
+          initialPaneId: 7,
+          initialPaneLabel: 77,
+        }),
+      );
+      assert.equal(paired.ok, true);
+      const listed = await request(socket, {
+        id: "rq_diag_panes_list" as never,
+        op: "panes.list",
+        payload: {},
+        sentAt: Date.now() as never,
+        type: "request",
+        v: 1,
+      });
+      assert.equal(listed.ok, true);
+      await closeSocket(socket);
+    });
+
+    const captured = lines.join("\n");
+    const recoverabilityLine = lines.find((line) => line.includes("event=pair_recoverable_state_decision"));
+    assert.ok(recoverabilityLine);
+    assert.match(recoverabilityLine, /result=false/);
+    assert.match(recoverabilityLine, /pane_count=1/);
+    assert.match(recoverabilityLine, /topology_revision=0/);
+    assert.match(recoverabilityLine, /pair_state=/);
+    const bootstrapResetLine = lines.find((line) => line.includes("event=pair_request_bootstrap_topology_reset"));
+    assert.ok(bootstrapResetLine);
+    assert.match(bootstrapResetLine, /before_state=/);
+    assert.match(bootstrapResetLine, /after_state=/);
+    assert.match(bootstrapResetLine, /7:77:nil/);
+    assert.match(captured, /event=pair_response_ok .*pane_count=1 .*pane_ids=7 .*pane_labels=77 .*pair_state=/);
+    assert.match(captured, /event=panes_list_summary .*pane_count=1 .*pane_ids=7 .*pane_labels=77 .*pane_content_ids=nil/);
   });
 });
 

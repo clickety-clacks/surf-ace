@@ -210,6 +210,13 @@ function persistentServerDiagnostic(
   recordClientDiagnostic(level, "server", event, fields);
 }
 
+function pairStateDiagnosticSummary(state: ReturnType<SurfaceCore["pairState"]>): string {
+  const panes = state.panes.map((pane) =>
+    `${Number(pane.paneId)}:${pane.paneLabel}:${pane.currentContentId ?? "nil"}`
+  ).join(",");
+  return `rev=${Number(state.topologyRevision)} panes=${panes || "none"} layout=${JSON.stringify(state.layout)}`;
+}
+
 export class SurfaceWsServer {
   private readonly bindAddress: string;
   private readonly compositorSocketPath: string | null;
@@ -1326,12 +1333,23 @@ export class SurfaceWsServer {
       }
       // Preserve provider-persisted topology/content across provider restart when recoverable state exists.
       // Only reset to a single bootstrap pane if we truly have no recoverable state.
+      const beforeBootstrapState = this.core.pairState(surfaceId);
       if (!this.hasRecoverablePairState(surfaceId)) {
         this.core.resetProviderBootstrapTopology(surfaceId, {
           initialPaneId: Number(request.payload.initialPaneId),
           initialPaneLabel: Number(request.payload.initialPaneLabel),
           windowLabel: request.payload.windowLabel,
         });
+        persistentServerDiagnostic(
+          "warn",
+          "pair_request_bootstrap_topology_reset",
+          {
+            after_state: pairStateDiagnosticSummary(this.core.pairState(surfaceId)),
+            before_state: pairStateDiagnosticSummary(beforeBootstrapState),
+            request_id: request.id,
+            surface_id: surfaceId,
+          },
+        );
       } else {
         persistentServerDiagnostic(
           "info",
@@ -1397,11 +1415,16 @@ export class SurfaceWsServer {
       "pair_response_ok",
       {
         pane_count: response.payload.state.panes.length,
+        pane_content_count: response.payload.state.panes.filter((pane) => pane.currentContentId !== null).length,
+        pane_ids: response.payload.state.panes.map((pane) => Number(pane.paneId)).join(","),
+        pane_labels: response.payload.state.panes.map((pane) => pane.paneLabel).join(","),
+        pair_state: pairStateDiagnosticSummary(response.payload.state),
         request_id: request.id,
         resumed,
         session_id: sessionId,
         socket_id: meta?.socketId,
         surface_id: surfaceId,
+        topology_revision: Number(response.payload.state.topologyRevision),
       },
     );
 
@@ -1410,9 +1433,22 @@ export class SurfaceWsServer {
 
   private hasRecoverablePairState(surfaceId: string): boolean {
     const state = this.core.pairState(surfaceId);
-    return state.topologyRevision > 0 ||
+    const result = state.topologyRevision > 0 ||
       state.panes.length > 1 ||
       state.panes.some((pane) => pane.currentContentId !== null || pane.contentType !== null);
+    persistentServerDiagnostic(
+      "info",
+      "pair_recoverable_state_decision",
+      {
+        content_pane_count: state.panes.filter((pane) => pane.currentContentId !== null || pane.contentType !== null).length,
+        pane_count: state.panes.length,
+        result,
+        surface_id: surfaceId,
+        topology_revision: Number(state.topologyRevision),
+        pair_state: pairStateDiagnosticSummary(state),
+      },
+    );
+    return result;
   }
 
   private async admitProviderWindowLabel(
@@ -1469,11 +1505,24 @@ export class SurfaceWsServer {
   private async handlePanesList(socket: WebSocket, request: PanesListRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
     await this.refreshNativePaneWindowGroups(surfaceId);
+    const payload = this.core.panesList(surfaceId);
+    persistentServerDiagnostic(
+      "info",
+      "panes_list_summary",
+      {
+        pane_count: payload.panes.length,
+        pane_ids: payload.panes.map((pane) => Number(pane.paneId)).join(","),
+        pane_labels: payload.panes.map((pane) => pane.paneLabel).join(","),
+        pane_content_ids: payload.panes.map((pane) => pane.activeContentId ?? "nil").join(","),
+        request_id: request.id,
+        surface_id: surfaceId,
+      },
+    );
     return {
       id: request.id,
       ok: true,
       op: "panes.list",
-      payload: this.core.panesList(surfaceId),
+      payload,
       sentAt: Date.now(),
       type: "response",
       v: 1,

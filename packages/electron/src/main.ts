@@ -85,6 +85,19 @@ function clientWarn(event: string, fields: Record<string, boolean | number | str
   recordClientDiagnostic("warn", "app", event, fields);
 }
 
+function restoredSurfaceDiagnosticSummary(): string {
+  if (!core) {
+    return "none";
+  }
+  return core.listSurfaces().map((surface) => {
+    const state = core!.pairState(surface.surfaceId);
+    const panes = state.panes.map((pane) =>
+      `${Number(pane.paneId)}:${pane.paneLabel}:${pane.currentContentId ?? "nil"}`
+    ).join(",");
+    return `${surface.surfaceId}|rev=${Number(state.topologyRevision)}|panes=${panes || "none"}|layout=${JSON.stringify(state.layout)}`;
+  }).join(";");
+}
+
 function gpuDisableRequested(): boolean {
   const value = process.env.SURF_ACE_DISABLE_GPU?.trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes";
@@ -1559,6 +1572,7 @@ async function boot(): Promise<void> {
     ?? core.ensurePrimarySurface(endpointName(), displayViewport());
   clientInfo("surface_restore_result", {
     primary_surface_id: primarySurface.surfaceId,
+    restored_surface_summary: restoredSurfaceDiagnosticSummary(),
     restored_surface_ids: restoredSurfaces.map((surface) => surface.surfaceId).join(","),
     restored_surface_count: restoredSurfaces.length,
   });

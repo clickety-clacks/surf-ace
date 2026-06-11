@@ -3063,6 +3063,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       await ensureDirectory(this.stateDir);
       await this.warnIfLegacyStateRootExists();
       await this.loadState();
+      this.logger.info?.(
+        runtimeDiagnostic("startup_state_dir", {
+          provider_id: this.persistentState.providerId,
+          state_dir: this.stateDir,
+        }),
+      );
       this.ownsRuntimeLease = await this.acquireRuntimeLease();
       if (this.ownsRuntimeLease) {
         await this.loadDurableProviderLineage();
@@ -3139,6 +3145,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.discovery.stop();
     this.unsubscribeDiscovery?.();
     this.unsubscribeDiscovery = null;
+    this.captureProviderShutdownSnapshots();
 
     const stopPromises = [...this.surfaces.values()].map(async (surface) => {
       surface.stopRequested = true;
@@ -3167,6 +3174,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.stateWrite;
     await this.screenSnapshotWrite;
     await this.releaseRuntimeLease();
+  }
+
+  private captureProviderShutdownSnapshots(): void {
+    for (const surface of this.canonicalVisibleSurfaces()) {
+      if (!this.hasAcceptedSurfaceTopology(surface)) {
+        continue;
+      }
+      const screen = this.buildScreenSummary(surface);
+      if (!this.hasTrustedPersistedSelfOwnership(screen)) {
+        continue;
+      }
+      this.restartSnapshots.set(surface.surfaceId, structuredClone(screen));
+      const restartContent = this.captureRestartContentEntries(surface);
+      if (restartContent.length > 0) {
+        this.restartContentBySurface.set(surface.surfaceId, structuredClone(restartContent));
+      }
+    }
   }
 
   subscribe(listener: (event: SurfAceLocalEvent) => void): () => void {
@@ -9035,12 +9059,39 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface: ManagedSurface,
     pairRemotePaneIds: ReadonlySet<number>,
   ): boolean {
+    const hasTopologyContinuity = this.visiblePanes(surface).some((pane) =>
+      isBoundRemotePaneId(pane.remotePaneId) && !pairRemotePaneIds.has(Number(pane.remotePaneId))
+    );
+    if (hasTopologyContinuity) {
+      return true;
+    }
     const hasVisibleContinuity = this.visiblePanes(surface).some((pane) =>
       isBoundRemotePaneId(pane.remotePaneId) &&
       !pairRemotePaneIds.has(Number(pane.remotePaneId)) &&
       this.visibleHistoryEntry(pane) !== null
     );
     if (hasVisibleContinuity) {
+      return true;
+    }
+    const paneLineageByRemotePaneId = new Map<number, string>();
+    for (const pane of this.visiblePanes(surface)) {
+      if (isBoundRemotePaneId(pane.remotePaneId)) {
+        paneLineageByRemotePaneId.set(Number(pane.remotePaneId), pane.paneLineageId);
+      }
+    }
+    const persistedTargets = this.persistentState.targetStateBySurfaceId?.[surface.surfaceId]?.targetRecords ?? [];
+    const targetRecords = [
+      ...surface.targetRecords.values(),
+      ...persistedTargets,
+    ];
+    const hasTargetContinuity = targetRecords.some((target) =>
+      target.surfaceId === surface.surfaceId &&
+      (target.currentState === "current" || target.currentState === "stale") &&
+      [...paneLineageByRemotePaneId].some(([remotePaneId, paneLineageId]) =>
+        !pairRemotePaneIds.has(remotePaneId) && paneLineageId === target.paneLineageId
+      )
+    );
+    if (hasTargetContinuity) {
       return true;
     }
     const restartContent = this.restartContentBySurface.get(surface.surfaceId) ?? [];
@@ -9947,6 +9998,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.restartContentBySurface = new Map(
       Object.entries(snapshotFile?.contentContinuity ?? {})
         .filter(([surfaceId]) => trustedSurfaceIds.has(surfaceId)),
+    );
+    this.logger.info?.(
+      runtimeDiagnostic("persisted_snapshot_read", {
+        content_continuity_keys: Object.keys(snapshotFile?.contentContinuity ?? {}).sort().join(",") || "none",
+        provider_id: this.persistentState.providerId,
+        screen_count: screens.length,
+        screens: screens
+          .map((screen) =>
+            `${screen.fingerprint}:${screen.panes.length}:${screen.topologyRevision}:${screen._debug?.localOwnership?.providerId ?? "nil"}:${screen._debug?.localOwnership?.sessionId ?? "nil"}`,
+          )
+          .join("|") || "none",
+        state_dir: this.stateDir,
+        trusted_count: trustedRestartScreens.length,
+        trusted_surface_ids: [...trustedSurfaceIds].sort().join(",") || "none",
+      }),
     );
   }
 
@@ -12082,26 +12148,25 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           };
           const preserveRestartPairState =
             this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId) &&
-            pairResponse.payload.state.panes.length === 1 &&
-            pairResponse.payload.state.panes[0]?.currentContentId === null &&
-            (
-              hadRestartOwnershipPendingPair ||
-              this.visiblePanes(surface).length > 1 ||
-              (this.restartContentBySurface.get(surface.surfaceId)?.length ?? 0) > 1
-            );
+            this.shouldPreserveProviderAuthorityForPairObservation(surface, pairResponse);
           const preserveProviderAuthorityPairState =
             preserveRestartPairState ||
-            this.shouldPreserveProviderAuthorityForEmptyPairObservation(surface, pairResponse);
+            this.shouldPreserveProviderAuthorityForPairObservation(surface, pairResponse);
           const adoptEmptyPairProviderPaneState =
             preserveProviderAuthorityPairState &&
             !preserveRestartPairState &&
             this.shouldAdoptEmptyPairProviderPaneState(surface, pairResponse);
           this.logger.info?.(
             runtimeDiagnostic("pair_response_ok", {
+              pair_state: this.pairResponseStateDiagnosticSummary(pairResponse),
               panes: pairResponse.payload.state.panes.length,
+              pane_content_count: pairResponse.payload.state.panes.filter((pane) => pane.currentContentId !== null).length,
+              pane_ids: pairResponse.payload.state.panes.map((pane) => Number(pane.paneId)).join(",") || "none",
+              pane_labels: pairResponse.payload.state.panes.map((pane) => Number(pane.paneLabel)).join(",") || "none",
               resumed: pairResponse.payload.resumed,
               session_id: pairResponse.payload.sessionId,
               surface_id: surface.surfaceId,
+              topology_revision: Number(pairResponse.payload.state.topologyRevision),
             }),
           );
           surface.unreachableFailures = 0;
@@ -12665,10 +12730,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return null;
     }
 
+    const rawPaneStates = (response as PanesListResponse).payload.panes;
     const providerOwnedRemotePaneIds =
       surface.topologyRevision > 0 ? this.layoutRemotePaneIds(surface) : null;
-    const paneStates = (response as PanesListResponse).payload.panes.filter((paneState) =>
+    const paneStates = rawPaneStates.filter((paneState) =>
       !providerOwnedRemotePaneIds || providerOwnedRemotePaneIds.has(paneState.paneId),
+    );
+    this.logger.info?.(
+      runtimeDiagnostic("panes_list_summary", {
+        adopted_pane_count: paneStates.length,
+        adopted_panes: this.paneListDiagnosticSummary(paneStates),
+        layout: JSON.stringify(surface.layout),
+        raw_pane_count: rawPaneStates.length,
+        raw_panes: this.paneListDiagnosticSummary(rawPaneStates),
+        surface_id: surface.surfaceId,
+        topology_revision: surface.topologyRevision,
+      }),
     );
     this.assertProviderPaneLabelsUnique(surface, paneStates);
     let lineageChanged = false;
@@ -12734,6 +12811,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
     return providerPaneIds;
+  }
+
+  private pairResponseStateDiagnosticSummary(pairResponse: PairResponse): string {
+    const state = pairResponse.payload.state;
+    const panes = state.panes.map((pane) =>
+      `${Number(pane.paneId)}:${Number(pane.paneLabel)}:${pane.currentContentId ?? "nil"}`
+    ).join(",");
+    return `rev=${Number(state.topologyRevision)} panes=${panes || "none"} layout=${JSON.stringify(state.layout)}`;
+  }
+
+  private paneListDiagnosticSummary(panes: PanesListResponse["payload"]["panes"]): string {
+    return panes.map((pane) =>
+      `${Number(pane.paneId)}:${Number(pane.paneLabel)}:${pane.activeContentId ?? "nil"}`
+    ).join(",") || "none";
   }
 
   private reconcilePreRevisionPaneListLayout(surface: ManagedSurface): boolean {
@@ -13432,15 +13523,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return this.hasValidResumeSession(surface);
   }
 
-  private shouldPreserveProviderAuthorityForEmptyPairObservation(
+  private shouldPreserveProviderAuthorityForPairObservation(
     surface: ManagedSurface,
     pairResponse: PairResponse,
   ): boolean {
-    if (!this.hasAcceptedSurfaceTopology(surface)) {
+    if (
+      !this.hasAcceptedSurfaceTopology(surface) &&
+      !this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId)
+    ) {
       return false;
     }
     const pairPanes = pairResponse.payload.state.panes;
-    if (pairPanes.length === 0 || pairPanes.some((pane) => pane.currentContentId !== null)) {
+    if (pairPanes.length === 0) {
       return false;
     }
     const visiblePanes = this.visiblePanes(surface);
@@ -13452,11 +13546,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       isBoundRemotePaneId(pane.remotePaneId) && !pairRemotePaneIds.has(Number(pane.remotePaneId))
     );
     const collapsesTopology = pairPanes.length < visiblePanes.length;
-    if (!omitsVisiblePane && !collapsesTopology) {
+    if (
+      (!omitsVisiblePane && !collapsesTopology) ||
+      !this.hasProviderAuthorityContinuityOutsideRemotePanes(surface, pairRemotePaneIds)
+    ) {
       return false;
     }
     this.logger.info?.(
-      runtimeDiagnostic("pair_empty_observation_preserved_provider_topology_authority", {
+      runtimeDiagnostic("pair_observation_preserved_provider_topology_authority", {
+        observed_content_count: pairPanes.filter((pane) => pane.currentContentId !== null).length,
         observed_pane_count: pairPanes.length,
         surface_id: surface.surfaceId,
         visible_pane_count: visiblePanes.length,

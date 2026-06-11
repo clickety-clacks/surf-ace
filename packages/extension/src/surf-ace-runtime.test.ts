@@ -10085,7 +10085,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("provider restart restores durable multi-pane topology targets and content after blank pair", async () => {
+  await t.test("provider restart restores durable multi-pane topology targets and content after collapsed content pair", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
         server.targetCapabilities = [
@@ -10193,9 +10193,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         await fs.writeFile(path.join(stateDir, "surf-ace-runtime-screens.json"), preBounceSnapshot);
 
         server.resetToSinglePane(server.initialRemotePaneId);
-        const blankPane = server.panes.get(server.initialRemotePaneId);
-        assert.ok(blankPane);
-        blankPane.paneLabel = 2;
+        const collapsedPane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(collapsedPane);
+        collapsedPane.paneLabel = 2;
+        collapsedPane.contentId = htmlPush.contentId;
+        collapsedPane.contentType = "html";
+        collapsedPane.revision = 1;
         server.setTopologyLayout({ paneId: server.initialRemotePaneId, type: "pane" }, 161);
         const restartInfos: string[] = [];
         const restartedRuntime = createSurfAceRuntime({
@@ -10271,11 +10274,164 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           );
           assert.ok(
             restartInfos.some((info) =>
+              info.includes("event=pair_response_ok") &&
+              info.includes("pane_content_count=1") &&
+              info.includes("pane_ids=") &&
+              info.includes("pane_labels=") &&
+              info.includes("topology_revision=161") &&
+              info.includes("pair_state=")),
+          );
+          assert.ok(
+            restartInfos.some((info) =>
+              info.includes("event=panes_list_summary") &&
+              info.includes("raw_pane_count=") &&
+              info.includes("adopted_pane_count=") &&
+              info.includes("raw_panes=") &&
+              info.includes("adopted_panes=") &&
+              info.includes("topology_revision=") &&
+              info.includes("layout=")),
+          );
+          assert.ok(
+            restartInfos.some((info) =>
               info.includes("event=restart_content_restore_result") &&
               info.includes("applied_count=1")),
           );
         } finally {
           await restartedRuntime.stop();
+        }
+      },
+    });
+  });
+
+  await t.test("provider restart preserves topology-only restored panes after non-empty collapsed pair", async () => {
+    await withRuntimeHarness({
+      run: async ({ discovery, runtime, server, stateDir }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const split = await runtime.split({
+          count: 2,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+        const htmlPush = await runtime.push(
+          {
+            content: "<main>provider collapse remains authoritative without omitted continuity</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: paneIds[0]!,
+          },
+          { sessionKey: "agent:test:restart-collapse-negative" },
+        );
+        await (runtime as any).persistScreenSnapshot();
+        const persistedSnapshot = JSON.parse(
+          await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8"),
+        ) as {
+          screens: Array<{
+            fingerprint: string;
+            panes: Array<unknown>;
+            _debug?: {
+              hasPairedInGatewaySession?: boolean;
+              localOwnership?: { providerId?: string; sessionId?: string; source?: string; surfaceId?: string } | null;
+              sessionId?: string | null;
+            };
+          }>;
+        };
+        const persistedScreen = persistedSnapshot.screens.find((screen) => screen.fingerprint === server.surfaceId);
+        assert.ok(persistedScreen, "expected provider-owned screen snapshot before restart");
+        assert.equal(persistedScreen.panes.length, 2);
+        assert.equal(persistedScreen._debug?.hasPairedInGatewaySession, true);
+        assert.equal(persistedScreen._debug?.localOwnership?.source, "pair.response");
+        assert.equal(persistedScreen._debug?.localOwnership?.surfaceId, server.surfaceId);
+        assert.equal(persistedScreen._debug?.localOwnership?.sessionId, persistedScreen._debug?.sessionId);
+
+        await runtime.stop();
+        const persistedSnapshotAfterStop = JSON.parse(
+          await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8"),
+        ) as typeof persistedSnapshot;
+        const persistedScreenAfterStop = persistedSnapshotAfterStop.screens.find((screen) =>
+          screen.fingerprint === server.surfaceId
+        );
+        assert.ok(persistedScreenAfterStop, "expected provider-owned screen snapshot after stop");
+        assert.equal(persistedScreenAfterStop.panes.length, 2);
+        assert.equal(persistedScreenAfterStop._debug?.hasPairedInGatewaySession, true);
+        assert.equal(persistedScreenAfterStop._debug?.localOwnership?.source, "pair.response");
+        assert.equal(persistedScreenAfterStop._debug?.localOwnership?.surfaceId, server.surfaceId);
+        assert.equal(
+          persistedScreenAfterStop._debug?.localOwnership?.sessionId,
+          persistedScreenAfterStop._debug?.sessionId,
+        );
+        const persistedIdentityAfterStop = JSON.parse(
+          await fs.readFile(path.join(stateDir, "surf-ace-provider-identity.json"), "utf8"),
+        ) as { providerId: string };
+        const persistedStateAfterStop = JSON.parse(
+          await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+        ) as { providerId: string };
+        assert.equal(persistedScreenAfterStop._debug?.localOwnership?.providerId, persistedIdentityAfterStop.providerId);
+        assert.equal(persistedStateAfterStop.providerId, persistedIdentityAfterStop.providerId);
+
+        server.resetToSinglePane(server.initialRemotePaneId);
+        const collapsedPane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(collapsedPane);
+        collapsedPane.paneLabel = 1;
+        collapsedPane.contentId = htmlPush.contentId;
+        collapsedPane.contentType = "html";
+        collapsedPane.revision = 1;
+        server.setTopologyLayout({ paneId: server.initialRemotePaneId, type: "pane" }, 162);
+
+        const restartInfos: string[] = [];
+        const restartedRuntime = createSurfAceRuntime({
+          discovery,
+          logger: {
+            info: (message: string) => restartInfos.push(message),
+            warn: () => {},
+          },
+          stateDir,
+        });
+        try {
+          await restartedRuntime.start();
+          try {
+            await waitFor(async () => {
+              const screens = await restartedRuntime.listScreens();
+              const screen = screens.find((candidate) => candidate.fingerprint === server.surfaceId);
+              return screen?.panes.length === 2 &&
+                screen.panes.map((pane) => pane.paneLabel).sort((left, right) => left - right).join(",") === "1,2";
+            });
+          } catch (error) {
+            assert.fail(`${String(error)}\n${restartInfos.join("\n")}`);
+          }
+          assert.ok(
+            restartInfos.some((info) =>
+              info.includes("event=persisted_snapshot_read") &&
+              info.includes("screen_count=1") &&
+              info.includes("trusted_count=1")),
+            restartInfos.join("\n"),
+          );
+          assert.ok(
+            restartInfos.some((info) =>
+              info.includes("event=restart_topology_restore_applied") &&
+              info.includes("restored_pane_count=2")),
+            restartInfos.join("\n"),
+          );
+          assert.ok(
+            restartInfos.some((info) =>
+              info.includes("event=pair_observation_preserved_provider_topology_authority") &&
+              info.includes("observed_pane_count=1") &&
+              info.includes("visible_pane_count=2")),
+            restartInfos.join("\n"),
+          );
+          const screens = await restartedRuntime.listScreens();
+          const screen = screens.find((candidate) => candidate.fingerprint === server.surfaceId);
+          assert.ok(screen);
+          assert.equal(screen.panes.length, 2);
+          assert.equal(
+            screen.panes.some((pane) => pane.activeContent?.contentId === htmlPush.contentId),
+            true,
+          );
+        } finally {
+          await restartedRuntime.stop();
+          await server.close();
+          await fs.rm(stateDir, { force: true, recursive: true });
         }
       },
     });
@@ -15217,7 +15373,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(afterRestart);
       assert.equal(afterRestart.panes.length, 1);
       assertOpaquePaneId(afterRestart.panes[0]?.paneId);
-      assert.notEqual(afterRestart.panes[0]?.paneId, beforePaneIds[0]);
+      assert.equal(afterRestart.panes[0]?.paneId, beforePaneIds[0]);
       assert.equal(afterRestart.panes[0]?.paneLabel, 1);
     } finally {
       await runtimeB.stop();

@@ -24,6 +24,6 @@ test("client flight recorder formats SSH-readable diagnostic lines and commands"
   assert.equal(clientFlightRecorderTailCommand("/tmp/surf ace/client.log"), "tail -n 200 '/tmp/surf ace/client.log'");
   assert.equal(
     clientFlightRecorderGrepCommand("/tmp/surf ace/client.log"),
-    "rg 'event=(app_|server_|socket_|pair_|topology_|surface_|window_)' '/tmp/surf ace/client.log'",
+    "rg 'event=(app_|server_|socket_|pair_|panes_|topology_|surface_|window_)' '/tmp/surf ace/client.log'",
   );
 });

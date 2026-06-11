@@ -12,7 +12,7 @@ export function clientFlightRecorderTailCommand(logPath = CLIENT_FLIGHT_RECORDER
 }
 
 export function clientFlightRecorderGrepCommand(logPath = CLIENT_FLIGHT_RECORDER_LOG_PATH): string {
-  return `rg 'event=(app_|server_|socket_|pair_|topology_|surface_|window_)' ${shellQuote(logPath)}`;
+  return `rg 'event=(app_|server_|socket_|pair_|panes_|topology_|surface_|window_)' ${shellQuote(logPath)}`;
 }
 
 export function formatClientDiagnosticValue(value: string | number | boolean): string {
