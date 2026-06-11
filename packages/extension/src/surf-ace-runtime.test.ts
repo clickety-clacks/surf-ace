@@ -3669,6 +3669,191 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("startup preserves current local target authority beyond short startup grace", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-current-target-authority-"));
+    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+    try {
+      const surfaceId = "sf_current_target_authority";
+      const paneLineageId = "pl_current_target_authority";
+      const targetId = "tg_current_target_authority";
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 2,
+          nextRemotePaneId: 96363,
+          nextWindowLabelIndex: 1,
+          paneLabelsByPaneId: {},
+          providerId: "pv_current_target_authority",
+          selfOwnedSurfaceIds: {
+            [surfaceId]: {
+              observedAt: Date.now() - 120_000,
+              providerId: "pv_current_target_authority",
+              source: "current_local_ownership",
+            },
+          },
+          targetStateBySurfaceId: {
+            [surfaceId]: {
+              ownershipEpoch: 7,
+              paneTargets: {
+                [paneLineageId]: {
+                  currentTargetId: targetId,
+                  diagnosticContent: null,
+                  lastRestoreBlockedReason: null,
+                  nonDurableTargetDiagnostic: null,
+                  paneLineageId,
+                  staleTargetId: null,
+                  targetEpoch: 1,
+                },
+              },
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [
+                {
+                  appliedAt: new Date(Date.now() - 120_000).toISOString(),
+                  currentState: "current",
+                  ownerProviderId: "pv_current_target_authority",
+                  ownershipEpoch: 7,
+                  ownershipSessionId: "sa_current_target_authority",
+                  paneIdAtApply: "pn_current_target_authority",
+                  paneLabelAtApply: 1,
+                  paneLineageId,
+                  restorePolicy: "auto",
+                  surfaceId,
+                  surfaceInstanceId: null,
+                  targetEpoch: 1,
+                  targetHeader: {
+                    payloadSchemaVersion: 1,
+                    replaySemantics: "bytes",
+                    requiredCapabilities: ["target.html.v1"],
+                    safeToLogFields: [],
+                    safetyClass: "passive",
+                    summary: "T338 persisted current local target authority",
+                  },
+                  targetId,
+                  targetKind: "html",
+                  targetPayload: { html: "<main>T338 persisted current local target authority</main>" },
+                },
+              ],
+            },
+          },
+          tombstonedEndpointIds: [],
+          version: 1,
+          windowLabels: {
+            [surfaceId]: "a",
+          },
+        }, null, 2),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify({ contentContinuity: {}, screens: [], updatedAt: Date.now(), version: 1 }, null, 2),
+      );
+
+      const discovery = new StaticDiscoveryService([]);
+      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+      assert.deepEqual(await runtime.listScreens(), []);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 250);
+      });
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.equal(diagnostics.surfaceTombstones[surfaceId], undefined);
+      assert.equal(diagnostics.targetStateSurfaceIds.includes(surfaceId), true);
+      assert.equal(diagnostics.windowLabelSurfaceIds.includes(surfaceId), true);
+    } finally {
+      await runtime?.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("startup preserves current target imports beyond short startup grace", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-current-target-import-authority-"));
+    let runtime: ReturnType<typeof createSurfAceRuntime> | null = null;
+    try {
+      const surfaceId = "sf_current_target_import_authority";
+      const paneLineageId = "pl_current_target_import_authority";
+      const targetId = "tg_current_target_import_authority";
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify({
+          nextPaneLabel: 2,
+          nextRemotePaneId: 96363,
+          nextWindowLabelIndex: 1,
+          paneLabelsByPaneId: {},
+          providerId: "pv_current_target_import_authority",
+          selfOwnedSurfaceIds: {},
+          targetStateBySurfaceId: {
+            [surfaceId]: {
+              ownershipEpoch: 7,
+              paneTargets: {
+                [paneLineageId]: {
+                  currentTargetId: targetId,
+                  diagnosticContent: null,
+                  lastRestoreBlockedReason: null,
+                  nonDurableTargetDiagnostic: null,
+                  paneLineageId,
+                  staleTargetId: null,
+                  targetEpoch: 1,
+                },
+              },
+              registeredTargetIdsByIdempotencyKey: {},
+              targetRecords: [
+                {
+                  appliedAt: new Date(Date.now() - 120_000).toISOString(),
+                  currentState: "current",
+                  ownerProviderId: "pv_current_target_import_authority",
+                  ownershipEpoch: 7,
+                  ownershipSessionId: "sa_current_target_import_authority",
+                  paneIdAtApply: "pn_current_target_import_authority",
+                  paneLabelAtApply: 1,
+                  paneLineageId,
+                  restorePolicy: "auto",
+                  surfaceId,
+                  surfaceInstanceId: null,
+                  targetEpoch: 1,
+                  targetHeader: {
+                    payloadSchemaVersion: 1,
+                    replaySemantics: "bytes",
+                    requiredCapabilities: ["target.html.v1"],
+                    safeToLogFields: [],
+                    safetyClass: "passive",
+                    summary: "T338 persisted current target import authority",
+                  },
+                  targetId,
+                  targetKind: "html",
+                  targetPayload: { html: "<main>T338 persisted current target import authority</main>" },
+                },
+              ],
+            },
+          },
+          tombstonedEndpointIds: [],
+          version: 1,
+          windowLabels: {
+            [surfaceId]: "a",
+          },
+        }, null, 2),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify({ contentContinuity: {}, screens: [], updatedAt: Date.now(), version: 1 }, null, 2),
+      );
+
+      const discovery = new StaticDiscoveryService([]);
+      runtime = createSurfAceRuntime({ discovery, legacyStateDir: stateDir, stateDir });
+      assert.deepEqual(await runtime.listScreens(), []);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 250);
+      });
+
+      const diagnostics = await runtime.providerAuthorityDiagnostics();
+      assert.equal(diagnostics.surfaceTombstones[surfaceId], undefined);
+      assert.equal(diagnostics.persistedSelfOwnedSurfaceIds.includes(surfaceId), true);
+      assert.equal(diagnostics.targetStateSurfaceIds.includes(surfaceId), true);
+      assert.equal(diagnostics.windowLabelSurfaceIds.includes(surfaceId), true);
+    } finally {
+      await runtime?.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
   await t.test("startup tombstones stale legacy-root target imports without refreshing ownership age", async () => {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-current-"));
     const legacyStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-stale-legacy-root-"));
@@ -10197,6 +10382,79 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(browserPane?.target?.targetId, browserPush.targetId);
         assert.equal(browserPane?.target?.targetKind, "browser_url");
         assert.equal(browserPane?.target?.blockedReason, null);
+      },
+    });
+  });
+
+  await t.test("empty surfaces.list preserves provider-owned topology targets and content", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ discovery, infos, runtime, server, stateDir }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const split = await runtime.split({
+          count: 2,
+          direction: "vertical",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+        const htmlPush = await runtime.push(
+          {
+            content: "<main>Empty surfaces.list must not clear Surf Ace panes</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: paneIds[0]!,
+          },
+          { sessionKey: "agent:test:empty-surfaces-list-html" },
+        );
+        const browserPush = await runtime.push({
+          content: "https://example.com/empty-surfaces-list",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: paneIds[1]!,
+        });
+        assert.equal(browserPush.blockedReason, null);
+
+        const internalRuntime = runtime as any;
+        await internalRuntime.persistScreenSnapshot();
+        server.removeSurfaceWithoutEvent(server.surfaceId);
+        await discovery.refreshNow();
+        await waitFor(() => !internalRuntime.surfaces.has(server.surfaceId));
+        assert.ok(internalRuntime.persistentState.targetStateBySurfaceId[server.surfaceId]);
+        assert.equal(internalRuntime.persistentState.surfaceTombstones?.[server.surfaceId], undefined);
+
+        let persistedScreens: {
+          contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown; paneLabel?: number }>>;
+          screens?: Array<{ fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
+        } = {};
+        await waitFor(async () => {
+          persistedScreens = JSON.parse(
+            await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8"),
+          );
+          return Boolean(
+            persistedScreens.screens?.some((screen) =>
+              screen.fingerprint === server.surfaceId &&
+              screen.panes?.map((pane) => pane.paneLabel).join(",") === "1,2"
+            ) &&
+            persistedScreens.contentContinuity?.[server.surfaceId]?.some((entry) =>
+              entry.contentId === htmlPush.contentId &&
+              entry.paneLabel === 1 &&
+              entry.contentValue === "<main>Empty surfaces.list must not clear Surf Ace panes</main>"
+            ),
+          );
+        });
+        assert.equal(
+          infos.some((info) =>
+            info.includes("event=surface_removed_target_state") &&
+            info.includes("reason=surfaces_list_absent")
+          ),
+          false,
+        );
       },
     });
   });

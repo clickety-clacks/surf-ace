@@ -5153,7 +5153,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private removeClosedSurface(
     surfaceId: SurfaceId,
-    reason: "surface_removed_event" | "surfaces_list_absent" | "discovery_endpoint_absent" | "unowned_unreachable",
+    reason:
+      | "surface_removed_event"
+      | "surfaces_list_absent"
+      | "surfaces_list_empty"
+      | "discovery_endpoint_absent"
+      | "unowned_unreachable",
   ): void {
     const surface = this.surfaces.get(surfaceId);
     const preserveDurableSurfaceState = Boolean(
@@ -8444,7 +8449,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 	  }
 
   private hasRecoverableStartupOwnershipPath(surfaceId: string): boolean {
-    const hasDurableOwnershipHint = this.hasRecoverableDurableOwnershipHint(surfaceId);
+    const hasDurableOwnershipHint = this.hasRecoverableDurableOwnershipHint(
+      surfaceId,
+      "current_target_state",
+      { allowCurrentTargetState: true },
+    );
     return this.startupImportedOwnershipSurfaceIds.has(surfaceId) && hasDurableOwnershipHint;
   }
 
@@ -8455,7 +8464,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (!this.ownershipRecoveryPolicy.isTrustedProviderLineageId(this.persistentState, ownership.providerId)) {
       return false;
     }
-    if (this.hasRecoverableDurableOwnershipHint(surfaceId)) {
+    if (this.hasRecoverableDurableOwnershipHint(surfaceId, ownership.source)) {
       return true;
     }
     const observedAt = Number.isFinite(ownership.observedAt) ? ownership.observedAt : 0;
@@ -8465,7 +8474,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return ownership.source === "current_local_ownership" || ownership.source === "legacy_target_state";
   }
 
-  private hasRecoverableDurableOwnershipHint(surfaceId: string): boolean {
+  private hasRecoverableDurableOwnershipHint(
+    surfaceId: string,
+    ownershipSource?: string,
+    options: { allowCurrentTargetState?: boolean } = {},
+  ): boolean {
     const targetState = this.persistentState.targetStateBySurfaceId?.[surfaceId];
     const currentTargetIds = new Set(
       Object.values(targetState?.paneTargets ?? {})
@@ -8476,17 +8489,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return false;
     }
     const targetRecords = Array.isArray(targetState?.targetRecords) ? targetState.targetRecords : [];
-    return targetRecords.some((target) => (
-      currentTargetIds.has(target.targetId) &&
-      typeof target.ownershipSessionId === "string" &&
-      target.ownershipSessionId.length > 0 &&
-      target.currentState === "current" &&
-      this.isRecoverableDurableTargetHint(target) &&
-      this.ownershipRecoveryPolicy.isTrustedProviderLineageId(
-        this.persistentState,
-        typeof target.ownerProviderId === "string" ? target.ownerProviderId : "",
-      )
-    ));
+    return targetRecords.some((target) => {
+      if (
+        !currentTargetIds.has(target.targetId) ||
+        typeof target.ownershipSessionId !== "string" ||
+        target.ownershipSessionId.length === 0 ||
+        target.currentState !== "current" ||
+        !this.ownershipRecoveryPolicy.isTrustedProviderLineageId(
+          this.persistentState,
+          typeof target.ownerProviderId === "string" ? target.ownerProviderId : "",
+        )
+      ) {
+        return false;
+      }
+      if (
+        ownershipSource === "current_local_ownership" ||
+        (ownershipSource === "current_target_state" && options.allowCurrentTargetState === true)
+      ) {
+        return target.targetHeader !== null && target.targetHeader !== undefined;
+      }
+      return this.isRecoverableDurableTargetHint(target);
+    });
   }
 
   private isRecoverableDurableTargetHint(target: PaneTargetRecord): boolean {
@@ -11054,7 +11077,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.tombstoneEndpointId(endpointId, "empty surfaces.list");
       for (const candidate of [...this.surfaces.values()]) {
         if (candidate.endpointId === endpointId || endpointProbeKey(candidate.endpoint) === endpointKey) {
-          this.removeClosedSurface(candidate.surfaceId, "surfaces_list_absent");
+          this.removeClosedSurface(candidate.surfaceId, "surfaces_list_empty");
         }
       }
       this.logEndpointCanonicalSurfaceCardinality(input.endpoint, "surfaces.list empty");
