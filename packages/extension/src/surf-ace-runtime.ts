@@ -3019,6 +3019,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private ownerControlPort: number | null = null;
   private ownerControlServer: Server | null = null;
   private screenSnapshotWrite: Promise<void> = Promise.resolve();
+  private lastPersistedContentContinuity = new Map<string, PersistedRestartContentEntry[]>();
   private restartContentBySurface = new Map<string, PersistedRestartContentEntry[]>();
   private restartTopologyRestoredSurfaceIds = new Set<string>();
   private restartSnapshots = new Map<string, SurfAceScreenSummary>();
@@ -10116,8 +10117,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       ...this.retainedRestartScreens(liveScreens),
     ];
     this.persistedRuntimeScreenIds = new Set(screens.map((screen) => screen.fingerprint));
+    await this.screenSnapshotWrite.catch(() => {});
+    const previousContentContinuity = (await this.loadPersistedScreenSnapshotFile())?.contentContinuity ?? {};
     const payload: PersistedScreenSnapshotFile = {
-      contentContinuity: this.buildContentContinuitySnapshot(),
+      contentContinuity: this.buildContentContinuitySnapshot(previousContentContinuity),
       screens,
       updatedAt: this.now(),
       version: 1,
@@ -10128,13 +10131,23 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.screenSnapshotWrite;
   }
 
-  private buildContentContinuitySnapshot(): Record<string, PersistedRestartContentEntry[]> {
+  private buildContentContinuitySnapshot(
+    previousContentContinuity: Record<string, PersistedRestartContentEntry[]> = {},
+  ): Record<string, PersistedRestartContentEntry[]> {
     const contentContinuity: Record<string, PersistedRestartContentEntry[]> = {};
     const retainedContent = new Map(this.restartContentBySurface);
     for (const surface of this.canonicalVisibleSurfaces()) {
       const entries = this.captureRestartContentEntries(surface);
       if (entries.length > 0) {
         contentContinuity[surface.surfaceId] = entries;
+        this.lastPersistedContentContinuity.set(surface.surfaceId, structuredClone(entries));
+      } else {
+        const previousEntries = previousContentContinuity[surface.surfaceId] ??
+          this.lastPersistedContentContinuity.get(surface.surfaceId);
+        if (previousEntries && previousEntries.length > 0 && this.shouldRetainContentContinuityForSurface(surface)) {
+          contentContinuity[surface.surfaceId] = structuredClone(previousEntries);
+          this.lastPersistedContentContinuity.set(surface.surfaceId, structuredClone(previousEntries));
+        }
       }
       retainedContent.delete(surface.surfaceId);
     }
@@ -10144,6 +10157,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
     }
     return contentContinuity;
+  }
+
+  private shouldRetainContentContinuityForSurface(surface: ManagedSurface): boolean {
+    if (!this.hasAcceptedSurfaceTopology(surface)) {
+      return false;
+    }
+    return this.visiblePanes(surface).some((pane) => this.hasProviderOwnedPaneAuthority(surface, pane));
   }
 
   private captureRestartContentEntries(surface: ManagedSurface): PersistedRestartContentEntry[] {

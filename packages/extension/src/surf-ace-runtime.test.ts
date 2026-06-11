@@ -11200,7 +11200,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
             paneLabel: number;
           }>>;
         };
-        return true;
+        return projectedSnapshot.contentContinuity?.[server.surfaceId]?.[0]?.paneLabel === 1;
       });
       assert.ok(projectedSnapshot);
       const projectedContinuityEntry = projectedSnapshot.contentContinuity?.[server.surfaceId]?.[0];
@@ -11213,6 +11213,57 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(continuityEntry?.sessionKey, "agent:test:restart-persist");
       assert.equal(projectedContinuityEntry?.paneLabel, 1);
       assert.equal(firstPane.paneLabel, 1);
+    });
+  });
+
+  await t.test("blank provider observation does not erase persisted restart continuity", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const pushed = await runtime.push(
+        {
+          content: "<main>T338 continuity survives blank pair</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:blank-continuity" },
+      );
+
+      const internalRuntime = runtime as any;
+      await internalRuntime.persistScreenSnapshot();
+      const snapshotPath = path.join(internalRuntime.stateDir, "surf-ace-runtime-screens.json");
+      const persistedBefore = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+        contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+      };
+      assert.equal(
+        persistedBefore.contentContinuity?.[server.surfaceId]?.some((entry) =>
+          entry.contentId === pushed.contentId &&
+          entry.contentValue === "<main>T338 continuity survives blank pair</main>"
+        ),
+        true,
+      );
+
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(firstPaneId);
+      assert.ok(pane);
+      pane.activeContentId = null;
+      pane.contentType = null;
+      pane.contentValue = null;
+      pane.currentRevision = 2;
+      pane.historySummary.visibleContentId = null;
+      await internalRuntime.persistScreenSnapshot();
+
+      const persistedAfter = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+        contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+      };
+      assert.equal(
+        persistedAfter.contentContinuity?.[server.surfaceId]?.some((entry) =>
+          entry.contentId === pushed.contentId &&
+          entry.contentValue === "<main>T338 continuity survives blank pair</main>"
+        ),
+        true,
+      );
     });
   });
 
