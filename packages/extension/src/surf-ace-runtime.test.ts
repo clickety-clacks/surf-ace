@@ -11219,12 +11219,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
   await t.test("blank provider observation does not erase persisted restart continuity", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
       const pushed = await runtime.push(
         {
           content: "<main>T338 continuity survives blank pair</main>",
           contentType: "html",
           fingerprint: server.surfaceId,
-          paneId: firstPaneId,
+          paneId: paneIds[0]!,
         },
         { sessionKey: "agent:test:blank-continuity" },
       );
@@ -11234,6 +11241,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const snapshotPath = path.join(internalRuntime.stateDir, "surf-ace-runtime-screens.json");
       const persistedBefore = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
         contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+        screens?: Array<{ fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
       };
       assert.equal(
         persistedBefore.contentContinuity?.[server.surfaceId]?.some((entry) =>
@@ -11242,11 +11250,21 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         ),
         true,
       );
+      assert.deepEqual(
+        persistedBefore.screens
+          ?.find((screen) => screen.fingerprint === server.surfaceId)
+          ?.panes
+          ?.map((pane) => pane.paneLabel),
+        [1, 2],
+      );
 
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
-      const pane = surface.panes.get(firstPaneId);
+      const pane = surface.panes.get(paneIds[0]!);
       assert.ok(pane);
+      surface.panes = new Map([[pane.paneId, pane]]);
+      surface.layout = { paneId: pane.paneId, type: "pane" };
+      surface.topologyRevision += 1;
       pane.activeContentId = null;
       pane.contentType = null;
       pane.contentValue = null;
@@ -11256,6 +11274,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       const persistedAfter = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
         contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+        screens?: Array<{ fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
       };
       assert.equal(
         persistedAfter.contentContinuity?.[server.surfaceId]?.some((entry) =>
@@ -11263,6 +11282,13 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           entry.contentValue === "<main>T338 continuity survives blank pair</main>"
         ),
         true,
+      );
+      assert.deepEqual(
+        persistedAfter.screens
+          ?.find((screen) => screen.fingerprint === server.surfaceId)
+          ?.panes
+          ?.map((pane) => pane.paneLabel),
+        [1, 2],
       );
     });
   });

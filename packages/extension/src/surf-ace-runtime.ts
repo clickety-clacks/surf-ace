@@ -3018,6 +3018,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private ownsRuntimeLease = false;
   private ownerControlPort: number | null = null;
   private ownerControlServer: Server | null = null;
+  private screenSnapshotPersist: Promise<void> = Promise.resolve();
   private screenSnapshotWrite: Promise<void> = Promise.resolve();
   private lastPersistedContentContinuity = new Map<string, PersistedRestartContentEntry[]>();
   private restartContentBySurface = new Map<string, PersistedRestartContentEntry[]>();
@@ -10107,20 +10108,38 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private async persistScreenSnapshot(): Promise<void> {
+    this.screenSnapshotPersist = this.screenSnapshotPersist
+      .catch(() => {})
+      .then(() => this.persistScreenSnapshotNow());
+    await this.screenSnapshotPersist;
+  }
+
+  private async persistScreenSnapshotNow(): Promise<void> {
     if (!this.ownsRuntimeLease) {
       return;
     }
     const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
+    await this.screenSnapshotWrite.catch(() => {});
+    const previousSnapshotFile = await this.loadPersistedScreenSnapshotFile();
     const liveScreens = this.buildScreenSummaries();
+    const retainedBlankSurfaceIds = new Set<string>();
+    this.collectBlankContentContinuityRetentions(
+      liveScreens,
+      previousSnapshotFile?.contentContinuity ?? {},
+      retainedBlankSurfaceIds,
+    );
     const screens = [
-      ...liveScreens,
+      ...this.retainTrustedScreensAcrossBlankLiveObservation(
+        liveScreens,
+        previousSnapshotFile?.screens ?? [],
+        retainedBlankSurfaceIds,
+      ),
       ...this.retainedRestartScreens(liveScreens),
     ];
     this.persistedRuntimeScreenIds = new Set(screens.map((screen) => screen.fingerprint));
-    await this.screenSnapshotWrite.catch(() => {});
-    const previousContentContinuity = (await this.loadPersistedScreenSnapshotFile())?.contentContinuity ?? {};
+    const previousContentContinuity = previousSnapshotFile?.contentContinuity ?? {};
     const payload: PersistedScreenSnapshotFile = {
-      contentContinuity: this.buildContentContinuitySnapshot(previousContentContinuity),
+      contentContinuity: this.buildContentContinuitySnapshot(previousContentContinuity, retainedBlankSurfaceIds),
       screens,
       updatedAt: this.now(),
       version: 1,
@@ -10133,6 +10152,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private buildContentContinuitySnapshot(
     previousContentContinuity: Record<string, PersistedRestartContentEntry[]> = {},
+    retainedBlankSurfaceIds: Set<string> = new Set(),
   ): Record<string, PersistedRestartContentEntry[]> {
     const contentContinuity: Record<string, PersistedRestartContentEntry[]> = {};
     const retainedContent = new Map(this.restartContentBySurface);
@@ -10144,7 +10164,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       } else {
         const previousEntries = previousContentContinuity[surface.surfaceId] ??
           this.lastPersistedContentContinuity.get(surface.surfaceId);
-        if (previousEntries && previousEntries.length > 0 && this.shouldRetainContentContinuityForSurface(surface)) {
+        if (
+          previousEntries &&
+          previousEntries.length > 0 &&
+          (this.shouldRetainContentContinuityForSurface(surface) || retainedBlankSurfaceIds.has(surface.surfaceId))
+        ) {
           contentContinuity[surface.surfaceId] = structuredClone(previousEntries);
           this.lastPersistedContentContinuity.set(surface.surfaceId, structuredClone(previousEntries));
         }
@@ -10156,7 +10180,86 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         contentContinuity[surfaceId] = structuredClone(entries);
       }
     }
+    for (const surfaceId of retainedBlankSurfaceIds) {
+      if (contentContinuity[surfaceId]) {
+        continue;
+      }
+      const previousEntries = previousContentContinuity[surfaceId] ??
+        this.lastPersistedContentContinuity.get(surfaceId);
+      if (previousEntries && previousEntries.length > 0) {
+        contentContinuity[surfaceId] = structuredClone(previousEntries);
+        this.lastPersistedContentContinuity.set(surfaceId, structuredClone(previousEntries));
+      }
+    }
     return contentContinuity;
+  }
+
+  private retainTrustedScreensAcrossBlankLiveObservation(
+    liveScreens: SurfAceScreenSummary[],
+    previousScreens: SurfAceScreenSummary[],
+    retainedBlankSurfaceIds: Set<string>,
+  ): SurfAceScreenSummary[] {
+    const previousBySurfaceId = new Map(previousScreens.map((screen) => [screen.fingerprint, screen]));
+    return liveScreens.map((screen) => {
+      const previous = previousBySurfaceId.get(screen.fingerprint);
+      if (previous && this.shouldRetainTrustedScreenForBlankLiveObservation(screen, previous)) {
+        retainedBlankSurfaceIds.add(screen.fingerprint);
+        return structuredClone(previous);
+      }
+      return screen;
+    });
+  }
+
+  private collectBlankContentContinuityRetentions(
+    liveScreens: SurfAceScreenSummary[],
+    previousContentContinuity: Record<string, PersistedRestartContentEntry[]>,
+    retainedBlankSurfaceIds: Set<string>,
+  ): void {
+    for (const screen of liveScreens) {
+      const previousEntries = previousContentContinuity[screen.fingerprint] ??
+        this.lastPersistedContentContinuity.get(screen.fingerprint);
+      if (
+        previousEntries &&
+        previousEntries.length > 0 &&
+        this.isBlankSinglePaneScreen(screen)
+      ) {
+        retainedBlankSurfaceIds.add(screen.fingerprint);
+      }
+    }
+  }
+
+  private shouldRetainTrustedScreenForBlankLiveObservation(
+    liveScreen: SurfAceScreenSummary,
+    previousScreen: SurfAceScreenSummary,
+  ): boolean {
+    if (!this.isTrustedRestartScreen(previousScreen)) {
+      return false;
+    }
+    if (previousScreen.fingerprint !== liveScreen.fingerprint) {
+      return false;
+    }
+    if (previousScreen.panes.length <= liveScreen.panes.length) {
+      return false;
+    }
+    if (!this.isBlankSinglePaneScreen(liveScreen)) {
+      return false;
+    }
+    return previousScreen.panes.some((pane) =>
+      pane.activeContent !== null ||
+      pane.historySummary.visibleContentId !== null ||
+      pane.target !== null
+    );
+  }
+
+  private isBlankSinglePaneScreen(screen: SurfAceScreenSummary): boolean {
+    if (screen.panes.length !== 1) {
+      return false;
+    }
+    const pane = screen.panes[0];
+    if (!pane || pane.activeContent !== null || pane.historySummary.visibleContentId !== null) {
+      return false;
+    }
+    return screen.topology?.type === "pane";
   }
 
   private shouldRetainContentContinuityForSurface(surface: ManagedSurface): boolean {
