@@ -9605,6 +9605,86 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return true;
   }
 
+  private bootstrapTopologyFromPersistedTargets(
+    surface: ManagedSurface,
+    options: { allowReplacingBlankInitialPane?: boolean } = {},
+  ): boolean {
+    const persisted = this.persistentState.targetStateBySurfaceId?.[surface.surfaceId];
+    if (!this.isHydratablePersistedTargetState(persisted) || !persisted) {
+      return false;
+    }
+    if (!this.hasDurableSelfOwnedSurface(surface)) {
+      return false;
+    }
+    if (surface.panes.size > 0) {
+      const panes = [...surface.panes.values()];
+      const canReplaceBlankInitialPane =
+        options.allowReplacingBlankInitialPane === true &&
+        panes.length === 1 &&
+        panes[0]?.activeContentId === null &&
+        panes[0]?.contentType === null &&
+        panes[0]?.contentValue === null &&
+        panes[0]?.currentTargetId === null &&
+        panes[0]?.staleTargetId === null;
+      if (!canReplaceBlankInitialPane) {
+        return false;
+      }
+    }
+    const targets = persisted.targetRecords.filter((target) =>
+      target.currentState === "current" &&
+        persisted.paneTargets[target.paneLineageId]?.currentTargetId === target.targetId &&
+        this.isTrustedProviderLineageId(target.ownerProviderId) &&
+        (
+          target.targetKind === "html" ||
+          target.targetKind === "markdown" ||
+          target.targetKind === "image" ||
+          target.targetKind === "web_snapshot"
+        )
+    );
+    if (targets.length === 0) {
+      return false;
+    }
+    const paneByLineage = new Map<string, ManagedPane>();
+    for (const target of targets) {
+      if (paneByLineage.has(target.paneLineageId)) {
+        continue;
+      }
+      const paneLabel = target.paneLabelAtApply;
+      if (typeof paneLabel !== "number" || !Number.isInteger(paneLabel) || paneLabel <= 0) {
+        continue;
+      }
+      const remotePaneId = this.allocateRemotePaneId();
+      const pane = createPane(
+        asPaneId(target.paneIdAtApply || `pn_${String(remotePaneId)}_${String(paneLabel)}`),
+        paneLabel,
+        remotePaneId,
+        cloneViewport(surface.viewport),
+      );
+      pane.paneLineageId = target.paneLineageId;
+      pane.targetEpoch = target.targetEpoch;
+      paneByLineage.set(target.paneLineageId, pane);
+    }
+    const panes = [...paneByLineage.values()].sort((a, b) => a.paneLabel - b.paneLabel);
+    if (panes.length === 0) {
+      return false;
+    }
+    surface.panes = new Map(panes.map((pane) => [pane.paneId, pane]));
+    surface.layout = panes.length === 1
+      ? { type: "pane", paneId: panes[0]!.paneId }
+      : { type: "split", direction: "vertical", children: panes.map((pane) => ({ type: "pane", paneId: pane.paneId })) };
+    surface.topologyRevision = Math.max(0, Number(surface.topologyRevision) || 0);
+    surface.snapshotBufferedEvents = [];
+    this.restartTopologyRestoredSurfaceIds.add(surface.surfaceId);
+    this.logger.info?.(
+      runtimeDiagnostic("restart_topology_bootstrap_from_targets", {
+        panes: panes.length,
+        surface_id: surface.surfaceId,
+        targets: targets.length,
+      }),
+    );
+    return true;
+  }
+
   private queuePersistScreenSnapshot(reason: string): void {
     if (!this.ownsRuntimeLease) {
       return;
@@ -9664,9 +9744,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       updatedAt: this.now(),
       version: 1,
     };
+    const snapshotTmpPath = `${snapshotPath}.${randomUUID()}.tmp`;
     this.screenSnapshotWrite = this.screenSnapshotWrite
       .catch(() => {})
-      .then(() => fs.writeFile(snapshotPath, JSON.stringify(payload, null, 2)));
+      .then(async () => {
+        try {
+          await fs.writeFile(snapshotTmpPath, JSON.stringify(payload, null, 2));
+          await fs.rename(snapshotTmpPath, snapshotPath);
+        } catch (error) {
+          await fs.rm(snapshotTmpPath, { force: true }).catch(() => {});
+          throw error;
+        }
+      });
     await this.screenSnapshotWrite;
   }
 
@@ -10882,6 +10971,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
   }
 
+  private hasDurableSelfOwnedSurface(surface: ManagedSurface): boolean {
+    const ownership = this.persistentState.selfOwnedSurfaceIds?.[surface.surfaceId];
+    return Boolean(
+      ownership &&
+        !ownership.relinquishedAt &&
+        ownership.source !== "current_target_state" &&
+        this.isTrustedProviderLineageId(ownership.providerId),
+    );
+  }
+
   private isTrustedProviderLineageId(providerId: string): boolean {
     return this.ownershipRecoveryPolicy.isTrustedProviderLineageId(this.persistentState, providerId);
   }
@@ -11262,20 +11361,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           if (canonicalSurface !== surface) {
             surface = canonicalSurface;
           }
+          const pairBlankSinglePane =
+            pairResponse.payload.state.panes.length === 1 &&
+            pairResponse.payload.state.panes[0]?.currentContentId == null &&
+            pairResponse.payload.state.panes[0]?.contentType == null &&
+            (Number(pairResponse.payload.state.topologyRevision) || 0) === 0;
+          const pairFreshBlankSinglePane =
+            pairBlankSinglePane &&
+            pairResponse.payload.resumed === false;
+          const pairSinglePaneLabel = pairResponse.payload.state.panes[0]?.paneLabel ?? null;
+          const pairTopologyRevision = Number(pairResponse.payload.state.topologyRevision);
           // Now that we have the canonical provider-assigned surface id,
           // attempt restart restoration again keyed by this id, and if no snapshot
           // exists, synthesize a minimal topology from persisted restart content so
           // the very first blank single-pane pair can be preserved in-flight.
           this.restoreRestartOwnership(surface);
-          const hadSyntheticBootstrap = this.bootstrapTopologyFromRestartContent(surface);
+          const hadSyntheticBootstrap =
+            this.bootstrapTopologyFromRestartContent(surface) ||
+            (
+              pairFreshBlankSinglePane &&
+              this.bootstrapTopologyFromPersistedTargets(surface, {
+                allowReplacingBlankInitialPane: true,
+              })
+            );
           const hadAcceptedLocalTopology =
             (this.hasAcceptedSurfaceTopology(surface) || this.hasProviderOwnedLocalState(surface)) &&
             surface.panes.size > 0;
-          const pairBlankSinglePane =
-            pairResponse.payload.state.panes.length === 1 &&
-            pairResponse.payload.state.panes[0]?.currentContentId === null;
-          const pairSinglePaneLabel = pairResponse.payload.state.panes[0]?.paneLabel ?? null;
-          const pairTopologyRevision = Number(pairResponse.payload.state.topologyRevision);
           // Preserve pending restart state even before a valid resume session exists.
           // Requiring hasValidResumeSession here caused provider restarts with a blank
           // single-pane pair response to clear locally restored multi-pane topology
@@ -11295,6 +11406,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             pairBlankSinglePane &&
             pairSinglePaneLabel === 1 &&
             pairTopologyRevision === 0 &&
+            this.hasDurableSelfOwnedSurface(surface) &&
             hadAcceptedLocalTopology &&
             (surface.panes.size > 1 || this.hasSurfaceTargetState(surface));
           const treatPairAsBootstrap =
@@ -11307,6 +11419,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               had_restart_pending_pair: hadRestartOwnershipPendingPair,
               restart_topology_restored: this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId),
               pair_blank_single_pane: pairBlankSinglePane,
+              pair_fresh_blank_single_pane: pairFreshBlankSinglePane,
               pair_single_pane_label: pairSinglePaneLabel,
               pair_topology_revision: pairTopologyRevision,
               preserve_restart_pair_state: preserveRestartPairState,
@@ -11325,7 +11438,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             }),
             );
             surface.unreachableFailures = 0;
-            if (!hadAcceptedLocalTopology && !preserveRestartPairState) {
+            if (!hadAcceptedLocalTopology && !preserveRestartPairState && !hadSyntheticBootstrap) {
               this.clearSurfaceLocalTopologyState(surface, {
                 preservePaneLabels: hadRestartOwnershipPendingPair,
                 preserveRestartContent: hadRestartOwnershipPendingPair,

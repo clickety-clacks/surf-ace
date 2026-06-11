@@ -15238,6 +15238,118 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
     });
 
+    await t.test("fresh blank pair restores accepted provider html target when screen snapshot is missing", async () => {
+      const port = nextPort++;
+      const surfaceId = "sf_fresh_blank_persisted_target";
+      const providerId = "pv_11112222333344445555666677778888";
+      const paneLineageId = `pl_${surfaceId}_durable`;
+      const targetId = "tg_fresh_blank_persisted_html";
+      const server = new FakeSurfAceWsServer(port, { surfaceId });
+      const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-fresh-blank-target-"));
+      const discovery = new StaticDiscoveryService([discoveryEndpoint(port)]);
+      const runtime = createSurfAceRuntime({ discovery, stateDir });
+
+      try {
+        await fs.writeFile(
+          path.join(stateDir, "surf-ace-provider-identity.json"),
+          JSON.stringify({ providerId, version: 1 }),
+        );
+        await fs.writeFile(
+          path.join(stateDir, "surf-ace-runtime-state.json"),
+          JSON.stringify({
+            nextPaneLabel: 2,
+            nextRemotePaneId: 42,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId,
+            selfOwnedSurfaceIds: {
+              [surfaceId]: {
+                observedAt: Date.now(),
+                providerId,
+                source: "current_local_ownership",
+              },
+            },
+            targetStateBySurfaceId: {
+              [surfaceId]: {
+                ownershipEpoch: 7,
+                paneTargets: {
+                  [paneLineageId]: {
+                    currentTargetId: targetId,
+                    diagnosticContent: null,
+                    lastRestoreBlockedReason: null,
+                    nonDurableTargetDiagnostic: null,
+                    paneLineageId,
+                    staleTargetId: null,
+                    targetEpoch: 1,
+                  },
+                },
+                registeredTargetIdsByIdempotencyKey: {},
+                targetRecords: [
+                  {
+                    appliedAt: new Date().toISOString(),
+                    currentState: "current",
+                    ownerProviderId: providerId,
+                    ownershipEpoch: 7,
+                    ownershipSessionId: "sa_previous_fresh_blank",
+                    paneIdAtApply: "pn_previous_fresh_blank",
+                    paneLabelAtApply: 1,
+                    paneLineageId,
+                    restorePolicy: "auto",
+                    surfaceId,
+                    surfaceInstanceId: null,
+                    targetEpoch: 1,
+                    targetHeader: {
+                      payloadSchemaVersion: 1,
+                      replaySemantics: "bytes",
+                      requiredCapabilities: ["target.html.v1"],
+                      safeToLogFields: [],
+                      safetyClass: "passive",
+                      summary: "T338 persisted html target",
+                    },
+                    targetId,
+                    targetKind: "html",
+                    targetPayload: { html: "<strong>T338 persisted html target</strong>" },
+                  },
+                ],
+              },
+            },
+            version: 1,
+            windowLabels: {
+              [surfaceId]: "a",
+            },
+          }),
+        );
+
+        server.resetToSinglePane();
+        server.pairResponseOwnershipEpoch = 8;
+        await runtime.start();
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+        await waitFor(() => server.contentSetRequests.length >= 1, 12_000);
+
+        const screens = await runtime.listScreens();
+        const pane = screens[0]?.panes[0];
+        assert.ok(pane);
+        assert.equal(pane.paneId, "pn_previous_fresh_blank");
+        assert.equal(pane.target?.targetId, targetId);
+        assert.equal(pane.target?.targetKind, "html");
+        assert.equal(pane.target?.blockedReason, null);
+        assert.equal(pane.activeContent?.contentType, "html");
+        assert.deepEqual(server.contentSetRequests.at(-1)?.content, {
+          html: "<strong>T338 persisted html target</strong>",
+        });
+
+        const read = await runtime.read({ fingerprint: surfaceId, paneId: pane.paneId as any });
+        assert.equal(read.contentSnapshot?.contentType, "html");
+        assert.deepEqual(read.contentSnapshot?.content, {
+          html: "<strong>T338 persisted html target</strong>",
+        });
+      } finally {
+        await runtime.stop();
+        await server.close();
+        await fs.rm(stateDir, { force: true, recursive: true });
+      }
+    });
+
     await t.test("fresh pair with persisted target evidence uses pair-response ownership epoch for new targets", async () => {
       await withRuntimeHarness({
         configureServer: (server) => {
