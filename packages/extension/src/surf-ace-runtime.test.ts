@@ -11272,10 +11272,22 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(surface);
       const pane = surface.panes.get(paneIds[0]!);
       assert.ok(pane);
+      pane.activeContentId = null;
+      await internalRuntime.persistScreenSnapshot();
+      const persistedProjected = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+        contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+      };
+      assert.equal(
+        persistedProjected.contentContinuity?.[server.surfaceId]?.some((entry) =>
+          entry.contentId === pushed.contentId &&
+          entry.contentValue === "<main>T338 continuity survives blank pair</main>"
+        ),
+        true,
+      );
+
       surface.panes = new Map([[pane.paneId, pane]]);
       surface.layout = { paneId: pane.paneId, type: "pane" };
       surface.topologyRevision += 1;
-      pane.activeContentId = null;
       pane.contentType = null;
       pane.contentValue = null;
       pane.currentRevision = 2;

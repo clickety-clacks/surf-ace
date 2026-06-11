@@ -6822,6 +6822,28 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     };
   }
 
+  private restartContinuityEntry(pane: ManagedPane): ManagedHistoryEntry | null {
+    const visibleEntry = this.visibleHistoryEntry(pane);
+    if (visibleEntry) {
+      return visibleEntry;
+    }
+    const contentId = pane.historySummary.visibleContentId ?? pane.snapshot?.contentId;
+    const contentType = pane.contentType ?? pane.snapshot?.contentType;
+    if (!contentId || !contentType || pane.contentValue === null) {
+      return null;
+    }
+    return {
+      contentId: contentId as ContentId,
+      contentType,
+      contentValue: structuredClone(pane.contentValue),
+      display: pane.display ? structuredClone(pane.display) : null,
+      historyOwnerToken: pane.historyOwnerToken,
+      revision: pane.currentRevision,
+      sessionKey: pane.ownerSessionKey,
+      targetId: pane.currentTargetId,
+    };
+  }
+
   private storeHiddenHistoryEntry(
     pane: ManagedPane,
     entry: ManagedHistoryEntry | null,
@@ -10272,7 +10294,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private captureRestartContentEntries(surface: ManagedSurface): PersistedRestartContentEntry[] {
     return this.visiblePanes(surface)
       .map((pane): PersistedRestartContentEntry | null => {
-        const entry = this.visibleHistoryEntry(pane);
+        const entry = this.restartContinuityEntry(pane);
         if (!entry) {
           return null;
         }
