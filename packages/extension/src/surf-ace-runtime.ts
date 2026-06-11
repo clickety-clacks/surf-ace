@@ -9982,7 +9982,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private restoreRestartOwnership(surface: ManagedSurface): void {
-    if (surface.hasPairedInGatewaySession || surface.sessionId) {
+    if (this.hasAcceptedSurfaceTopology(surface)) {
       return;
     }
     const snapshot = this.restartSnapshots.get(surface.surfaceId);
