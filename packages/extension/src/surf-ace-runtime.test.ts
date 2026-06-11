@@ -10193,6 +10193,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         await fs.writeFile(path.join(stateDir, "surf-ace-runtime-screens.json"), preBounceSnapshot);
 
         server.resetToSinglePane(server.initialRemotePaneId);
+        const blankPane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(blankPane);
+        blankPane.paneLabel = 2;
+        server.setTopologyLayout({ paneId: server.initialRemotePaneId, type: "pane" }, 161);
         const restartInfos: string[] = [];
         const restartedRuntime = createSurfAceRuntime({
           discovery,

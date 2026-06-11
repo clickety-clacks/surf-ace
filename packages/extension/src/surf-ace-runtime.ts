@@ -9983,10 +9983,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
   private restoreRestartOwnership(surface: ManagedSurface): void {
     if (this.hasAcceptedSurfaceTopology(surface)) {
+      this.logger.info?.(
+        runtimeDiagnostic("restart_restore_skipped", {
+          reason: "accepted_topology_already_present",
+          surface_id: surface.surfaceId,
+        }),
+      );
       return;
     }
     const snapshot = this.restartSnapshots.get(surface.surfaceId);
-    if (!snapshot || !this.hasTrustedLocalOwnershipProvenanceForProvider(snapshot, this.persistentState.providerId)) {
+    if (!snapshot || !(this.isTrustedRestartScreen(snapshot) || this.hasTrustedPersistedSelfOwnership(snapshot))) {
+      this.logger.info?.(
+        runtimeDiagnostic("restart_restore_skipped", {
+          reason: !snapshot ? "no_trusted_snapshot" : "untrusted_local_ownership",
+          surface_id: surface.surfaceId,
+        }),
+      );
       return;
     }
     const sessionId = snapshot._debug?.sessionId as string;
@@ -10087,6 +10099,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private restoreRestartTopology(surface: ManagedSurface, snapshot: SurfAceScreenSummary): void {
+    const canReplaceCurrentTopology =
+      surface.panes.size === 0 ||
+      (this.isSingleBlankStartupPane(surface) && snapshot.panes.length > 0);
+    if (!canReplaceCurrentTopology) {
+      return;
+    }
     if (snapshot.panes.length === 0 || !snapshot.topology) {
       this.logger.info?.(
         runtimeDiagnostic("restart_topology_restore_skipped", {
@@ -10139,6 +10157,21 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         target_lineage_match_count: targetLineageMatchCount,
         target_lineage_miss_count: targetLineageMissCount,
       }),
+    );
+  }
+
+  private isSingleBlankStartupPane(surface: ManagedSurface): boolean {
+    if (surface.panes.size !== 1) {
+      return false;
+    }
+    const pane = [...surface.panes.values()][0];
+    return Boolean(
+      pane &&
+        pane.activeContentId === null &&
+        pane.contentType === null &&
+        pane.contentValue === null &&
+        pane.currentTargetId === null &&
+        pane.staleTargetId === null,
     );
   }
 
@@ -12036,6 +12069,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           if (canonicalSurface !== surface) {
             surface = canonicalSurface;
           }
+          const pairBlankSinglePane =
+            pairResponse.payload.state.panes.length === 1 &&
+            pairResponse.payload.state.panes[0]?.currentContentId == null &&
+            pairResponse.payload.state.panes[0]?.contentType == null;
+          const pairFreshBlankSinglePane =
+            pairBlankSinglePane &&
+            pairResponse.payload.resumed === false &&
+            (Number(pairResponse.payload.state.topologyRevision) || 0) === 0;
+          const pairSinglePaneLabel = pairResponse.payload.state.panes[0]?.paneLabel ?? null;
+          const pairTopologyRevision = Number(pairResponse.payload.state.topologyRevision);
+          // Now that we have the canonical provider-assigned surface id,
+          // attempt restart restoration again keyed by this id, and if no snapshot
+          // exists, synthesize a minimal topology from persisted restart content so
+          // the very first blank single-pane pair can be preserved in-flight.
           this.restoreRestartProviderAuthorityBeforePair(surface);
           const hadAcceptedLocalTopology =
             this.hasAcceptedSurfaceTopology(surface) &&
