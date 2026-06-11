@@ -2129,26 +2129,7 @@ test("surface core exposes native materialized panes to the renderer until conte
 
   core.markNativePaneMaterialized(surface.surfaceId, materialization);
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.externalNative, true);
-  assert.deepEqual(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, {
-    acceptedSecondaryCount: 0,
-    clippingStatus: "unknown",
-    deniedReasons: [],
-    deniedToplevelCount: 0,
-    focusedWindowId: null,
-    launchToken,
-    members: [{
-      bounds: listedPane.geometry.contentViewport,
-      clippedToPane: null,
-      focused: false,
-      id: `${paneId}:target_top`,
-      lifecycle: "live",
-      role: "primary",
-    }],
-    paneId,
-    paneInstanceId: listedPane.geometry.paneInstanceId,
-    paneLocalBounds: listedPane.geometry.contentViewport,
-    primaryWindowId: `${paneId}:target_top`,
-  });
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
   core.markNativePaneWindowGroups(surface.surfaceId, [{
     acceptedSecondaryCount: 1,
     clippingStatus: "clipped",
@@ -2184,8 +2165,21 @@ test("surface core exposes native materialized panes to the renderer until conte
     paneLocalBounds: listedPane.geometry.contentViewport,
     primaryWindowId: "foreign-primary",
   }]);
-  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 0);
-  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.launchToken, launchToken);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
+  core.markNativePaneWindowGroups(surface.surfaceId, [{
+    acceptedSecondaryCount: 2,
+    clippingStatus: "clipped",
+    deniedReasons: [],
+    deniedToplevelCount: 0,
+    focusedWindowId: "dialog-2",
+    launchToken: null,
+    members: [],
+    paneId: String(paneId),
+    paneInstanceId: listedPane.geometry.paneInstanceId,
+    paneLocalBounds: listedPane.geometry.contentViewport,
+    primaryWindowId: null,
+  }]);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 2);
 
   core.contentClear(surface.surfaceId, {
     paneId: paneId as never,

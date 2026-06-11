@@ -3695,7 +3695,7 @@ test("ws server derives target.apply native pane host materialization for compos
       });
       assert.equal(cleared.ok, true);
       assert.equal(cleared.op, "panes.list");
-      assert.equal(cleared.payload.panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 0);
+      assert.equal(cleared.payload.panes[0]?.nativeWindowGroup, undefined);
 
       await closeSocket(socket);
     }, {

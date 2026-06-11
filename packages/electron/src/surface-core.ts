@@ -685,8 +685,8 @@ export class SurfaceCore {
           externalNative: pane.externalNative,
           geometry,
           name: pane.name,
-          ...(pane.externalNative && pane.nativeHost
-            ? { nativeWindowGroup: pane.nativeWindowGroup ?? nativePaneWindowGroupDiagnosticForPane(pane, geometry) }
+          ...(pane.externalNative && pane.nativeWindowGroup
+            ? { nativeWindowGroup: pane.nativeWindowGroup }
             : {}),
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
@@ -1026,7 +1026,7 @@ export class SurfaceCore {
     for (const group of groups) {
       const paneId = Number(group.paneId);
       const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
-      if (!pane || !pane.nativeHost?.launchToken || group.launchToken !== pane.nativeHost.launchToken) {
+      if (!pane || !pane.nativeHost?.launchToken || !sameNativePaneWindowGroupIdentity(group, pane, paneGeometry.get(paneId))) {
         continue;
       }
       trustedGroups.set(paneId, group);
@@ -3163,34 +3163,6 @@ function nativePaneMaterializationFromProjectedPanes(
   };
 }
 
-function nativePaneWindowGroupDiagnosticForPane(
-  pane: PaneState,
-  geometry: PaneGeometryProjection,
-): NativePaneWindowGroupDiagnostic {
-  const bounds = compositorResolvedRect(geometry.contentViewport);
-  const primaryWindowId = pane.nativeHost?.bindingId ?? pane.nativeHost?.contentId ?? String(pane.paneId);
-  return {
-    acceptedSecondaryCount: 0,
-    clippingStatus: "unknown",
-    deniedReasons: [],
-    deniedToplevelCount: 0,
-    focusedWindowId: null,
-    launchToken: pane.nativeHost?.launchToken ?? null,
-    members: [{
-      bounds,
-      clippedToPane: null,
-      focused: false,
-      id: primaryWindowId,
-      lifecycle: "live",
-      role: "primary",
-    }],
-    paneId: pane.paneId as PaneId,
-    paneInstanceId: geometry.paneInstanceId,
-    paneLocalBounds: bounds,
-    primaryWindowId,
-  };
-}
-
 function nativePaneWindowGroupDiagnosticFromStatus(
   pane: PaneState,
   geometry: PaneGeometryProjection,
@@ -3223,6 +3195,25 @@ function sameNativePaneWindowGroupDiagnostic(
   b: NativePaneWindowGroupDiagnostic | null,
 ): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function sameNativePaneWindowGroupIdentity(
+  group: NativePaneWindowGroupStatus,
+  pane: PaneState,
+  geometry: PaneGeometryProjection | undefined,
+): boolean {
+  if (group.launchToken) {
+    return group.launchToken === pane.nativeHost?.launchToken;
+  }
+  if (group.paneInstanceId && geometry && group.paneInstanceId === geometry.paneInstanceId) {
+    return true;
+  }
+  const expectedPrimaryWindowIds = [
+    pane.nativeHost?.bindingId,
+    pane.nativeHost?.contentId,
+    String(pane.paneId),
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  return group.primaryWindowId !== null && expectedPrimaryWindowIds.includes(group.primaryWindowId);
 }
 
 function nativePaneLaunchToken(surfaceId: string, paneId: number, targetId: string, targetEpoch: number): string {

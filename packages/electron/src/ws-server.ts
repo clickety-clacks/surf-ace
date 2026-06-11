@@ -55,6 +55,7 @@ import {
   validateMaterializationAgainstCompositorStatus,
   type CompositorControlRequest,
   type CompositorControlResponse,
+  type NativePaneWindowGroupStatus,
 } from "./native-pane-bridge.js";
 import {
   type ClientDiagnosticFields,
@@ -2049,8 +2050,10 @@ export class SurfaceWsServer {
           appliedAt,
           materializedState: {
             ...nativeHostMaterializedState(request.payload, materialization, {
-              ...nativePaneReadinessFromCompositor(hostResponse, materialization),
-              nativeHost: "applied",
+              ...nativePaneReadinessFromCompositor(overlayResponse ?? hostResponse, materialization),
+              nativeHost: nativePaneWindowGroupsFromCompositorStatus(overlayResponse ?? hostResponse).some((group) =>
+                nativePaneWindowGroupMatchesMaterialization(group, materialization)
+              ) ? "applied" : "not_applied",
               overlayRegions: overlayRequest ? "applied" : "not_requested",
             }),
           },
@@ -3487,10 +3490,33 @@ function nativePaneReadinessFromCompositor(
   const diagnostics = nativePaneDiagnosticsFromCompositorStatus(status, isPlainRecord(paneStatus) ? paneStatus : null);
   return {
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
+    ...(!nativePaneWindowGroupsFromCompositorStatus(response).some((group) =>
+      nativePaneWindowGroupMatchesMaterialization(group, materialization)
+    ) ? { diagnostics: [...diagnostics, "matching native pane window group was not observed"] } : {}),
     inputFocus: normalizeNativeInputFocus(source.inputFocus ?? source.input_focus),
     lifecycle: normalizeNativeLifecycle(source.lifecycle),
     ...(proof ? { proof } : {}),
   };
+}
+
+function nativePaneWindowGroupMatchesMaterialization(
+  group: NativePaneWindowGroupStatus,
+  materialization: NativePaneMaterialization,
+): boolean {
+  const pane = materialization.panes[0];
+  if (!pane) {
+    return false;
+  }
+  if (group.launchToken) {
+    return group.launchToken === pane.windowGroup?.launchIdentity.launchToken;
+  }
+  if (group.paneInstanceId && group.paneInstanceId === pane.geometry.paneInstanceId) {
+    return true;
+  }
+  return group.paneId === String(pane.id) && (
+    group.primaryWindowId === pane.binding_id ||
+    group.primaryWindowId === pane.content_id
+  );
 }
 
 function nativePaneDiagnosticsFromCompositorStatus(
