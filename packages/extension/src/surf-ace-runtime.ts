@@ -10232,7 +10232,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     liveScreen: SurfAceScreenSummary,
     previousScreen: SurfAceScreenSummary,
   ): boolean {
-    if (!this.isTrustedRestartScreen(previousScreen)) {
+    if (!this.hasTrustedPersistedSelfOwnership(previousScreen)) {
       return false;
     }
     if (previousScreen.fingerprint !== liveScreen.fingerprint) {

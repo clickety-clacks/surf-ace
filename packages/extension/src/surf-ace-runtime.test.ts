@@ -11257,6 +11257,14 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           ?.map((pane) => pane.paneLabel),
         [1, 2],
       );
+      const persistedScreenBefore = persistedBefore.screens?.find((screen) => screen.fingerprint === server.surfaceId) as
+        | { _debug?: { localOwnership?: unknown }; fingerprint?: string }
+        | undefined;
+      assert.ok(persistedScreenBefore);
+      if (persistedScreenBefore._debug) {
+        persistedScreenBefore._debug.localOwnership = null;
+      }
+      await fs.writeFile(snapshotPath, JSON.stringify(persistedBefore, null, 2));
 
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
