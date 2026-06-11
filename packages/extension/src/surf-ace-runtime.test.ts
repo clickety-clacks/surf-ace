@@ -11658,6 +11658,54 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider shutdown snapshot keeps prior topology and continuity when no live screens remain", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+      const pushed = await runtime.push(
+        {
+          content: "<main>T338 shutdown retention</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: paneIds[0]!,
+        },
+        { sessionKey: "agent:test:shutdown-retention" },
+      );
+
+      const internalRuntime = runtime as any;
+      await internalRuntime.persistScreenSnapshot();
+      const snapshotPath = path.join(internalRuntime.stateDir, "surf-ace-runtime-screens.json");
+      internalRuntime.surfaces.clear();
+      internalRuntime.preserveEmptyScreenSnapshotOnce = true;
+
+      await internalRuntime.persistScreenSnapshot();
+      const persistedAfter = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+        contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+        screens?: Array<{ fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
+      };
+      assert.equal(
+        persistedAfter.contentContinuity?.[server.surfaceId]?.some((entry) =>
+          entry.contentId === pushed.contentId &&
+          entry.contentValue === "<main>T338 shutdown retention</main>"
+        ),
+        true,
+      );
+      assert.deepEqual(
+        persistedAfter.screens
+          ?.find((screen) => screen.fingerprint === server.surfaceId)
+          ?.panes
+          ?.map((pane) => pane.paneLabel),
+        [1, 2],
+      );
+    });
+  });
+
   await t.test("restart content snapshot restores pane content before replay", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);

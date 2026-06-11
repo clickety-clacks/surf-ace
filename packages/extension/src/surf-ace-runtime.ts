@@ -3021,6 +3021,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private screenSnapshotPersist: Promise<void> = Promise.resolve();
   private screenSnapshotWrite: Promise<void> = Promise.resolve();
   private lastPersistedContentContinuity = new Map<string, PersistedRestartContentEntry[]>();
+  private preserveEmptyScreenSnapshotOnce = false;
   private restartContentBySurface = new Map<string, PersistedRestartContentEntry[]>();
   private restartTopologyRestoredSurfaceIds = new Set<string>();
   private restartSnapshots = new Map<string, SurfAceScreenSummary>();
@@ -3161,6 +3162,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await Promise.all(stopPromises);
     this.surfaces.clear();
     this.endpointProbes.clear();
+    this.preserveEmptyScreenSnapshotOnce = true;
     await this.persistScreenSnapshot();
     await this.stateWrite;
     await this.screenSnapshotWrite;
@@ -10229,6 +10231,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.screenSnapshotWrite.catch(() => {});
     const previousSnapshotFile = await this.loadPersistedScreenSnapshotFile();
     const liveScreens = this.buildScreenSummaries();
+    const preserveEmptyScreenSnapshot = this.preserveEmptyScreenSnapshotOnce;
+    this.preserveEmptyScreenSnapshotOnce = false;
+    if (
+      preserveEmptyScreenSnapshot &&
+      liveScreens.length === 0 &&
+      ((previousSnapshotFile?.screens.length ?? 0) > 0 ||
+        Object.keys(previousSnapshotFile?.contentContinuity ?? {}).length > 0)
+    ) {
+      const payload: PersistedScreenSnapshotFile = {
+        contentContinuity: structuredClone(previousSnapshotFile?.contentContinuity ?? {}),
+        screens: structuredClone(previousSnapshotFile?.screens ?? []),
+        updatedAt: this.now(),
+        version: 1,
+      };
+      this.persistedRuntimeScreenIds = new Set(payload.screens.map((screen) => screen.fingerprint));
+      this.screenSnapshotWrite = this.screenSnapshotWrite
+        .catch(() => {})
+        .then(() => fs.writeFile(snapshotPath, JSON.stringify(payload, null, 2)));
+      await this.screenSnapshotWrite;
+      return;
+    }
     const retainedBlankSurfaceIds = new Set<string>();
     this.collectBlankContentContinuityRetentions(
       liveScreens,
