@@ -12049,10 +12049,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             sessionId: surface.sessionId,
           };
           const preserveRestartPairState =
-            hadRestartOwnershipPendingPair &&
             this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId) &&
             pairResponse.payload.state.panes.length === 1 &&
-            pairResponse.payload.state.panes[0]?.currentContentId === null;
+            pairResponse.payload.state.panes[0]?.currentContentId === null &&
+            (
+              hadRestartOwnershipPendingPair ||
+              this.visiblePanes(surface).length > 1 ||
+              (this.restartContentBySurface.get(surface.surfaceId)?.length ?? 0) > 1
+            );
           const preserveProviderAuthorityPairState =
             preserveRestartPairState ||
             this.shouldPreserveProviderAuthorityForEmptyPairObservation(surface, pairResponse);
