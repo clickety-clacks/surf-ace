@@ -5851,7 +5851,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           this.clearSurfaceTombstone(input.surfaceId, "live paired surfaces.list rediscovery");
           this.livePairedSelfRediscoveredSurfaceIds.add(input.surfaceId);
         }
-      } else {
+      } else if (input.source === "pair.response") {
         delete this.persistentState.surfaceTombstones[input.surfaceId];
         this.tombstonedSurfaceIds.delete(input.surfaceId);
       }
@@ -8605,6 +8605,18 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
   }
 
+  private hasProviderOwnedLocalState(surface: ManagedSurface): boolean {
+    return (
+      surface.localOwnership !== null &&
+      surface.localOwnership.providerId === this.persistentState.providerId &&
+      surface.localOwnership.sessionId === surface.sessionId &&
+      surface.localOwnership.surfaceId === surface.surfaceId &&
+      surface.sessionId !== null &&
+      surface.panes.size > 0 &&
+      !surface.restartOwnershipPendingPair
+    );
+  }
+
   private isUnownedDisconnectedGhostSurface(surface: ManagedSurface): boolean {
     return (
       surface.connectionState !== "connected" &&
@@ -9612,17 +9624,36 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const snapshotPath = path.join(this.stateDir, SCREEN_SNAPSHOT_FILE_NAME);
     const screens = this.buildScreenSummaries();
     this.persistedRuntimeScreenIds = new Set(screens.map((screen) => screen.fingerprint));
-    let contentContinuity = this.buildContentContinuitySnapshot();
+    const blockedContinuitySurfaceIds = new Set<string>([
+      ...Object.keys(this.persistentState.surfaceTombstones ?? {}),
+      ...this.tombstonedSurfaceIds,
+    ]);
+    const filterBlockedContinuity = (
+      entries: Record<string, PersistedRestartContentEntry[]>,
+    ): Record<string, PersistedRestartContentEntry[]> => {
+      const filtered: Record<string, PersistedRestartContentEntry[]> = {};
+      for (const [surfaceId, surfaceEntries] of Object.entries(entries)) {
+        if (!blockedContinuitySurfaceIds.has(surfaceId)) {
+          filtered[surfaceId] = surfaceEntries;
+        }
+      }
+      return filtered;
+    };
+    let contentContinuity = filterBlockedContinuity(this.buildContentContinuitySnapshot());
     let finalScreens = screens;
     try {
       const raw = await fs.readFile(snapshotPath, "utf8");
       const prev = JSON.parse(raw) as Partial<PersistedScreenSnapshotFile>;
       const prevScreens = Array.isArray(prev.screens) ? prev.screens : [];
       if (finalScreens.length === 0 && prevScreens.length > 0) {
-        finalScreens = prevScreens as any;
+        finalScreens = (prevScreens as any[]).filter(
+          (screen) =>
+            typeof screen?.fingerprint !== "string" ||
+            !blockedContinuitySurfaceIds.has(screen.fingerprint),
+        ) as any;
       }
       if (Object.keys(contentContinuity).length === 0 && prev.contentContinuity && Object.keys(prev.contentContinuity).length > 0) {
-        contentContinuity = prev.contentContinuity as any;
+        contentContinuity = filterBlockedContinuity(prev.contentContinuity as any);
       }
     } catch {
       // no previous snapshot — proceed
@@ -10523,13 +10554,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     // before the first successful resume. Gating on hasValidResumeSession here causes
     // us to clear trusted local restart state just before pair, which collapses panes.
     const hasRestartOwnershipPendingPair = surface.restartOwnershipPendingPair;
+    const hasProviderOwnedLocalState = this.hasProviderOwnedLocalState(surface);
     if (
       !this.hasAcceptedSurfaceTopology(surface) &&
       surface.panes.size > 0 &&
-      !hasRestartOwnershipPendingPair
+      !hasRestartOwnershipPendingPair &&
+      !hasProviderOwnedLocalState
     ) {
       this.logger.warn?.(
         runtimeDiagnostic("pre_pair_clear_local_topology", {
+          had_provider_owned_local_state: hasProviderOwnedLocalState,
           had_restart_pending_pair: hasRestartOwnershipPendingPair,
           panes: surface.panes.size,
           surface_id: surface.surfaceId,
@@ -11234,38 +11268,49 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           // the very first blank single-pane pair can be preserved in-flight.
           this.restoreRestartOwnership(surface);
           const hadSyntheticBootstrap = this.bootstrapTopologyFromRestartContent(surface);
-            const hadAcceptedLocalTopology =
-              this.hasAcceptedSurfaceTopology(surface) &&
-              surface.panes.size > 0;
-            // Preserve pending restart state even before a valid resume session exists.
-            // Requiring hasValidResumeSession here caused provider restarts with a blank
-            // single-pane pair response to clear locally restored multi-pane topology
-            // and snapshots. That led to the visible collapse/blank even though we had
-            // trusted local restart context. Pending restart ownership is explicitly the
-            // pre-pair window; do not gate on hasValidResumeSession.
-            const hadRestartOwnershipPendingPair = surface.restartOwnershipPendingPair;
-            const previousOwnership = {
-              ownershipEpoch: surface.ownershipEpoch,
-              sessionId: surface.sessionId,
-            };
-            const preserveRestartPairState =
-              hadRestartOwnershipPendingPair &&
-              this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId) &&
-              pairResponse.payload.state.panes.length === 1 &&
-              pairResponse.payload.state.panes[0]?.currentContentId === null;
-          const pairIsBlankSinglePane =
+          const hadAcceptedLocalTopology =
+            (this.hasAcceptedSurfaceTopology(surface) || this.hasProviderOwnedLocalState(surface)) &&
+            surface.panes.size > 0;
+          const pairBlankSinglePane =
             pairResponse.payload.state.panes.length === 1 &&
-            (pairResponse.payload.state.panes[0]?.currentContentId === null);
-          const treatPairAsBootstrap = preserveRestartPairState || hadSyntheticBootstrap || (hadAcceptedLocalTopology && pairIsBlankSinglePane);
+            pairResponse.payload.state.panes[0]?.currentContentId === null;
+          const pairSinglePaneLabel = pairResponse.payload.state.panes[0]?.paneLabel ?? null;
+          const pairTopologyRevision = Number(pairResponse.payload.state.topologyRevision);
+          // Preserve pending restart state even before a valid resume session exists.
+          // Requiring hasValidResumeSession here caused provider restarts with a blank
+          // single-pane pair response to clear locally restored multi-pane topology
+          // and snapshots. That led to the visible collapse/blank even though we had
+          // trusted local restart context. Pending restart ownership is explicitly the
+          // pre-pair window; do not gate on hasValidResumeSession.
+          const hadRestartOwnershipPendingPair = surface.restartOwnershipPendingPair;
+          const previousOwnership = {
+            ownershipEpoch: surface.ownershipEpoch,
+            sessionId: surface.sessionId,
+          };
+          const preserveRestartPairState =
+            hadRestartOwnershipPendingPair &&
+            this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId) &&
+            pairBlankSinglePane;
+          const preserveSameRuntimeBouncePairState =
+            pairBlankSinglePane &&
+            pairSinglePaneLabel === 1 &&
+            pairTopologyRevision === 0 &&
+            hadAcceptedLocalTopology &&
+            (surface.panes.size > 1 || this.hasSurfaceTargetState(surface));
+          const treatPairAsBootstrap =
+            preserveRestartPairState ||
+            preserveSameRuntimeBouncePairState ||
+            hadSyntheticBootstrap;
           this.logger.info?.(
             runtimeDiagnostic("pair_restart_preserve_decision", {
               had_accepted_local_topology: hadAcceptedLocalTopology,
               had_restart_pending_pair: hadRestartOwnershipPendingPair,
               restart_topology_restored: this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId),
-              pair_blank_single_pane:
-                pairResponse.payload.state.panes.length === 1 &&
-                (pairResponse.payload.state.panes[0]?.currentContentId === null),
+              pair_blank_single_pane: pairBlankSinglePane,
+              pair_single_pane_label: pairSinglePaneLabel,
+              pair_topology_revision: pairTopologyRevision,
               preserve_restart_pair_state: preserveRestartPairState,
+              preserve_same_runtime_bounce_pair_state: preserveSameRuntimeBouncePairState,
               synthetic_bootstrap: hadSyntheticBootstrap,
               treat_pair_as_bootstrap: treatPairAsBootstrap,
               surface_id: surface.surfaceId,
@@ -12403,6 +12448,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (preserveTargetState) {
       this.prunePassiveForeignTargetState(surface);
     }
+    this.recordSurfaceTombstone(surface.surfaceId, "foreign_ownership_lock");
     this.clearSurfaceResumeState(surface);
     this.clearSurfaceLocalTopologyState(surface, { preserveTargetState });
     this.runBackgroundTask("persist foreign ownership state clear", async () => {
@@ -12729,32 +12775,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           "invalid_operation",
           `Pair response topology for ${surface.surfaceId} did not exactly match its pane list.`,
         );
-      }
-
-      // Non-destructive import guard for blank single-pane pair over a trusted multi-pane local topology.
-      // If we have an accepted/restored multi-pane local topology (revision > 0 and >1 visible panes)
-      // and the incoming pair is exactly one pane with no current content, do not collapse local panes/layout.
-      // This behaves like pruneStalePanes=false and skipPairPaneState=true for panes/layout and preserves
-      // local content/targets against an empty pair authority.
-      const pairIsBlankSinglePane =
-        paneStates.length === 1 && (paneStates[0]?.currentContentId === null);
-      const localVisibleCount = this.visiblePanes(surface).length;
-      const hasTrustedLocalMultiPane = surface.topologyRevision > 0 && localVisibleCount > 1;
-      if ((options.pruneStalePanes ?? true) && pairIsBlankSinglePane && hasTrustedLocalMultiPane) {
-        this.logger.info?.(
-          runtimeDiagnostic("pair_import_guard_preserved_local_topology", {
-            surface_id: surface.surfaceId,
-            local_visible_panes: localVisibleCount,
-            pair_panes: paneStates.length,
-            topology_revision: surface.topologyRevision,
-          }),
-        );
-        // Request a follow-up provider topology publish after pair completes.
-        this.pendingGuardTopologyPublishSurfaceIds.add(surface.surfaceId);
-        // Intentionally do not mutate panes/layout/revision or apply empty content authority.
-        // Still queue a screen snapshot to record the observation without destructive changes.
-        this.queuePersistScreenSnapshot("pair import guard");
-        return;
       }
 
       const paneByRemoteId = new Map(providerPaneLabels.map((entry) => [entry.remotePaneId, entry.pane]));
