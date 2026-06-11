@@ -9825,6 +9825,222 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider-owned restored html content reattaches its stale durable target without replay", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const pushed = await runtime.push(
+        {
+          content: "<main>T338 restored provider-owned html</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:t338-provider-owned-reattach" },
+      );
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(firstPaneId);
+      assert.ok(pane);
+      const target = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "html");
+      assert.ok(target);
+
+      target.currentState = "stale";
+      pane.currentTargetId = null;
+      pane.staleTargetId = target.targetId;
+      pane.lastRestoreBlockedReason = "restore_blocked_stale_target";
+      pane.activeContentId = pushed.contentId;
+      pane.contentType = "html";
+      pane.contentValue = null;
+      pane.pairImportedContentAuthority = true;
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.contentSetRequests.length, initialContentApplyCount);
+      assert.equal(target.currentState, "current");
+      assert.equal(target.ownerProviderId, internalRuntime.persistentState.providerId);
+      assert.equal(target.ownershipSessionId, surface.sessionId);
+      assert.equal(target.ownershipEpoch, surface.ownershipEpoch);
+      assert.equal(pane.currentTargetId, target.targetId);
+      assert.equal(pane.staleTargetId, null);
+      assert.equal(pane.lastRestoreBlockedReason, null);
+      const screen = (await runtime.listScreens())[0];
+      assert.equal(screen?.panes[0]?.target?.targetId, target.targetId);
+      assert.equal(screen?.panes[0]?.target?.blockedReason, null);
+    });
+  });
+
+  await t.test("provider-owned materialized html target reattaches by applied content identity", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const registered = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: null,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "html:t338-materialized-provider-owned",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached",
+        restorePolicy: "auto",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "bytes",
+          requiredCapabilities: ["target.html.v1"],
+          safeToLogFields: [],
+          safetyClass: "passive",
+          summary: "T338 materialized html target",
+        },
+        targetKind: "html",
+        targetPayload: { html: "<main>T338 materialized provider-owned html</main>" },
+      });
+
+      const restored = await runtime.restoreTarget({
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+        targetId: registered.targetId,
+      });
+      assert.equal(restored.blockedReason, null);
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(firstPaneId);
+      assert.ok(pane);
+      const target = surface.targetRecords.get(registered.targetId);
+      assert.ok(target);
+      assert.equal(target.contentIdAtApply, pane.activeContentId);
+
+      target.currentState = "stale";
+      pane.currentTargetId = null;
+      pane.staleTargetId = target.targetId;
+      pane.lastRestoreBlockedReason = "restore_blocked_stale_target";
+      pane.contentType = "html";
+      pane.contentValue = null;
+      pane.pairImportedContentAuthority = true;
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.contentSetRequests.length, initialContentApplyCount);
+      assert.equal(target.currentState, "current");
+      assert.equal(pane.currentTargetId, target.targetId);
+      assert.equal(pane.staleTargetId, null);
+      assert.equal(pane.lastRestoreBlockedReason, null);
+      const screen = (await runtime.listScreens())[0];
+      assert.equal(screen?.panes[0]?.target?.targetId, target.targetId);
+      assert.equal(screen?.panes[0]?.target?.blockedReason, null);
+    });
+  });
+
+  await t.test("provider-owned unmaterialized html target does not inherit existing content identity", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const pushed = await runtime.push(
+        {
+          content: "<main>existing provider-owned html</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:t338-existing-provider-owned" },
+      );
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(firstPaneId);
+      assert.ok(pane);
+      const registered = await runtime.registerTarget({
+        expectedPreviousTargetEpoch: pane.targetEpoch,
+        fingerprint: server.surfaceId,
+        idempotencyKey: "html:t338-unmaterialized-provider-owned",
+        ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
+        paneId: firstPaneId,
+        registrationState: "attached",
+        restorePolicy: "auto",
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "bytes",
+          requiredCapabilities: ["target.html.v1"],
+          safeToLogFields: [],
+          safetyClass: "passive",
+          summary: "T338 unmaterialized html target",
+        },
+        targetKind: "html",
+        targetPayload: { html: "<main>new target never materialized</main>" },
+      });
+
+      const target = surface.targetRecords.get(registered.targetId);
+      assert.ok(target);
+      assert.equal(target.contentIdAtApply, null);
+
+      target.currentState = "stale";
+      pane.activeContentId = pushed.contentId;
+      pane.currentTargetId = null;
+      pane.staleTargetId = target.targetId;
+      pane.lastRestoreBlockedReason = "restore_blocked_stale_target";
+      pane.contentType = "html";
+      pane.contentValue = null;
+      pane.pairImportedContentAuthority = true;
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.contentSetRequests.length, initialContentApplyCount);
+      assert.equal(target.currentState, "stale");
+      assert.equal(pane.currentTargetId, null);
+      assert.equal(pane.staleTargetId, target.targetId);
+      assert.equal(pane.lastRestoreBlockedReason, "restore_blocked_stale_target");
+      const screen = (await runtime.listScreens())[0];
+      assert.equal(screen?.panes[0]?.target?.targetId, target.targetId);
+      assert.equal(screen?.panes[0]?.target?.blockedReason, "restore_blocked_stale_target");
+    });
+  });
+
+  await t.test("provider-owned different html content does not reattach a stale durable target", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await runtime.push(
+        {
+          content: "<main>old html target</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:t338-provider-owned-old-target" },
+      );
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(firstPaneId);
+      assert.ok(pane);
+      const target = [...surface.targetRecords.values()].find((record: any) => record.targetKind === "html");
+      assert.ok(target);
+
+      target.currentState = "stale";
+      pane.currentTargetId = null;
+      pane.staleTargetId = target.targetId;
+      pane.lastRestoreBlockedReason = "restore_blocked_stale_target";
+      pane.activeContentId = "ct_provider_owned_different_html" as any;
+      pane.contentType = "html";
+      pane.contentValue = null;
+      pane.pairImportedContentAuthority = true;
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      await internalRuntime.repushSurfaceContent(surface);
+
+      assert.equal(server.contentSetRequests.length, initialContentApplyCount);
+      assert.equal(target.currentState, "stale");
+      assert.equal(pane.currentTargetId, null);
+      assert.equal(pane.staleTargetId, target.targetId);
+      assert.equal(pane.lastRestoreBlockedReason, "restore_blocked_stale_target");
+      const screen = (await runtime.listScreens())[0];
+      assert.equal(screen?.panes[0]?.target?.targetId, target.targetId);
+      assert.equal(screen?.panes[0]?.target?.blockedReason, "restore_blocked_stale_target");
+    });
+  });
+
   await t.test("history navigation provider-owned visible content is not replayed after reconnect", async () => {
     await withRuntimeHarness(async ({ infos, runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);

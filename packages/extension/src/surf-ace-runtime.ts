@@ -540,6 +540,7 @@ export type PaneTargetRecord = {
   targetKind: TargetKind;
   targetHeader: TargetHeader;
   targetPayload: unknown;
+  contentIdAtApply?: string | null;
   display?: ContentDisplay | null;
   restorePolicy: RestorePolicy;
   ownerProviderId: string;
@@ -6245,6 +6246,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane: ManagedPane,
     input: {
       appliedAt?: string;
+      contentIdAtApply?: string | null;
       deferPersist?: boolean;
       restorePolicy?: RestorePolicy;
       targetHeader: TargetHeader;
@@ -6277,6 +6279,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       targetId,
       targetKind: input.targetKind,
       targetPayload: structuredClone(input.targetPayload),
+      contentIdAtApply: input.contentIdAtApply ?? null,
       display: input.display ? structuredClone(input.display) : null,
     };
     surface.targetRecords.set(targetId, record);
@@ -6757,6 +6760,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         continue;
       }
       try {
+        if (this.repairProviderOwnedContentTargetAuthority(surface, pane)) {
+          await this.persistSurfaceTargetState(surface, "provider-owned content target authority repair");
+        }
         if (pane.pairImportedContentAuthority) {
           this.logReplayOutcome(surface, pane, "content", "skipped_provider_owned");
           continue;
@@ -6848,6 +6854,53 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         throw error;
       }
     }
+  }
+
+  private repairProviderOwnedContentTargetAuthority(surface: ManagedSurface, pane: ManagedPane): boolean {
+    if (
+      pane.currentTargetId !== null ||
+      !pane.activeContentId ||
+      !pane.contentType ||
+      pane.contentValue !== null ||
+      !pane.pairImportedContentAuthority
+    ) {
+      return false;
+    }
+    const staleTarget = pane.staleTargetId ? surface.targetRecords.get(pane.staleTargetId) ?? null : null;
+    if (
+      !staleTarget ||
+      staleTarget.surfaceId !== surface.surfaceId ||
+      staleTarget.paneLineageId !== pane.paneLineageId ||
+      staleTarget.currentState !== "stale" ||
+      !this.isTrustedProviderLineageId(staleTarget.ownerProviderId)
+    ) {
+      return false;
+    }
+    const contentTarget = contentPayloadForTarget(staleTarget.targetKind, staleTarget.targetPayload);
+    if (
+      !contentTarget ||
+      contentTarget.contentType !== pane.contentType ||
+      staleTarget.contentIdAtApply !== pane.activeContentId
+    ) {
+      return false;
+    }
+
+    staleTarget.currentState = "current";
+    delete staleTarget.supersededByTargetId;
+    staleTarget.ownerProviderId = this.persistentState.providerId;
+    staleTarget.ownershipSessionId = surface.sessionId ?? "";
+    staleTarget.ownershipEpoch = surface.ownershipEpoch;
+    pane.currentTargetId = staleTarget.targetId;
+    pane.staleTargetId = null;
+    if (
+      pane.lastRestoreBlockedReason === "restore_blocked_stale_target" ||
+      pane.lastRestoreBlockedReason === "ownership_session_mismatch" ||
+      pane.lastRestoreBlockedReason === "ownership_epoch_mismatch" ||
+      pane.lastRestoreBlockedReason === "target_superseded"
+    ) {
+      pane.lastRestoreBlockedReason = null;
+    }
+    return true;
   }
 
   private async materializeTargetRecordWithResumeRetries(
@@ -7178,6 +7231,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       await this.applyMutationResponse(surface, pane, response, request, pane.ownerSessionKey ?? undefined, {
         skipTargetRecord: true,
       });
+      target.contentIdAtApply = pane.activeContentId;
       const evidence: ApplyEvidence = {
         appliedAt: new Date(this.now()).toISOString(),
         materializedState: {
@@ -13263,6 +13317,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         const targetHeader = passiveContentTargetHeader(setPayload.contentType, setPayload.content);
         if (targetKind && targetHeader) {
           await this.createPaneTargetRecord(surface, pane, {
+            contentIdAtApply: payload.currentContentId,
             display: setPayload.display ? structuredClone(setPayload.display) : null,
             targetHeader,
             targetKind,
