@@ -11592,6 +11592,72 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("blank provider observation retains prior topology when only continuity hints exist", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2]);
+      const pushed = await runtime.push(
+        {
+          content: "<main>T338 continuity-only topology retention</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: paneIds[0]!,
+        },
+        { sessionKey: "agent:test:continuity-only-retention" },
+      );
+
+      const internalRuntime = runtime as any;
+      await internalRuntime.persistScreenSnapshot();
+      const snapshotPath = path.join(internalRuntime.stateDir, "surf-ace-runtime-screens.json");
+      const persistedBefore = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+        contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+        screens?: Array<{ _debug?: unknown; fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
+      };
+      const previousScreen = persistedBefore.screens?.find((screen) => screen.fingerprint === server.surfaceId);
+      assert.ok(previousScreen);
+      delete previousScreen._debug;
+      await fs.writeFile(snapshotPath, JSON.stringify(persistedBefore, null, 2));
+
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(paneIds[0]!);
+      assert.ok(pane);
+      surface.panes = new Map([[pane.paneId, pane]]);
+      surface.layout = { paneId: pane.paneId, type: "pane" };
+      surface.topologyRevision += 1;
+      pane.activeContentId = null;
+      pane.contentType = null;
+      pane.contentValue = null;
+      pane.historySummary.visibleContentId = null;
+
+      await internalRuntime.persistScreenSnapshot();
+      const persistedAfter = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+        contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+        screens?: Array<{ fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
+      };
+      assert.equal(
+        persistedAfter.contentContinuity?.[server.surfaceId]?.some((entry) =>
+          entry.contentId === pushed.contentId &&
+          entry.contentValue === "<main>T338 continuity-only topology retention</main>"
+        ),
+        true,
+      );
+      assert.deepEqual(
+        persistedAfter.screens
+          ?.find((screen) => screen.fingerprint === server.surfaceId)
+          ?.panes
+          ?.map((pane) => pane.paneLabel),
+        [1, 2],
+      );
+    });
+  });
+
   await t.test("restart content snapshot restores pane content before replay", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);

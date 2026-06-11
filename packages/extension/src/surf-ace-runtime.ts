@@ -10318,7 +10318,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         retainedBlankSurfaceIds.has(screen.fingerprint) &&
         previous.fingerprint === screen.fingerprint &&
         previous.panes.length > screen.panes.length &&
-        this.hasTrustedPersistedSelfOwnership(previous) &&
         this.isBlankSinglePaneScreen(screen)
       ) {
         return structuredClone(previous);
