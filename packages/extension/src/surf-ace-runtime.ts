@@ -9890,7 +9890,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const snapshotFile = await this.loadPersistedScreenSnapshotFile();
     const screens = snapshotFile?.screens ?? [];
     const trustedRestartScreens = screens.filter((screen) =>
-      this.isTrustedRestartScreen(screen)
+      this.hasTrustedPersistedSelfOwnership(screen)
     );
     const trustedSurfaceIds = new Set(trustedRestartScreens.map((screen) => screen.fingerprint));
     this.restartSnapshots = new Map(trustedRestartScreens.map((screen) => [screen.fingerprint, screen]));

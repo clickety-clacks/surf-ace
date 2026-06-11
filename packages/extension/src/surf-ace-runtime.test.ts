@@ -11265,6 +11265,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         persistedScreenBefore._debug.localOwnership = null;
       }
       await fs.writeFile(snapshotPath, JSON.stringify(persistedBefore, null, 2));
+      await internalRuntime.loadRestartSnapshots();
+      assert.ok(internalRuntime.restartSnapshots.has(server.surfaceId));
 
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
