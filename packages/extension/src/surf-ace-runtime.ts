@@ -12112,7 +12112,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           if (preserveProviderAuthorityPairState && this.hasAcceptedSurfaceTopology(surface)) {
             await this.pushTopology(surface);
           }
-          if (preserveProviderAuthorityPairState && !preserveRestartPairState) {
+          if (
+            preserveProviderAuthorityPairState &&
+            !preserveRestartPairState &&
+            !this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId)
+          ) {
             this.restartContentBySurface.delete(surface.surfaceId);
           }
           this.restartTopologyRestoredSurfaceIds.delete(surface.surfaceId);
