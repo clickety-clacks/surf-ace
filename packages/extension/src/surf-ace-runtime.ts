@@ -10228,6 +10228,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         retainedBlankSurfaceIds.add(screen.fingerprint);
         return structuredClone(previous);
       }
+      if (
+        previous &&
+        retainedBlankSurfaceIds.has(screen.fingerprint) &&
+        previous.fingerprint === screen.fingerprint &&
+        previous.panes.length > screen.panes.length &&
+        this.hasTrustedPersistedSelfOwnership(previous) &&
+        this.isBlankSinglePaneScreen(screen)
+      ) {
+        return structuredClone(previous);
+      }
       return screen;
     });
   }

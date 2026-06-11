@@ -11276,6 +11276,14 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       await internalRuntime.persistScreenSnapshot();
       const persistedProjected = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
         contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown }>>;
+        screens?: Array<{
+          fingerprint?: string;
+          panes?: Array<{
+            activeContent?: unknown;
+            historySummary?: { visibleContentId?: string | null };
+            target?: unknown;
+          }>;
+        }>;
       };
       assert.equal(
         persistedProjected.contentContinuity?.[server.surfaceId]?.some((entry) =>
@@ -11284,6 +11292,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         ),
         true,
       );
+      const projectedScreen = persistedProjected.screens?.find((screen) => screen.fingerprint === server.surfaceId);
+      assert.ok(projectedScreen);
+      for (const projectedPane of projectedScreen.panes ?? []) {
+        projectedPane.activeContent = null;
+        projectedPane.historySummary = {
+          ...(projectedPane.historySummary ?? {}),
+          visibleContentId: null,
+        };
+        projectedPane.target = null;
+      }
+      await fs.writeFile(snapshotPath, JSON.stringify(persistedProjected, null, 2));
 
       surface.panes = new Map([[pane.paneId, pane]]);
       surface.layout = { paneId: pane.paneId, type: "pane" };
