@@ -5746,6 +5746,50 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return existingPane;
   }
 
+  private recoverProviderPaneForPairObservation(
+    surface: ManagedSurface,
+    paneState: PairResponse["payload"]["state"]["panes"][number],
+    usedPaneIds: Set<PaneId>,
+  ): ManagedPane | null {
+    if (this.findPaneByRemoteId(surface, paneState.paneId)) {
+      return null;
+    }
+    if (!this.hasAcceptedSurfaceTopology(surface) && !this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId)) {
+      return null;
+    }
+    const visibleMatches = this.visiblePanes(surface).filter((pane) =>
+      !usedPaneIds.has(pane.paneId) &&
+      pane.paneLabel === paneState.paneLabel &&
+      (
+        this.hasProviderOwnedPaneAuthority(surface, pane) ||
+        this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId)
+      )
+    );
+    if (visibleMatches.length !== 1) {
+      return null;
+    }
+    const existingPane = visibleMatches[0]!;
+    const previousRemotePaneId = existingPane.remotePaneId;
+    if (isBoundRemotePaneId(previousRemotePaneId) && previousRemotePaneId !== paneState.paneId) {
+      delete this.persistentState.paneLabelsByPaneId[paneLabelStorageKey(surface.surfaceId, previousRemotePaneId)];
+    }
+    existingPane.remotePaneId = paneState.paneId;
+    this.noteObservedRemotePaneId(paneState.paneId);
+    this.persistentState.paneLabelsByPaneId[paneLabelStorageKey(surface.surfaceId, paneState.paneId)] =
+      existingPane.paneLabel;
+    this.logger.info?.(
+      runtimeDiagnostic("pair_observation_rebound_provider_pane", {
+        pane_id: existingPane.paneId,
+        pane_label: existingPane.paneLabel,
+        previous_remote_pane_id: Number(previousRemotePaneId ?? 0),
+        remote_pane_id: Number(paneState.paneId),
+        surface_id: surface.surfaceId,
+        window_label: surface.windowLabel || "nil",
+      }),
+    );
+    return existingPane;
+  }
+
   private ensureSurfaceWorker(surface: ManagedSurface): void {
     if (this.isStalePersistedSurfaceTombstone(surface.surfaceId)) {
       surface.autoRetryEnabled = false;
@@ -12135,6 +12179,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           // exists, synthesize a minimal topology from persisted restart content so
           // the very first blank single-pane pair can be preserved in-flight.
           this.restoreRestartProviderAuthorityBeforePair(surface);
+          const hadRestartRestoredTopology =
+            this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId) &&
+            surface.panes.size > 0;
           const hadAcceptedLocalTopology =
             this.hasAcceptedSurfaceTopology(surface) &&
             surface.panes.size > 0;
@@ -12170,7 +12217,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             }),
           );
           surface.unreachableFailures = 0;
-          if (!hadAcceptedLocalTopology && !preserveProviderAuthorityPairState) {
+          if (!hadAcceptedLocalTopology && !hadRestartRestoredTopology && !preserveProviderAuthorityPairState) {
             this.clearSurfaceLocalTopologyState(surface, {
               preservePaneLabels: hadRestartOwnershipPendingPair,
               preserveRestartContent: hadRestartOwnershipPendingPair,
@@ -13546,6 +13593,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       isBoundRemotePaneId(pane.remotePaneId) && !pairRemotePaneIds.has(Number(pane.remotePaneId))
     );
     const collapsesTopology = pairPanes.length < visiblePanes.length;
+    const visiblePaneLabels = new Set(visiblePanes.map((pane) => pane.paneLabel));
+    const pairPaneLabels = new Set(pairPanes.map((pane) => pane.paneLabel));
+    const pairCoversVisibleLabels =
+      pairPanes.length >= visiblePanes.length &&
+      visiblePanes.every((pane) => pairPaneLabels.has(pane.paneLabel)) &&
+      pairPanes.every((pane) => visiblePaneLabels.has(pane.paneLabel));
+    if (pairCoversVisibleLabels && !collapsesTopology) {
+      return false;
+    }
     if (
       (!omitsVisiblePane && !collapsesTopology) ||
       !this.hasProviderAuthorityContinuityOutsideRemotePanes(surface, pairRemotePaneIds)
@@ -13710,11 +13766,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     );
     let lineageChanged = false;
     let consumedBootstrapPane = false;
+    const reboundProviderPaneIds = new Set<PaneId>();
     const providerPaneLabels: Array<{ pane: ManagedPane; paneLabel: number; remotePaneId: RemotePaneId }> = [];
     try {
       for (const paneState of paneStates) {
         let pane = this.findPaneByRemoteId(surface, paneState.paneId);
         const pairStateMatchedExistingRemotePane = pane !== null;
+        pane ??= this.recoverProviderPaneForPairObservation(surface, paneState, reboundProviderPaneIds);
+        if (pane) {
+          reboundProviderPaneIds.add(pane.paneId);
+        }
         if (!pane && !consumedBootstrapPane && nextPanes.size === 0) {
           pane = this.consumeBootstrapPaneForPairState(surface, paneState.paneId);
           consumedBootstrapPane = pane !== null;

@@ -14019,6 +14019,107 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("full pair response rebinds restored provider panes before topology publish", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const split = await runtime.split({
+        count: 3,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const paneIds = assertPaneLabelsWithOpaqueIds(split, [1, 2, 3]);
+      const pushed = [];
+      for (const paneId of paneIds) {
+        pushed.push(await runtime.push({
+          content: `<main>T338 restored pane ${paneId}</main>`,
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: paneId!,
+        }));
+      }
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const panes = paneIds.map((paneId) => surface.panes.get(paneId!));
+      assert.equal(panes.every(Boolean), true);
+      const originalRemoteIds = panes.map((pane) => Number(pane.remotePaneId));
+      const originalPaneIds = panes.map((pane) => pane.paneId);
+      for (const [index, pane] of panes.entries()) {
+        pane.remotePaneId = 9001 + index;
+      }
+      surface.topologyRevision = 42;
+      internalRuntime.restartTopologyRestoredSurfaceIds.add(server.surfaceId);
+
+      internalRuntime.applyPairState(surface, {
+        id: "rq_full_pair_rebind_restored_provider_panes",
+        ok: true,
+        op: "pair.request",
+        payload: {
+          capabilities: {
+            contentTypes: ["html", "image", "pdf", "terminal", "markdown"],
+            eventTypes: [],
+            protocolFeatures: ["authority.state.v1"],
+            targetCapabilities: server.targetCapabilities,
+          },
+          eventConfig: {
+            activeEvents: [],
+            drawingFlushConfig: {
+              idleWindowMs: 8000,
+              maxIntervalMs: 30000,
+            },
+            profile: "minimum_deep",
+          },
+          limits: {
+            maxDrawingFlushBytes: 2 * 1024 * 1024,
+            maxFrameBytes: 10 * 1024 * 1024,
+            maxMessageBytes: 12 * 1024 * 1024,
+            maxStrokePointsPerFlush: 8192,
+            maxVisibleTextBytes: 4096,
+            resumeGraceMs: 20_000,
+          },
+          ownershipEpoch: surface.ownershipEpoch,
+          resumed: true,
+          sessionId: surface.sessionId ?? "sa_test_session",
+          state: {
+            layout: {
+              children: originalRemoteIds.map((paneId) => ({ paneId, type: "pane" as const })),
+              direction: "vertical",
+              type: "split",
+            },
+            panes: originalRemoteIds.map((remotePaneId, index) => ({
+              contentType: "html" as const,
+              currentContentId: pushed[index]!.contentId,
+              currentRevision: pushed[index]!.revision,
+              paneId: remotePaneId,
+              paneLabel: index + 1,
+              paneLineageId: panes[index]!.paneLineageId,
+            })),
+            topologyRevision: 42,
+          },
+          surfaceId: server.surfaceId,
+          surfaceName: surface.name,
+          viewport: surface.viewport,
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      });
+
+      const reboundPanes = originalPaneIds.map((paneId) => surface.panes.get(paneId));
+      assert.equal(reboundPanes.every(Boolean), true);
+      assert.deepEqual(reboundPanes.map((pane) => Number(pane.remotePaneId)), originalRemoteIds);
+      assert.deepEqual(reboundPanes.map((pane) => pane.activeContentId), pushed.map((result) => result.contentId));
+      const screens = await runtime.listScreens();
+      assertPaneLabelsWithOpaqueIds(screens[0]?.panes ?? [], [1, 2, 3]);
+      assert.deepEqual(
+        screens[0]?.panes.map((pane) => pane.activeContent?.contentId),
+        pushed.map((result) => result.contentId),
+      );
+    });
+  });
+
   await t.test("pair response publishes topology for multi-pane label repair before authority", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
