@@ -513,6 +513,8 @@ async function withServer(
     nativeOverlayLivenessRetryDelayMs?: number;
     onNativeMaterialized?: (surfaceId: string) => void;
     onNativeReleased?: (surfaceId: string, paneIds: string[]) => void;
+    onSurfaceWindowClose?: (surfaceId: string) => boolean;
+    onSurfaceWindowOpen?: () => { surfaceId: string };
   } = {},
 ): Promise<void> {
   const core = new SurfaceCore({
@@ -534,6 +536,8 @@ async function withServer(
     nativeOverlayLivenessRetryDelayMs: options.nativeOverlayLivenessRetryDelayMs,
     onNativeMaterialized: options.onNativeMaterialized,
     onNativeReleased: options.onNativeReleased,
+    onSurfaceWindowClose: options.onSurfaceWindowClose,
+    onSurfaceWindowOpen: options.onSurfaceWindowOpen,
     port,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
@@ -601,6 +605,50 @@ test("ws server keeps ownership lock after owner socket closes", async () => {
     assert.equal(listed.op, "surfaces.list");
     assert.equal(listed.payload.surfaces[0]?.paired, true);
     await closeSocket(probe);
+  });
+});
+
+test("ws server applies surface window lifecycle only for active lock owner", async () => {
+  let closeSurfaceId: string | null = null;
+  await withServer(async ({ surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const opened = await request(owner, {
+      id: "req_window_open",
+      op: "surface.window.open",
+      payload: { requestedBy: "agent" },
+      sentAt: Date.now() as never,
+      type: "request",
+      v: 1,
+    });
+    assert.equal(opened.ok, true);
+    assert.equal(opened.op, "surface.window.open");
+    assert.equal(opened.payload.accepted, true);
+    assert.equal(opened.payload.surfaceId, "sf_new");
+
+    const closed = await request(owner, {
+      id: "req_window_close",
+      op: "surface.window.close",
+      payload: { requestedBy: "agent" },
+      sentAt: Date.now() as never,
+      type: "request",
+      v: 1,
+    });
+    assert.equal(closed.ok, true);
+    assert.equal(closed.op, "surface.window.close");
+    assert.equal(closed.payload.closed, true);
+    assert.equal(closed.payload.surfaceId, surfaceId);
+    assert.equal(closeSurfaceId, surfaceId);
+
+    await closeSocket(owner);
+  }, {
+    onSurfaceWindowClose: (surfaceId) => {
+      closeSurfaceId = surfaceId;
+      return true;
+    },
+    onSurfaceWindowOpen: () => ({ surfaceId: "sf_new" }),
   });
 });
 

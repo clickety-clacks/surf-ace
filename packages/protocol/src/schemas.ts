@@ -9,6 +9,8 @@ type ProtocolSchemaDefName =
   | "PairResponse"
   | "RelinquishRequest"
   | "RelinquishResponse"
+  | "SurfaceWindowCloseRequest"
+  | "SurfaceWindowCloseResponse"
   | "SurfaceWindowOpenRequest"
   | "SurfaceWindowOpenResponse"
   | "TargetApplyRequest"
@@ -74,6 +76,8 @@ export const pairRequestSchema = getSchemaDef("PairRequest");
 export const pairResponseSchema = getSchemaDef("PairResponse");
 export const relinquishRequestSchema = getSchemaDef("RelinquishRequest");
 export const relinquishResponseSchema = getSchemaDef("RelinquishResponse");
+export const surfaceWindowCloseRequestSchema = getSchemaDef("SurfaceWindowCloseRequest");
+export const surfaceWindowCloseResponseSchema = getSchemaDef("SurfaceWindowCloseResponse");
 export const surfaceWindowOpenRequestSchema = getSchemaDef("SurfaceWindowOpenRequest");
 export const surfaceWindowOpenResponseSchema = getSchemaDef("SurfaceWindowOpenResponse");
 export const targetApplyRequestSchema = getSchemaDef("TargetApplyRequest");

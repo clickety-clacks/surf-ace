@@ -644,6 +644,7 @@ export type SurfAceOpenSurfaceWindowResult = {
   accepted: boolean;
   fingerprint: string;
   message: string;
+  openedSurfaceId?: string;
   windowLabel: string;
 };
 
@@ -686,10 +687,19 @@ export type SurfAceRealizeTopologyInput = {
 };
 
 export type SurfAceRealizeTopologiesInput = {
-  operations: Array<SurfAceRealizeTopologyInput & {
-    operationId?: string;
-    windowLabel?: string;
-  }>;
+  operations: Array<
+    | (SurfAceRealizeTopologyInput & {
+        operationId?: string;
+        windowLabel?: string;
+      })
+    | {
+        action: "openWindow" | "closeWindow";
+        fingerprint: string;
+        operationId?: string;
+        requestedBy?: string;
+        windowLabel?: string;
+      }
+  >;
 };
 
 export type SurfAceRealizeTopologyResult = {
@@ -712,18 +722,29 @@ export type SurfAceRealizeTopologyResult = {
 };
 
 export type SurfAceRealizeTopologyOperationResult = SurfAceRealizeTopologyResult & {
+  action?: "realizeTopology";
   fingerprint: string;
   operationId?: string;
   windowLabel: string;
 };
 
+export type SurfAceWindowLifecycleOperationResult = {
+  accepted?: boolean;
+  action: "openWindow" | "closeWindow";
+  closed?: boolean;
+  fingerprint: string;
+  operationId?: string;
+  openedSurfaceId?: string;
+  windowLabel: string;
+};
+
 export type SurfAceRealizeTopologiesResult =
   | {
-      applied: SurfAceRealizeTopologyOperationResult[];
+      applied: Array<SurfAceRealizeTopologyOperationResult | SurfAceWindowLifecycleOperationResult>;
       ok: true;
     }
   | {
-      applied: SurfAceRealizeTopologyOperationResult[];
+      applied: Array<SurfAceRealizeTopologyOperationResult | SurfAceWindowLifecycleOperationResult>;
       failed: {
         code: string;
         fingerprint: string;
@@ -801,7 +822,6 @@ export interface SurfAceRuntime {
   listScreens(): Promise<SurfAceScreenSummary[]>;
   launchNativeApp(input: SurfAceLaunchNativeAppInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   providerAuthorityDiagnostics(): Promise<SurfAceProviderAuthorityProjection>;
-  openSurfaceWindow(input: SurfAceOpenSurfaceWindowInput): Promise<SurfAceOpenSurfaceWindowResult>;
   push(input: SurfAcePushInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
   realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult>;
@@ -1316,10 +1336,6 @@ type OwnerControlCommand =
   | {
       input: { fingerprint: string; paneId: PaneId };
       op: "capturePane" | "clear" | "closePane" | "read" | "snapshot";
-    }
-  | {
-      input: SurfAceOpenSurfaceWindowInput;
-      op: "openSurfaceWindow";
     }
   | {
       input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string };
@@ -3330,14 +3346,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return await this.contentClear(surface, input);
   }
 
-  async openSurfaceWindow(input: SurfAceOpenSurfaceWindowInput): Promise<SurfAceOpenSurfaceWindowResult> {
-    await this.start();
-    if (!this.ownsRuntimeLease) {
-      return await this.forwardToRuntimeOwner<SurfAceOpenSurfaceWindowResult>({
-        input,
-        op: "openSurfaceWindow",
-      });
-    }
+  private async openSurfaceWindow(input: SurfAceOpenSurfaceWindowInput): Promise<SurfAceOpenSurfaceWindowResult> {
     const surface = await this.requireActionableSurface(input.fingerprint);
     const response = await this.sendRequest(
       surface,
@@ -3354,9 +3363,32 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return {
       accepted: response.payload.accepted,
       fingerprint: surface.surfaceId,
+      openedSurfaceId: response.payload.surfaceId,
       message: response.payload.accepted
         ? "Surf Ace surface window open request accepted."
         : "Surf Ace surface window open request was not accepted.",
+      windowLabel: surface.windowLabel,
+    };
+  }
+
+  private async closeSurfaceWindow(input: SurfAceOpenSurfaceWindowInput): Promise<SurfAceWindowLifecycleOperationResult> {
+    const surface = await this.requireActionableSurface(input.fingerprint);
+    const response = await this.sendRequest(
+      surface,
+      this.requestEnvelope("surface.window.close", {
+        requestedBy: input.requestedBy,
+      }),
+    );
+    if (isErrorResponse(response)) {
+      throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
+    }
+    if (response.op !== "surface.window.close") {
+      throw new SurfAceToolError("invalid_operation", `Unexpected response for surface.window.close: ${response.op}`);
+    }
+    return {
+      action: "closeWindow",
+      closed: response.payload.closed,
+      fingerprint: response.payload.surfaceId,
       windowLabel: surface.windowLabel,
     };
   }
@@ -3397,7 +3429,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       throw new SurfAceToolError("invalid_operation", "Topology realization requires at least one operation.");
     }
 
-    const applied: SurfAceRealizeTopologyOperationResult[] = [];
+    const applied: Array<SurfAceRealizeTopologyOperationResult | SurfAceWindowLifecycleOperationResult> = [];
     for (const [index, operation] of operations.entries()) {
       try {
         const surface = await this.requireActionableSurface(operation.fingerprint);
@@ -3407,10 +3439,31 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             `Surf Ace surface ${operation.fingerprint} has window label ${surface.windowLabel}, expected ${operation.windowLabel}.`,
           );
         }
+        if ("action" in operation) {
+          if (operation.action === "openWindow") {
+            const result = await this.openSurfaceWindow(operation);
+            applied.push({
+              accepted: result.accepted,
+              action: "openWindow",
+              fingerprint: result.fingerprint,
+              openedSurfaceId: result.openedSurfaceId,
+              operationId: operation.operationId,
+              windowLabel: result.windowLabel,
+            });
+            continue;
+          }
+          const result = await this.closeSurfaceWindow(operation);
+          applied.push({
+            ...result,
+            operationId: operation.operationId,
+          });
+          continue;
+        }
         await this.reconcilePaneTopologyAuthority(surface, "topology realization");
         const result = await this.realizeSurfaceTopology(surface, operation);
         applied.push({
           ...result,
+          action: "realizeTopology",
           fingerprint: surface.surfaceId,
           operationId: operation.operationId,
           windowLabel: surface.windowLabel,
@@ -10770,8 +10823,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.launchNativeApp(command.input, command.context);
       case "launchTerminal":
         return await this.launchTerminal(command.input, command.context);
-      case "openSurfaceWindow":
-        return await this.openSurfaceWindow(command.input);
       case "push":
         return await this.push(command.input, command.context);
       case "read":

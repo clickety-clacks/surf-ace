@@ -3,7 +3,6 @@ import type { PusherProvenance } from "../../protocol/src/index.js";
 import {
   type SurfAceAnnotateRemoveInput,
   type SurfAceLaunchNativeAppInput,
-  type SurfAceOpenSurfaceWindowInput,
   type PaneId,
   type SurfAceRealizeTopologyInput,
   type SurfAceRealizeTopologiesInput,
@@ -24,7 +23,6 @@ export const surfAceToolNames = [
   "surf_ace_clear",
   "surf_ace_relinquish",
   "surf_ace_reattempt_connections",
-  "surf_ace_open_surface_window",
   "surf_ace_split",
   "surf_ace_realize_topology",
   "surf_ace_realize_topologies",
@@ -359,27 +357,6 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_reattempt_connections",
     },
     {
-      description: "Request a new top-level Surf Ace Spatial surface window from an already paired surface endpoint.",
-      execute: async (args: SurfAceOpenSurfaceWindowInput, context?: SurfAceToolContext) =>
-        await runtime.openSurfaceWindow({
-          ...args,
-          requestedBy: args.requestedBy ?? context?.displayName ?? context?.agentId ?? context?.sessionKey,
-        }),
-      inputSchema: {
-        additionalProperties: false,
-        properties: {
-          fingerprint: fingerprintParam,
-          requestedBy: {
-            description: "Optional caller label forwarded to the surface for diagnostics.",
-            type: "string",
-          },
-        },
-        required: ["fingerprint"],
-        type: "object",
-      },
-      name: "surf_ace_open_surface_window",
-    },
-    {
       description: "Split an existing Surf Ace pane into a larger pane layout.",
       execute: async (args: SurfAceSplitInput) => await runtime.split(args),
       inputSchema: {
@@ -419,30 +396,66 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_realize_topology",
     },
     {
-      description: "Realize desired Surf Ace topology changes across multiple surfaces in one CLU-facing operation.",
-      execute: async (args: SurfAceRealizeTopologiesInput) => await runtime.realizeTopologies(args),
+      description: "Realize desired Surf Ace topology changes and top-level app-window lifecycle mutations across one or more surfaces.",
+      execute: async (args: SurfAceRealizeTopologiesInput, context?: SurfAceToolContext) =>
+        await runtime.realizeTopologies({
+          operations: args.operations.map((operation) =>
+            "action" in operation && !operation.requestedBy
+              ? { ...operation, requestedBy: context?.displayName ?? context?.agentId ?? context?.sessionKey }
+              : operation
+          ),
+        }),
       inputSchema: {
         additionalProperties: false,
         properties: {
           operations: {
             items: {
-              additionalProperties: false,
-              properties: {
-                ...realizeTopologyInputProperties,
-                desired: {
-                  ...realizeTopologyDesiredSchema,
+              anyOf: [
+                {
+                  additionalProperties: false,
+                  properties: {
+                    ...realizeTopologyInputProperties,
+                    desired: {
+                      ...realizeTopologyDesiredSchema,
+                    },
+                    operationId: {
+                      description: "Optional caller-supplied identifier echoed in per-surface results.",
+                      type: "string",
+                    },
+                    windowLabel: {
+                      description: "Optional current window label guard from `surf_ace_list`.",
+                      type: "string",
+                    },
+                  },
+                  required: realizeTopologyRequiredProperties,
+                  type: "object",
                 },
-                operationId: {
-                  description: "Optional caller-supplied identifier echoed in per-surface results.",
-                  type: "string",
+                {
+                  additionalProperties: false,
+                  properties: {
+                    action: {
+                      description: "Top-level Surf Ace app-window lifecycle mutation.",
+                      enum: ["openWindow", "closeWindow"],
+                      type: "string",
+                    },
+                    fingerprint: fingerprintParam,
+                    operationId: {
+                      description: "Optional caller-supplied identifier echoed in per-surface results.",
+                      type: "string",
+                    },
+                    requestedBy: {
+                      description: "Optional caller label forwarded to the app host for diagnostics.",
+                      type: "string",
+                    },
+                    windowLabel: {
+                      description: "Optional current window label guard from `surf_ace_list`.",
+                      type: "string",
+                    },
+                  },
+                  required: ["fingerprint", "action"],
+                  type: "object",
                 },
-                windowLabel: {
-                  description: "Optional current window label guard from `surf_ace_list`.",
-                  type: "string",
-                },
-              },
-              required: realizeTopologyRequiredProperties,
-              type: "object",
+              ],
             },
             minItems: 1,
             type: "array",

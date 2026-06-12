@@ -592,6 +592,12 @@ export type SurfaceWindowOpenRequest = RequestBase<"surface.window.open"> & {
   };
 };
 
+export type SurfaceWindowCloseRequest = RequestBase<"surface.window.close"> & {
+  payload: {
+    requestedBy?: string;
+  };
+};
+
 export type ContentApplyRequest = RequestBase<"content.apply"> & {
   payload:
     | (ContentSetPayload & {
@@ -876,6 +882,14 @@ export type TargetRegisterRejectedResponse = ResponseBase<"target.register.rejec
 export type SurfaceWindowOpenResponse = ResponseBase<"surface.window.open"> & {
   payload: {
     accepted: boolean;
+    surfaceId?: SurfaceId;
+  };
+};
+
+export type SurfaceWindowCloseResponse = ResponseBase<"surface.window.close"> & {
+  payload: {
+    closed: boolean;
+    surfaceId: SurfaceId;
   };
 };
 
@@ -910,6 +924,7 @@ export type ErrorResponse = {
     | "pair.request"
     | "ownership.relinquish"
     | "surface.window.open"
+    | "surface.window.close"
     | "topology.apply"
     | "content.apply"
     | "target.apply"
@@ -1104,6 +1119,7 @@ export type Request =
   | RuntimeAppBindingRequest
   | RelinquishRequest
   | SurfaceWindowOpenRequest
+  | SurfaceWindowCloseRequest
   | TopologyApplyRequest
   | ContentApplyRequest
   | TargetApplyRequest
@@ -1127,6 +1143,7 @@ export type Response =
   | RuntimeAppBindingResponse
   | RelinquishResponse
   | SurfaceWindowOpenResponse
+  | SurfaceWindowCloseResponse
   | TopologyApplyResponse
   | ContentApplyResponse
   | TargetApplyResponse

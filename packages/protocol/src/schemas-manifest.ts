@@ -19,6 +19,8 @@ import {
   pairResponseSchema,
   relinquishRequestSchema,
   relinquishResponseSchema,
+  surfaceWindowCloseRequestSchema,
+  surfaceWindowCloseResponseSchema,
   surfaceWindowOpenRequestSchema,
   surfaceWindowOpenResponseSchema,
   targetApplyRequestSchema,
@@ -70,6 +72,11 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "surface.window.open": {
     request: surfaceWindowOpenRequestSchema,
     response: surfaceWindowOpenResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "surface.window.close": {
+    request: surfaceWindowCloseRequestSchema,
+    response: surfaceWindowCloseResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "target.apply": {

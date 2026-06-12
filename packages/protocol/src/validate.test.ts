@@ -461,7 +461,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   assert.deepEqual(errorResponse, { ok: true });
 });
 
-test("validateEnvelopeType accepts surface window open requests and responses", () => {
+test("validateEnvelopeType accepts surface window lifecycle requests and responses", () => {
   const request = validateEnvelopeType("surface.window.open", {
     id: "req_window_1",
     op: "surface.window.open",
@@ -480,12 +480,39 @@ test("validateEnvelopeType accepts surface window open requests and responses", 
     op: "surface.window.open",
     payload: {
       accepted: true,
+      surfaceId: "sf_new",
     },
     sentAt: Date.now(),
     type: "response",
     v: 1,
   });
   assert.deepEqual(response, { ok: true });
+
+  const closeRequest = validateEnvelopeType("surface.window.close", {
+    id: "req_window_2",
+    op: "surface.window.close",
+    payload: {
+      requestedBy: "agent",
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+  assert.deepEqual(closeRequest, { ok: true });
+
+  const closeResponse = validateEnvelopeType("surface.window.close", {
+    id: "req_window_2",
+    ok: true,
+    op: "surface.window.close",
+    payload: {
+      closed: true,
+      surfaceId: "sf_1",
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(closeResponse, { ok: true });
 });
 
 test("validateEnvelopeType accepts target.apply.result responses", () => {
