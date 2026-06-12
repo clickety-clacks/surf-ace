@@ -14127,6 +14127,17 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const target = surface.targetRecords.get(pane.currentTargetId);
         assert.equal(target?.currentState, "current");
       }
+
+      server.nextContentApplyError = {
+        code: "stale_revision",
+        details: { expectedRevision: Number(reboundPanes[0]?.currentRevision ?? 0) },
+        message: "provider already has restored content",
+      };
+      await (runtime as any).repushSurfaceContent(surface);
+      const retainedPane = reboundPanes[0];
+      assert.ok(retainedPane?.currentTargetId);
+      assert.equal(retainedPane.lastRestoreBlockedReason, null);
+      assert.equal(surface.targetRecords.get(retainedPane.currentTargetId)?.currentState, "current");
     });
   });
 

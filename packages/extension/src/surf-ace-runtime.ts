@@ -7297,6 +7297,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           error instanceof SurfAceToolError &&
           (error.code === "stale_revision" || error.code === "stale_content")
         ) {
+          const authority = this.providerPaneAuthorityRecord(surface, pane);
+          const target = authority.targetState === "current" ? authority.target : null;
+          const contentTarget = target ? contentPayloadForTarget(target.targetKind, target.targetPayload) : null;
+          if (
+            target &&
+            contentTarget &&
+            pane.activeContentId &&
+            pane.contentType === contentTarget.contentType
+          ) {
+            pane.lastRestoreBlockedReason = null;
+            pane.diagnosticContent = null;
+            pane.nonDurableTargetDiagnostic = null;
+            await this.persistSurfaceTargetState(surface, "resume restore skipped provider-owned content");
+            this.logReplayOutcome(surface, pane, "target", "skipped_provider_owned", error.code, error.message);
+            continue;
+          }
           this.clearVisiblePaneContent(pane, pane.currentRevision);
           await this.tombstonePaneTarget(surface, pane);
           this.logReplayOutcome(surface, pane, "content", "skipped_stale", error.code, error.message);
