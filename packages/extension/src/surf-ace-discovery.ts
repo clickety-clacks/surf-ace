@@ -533,6 +533,15 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
           updated_count: updated,
         }),
       );
+    } else if (endpoints.length > 0) {
+      this.logger.debug?.(
+        discoveryDiagnostic("reconcile_unchanged", {
+          resolved_count: endpoints.length,
+          snapshot_count: this.snapshot.size,
+        }),
+      );
+    }
+    if (changed || endpoints.length > 0) {
       this.notify();
     }
   }

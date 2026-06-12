@@ -158,6 +158,27 @@ test("refreshNow clears stale endpoints when a full refresh returns no advertise
   assert.deepEqual(notifications, [[]]);
 });
 
+test("refreshNow notifies unchanged live endpoints as rediscovery", async () => {
+  const discovery = new __test.BonjourSurfAceDiscoveryService({
+    logger: {},
+    now: () => 1234,
+  }) as any;
+  const retained = endpoint();
+  const notifications: SurfAceDiscoveryEndpoint[][] = [];
+  discovery.subscribe((endpoints: SurfAceDiscoveryEndpoint[]) => {
+    notifications.push(endpoints);
+  });
+  discovery.started = true;
+  discovery.browser = { update() {} };
+  discovery.snapshot.set(retained.endpointId, retained);
+  discovery.queryCurrentEndpoints = async () => [retained];
+
+  await discovery.refreshNow();
+
+  assert.deepEqual(discovery.getSnapshot(), [retained]);
+  assert.deepEqual(notifications, [[retained]]);
+});
+
 test("refreshNow removes endpoints missing from the refreshed snapshot", async () => {
   const discovery = new __test.BonjourSurfAceDiscoveryService({
     logger: {},
