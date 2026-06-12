@@ -14117,6 +14117,16 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         screens[0]?.panes.map((pane) => pane.activeContent?.contentId),
         pushed.map((result) => result.contentId),
       );
+      assert.deepEqual(
+        screens[0]?.panes.map((pane) => pane.target?.blockedReason ?? null),
+        [null, null, null],
+      );
+      for (const pane of reboundPanes) {
+        assert.equal(pane?.lastRestoreBlockedReason, null);
+        assert.ok(pane?.currentTargetId);
+        const target = surface.targetRecords.get(pane.currentTargetId);
+        assert.equal(target?.currentState, "current");
+      }
     });
   });
 

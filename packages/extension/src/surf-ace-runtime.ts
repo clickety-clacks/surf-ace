@@ -13701,6 +13701,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           },
         );
       }
+      if (this.restartTopologyRestoredSurfaceIds.has(surface.surfaceId)) {
+        for (const paneState of response.payload.state.panes) {
+          const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+          if (
+            pane &&
+            paneState.currentContentId !== null &&
+            pane.activeContentId === paneState.currentContentId &&
+            pane.contentType === paneState.contentType
+          ) {
+            pairImportedRemotePaneIds.delete(Number(paneState.paneId));
+          }
+        }
+      }
       if (options.prunePairClearedPaneTargets === true) {
         this.pruneRestartContentForPairImportedPanes(
           surface,
