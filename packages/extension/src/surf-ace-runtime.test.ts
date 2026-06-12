@@ -11012,6 +11012,67 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("provider-owned panes.list content reattaches stale durable target after client bounce", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      const pushed = await runtime.push(
+        {
+          content: "<main>T338 client bounce provider-owned html</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        },
+        { sessionKey: "agent:test:t338-client-bounce-reattach" },
+      );
+
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(firstPaneId);
+      assert.ok(pane);
+      const target = surface.targetRecords.get(pane.currentTargetId);
+      assert.ok(target);
+
+      target.currentState = "stale";
+      pane.currentTargetId = null;
+      pane.staleTargetId = target.targetId;
+      pane.lastRestoreBlockedReason = "restore_blocked_stale_target";
+      pane.activeContentId = null;
+      pane.contentType = null;
+      pane.contentValue = null;
+      pane.historySummary.visibleContentId = null;
+      pane.pairImportedContentAuthority = false;
+      server.panes.set(Number(pane.remotePaneId), {
+        contentId: pushed.contentId,
+        contentType: "html",
+        drawings: [],
+        frame: { height: 768, width: 1024, x: 0, y: 0 },
+        name: null,
+        paneLabel: pane.paneLabel,
+        paneLineageId: pane.paneLineageId,
+        revision: Number(pane.currentRevision),
+        viewport: { height: 768, scale: 2, width: 1024 },
+      });
+
+      const initialContentApplyCount = server.contentSetRequests.length;
+      await internalRuntime.syncRemotePaneList(surface);
+
+      assert.equal(server.contentSetRequests.length, initialContentApplyCount);
+      assert.equal(pane.activeContentId, pushed.contentId);
+      assert.equal(pane.contentType, "html");
+      assert.equal(target.currentState, "current");
+      assert.equal(target.ownerProviderId, internalRuntime.persistentState.providerId);
+      assert.equal(target.ownershipSessionId, surface.sessionId);
+      assert.equal(target.ownershipEpoch, surface.ownershipEpoch);
+      assert.equal(pane.currentTargetId, target.targetId);
+      assert.equal(pane.staleTargetId, null);
+      assert.equal(pane.lastRestoreBlockedReason, null);
+      const screen = (await runtime.listScreens())[0];
+      assert.equal(screen?.panes[0]?.target?.targetId, target.targetId);
+      assert.equal(screen?.panes[0]?.target?.blockedReason, null);
+    });
+  });
+
   await t.test("history navigation provider-owned visible content is not replayed after reconnect", async () => {
     await withRuntimeHarness(async ({ infos, runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
