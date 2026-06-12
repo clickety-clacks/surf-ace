@@ -252,13 +252,17 @@ function parseDnsSdLookupOutput(
 }
 
 function resolveServiceHost(service: Service): string | null {
+  const host = rawServiceHost(service);
+  if (host && !isIpv4Address(host)) {
+    return host;
+  }
+
   const resolvedAddresses = (service.addresses ?? []).map((address) => address.trim()).filter(Boolean);
   const ipv4Address = resolvedAddresses.find(isIpv4Address);
   if (ipv4Address) {
     return ipv4Address;
   }
 
-  const host = rawServiceHost(service);
   return host || null;
 }
 
@@ -661,4 +665,6 @@ export const __test = {
   formatDiagnosticFields,
   parseDnsSdBrowseOutput,
   parseDnsSdLookupOutput,
+  resolveServiceHost,
+  serviceToEndpoint,
 };

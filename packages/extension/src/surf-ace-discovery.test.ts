@@ -113,6 +113,31 @@ DATE: ---Mon 27 Apr 2026---
   assert.equal(simulator.endpointId, "eezo.local:19001/ws#2bb97f09");
 });
 
+test("serviceToEndpoint prefers stable service hostname over stale numeric addresses", () => {
+  const endpoint = __test.serviceToEndpoint(
+    {
+      addresses: ["192.168.50.183"],
+      host: "eezo.local.",
+      name: "eezo Surf Ace (eezo)",
+      port: 19001,
+      txt: {
+        cap: "31",
+        h: "1410",
+        name: "eezo Surf Ace",
+        pk: "b0ddd36d",
+        s: "1",
+        v: "1",
+        w: "5120",
+        ws: "/ws",
+      },
+    } as any,
+    () => 1234,
+  );
+
+  assert.equal(endpoint?.host, "eezo.local");
+  assert.equal(endpoint?.endpointId, "eezo.local:19001/ws#b0ddd36d");
+});
+
 test("refreshNow clears stale endpoints when a full refresh returns no advertisements", async () => {
   const discovery = new __test.BonjourSurfAceDiscoveryService({
     logger: {},
