@@ -635,6 +635,18 @@ export type SurfAceReattemptConnectionsResult = {
   }>;
 };
 
+export type SurfAceOpenSurfaceWindowInput = {
+  fingerprint: string;
+  requestedBy?: string;
+};
+
+export type SurfAceOpenSurfaceWindowResult = {
+  accepted: boolean;
+  fingerprint: string;
+  message: string;
+  windowLabel: string;
+};
+
 export type SurfAceSplitInput = {
   count: number;
   direction?: "horizontal" | "vertical";
@@ -789,6 +801,7 @@ export interface SurfAceRuntime {
   listScreens(): Promise<SurfAceScreenSummary[]>;
   launchNativeApp(input: SurfAceLaunchNativeAppInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   providerAuthorityDiagnostics(): Promise<SurfAceProviderAuthorityProjection>;
+  openSurfaceWindow(input: SurfAceOpenSurfaceWindowInput): Promise<SurfAceOpenSurfaceWindowResult>;
   push(input: SurfAcePushInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
   realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult>;
@@ -1303,6 +1316,10 @@ type OwnerControlCommand =
   | {
       input: { fingerprint: string; paneId: PaneId };
       op: "capturePane" | "clear" | "closePane" | "read" | "snapshot";
+    }
+  | {
+      input: SurfAceOpenSurfaceWindowInput;
+      op: "openSurfaceWindow";
     }
   | {
       input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string };
@@ -3311,6 +3328,37 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const surface = await this.requireActionableSurface(input.fingerprint);
     return await this.contentClear(surface, input);
+  }
+
+  async openSurfaceWindow(input: SurfAceOpenSurfaceWindowInput): Promise<SurfAceOpenSurfaceWindowResult> {
+    await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAceOpenSurfaceWindowResult>({
+        input,
+        op: "openSurfaceWindow",
+      });
+    }
+    const surface = await this.requireActionableSurface(input.fingerprint);
+    const response = await this.sendRequest(
+      surface,
+      this.requestEnvelope("surface.window.open", {
+        requestedBy: input.requestedBy,
+      }),
+    );
+    if (isErrorResponse(response)) {
+      throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
+    }
+    if (response.op !== "surface.window.open") {
+      throw new SurfAceToolError("invalid_operation", `Unexpected response for surface.window.open: ${response.op}`);
+    }
+    return {
+      accepted: response.payload.accepted,
+      fingerprint: surface.surfaceId,
+      message: response.payload.accepted
+        ? "Surf Ace surface window open request accepted."
+        : "Surf Ace surface window open request was not accepted.",
+      windowLabel: surface.windowLabel,
+    };
   }
 
   async split(input: SurfAceSplitInput): Promise<SurfAceSplitResult> {
@@ -10722,6 +10770,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.launchNativeApp(command.input, command.context);
       case "launchTerminal":
         return await this.launchTerminal(command.input, command.context);
+      case "openSurfaceWindow":
+        return await this.openSurfaceWindow(command.input);
       case "push":
         return await this.push(command.input, command.context);
       case "read":

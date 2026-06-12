@@ -461,6 +461,33 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   assert.deepEqual(errorResponse, { ok: true });
 });
 
+test("validateEnvelopeType accepts surface window open requests and responses", () => {
+  const request = validateEnvelopeType("surface.window.open", {
+    id: "req_window_1",
+    op: "surface.window.open",
+    payload: {
+      requestedBy: "agent",
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+  assert.deepEqual(request, { ok: true });
+
+  const response = validateEnvelopeType("surface.window.open", {
+    id: "req_window_1",
+    ok: true,
+    op: "surface.window.open",
+    payload: {
+      accepted: true,
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(response, { ok: true });
+});
+
 test("validateEnvelopeType accepts target.apply.result responses", () => {
   const result = validateEnvelopeType("target.apply", {
     id: "req_target",

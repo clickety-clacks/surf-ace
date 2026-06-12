@@ -1026,6 +1026,7 @@ final class SurfAceRuntime {
                             "authority.state",
                             "heartbeat.ping",
                             "ownership.relinquish",
+                            "surface.window.open",
                             "panes.list",
                             "pane.split",
                             "pane.rename",
@@ -1192,6 +1193,11 @@ final class SurfAceRuntime {
         case "target.apply":
             return SurfAceProcessedRequestResult(
                 responseObject: await handleTargetApply(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
+        case "surface.window.open":
+            return SurfAceProcessedRequestResult(
+                responseObject: handleSurfaceWindowOpen(id: id, payload: payload, connectionUUID: connectionUUID),
                 postSendPairCommit: nil
             )
         case "target.register":
@@ -1598,6 +1604,26 @@ final class SurfAceRuntime {
             surfaceNeedsResumedEvent.remove(plan.surfaceId)
             enqueuePostReconnectEvents(surfaceId: plan.surfaceId)
         }
+    }
+
+    private func handleSurfaceWindowOpen(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard pairedSurface(for: connectionUUID) != nil else {
+            return makeErrorResponse(op: "surface.window.open", id: id, code: "not_paired", message: "pair.request required")
+        }
+
+        let requestedBy = payload["requestedBy"] as? String ?? "provider_tool"
+        SurfAceSceneActivation.requestNewWindow(source: "provider:\(requestedBy)")
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "surface.window.open",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "accepted": true,
+            ],
+        ]
     }
 
     private func handlePanesList(id: String, connectionUUID: String) -> [String: Any] {

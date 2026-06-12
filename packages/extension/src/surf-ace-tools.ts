@@ -3,6 +3,7 @@ import type { PusherProvenance } from "../../protocol/src/index.js";
 import {
   type SurfAceAnnotateRemoveInput,
   type SurfAceLaunchNativeAppInput,
+  type SurfAceOpenSurfaceWindowInput,
   type PaneId,
   type SurfAceRealizeTopologyInput,
   type SurfAceRealizeTopologiesInput,
@@ -23,6 +24,7 @@ export const surfAceToolNames = [
   "surf_ace_clear",
   "surf_ace_relinquish",
   "surf_ace_reattempt_connections",
+  "surf_ace_open_surface_window",
   "surf_ace_split",
   "surf_ace_realize_topology",
   "surf_ace_realize_topologies",
@@ -355,6 +357,27 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_reattempt_connections",
+    },
+    {
+      description: "Request a new top-level Surf Ace Spatial surface window from an already paired surface endpoint.",
+      execute: async (args: SurfAceOpenSurfaceWindowInput, context?: SurfAceToolContext) =>
+        await runtime.openSurfaceWindow({
+          ...args,
+          requestedBy: args.requestedBy ?? context?.displayName ?? context?.agentId ?? context?.sessionKey,
+        }),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          fingerprint: fingerprintParam,
+          requestedBy: {
+            description: "Optional caller label forwarded to the surface for diagnostics.",
+            type: "string",
+          },
+        },
+        required: ["fingerprint"],
+        type: "object",
+      },
+      name: "surf_ace_open_surface_window",
     },
     {
       description: "Split an existing Surf Ace pane into a larger pane layout.",

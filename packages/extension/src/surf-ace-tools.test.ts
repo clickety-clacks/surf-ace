@@ -176,6 +176,12 @@ function createStubRuntime(): SurfAceRuntime {
       targetStateSurfaceIds: [],
       windowLabelSurfaceIds: [],
     }),
+    openSurfaceWindow: async () => ({
+      accepted: true,
+      fingerprint: "sf_1",
+      message: "Surf Ace surface window open request accepted.",
+      windowLabel: "a",
+    }),
     push: async () => ({
       contentId: "ct_1",
       displayId: "1",
@@ -258,6 +264,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_clear",
     "surf_ace_relinquish",
     "surf_ace_reattempt_connections",
+    "surf_ace_open_surface_window",
     "surf_ace_split",
     "surf_ace_realize_topology",
     "surf_ace_realize_topologies",
@@ -395,6 +402,37 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(reattemptTool.inputSchema.required, undefined);
   assert.equal(reattemptTool.inputSchema.additionalProperties, false);
+
+  const openSurfaceWindowTool = tools.find((tool) => tool.name === "surf_ace_open_surface_window");
+  assert.ok(openSurfaceWindowTool);
+  assert.deepEqual(
+    Object.keys(openSurfaceWindowTool.inputSchema.properties as Record<string, unknown>).sort(),
+    ["fingerprint", "requestedBy"].sort(),
+  );
+  assert.deepEqual(openSurfaceWindowTool.inputSchema.required, ["fingerprint"]);
+  assert.equal(openSurfaceWindowTool.inputSchema.additionalProperties, false);
+});
+
+test("surf_ace_open_surface_window forwards caller provenance for surface diagnostics", async () => {
+  let observedRequestedBy: string | undefined;
+  const runtime = {
+    ...createStubRuntime(),
+    openSurfaceWindow: async (input) => {
+      observedRequestedBy = input.requestedBy;
+      return {
+        accepted: true,
+        fingerprint: input.fingerprint,
+        message: "Surf Ace surface window open request accepted.",
+        windowLabel: "a",
+      };
+    },
+  } satisfies SurfAceRuntime;
+  const tool = createSurfAceTools(runtime).find((candidate) => candidate.name === "surf_ace_open_surface_window");
+  assert.ok(tool);
+
+  await tool.execute({ fingerprint: "sf_1" }, { displayName: "Spatial Agent" });
+
+  assert.equal(observedRequestedBy, "Spatial Agent");
 });
 
 test("surf_ace_list returns compact actionable surfaces and keeps authority projection diagnostic-only", async () => {

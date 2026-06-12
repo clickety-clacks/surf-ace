@@ -13,6 +13,8 @@ export type {
   Response,
   SnapshotGetRequest,
   SnapshotResponse,
+  SurfaceWindowOpenRequest,
+  SurfaceWindowOpenResponse,
   SurfaceViewport as Viewport,
   TargetApplyRequest,
   TargetApplyResponse,
