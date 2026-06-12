@@ -381,6 +381,10 @@ export class BonjourAdvertiser {
           same_name_count: sameNameServices.length,
         }),
       );
+      if (this.isolatedPublisher) {
+        this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
+        return;
+      }
       if (!this.isolatedPublisher && sameNameServices.length > 0) {
         await this.republishWithFallbackName();
         return;

@@ -406,6 +406,29 @@ test("bonjour advertiser handles missing dns-sd isolated publisher without crash
   assert.match(warnings.join("\n"), /\[surf-ace:bonjour\] event=publish_isolated_error .*error=ENOENT/);
 });
 
+test("bonjour advertiser keeps isolated publisher alive when self-discovery is blind", async () => {
+  const child = new FakeChildProcess();
+  const fakeSpawn: typeof spawn = (() => child) as never;
+  const advertiser = new BonjourAdvertiser({
+    bonjour: new FakeBonjour([[]]),
+    isolatedPublisherSpawn: fakeSpawn,
+    name: "eezo Surf Ace (eezo)",
+    port: 19001,
+    txtProvider: () => ({ pk: "b0ddd36d" }),
+  });
+
+  await (advertiser as unknown as {
+    publishWithIsolatedPublisher(name: string): Promise<void>;
+  }).publishWithIsolatedPublisher("eezo Surf Ace (eezo)");
+  await (advertiser as unknown as {
+    verifyPublishedService(): Promise<void>;
+  }).verifyPublishedService();
+
+  assert.equal(child.killed, false);
+  assert.equal((advertiser as unknown as { isolatedPublisher: FakeChildProcess | null }).isolatedPublisher, child);
+  await advertiser.stop();
+});
+
 test("bonjour advertiser reaps only stale orphaned isolated publishers with the same identity", async () => {
   const killedPids: number[] = [];
   const advertiser = new BonjourAdvertiser({
