@@ -11229,6 +11229,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     existing.name = endpoint.name;
     existing.viewport = cloneViewport(endpoint.viewport);
     existing.stopRequested = false;
+    if (!endpointChanged && (existing.connectionCircuitOpenedAt || !existing.autoRetryEnabled || existing.unreachableFailures > 0)) {
+      this.logger.info?.(
+        runtimeDiagnostic("endpoint_probe_rediscovery_retry_reset", {
+          endpoint_id: existing.endpointId,
+          failures: existing.unreachableFailures,
+        }),
+      );
+      this.resetEndpointProbeConnectionCircuit(existing, "endpoint rediscovered", { enableRetry: true });
+      this.wakeEndpointProbeRetry(existing);
+    }
     if (endpointChanged) {
       this.resetEndpointProbeConnectionCircuit(existing, "endpoint changed");
       if (existing.client) {
@@ -11303,6 +11313,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     surface.viewport = cloneViewport(endpoint.viewport);
 
     if (!endpointChanged && !endpointUrlChanged) {
+      if (surface.connectionCircuitOpenedAt || !surface.autoRetryEnabled || surface.unreachableFailures > 0) {
+        this.logger.info?.(
+          runtimeDiagnostic("surface_rediscovery_retry_reset", {
+            failures: surface.unreachableFailures,
+            surface_id: surface.surfaceId,
+          }),
+        );
+        this.resetSurfaceConnectionCircuit(surface, "endpoint rediscovered", { enableRetry: true });
+        this.wakeSurfaceRetry(surface);
+      }
       return;
     }
     this.logger.info?.(

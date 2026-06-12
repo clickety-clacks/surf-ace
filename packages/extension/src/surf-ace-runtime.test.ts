@@ -4392,6 +4392,30 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
+  await t.test("same endpoint rediscovery reopens retained surface retry circuit", async () => {
+    await withRuntimeHarness(async ({ discovery, runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      surface.connectionCircuitOpenedAt = Date.now();
+      surface.connectionCircuitReason = "test client down";
+      surface.connectionState = "unreachable";
+      surface.autoRetryEnabled = false;
+      surface.unreachableFailures = 3;
+      surface.reconnectAttempt = 4;
+
+      await discovery.refreshNow();
+
+      assert.equal(surface.autoRetryEnabled, true);
+      assert.equal(surface.connectionCircuitOpenedAt, null);
+      assert.equal(surface.connectionCircuitReason, null);
+      assert.equal(surface.connectionState, "connecting");
+      assert.equal(surface.unreachableFailures, 0);
+      assert.equal(surface.reconnectAttempt, 0);
+    });
+  });
+
   await t.test("previously unseen remote panes adopt provider-visible pane labels", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const internalRuntime = runtime as any;
