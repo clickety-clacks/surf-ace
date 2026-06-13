@@ -31,8 +31,6 @@ import type {
   Selection,
   SnapshotGetRequest,
   SnapshotHintEvent,
-  SurfaceWindowCloseRequest,
-  SurfaceWindowOpenRequest,
   SurfaceViewport,
   SurfacesListRequest,
   TargetApplyRequest,
@@ -148,8 +146,6 @@ export type SurfaceWsServerOptions = {
   nativeOverlayLivenessRetryDelayMs?: number;
   getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
   onBusyChanged?: () => void;
-  onSurfaceWindowClose?: (surfaceId: string) => Promise<boolean> | boolean;
-  onSurfaceWindowOpen?: () => Promise<{ surfaceId: string } | null> | { surfaceId: string } | null;
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   port: number;
@@ -232,8 +228,6 @@ export class SurfaceWsServer {
   private readonly nativeOverlayLivenessRetryDelayMs: number;
   private readonly getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
   private readonly onBusyChanged?: () => void;
-  private readonly onSurfaceWindowClose?: (surfaceId: string) => Promise<boolean> | boolean;
-  private readonly onSurfaceWindowOpen?: () => Promise<{ surfaceId: string } | null> | { surfaceId: string } | null;
   private readonly onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   private readonly onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   private readonly port: number;
@@ -267,8 +261,6 @@ export class SurfaceWsServer {
     this.nativeOverlayLivenessRetryCount = options.nativeOverlayLivenessRetryCount ?? NATIVE_OVERLAY_LIVENESS_RETRY_COUNT;
     this.nativeOverlayLivenessRetryDelayMs = options.nativeOverlayLivenessRetryDelayMs ?? NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS;
     this.onBusyChanged = options.onBusyChanged;
-    this.onSurfaceWindowClose = options.onSurfaceWindowClose;
-    this.onSurfaceWindowOpen = options.onSurfaceWindowOpen;
     this.onNativeMaterialized = options.onNativeMaterialized;
     this.onNativeReleased = options.onNativeReleased;
     this.port = options.port;
@@ -953,10 +945,6 @@ export class SurfaceWsServer {
         return await this.handleRuntimeAppBinding(request);
       case "ownership.relinquish":
         return this.handleRelinquish(socket, request);
-      case "surface.window.open":
-        return await this.handleSurfaceWindowOpen(socket, request);
-      case "surface.window.close":
-        return await this.handleSurfaceWindowClose(socket, request);
       case "topology.apply":
         return await this.handleTopologyApply(socket, request);
       case "content.apply":
@@ -1508,53 +1496,6 @@ export class SurfaceWsServer {
       ok: true,
       op: "ownership.relinquish",
       payload: { relinquished: true },
-      sentAt: Date.now(),
-      type: "response",
-      v: 1,
-    };
-  }
-
-  private requireActiveLockOwner(socket: WebSocket, surfaceId: string, op: string): void {
-    const transport = this.transport(surfaceId);
-    const active = transport.active;
-    if (!active || active.socket !== socket) {
-      throw new SurfaceCoreError("not_lock_owner", `${op} requires the active lock owner`);
-    }
-    if (!transport.lock || transport.lock.providerId !== active.providerId) {
-      throw new SurfaceCoreError("not_lock_owner", `${op} requires the current lock owner`);
-    }
-  }
-
-  private async handleSurfaceWindowOpen(socket: WebSocket, request: SurfaceWindowOpenRequest): Promise<Response> {
-    const surfaceId = this.requirePairedSurfaceId(socket);
-    this.requireActiveLockOwner(socket, surfaceId, "surface.window.open");
-    const opened = await this.onSurfaceWindowOpen?.();
-    return {
-      id: request.id,
-      ok: true,
-      op: "surface.window.open",
-      payload: {
-        accepted: Boolean(opened),
-        ...(opened ? { surfaceId: opened.surfaceId } : {}),
-      },
-      sentAt: Date.now(),
-      type: "response",
-      v: 1,
-    };
-  }
-
-  private async handleSurfaceWindowClose(socket: WebSocket, request: SurfaceWindowCloseRequest): Promise<Response> {
-    const surfaceId = this.requirePairedSurfaceId(socket);
-    this.requireActiveLockOwner(socket, surfaceId, "surface.window.close");
-    const closed = await this.onSurfaceWindowClose?.(surfaceId);
-    return {
-      id: request.id,
-      ok: true,
-      op: "surface.window.close",
-      payload: {
-        closed: Boolean(closed),
-        surfaceId,
-      },
       sentAt: Date.now(),
       type: "response",
       v: 1,

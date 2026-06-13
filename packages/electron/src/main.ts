@@ -182,18 +182,6 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
       endpointName: endpointName(),
       hostName: shortHostName(),
       onBusyChanged: scheduleAdvertiserTxtRefresh,
-      onSurfaceWindowClose: async (surfaceId) => {
-        const window = windows.get(surfaceId);
-        if (!window || window.isDestroyed()) {
-          return false;
-        }
-        window.close();
-        return true;
-      },
-      onSurfaceWindowOpen: async () => {
-        const surface = await createAdditionalWindow();
-        return { surfaceId: surface.surfaceId };
-      },
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
       onNativeMaterialized: (surfaceId, materialization) => {
@@ -1264,12 +1252,11 @@ async function contentPayloadFromFile(
   }
 }
 
-async function createAdditionalWindow(): Promise<{ surfaceId: string }> {
+async function createAdditionalWindow(): Promise<void> {
   const surface = core.createAdditionalSurface(endpointName(), displayViewport());
   await persistState();
   await createWindowForSurface(surface.surfaceId);
   await server.broadcastSurfaceAppeared(surface.surfaceId);
-  return { surfaceId: surface.surfaceId };
 }
 
 function installMenu(): void {

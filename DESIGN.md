@@ -287,7 +287,7 @@ Rules:
 4. Window lifecycle changes are in-band WS signals; they do not require mDNS rebroadcast.
 5. Surface identity is window-scoped and stable across app restarts when restoration metadata exists; otherwise new windows receive new `surfaceId`s.
 6. `event.surface_appeared` and `event.surface_removed` are **not profile-gated** — they are always emitted regardless of `eventProfile` setting. Providers MUST handle these events on any active socket.
-7. Authorized provider/tool calls may request top-level Surf Ace app-window creation and removal over the same paired, lock-owner WS authority used for topology mutations. Supported app hosts are visionOS Spatial, iPadOS/iPad, and Electron. Window creation/removal is not a pane split and must not be represented as pane topology inside an existing surface.
+7. Authorized provider/tool calls may request top-level Surf Ace Spatial surface-window creation and removal over the same paired, lock-owner WS authority used for topology mutations. iPadOS/iPad and Electron app-window lifecycle are out of scope for this operation. Window creation/removal is not a pane split and must not be represented as pane topology inside an existing surface.
 
 ## 5. Message Model
 
@@ -380,24 +380,24 @@ A successful `pair.response` MUST include at least one topology pane. Providers 
 These operations are post-pair and scoped to a paired `surfaceId`. They implement the ownership model in §4 and the pane topology committed in §2.3 Phase 1 and §3.1.1.
 
 #### `surface.window.open`
-Requests that the paired Surf Ace app endpoint create a new top-level Surf Ace app window/surface.
+Requests that the paired Surf Ace Spatial app endpoint create a new top-level Surf Ace Spatial surface window.
 
 **Request fields:** optional `requestedBy` diagnostic string.
 
 **Behavior:**
 1. Only the active lock owner for the paired source surface may call `surface.window.open`.
-2. On supported hosts, the app creates a new top-level Surf Ace window. The new window is provider-discoverable through `event.surface_appeared` and/or the next `surfaces.list`.
-3. On hosts that cannot create another app window, the response is successful but `accepted:false`.
+2. On visionOS Spatial, the app creates a new top-level Surf Ace Spatial surface window. The new window is provider-discoverable through `event.surface_appeared` and/or the next `surfaces.list`.
+3. Non-Spatial hosts are out of scope for T1280 and have no product readiness requirement for this request.
 4. The request does not mutate pane topology inside the source surface.
 
 #### `surface.window.close`
-Requests that the paired Surf Ace app close the currently paired top-level window/surface.
+Requests that the paired Surf Ace Spatial app close the currently paired top-level Spatial surface window.
 
 **Request fields:** optional `requestedBy` diagnostic string.
 
 **Behavior:**
 1. Only the active lock owner for that surface may call `surface.window.close`.
-2. On success, the app closes that top-level Surf Ace window, emits `event.surface_removed`, and closes any paired socket for that surface.
+2. On success, the app closes that top-level Surf Ace Spatial surface window, emits `event.surface_removed`, and closes any paired socket for that surface.
 3. Closing a window removes the surface from live provider topology and must follow the same stale-target cleanup semantics as user-initiated window close.
 4. The request does not mutate pane topology inside any surviving surface.
 
@@ -2829,7 +2829,7 @@ pane node:  { "type": "pane", "paneId"?: paneId, "name"?: string | null, "weight
 
 #### `surf_ace_realize_topologies`
 
-Realize desired pane topology changes and top-level Surf Ace app-window lifecycle mutations across one or more Surf Ace surfaces/windows in one CLU-facing operation. Write.
+Realize desired pane topology changes and top-level Surf Ace Spatial surface-window lifecycle mutations across one or more Surf Ace surfaces/windows in one CLU-facing operation. Write.
 
 **Params:**
 ```
@@ -2847,7 +2847,7 @@ allowDestroyPaneIds       array    Existing internal pane ids this call may dest
 desired                   object   Recursive desired subtree
 ```
 
-Top-level window lifecycle operations use this shape:
+Top-level Spatial surface-window lifecycle operations use this shape:
 ```
 fingerprint               string   Source/target screen from `surf_ace_list`
 action                    enum     "openWindow" | "closeWindow"
@@ -2856,7 +2856,7 @@ operationId               string?  Optional caller id echoed in results
 requestedBy               string?  Optional diagnostic caller label
 ```
 
-**Behavior:** The provider applies pane operations through the same provider-owned topology authority as `surf_ace_realize_topology`. For `openWindow` and `closeWindow`, the provider sends the matching lock-owner window lifecycle request to the app host. `openWindow` creates a new provider-discoverable top-level window/surface on supported app hosts. `closeWindow` removes the targeted top-level window/surface. Content pushes remain pane-scoped.
+**Behavior:** The provider applies pane operations through the same provider-owned topology authority as `surf_ace_realize_topology`. For `openWindow` and `closeWindow`, the provider sends the matching lock-owner Spatial surface-window lifecycle request to the app host. `openWindow` creates a new provider-discoverable top-level Spatial surface window. `closeWindow` removes the targeted top-level Spatial surface window. Content pushes remain pane-scoped.
 
 **Partial failure semantics:** The provider reports unambiguous partial state. If every operation applies, the result is `{ ok: true, applied: [...] }`. If an operation fails, the result is `{ ok: false, applied, failed, skipped }`, where `applied` lists earlier operations that already committed, `failed` identifies the failed operation by index/fingerprint/windowLabel/operationId/code/message, and `skipped` lists later operations not attempted. This is not transactional across devices; callers must inspect `ok` before assuming every surface changed.
 

@@ -396,7 +396,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_realize_topology",
     },
     {
-      description: "Realize desired Surf Ace topology changes and top-level app-window lifecycle mutations across one or more surfaces.",
+      description: "Realize desired Surf Ace topology changes and top-level Spatial surface-window lifecycle mutations across one or more surfaces.",
       execute: async (args: SurfAceRealizeTopologiesInput, context?: SurfAceToolContext) =>
         await runtime.realizeTopologies({
           operations: args.operations.map((operation) =>
@@ -434,7 +434,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
                   additionalProperties: false,
                   properties: {
                     action: {
-                      description: "Top-level Surf Ace app-window lifecycle mutation.",
+                      description: "Top-level Surf Ace Spatial surface-window lifecycle mutation.",
                       enum: ["openWindow", "closeWindow"],
                       type: "string",
                     },

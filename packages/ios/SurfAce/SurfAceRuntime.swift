@@ -1624,8 +1624,14 @@ final class SurfAceRuntime {
         }
 
         let requestedBy = payload["requestedBy"] as? String ?? "provider_tool"
+        #if os(visionOS)
         let accepted = UIApplication.shared.supportsMultipleScenes
-        SurfAceSceneActivation.requestNewWindow(source: "provider:\(requestedBy)")
+        if accepted {
+            SurfAceSceneActivation.requestNewWindow(source: "provider:\(requestedBy)")
+        }
+        #else
+        let accepted = false
+        #endif
         return [
             "v": 1,
             "type": "response",
@@ -1651,11 +1657,17 @@ final class SurfAceRuntime {
         }
 
         let requestedBy = payload["requestedBy"] as? String ?? "provider_tool"
+        #if os(visionOS)
         let scene = UIApplication.shared.connectedScenes.first { $0.session.persistentIdentifier == surface.sceneKey }
         if let scene {
             SurfAceSceneActivation.log(event: "scene_destruction_request", fields: [("source", "provider:\(requestedBy)"), ("surface_id", surfaceId)])
             UIApplication.shared.requestSceneSessionDestruction(scene.session, options: nil)
         }
+        let closed = scene != nil
+        #else
+        _ = requestedBy
+        let closed = false
+        #endif
         return [
             "v": 1,
             "type": "response",
@@ -1664,7 +1676,7 @@ final class SurfAceRuntime {
             "ok": true,
             "sentAt": timestampNow(),
             "payload": [
-                "closed": scene != nil,
+                "closed": closed,
                 "surfaceId": surfaceId,
             ],
         ]
