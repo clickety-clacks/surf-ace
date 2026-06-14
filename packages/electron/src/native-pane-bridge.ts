@@ -223,7 +223,10 @@ export function requestForCompositor(
       if (!pane.geometry.paneInstanceId || pane.geometry.topologyEpoch === undefined || !pane.geometry.surfaceEpoch || pane.geometry.geometryRevision === undefined) {
         throw new Error(`native pane ${pane.id} geometry missing canonical revision identity`);
       }
-      return pane;
+      return {
+        ...pane,
+        ...(pane.windowGroup?.launchIdentity.launchToken ? { launchToken: pane.windowGroup.launchIdentity.launchToken } : {}),
+      };
     }),
     type: materialization.op,
   };

@@ -2033,6 +2033,9 @@ export class SurfaceWsServer {
           }
           overlayApplied = true;
         }
+        const readinessResponse = request.payload.targetKind === "native_app"
+          ? await this.waitForNativePaneWindowGroupReadiness(materialization, overlayResponse ?? hostResponse)
+          : overlayResponse ?? hostResponse;
         const postOverlayLayoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
         if (postOverlayLayoutFailure) {
           throw new Error(postOverlayLayoutFailure);
@@ -2050,8 +2053,8 @@ export class SurfaceWsServer {
           appliedAt,
           materializedState: {
             ...nativeHostMaterializedState(request.payload, materialization, {
-              ...nativePaneReadinessFromCompositor(overlayResponse ?? hostResponse, materialization),
-              nativeHost: nativePaneWindowGroupsFromCompositorStatus(overlayResponse ?? hostResponse).some((group) =>
+              ...nativePaneReadinessFromCompositor(readinessResponse, materialization),
+              nativeHost: nativePaneWindowGroupsFromCompositorStatus(readinessResponse).some((group) =>
                 nativePaneWindowGroupMatchesMaterialization(group, materialization)
               ) ? "applied" : "not_applied",
               overlayRegions: overlayRequest ? "applied" : "not_requested",
@@ -2064,7 +2067,7 @@ export class SurfaceWsServer {
           targetId: request.payload.targetId,
         };
         this.core.markNativePaneMaterialized(surfaceId, materialization);
-        const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(overlayResponse ?? hostResponse);
+        const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(readinessResponse);
         if (observedWindowGroups.length > 0) {
           this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
         }
@@ -2180,6 +2183,30 @@ export class SurfaceWsServer {
             topologyEpoch,
           };
       response = await sendCompositorControl(this.compositorSocketPath, currentRequest);
+    }
+    return response;
+  }
+
+  private async waitForNativePaneWindowGroupReadiness(
+    materialization: NativePaneMaterialization,
+    initialResponse: CompositorControlResponse,
+  ): Promise<CompositorControlResponse> {
+    if (!this.compositorSocketPath) {
+      return initialResponse;
+    }
+    let response = initialResponse;
+    for (let attempt = 0; attempt < this.nativeOverlayLivenessRetryCount; attempt += 1) {
+      if (nativePaneWindowGroupsFromCompositorStatus(response).some((group) =>
+        nativePaneWindowGroupMatchesMaterialization(group, materialization)
+      )) {
+        return response;
+      }
+      await new Promise((resolve) => setTimeout(resolve, this.nativeOverlayLivenessRetryDelayMs));
+      response = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      const failure = compositorFailureMessage(response);
+      if (failure) {
+        return response;
+      }
     }
     return response;
   }
@@ -3507,8 +3534,8 @@ function nativePaneWindowGroupMatchesMaterialization(
   if (!pane) {
     return false;
   }
-  if (group.launchToken) {
-    return group.launchToken === pane.windowGroup?.launchIdentity.launchToken;
+  if (pane.windowGroup?.launchIdentity.launchToken) {
+    return group.launchToken === pane.windowGroup.launchIdentity.launchToken;
   }
   if (group.paneInstanceId && group.paneInstanceId === pane.geometry.paneInstanceId) {
     return true;

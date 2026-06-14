@@ -2020,6 +2020,49 @@ for (const { command, processEnv } of [
   });
 }
 
+test("surface core materializes KolourPaint native_app with direct native pane process env", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const pane = core.pairState(surface.surfaceId).panes[0]!;
+
+  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+    ownershipEpoch: 1,
+    ownershipSessionId: "sa_test" as never,
+    paneLineageId: pane.paneLineageId,
+    requestId: "restore_kolourpaint",
+    restoreReason: "resume_restore",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 3,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.native_app.v1"],
+      safeToLogFields: ["appId", "args"],
+      safetyClass: "process",
+      summary: "kolourpaint",
+    },
+    targetId: "target_kolourpaint",
+    targetKind: "native_app",
+    targetPayload: { appId: "kolourpaint", args: [], launchMode: "new_instance" },
+  });
+
+  assert.equal(materialization.op, "native_pane.host");
+  assert.deepEqual(materialization.panes[0]?.process, {
+    args: [],
+    command: "kolourpaint",
+    env: { QT_QPA_PLATFORM: "wayland" },
+  });
+  assert.equal(materialization.panes[0]?.target, "native_app");
+  assert.equal(materialization.panes[0]?.nativeApp?.appId, "kolourpaint");
+});
+
 test("surface core snaps terminal native geometry to compositor integer bounds", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -2179,7 +2222,7 @@ test("surface core exposes native materialized panes to the renderer until conte
     paneLocalBounds: listedPane.geometry.contentViewport,
     primaryWindowId: null,
   }]);
-  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 2);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
 
   core.contentClear(surface.surfaceId, {
     paneId: paneId as never,

@@ -91,7 +91,12 @@ test("native pane bridge serializes host and overlay requests from protocol mate
   const input = materialization();
 
   assert.deepEqual(requestForCompositor(input), {
-    panes: input.panes,
+    panes: input.panes.map((pane) => ({
+      ...pane,
+      ...(pane.windowGroup?.launchIdentity.launchToken
+        ? { launchToken: pane.windowGroup.launchIdentity.launchToken }
+        : {}),
+    })),
     type: "native_pane.host",
   });
   assert.deepEqual(overlayRequestForCompositor(input), {

@@ -3587,8 +3587,8 @@ test("ws server derives target.apply native pane host materialization for compos
         })}\n`);
       } else if (message.type === "native_pane.host") {
         const panes = Array.isArray(message.panes) ? message.panes : [];
-        const firstPane = panes[0] as { windowGroup?: { launchIdentity?: { launchToken?: string } } } | undefined;
-        observedLaunchToken = firstPane?.windowGroup?.launchIdentity?.launchToken ?? "";
+        const firstPane = panes[0] as { launchToken?: string } | undefined;
+        observedLaunchToken = firstPane?.launchToken ?? "";
         socket.write(`${JSON.stringify({ ok: true, status: { overlay_regions: { topologyEpoch: "topology-hosted" }, panes: [{ id: "1" }] } })}\n`);
       } else {
         socket.write(`${JSON.stringify({
@@ -3645,6 +3645,7 @@ test("ws server derives target.apply native pane host materialization for compos
           y: 0,
         },
         id: "1",
+        launchToken: `${surfaceId}:1:target_top_118:3`,
         process: { args: ["top"], command: "foot" },
         revision: 3,
         target: "terminal",

@@ -788,6 +788,11 @@ export class SurfaceCore {
       if (typeof appId === "string") {
         const appArgs = Array.isArray(args) && args.every((arg) => typeof arg === "string") ? [...args] : [];
         const appLaunchMode = launchMode === "attach_or_launch" ? "attach_or_launch" : "new_instance";
+        const directNativeEnv = DIRECT_NATIVE_PANE_EXECUTABLE_ENV.get(appId);
+        const processEnv = {
+          ...(directNativeEnv ?? {}),
+          ...(isPlainRecord(env) && isStringRecord(env) ? env : {}),
+        };
         paneEntry.target = "native_app";
         paneEntry.nativeApp = {
           appId,
@@ -798,7 +803,7 @@ export class SurfaceCore {
           args: appArgs,
           command: appId,
           ...(typeof cwd === "string" ? { cwd } : {}),
-          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
+          ...(Object.keys(processEnv).length > 0 ? { env: processEnv } : {}),
         };
       }
     }
@@ -3202,8 +3207,8 @@ function sameNativePaneWindowGroupIdentity(
   pane: PaneState,
   geometry: PaneGeometryProjection | undefined,
 ): boolean {
-  if (group.launchToken) {
-    return group.launchToken === pane.nativeHost?.launchToken;
+  if (pane.nativeHost?.launchToken) {
+    return group.launchToken === pane.nativeHost.launchToken;
   }
   if (group.paneInstanceId && geometry && group.paneInstanceId === geometry.paneInstanceId) {
     return true;
