@@ -7,10 +7,13 @@ const keychainAccessGroup = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
 test("Surf Ace enables Electron platform WebAuthn before app readiness", async () => {
   const mainSource = await fs.readFile(new URL("../../src/main.ts", import.meta.url), "utf8");
   const configureIndex = mainSource.indexOf("app.configureWebAuthn({");
+  const supportCheckIndex = mainSource.indexOf('typeof app.configureWebAuthn !== "function"');
   const readyIndex = mainSource.indexOf("app.whenReady()");
 
   assert.notEqual(configureIndex, -1);
+  assert.notEqual(supportCheckIndex, -1);
   assert.notEqual(readyIndex, -1);
+  assert.ok(supportCheckIndex < configureIndex);
   assert.ok(configureIndex < readyIndex);
   assert.match(mainSource, /touchID:\s*\{\s*keychainAccessGroup: SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP/s);
   assert.match(mainSource, /session\.defaultSession\.on\("select-webauthn-account"/);

@@ -114,6 +114,9 @@ function configurePlatformWebAuthn(): void {
   if (process.platform !== "darwin") {
     return;
   }
+  if (typeof app.configureWebAuthn !== "function") {
+    return;
+  }
   app.configureWebAuthn({
     touchID: {
       keychainAccessGroup: SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP,
