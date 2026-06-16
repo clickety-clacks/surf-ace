@@ -223,6 +223,10 @@ private final class ControlledPaneBridge: SurfAcePaneBridging {
         true
     }
 
+    func restoreDrawingStrokes(_ strokes: [SurfAceStroke]) -> Bool {
+        true
+    }
+
     func captureDrawingData() -> Data {
         Data()
     }
