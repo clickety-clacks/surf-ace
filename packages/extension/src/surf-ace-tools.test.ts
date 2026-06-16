@@ -348,8 +348,13 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   const operationsSchema = (realizeBatchTool.inputSchema.properties as Record<string, any>).operations;
   assert.equal(operationsSchema.type, "array");
   assert.equal(operationsSchema.minItems, 1);
+  assert.ok(Array.isArray(operationsSchema.items.anyOf));
+  const topologyOperationSchema = operationsSchema.items.anyOf.find((variant: any) => variant.properties.desired);
+  const lifecycleOperationSchema = operationsSchema.items.anyOf.find((variant: any) => variant.properties.action);
+  assert.ok(topologyOperationSchema);
+  assert.ok(lifecycleOperationSchema);
   assert.deepEqual(
-    Object.keys(operationsSchema.items.properties).sort(),
+    Object.keys(topologyOperationSchema.properties).sort(),
     [
       "allowDestroyPaneIds",
       "desired",
@@ -360,14 +365,21 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
       "windowLabel",
     ].sort(),
   );
-  assert.deepEqual(operationsSchema.items.required, [
+  assert.deepEqual(topologyOperationSchema.required, [
     "fingerprint",
     "target",
     "expectedTopologyRevision",
     "allowDestroyPaneIds",
     "desired",
   ]);
-  assert.equal(operationsSchema.items.additionalProperties, false);
+  assert.equal(topologyOperationSchema.additionalProperties, false);
+  assert.deepEqual(
+    Object.keys(lifecycleOperationSchema.properties).sort(),
+    ["action", "fingerprint", "operationId", "requestedBy", "windowLabel"].sort(),
+  );
+  assert.deepEqual(lifecycleOperationSchema.required, ["fingerprint", "action"]);
+  assert.deepEqual(lifecycleOperationSchema.properties.action.enum, ["openWindow", "closeWindow"]);
+  assert.equal(lifecycleOperationSchema.additionalProperties, false);
 
   const closePaneTool = tools.find((tool) => tool.name === "surf_ace_close_pane");
   assert.ok(closePaneTool);
@@ -395,6 +407,32 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(reattemptTool.inputSchema.required, undefined);
   assert.equal(reattemptTool.inputSchema.additionalProperties, false);
+
+});
+
+test("surf_ace_realize_topologies forwards caller provenance for window lifecycle diagnostics", async () => {
+  let observedRequestedBy: string | undefined;
+  const runtime = {
+    ...createStubRuntime(),
+    realizeTopologies: async (input) => {
+      const operation = input.operations[0];
+      if (operation && "action" in operation) {
+        observedRequestedBy = operation.requestedBy;
+      }
+      return {
+        applied: [],
+        ok: true,
+      };
+    },
+  } satisfies SurfAceRuntime;
+  const tool = createSurfAceTools(runtime).find((candidate) => candidate.name === "surf_ace_realize_topologies");
+  assert.ok(tool);
+
+  await tool.execute({
+    operations: [{ action: "openWindow", fingerprint: "sf_1" }],
+  }, { displayName: "Surface Agent" });
+
+  assert.equal(observedRequestedBy, "Surface Agent");
 });
 
 test("surf_ace_list returns compact actionable surfaces and keeps authority projection diagnostic-only", async () => {

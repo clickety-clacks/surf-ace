@@ -19,6 +19,10 @@ import {
   pairResponseSchema,
   relinquishRequestSchema,
   relinquishResponseSchema,
+  surfaceWindowCloseRequestSchema,
+  surfaceWindowCloseResponseSchema,
+  surfaceWindowOpenRequestSchema,
+  surfaceWindowOpenResponseSchema,
   targetApplyRequestSchema,
   targetApplyResponseSchema,
   targetRegisterRejectedResponseSchema,
@@ -63,6 +67,16 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "ownership.relinquish": {
     request: relinquishRequestSchema,
     response: relinquishResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "surface.window.open": {
+    request: surfaceWindowOpenRequestSchema,
+    response: surfaceWindowOpenResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
+  "surface.window.close": {
+    request: surfaceWindowCloseRequestSchema,
+    response: surfaceWindowCloseResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "target.apply": {

@@ -1026,6 +1026,8 @@ final class SurfAceRuntime {
                             "authority.state",
                             "heartbeat.ping",
                             "ownership.relinquish",
+                            "surface.window.open",
+                            "surface.window.close",
                             "panes.list",
                             "pane.split",
                             "pane.rename",
@@ -1192,6 +1194,16 @@ final class SurfAceRuntime {
         case "target.apply":
             return SurfAceProcessedRequestResult(
                 responseObject: await handleTargetApply(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
+        case "surface.window.open":
+            return SurfAceProcessedRequestResult(
+                responseObject: handleSurfaceWindowOpen(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
+        case "surface.window.close":
+            return SurfAceProcessedRequestResult(
+                responseObject: handleSurfaceWindowClose(id: id, payload: payload, connectionUUID: connectionUUID),
                 postSendPairCommit: nil
             )
         case "target.register":
@@ -1598,6 +1610,76 @@ final class SurfAceRuntime {
             surfaceNeedsResumedEvent.remove(plan.surfaceId)
             enqueuePostReconnectEvents(surfaceId: plan.surfaceId)
         }
+    }
+
+    private func handleSurfaceWindowOpen(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
+              let activeSession = activeSessions[surfaceId],
+              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
+            return makeErrorResponse(op: "surface.window.open", id: id, code: "not_paired", message: "pair.request required")
+        }
+        guard activeSession.connectionUUID == connectionUUID,
+              ownershipLock.providerId == activeSession.providerId else {
+            return makeErrorResponse(op: "surface.window.open", id: id, code: "not_lock_owner", message: "Only the current lock owner may open Surf Ace windows")
+        }
+
+        let requestedBy = payload["requestedBy"] as? String ?? "provider_tool"
+        #if os(visionOS)
+        let accepted = UIApplication.shared.supportsMultipleScenes
+        if accepted {
+            SurfAceSceneActivation.requestNewWindow(source: "provider:\(requestedBy)")
+        }
+        #else
+        let accepted = false
+        #endif
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "surface.window.open",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "accepted": accepted,
+            ],
+        ]
+    }
+
+    private func handleSurfaceWindowClose(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
+              let activeSession = activeSessions[surfaceId],
+              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
+            return makeErrorResponse(op: "surface.window.close", id: id, code: "not_paired", message: "pair.request required")
+        }
+        guard activeSession.connectionUUID == connectionUUID,
+              ownershipLock.providerId == activeSession.providerId else {
+            return makeErrorResponse(op: "surface.window.close", id: id, code: "not_lock_owner", message: "Only the current lock owner may close this Surf Ace window")
+        }
+
+        let requestedBy = payload["requestedBy"] as? String ?? "provider_tool"
+        #if os(visionOS)
+        let scene = UIApplication.shared.connectedScenes.first { $0.session.persistentIdentifier == surface.sceneKey }
+        if let scene {
+            SurfAceSceneActivation.log(event: "scene_destruction_request", fields: [("source", "provider:\(requestedBy)"), ("surface_id", surfaceId)])
+            UIApplication.shared.requestSceneSessionDestruction(scene.session, options: nil)
+        }
+        let closed = scene != nil
+        #else
+        _ = requestedBy
+        let closed = false
+        #endif
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "surface.window.close",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "closed": closed,
+                "surfaceId": surfaceId,
+            ],
+        ]
     }
 
     private func handlePanesList(id: String, connectionUUID: String) -> [String: Any] {
