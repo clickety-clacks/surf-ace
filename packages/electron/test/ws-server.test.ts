@@ -285,6 +285,20 @@ async function waitForRendererPaneSet(core: SurfaceCore, surfaceId: string, pane
   assert.fail(`renderer pane set did not include ${paneIds.join(",")}`);
 }
 
+async function waitForRendererConnectionBar(
+  core: SurfaceCore,
+  surfaceId: string,
+  connectionBar: "connected" | "connecting" | "disconnected",
+): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (core.getRendererWindowState(surfaceId).connectionBar === connectionBar) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail(`renderer connection bar did not become ${connectionBar}`);
+}
+
 function contentApplyRequest(paneId: number, revision: number): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
@@ -1640,6 +1654,25 @@ test("ws server exposes providerName while connected and clears it on relinquish
     assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
 
     await closeSocket(owner);
+  });
+});
+
+test("ws server clears green connection bar when accepted provider socket closes", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", { providerName: "CLU / Surf Ace" }));
+    assert.equal(paired.ok, true);
+
+    const authority = await request(owner, authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>));
+    assert.equal(authority.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, "CLU / Surf Ace");
+
+    await closeSocket(owner, 1001, "network_lost");
+    await waitForRendererConnectionBar(core, surfaceId, "disconnected");
+
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "disconnected");
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
   });
 });
 

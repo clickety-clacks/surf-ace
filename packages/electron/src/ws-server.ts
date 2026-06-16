@@ -3174,7 +3174,7 @@ export class SurfaceWsServer {
         surface_id: surfaceId,
       },
     );
-    this.core.setConnectionBar(surfaceId, "connecting");
+    this.core.setConnectionBar(surfaceId, "disconnected");
     this.onBusyChanged?.();
   }
 
@@ -3185,6 +3185,7 @@ export class SurfaceWsServer {
       return;
     }
     transport.active = null;
+    this.core.setConnectionBar(surfaceId, "disconnected");
     this.closeSession(surfaceId, active, reason);
   }
 
