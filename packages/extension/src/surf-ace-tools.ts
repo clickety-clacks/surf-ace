@@ -72,8 +72,61 @@ const paneIdParam = {
 
 type PublicSurfAceScreenSummary = Omit<SurfAceScreenSummary, "_debug">;
 
-function compactSurfAceListOutput(screens: SurfAceScreenSummary[]): PublicSurfAceScreenSummary[] {
-  return screens.map(({ _debug, ...screen }) => screen);
+type SurfAceListInput = {
+  actionableOnly?: boolean;
+  fingerprint?: string;
+  name?: string;
+  paneAddress?: string;
+  paneId?: PaneId | string | number;
+  windowLabel?: string;
+};
+
+function compactSurfAceListOutput(
+  screens: SurfAceScreenSummary[],
+  input: SurfAceListInput = {},
+): PublicSurfAceScreenSummary[] {
+  const hasPaneFilter = input.paneAddress !== undefined || input.paneId !== undefined;
+  return screens
+    .filter((screen) => screenMatchesSurfAceListInput(screen, input))
+    .map(({ _debug, ...screen }) => {
+      const panes = hasPaneFilter
+        ? screen.panes.filter((pane) => paneMatchesSurfAceListInput(pane, input))
+        : screen.panes;
+      return {
+        ...screen,
+        panes,
+      };
+    })
+    .filter((screen) => !hasPaneFilter || screen.panes.length > 0);
+}
+
+function screenMatchesSurfAceListInput(screen: SurfAceScreenSummary, input: SurfAceListInput): boolean {
+  if (input.actionableOnly === true && !screen.authority.actionable) {
+    return false;
+  }
+  if (input.fingerprint !== undefined && screen.fingerprint !== input.fingerprint) {
+    return false;
+  }
+  if (input.windowLabel !== undefined && screen.windowLabel !== input.windowLabel) {
+    return false;
+  }
+  if (input.name !== undefined && !screen.name.toLowerCase().includes(input.name.toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
+function paneMatchesSurfAceListInput(
+  pane: PublicSurfAceScreenSummary["panes"][number],
+  input: SurfAceListInput,
+): boolean {
+  if (input.paneAddress !== undefined && pane.paneAddress !== input.paneAddress && pane.displayId !== input.paneAddress) {
+    return false;
+  }
+  if (input.paneId !== undefined && String(pane.paneId) !== String(input.paneId)) {
+    return false;
+  }
+  return true;
 }
 
 const realizeTopologyTargetSchema = {
@@ -187,11 +240,30 @@ const realizeTopologyDesiredSchema = createRealizeTopologyNodeSchema();
 export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefinition<any>[] {
   return [
     {
-      description: "List all discovered Surf Ace surfaces, including the unique user-facing `displayId` / `paneAddress`, `windowLabel` / `paneLabel`, and internal pane ids for subsequent pane-scoped calls.",
-      execute: async () => compactSurfAceListOutput(await runtime.listScreens()),
+      description: "List discovered Surf Ace surfaces, optionally narrowed by surface or pane identifiers, including the unique user-facing `displayId` / `paneAddress`, `windowLabel` / `paneLabel`, and internal pane ids for subsequent pane-scoped calls.",
+      execute: async (args: SurfAceListInput = {}) => compactSurfAceListOutput(await runtime.listScreens(), args),
       inputSchema: {
         additionalProperties: false,
-        properties: {},
+        properties: {
+          actionableOnly: {
+            description: "When true, return only surfaces whose provider authority says they are actionable.",
+            type: "boolean",
+          },
+          fingerprint: fingerprintParam,
+          name: {
+            description: "Case-insensitive substring match against the Surf Ace surface name, e.g. `eezo` or `Cyberbrain`.",
+            type: "string",
+          },
+          paneAddress: {
+            description: "Visible pane address/displayId returned by `surf_ace_list`, e.g. `b4`.",
+            type: "string",
+          },
+          paneId: paneIdParam,
+          windowLabel: {
+            description: "Provider-assigned visible window label returned by `surf_ace_list`, e.g. `b`.",
+            type: "string",
+          },
+        },
         type: "object",
       },
       name: "surf_ace_list",

@@ -271,6 +271,15 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     [...surfAceToolNames],
   );
 
+  const listTool = tools.find((tool) => tool.name === "surf_ace_list");
+  assert.ok(listTool);
+  assert.deepEqual(
+    Object.keys(listTool.inputSchema.properties as Record<string, unknown>).sort(),
+    ["actionableOnly", "fingerprint", "name", "paneAddress", "paneId", "windowLabel"].sort(),
+  );
+  assert.deepEqual(listTool.inputSchema.required, undefined);
+  assert.equal(listTool.inputSchema.additionalProperties, false);
+
   const pushTool = tools.find((tool) => tool.name === "surf_ace_push");
   assert.ok(pushTool);
   assert.deepEqual(
@@ -468,6 +477,108 @@ test("surf_ace_list returns compact actionable surfaces and keeps authority proj
   assert.equal("_debug" in listResult[0], false);
   assert.equal(listJson.includes("providerAuthorityProjection"), false);
   assert.equal(diagnosticsJson.includes("providerId"), true);
+});
+
+test("surf_ace_list supports bounded official fleet selection by surface and pane", async () => {
+  const largeDebug = {
+    autoRetryEnabled: true,
+    endpointId: "endpoint-large",
+    hasPairedInGatewaySession: true,
+    localOwnership: null,
+    ownershipRecovery: "active" as const,
+    providerAuthority: {
+      actionable: true,
+      admitted: true,
+      blockers: [],
+      reason: null,
+    },
+    providerAuthorityProjection: {
+      providerId: "pv_large",
+      repeatedDiagnostics: "x".repeat(40_000),
+    },
+    reconnectAttempt: 0,
+    remoteOwnership: null,
+    sessionId: "sa_large",
+    unreachableFailures: 0,
+    wsOpen: true,
+  };
+  const runtime = {
+    ...createStubRuntime(),
+    listScreens: async () => [
+      {
+        ...(await createStubRuntime().listScreens())[0],
+        _debug: largeDebug,
+        fingerprint: "sf_cyberbrain",
+        name: "Cyberbrain",
+        panes: [
+          {
+            activeContent: null,
+            displayId: "a1",
+            historySummary: [],
+            name: null,
+            paneAddress: "a1",
+            paneId: 1,
+            paneLabel: 1,
+            target: null,
+            viewport: { height: 768, scale: 2, width: 1024 },
+          },
+        ],
+        windowLabel: "a",
+      },
+      {
+        ...(await createStubRuntime().listScreens())[0],
+        _debug: largeDebug,
+        fingerprint: "sf_eezo",
+        name: "eezo",
+        panes: [
+          {
+            activeContent: null,
+            displayId: "b4",
+            historySummary: [],
+            name: null,
+            paneAddress: "b4",
+            paneId: 4,
+            paneLabel: 4,
+            target: null,
+            viewport: { height: 768, scale: 2, width: 1024 },
+          },
+          {
+            activeContent: null,
+            displayId: "b9",
+            historySummary: [],
+            name: null,
+            paneAddress: "b9",
+            paneId: 9,
+            paneLabel: 9,
+            target: null,
+            viewport: { height: 768, scale: 2, width: 1024 },
+          },
+        ],
+        windowLabel: "b",
+      },
+    ],
+  } as SurfAceRuntime;
+  const listTool = createSurfAceTools(runtime).find((tool) => tool.name === "surf_ace_list");
+  assert.ok(listTool);
+
+  const eezo = await listTool.execute({ actionableOnly: true, name: "eezo" });
+  assert.deepEqual(eezo.map((screen) => screen.fingerprint), ["sf_eezo"]);
+  assert.equal(eezo[0]?.panes.some((pane) => pane.displayId === "b4" && pane.paneId === 4), true);
+  assert.equal(eezo[0]?.panes.some((pane) => pane.displayId === "b9" && pane.paneId === 9), true);
+  assert.equal(JSON.stringify(eezo).includes("providerAuthorityProjection"), false);
+
+  const cyberbrain = await listTool.execute({ actionableOnly: true, name: "Cyberbrain" });
+  assert.deepEqual(cyberbrain.map((screen) => screen.fingerprint), ["sf_cyberbrain"]);
+  assert.equal(cyberbrain[0]?.panes[0]?.displayId, "a1");
+
+  const paneB9 = await listTool.execute({ paneAddress: "b9" });
+  assert.deepEqual(paneB9.map((screen) => screen.fingerprint), ["sf_eezo"]);
+  assert.deepEqual(paneB9[0]?.panes.map((pane) => pane.displayId), ["b9"]);
+  assert.ok(JSON.stringify(paneB9).length < 16_000);
+
+  const paneIdB4 = await listTool.execute({ paneId: "4" });
+  assert.deepEqual(paneIdB4.map((screen) => screen.fingerprint), ["sf_eezo"]);
+  assert.deepEqual(paneIdB4[0]?.panes.map((pane) => pane.displayId), ["b4"]);
 });
 
 test("surf_ace_push forwards markdown content through the first-class push path", async () => {
