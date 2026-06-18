@@ -219,9 +219,12 @@ test("browser_url navigation command forwards renderer readback evidence", async
 
 test("keyboard shortcuts route pane navigation and focused pane scroll intents", async () => {
   const source = await mainSource();
-  const shortcutIndex = source.indexOf("function wireWindowShortcuts");
+  const shortcutIndex = source.indexOf("function handleShortcutInput");
+  const windowWireIndex = source.indexOf("function wireWindowShortcuts");
 
   assert.ok(shortcutIndex > -1);
+  assert.ok(windowWireIndex > shortcutIndex);
+  assert.match(source.slice(shortcutIndex, windowWireIndex), /focusedPaneId && focusedPaneId > 0[\s\S]*core\.setActiveKeyboardPane\(surfaceId, focusedPaneId\)/);
   assert.match(source.slice(shortcutIndex), /keyboardDirectionForPhysicalKey\(input\.code\)/);
   assert.match(source.slice(shortcutIndex), /command && input\.alt && input\.shift && !input\.control && paneNavigationDirection/);
   assert.match(source.slice(shortcutIndex), /core\.navigateActiveKeyboardPane\(surfaceId, paneNavigationDirection\)/);
@@ -231,11 +234,12 @@ test("keyboard shortcuts route pane navigation and focused pane scroll intents",
   assert.match(source.slice(shortcutIndex), /sendKeyboardScrollIntent\(window, activePaneId, vimDirection, "line"\)/);
   assert.match(source.slice(shortcutIndex), /keyboardDirectionForArrowKey\(input\.key\)/);
   assert.match(source.slice(shortcutIndex), /input\.key === "PageUp" \|\| input\.key === "PageDown"/);
+  assert.match(source.slice(windowWireIndex), /wireWebContentsShortcuts\(surfaceId, window, window\.webContents, \(\) => null\)/);
 });
 
 test("custom window cycling is not installed on macOS where Cmd-backtick is platform-owned", async () => {
   const source = await mainSource();
-  const shortcutIndex = source.indexOf("function wireWindowShortcuts");
+  const shortcutIndex = source.indexOf("function handleShortcutInput");
 
   assert.ok(shortcutIndex > -1);
   assert.match(source.slice(shortcutIndex), /process\.platform !== "darwin"[\s\S]*input\.key === "`"[\s\S]*focusNextWindow\(surfaceId\)/);
@@ -282,7 +286,26 @@ test("editable contexts show native text input context menu in renderer and brow
   assert.match(contextWireSource, /event\.preventDefault\(\)/);
   assert.match(contextWireSource, /Menu\.buildFromTemplate\(editableContextMenuTemplate\(params\)\)\.popup\(\{ window \}\)/);
   assert.match(wireSource, /window\.webContents\.on\("did-attach-webview"[\s\S]*wireEditableContextMenu\(webContents, window\)/);
-  assert.match(createWindowSource, /wireWindowInputMenus\(window\)/);
+  assert.match(createWindowSource, /wireWindowInputMenus\(surfaceId, window\)/);
+});
+
+test("browser_url guest webContents route Surf Ace shortcuts through the owning pane", async () => {
+  const source = await mainSource();
+  const recordIndex = source.indexOf("function recordBrowserUrlDiagnostics");
+  const shortcutIndex = source.indexOf("function handleShortcutInput");
+  const wireIndex = source.indexOf("function wireWindowInputMenus");
+  const createWindowIndex = source.indexOf("async function createWindowForSurface");
+
+  assert.ok(recordIndex > -1);
+  assert.match(source.slice(recordIndex, shortcutIndex), /browserUrlWebContentsPanes\.set\(webContentsId, \{ paneId, surfaceId \}\)/);
+  assert.ok(shortcutIndex > recordIndex);
+  assert.match(source.slice(shortcutIndex, wireIndex), /focusedPaneId && focusedPaneId > 0[\s\S]*core\.setActiveKeyboardPane\(surfaceId, focusedPaneId\)/);
+  assert.match(source.slice(shortcutIndex, wireIndex), /focusedPaneId && focusedPaneId > 0 \? focusedPaneId : core\.activeKeyboardPaneId\(surfaceId\)/);
+  assert.ok(wireIndex > shortcutIndex);
+  assert.match(source.slice(wireIndex, createWindowIndex), /window\.webContents\.on\("did-attach-webview"[\s\S]*wireWebContentsShortcuts\(surfaceId, window, webContents/);
+  assert.match(source.slice(wireIndex, createWindowIndex), /browserUrlWebContentsPanes\.get\(webContents\.id\)/);
+  assert.match(source.slice(wireIndex, createWindowIndex), /browserUrlWebContentsPanes\.delete\(webContents\.id\)/);
+  assert.match(source.slice(createWindowIndex), /wireWindowInputMenus\(surfaceId, window\)/);
 });
 
 test("renderer applies keyboard scroll intents to regular and browser-hosted pane content", async () => {

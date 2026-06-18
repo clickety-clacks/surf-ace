@@ -71,6 +71,18 @@ const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
 
 type WebAuthnAccountSelectionCallback = (credentialId?: string | null) => void;
+type ShortcutInput = {
+  alt: boolean;
+  code?: string;
+  control: boolean;
+  key: string;
+  meta: boolean;
+  shift: boolean;
+  type: string;
+};
+type ShortcutEvent = {
+  preventDefault: () => void;
+};
 
 function advertisingDisabled(): boolean {
   const value = process.env.SURF_ACE_DISABLE_ADVERTISING?.trim().toLowerCase();
@@ -128,6 +140,7 @@ configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
+const browserUrlWebContentsPanes = new Map<number, { paneId: number; surfaceId: string }>();
 const readyWindows = new Set<string>();
 const overlayDiagnostics = new Map<string, Record<string, unknown>>();
 const overlayForwardState = new Map<string, { revision: number; topologyEpoch: string | null }>();
@@ -738,6 +751,10 @@ async function forwardRendererOverlayRegions(surfaceId: string, payload: Record<
 }
 
 function recordBrowserUrlDiagnostics(surfaceId: string, paneId: number, payload: Record<string, unknown>): void {
+  const webContentsId = Number(payload.webContentsId ?? 0);
+  if (paneId > 0 && Number.isInteger(webContentsId) && webContentsId > 0) {
+    browserUrlWebContentsPanes.set(webContentsId, { paneId, surfaceId });
+  }
   const current = overlayDiagnostics.get(surfaceId) ?? {};
   const existingByPane =
     current.browserUrlDiagnostics && typeof current.browserUrlDiagnostics === "object"
@@ -907,13 +924,21 @@ function wireEditableContextMenu(contents: WebContents, window: BrowserWindow): 
   });
 }
 
-function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
-  window.webContents.on("before-input-event", (event, input) => {
+function handleShortcutInput(
+  surfaceId: string,
+  window: BrowserWindow,
+  event: ShortcutEvent,
+  input: ShortcutInput,
+  focusedPaneId?: number | null,
+): void {
     if (input.type !== "keyDown") {
       return;
     }
+    if (focusedPaneId && focusedPaneId > 0) {
+      core.setActiveKeyboardPane(surfaceId, focusedPaneId);
+    }
     const state = core.getRendererWindowState(surfaceId);
-    const activePaneId = core.activeKeyboardPaneId(surfaceId);
+    const activePaneId = focusedPaneId && focusedPaneId > 0 ? focusedPaneId : core.activeKeyboardPaneId(surfaceId);
     const activePane = state.panes.find((pane) => pane.paneId === activePaneId);
     if (!activePaneId || !activePane) {
       return;
@@ -982,13 +1007,34 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
         console.warn(`[surf-ace] history navigation failed: ${error}`);
       });
     }
+}
+
+function wireWebContentsShortcuts(
+  surfaceId: string,
+  window: BrowserWindow,
+  contents: WebContents,
+  focusedPaneId: () => number | null,
+): void {
+  contents.on("before-input-event", (event, input) => {
+    handleShortcutInput(surfaceId, window, event, input, focusedPaneId());
   });
 }
 
-function wireWindowInputMenus(window: BrowserWindow): void {
+function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
+  wireWebContentsShortcuts(surfaceId, window, window.webContents, () => null);
+}
+
+function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
   wireEditableContextMenu(window.webContents, window);
   window.webContents.on("did-attach-webview", (_event, webContents) => {
     wireEditableContextMenu(webContents, window);
+    wireWebContentsShortcuts(surfaceId, window, webContents, () => {
+      const binding = browserUrlWebContentsPanes.get(webContents.id);
+      return binding?.surfaceId === surfaceId ? binding.paneId : null;
+    });
+    webContents.once("destroyed", () => {
+      browserUrlWebContentsPanes.delete(webContents.id);
+    });
   });
 }
 
@@ -1083,7 +1129,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);
   wireWindowDiagnostics(surfaceId, window);
-  wireWindowInputMenus(window);
+  wireWindowInputMenus(surfaceId, window);
   window.once("ready-to-show", () => {
     syncWindowViewport(surfaceId, window);
     syncWindowPlacement(surfaceId, window);
