@@ -237,6 +237,23 @@ test("keyboard shortcuts route pane navigation and focused pane scroll intents",
   assert.match(source.slice(windowWireIndex), /wireWebContentsShortcuts\(surfaceId, window, window\.webContents, \(\) => null\)/);
 });
 
+test("font-size shortcuts route focused pane content scale intents", async () => {
+  const source = await mainSource();
+  const shortcutIndex = source.indexOf("function handleShortcutInput");
+  const windowWireIndex = source.indexOf("function wireWindowShortcuts");
+
+  assert.ok(shortcutIndex > -1);
+  assert.ok(windowWireIndex > shortcutIndex);
+  assert.match(source.slice(shortcutIndex, windowWireIndex), /contentScaleActionForInput\(input\)/);
+  assert.match(source, /function contentScaleActionForInput[\s\S]*!input\.meta \|\| input\.alt \|\| input\.control/);
+  assert.match(source, /function contentScaleActionForInput[\s\S]*input\.key === "\+" \|\| input\.key === "="/);
+  assert.match(source, /function contentScaleActionForInput[\s\S]*if \(input\.shift\)[\s\S]*return null/);
+  assert.match(source, /function contentScaleActionForInput[\s\S]*input\.key === "-"/);
+  assert.match(source, /function contentScaleActionForInput[\s\S]*input\.key === "0"/);
+  assert.match(source.slice(shortcutIndex, windowWireIndex), /sendContentScaleIntent\(window, activePaneId, contentScaleAction\)/);
+  assert.match(source.slice(shortcutIndex, windowWireIndex), /sendContentScaleIntent\(window, activePaneId, contentScaleAction\);[\s\S]*event\.preventDefault\(\);[\s\S]*return;/);
+});
+
 test("custom window cycling is not installed on macOS where Cmd-backtick is platform-owned", async () => {
   const source = await mainSource();
   const shortcutIndex = source.indexOf("function handleShortcutInput");
@@ -308,6 +325,20 @@ test("browser_url guest webContents route Surf Ace shortcuts through the owning 
   assert.match(source.slice(createWindowIndex), /wireWindowInputMenus\(surfaceId, window\)/);
 });
 
+test("browser_url guest webContents route Surf Ace content-scale shortcuts through the owning pane", async () => {
+  const source = await mainSource();
+  const shortcutIndex = source.indexOf("function handleShortcutInput");
+  const wireIndex = source.indexOf("function wireWindowInputMenus");
+  const createWindowIndex = source.indexOf("async function createWindowForSurface");
+
+  assert.ok(shortcutIndex > -1);
+  assert.ok(wireIndex > shortcutIndex);
+  assert.match(source.slice(shortcutIndex, wireIndex), /focusedPaneId && focusedPaneId > 0 \? focusedPaneId : core\.activeKeyboardPaneId\(surfaceId\)/);
+  assert.match(source.slice(shortcutIndex, wireIndex), /sendContentScaleIntent\(window, activePaneId, contentScaleAction\)/);
+  assert.match(source.slice(wireIndex, createWindowIndex), /wireWebContentsShortcuts\(surfaceId, window, webContents/);
+  assert.match(source.slice(wireIndex, createWindowIndex), /browserUrlWebContentsPanes\.get\(webContents\.id\)/);
+});
+
 test("renderer applies keyboard scroll intents to regular and browser-hosted pane content", async () => {
   const source = await rendererSource();
   const intentIndex = source.indexOf("function scrollPaneByKeyboard");
@@ -321,6 +352,47 @@ test("renderer applies keyboard scroll intents to regular and browser-hosted pan
   assert.doesNotMatch(source.slice(intentIndex, initIndex), /frame\.contentWindow\.scrollBy/);
   assert.match(source.slice(intentIndex, initIndex), /view\.scrollEl\.scrollBy/);
   assert.match(source.slice(initIndex), /window\.surfAce\.onKeyboardIntent/);
+});
+
+test("renderer scales every source-proven scalable content type", async () => {
+  const source = await rendererSource();
+  const styles = await rendererStyles();
+  const scalableIndex = source.indexOf("function isRendererScalableContentType");
+  const scaleIndex = source.indexOf("function scalePaneContent");
+  const renderIndex = source.indexOf("function renderPaneContent");
+  const initIndex = source.indexOf("async function init");
+
+  assert.ok(scalableIndex > -1);
+  assert.ok(scaleIndex > scalableIndex);
+  for (const contentType of ["browser_url", "html", "image", "markdown", "pdf", "terminal"]) {
+    assert.match(source.slice(scalableIndex, scaleIndex), new RegExp(`contentType === "${contentType}"`));
+  }
+  assert.doesNotMatch(source.slice(scalableIndex, scaleIndex), /contentType === "video"/);
+  assert.doesNotMatch(source.slice(scalableIndex, scaleIndex), /contentType === "canvas"/);
+  assert.match(source.slice(scaleIndex, renderIndex), /pane\?\.annotationBorderVisible/);
+  assert.match(source.slice(scaleIndex, renderIndex), /view\.scale = nextContentScale\(view\.scale, intent\.action\)/);
+  assert.match(source.slice(scaleIndex, renderIndex), /applyContentScale\(view\)/);
+  assert.match(source.slice(renderIndex), /view\.contentEl\.style\.setProperty\("--surf-ace-content-scale", String\(view\.scale\)\)/);
+  assert.match(source.slice(initIndex), /isContentScaleIntent\(intent\)[\s\S]*scalePaneContent\(intent\)/);
+  assert.match(styles, /--surf-ace-content-scale:\s*1;/);
+  assert.match(styles, /\.content-markdown\s*\{[\s\S]*font-size:\s*calc\(17px \* var\(--surf-ace-content-scale\)\)/);
+  assert.match(styles, /\.content-terminal\s*\{[\s\S]*font:\s*calc\(14px \* var\(--surf-ace-content-scale\)\)\/1\.45/);
+  assert.match(styles, /\.content-image\s*\{[\s\S]*width:\s*calc\(100% \* var\(--surf-ace-content-scale\)\)/);
+  assert.match(styles, /\.content-pdf-stack\s*\{[\s\S]*width:\s*calc\(100% \* var\(--surf-ace-content-scale\)\)/);
+});
+
+test("html and browser_url content scale through guest document zoom", async () => {
+  const source = await rendererSource();
+  const scaleIndex = source.indexOf("function applyBrowserContentScale");
+  const renderBrowserIndex = source.indexOf("function renderBrowserContent");
+  const renderPaneIndex = source.indexOf("function renderPaneContent");
+
+  assert.ok(scaleIndex > -1);
+  assert.ok(renderBrowserIndex > scaleIndex);
+  assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.documentElement\.style\.zoom = scale === 1 \? "" : String\(scale\)/);
+  assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.body\?\.style\.setProperty\("--surf-ace-content-scale", String\(scale\)\)/);
+  assert.match(source.slice(renderBrowserIndex, renderPaneIndex), /reportBrowserUrlDiagnostics\(view, browserView, "did-attach"\);[\s\S]*applyBrowserContentScale\(view, browserView\)/);
+  assert.match(source.slice(renderBrowserIndex, renderPaneIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\);[\s\S]*applyBrowserContentScale\(view, browserView\)/);
 });
 
 test("html and browser_url frames have a non-auto CSS height fallback", async () => {

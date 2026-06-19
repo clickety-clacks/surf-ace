@@ -827,6 +827,7 @@ function focusExistingWindow(): void {
 
 type KeyboardScrollDirection = "down" | "left" | "right" | "up";
 type KeyboardScrollAmount = "line" | "page";
+type ContentScaleAction = "decrease" | "increase" | "reset";
 
 function keyboardDirectionForVimKey(key: string): KeyboardScrollDirection | null {
   switch (key.toLowerCase()) {
@@ -888,6 +889,37 @@ function sendKeyboardScrollIntent(
     direction,
     paneId,
     type: "scroll",
+  });
+}
+
+function contentScaleActionForInput(input: ShortcutInput): ContentScaleAction | null {
+  if (!input.meta || input.alt || input.control) {
+    return null;
+  }
+  if (input.key === "+" || input.key === "=") {
+    return "increase";
+  }
+  if (input.shift) {
+    return null;
+  }
+  if (input.key === "-") {
+    return "decrease";
+  }
+  if (input.key === "0") {
+    return "reset";
+  }
+  return null;
+}
+
+function sendContentScaleIntent(
+  window: BrowserWindow,
+  paneId: number,
+  action: ContentScaleAction,
+): void {
+  window.webContents.send("surface:keyboard-intent", {
+    action,
+    paneId,
+    type: "content-scale",
   });
 }
 
@@ -961,6 +993,12 @@ function handleShortcutInput(
     const paneNavigationDirection = keyboardDirectionForPhysicalKey(input.code);
     if (command && input.alt && input.shift && !input.control && paneNavigationDirection) {
       core.navigateActiveKeyboardPane(surfaceId, paneNavigationDirection);
+      event.preventDefault();
+      return;
+    }
+    const contentScaleAction = contentScaleActionForInput(input);
+    if (!activePane.annotationBorderVisible && contentScaleAction) {
+      sendContentScaleIntent(window, activePaneId, contentScaleAction);
       event.preventDefault();
       return;
     }
