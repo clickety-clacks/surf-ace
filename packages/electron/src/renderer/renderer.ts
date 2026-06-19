@@ -183,6 +183,12 @@ type KeyboardScrollIntent = {
   type: "scroll";
 };
 
+type ContentScaleIntent = {
+  action: "decrease" | "increase" | "reset";
+  paneId: number;
+  type: "content-scale";
+};
+
 type BrowserUrlKeyboardScrollResult = {
   viewport: Viewport;
   visibleText: string;
@@ -217,6 +223,7 @@ type PaneView = {
   lastNavigation: NavigationMemo | null;
   paneId: number;
   rootEl: HTMLDivElement;
+  scale: number;
   scrollEl: HTMLDivElement;
   toastTimeout: number | null;
 };
@@ -257,6 +264,10 @@ const PANE_LABEL_EDGE_MARGIN_RATIO = 0.04;
 const PANE_LABEL_MAX_EDGE_MARGIN_PX = 24;
 const PANE_LABEL_MIN_EDGE_MARGIN_PX = 8;
 const PANE_LABEL_MIN_NUMBER_SIZE_PX = 10;
+const CONTENT_SCALE_DEFAULT = 1;
+const CONTENT_SCALE_MAX = 2.25;
+const CONTENT_SCALE_MIN = 0.5;
+const CONTENT_SCALE_STEP = 0.1;
 type SurfAceOverlayKind =
   | "annotation-control"
   | "history-back"
@@ -1004,6 +1015,7 @@ function ensurePaneView(paneId: number): PaneView {
     lastNavigation: null,
     paneId,
     rootEl,
+    scale: CONTENT_SCALE_DEFAULT,
     scrollEl,
     toastTimeout: null,
   };
@@ -1138,6 +1150,18 @@ function isKeyboardScrollIntent(intent: unknown): intent is KeyboardScrollIntent
   );
 }
 
+function isContentScaleIntent(intent: unknown): intent is ContentScaleIntent {
+  if (!intent || typeof intent !== "object") {
+    return false;
+  }
+  const candidate = intent as Partial<ContentScaleIntent>;
+  return (
+    candidate.type === "content-scale" &&
+    typeof candidate.paneId === "number" &&
+    (candidate.action === "decrease" || candidate.action === "increase" || candidate.action === "reset")
+  );
+}
+
 function keyboardScrollDelta(view: PaneView, intent: KeyboardScrollIntent): { left: number; top: number } {
   const lineDistance = 64;
   const pageDistance = Math.max(1, Math.floor(
@@ -1222,6 +1246,60 @@ function reportBrowserUrlKeyboardScroll(view: PaneView, result: BrowserUrlKeyboa
     viewport: result.viewport,
     visibleText: result.visibleText,
   });
+}
+
+function nextContentScale(current: number, action: ContentScaleIntent["action"]): number {
+  if (action === "reset") {
+    return CONTENT_SCALE_DEFAULT;
+  }
+  const delta = action === "increase" ? CONTENT_SCALE_STEP : -CONTENT_SCALE_STEP;
+  return Math.min(CONTENT_SCALE_MAX, Math.max(CONTENT_SCALE_MIN, Math.round((current + delta) * 10) / 10));
+}
+
+function isRendererScalableContentType(pane: RendererPaneState | null): boolean {
+  return (
+    pane?.content.contentType === "browser_url" ||
+    pane?.content.contentType === "html" ||
+    pane?.content.contentType === "image" ||
+    pane?.content.contentType === "markdown" ||
+    pane?.content.contentType === "pdf" ||
+    pane?.content.contentType === "terminal"
+  );
+}
+
+function applyBrowserContentScale(view: PaneView, webview: BrowserUrlWebViewElement): void {
+  const scale = view.scale;
+  const scalePromise = webview.executeJavaScript?.(
+    `(() => {
+      const scale = ${JSON.stringify(scale)};
+      document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
+      document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
+    })()`,
+  );
+  void scalePromise?.catch(() => {});
+}
+
+function applyContentScale(view: PaneView): void {
+  view.contentEl.style.setProperty("--surf-ace-content-scale", String(view.scale));
+  const frame = currentPaneFrameElement(view);
+  if (frame?.matches("webview.content-browser-url-frame")) {
+    applyBrowserContentScale(view, frame as BrowserUrlWebViewElement);
+  }
+  reportPaneSnapshot(view);
+}
+
+function scalePaneContent(intent: ContentScaleIntent): void {
+  const view = paneViews.get(intent.paneId);
+  if (!view) {
+    return;
+  }
+  const pane = paneStateFor(view);
+  if (pane?.annotationBorderVisible || !isRendererScalableContentType(pane)) {
+    return;
+  }
+  rememberPaneContext(intent.paneId);
+  view.scale = nextContentScale(view.scale, intent.action);
+  applyContentScale(view);
 }
 
 function scrollPaneByKeyboard(intent: KeyboardScrollIntent): void {
@@ -1847,6 +1925,7 @@ async function renderPdfContent(view: PaneView, pane: RendererPaneState, token: 
     view.currentScrollHandler = () => {
       visiblePdfPageReport(view, pane.paneId, documentProxy.numPages);
     };
+    applyContentScale(view);
     visiblePdfPageReport(view, pane.paneId, documentProxy.numPages, true);
     reportPaneSnapshot(view);
   } catch {
@@ -1948,6 +2027,7 @@ function renderBrowserContent(
     void resetBrowserUrlGuestScroll(browserView).finally(() => {
       const eventReason = reason === "dom-ready:guest-viewport" ? "dom-ready" : "did-finish-load";
       reportBrowserUrlDiagnostics(view, browserView, eventReason);
+      applyBrowserContentScale(view, browserView);
       void verifyBrowserUrlGuestViewport(view, browserView, reason).then(({ mismatch }) => {
         if (renderToken !== view.currentRenderToken) {
           return;
@@ -1976,6 +2056,7 @@ function renderBrowserContent(
         webContentsId: browserUrlWebContentsId(browserView),
       });
       reportBrowserUrlDiagnostics(view, browserView, "did-attach");
+      applyBrowserContentScale(view, browserView);
     },
   );
   browserView.addEventListener(
@@ -2108,6 +2189,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
   hideDuplicateRepushOverlay(view);
   const renderToken = resetDynamicContent(view);
   view.contentEl.className = `pane-content type-${pane.content.contentType ?? "empty"}`;
+  view.contentEl.style.setProperty("--surf-ace-content-scale", String(view.scale));
   rendererDiagnostic("pane_content_render", {
     contentType: pane.content.contentType ?? "empty",
     hasContent: pane.content.content !== null,
@@ -2150,6 +2232,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     image.alt = imageContent.alt ?? "";
     image.src = `data:${imageContent.mediaType};base64,${imageContent.data}`;
     view.contentEl.appendChild(image);
+    applyContentScale(view);
     reportPaneSnapshot(view);
     return;
   }
@@ -2164,6 +2247,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     article.className = "content-markdown";
     article.innerHTML = markdownToHtml((pane.content.content as MarkdownContent).markdown);
     view.contentEl.appendChild(article);
+    applyContentScale(view);
     reportPaneSnapshot(view);
     return;
   }
@@ -2173,6 +2257,7 @@ function renderPaneContent(view: PaneView, pane: RendererPaneState): void {
     pre.className = "content-terminal";
     pre.textContent = (pane.content.content as TerminalContent).lines.join("\n");
     view.contentEl.appendChild(pre);
+    applyContentScale(view);
     reportPaneSnapshot(view);
     return;
   }
@@ -2443,6 +2528,10 @@ async function init(): Promise<void> {
   window.surfAce.onKeyboardIntent((intent) => {
     if (isKeyboardScrollIntent(intent)) {
       scrollPaneByKeyboard(intent);
+      return;
+    }
+    if (isContentScaleIntent(intent)) {
+      scalePaneContent(intent);
     }
   });
 
