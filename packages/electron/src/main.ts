@@ -26,6 +26,12 @@ import {
 } from "./client-flight-recorder.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import {
+  loadPersistentStateFile,
+  shouldGuardUnrestorablePersistentState,
+  writePersistentStateFile,
+  type PersistentStateLoadResult,
+} from "./persistent-state-file.js";
+import {
   type CompositorControlRequest,
   type CompositorControlResponse,
   type NativePaneMaterialization,
@@ -69,6 +75,7 @@ const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
 let runtimeAppBindingDiagnostics: RuntimeAppBindingDiagnostics | null = null;
 const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
+let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
 
 type WebAuthnAccountSelectionCallback = (credentialId?: string | null) => void;
 type ShortcutInput = {
@@ -361,31 +368,37 @@ function syncWindowPlacement(surfaceId: string, window: BrowserWindow): void {
 
 async function loadPersistentState(): Promise<PersistentSurfaceState | undefined> {
   const statePath = path.join(stateDir, STATE_FILE_NAME);
-  try {
-    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as PersistentSurfaceState;
+  const result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  persistentStateWriteGuard = result.writeGuard;
+  if (result.state) {
     clientInfo("state_restore_read_ok", {
       path: statePath,
-      primary_surface_id: state.primarySurfaceId,
-      surface_count: state.surfaces?.length ?? 0,
+      recovered_from_backup: result.recoveredFromBackup,
+      primary_surface_id: result.state.primarySurfaceId,
+      surface_count: result.state.surfaces?.length ?? 0,
     });
-    return state;
-  } catch (error) {
-    clientInfo("state_restore_read_miss", {
-      path: statePath,
-      ...errorDiagnosticFields(error),
-    });
-    return undefined;
+    return result.state;
   }
+  clientInfo("state_restore_read_miss", {
+    path: statePath,
+    write_guard: result.writeGuard || "none",
+    ...errorDiagnosticFields(result.error),
+  });
+  return undefined;
 }
 
 async function persistState(): Promise<void> {
+  if (persistentStateWriteGuard) {
+    clientWarn("state_persist_skipped_corrupt_restore", {
+      path: path.join(stateDir, STATE_FILE_NAME),
+      write_guard: persistentStateWriteGuard,
+    });
+    return;
+  }
   stateWrite = stateWrite
     .catch(() => {})
     .then(async () => {
-      await fs.writeFile(
-        path.join(stateDir, STATE_FILE_NAME),
-        JSON.stringify(core.getPersistentState(), null, 2),
-      );
+      await writePersistentStateFile(stateDir, STATE_FILE_NAME, core.getPersistentState());
     });
   await stateWrite;
 }
@@ -1616,6 +1629,13 @@ async function boot(): Promise<void> {
 
   core = new SurfaceCore({ persistentState });
   const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
+  if (shouldGuardUnrestorablePersistentState(persistentState, restoredSurfaces.length)) {
+    persistentStateWriteGuard = "unrestorable-primary";
+    clientWarn("state_restore_unrestorable_write_guard", {
+      persisted_surface_count: persistentState.surfaces?.length ?? 0,
+      write_guard: persistentStateWriteGuard,
+    });
+  }
   const primarySurface = restoredSurfaces.find((surface) => surface.surfaceId === persistentState?.primarySurfaceId)
     ?? restoredSurfaces[0]
     ?? core.ensurePrimarySurface(endpointName(), displayViewport());

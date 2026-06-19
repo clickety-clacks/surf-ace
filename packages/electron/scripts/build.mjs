@@ -58,6 +58,7 @@ await build({
     path.join(rootDir, "test", "identity.test.ts"),
     path.join(rootDir, "test", "native-pane-bridge.test.ts"),
     path.join(rootDir, "test", "overlay-rects.test.ts"),
+    path.join(rootDir, "test", "persistent-state-file.test.ts"),
     path.join(rootDir, "test", "port-selection.test.ts"),
     path.join(rootDir, "test", "racter-pointer-fixture.test.ts"),
     path.join(rootDir, "test", "markdown-rendering.test.ts"),
