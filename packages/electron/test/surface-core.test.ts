@@ -132,6 +132,67 @@ test("surface core persists and restores multiple live windows with pane content
   assert.equal(restoredSecondary.panes[0]?.content.contentType, "markdown");
 });
 
+test("surface core rejects persisted surfaces with invalid pane history", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 3);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "# recovered" },
+    contentId: "ct_recovered" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_recovered" as never,
+    paneId: 3 as never,
+    revision: 1 as Revision,
+  });
+
+  const persistentState = core.getPersistentState();
+  persistentState.surfaces![0]!.panes[0]!.history = [];
+  const restoredCore = new SurfaceCore({ persistentState });
+  const restoredSurfaces = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+
+  assert.deepEqual(restoredSurfaces, []);
+  assert.deepEqual(restoredCore.listSurfaces(), []);
+});
+
+test("surface core rejects persisted surfaces with partially restorable pane topology", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const initialPaneId = applyProviderBootstrap(core, surface.surfaceId, 3);
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [5],
+    newPaneLabels: [5],
+    paneId: initialPaneId,
+  });
+
+  const invalidPaneOrderState = core.getPersistentState();
+  invalidPaneOrderState.surfaces![0]!.paneOrder = [3, 404];
+  const invalidPaneOrderCore = new SurfaceCore({ persistentState: invalidPaneOrderState });
+  assert.deepEqual(
+    invalidPaneOrderCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 }),
+    [],
+  );
+
+  const invalidLayoutState = core.getPersistentState();
+  invalidLayoutState.surfaces![0]!.layout = { paneId: 404, type: "pane" };
+  const invalidLayoutCore = new SurfaceCore({ persistentState: invalidLayoutState });
+  assert.deepEqual(
+    invalidLayoutCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 }),
+    [],
+  );
+});
+
 test("surface core persists and restores local window placement without changing surface identity", () => {
   const core = new SurfaceCore({
     persistentState: {

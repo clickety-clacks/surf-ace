@@ -2624,8 +2624,11 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
   const panes = new Map<number, PaneState>();
   const paneOrder: number[] = [];
   for (const paneRecord of record.panes) {
-    if (!Number.isInteger(paneRecord.paneId)) {
-      continue;
+    if (!Number.isInteger(paneRecord.paneId) || panes.has(paneRecord.paneId)) {
+      return null;
+    }
+    if (!Array.isArray(paneRecord.history) || paneRecord.history.length === 0) {
+      return null;
     }
     const pane = createPaneState(
       paneRecord.paneId,
@@ -2639,9 +2642,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     pane.externalNative = false;
     pane.firstDirtyStrokeAt = typeof paneRecord.firstDirtyStrokeAt === "number" ? paneRecord.firstDirtyStrokeAt : null;
     pane.flushInFlight = false;
-    pane.history = Array.isArray(paneRecord.history) && paneRecord.history.length > 0
-      ? structuredClone(paneRecord.history)
-      : pane.history;
+    pane.history = structuredClone(paneRecord.history);
     pane.historyIndex = Math.min(
       Math.max(0, Math.trunc(Number(paneRecord.historyIndex ?? 0))),
       pane.history.length - 1,
@@ -2664,11 +2665,18 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
   if (panes.size === 0) {
     return null;
   }
-  const orderedPaneIds = Array.isArray(record.paneOrder)
-    ? record.paneOrder.filter((paneId) => panes.has(paneId))
-    : [];
-  const finalPaneOrder = orderedPaneIds.length > 0 ? orderedPaneIds : paneOrder;
+  if (
+    !Array.isArray(record.paneOrder) ||
+    record.paneOrder.length === 0 ||
+    record.paneOrder.some((paneId) => !panes.has(paneId))
+  ) {
+    return null;
+  }
+  const finalPaneOrder = record.paneOrder;
   const knownPaneIds = new Set(finalPaneOrder);
+  if (record.layout && !layoutReferencesKnownPanes(record.layout, knownPaneIds)) {
+    return null;
+  }
   const sanitizedLayout = record.layout ? sanitizeLayoutNode(record.layout, knownPaneIds) : null;
   const layout = collapseLayout(sanitizedLayout ?? { paneId: finalPaneOrder[0]!, type: "pane" });
   const surfaceEpochRevision = Math.max(1, Math.trunc(Number(record.surfaceEpochRevision ?? 1)));
@@ -3048,6 +3056,13 @@ function sanitizeLayoutNode(node: LayoutNode, knownPaneIds: Set<number>): Layout
     ...node,
     children: nextChildren,
   };
+}
+
+function layoutReferencesKnownPanes(node: LayoutNode, knownPaneIds: Set<number>): boolean {
+  if (node.type === "pane") {
+    return knownPaneIds.has(node.paneId);
+  }
+  return node.children.every((child) => layoutReferencesKnownPanes(child, knownPaneIds));
 }
 
 function collapseLayout(node: LayoutNode | null): LayoutNode {
