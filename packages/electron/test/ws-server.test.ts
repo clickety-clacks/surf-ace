@@ -7,7 +7,7 @@ import test from "node:test";
 
 import WebSocket from "ws";
 
-import type { PairRequest, Request, Response } from "../../protocol/src/index.js";
+import type { PairRequest, Request, Response, RuntimeAppBindingDiagnostics } from "../../protocol/src/index.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { SurfaceWsServer, __test } from "../src/ws-server.js";
 
@@ -373,6 +373,72 @@ function targetApplyRequest(
   };
 }
 
+function nativeAppTargetApplyRequest(
+  overrides: Partial<{
+    appId: string;
+    args: string[];
+    ownershipEpoch: number;
+    ownershipSessionId: string;
+    paneLineageId: string;
+    surfaceId: string;
+    targetId: string;
+  }> = {},
+): Request {
+  const appId = overrides.appId ?? "foot";
+  const args = overrides.args ?? ["-e", "top"];
+  const surfaceId = overrides.surfaceId ?? "sf_test";
+  const paneLineageId = overrides.paneLineageId ?? "pl_118";
+  const targetId = overrides.targetId ?? "target_native_118";
+  return {
+    id: `rq_${Math.random().toString(16).slice(2)}` as never,
+    op: "target.apply",
+    payload: {
+      ownershipEpoch: overrides.ownershipEpoch ?? 1,
+      ownershipSessionId: overrides.ownershipSessionId ?? "sa_test",
+      paneLineageId,
+      restoreReason: "resume_restore",
+      requestId: "restore_native_118",
+      surfaceId: surfaceId as never,
+      targetEpoch: 3,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.native_app.v1"],
+        safeToLogFields: [],
+        safetyClass: "process",
+        summary: [appId, ...args].join(" "),
+      },
+      targetId,
+      targetKind: "native_app",
+      targetPayload: { appId, args, launchMode: "new_instance" },
+    },
+    sentAt: Date.now() as never,
+    type: "request",
+    v: 1,
+  };
+}
+
+function trustedRuntimeAppBinding(): RuntimeAppBindingDiagnostics {
+  return {
+    acknowledgement: "accepted",
+    bindingAuthority: "trusted",
+    bindingDegradedReasons: [],
+    diagnosticDrift: [],
+    expectedBundleId: null,
+    expectedPackageName: "@surf-ace/electron",
+    expectedRuntimeId: "surf-ace-runtime",
+    launchTokenStatus: "matched",
+    observedUiLabel: null,
+    observedWaylandAppId: "@surf-ace/electron",
+    observedWindowTitle: null,
+    processLineageStatus: "matched",
+    ready: true,
+    reportedBundleId: null,
+    reportedPackageName: "@surf-ace/electron",
+    reportedRuntimeId: "surf-ace-runtime",
+  };
+}
+
 function browserUrlTargetApplyRequest(
   options: {
     ownershipSessionId: string;
@@ -522,6 +588,7 @@ async function withServer(
   options: {
     capturePaneImage?: (surfaceId: string, paneId: number) => Promise<string | null>;
     compositorSocketPath?: string | null;
+    getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
     getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
     nativeOverlayLivenessRetryCount?: number;
     nativeOverlayLivenessRetryDelayMs?: number;
@@ -541,6 +608,7 @@ async function withServer(
     capturePaneImage: options.capturePaneImage ?? (async () => null),
     core,
     endpointName: "Surf Ace",
+    getRuntimeAppBinding: options.getRuntimeAppBinding,
     getOverlayDiagnostics: options.getOverlayDiagnostics,
     hostName: "localhost",
     compositorSocketPath: options.compositorSocketPath ?? null,
@@ -3855,6 +3923,146 @@ test("ws server derives target.apply native pane host materialization for compos
     }, {
       compositorSocketPath: socketPath,
       onNativeMaterialized: (surfaceId) => nativeMaterializedSurfaces.push(surfaceId),
+    });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server derives native app readiness proof from nested nativeHost status", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  let observedLaunchToken = "";
+  const emptyEnvDigest = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+  const nestedNativeHostPane = () => ({
+    id: "1",
+    nativeHost: {
+      bindingId: "1:target_native_118",
+      contentId: "target_native_118",
+      lifecycle: {
+        pid: 4242,
+        state: "running",
+      },
+      nativeApp: {
+        appId: "foot",
+        args: ["-e", "top"],
+        launchMode: "new_instance",
+      },
+      process: {
+        args: ["-e", "top"],
+        command: "foot",
+        envDigest: emptyEnvDigest,
+      },
+    },
+  });
+  const windowGroupStatus = () => ({
+    accepted_secondary_count: 0,
+    clipping_status: "clipped",
+    denied_reasons: [],
+    denied_toplevel_count: 0,
+    focused_window_id: "foot-primary",
+    launch_token: observedLaunchToken,
+    members: [{
+      bounds: { height: 800, width: 1200, x: 0, y: 0 },
+      clipped_to_pane: true,
+      focused: true,
+      id: "foot-primary",
+      lifecycle: "live",
+      role: "primary",
+    }],
+    pane_id: "1",
+    pane_instance_id: "live-native-pane-1",
+    pane_local_bounds: { height: 800, width: 1200, x: 0, y: 0 },
+    primary_window_id: "foot-primary",
+  });
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      if (message.type === "get_status") {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            logical_surface_height: 3840,
+            logical_surface_width: 2160,
+            overlay_regions: { topologyEpoch: "topology-live" },
+            pane_geometry_coordinate_space: "compositor_logical",
+          },
+        })}\n`);
+      } else if (message.type === "native_pane.host") {
+        const panes = Array.isArray(message.panes) ? message.panes : [];
+        const firstPane = panes[0] as { windowGroup?: { launchIdentity?: { launchToken?: string } } } | undefined;
+        observedLaunchToken = firstPane?.windowGroup?.launchIdentity?.launchToken ?? "";
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            overlay_regions: { topologyEpoch: "topology-hosted" },
+            panes: [nestedNativeHostPane()],
+          },
+        })}\n`);
+      } else {
+        socket.write(`${JSON.stringify({
+          ok: true,
+          status: {
+            native_pane_window_groups: [windowGroupStatus()],
+            overlay_regions: { regionCount: 1, topologyEpoch: "topology-live" },
+            panes: [nestedNativeHostPane()],
+          },
+        })}\n`);
+      }
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+
+      const applied = await request(socket, nativeAppTargetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: paired.payload.state.panes[0]!.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+
+      assert.equal(applied.ok, true);
+      assert.equal(applied.op, "target.apply.result");
+      assert.equal(applied.payload.status, "applied");
+      assert.equal(applied.payload.materializedState?.nativeHost, "applied");
+      assert.equal(applied.payload.materializedState?.overlayRegions, "applied");
+      assert.equal(applied.payload.materializedState?.lifecycle, "running");
+      assert.deepEqual(applied.payload.materializedState?.proof, {
+        appId: "foot",
+        args: ["-e", "top"],
+        bindingId: "1:target_native_118",
+        contentId: "target_native_118",
+        envDigest: emptyEnvDigest,
+        launchMode: "new_instance",
+        paneId: "1",
+      });
+      assert.deepEqual(received.map((message) => (message as { type: string }).type), [
+        "get_status",
+        "native_pane.host",
+        "overlay_regions.set",
+      ]);
+
+      await closeSocket(socket);
+    }, {
+      compositorSocketPath: socketPath,
+      getRuntimeAppBinding: trustedRuntimeAppBinding,
     });
   } finally {
     await new Promise<void>((resolve) => compositor.close(() => resolve()));

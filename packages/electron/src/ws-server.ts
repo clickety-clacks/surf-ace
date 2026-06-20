@@ -2194,7 +2194,7 @@ export class SurfaceWsServer {
           appliedAt,
           materializedState: {
             ...nativeHostMaterializedState(request.payload, materialization, {
-              ...nativePaneReadinessFromCompositor(hostResponse, materialization),
+              ...nativePaneReadinessFromCompositor(overlayResponse ?? hostResponse, materialization),
               nativeHost: "applied",
               overlayRegions: overlayRequest ? "applied" : "not_requested",
             }),
@@ -3642,17 +3642,30 @@ function nativePaneReadinessFromCompositor(
       (pane.binding_id ? String(candidate.binding_id ?? "") === String(pane.binding_id) : false);
   });
   const source = isPlainRecord(paneStatus) ? paneStatus : status;
+  const nativeHostStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.nativeHost)
+    ? paneStatus.nativeHost
+    : null;
   const paneStatusId = isPlainRecord(paneStatus) && (typeof paneStatus.id === "string" || typeof paneStatus.id === "number")
     ? String(paneStatus.id)
     : null;
-  const paneStatusBindingId = isPlainRecord(paneStatus) && typeof paneStatus.binding_id === "string"
-    ? paneStatus.binding_id
+  const paneStatusBindingId = isPlainRecord(paneStatus)
+    ? stringProperty(paneStatus, "binding_id") ?? stringProperty(paneStatus, "bindingId") ??
+      stringProperty(nativeHostStatus, "binding_id") ?? stringProperty(nativeHostStatus, "bindingId")
     : null;
-  const paneStatusContentId = isPlainRecord(paneStatus) && typeof paneStatus.content_id === "string"
-    ? paneStatus.content_id
+  const paneStatusContentId = isPlainRecord(paneStatus)
+    ? stringProperty(paneStatus, "content_id") ?? stringProperty(paneStatus, "contentId") ??
+      stringProperty(nativeHostStatus, "content_id") ?? stringProperty(nativeHostStatus, "contentId")
     : null;
-  const nativeAppStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.nativeApp) ? paneStatus.nativeApp : null;
-  const processStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.process) ? paneStatus.process : null;
+  const nativeAppStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.nativeApp)
+    ? paneStatus.nativeApp
+    : isPlainRecord(nativeHostStatus) && isPlainRecord(nativeHostStatus.nativeApp)
+    ? nativeHostStatus.nativeApp
+    : null;
+  const processStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.process)
+    ? paneStatus.process
+    : isPlainRecord(nativeHostStatus) && isPlainRecord(nativeHostStatus.process)
+    ? nativeHostStatus.process
+    : null;
   const proof = paneProofFromCompositorStatus({
     nativeAppStatus,
     pane,
@@ -3666,7 +3679,12 @@ function nativePaneReadinessFromCompositor(
   return {
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
     inputFocus: normalizeNativeInputFocus(source.inputFocus ?? source.input_focus),
-    lifecycle: normalizeNativeLifecycle(source.lifecycle),
+    lifecycle: normalizeNativeLifecycle(source.lifecycle) ??
+      normalizeNativeLifecycle(
+        isPlainRecord(nativeHostStatus?.lifecycle)
+          ? nativeHostStatus.lifecycle.state
+          : undefined,
+      ),
     ...(proof ? { proof } : {}),
   };
 }
