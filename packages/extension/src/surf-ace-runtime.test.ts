@@ -292,6 +292,7 @@ class FakeSurfAceWsServer {
   nextTopologyApplyError: { code: string; message: string } | null = null;
   nextTopologyApplyResponsePaneLabels: number[] | null = null;
   topologyApplyDelayMs = 0;
+  nextContentApplyErrors: Array<{ code: string; details?: Record<string, unknown>; message: string }> = [];
   nextContentApplyError: { code: string; details?: Record<string, unknown>; message: string } | null = null;
   nextContentApplyRenderStatus: string | null = null;
   snapshotDelayMs = 0;
@@ -1205,9 +1206,12 @@ class FakeSurfAceWsServer {
         const paneId = Number(message.payload?.paneId ?? 0);
         const pane = targetSurface.panes.get(paneId);
         assert.ok(pane);
-        if (this.nextContentApplyError) {
-          const error = this.nextContentApplyError;
-          this.nextContentApplyError = null;
+        const queuedContentApplyError = this.nextContentApplyErrors.shift() ?? null;
+        if (queuedContentApplyError || this.nextContentApplyError) {
+          const error = queuedContentApplyError ?? this.nextContentApplyError!;
+          if (!queuedContentApplyError) {
+            this.nextContentApplyError = null;
+          }
           socket.send(
             JSON.stringify(
               this.errorResponse(
@@ -8568,6 +8572,210 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(target?.targetKind, "browser_url");
         assert.equal(target?.blockedReason, "materialization_failed");
         assert.equal(target?.lastApplyEvidence?.status, "failed");
+      },
+    });
+  });
+
+  await t.test("surf_ace_push html replaces failed browser_url target after provider revision reset", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+        server.targetApplyErrorCode = "materialization_failed";
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        await runtime.push({
+          content: "<main>before browser target</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const browserPush = await runtime.push({
+          content: "https://blocked.invalid/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(browserPush.blockedReason, "materialization_failed");
+
+        server.targetApplyErrorCode = null;
+        server.nextContentApplyError = {
+          code: "stale_revision",
+          details: { expectedRevision: 1 },
+          message: "revision mismatch",
+        };
+        const htmlPush = await runtime.push({
+          content: "<main>replacement</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(htmlPush.revision, 1);
+        assert.equal(server.contentSetRequests.at(-1)?.revision, 1);
+        const screen = (await runtime.listScreens())[0];
+        const pane = screen?.panes[0];
+        assert.equal(screen?.authority.actionable, true);
+        assert.equal(pane?.activeContent?.contentId, htmlPush.contentId);
+        assert.equal(pane?.target?.targetKind, "html");
+        assert.equal(pane?.target?.blockedReason, null);
+      },
+    });
+  });
+
+  await t.test("surf_ace_clear clears failed browser_url target without dropping actionability", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+        server.targetApplyErrorCode = "materialization_failed";
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        await runtime.push({
+          content: "<main>before browser target</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const browserPush = await runtime.push({
+          content: "https://blocked.invalid/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(browserPush.blockedReason, "materialization_failed");
+
+        server.targetApplyErrorCode = null;
+        server.nextContentApplyError = {
+          code: "stale_revision",
+          details: { expectedRevision: 1 },
+          message: "revision mismatch",
+        };
+        const cleared = await runtime.clear({
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(cleared.revision, 1);
+        assert.deepEqual(server.clearRequests.map((request) => request.revision), [1]);
+        const screen = (await runtime.listScreens())[0];
+        assert.equal(screen?.authority.actionable, true);
+        assert.equal(screen?.panes[0]?.activeContent, null);
+        assert.equal(screen?.panes[0]?.target, null);
+      },
+    });
+  });
+
+  await t.test("surf_ace_push html retries failed browser_url revision recovery once", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+        server.targetApplyErrorCode = "materialization_failed";
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const initial = await runtime.push({
+          content: "<main>before browser target</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const browserPush = await runtime.push({
+          content: "https://blocked.invalid/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(browserPush.blockedReason, "materialization_failed");
+
+        server.targetApplyErrorCode = null;
+        const staleRevisionError = {
+          code: "stale_revision",
+          details: { expectedRevision: 1 },
+          message: "revision mismatch",
+        };
+        server.nextContentApplyErrors = [staleRevisionError, staleRevisionError, staleRevisionError];
+
+        await assert.rejects(
+          runtime.push({
+            content: "<main>replacement</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: firstPaneId,
+          }),
+          /revision mismatch/,
+        );
+
+        const screen = (await runtime.listScreens())[0];
+        const pane = screen?.panes[0];
+        assert.equal(screen?.authority.actionable, true);
+        assert.equal(pane?.activeContent?.contentId, initial.contentId);
+        assert.equal(pane?.target?.targetKind, "browser_url");
+        assert.equal(pane?.target?.blockedReason, "materialization_failed");
+      },
+    });
+  });
+
+  await t.test("surf_ace_push html stays actionable after browser_url recovery navigation", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+        server.targetApplyErrorCode = "materialization_failed";
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        await runtime.push({
+          content: "<main>before browser target</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const failedBrowserPush = await runtime.push({
+          content: "https://blocked.invalid/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(failedBrowserPush.blockedReason, "materialization_failed");
+
+        server.targetApplyErrorCode = null;
+        const recoveryNavigation = await runtime.push({
+          content: "https://example.com/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(recoveryNavigation.blockedReason, null);
+
+        const htmlPush = await runtime.push({
+          content: "<main>after browser recovery</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        const screen = (await runtime.listScreens())[0];
+        const pane = screen?.panes[0];
+        assert.equal(screen?.authority.actionable, true);
+        assert.equal(pane?.activeContent?.contentId, htmlPush.contentId);
+        assert.equal(pane?.target?.targetKind, "html");
+        assert.equal(pane?.target?.blockedReason, null);
       },
     });
   });
