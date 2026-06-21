@@ -256,7 +256,6 @@ private struct SurfAcePairCommitPlan {
     let providerName: String?
     let providerInitialPaneId: Int
     let providerInitialPaneLabel: Int
-    let providerWindowLabel: String
     let shouldEnqueuePostReconnectEvents: Bool
 }
 
@@ -1574,7 +1573,6 @@ final class SurfAceRuntime {
                 providerName: providerName,
                 providerInitialPaneId: providerInitialPaneId,
                 providerInitialPaneLabel: providerInitialPaneLabel,
-                providerWindowLabel: providerWindowLabel,
                 shouldEnqueuePostReconnectEvents: resumed || surfaceNeedsResumedEvent.contains(surfaceId)
             )
         )
@@ -1585,9 +1583,6 @@ final class SurfAceRuntime {
         surfAceGatewayLog(
             "event=pair_commit \(surfAceDiagnosticFields([("provider_id", plan.session.providerId), ("resumed", plan.resumed), ("session_id", plan.session.sessionId), ("surface_id", plan.surfaceId)]))"
         )
-        if plan.resumed {
-            applyProviderWindowLabel(surface: surface, windowLabel: plan.providerWindowLabel)
-        }
         activeSessions[plan.surfaceId] = plan.session
         surface.providerName = plan.providerName
         ownershipLocksBySurfaceId[plan.surfaceId] = SurfAceOwnershipLockState(
@@ -2594,11 +2589,6 @@ final class SurfAceRuntime {
             surfAceGatewayLog(
                 "event=authority_state_same_provider_session_metadata_mismatch \(surfAceDiagnosticFields([("active_ownership_epoch", session.ownershipEpoch), ("active_session_id", session.sessionId), ("provider_id", session.providerId), ("received_ownership_epoch", payload["ownershipEpoch"] as? Int), ("received_session_id", payload["sessionId"] as? String), ("surface_id", surfaceId)]))"
             )
-        }
-        if providerMatches,
-           let providerWindowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
-           providerWindowLabel != surface.windowLabel {
-            applyProviderWindowLabel(surface: surface, windowLabel: providerWindowLabel)
         }
         if providerMatches,
            let providerPaneIdentities = surfAceProviderAuthorityPaneIdentityMap(
