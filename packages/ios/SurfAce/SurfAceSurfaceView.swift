@@ -1522,6 +1522,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private var pendingViewportRestore: SurfAceViewport?
     private var pendingHTMLRenderActive = false
     private var pendingHTMLRenderContinuations: [CheckedContinuation<Void, Never>] = []
+    private var lastCanvasBounds: CGRect = .zero
     private var lastViewport = SurfAceViewport(
         scrollOffset: SurfAcePoint(x: 0, y: 0),
         visibleRect: SurfAceRect(x: 0, y: 0, width: 1, height: 1),
@@ -1549,6 +1550,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        preserveDrawingAlignmentAfterCanvasResize()
     }
 
     deinit {
@@ -2142,6 +2148,40 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         isApplyingProgrammaticDrawingChange = true
         canvasView.drawing = PKDrawing(strokes: strokes)
         isApplyingProgrammaticDrawingChange = false
+    }
+
+    private func preserveDrawingAlignmentAfterCanvasResize() {
+        let oldBounds = lastCanvasBounds
+        let newBounds = canvasView.bounds
+        defer { lastCanvasBounds = newBounds }
+
+        guard annotationMode,
+              !canvasView.drawing.strokes.isEmpty,
+              oldBounds.width > 1,
+              oldBounds.height > 1,
+              newBounds.width > 1,
+              newBounds.height > 1,
+              oldBounds.size != newBounds.size else {
+            return
+        }
+
+        let transform = CGAffineTransform(
+            scaleX: newBounds.width / oldBounds.width,
+            y: newBounds.height / oldBounds.height
+        )
+        let resizedStrokes = canvasView.drawing.strokes.map { stroke in
+            PKStroke(
+                ink: stroke.ink,
+                path: stroke.path,
+                transform: stroke.transform.concatenating(transform),
+                mask: stroke.mask
+            )
+        }
+        for index in resizedStrokes.indices where index < trackedStrokes.count {
+            trackedStrokes[index].stroke = resizedStrokes[index]
+            trackedStrokes[index].signature = strokeSignature(resizedStrokes[index])
+        }
+        applyDrawing(strokes: resizedStrokes)
     }
 
     private func syncTrackedStrokes(with strokes: [PKStroke], emitChanges: Bool) -> [SurfAceStroke] {

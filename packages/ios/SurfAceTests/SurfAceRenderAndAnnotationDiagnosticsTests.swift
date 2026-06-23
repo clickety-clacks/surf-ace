@@ -224,6 +224,50 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertFalse(surfAceShowsAnnotationBorder(annotationMode: false))
     }
 
+    func testDoneExitsAnnotationModeAndClearsRenderedAndStoredMarks() {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "annotation-done-clears")
+        let pane = surface.panes.first!
+        let bridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+        pane.currentEntry = SurfAcePaneEntry.from(
+            frame: SurfAceFrame(
+                contentId: "ct_done_clears",
+                revision: 1,
+                contentType: .html,
+                payload: .html(html: "<p>Annotate</p>", baseURL: nil),
+                reloadSource: nil,
+                title: nil,
+                scrollable: true,
+                interactive: true
+            ),
+            historyOwnerToken: "hot_test"
+        )
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId, enabled: true, fingerDrawEnabled: true)
+        runtime.handleNewStrokes(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            strokes: [
+                SurfAceStroke(
+                    strokeId: "stroke_done",
+                    points: [SurfAceStrokePoint(x: 10, y: 20, pressure: 1, timestamp: 100)],
+                    tool: "finger"
+                ),
+            ],
+            drawingData: Data([9, 8, 7])
+        )
+
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId, enabled: false, fingerDrawEnabled: false)
+
+        XCTAssertFalse(pane.annotationMode)
+        XCTAssertFalse(pane.fingerDrawEnabled)
+        XCTAssertTrue(pane.currentEntry.drawingData.isEmpty)
+        XCTAssertTrue(pane.currentEntry.strokesById.isEmpty)
+        XCTAssertTrue(pane.pendingFlushStrokes.isEmpty)
+        XCTAssertEqual(bridge.interactionStates.last?.annotationMode, false)
+        XCTAssertEqual(bridge.clearDrawingsCallCount, 1)
+    }
+
     func testVisibleEmptyEntryTracksPushedBrowserAndClearedStates() {
         let emptyEntry = SurfAcePaneEntry.empty()
         XCTAssertTrue(surfAceEntryIsVisibleEmpty(emptyEntry))
@@ -493,6 +537,7 @@ private final class RecordingPaneBridge: SurfAcePaneBridging {
     var renderedEntries: [SurfAcePaneEntry] = []
     var renderCallEntries: [SurfAcePaneEntry?] = []
     var interactionStates: [(annotationMode: Bool, fingerDrawEnabled: Bool)] = []
+    var clearDrawingsCallCount = 0
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
         renderCallEntries.append(entry)
@@ -531,5 +576,7 @@ private final class RecordingPaneBridge: SurfAcePaneBridging {
 
     func removeDrawingStrokeIDs(_ strokeIDs: [String]) {}
 
-    func clearDrawings() {}
+    func clearDrawings() {
+        clearDrawingsCallCount += 1
+    }
 }

@@ -689,6 +689,7 @@ final class SurfAceRuntime {
         )
         if wasEnabled && !enabled {
             requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
+            clearPaneDrawings(pane)
         }
     }
 
@@ -2997,6 +2998,15 @@ final class SurfAceRuntime {
         if pane.drawingRestoreWarningVisible {
             pane.toast = "Annotation restore failed"
         }
+    }
+
+    private func clearPaneDrawings(_ pane: SurfAcePaneModel) {
+        pane.currentEntry.drawingData = Data()
+        pane.currentEntry.strokesById.removeAll()
+        pane.pendingFlushStrokes.removeAll()
+        pane.firstPendingStrokeAt = nil
+        pane.lastPendingStrokeAt = nil
+        pane.bridge?.clearDrawings()
     }
 
     private func applyRestoredDrawingsPayload(_ restoredDrawings: Any?, to pane: SurfAcePaneModel) {
