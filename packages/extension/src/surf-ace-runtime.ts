@@ -2875,6 +2875,10 @@ function targetErrorCodeFromResponse(errorCode: string): TargetErrorCode {
     : "materialization_failed";
 }
 
+function isNativeHostTargetKind(targetKind: string | undefined): boolean {
+  return targetKind === "native_app" || targetKind === "terminal_app";
+}
+
 function isTransientTargetAuthorityErrorCode(errorCode: TargetErrorCode | undefined): boolean {
   return errorCode === "ownership_epoch_mismatch" ||
     errorCode === "ownership_session_mismatch" ||
@@ -3244,6 +3248,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       `[surf-ace:runtime] listScreens: ${this.surfaces.size} canonical surface(s), ${this.endpointProbes.size} endpoint probe(s), ${discoverySnapshot.length} discovery endpoint(s): ${discoverySnapshot.map((ep) => `${ep.name}@${ep.endpointId}`).join(", ") || "(none)"}`,
     );
     for (const surface of this.surfaces.values()) {
+      if (this.needsNativeWindowProjectionRefresh(surface)) {
+        await this.syncRemotePaneList(surface);
+      }
       await this.reconcileProviderPaneAuthorityForSurface(surface, "list screens");
     }
     return this.buildScreenSummaries();
@@ -6553,6 +6560,24 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return null;
     }
     return target;
+  }
+
+  private needsNativeWindowProjectionRefresh(surface: ManagedSurface): boolean {
+    if (!this.canSendRequests(surface)) {
+      return false;
+    }
+    for (const pane of surface.panes.values()) {
+      const target = this.currentTargetRecord(surface, pane);
+      if (
+        target &&
+        isNativeHostTargetKind(target.targetKind) &&
+        pane.lastRestoreBlockedReason === "materialization_failed" &&
+        pane.nativeWindowGroup === null
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private providerPaneAuthorityRecord(
@@ -12995,6 +13020,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       providerPaneLabels.push({ pane, paneLabel: paneState.paneLabel, remotePaneId: paneState.paneId });
       pane.externalNative = paneState.externalNative === true;
       pane.nativeWindowGroup = paneState.nativeWindowGroup ? structuredClone(paneState.nativeWindowGroup) : null;
+      if (
+        pane.nativeWindowGroup &&
+        pane.lastRestoreBlockedReason === "materialization_failed" &&
+        isNativeHostTargetKind(this.currentTargetRecord(surface, pane)?.targetKind)
+      ) {
+        pane.lastRestoreBlockedReason = null;
+        targetAuthorityChanged = true;
+      }
       pane.viewport = cloneViewport(paneState.viewport);
       pane.geometry = structuredClone(paneState.geometry);
       if (pane.externalNative) {

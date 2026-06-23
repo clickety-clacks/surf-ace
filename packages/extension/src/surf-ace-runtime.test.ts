@@ -56,6 +56,7 @@ type TestPane = {
     y: number;
   };
   name: string | null;
+  nativeWindowGroup?: Record<string, unknown>;
   paneLabel: number;
   paneLineageId: string;
   revision: number;
@@ -1429,6 +1430,7 @@ class FakeSurfAceWsServer {
                   externalNative: pane.externalNative ?? false,
                   geometry: this.paneGeometry(targetSurface, paneId, pane),
                   name: pane.name,
+                  ...(pane.nativeWindowGroup ? { nativeWindowGroup: structuredClone(pane.nativeWindowGroup) } : {}),
                   paneId,
                   paneLineageId: pane.paneLineageId,
                   viewport: {
@@ -8439,6 +8441,54 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
         assert.equal(screenPane?.target?.targetKind, "native_app");
         assert.equal(screenPane?.target?.blockedReason, "materialization_failed");
+      },
+    });
+  });
+
+  await t.test("surf_ace_list adopts native window group projection and clears stale native materialization block", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.runtimeAppBinding = trustedRuntimeAppBinding();
+        server.nativeTargetProofContentIdOverride = "target_other";
+        server.nativeTargetProofPaneIdOverride = String(server.initialRemotePaneId);
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const launched = await runtime.launchNativeApp({
+          appId: "com.example.NativeApp",
+          confirmed: true,
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+
+        assert.equal(launched.blockedReason, "materialization_failed");
+        const remotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(remotePane);
+        remotePane.nativeWindowGroup = {
+          acceptedSecondaryCount: 0,
+          clippingStatus: "clipped",
+          deniedReasons: [],
+          deniedToplevelCount: 0,
+          focusedWindowId: "native-primary",
+          launchToken: "provider-launch-token",
+          members: [{
+            bounds: { height: 480, width: 640, x: 0, y: 0 },
+            clippedToPane: true,
+            focused: true,
+            id: "native-primary",
+            lifecycle: "live",
+            role: "primary",
+          }],
+          paneId: String(server.initialRemotePaneId),
+          paneInstanceId: remotePane.paneLineageId,
+          paneLocalBounds: { height: 480, width: 640, x: 0, y: 0 },
+          primaryWindowId: "native-primary",
+        };
+
+        const screenPane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
+        assert.equal(screenPane?.target?.targetKind, "native_app");
+        assert.equal(screenPane?.target?.blockedReason, null);
+        assert.equal(screenPane?.nativeWindowGroup?.primaryWindowId, "native-primary");
       },
     });
   });

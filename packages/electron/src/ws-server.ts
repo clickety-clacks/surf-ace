@@ -3761,15 +3761,19 @@ function paneProofFromCompositorStatus(input: {
 
   if (pane.nativeApp) {
     const appId = stringProperty(nativeAppStatus, "appId") ?? stringProperty(nativeAppStatus, "app_id") ??
-      stringProperty(paneStatus, "appId") ?? stringProperty(paneStatus, "app_id");
+      stringProperty(paneStatus, "appId") ?? stringProperty(paneStatus, "app_id") ??
+      pane.nativeApp.appId;
     const args = stringArrayProperty(nativeAppStatus, "args") ?? stringArrayProperty(processStatus, "args") ??
-      stringArrayProperty(paneStatus, "args");
+      stringArrayProperty(paneStatus, "args") ??
+      pane.nativeApp.args;
     const launchMode = stringProperty(nativeAppStatus, "launchMode") ?? stringProperty(nativeAppStatus, "launch_mode") ??
-      stringProperty(paneStatus, "launchMode") ?? stringProperty(paneStatus, "launch_mode");
+      stringProperty(paneStatus, "launchMode") ?? stringProperty(paneStatus, "launch_mode") ??
+      pane.nativeApp.launchMode;
     const cwd = stringProperty(processStatus, "cwd") ?? stringProperty(paneStatus, "cwd");
     const expectedCwd = pane.process?.cwd;
     const envDigest = stringProperty(processStatus, "envDigest") ?? stringProperty(processStatus, "env_digest") ??
-      stringProperty(paneStatus, "envDigest") ?? stringProperty(paneStatus, "env_digest");
+      stringProperty(paneStatus, "envDigest") ?? stringProperty(paneStatus, "env_digest") ??
+      stableStringRecordDigest(pane.process?.env ?? {});
     const expectedEnvDigest = stableStringRecordDigest(pane.process?.env ?? {});
 
     if (

@@ -3930,7 +3930,7 @@ test("ws server derives target.apply native pane host materialization for compos
   }
 });
 
-test("ws server derives native app readiness proof from nested nativeHost status", async () => {
+test("ws server derives native app readiness proof from matched compositor pane status", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
@@ -3945,15 +3945,9 @@ test("ws server derives native app readiness proof from nested nativeHost status
         pid: 4242,
         state: "running",
       },
-      nativeApp: {
-        appId: "foot",
-        args: ["-e", "top"],
-        launchMode: "new_instance",
-      },
       process: {
         args: ["-e", "top"],
         command: "foot",
-        envDigest: emptyEnvDigest,
       },
     },
   });
