@@ -338,6 +338,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.equal(realizeProperties.target.type, "object");
   assert.equal(realizeProperties.target.anyOf, undefined);
   assert.deepEqual(Object.keys(realizeProperties.target.properties).sort(), ["paneId", "root"]);
+  assert.deepEqual(realizeProperties.target.required, ["root"]);
   assert.equal(realizeProperties.target.properties.root.type, "boolean");
   assert.equal(realizeProperties.target.properties.root.enum, undefined);
   assert.ok(Array.isArray(realizeProperties.desired.anyOf));

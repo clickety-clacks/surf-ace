@@ -138,6 +138,7 @@ const realizeTopologyTargetSchema = {
       type: "boolean",
     },
   },
+  required: ["root"],
   description: "Use `{ root: true }` to replace the whole layout, or `{ paneId }` to replace one pane slot.",
   type: "object",
 };
