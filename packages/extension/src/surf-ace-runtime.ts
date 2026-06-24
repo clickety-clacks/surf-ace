@@ -4178,7 +4178,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     const currentLayout = collapseManagedLayout(surface.layout);
-    const targetPaneId = "paneId" in input.target ? input.target.paneId ?? null : null;
+    const targetsRoot = "root" in input.target && input.target.root === true;
+    const targetsPane = "paneId" in input.target && input.target.paneId !== undefined && input.target.paneId !== null;
+    if (targetsRoot === targetsPane) {
+      throw new SurfAceToolError("invalid_operation", "Topology realization target must be exactly `{ root: true }` or `{ paneId }`.");
+    }
+    const targetPaneId = targetsPane ? input.target.paneId! : null;
     if (targetPaneId && !surface.panes.has(targetPaneId)) {
       throw new SurfAceToolError("invalid_operation", `Unknown Surf Ace pane ${targetPaneId} on ${surface.surfaceId}`);
     }

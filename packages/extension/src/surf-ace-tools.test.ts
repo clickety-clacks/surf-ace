@@ -335,16 +335,11 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   ]);
   assert.equal(realizeTool.inputSchema.additionalProperties, false);
   const realizeProperties = realizeTool.inputSchema.properties as Record<string, any>;
-  assert.ok(Array.isArray(realizeProperties.target.anyOf));
-  assert.deepEqual(
-    realizeProperties.target.anyOf.map((variant: any) => Object.keys(variant.properties).sort()),
-    [["root"], ["paneId"]],
-  );
-  const rootTarget = realizeProperties.target.anyOf.find((variant: any) => variant.properties.root);
-  assert.ok(rootTarget);
-  assert.deepEqual(rootTarget.required, ["root"]);
-  assert.equal(rootTarget.properties.root.type, "boolean");
-  assert.equal(rootTarget.properties.root.enum, undefined);
+  assert.equal(realizeProperties.target.type, "object");
+  assert.equal(realizeProperties.target.anyOf, undefined);
+  assert.deepEqual(Object.keys(realizeProperties.target.properties).sort(), ["paneId", "root"]);
+  assert.equal(realizeProperties.target.properties.root.type, "boolean");
+  assert.equal(realizeProperties.target.properties.root.enum, undefined);
   assert.ok(Array.isArray(realizeProperties.desired.anyOf));
   const splitDesired = realizeProperties.desired.anyOf.find((variant: any) => variant.properties.children);
   assert.ok(splitDesired);

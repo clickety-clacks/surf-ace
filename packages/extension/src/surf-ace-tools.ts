@@ -130,28 +130,16 @@ function paneMatchesSurfAceListInput(
 }
 
 const realizeTopologyTargetSchema = {
-  anyOf: [
-    {
-      additionalProperties: false,
-      properties: {
-        root: {
-          description: "Set to true to target the whole layout.",
-          type: "boolean",
-        },
-      },
-      required: ["root"],
-      type: "object",
+  additionalProperties: false,
+  properties: {
+    paneId: paneIdParam,
+    root: {
+      description: "Set to true to target the whole layout.",
+      type: "boolean",
     },
-    {
-      additionalProperties: false,
-      properties: {
-        paneId: paneIdParam,
-      },
-      required: ["paneId"],
-      type: "object",
-    },
-  ],
+  },
   description: "Use `{ root: true }` to replace the whole layout, or `{ paneId }` to replace one pane slot.",
+  type: "object",
 };
 
 const realizeTopologyInputProperties = {
