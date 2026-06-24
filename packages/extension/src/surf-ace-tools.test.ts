@@ -18,6 +18,7 @@ function createStubRuntime(): SurfAceRuntime {
     }),
     capturePane: async () => ({
       capture: {
+        browserUrl: null,
         bytesBase64: "iVBORw0KGgo=",
         capturedAt: Date.now(),
         contentType: "html",
@@ -186,6 +187,7 @@ function createStubRuntime(): SurfAceRuntime {
       revision: 1,
     }),
     read: async () => ({
+      browserUrl: null,
       contentSnapshot: null,
       displayId: "1",
       fingerprint: "sf_1",
