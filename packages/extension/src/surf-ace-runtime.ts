@@ -320,6 +320,7 @@ export type SurfAceFrame = {
 };
 
 export type SurfAceReadResult = {
+  browserUrl: SurfAceBrowserUrlSemanticEvidence | null;
   contentSnapshot: {
     cachedAt: number;
     content?: ContentSetRequest["payload"]["content"];
@@ -382,6 +383,17 @@ export type SurfAceReadResult = {
   windowLabel: string;
 };
 
+export type SurfAceBrowserUrlSemanticEvidence = {
+  appliedAt: string;
+  navigationStatus: "loaded";
+  paneLineageId: string;
+  replaySemantics: "navigate";
+  requestId: string;
+  targetEpoch: number;
+  targetId: string;
+  url: string;
+};
+
 export type SurfAceSnapshotResult = {
   displayId: string;
   fingerprint: string;
@@ -410,6 +422,7 @@ export type SurfAceAnnotateRemoveInput = {
 
 export type SurfAcePaneCaptureResult = {
   capture: {
+    browserUrl: SurfAceBrowserUrlSemanticEvidence | null;
     bytesBase64: string | null;
     capturedAt: number;
     contentType: ContentType | null;
@@ -2171,6 +2184,45 @@ function cloneCurrentContentSnapshot(
   return cloned;
 }
 
+function currentBrowserUrlSemanticEvidence(surface: ManagedSurface, pane: ManagedPane): SurfAceBrowserUrlSemanticEvidence | null {
+  if (!pane.currentTargetId) {
+    return null;
+  }
+  const target = surface.targetRecords.get(pane.currentTargetId);
+  if (!target || target.currentState !== "current" || target.targetKind !== "browser_url") {
+    return null;
+  }
+  if (!isPlainRecord(target.targetPayload) || typeof target.targetPayload.url !== "string") {
+    return null;
+  }
+  const evidence = target.lastApplyEvidence;
+  if (!evidence || evidence.status !== "applied") {
+    return null;
+  }
+  if (!isPlainRecord(evidence.materializedState)) {
+    return null;
+  }
+  const materializedState = evidence.materializedState as Record<string, unknown>;
+  if (
+    materializedState.navigationStatus !== "loaded" ||
+    materializedState.replaySemantics !== "navigate" ||
+    typeof materializedState.url !== "string" ||
+    materializedState.url !== target.targetPayload.url
+  ) {
+    return null;
+  }
+  return {
+    appliedAt: evidence.appliedAt,
+    navigationStatus: "loaded",
+    paneLineageId: target.paneLineageId,
+    replaySemantics: "navigate",
+    requestId: evidence.requestId,
+    targetEpoch: target.targetEpoch,
+    targetId: target.targetId,
+    url: materializedState.url,
+  };
+}
+
 function computeStrokeBBox(points: Stroke["points"]): SurfAceFrameStroke["bbox"] {
   if (points.length === 0) {
     return {
@@ -3652,6 +3704,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
 
     const result: SurfAceReadResult = {
+      browserUrl: currentBrowserUrlSemanticEvidence(surface, pane),
       contentSnapshot: cloneCurrentContentSnapshot(pane.snapshot, pane.activeContentId, pane.contentValue),
       displayId,
       fingerprint: input.fingerprint,
@@ -3760,6 +3813,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       : payload?.contentType ?? pane.contentType;
     return {
       capture: {
+        browserUrl: currentBrowserUrlSemanticEvidence(surface, pane),
         bytesBase64: imageBytes,
         capturedAt,
         contentType,

@@ -337,6 +337,7 @@ class FakeSurfAceWsServer {
   omitTopologyApplyResponsePaneLabel = false;
   nativeTargetProofContentIdOverride: string | null | undefined = undefined;
   nativeTargetProofPaneIdOverride: string | null | undefined = undefined;
+  browserUrlMaterializedStateOverride: unknown | undefined = undefined;
   surfacesListErrorCode: string | null = null;
   surfacesListRequests = 0;
 
@@ -1397,7 +1398,15 @@ class FakeSurfAceWsServer {
                         : this.nativeTargetProofPaneIdOverride,
                     },
                   }
-                : { paneLineageId: String(message.payload?.paneLineageId ?? "") },
+                : targetKind === "browser_url" && typeof targetPayload.url === "string"
+                  ? this.browserUrlMaterializedStateOverride === undefined
+                    ? {
+                      navigationStatus: "loaded",
+                      replaySemantics: "navigate",
+                      url: targetPayload.url,
+                    }
+                    : this.browserUrlMaterializedStateOverride
+                  : { paneLineageId: String(message.payload?.paneLineageId ?? "") },
               paneLineageId: String(message.payload?.paneLineageId ?? ""),
               requestId: String(message.payload?.requestId ?? message.id),
               status: "applied",
@@ -7343,6 +7352,29 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(target?.display?.title, undefined);
         assert.deepEqual(target?.targetPayload, { url: "https://google.com" });
 
+        const expectedBrowserUrlEvidence = {
+          appliedAt: pushed.targetApplyEvidence?.appliedAt,
+          navigationStatus: "loaded",
+          paneLineageId: target?.paneLineageId,
+          replaySemantics: "navigate",
+          requestId: pushed.targetApplyEvidence?.requestId,
+          targetEpoch: 1,
+          targetId: pushed.targetId,
+          url: "https://google.com",
+        };
+        assert.equal(target?.lastApplyEvidence?.status, "applied");
+        assert.deepEqual(target?.lastApplyEvidence?.materializedState, {
+          navigationStatus: "loaded",
+          replaySemantics: "navigate",
+          url: "https://google.com",
+        });
+        const read = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(read.contentSnapshot, null);
+        assert.deepEqual(read.browserUrl, expectedBrowserUrlEvidence);
+        const captured = await runtime.capturePane({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(captured.capture.visibleContentId, null);
+        assert.deepEqual(captured.capture.browserUrl, expectedBrowserUrlEvidence);
+
         await runtime.push({
           content: "<p>replacement</p>",
           contentType: "html",
@@ -7350,6 +7382,82 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           paneId: firstPaneId,
         });
         assert.equal(server.contentSetRequests.at(-1)?.revision, pushed.revision + 1);
+      },
+    });
+  });
+
+  await t.test("browser_url read and capture require complete loaded semantic materializedState", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const loaded = await runtime.push({
+          content: "https://loaded.example/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(loaded.targetApplyEvidence?.status, "applied");
+        const loadedRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(loadedRead.browserUrl?.navigationStatus, "loaded");
+        assert.equal(loadedRead.browserUrl?.replaySemantics, "navigate");
+        assert.equal(loadedRead.browserUrl?.url, "https://loaded.example/");
+        const loadedCapture = await runtime.capturePane({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(loadedCapture.capture.browserUrl?.navigationStatus, "loaded");
+        assert.equal(loadedCapture.capture.browserUrl?.replaySemantics, "navigate");
+        assert.equal(loadedCapture.capture.browserUrl?.url, "https://loaded.example/");
+
+        server.targetApplyErrorCode = "materialization_failed";
+        const restored = await runtime.restoreTarget({
+          confirmed: true,
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+          targetId: loaded.targetId,
+        });
+        assert.equal(restored.evidence?.status, "failed");
+        assert.equal(restored.evidence?.errorCode, "materialization_failed");
+        const staleRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(staleRead.browserUrl, null);
+        const staleCapture = await runtime.capturePane({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(staleCapture.capture.browserUrl, null);
+        server.targetApplyErrorCode = null;
+
+        server.browserUrlMaterializedStateOverride = {
+          navigationStatus: "started_unverified",
+          replaySemantics: "navigate",
+          url: "https://unverified.example/",
+        };
+        const unverified = await runtime.push({
+          content: "https://unverified.example/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(unverified.targetApplyEvidence?.status, "applied");
+        assert.equal(unverified.targetApplyEvidence?.materializedState?.navigationStatus, "started_unverified");
+        const unverifiedRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(unverifiedRead.browserUrl, null);
+        const unverifiedCapture = await runtime.capturePane({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(unverifiedCapture.capture.browserUrl, null);
+
+        server.browserUrlMaterializedStateOverride = { url: "https://incomplete.example/" };
+        const incomplete = await runtime.push({
+          content: "https://incomplete.example/",
+          contentType: "browser_url",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+        });
+        assert.equal(incomplete.targetApplyEvidence?.status, "applied");
+        const incompleteRead = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(incompleteRead.browserUrl, null);
+        const incompleteCapture = await runtime.capturePane({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(incompleteCapture.capture.browserUrl, null);
+        server.browserUrlMaterializedStateOverride = undefined;
       },
     });
   });
