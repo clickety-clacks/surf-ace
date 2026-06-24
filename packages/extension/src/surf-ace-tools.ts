@@ -135,7 +135,7 @@ const realizeTopologyTargetSchema = {
       additionalProperties: false,
       properties: {
         root: {
-          enum: [true],
+          description: "Set to true to target the whole layout.",
           type: "boolean",
         },
       },
