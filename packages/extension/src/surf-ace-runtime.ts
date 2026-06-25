@@ -6944,6 +6944,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (pointerTarget) {
       targetIds.add(pointerTarget.targetId);
     }
+    if (pane.staleTargetId) {
+      targetIds.add(pane.staleTargetId);
+    }
     for (const target of this.currentProviderTargetsForPaneLineage(surface, pane)) {
       targetIds.add(target.targetId);
     }
@@ -7019,6 +7022,37 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           changed = true;
         }
       }
+    }
+    return changed;
+  }
+
+  private failedBrowserUrlMaterializationTarget(surface: ManagedSurface, pane: ManagedPane): PaneTargetRecord | null {
+    const targetId = pane.currentTargetId ?? pane.staleTargetId;
+    const target = targetId ? surface.targetRecords.get(targetId) ?? null : null;
+    if (
+      !target ||
+      target.targetKind !== "browser_url" ||
+      target.paneLineageId !== pane.paneLineageId ||
+      target.lastApplyEvidence?.status !== "failed" ||
+      target.lastApplyEvidence.errorCode !== "materialization_failed"
+    ) {
+      return null;
+    }
+    return target;
+  }
+
+  private async staleFailedBrowserUrlMaterializationTarget(
+    surface: ManagedSurface,
+    pane: ManagedPane,
+    reason: string,
+  ): Promise<boolean> {
+    const target = this.failedBrowserUrlMaterializationTarget(surface, pane);
+    if (!target) {
+      return false;
+    }
+    const changed = this.markTargetStale(surface, target, "materialization_failed", reason, pane);
+    if (changed) {
+      await this.persistSurfaceTargetState(surface, reason);
     }
     return changed;
   }
@@ -14520,7 +14554,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     response: Response,
     request: ContentApplyRequest | ContentClearRequest | ContentSetRequest,
     sessionKey?: string,
-    options: { diagnostic?: SurfAcePushInput["diagnostic"]; skipTargetRecord?: boolean } = {},
+    options: { diagnostic?: SurfAcePushInput["diagnostic"]; failedBrowserUrlRevisionRecoveryAttempted?: boolean; skipTargetRecord?: boolean } = {},
   ): Promise<SurfAcePushResult | SurfAceClearResult> {
     if (isErrorResponse(response)) {
       const expectedRevision = staleRevisionExpectedRevision(response);
@@ -14540,6 +14574,35 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         } as ContentApplyRequest | ContentClearRequest | ContentSetRequest;
         const retryResponse = await this.sendRequest(surface, retryRequest);
         return await this.applyMutationResponse(surface, pane, retryResponse, retryRequest, sessionKey, options);
+      }
+      if (
+        expectedRevision !== null &&
+        options.failedBrowserUrlRevisionRecoveryAttempted !== true &&
+        this.failedBrowserUrlMaterializationTarget(surface, pane)
+      ) {
+        this.logger.warn?.(
+          `[surf-ace:runtime] event=failed_browser_url_revision_recovery surface_id=${surface.surfaceId} window_label=${surface.windowLabel || "<none>"} pane_id=${pane.paneId} pane_label=${pane.paneLabel} remote_pane_id=${pane.remotePaneId} provider_revision=${pane.currentRevision} client_revision=${expectedRevision} op=${request.op}`,
+        );
+        await this.staleFailedBrowserUrlMaterializationTarget(
+          surface,
+          pane,
+          "failed browser_url target replaced by content mutation",
+        );
+        pane.currentRevision = asRevision(Math.max(0, Number(expectedRevision) - 1));
+        const retryRequest = {
+          ...request,
+          id: makeBrandedRequestId(),
+          payload: {
+            ...request.payload,
+            revision: expectedRevision,
+          },
+          sentAt: asEpochMs(this.now()),
+        } as ContentApplyRequest | ContentClearRequest | ContentSetRequest;
+        const retryResponse = await this.sendRequest(surface, retryRequest);
+        return await this.applyMutationResponse(surface, pane, retryResponse, retryRequest, sessionKey, {
+          ...options,
+          failedBrowserUrlRevisionRecoveryAttempted: true,
+        });
       }
       pane.pendingOwnerSessionKey = null;
       throw new SurfAceToolError(
