@@ -379,6 +379,7 @@ private struct SurfAceWindowView: View {
                     }
             }
         }
+        .focusedSceneValue(\.surfAceCommandTargetSurfaceId, surface.surfaceId)
     }
 }
 
@@ -1346,6 +1347,10 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             return await hostView.renderBrowserURL(entry: entry)
         }
 
+        func setContentScale(_ scale: CGFloat) {
+            hostView?.setContentScale(scale)
+        }
+
         func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool) {
             hostView?.setInteraction(annotationMode: annotationMode, fingerDrawEnabled: fingerDrawEnabled)
         }
@@ -1522,6 +1527,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private var pendingViewportRestore: SurfAceViewport?
     private var pendingHTMLRenderActive = false
     private var pendingHTMLRenderContinuations: [CheckedContinuation<Void, Never>] = []
+    private var contentScale: CGFloat = 1
     private var lastCanvasBounds: CGRect = .zero
     private var lastViewport = SurfAceViewport(
         scrollOffset: SurfAcePoint(x: 0, y: 0),
@@ -1692,6 +1698,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         self.annotationMode = annotationMode
         self.fingerDrawEnabled = fingerDrawEnabled
         applyCurrentInteractionState()
+    }
+
+    func setContentScale(_ scale: CGFloat) {
+        contentScale = max(0.5, min(scale, 2))
+        applyCurrentContentScale()
     }
 
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool {
@@ -2028,6 +2039,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.restorePendingViewportIfNeeded()
+            await self.applyWebContentScale()
             await self.publishCurrentWebViewportIfNeeded()
             await self.waitForWebContentPaint()
             self.finishPendingHTMLRender()
@@ -2085,11 +2097,47 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
         pdfView.document = document
         pdfView.goToFirstPage(nil)
+        applyPDFContentScale()
         lastViewport = pdfViewport()
         lastVisibleText = currentPDFPageText() ?? ""
         DispatchQueue.main.async { [weak self] in
+            self?.applyPDFContentScale()
             self?.notifyPDFPageChanged()
         }
+    }
+
+    private func applyCurrentContentScale() {
+        guard surfAcePaneContentCanScale(currentEntry ?? .empty()) else { return }
+        switch currentEntry?.payload {
+        case .pdf:
+            applyPDFContentScale()
+        case .html, .image, .terminal, .markdown, .browserURL:
+            Task { @MainActor in
+                await applyWebContentScale()
+            }
+        case .canvas, .video, nil:
+            break
+        }
+    }
+
+    private func applyPDFContentScale() {
+        guard !pdfView.isHidden, pdfView.document != nil else { return }
+        let baseScale = max(pdfView.scaleFactorForSizeToFit, 0.1)
+        pdfView.autoScales = false
+        pdfView.scaleFactor = baseScale * contentScale
+        lastViewport = pdfViewport()
+    }
+
+    private func applyWebContentScale() async {
+        guard !webView.isHidden else { return }
+        let script = """
+        (() => {
+          const scale = \(contentScale);
+          document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
+          document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
+        })();
+        """
+        _ = try? await webView.evaluateJavaScript(script)
     }
 
     private func pdfScrollView() -> UIScrollView? {

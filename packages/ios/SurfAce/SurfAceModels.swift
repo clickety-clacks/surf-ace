@@ -19,6 +19,32 @@ enum SurfAceContentType: String, Codable {
     case canvas
 }
 
+enum SurfAceContentScaleAction {
+    case decrease
+    case increase
+    case reset
+}
+
+func surfAceNextContentScale(_ current: CGFloat, action: SurfAceContentScaleAction) -> CGFloat {
+    switch action {
+    case .decrease:
+        return max(0.5, (current * 10 - 1).rounded() / 10)
+    case .increase:
+        return min(2, (current * 10 + 1).rounded() / 10)
+    case .reset:
+        return 1
+    }
+}
+
+func surfAcePaneContentCanScale(_ entry: SurfAcePaneEntry) -> Bool {
+    switch entry.payload {
+    case .html, .image, .pdf, .terminal, .markdown, .browserURL:
+        return true
+    case .canvas, .video, nil:
+        return false
+    }
+}
+
 enum SurfAceEventProfile: String {
     case minimumDeep = "minimum_deep"
     case deepPlusScroll = "deep_plus_scroll"
@@ -949,6 +975,7 @@ protocol SurfAcePaneBridging: AnyObject {
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?)
     func reloadBrowserURL()
     func renderBrowserURL(entry: SurfAcePaneEntry) async -> SurfAceBrowserNavigationResult
+    func setContentScale(_ scale: CGFloat)
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool)
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool
     func restoreDrawingStrokes(_ strokes: [SurfAceStroke]) -> Bool
@@ -961,6 +988,7 @@ protocol SurfAcePaneBridging: AnyObject {
 
 extension SurfAcePaneBridging {
     func reloadBrowserURL() {}
+    func setContentScale(_ scale: CGFloat) {}
 }
 
 struct SurfAceBrowserNavigationResult {
@@ -1039,6 +1067,7 @@ final class SurfAcePaneModel {
     var name: String?
     var backStack: [SurfAcePaneEntry]
     var currentEntry: SurfAcePaneEntry
+    var contentScale: CGFloat = 1
     var forwardStack: [SurfAcePaneEntry]
     var annotationMode = false
     var fingerDrawEnabled = false

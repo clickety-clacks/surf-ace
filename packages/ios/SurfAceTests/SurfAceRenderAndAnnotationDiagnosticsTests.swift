@@ -87,6 +87,125 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(render["contentId"] as? String, "ct_1234abcd")
     }
 
+    func testNativeContentScaleShortcutsRouteToActiveScalablePane() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "content-scale")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let bridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        _ = await runtime.contentApplyForTesting(
+            id: "rq_content_scale",
+            payload: htmlApplyPayload(paneId: pane.paneId, revision: 1),
+            surfaceId: surface.surfaceId
+        )
+
+        runtime.scaleActivePaneContent(.increase)
+        runtime.scaleActivePaneContent(.decrease)
+        runtime.scaleActivePaneContent(.reset)
+
+        XCTAssertEqual(bridge.contentScales, [1, 1.1, 1, 1])
+        XCTAssertEqual(pane.contentScale, 1)
+    }
+
+    func testNativeContentScaleRoutesToFocusedSurfacePane() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let firstSurface = runtime.registerSurface(sceneKey: "content-scale-first")
+        let firstPane = try XCTUnwrap(firstSurface.panes.first)
+        let firstBridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: firstSurface.surfaceId, paneId: firstPane.paneId, bridge: firstBridge)
+        _ = await runtime.contentApplyForTesting(
+            id: "rq_content_scale_first",
+            payload: htmlApplyPayload(paneId: firstPane.paneId, revision: 1),
+            surfaceId: firstSurface.surfaceId
+        )
+
+        let focusedSurface = runtime.registerSurface(sceneKey: "content-scale-focused")
+        let focusedPane = try XCTUnwrap(focusedSurface.panes.first)
+        let focusedBridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: focusedSurface.surfaceId, paneId: focusedPane.paneId, bridge: focusedBridge)
+        _ = await runtime.contentApplyForTesting(
+            id: "rq_content_scale_focused",
+            payload: htmlApplyPayload(paneId: focusedPane.paneId, revision: 1),
+            surfaceId: focusedSurface.surfaceId
+        )
+
+        runtime.scaleActivePaneContent(surfaceId: focusedSurface.surfaceId, action: .increase)
+        runtime.scaleActivePaneContent(surfaceId: "missing-surface", action: .increase)
+
+        XCTAssertEqual(firstBridge.contentScales, [1])
+        XCTAssertEqual(firstPane.contentScale, 1)
+        XCTAssertEqual(focusedBridge.contentScales, [1, 1.1])
+        XCTAssertEqual(focusedPane.contentScale, 1.1)
+    }
+
+    func testNativeContentScaleIgnoresAnnotationModeAndUnscalableContent() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "content-scale-ignored")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let bridge = RecordingPaneBridge()
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        runtime.scaleActivePaneContent(.increase)
+        XCTAssertEqual(bridge.contentScales, [1])
+        XCTAssertEqual(pane.contentScale, 1)
+
+        _ = await runtime.contentApplyForTesting(
+            id: "rq_content_scale_annotation",
+            payload: htmlApplyPayload(paneId: pane.paneId, revision: 1),
+            surfaceId: surface.surfaceId
+        )
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId, enabled: true, fingerDrawEnabled: false)
+        runtime.scaleActivePaneContent(.increase)
+
+        XCTAssertEqual(bridge.contentScales, [1])
+        XCTAssertEqual(pane.contentScale, 1)
+    }
+
+    func testNativeContentScaleCommandShortcutsAreSurfAceOwned() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SurfAce/SurfAceApp.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let commandIndex = try XCTUnwrap(source.range(of: "private struct SurfAceWindowCommands")?.lowerBound)
+        let commandSource = source[commandIndex...]
+
+        XCTAssertTrue(commandSource.contains("runtime.scaleActivePaneContent(surfaceId: commandSurfaceId, action: .increase)"))
+        XCTAssertTrue(commandSource.contains(".keyboardShortcut(\"=\", modifiers: .command)"))
+        XCTAssertTrue(commandSource.contains("runtime.scaleActivePaneContent(surfaceId: commandSurfaceId, action: .decrease)"))
+        XCTAssertTrue(commandSource.contains(".keyboardShortcut(\"-\", modifiers: .command)"))
+        XCTAssertTrue(commandSource.contains("runtime.scaleActivePaneContent(surfaceId: commandSurfaceId, action: .reset)"))
+        XCTAssertTrue(commandSource.contains(".keyboardShortcut(\"0\", modifiers: .command)"))
+        XCTAssertTrue(commandSource.contains("@FocusedValue(\\.surfAceCommandTargetSurfaceId)"))
+    }
+
+    func testNativeScalableContentTypeMatrix() {
+        let scalablePayloads: [(SurfAceContentType, SurfAceFramePayload)] = [
+            (.html, .html(html: "<p>hello</p>", baseURL: nil)),
+            (.image, .image(data: "", mediaType: "image/png", alt: nil)),
+            (.pdf, .pdf(data: "")),
+            (.terminal, .terminal(lines: ["hello"], scrollback: 0)),
+            (.markdown, .markdown(markdown: "# hello")),
+            (.html, .browserURL(url: "https://example.com", allowedSnapshotFallback: nil, fallbackSnapshotTargetId: nil))
+        ]
+        for (index, payload) in scalablePayloads.enumerated() {
+            XCTAssertTrue(surfAcePaneContentCanScale(contentScaleEntry(index: index, contentType: payload.0, payload: payload.1)))
+        }
+
+        XCTAssertFalse(surfAcePaneContentCanScale(.empty()))
+        XCTAssertFalse(surfAcePaneContentCanScale(contentScaleEntry(
+            index: 100,
+            contentType: .canvas,
+            payload: .canvas(color: nil, grid: false)
+        )))
+        XCTAssertFalse(surfAcePaneContentCanScale(contentScaleEntry(
+            index: 101,
+            contentType: .video,
+            payload: .video(url: "https://example.com/video.mp4")
+        )))
+    }
+
     func testStalePaneBridgeDetachDoesNotClearReplacementBridge() throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "stale-bridge-detach")
@@ -530,6 +649,23 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             "revision": revision,
         ]
     }
+
+    private func contentScaleEntry(
+        index: Int,
+        contentType: SurfAceContentType,
+        payload: SurfAceFramePayload
+    ) -> SurfAcePaneEntry {
+        .from(frame: SurfAceFrame(
+            contentId: String(format: "ct_%08x", index + 1),
+            revision: 1,
+            contentType: contentType,
+            payload: payload,
+            reloadSource: nil,
+            title: nil,
+            scrollable: true,
+            interactive: true
+        ))
+    }
 }
 
 @MainActor
@@ -537,6 +673,7 @@ private final class RecordingPaneBridge: SurfAcePaneBridging {
     var renderedEntries: [SurfAcePaneEntry] = []
     var renderCallEntries: [SurfAcePaneEntry?] = []
     var interactionStates: [(annotationMode: Bool, fingerDrawEnabled: Bool)] = []
+    var contentScales: [CGFloat] = []
     var clearDrawingsCallCount = 0
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
@@ -552,6 +689,10 @@ private final class RecordingPaneBridge: SurfAcePaneBridging {
 
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool) {
         interactionStates.append((annotationMode: annotationMode, fingerDrawEnabled: fingerDrawEnabled))
+    }
+
+    func setContentScale(_ scale: CGFloat) {
+        contentScales.append(scale)
     }
 
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool {
