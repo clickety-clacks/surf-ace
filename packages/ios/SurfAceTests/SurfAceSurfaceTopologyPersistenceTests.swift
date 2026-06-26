@@ -299,6 +299,10 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: 2, paneId: 1, paneCount: 2))
     }
 
+    func testKeyboardFocusBandUsesTwentyPointSpecThickness() {
+        XCTAssertEqual(surfAceKeyboardFocusBandWidth(), 20)
+    }
+
     @MainActor
     func testPaneLabelTextUsesVisiblePaneLabelNotOptionalName() {
         let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")

@@ -271,7 +271,6 @@ const CONTENT_SCALE_STEP = 0.1;
 type SurfAceOverlayKind =
   | "annotation-control"
   | "history-back"
-  | "keyboard-focus-edge"
   | "history-forward"
   | "pane-label"
   | "pane-handle"
@@ -472,8 +471,6 @@ function overlayMetadataForMarker(
       return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker, zIndex: 20 };
     case "duplicate-repush-close":
       return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker, zIndex: 30 };
-    case "keyboard-focus-edge":
-      return { captures: ["pointer_hover"], kind: "other", suffix: marker, zIndex: 25 };
     case "pane-label":
       return { captures: ["pointer_hover"], kind: "pane_badge", suffix: marker, zIndex: 15 };
     case "pane-handle":
@@ -981,7 +978,6 @@ function ensurePaneView(paneId: number): PaneView {
   for (const edge of ["top", "right", "bottom", "left"]) {
     const edgeEl = document.createElement("div");
     edgeEl.className = `keyboard-focus-edge keyboard-focus-edge--${edge}`;
-    surfAceOverlay(edgeEl, "keyboard-focus-edge");
     focusOverlayEl.appendChild(edgeEl);
   }
   const canvas = document.createElement("canvas");

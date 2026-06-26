@@ -169,37 +169,42 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 
 .keyboard-focus-edge {
   position: absolute;
-  background: rgb(128, 128, 128);
+  --keyboard-focus-edge-color: rgba(128, 128, 128, 0.25);
+  --keyboard-focus-clear-color: rgba(128, 128, 128, 0);
 }
 
 .keyboard-focus-edge--top,
 .keyboard-focus-edge--bottom {
   left: 0;
   right: 0;
-  height: 2px;
+  height: 20px;
 }
 
 .keyboard-focus-edge--top {
   top: 0;
+  background: linear-gradient(to bottom, var(--keyboard-focus-edge-color), var(--keyboard-focus-clear-color));
 }
 
 .keyboard-focus-edge--bottom {
   bottom: 0;
+  background: linear-gradient(to top, var(--keyboard-focus-edge-color), var(--keyboard-focus-clear-color));
 }
 
 .keyboard-focus-edge--left,
 .keyboard-focus-edge--right {
   top: 0;
   bottom: 0;
-  width: 2px;
+  width: 20px;
 }
 
 .keyboard-focus-edge--left {
   left: 0;
+  background: linear-gradient(to right, var(--keyboard-focus-edge-color), var(--keyboard-focus-clear-color));
 }
 
 .keyboard-focus-edge--right {
   right: 0;
+  background: linear-gradient(to left, var(--keyboard-focus-edge-color), var(--keyboard-focus-clear-color));
 }
 
 .direction-horizontal > .pane-shell + .pane-shell {
