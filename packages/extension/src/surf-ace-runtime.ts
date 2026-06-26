@@ -1301,6 +1301,7 @@ const STATE_FILE_NAME = "surf-ace-runtime-state.json";
 const SCREEN_SNAPSHOT_FILE_NAME = "surf-ace-runtime-screens.json";
 const RUNTIME_LEASE_FILE_NAME = "surf-ace-runtime-owner.lock";
 const OWNER_CONTROL_PATH = "/surf-ace-runtime-owner";
+const RESTORE_FLIGHT_RECORDER_ARTIFACT_DIR = path.join("/tmp", "surf-ace", "restore-flight-recorder");
 const OWNER_CONTROL_MAX_BODY_BYTES = 1024 * 1024;
 const LEGACY_STATE_FILE_NAMES = [
   STATE_FILE_NAME,
@@ -7426,14 +7427,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  private async repushSurfaceContent(surface: ManagedSurface): Promise<void> {
+  private async repushSurfaceContent(surface: ManagedSurface, restoreAttemptId?: string): Promise<void> {
     for (const pane of this.visiblePanes(surface)) {
       if (!isBoundRemotePaneId(pane.remotePaneId)) {
         continue;
       }
       try {
         if (pane.pairImportedContentAuthority) {
-          this.logReplayOutcome(surface, pane, "content", "skipped_provider_owned");
+          this.logReplayOutcome(surface, pane, "content", "skipped_provider_owned", undefined, undefined, restoreAttemptId);
           continue;
         }
 
@@ -7452,22 +7453,22 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           if (blockedReason) {
             pane.lastRestoreBlockedReason = blockedReason;
             await this.persistSurfaceTargetState(surface, "restore blocked");
-            this.logReplayOutcome(surface, pane, "target", blockedReason);
+            this.logReplayOutcome(surface, pane, "target", blockedReason, undefined, undefined, restoreAttemptId);
             continue;
           }
           const evidence = await this.materializeTargetRecordWithResumeRetries(surface, pane, target);
-          this.logReplayOutcome(surface, pane, "target", evidence.status, evidence.errorCode);
+          this.logReplayOutcome(surface, pane, "target", evidence.status, evidence.errorCode, undefined, restoreAttemptId);
           continue;
         }
 
         if (pane.activeContentId && pane.contentType && pane.contentValue === null) {
-          this.logReplayOutcome(surface, pane, "content", "skipped_provider_owned");
+          this.logReplayOutcome(surface, pane, "content", "skipped_provider_owned", undefined, undefined, restoreAttemptId);
           continue;
         }
 
         if (!pane.activeContentId || !pane.contentType) {
           if (pane.currentRevision <= asRevision(0)) {
-            this.logReplayOutcome(surface, pane, "clear", "skipped_empty_revision");
+            this.logReplayOutcome(surface, pane, "clear", "skipped_empty_revision", undefined, undefined, restoreAttemptId);
             continue;
           }
           const clearRequest: ContentApplyRequest = {
@@ -7477,15 +7478,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               clear: true,
               paneId: pane.remotePaneId,
               revision: pane.currentRevision,
+              ...(restoreAttemptId ? { restoreAttemptId } : {}),
               topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
-            },
+            } as ContentApplyRequest["payload"],
             sentAt: asEpochMs(this.now()),
             type: "request",
             v: 1,
           };
           const clearResponse = await this.sendRequest(surface, clearRequest);
           await this.applyMutationResponse(surface, pane, clearResponse, clearRequest);
-          this.logReplayOutcome(surface, pane, "clear", "applied");
+          this.logReplayOutcome(surface, pane, "clear", "applied", undefined, undefined, restoreAttemptId);
           continue;
         }
 
@@ -7505,6 +7507,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               historyOwnerTokenForSession(pane.ownerSessionKey ?? undefined),
             paneId: pane.remotePaneId,
             revision: pane.currentRevision,
+            ...(restoreAttemptId ? { restoreAttemptId } : {}),
             topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
           } as ContentApplyRequest["payload"],
           sentAt: asEpochMs(this.now()),
@@ -7513,7 +7516,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         };
         const contentResponse = await this.sendRequest(surface, contentRequest);
         await this.applyMutationResponse(surface, pane, contentResponse, contentRequest, pane.ownerSessionKey ?? undefined);
-        this.logReplayOutcome(surface, pane, "content", "applied");
+        this.logReplayOutcome(surface, pane, "content", "applied", undefined, undefined, restoreAttemptId);
       } catch (error) {
         if (
           error instanceof SurfAceToolError &&
@@ -7532,12 +7535,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
             pane.diagnosticContent = null;
             pane.nonDurableTargetDiagnostic = null;
             await this.persistSurfaceTargetState(surface, "resume restore skipped provider-owned content");
-            this.logReplayOutcome(surface, pane, "target", "skipped_provider_owned", error.code, error.message);
+            this.logReplayOutcome(surface, pane, "target", "skipped_provider_owned", error.code, error.message, restoreAttemptId);
             continue;
           }
           this.clearVisiblePaneContent(pane, pane.currentRevision);
           await this.tombstonePaneTarget(surface, pane);
-          this.logReplayOutcome(surface, pane, "content", "skipped_stale", error.code, error.message);
+          this.logReplayOutcome(surface, pane, "content", "skipped_stale", error.code, error.message, restoreAttemptId);
           continue;
         }
         throw error;
@@ -7678,6 +7681,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     outcome: string,
     errorCode?: string,
     message?: string,
+    restoreAttemptId?: string,
   ): void {
     this.logger.info?.(
       runtimeDiagnostic("resume_replay_outcome", {
@@ -7689,6 +7693,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         pane_label: pane.paneLabel,
         remote_pane_id: Number(pane.remotePaneId),
         replay_kind: replayKind,
+        restore_attempt_id: restoreAttemptId,
         revision: Number(pane.currentRevision),
         session_id: surface.sessionId ?? "nil",
         surface_id: surface.surfaceId,
@@ -11716,7 +11721,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     });
   }
 
-  private async requestPair(surface: ManagedSurface): Promise<{ response: PairResponse; requestedWindowLabel: string }> {
+  private async requestPair(surface: ManagedSurface): Promise<{
+    response: PairResponse;
+    requestedWindowLabel: string;
+    restoreAttemptId: string;
+  }> {
     const client = surface.client;
     if (!client || !client.isOpen()) {
       throw new SurfAceToolError(
@@ -11757,6 +11766,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.repairLivePaneLabelInvariant("pair request", surface, surface);
     const resumeSessionId = this.shouldAttemptResume(surface) ? surface.sessionId : null;
     const providerName = this.providerNameForSurface(surface);
+    const restoreAttemptId = `ra_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
 
     const buildPairRequest = (takeover: boolean, requestedResumeSessionId: SessionId | null): PairRequest => ({
       id: makeBrandedRequestId(),
@@ -11771,6 +11781,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         providerId: this.providerId(),
         providerName,
         resume: requestedResumeSessionId ? { sessionId: requestedResumeSessionId } : undefined,
+        restoreAttemptId,
         surfaceId: surface.surfaceId,
         takeover,
         windowLabel,
@@ -11895,7 +11906,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
 
-    return { response: response as PairResponse, requestedWindowLabel: windowLabel };
+    return { response: response as PairResponse, requestedWindowLabel: windowLabel, restoreAttemptId };
   }
 
   private quarantineMalformedPairResponsePaneState(surface: ManagedSurface, response: Response): Response {
@@ -12456,6 +12467,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           );
           const pair = await this.requestPair(surface);
           const pairResponse = pair.response;
+          const restoreAttemptId = pair.restoreAttemptId;
           this.assertPairResponseHasTopologyPanes(surface, pairResponse);
           this.assertPairResponseTopologyMatchesPanes(surface, pairResponse);
           const canonicalSurface = this.adoptCanonicalSurfaceId(
@@ -12517,6 +12529,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               pane_ids: pairResponse.payload.state.panes.map((pane) => Number(pane.paneId)).join(",") || "none",
               pane_labels: pairResponse.payload.state.panes.map((pane) => Number(pane.paneLabel)).join(",") || "none",
               resumed: pairResponse.payload.resumed,
+              restore_attempt_id: restoreAttemptId,
               session_id: pairResponse.payload.sessionId,
               surface_id: surface.surfaceId,
               topology_revision: Number(pairResponse.payload.state.topologyRevision),
@@ -12524,6 +12537,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           );
           surface.unreachableFailures = 0;
           if (!hadAcceptedLocalTopology && !hadRestartRestoredTopology && !preserveProviderAuthorityPairState) {
+            this.logger.warn?.(
+              runtimeDiagnostic("restore_pair_decision_clear_local_topology", {
+                had_accepted_local_topology: hadAcceptedLocalTopology,
+                had_restart_restored_topology: hadRestartRestoredTopology,
+                pair_blank_single_pane: pairBlankSinglePane,
+                pair_fresh_blank_single_pane: pairFreshBlankSinglePane,
+                restore_attempt_id: restoreAttemptId,
+                surface_id: surface.surfaceId,
+              }),
+            );
             this.clearSurfaceLocalTopologyState(surface, {
               preservePaneLabels: hadRestartOwnershipPendingPair,
               preserveRestartContent: hadRestartOwnershipPendingPair,
@@ -12557,6 +12580,19 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
               );
             }
           }
+          const restoreProviderDecision = {
+            adoptEmptyPairProviderPaneState,
+            hadAcceptedLocalTopology,
+            hadRestartRestoredTopology,
+            pairBlankSinglePane,
+            pairFreshBlankSinglePane,
+            pairPaneContentCount: pairResponse.payload.state.panes.filter((pane) => pane.currentContentId !== null).length,
+            pairPaneCount: pairResponse.payload.state.panes.length,
+            pairSinglePaneLabel,
+            pairTopologyRevision,
+            preserveProviderAuthorityPairState,
+            preserveRestartPairState,
+          };
           this.markPairConnected(
             surface,
             asSessionId(pairResponse.payload.sessionId),
@@ -12597,10 +12633,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           if (shouldPublishProviderTopology) {
             await this.pushTopology(surface);
           }
-          await this.repushSurfaceContent(surface);
+          await this.repushSurfaceContent(surface, restoreAttemptId);
           surface.connectionState = "connected";
           await this.syncSurfaceSnapshots(surface, true, {
             publishLabelRepairTopology: shouldPublishProviderTopology,
+          });
+          this.runBackgroundTask(`collect spatial restore flight recorder ${surface.surfaceId}`, async () => {
+            await this.collectSpatialRestoreFlightRecorder(surface, restoreAttemptId, restoreProviderDecision);
           });
           if (await this.publishAuthorityState(surface)) {
             this.startHeartbeat(surface);
@@ -12884,6 +12923,84 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         );
       }
       throw error;
+    }
+  }
+
+  private async collectSpatialRestoreFlightRecorder(
+    surface: ManagedSurface,
+    restoreAttemptId: string,
+    providerDecision: Record<string, unknown>,
+  ): Promise<void> {
+    const request = {
+      id: makeBrandedRequestId(),
+      op: "diagnostics.flight_recorder",
+      payload: {
+        maxLines: 240,
+        restoreAttemptId,
+      },
+      sentAt: asEpochMs(this.now()),
+      type: "request",
+      v: 1,
+    } as unknown as Request;
+    try {
+      const response = await this.sendRequest(surface, request);
+      if (isErrorResponse(response)) {
+        this.logger.warn?.(
+          runtimeDiagnostic("restore_flight_recorder_pull_failed", {
+            error: response.error.code,
+            restore_attempt_id: restoreAttemptId,
+            surface_id: surface.surfaceId,
+          }),
+        );
+        return;
+      }
+      const payload = (response as unknown as {
+        payload?: {
+          lines?: unknown;
+          logPath?: unknown;
+          restoreAttemptId?: unknown;
+          surfaceId?: unknown;
+        };
+      }).payload ?? {};
+      const artifact = {
+        capturedAt: new Date(this.now()).toISOString(),
+        providerDecision,
+        providerSurface: {
+          endpointId: surface.endpointId,
+          paneCount: surface.panes.size,
+          surfaceId: surface.surfaceId,
+          windowLabel: surface.windowLabel || null,
+        },
+        restoreAttemptId,
+        spatialFlightRecorder: {
+          lines: Array.isArray(payload.lines) ? payload.lines.filter((line) => typeof line === "string") : [],
+          logPath: typeof payload.logPath === "string" ? payload.logPath : null,
+          restoreAttemptId: typeof payload.restoreAttemptId === "string" ? payload.restoreAttemptId : null,
+          surfaceId: typeof payload.surfaceId === "string" ? payload.surfaceId : null,
+        },
+      };
+      await ensureDirectory(RESTORE_FLIGHT_RECORDER_ARTIFACT_DIR);
+      const artifactPath = path.join(
+        RESTORE_FLIGHT_RECORDER_ARTIFACT_DIR,
+        `${restoreAttemptId}-${surface.surfaceId}.json`,
+      );
+      await fs.writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`);
+      this.logger.info?.(
+        runtimeDiagnostic("restore_flight_recorder_artifact_written", {
+          artifact_path: artifactPath,
+          line_count: artifact.spatialFlightRecorder.lines.length,
+          restore_attempt_id: restoreAttemptId,
+          surface_id: surface.surfaceId,
+        }),
+      );
+    } catch (error) {
+      this.logger.warn?.(
+        runtimeDiagnostic("restore_flight_recorder_pull_failed", {
+          error: String(error),
+          restore_attempt_id: restoreAttemptId,
+          surface_id: surface.surfaceId,
+        }),
+      );
     }
   }
 

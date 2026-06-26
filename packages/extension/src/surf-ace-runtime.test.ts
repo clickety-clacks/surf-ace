@@ -272,6 +272,7 @@ class FakeSurfAceWsServer {
   readonly pairAttemptDetails: Array<{
     providerId: string | null;
     providerName: string | null;
+    restoreAttemptId: string | null;
     resumeSessionId: string | null;
     takeover: boolean;
   }> = [];
@@ -312,6 +313,12 @@ class FakeSurfAceWsServer {
   protocolFeatures = ["authority.state.v1"];
   runtimeAppBinding: RuntimeAppBindingDiagnostics | null = null;
   runtimeAppBindingRequests = 0;
+  readonly flightRecorderRequests: Array<{ maxLines: number; restoreAttemptId: string | null }> = [];
+  flightRecorderLines = [
+    "2026-06-26T00:00:00Z [surf-ace:lifecycle] event=scene_connect restore_attempt_id=ra_fixture persisted_content_count=1",
+    "2026-06-26T00:00:01Z [surf-ace:gateway] event=incoming_content_apply clear=true restore_attempt_id=ra_fixture",
+    "2026-06-26T00:00:02Z [surf-ace:lifecycle] event=render_transition_empty actor=content.apply.clear restore_attempt_id=ra_fixture",
+  ];
   dropNextSplitRequest = false;
   forcedPairErrors: Array<{ code: string; message: string }> = [];
   addPaneAfterPairResponse: {
@@ -804,6 +811,25 @@ class FakeSurfAceWsServer {
           ),
         );
         return;
+      case "diagnostics.flight_recorder":
+        this.flightRecorderRequests.push({
+          maxLines: Number(message.payload?.maxLines ?? 0),
+          restoreAttemptId:
+            typeof message.payload?.restoreAttemptId === "string"
+              ? String(message.payload.restoreAttemptId)
+              : null,
+        });
+        socket.send(
+          JSON.stringify(
+            this.response(message.id, "diagnostics.flight_recorder", {
+              lines: this.flightRecorderLines,
+              logPath: "/tmp/surf-ace-client-flight-recorder.log",
+              restoreAttemptId: message.payload?.restoreAttemptId ?? null,
+              surfaceId: this.surfaceId,
+            }),
+          ),
+        );
+        return;
       case "pair.request":
         this.pairRequestSurfaceIds.push(String(message.payload?.surfaceId ?? this.surfaceId));
         this.pairRequests.push({
@@ -819,6 +845,10 @@ class FakeSurfAceWsServer {
           providerName:
             typeof message.payload?.providerName === "string"
               ? String(message.payload.providerName)
+              : null,
+          restoreAttemptId:
+            typeof message.payload?.restoreAttemptId === "string"
+              ? String(message.payload.restoreAttemptId)
               : null,
           resumeSessionId:
             typeof message.payload?.resume === "object" &&
@@ -2251,6 +2281,36 @@ test("surf ace runtime defaults to the OpenClaw extension state root", () => {
       process.env.OPENCLAW_HOME = previousOpenClawHome;
     }
   }
+});
+
+test("restore flight recorder correlates pair attempt with pulled Spatial recorder artifact", async () => {
+  await withRuntimeHarness(async ({ runtime, server }) => {
+    await waitFor(() => server.pairAttemptDetails.length > 0 && server.flightRecorderRequests.length > 0, 12_000);
+    const restoreAttemptId = server.pairAttemptDetails[0]?.restoreAttemptId;
+    assert.match(restoreAttemptId ?? "", /^ra_[0-9a-f]{16}$/);
+    assert.equal(server.flightRecorderRequests[0]?.restoreAttemptId, restoreAttemptId);
+    assert.equal(server.flightRecorderRequests[0]?.maxLines, 240);
+
+    const artifactPath = path.join(
+      "/tmp",
+      "surf-ace",
+      "restore-flight-recorder",
+      `${restoreAttemptId}-${server.surfaceId}.json`,
+    );
+    await waitFor(async () => {
+      try {
+        await fs.access(artifactPath);
+        return true;
+      } catch {
+        return false;
+      }
+    }, 12_000);
+    const artifact = JSON.parse(await fs.readFile(artifactPath, "utf8"));
+    assert.equal(artifact.restoreAttemptId, restoreAttemptId);
+    assert.equal(artifact.providerSurface.surfaceId, server.surfaceId);
+    assert.equal(artifact.providerDecision.pairPaneCount, 1);
+    assert.deepEqual(artifact.spatialFlightRecorder.lines, server.flightRecorderLines);
+  });
 });
 
 test("surf ace runtime creates durable provider identity and reuses it across state-root migrations", async () => {

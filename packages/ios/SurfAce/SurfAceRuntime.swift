@@ -28,6 +28,22 @@ private func surfAceFlightRecorderLogPath() -> String {
         .path
 }
 
+private func surfAceFlightRecorderTail(maxLines: Int = 240) -> [String] {
+    let path = surfAceFlightRecorderLogPath()
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    return Array(lines.suffix(max(1, maxLines)))
+}
+
+private func surfAceTrimFlightRecorder(maxLines: Int = 512) {
+    let path = surfAceFlightRecorderLogPath()
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+    guard lines.count > maxLines else { return }
+    let trimmed = lines.suffix(maxLines).joined(separator: "\n") + "\n"
+    try? trimmed.write(toFile: path, atomically: true, encoding: .utf8)
+}
+
 private func surfAceSimulatorTailCommand() -> String {
     "APPDATA=$(xcrun simctl get_app_container booted co.clicketyclacks.SurfAce data); tail -n 200 \"$APPDATA/Library/Application Support/SurfAce/client-flight-recorder.log\""
 }
@@ -54,6 +70,7 @@ private func surfAceRecordFlight(scope: String, message: String) {
     } catch {
         // Diagnostics must never change Surf Ace runtime behavior.
     }
+    surfAceTrimFlightRecorder()
     print("[SurfAce-Client] \(message)")
 }
 
@@ -529,13 +546,16 @@ final class SurfAceRuntime {
         if let persistedTopology = persistedSurfaceTopologies[surfaceId] {
             persistedTopology.apply(to: surface)
         }
+        let restoreAttemptId = randomHex(prefix: "ra", byteCount: 8)
+        let persistedPaneCount = persistedSurfaceTopologies[surfaceId]?.panes.count ?? 0
+        let persistedContentCount = persistedSurfaceTopologies[surfaceId]?.panes.filter { $0.currentEntry?.contentId != nil }.count ?? 0
         ensureActiveKeyboardPane(surface: surface)
         surfaceById[surfaceId] = surface
         surfaceIdBySceneKey[sceneKey] = surfaceId
         surfaces.append(surface)
         persistSurfaceTopology(surfaceId: surfaceId)
         surfAceLifecycleLog(
-            "event=scene_connect \(surfAceDiagnosticFields([("restored_topology", persistedSurfaceTopologies[surfaceId] != nil), ("scene_key", sceneKey), ("surface_id", surfaceId)]))"
+            "event=scene_connect \(surfAceDiagnosticFields([("persisted_content_count", persistedContentCount), ("persisted_pane_count", persistedPaneCount), ("restored_topology", persistedSurfaceTopologies[surfaceId] != nil), ("restore_attempt_id", restoreAttemptId), ("scene_key", sceneKey), ("surface_id", surfaceId)]))"
         )
         refreshConnectionState(surfaceId: surfaceId)
         refreshBonjourTXT()
@@ -646,6 +666,9 @@ final class SurfAceRuntime {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         pane.bridge = bridge
         bridge.render(entry: renderableEntry(pane.currentEntry), restoreViewport: nil)
+        surfAceLifecycleLog(
+            "event=pane_bridge_attach \(surfAceDiagnosticFields([("content_id", pane.currentEntry.contentId), ("content_type", pane.currentEntry.contentType?.rawValue), ("pane_id", paneId), ("revision", pane.currentEntry.revision), ("surface_id", surfaceId)]))"
+        )
         noteRenderDiagnostics(
             surfaceId: surfaceId,
             pane: pane,
@@ -1033,6 +1056,7 @@ final class SurfAceRuntime {
                             "pane.split",
                             "pane.rename",
                             "pane.close",
+                            "diagnostics.flight_recorder",
                         ],
                     ],
                 ]
@@ -1295,6 +1319,11 @@ final class SurfAceRuntime {
                 responseObject: handleOwnershipRelinquish(id: id, connectionUUID: connectionUUID),
                 postSendPairCommit: nil
             )
+        case "diagnostics.flight_recorder":
+            return SurfAceProcessedRequestResult(
+                responseObject: handleFlightRecorderDiagnostics(id: id, payload: payload, connectionUUID: connectionUUID),
+                postSendPairCommit: nil
+            )
         default:
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(op: op, id: id, code: "invalid_payload", message: "unsupported operation"),
@@ -1324,6 +1353,32 @@ final class SurfAceRuntime {
         ]
     }
 
+    private func handleFlightRecorderDiagnostics(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
+        guard let (surfaceId, _) = pairedSurface(for: connectionUUID) else {
+            return makeErrorResponse(op: "diagnostics.flight_recorder", id: id, code: "not_paired", message: "pair.request required")
+        }
+        let requestedLines = payload["maxLines"] as? Int ?? 240
+        let lineCount = min(max(requestedLines, 1), 512)
+        let restoreAttemptId = payload["restoreAttemptId"] as? String
+        surfAceLifecycleLog(
+            "event=flight_recorder_requested \(surfAceDiagnosticFields([("line_count", lineCount), ("restore_attempt_id", restoreAttemptId), ("surface_id", surfaceId)]))"
+        )
+        return [
+            "v": 1,
+            "type": "response",
+            "op": "diagnostics.flight_recorder",
+            "id": id,
+            "ok": true,
+            "sentAt": timestampNow(),
+            "payload": [
+                "logPath": surfAceFlightRecorderLogPath(),
+                "lines": surfAceFlightRecorderTail(maxLines: lineCount),
+                "restoreAttemptId": restoreAttemptId as Any? ?? NSNull(),
+                "surfaceId": surfaceId,
+            ],
+        ]
+    }
+
     private func handlePairRequest(
         id: String,
         payload: [String: Any],
@@ -1334,8 +1389,9 @@ final class SurfAceRuntime {
         let takeover = payload["takeover"] as? Bool ?? false
         let resumePayload = payload["resume"] as? [String: Any]
         let resumeSessionId = resumePayload?["sessionId"] as? String
+        let restoreAttemptId = payload["restoreAttemptId"] as? String
         surfAceGatewayLog(
-            "event=pair_request_received \(surfAceDiagnosticFields([("connection_uuid", connectionUUID), ("provider_id", payload["providerId"] as? String), ("resume_session_id", resumeSessionId), ("surface_id", payload["surfaceId"] as? String), ("takeover", takeover)]))"
+            "event=pair_request_received \(surfAceDiagnosticFields([("connection_uuid", connectionUUID), ("provider_id", payload["providerId"] as? String), ("restore_attempt_id", restoreAttemptId), ("resume_session_id", resumeSessionId), ("surface_id", payload["surfaceId"] as? String), ("takeover", takeover)]))"
         )
         guard let providerId = payload["providerId"] as? String,
               let connectionId = payload["connectionId"] as? String,
@@ -1506,7 +1562,7 @@ final class SurfAceRuntime {
         )
 
         surfAceGatewayLog(
-            "event=pair_response_ready \(surfAceDiagnosticFields([("pane_count", surface.panes.count), ("resumed", resumed), ("session_id", sessionId), ("surface_id", surfaceId)]))"
+            "event=pair_response_ready \(surfAceDiagnosticFields([("content_count", surface.panes.filter { $0.currentEntry.contentId != nil }.count), ("pane_count", surface.panes.count), ("restore_attempt_id", restoreAttemptId), ("resumed", resumed), ("session_id", sessionId), ("surface_id", surfaceId)]))"
         )
         let response: [String: Any] = [
             "v": 1,
@@ -1805,6 +1861,10 @@ final class SurfAceRuntime {
               let revision = payload["revision"] as? Int else {
             return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "paneId and revision are required")
         }
+        let restoreAttemptId = payload["restoreAttemptId"] as? String
+        surfAceGatewayLog(
+            "event=incoming_content_apply \(surfAceDiagnosticFields([("clear", payload["clear"] as? Bool), ("content_id", payload["contentId"] as? String), ("pane_id", paneId), ("restore_attempt_id", restoreAttemptId), ("revision", revision), ("surface_id", surfaceId)]))"
+        )
 
         if let clear = payload["clear"] as? Bool, clear {
             guard revision == pane.currentEntry.revision + 1 else {
@@ -1829,6 +1889,9 @@ final class SurfAceRuntime {
             pane.lastPage = nil
             pane.pendingSnapshotHintReason = nil
             pane.bridge?.render(entry: nil, restoreViewport: nil)
+            surfAceLifecycleLog(
+                "event=render_transition_empty \(surfAceDiagnosticFields([("actor", "content.apply.clear"), ("pane_id", paneId), ("restore_attempt_id", restoreAttemptId), ("revision", revision), ("surface_id", surfaceId)]))"
+            )
             restorePaneDrawing(surfaceId: surfaceId, pane: pane)
             var response = mutationAck(id: id, op: "content.apply", paneId: paneId, entry: pane.currentEntry)
             if var payloadObject = response["payload"] as? [String: Any],
@@ -2434,6 +2497,10 @@ final class SurfAceRuntime {
               let revision = payload["revision"] as? Int else {
             return makeErrorResponse(op: "content.clear", id: id, code: "invalid_payload", message: "paneId and revision are required")
         }
+        let restoreAttemptId = payload["restoreAttemptId"] as? String
+        surfAceGatewayLog(
+            "event=incoming_content_clear \(surfAceDiagnosticFields([("pane_id", paneId), ("restore_attempt_id", restoreAttemptId), ("revision", revision), ("surface_id", surfaceId)]))"
+        )
 
         guard revision == pane.currentEntry.revision + 1 else {
             return staleRevisionResponse(op: "content.clear", id: id, expectedRevision: pane.currentEntry.revision + 1)
@@ -2455,6 +2522,9 @@ final class SurfAceRuntime {
         pane.firstPendingStrokeAt = nil
         pane.lastPendingStrokeAt = nil
         pane.bridge?.render(entry: nil, restoreViewport: nil)
+        surfAceLifecycleLog(
+            "event=render_transition_empty \(surfAceDiagnosticFields([("actor", "content.clear"), ("pane_id", paneId), ("restore_attempt_id", restoreAttemptId), ("revision", revision), ("surface_id", surfaceId)]))"
+        )
         pane.bridge?.clearDrawings()
 
         return mutationAck(id: id, op: "content.clear", paneId: paneId, entry: pane.currentEntry)

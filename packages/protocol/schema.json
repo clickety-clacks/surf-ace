@@ -1219,6 +1219,10 @@
             "protocolVersion": {
               "const": 1
             },
+            "restoreAttemptId": {
+              "type": "string",
+              "minLength": 1
+            },
             "takeover": {
               "type": "boolean",
               "description": "Explicit ownership transfer request. Normal reconnect/resume by the current owner MUST NOT rely on takeover."
