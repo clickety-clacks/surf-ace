@@ -372,6 +372,7 @@ export type PairRequest = RequestBase<"pair.request"> & {
     initialPaneLabel: number;
     providerName: string;
     protocolVersion: 1;
+    restoreAttemptId?: string;
     takeover?: boolean;
     eventProfile?: EventProfile;
     drawingFlushConfig?: DrawingFlushConfig;
@@ -601,11 +602,13 @@ export type SurfaceWindowCloseRequest = RequestBase<"surface.window.close"> & {
 export type ContentApplyRequest = RequestBase<"content.apply"> & {
   payload:
     | (ContentSetPayload & {
+        restoreAttemptId?: string;
         topologyRevision?: TopologyRevision;
       })
     | {
         clear: true;
         paneId: PaneId;
+        restoreAttemptId?: string;
         revision: Revision;
         topologyRevision?: TopologyRevision;
       };
