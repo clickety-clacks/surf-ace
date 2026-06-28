@@ -677,6 +677,7 @@ final class SurfAceRuntime {
             message: nil
         )
         restorePaneDrawing(surfaceId: surfaceId, pane: pane)
+        bridge.setContentScale(pane.contentScale)
         bridge.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
         if pane.currentEntry.contentType != .html,
            let reason = pane.pendingSnapshotHintReason {
@@ -777,6 +778,34 @@ final class SurfAceRuntime {
         if case .browserURL = pane.currentEntry.payload {
             pane.bridge?.reloadBrowserURL()
         }
+    }
+
+    func scaleActivePaneContent(_ action: SurfAceContentScaleAction) {
+        scaleActivePaneContent(surfaceId: nil, action: action)
+    }
+
+    func scaleActivePaneContent(surfaceId: String?, action: SurfAceContentScaleAction) {
+        let surface = if let surfaceId {
+            surfaceById[surfaceId]
+        } else {
+            surfaces.first
+        }
+        guard let surface,
+              let activePaneId = surface.activeKeyboardPaneId else {
+            return
+        }
+        scalePaneContent(surfaceId: surface.surfaceId, paneId: activePaneId, action: action)
+    }
+
+    func scalePaneContent(surfaceId: String, paneId: Int, action: SurfAceContentScaleAction) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
+              surfAcePaneContentCanScale(pane.currentEntry),
+              !pane.annotationMode else {
+            return
+        }
+        activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
+        pane.contentScale = surfAceNextContentScale(pane.contentScale, action: action)
+        pane.bridge?.setContentScale(pane.contentScale)
     }
 
     func activateKeyboardPane(surfaceId: String, paneId: Int) {

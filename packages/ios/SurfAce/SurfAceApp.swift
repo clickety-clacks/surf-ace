@@ -1,6 +1,17 @@
 import SwiftUI
 import UIKit
 
+struct SurfAceCommandTargetSurfaceIDKey: FocusedValueKey {
+    typealias Value = String
+}
+
+extension FocusedValues {
+    var surfAceCommandTargetSurfaceId: String? {
+        get { self[SurfAceCommandTargetSurfaceIDKey.self] }
+        set { self[SurfAceCommandTargetSurfaceIDKey.self] = newValue }
+    }
+}
+
 enum SurfAceSceneID {
     static let mainWindow = "surf-ace-main-window"
 }
@@ -78,6 +89,8 @@ enum SurfAceSceneActivation {
 
 private struct SurfAceWindowCommands: Commands {
     @Environment(\.openWindow) private var openWindow
+    @FocusedValue(\.surfAceCommandTargetSurfaceId) private var commandSurfaceId
+    let runtime: SurfAceRuntime
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
@@ -85,6 +98,21 @@ private struct SurfAceWindowCommands: Commands {
                 SurfAceSceneActivation.requestNewWindow(source: "swiftui_command", openWindow: openWindow)
             }
             .keyboardShortcut("n")
+
+            Button("Increase Content Size") {
+                runtime.scaleActivePaneContent(surfaceId: commandSurfaceId, action: .increase)
+            }
+            .keyboardShortcut("=", modifiers: .command)
+
+            Button("Decrease Content Size") {
+                runtime.scaleActivePaneContent(surfaceId: commandSurfaceId, action: .decrease)
+            }
+            .keyboardShortcut("-", modifiers: .command)
+
+            Button("Reset Content Size") {
+                runtime.scaleActivePaneContent(surfaceId: commandSurfaceId, action: .reset)
+            }
+            .keyboardShortcut("0", modifiers: .command)
         }
     }
 }
@@ -105,7 +133,7 @@ struct SurfAceApp: App {
         }
         .surfAceSpatialWindowSizing()
         .commands {
-            SurfAceWindowCommands()
+            SurfAceWindowCommands(runtime: runtime)
         }
     }
 }
