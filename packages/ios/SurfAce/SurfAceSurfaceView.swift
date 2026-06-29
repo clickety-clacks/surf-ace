@@ -1021,17 +1021,12 @@ private struct SurfAcePaneControls: View {
                 SurfAceWarningIndicator()
             }
 
-            if hasNavigationContext && (ownerName != nil || pane.canGoBack || pane.canGoForward || pane.canReload) {
-                HStack(spacing: 6) {
-                    if pane.canReload {
-                        Button {
-                            runtime.reloadPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(SurfAceGlassButtonStyle())
-                    }
+            if pane.browserControlsAvailable {
+                SurfAceBrowserControlsPill(runtime: runtime, surface: surface, pane: pane)
+            }
 
+            if hasNavigationContext && (ownerName != nil || pane.canGoBack || pane.canGoForward) {
+                HStack(spacing: 6) {
                     if pane.canGoBack {
                         Button {
                             runtime.navigateHistory(
@@ -1105,7 +1100,45 @@ private struct SurfAcePaneControls: View {
     }
 
     private var hasNavigationContext: Bool {
-        pane.currentEntry.contentId != nil || pane.currentEntry.payload != nil || pane.canGoBack || pane.canGoForward || pane.canReload
+        pane.currentEntry.contentId != nil || pane.currentEntry.payload != nil || pane.canGoBack || pane.canGoForward
+    }
+}
+
+private struct SurfAceBrowserControlsPill: View {
+    let runtime: SurfAceRuntime
+    @Bindable var surface: SurfAceSurfaceModel
+    @Bindable var pane: SurfAcePaneModel
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                runtime.browserGoBack(surfaceId: surface.surfaceId, paneId: pane.paneId)
+            } label: {
+                Image(systemName: "chevron.backward")
+            }
+            .buttonStyle(SurfAceGlassButtonStyle())
+            .disabled(!pane.canBrowserGoBack)
+            .opacity(pane.canBrowserGoBack ? 1 : 0.4)
+
+            Button {
+                runtime.browserGoForward(surfaceId: surface.surfaceId, paneId: pane.paneId)
+            } label: {
+                Image(systemName: "chevron.forward")
+            }
+            .buttonStyle(SurfAceGlassButtonStyle())
+            .disabled(!pane.canBrowserGoForward)
+            .opacity(pane.canBrowserGoForward ? 1 : 0.4)
+
+            Button {
+                runtime.reloadPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(SurfAceGlassButtonStyle())
+        }
+        .surfAceControlPillChrome()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Browser controls")
     }
 }
 
@@ -1336,6 +1369,17 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
                     drawingData: drawingData
                 )
             }
+            hostView.setBrowserNavigationStateChangeHandler { [weak self] canGoBack, canGoForward in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.runtime.handleBrowserNavigationStateChanged(
+                        surfaceId: self.surfaceId,
+                        paneId: self.paneId,
+                        canGoBack: canGoBack,
+                        canGoForward: canGoForward
+                    )
+                }
+            }
         }
 
         func updateBinding(surfaceId: String, paneId: Int, hostView: SurfAceSurfaceHostView) {
@@ -1517,6 +1561,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     var onNavigationEvent: ((String, Int64) -> Void)?
     var onPDFPageChanged: ((Int, Int, String?) -> Void)?
     var onStrokeBatch: (([SurfAceStroke], Data) -> Void)?
+    var onBrowserNavigationStateChanged: ((_ canGoBack: Bool, _ canGoForward: Bool) -> Void)?
 
     private struct TrackedStroke {
         let strokeId: String
@@ -1554,6 +1599,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     )
     private var lastVisibleText = ""
     private var lastSelection: SurfAceSelection?
+    private var browserNavigationObservers: [NSKeyValueObservation] = []
+    private var lastReportedBrowserCanGoBack = false
+    private var lastReportedBrowserCanGoForward = false
 
     override init(frame: CGRect) {
         let config = WKWebViewConfiguration()
@@ -1568,6 +1616,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         setupScripts()
         setupPDFTracking()
         setupInteractionTracking()
+        setupBrowserNavigationObservers()
         render(entry: nil, restoreViewport: nil)
     }
 
@@ -1582,6 +1631,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        browserNavigationObservers.forEach { $0.invalidate() }
     }
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
@@ -1591,6 +1641,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             url: pendingBrowserNavigationURL
         )
         currentEntry = entry
+        reportBrowserNavigationStateIfNeeded()
         pendingViewportRestore = nil
         let html: String
         let baseURL: URL?
@@ -1682,6 +1733,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         )
         return await withCheckedContinuation { continuation in
             currentEntry = entry
+            reportBrowserNavigationStateIfNeeded()
             pendingViewportRestore = nil
             pendingBrowserNavigation = continuation
             pendingBrowserNavigationURL = entry.url
@@ -1709,6 +1761,49 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     func reloadBrowserURL() {
         webView.reload()
+    }
+
+    func browserGoBack() {
+        guard webView.canGoBack else { return }
+        webView.goBack()
+    }
+
+    func browserGoForward() {
+        guard webView.canGoForward else { return }
+        webView.goForward()
+    }
+
+    func setBrowserNavigationStateChangeHandler(_ handler: ((_ canGoBack: Bool, _ canGoForward: Bool) -> Void)?) {
+        onBrowserNavigationStateChanged = handler
+        reportBrowserNavigationStateIfNeeded(force: true)
+    }
+
+    private func setupBrowserNavigationObservers() {
+        browserNavigationObservers.forEach { $0.invalidate() }
+        browserNavigationObservers = [
+            webView.observe(\.canGoBack, options: [.new]) { [weak self] _, _ in
+                Task { @MainActor in self?.reportBrowserNavigationStateIfNeeded() }
+            },
+            webView.observe(\.canGoForward, options: [.new]) { [weak self] _, _ in
+                Task { @MainActor in self?.reportBrowserNavigationStateIfNeeded() }
+            },
+        ]
+        reportBrowserNavigationStateIfNeeded(force: true)
+    }
+
+    private func reportBrowserNavigationStateIfNeeded(force: Bool = false) {
+        let isBrowserURL: Bool = {
+            guard case .browserURL = currentEntry?.payload else { return false }
+            return true
+        }()
+        let canGoBack = isBrowserURL && webView.canGoBack
+        let canGoForward = isBrowserURL && webView.canGoForward
+        guard force || canGoBack != lastReportedBrowserCanGoBack || canGoForward != lastReportedBrowserCanGoForward else {
+            return
+        }
+        lastReportedBrowserCanGoBack = canGoBack
+        lastReportedBrowserCanGoForward = canGoForward
+        onBrowserNavigationStateChanged?(canGoBack, canGoForward)
     }
 
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool) {
@@ -2055,6 +2150,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             await self.waitForWebContentPaint()
             self.finishPendingHTMLRender()
             self.finishPendingBrowserNavigation(status: "applied", errorMessage: nil, navigation: navigation, url: self.pendingBrowserNavigationURL)
+            self.reportBrowserNavigationStateIfNeeded()
         }
     }
 

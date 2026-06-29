@@ -53,9 +53,13 @@ type CanvasContent = "" | { color?: string; grid?: boolean };
 type BrowserUrlContent = { url: string };
 type ContentReloadSource = { kind: "file"; path: string };
 type BrowserUrlWebViewElement = HTMLElement & {
+  canGoBack?: () => boolean;
+  canGoForward?: () => boolean;
   executeJavaScript?: (code: string) => Promise<unknown>;
   getTitle?: () => string;
   getURL?: () => string;
+  goBack?: () => void;
+  goForward?: () => void;
   getWebContentsId?: () => number;
   reload?: () => void;
   src: string;
@@ -269,6 +273,8 @@ const CONTENT_SCALE_MAX = 2.25;
 const CONTENT_SCALE_MIN = 0.5;
 const CONTENT_SCALE_STEP = 0.1;
 type SurfAceOverlayKind =
+  | "browser-back"
+  | "browser-forward"
   | "annotation-control"
   | "history-back"
   | "history-forward"
@@ -463,6 +469,9 @@ function overlayMetadataForMarker(
   switch (marker) {
     case "annotation-control":
       return { captures: OVERLAY_CAPTURES, kind: "annotation_control", suffix: marker, zIndex: 20 };
+    case "browser-back":
+    case "browser-forward":
+      return { captures: OVERLAY_CAPTURES, kind: "other", suffix: marker, zIndex: 20 };
     case "history-back":
       return { captures: OVERLAY_CAPTURES, kind: "history_back", suffix: marker, zIndex: 20 };
     case "history-forward":
@@ -679,7 +688,7 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   return button;
 }
 
-function createLucideIcon(name: "pen-line" | "rotate-cw" | "x"): SVGSVGElement {
+function createLucideIcon(name: "chevron-left" | "chevron-right" | "pen-line" | "rotate-cw" | "x"): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("class", `lucide lucide-${name}`);
@@ -692,6 +701,12 @@ function createLucideIcon(name: "pen-line" | "rotate-cw" | "x"): SVGSVGElement {
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("width", "22");
   const pathsByIcon: Record<typeof name, string[]> = {
+    "chevron-left": [
+      "m15 18-6-6 6-6",
+    ],
+    "chevron-right": [
+      "m9 18 6-6-6-6",
+    ],
     "pen-line": [
       "M12 20h9",
       "M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z",
@@ -713,7 +728,7 @@ function createLucideIcon(name: "pen-line" | "rotate-cw" | "x"): SVGSVGElement {
   return svg;
 }
 
-function createIconButton(iconName: "pen-line" | "rotate-cw" | "x", accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
+function createIconButton(iconName: "chevron-left" | "chevron-right" | "pen-line" | "rotate-cw" | "x", accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
   const button = document.createElement("button");
   button.className = `control-button icon-button ${className}`;
   button.disabled = disabled;
@@ -721,6 +736,41 @@ function createIconButton(iconName: "pen-line" | "rotate-cw" | "x", accessibleLa
   button.title = accessibleLabel;
   button.appendChild(createLucideIcon(iconName));
   return button;
+}
+
+function browserUrlCanGoBack(webview: BrowserUrlWebViewElement | null): boolean {
+  try {
+    return Boolean(webview?.canGoBack?.());
+  } catch {
+    return false;
+  }
+}
+
+function browserUrlCanGoForward(webview: BrowserUrlWebViewElement | null): boolean {
+  try {
+    return Boolean(webview?.canGoForward?.());
+  } catch {
+    return false;
+  }
+}
+
+function currentBrowserUrlWebView(view: PaneView): BrowserUrlWebViewElement | null {
+  const frame = currentPaneFrameElement(view);
+  return frame?.matches("webview.content-browser-url-frame") ? frame as BrowserUrlWebViewElement : null;
+}
+
+function syncBrowserControlButtons(view: PaneView): void {
+  const webview = currentBrowserUrlWebView(view);
+  const canGoBack = browserUrlCanGoBack(webview);
+  const canGoForward = browserUrlCanGoForward(webview);
+  const back = view.controlsEl.querySelector<HTMLButtonElement>(".browser-back");
+  const forward = view.controlsEl.querySelector<HTMLButtonElement>(".browser-forward");
+  if (back) {
+    back.disabled = !canGoBack;
+  }
+  if (forward) {
+    forward.disabled = !canGoForward;
+  }
 }
 
 function duplicateRepushCulpritLines(pane: RendererPaneState): string[] {
@@ -1045,19 +1095,38 @@ function setToast(view: PaneView, message: string | null): void {
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
   const hasPushedContent = pane.content.contentId !== null;
+  if (isBrowserUrlPane(pane) && !pane.showDone) {
+    const browserPill = document.createElement("div");
+    browserPill.className = "control-pill browser-navigation-pill";
+    const browserBack = surfAceOverlay(createIconButton("chevron-left", "Browser Back", "browser-back", true), "browser-back");
+    browserBack.addEventListener("click", () => {
+      rememberPaneContext(pane.paneId);
+      currentBrowserUrlWebView(view)?.goBack?.();
+      window.setTimeout(() => syncBrowserControlButtons(view), 0);
+    });
+    const browserForward = surfAceOverlay(createIconButton("chevron-right", "Browser Forward", "browser-forward", true), "browser-forward");
+    browserForward.addEventListener("click", () => {
+      rememberPaneContext(pane.paneId);
+      currentBrowserUrlWebView(view)?.goForward?.();
+      window.setTimeout(() => syncBrowserControlButtons(view), 0);
+    });
+    const browserReload = surfAceOverlay(createIconButton("rotate-cw", "Browser Reload", "browser-reload"), "reload");
+    browserReload.addEventListener("click", () => {
+      rememberPaneContext(pane.paneId);
+      currentBrowserUrlWebView(view)?.reload?.();
+    });
+    browserPill.append(browserBack, browserForward, browserReload);
+    view.controlsEl.appendChild(browserPill);
+    syncBrowserControlButtons(view);
+  }
   if (hasPushedContent || pane.canGoBack || pane.canGoForward || pane.content.reloadable) {
     const navigationPill = document.createElement("div");
     navigationPill.className = "control-pill navigation-pill";
-    if (pane.content.reloadable && !pane.showDone) {
+    if (pane.content.reloadable && !pane.showDone && !isBrowserUrlPane(pane)) {
       const reload = surfAceOverlay(createIconButton("rotate-cw", "Reload", "reload"), "reload");
       reload.addEventListener("click", () => {
         rememberPaneContext(pane.paneId);
-        if (isBrowserUrlPane(pane)) {
-          const browserView = currentPaneFrameElement(view) as BrowserUrlWebViewElement | null;
-          browserView?.reload?.();
-        } else {
-          window.surfAce.command({ paneId: pane.paneId, type: "reload" });
-        }
+        window.surfAce.command({ paneId: pane.paneId, type: "reload" });
       });
       navigationPill.appendChild(reload);
     }
@@ -2020,6 +2089,7 @@ function renderBrowserContent(
     }, 0);
   };
   const verifyAndReportNavigation = (reason: BrowserUrlDiagnosticReason) => {
+    syncBrowserControlButtons(view);
     void resetBrowserUrlGuestScroll(browserView).finally(() => {
       const eventReason = reason === "dom-ready:guest-viewport" ? "dom-ready" : "did-finish-load";
       reportBrowserUrlDiagnostics(view, browserView, eventReason);
@@ -2058,6 +2128,7 @@ function renderBrowserContent(
   browserView.addEventListener(
     "did-start-loading",
     () => {
+      syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_did_start_loading", {
         currentUrl: browserUrlElementCurrentUrl(browserView),
         paneId: pane.paneId,
@@ -2098,6 +2169,7 @@ function renderBrowserContent(
   browserView.addEventListener(
     "dom-ready",
     () => {
+      syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_dom_ready", {
         currentUrl: browserUrlElementCurrentUrl(browserView),
         paneId: pane.paneId,
@@ -2112,6 +2184,7 @@ function renderBrowserContent(
   browserView.addEventListener(
     "did-finish-load",
     () => {
+      syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_did_finish_load", {
         currentUrl: browserUrlElementCurrentUrl(browserView),
         paneId: pane.paneId,
@@ -2126,6 +2199,9 @@ function renderBrowserContent(
   );
   browserView.addEventListener("will-navigate", blockStaticHtmlNavigation);
   browserView.addEventListener("will-frame-navigate", blockStaticHtmlNavigation);
+  browserView.addEventListener("did-navigate", () => syncBrowserControlButtons(view));
+  browserView.addEventListener("did-navigate-in-page", () => syncBrowserControlButtons(view));
+  browserView.addEventListener("did-stop-loading", () => syncBrowserControlButtons(view));
   browserView.addEventListener(
     "did-fail-load",
     (event) => {
