@@ -808,6 +808,41 @@ final class SurfAceRuntime {
         pane.bridge?.setContentScale(pane.contentScale)
     }
 
+    func browserGoBack(surfaceId: String, paneId: Int) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return
+        }
+        guard case .browserURL = pane.currentEntry.payload else { return }
+        pane.bridge?.browserGoBack()
+    }
+
+    func browserGoForward(surfaceId: String, paneId: Int) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
+        guard !pane.annotationMode else {
+            pane.toast = "Finish annotation (Done) to navigate"
+            return
+        }
+        guard case .browserURL = pane.currentEntry.payload else { return }
+        pane.bridge?.browserGoForward()
+    }
+
+    func handleBrowserNavigationStateChanged(surfaceId: String, paneId: Int, canGoBack: Bool, canGoForward: Bool) {
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        guard case .browserURL = pane.currentEntry.payload else {
+            if pane.canBrowserGoBack || pane.canBrowserGoForward {
+                pane.canBrowserGoBack = false
+                pane.canBrowserGoForward = false
+            }
+            return
+        }
+        pane.canBrowserGoBack = canGoBack
+        pane.canBrowserGoForward = canGoForward
+    }
+
     func activateKeyboardPane(surfaceId: String, paneId: Int) {
         guard let surface = surfaceById[surfaceId],
               surface.panesById[paneId] != nil else { return }

@@ -633,7 +633,9 @@ func surfAcePaneIsPristineProviderBootstrap(_ pane: SurfAcePaneModel) -> Bool {
         pane.firstPendingStrokeAt == nil &&
         pane.lastPendingStrokeAt == nil &&
         pane.pendingAnnotationCommit == false &&
-        pane.currentTarget == nil
+        pane.currentTarget == nil &&
+        pane.canBrowserGoBack == false &&
+        pane.canBrowserGoForward == false
 }
 
 struct SurfAcePaneTargetState: Codable, Equatable {
@@ -984,11 +986,17 @@ protocol SurfAcePaneBridging: AnyObject {
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult
     func removeDrawingStrokeIDs(_ strokeIDs: [String])
     func clearDrawings()
+    func browserGoBack()
+    func browserGoForward()
+    func setBrowserNavigationStateChangeHandler(_ handler: ((_ canGoBack: Bool, _ canGoForward: Bool) -> Void)?)
 }
 
 extension SurfAcePaneBridging {
     func reloadBrowserURL() {}
     func setContentScale(_ scale: CGFloat) {}
+    func browserGoBack() {}
+    func browserGoForward() {}
+    func setBrowserNavigationStateChangeHandler(_ handler: ((_ canGoBack: Bool, _ canGoForward: Bool) -> Void)?) {}
 }
 
 struct SurfAceBrowserNavigationResult {
@@ -1136,6 +1144,9 @@ final class SurfAcePaneModel {
         }
         return false
     }
+    var browserControlsAvailable: Bool { canReload }
+    var canBrowserGoBack: Bool = false
+    var canBrowserGoForward: Bool = false
     var activeStrokes: [SurfAceStroke] { currentEntry.strokesById.values.sorted { $0.strokeId < $1.strokeId } }
 
     func currentOwnerDisplayName() -> String? {
