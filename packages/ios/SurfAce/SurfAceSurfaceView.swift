@@ -1631,7 +1631,6 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        browserNavigationObservers.forEach { $0.invalidate() }
     }
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
