@@ -249,6 +249,13 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   z-index: 22;
 }
 
+.pane-label[hidden],
+.pane-label__window[hidden],
+.pane-label__disconnected[hidden],
+.pane-label__number[hidden] {
+  display: none;
+}
+
 .pane-label__window {
   display: inline-flex;
   align-items: center;

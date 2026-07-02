@@ -25,6 +25,7 @@ async function preloadSource(): Promise<string> {
 
 test("disconnected pane chrome replaces window and pane IDs with the wifi-off glyph", async () => {
   const source = await rendererSource();
+  const styles = await rendererStyles();
   const updateIndex = source.indexOf("function updatePane");
   const updateSource = source.slice(updateIndex, source.indexOf("function layoutWeight", updateIndex));
 
@@ -35,6 +36,10 @@ test("disconnected pane chrome replaces window and pane IDs with the wifi-off gl
   assert.match(updateSource, /label\.hidden = disconnected/);
   assert.match(updateSource, /labelWrap\.hidden = disconnected \? false : !visibleAddress/);
   assert.match(updateSource, /disconnected\s*\? "Surf Ace disconnected"/);
+  assert.match(
+    styles,
+    /\.pane-label\[hidden\],\s*\.pane-label__window\[hidden\],\s*\.pane-label__disconnected\[hidden\],\s*\.pane-label__number\[hidden\]\s*\{\s*display:\s*none;/,
+  );
 });
 
 test("browser_url webviews defer navigation until the pane has a measured frame", async () => {
