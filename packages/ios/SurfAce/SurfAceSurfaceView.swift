@@ -944,6 +944,15 @@ private struct SurfAcePaneIdentityOverlay: View {
                     .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
             }
 
+            if connectionState == .disconnected {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio, weight: .regular))
+                    .foregroundStyle(connectionColor.opacity(0.35))
+                    .symbolRenderingMode(.monochrome)
+                    .accessibilityHidden(true)
+                    .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
+            }
+
             SurfAcePaneNumberText(paneLabel: displayId.uppercased(), fontSize: fontSize)
                 .lineLimit(1)
                 .minimumScaleFactor(0.35)
