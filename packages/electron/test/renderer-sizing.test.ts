@@ -22,6 +22,21 @@ async function preloadSource(): Promise<string> {
   return fs.readFile(new URL("../../src/preload.ts", import.meta.url), "utf8");
 }
 
+
+test("disconnected pane chrome replaces window and pane IDs with the wifi-off glyph", async () => {
+  const source = await rendererSource();
+  const updateIndex = source.indexOf("function updatePane");
+  const updateSource = source.slice(updateIndex, source.indexOf("function layoutWeight", updateIndex));
+
+  assert.ok(updateIndex > -1);
+  assert.match(updateSource, /const disconnected = latestState\?\.connectionBar === "disconnected"/);
+  assert.match(updateSource, /windowLabel\.hidden = disconnected \|\| !visibleWindowLabel/);
+  assert.match(updateSource, /disconnectedGlyph\.hidden = !disconnected/);
+  assert.match(updateSource, /label\.hidden = disconnected/);
+  assert.match(updateSource, /labelWrap\.hidden = disconnected \? false : !visibleAddress/);
+  assert.match(updateSource, /disconnected\s*\? "Surf Ace disconnected"/);
+});
+
 test("browser_url webviews defer navigation until the pane has a measured frame", async () => {
   const source = await rendererSource();
   const deferIndex = source.indexOf("function deferUntilPaneFrameReady");
@@ -511,10 +526,11 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.match(source, /connectionBar: state\.connectionBar/);
   assert.doesNotMatch(source, /const showProviderIdentity = latestState\?\.connectionBar === "connected"/);
   assert.match(source, /const visibleAddress = pane\.displayId \|\| pane\.visibleAddress \|\| pane\.label/);
-  assert.match(source, /windowLabel\.hidden = !visibleWindowLabel/);
+  assert.match(source, /windowLabel\.hidden = disconnected \|\| !visibleWindowLabel/);
+  assert.match(source, /label\.hidden = disconnected/);
   assert.doesNotMatch(source, /windowLabel\.hidden = true/);
   assert.match(source, /createLucideIcon\("wifi-off"\)/);
-  assert.match(source, /disconnectedGlyph\.hidden = latestState\?\.connectionBar !== "disconnected"/);
+  assert.match(source, /disconnectedGlyph\.hidden = !disconnected/);
   assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);
   assert.match(source, /` window \$\{visibleWindowLabel\}`/);
   assert.match(source, /`Surf Ace\$\{visibleWindowLabel/);

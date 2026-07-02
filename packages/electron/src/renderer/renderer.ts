@@ -2372,19 +2372,25 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
   const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
   const visibleWindowLabel = latestState?.windowLabel ?? "";
+  const disconnected = latestState?.connectionBar === "disconnected";
   windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
-  windowLabel.hidden = !visibleWindowLabel;
-  disconnectedGlyph.hidden = latestState?.connectionBar !== "disconnected";
+  windowLabel.hidden = disconnected || !visibleWindowLabel;
+  disconnectedGlyph.hidden = !disconnected;
   label.textContent = visibleAddress.toUpperCase();
-  labelWrap.hidden = !visibleAddress;
-  labelWrap.title = [visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]
-    .filter(Boolean)
-    .join(" ");
+  label.hidden = disconnected;
+  labelWrap.hidden = disconnected ? false : !visibleAddress;
+  labelWrap.title = disconnected
+    ? "Surf Ace disconnected"
+    : [visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]
+      .filter(Boolean)
+      .join(" ");
   labelWrap.setAttribute(
     "aria-label",
-    visibleAddress
-      ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}`
-      : "",
+    disconnected
+      ? "Surf Ace disconnected"
+      : visibleAddress
+        ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}`
+        : "",
   );
   fitPaneLabelToVisibleBounds(view);
   buildControls(view, pane);

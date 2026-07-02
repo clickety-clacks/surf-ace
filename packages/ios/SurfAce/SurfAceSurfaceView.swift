@@ -916,6 +916,10 @@ func surfAcePaneChromeIdentityParts(surface: SurfAceSurfaceModel, pane: SurfAceP
     )
 }
 
+func surfAcePaneChromeShowsIdentityLabels(connectionState: SurfAceConnectionBarState) -> Bool {
+    connectionState != .disconnected
+}
+
 private struct SurfAcePaneIdentityOverlay: View {
     let displayId: String
     let windowLabel: String
@@ -928,35 +932,35 @@ private struct SurfAcePaneIdentityOverlay: View {
 
     var body: some View {
         HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
-            if !windowLabel.isEmpty {
-                Text(windowLabel.uppercased())
-                    .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
-                    .foregroundStyle(connectionColor.opacity(0.35))
-                    .lineLimit(1)
-                    .tracking(fontSize * SurfAceRajdhaniMetrics.windowTextRatio * SurfAceRajdhaniMetrics.windowTrackingRatio)
-                    .padding(.horizontal, fontSize * SurfAceRajdhaniMetrics.windowBoxPaddingRatio)
-                    .frame(minWidth: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
-                    .frame(height: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: fontSize * 0.04, style: .continuous)
-                            .strokeBorder(connectionColor.opacity(0.35), lineWidth: max(1, fontSize * 0.008))
-                    }
-                    .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
-            }
+            if surfAcePaneChromeShowsIdentityLabels(connectionState: connectionState) {
+                if !windowLabel.isEmpty {
+                    Text(windowLabel.uppercased())
+                        .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
+                        .foregroundStyle(connectionColor.opacity(0.35))
+                        .lineLimit(1)
+                        .tracking(fontSize * SurfAceRajdhaniMetrics.windowTextRatio * SurfAceRajdhaniMetrics.windowTrackingRatio)
+                        .padding(.horizontal, fontSize * SurfAceRajdhaniMetrics.windowBoxPaddingRatio)
+                        .frame(minWidth: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
+                        .frame(height: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: fontSize * 0.04, style: .continuous)
+                                .strokeBorder(connectionColor.opacity(0.35), lineWidth: max(1, fontSize * 0.008))
+                        }
+                        .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
+                }
 
-            if connectionState == .disconnected {
+                SurfAcePaneNumberText(paneLabel: displayId.uppercased(), fontSize: fontSize)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.35)
+                    .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
+            } else {
                 Image(systemName: "wifi.slash")
-                    .font(.system(size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio, weight: .regular))
+                    .font(.system(size: fontSize * 0.46, weight: .regular))
                     .foregroundStyle(connectionColor.opacity(0.35))
                     .symbolRenderingMode(.monochrome)
                     .accessibilityHidden(true)
                     .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
             }
-
-            SurfAcePaneNumberText(paneLabel: displayId.uppercased(), fontSize: fontSize)
-                .lineLimit(1)
-                .minimumScaleFactor(0.35)
-                .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
         }
         .alignmentGuide(.bottom) { dimensions in dimensions[.surfAceIdentityBaseline] }
     }

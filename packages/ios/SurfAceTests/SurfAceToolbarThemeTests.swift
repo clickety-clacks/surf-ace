@@ -18,6 +18,12 @@ final class SurfAceToolbarThemeTests: XCTestCase {
     func testToolbarChromeStrokeUsesDarkThemeContrast() {
         XCTAssertTrue(surfAceToolbarChromeStrokeColor(for: .dark).surfAceIsLightForTesting)
     }
+
+    func testPaneIdentityChromeReplacesLabelsWithDisconnectedGlyph() {
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: .connected))
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: .connecting))
+        XCTAssertFalse(surfAcePaneChromeShowsIdentityLabels(connectionState: .disconnected))
+    }
 }
 
 private extension Color {

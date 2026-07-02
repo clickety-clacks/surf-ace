@@ -269,10 +269,10 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 
 .pane-label__disconnected {
   flex: none;
-  width: calc(var(--pane-number-size) * 0.28);
-  height: calc(var(--pane-number-size) * 0.28);
+  width: calc(var(--pane-number-size) * 0.46);
+  height: calc(var(--pane-number-size) * 0.46);
   color: rgba(239, 68, 68, 0.35);
-  transform: translateY(calc(var(--pane-number-size) * -0.05));
+  transform: translateY(calc(var(--pane-number-size) * -0.02));
 }
 
 .connection-connected .pane-label__window {
