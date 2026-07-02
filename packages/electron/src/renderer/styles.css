@@ -267,6 +267,14 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   text-transform: uppercase;
 }
 
+.pane-label__disconnected {
+  flex: none;
+  width: calc(var(--pane-number-size) * 0.28);
+  height: calc(var(--pane-number-size) * 0.28);
+  color: rgba(239, 68, 68, 0.35);
+  transform: translateY(calc(var(--pane-number-size) * -0.05));
+}
+
 .connection-connected .pane-label__window {
   color: rgba(34, 197, 94, 0.35);
 }

@@ -507,12 +507,14 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.match(source, /ownerName\.textContent = navigationOwnerName/);
   assert.doesNotMatch(source, /pane-label__sender/);
   assert.doesNotMatch(source, /provenanceLabelEl/);
-  assert.match(source, /labelEl\.append\(windowLabelEl, labelTextEl\)/);
+  assert.match(source, /labelEl\.append\(windowLabelEl, disconnectedGlyphEl, labelTextEl\)/);
   assert.match(source, /connectionBar: state\.connectionBar/);
   assert.doesNotMatch(source, /const showProviderIdentity = latestState\?\.connectionBar === "connected"/);
   assert.match(source, /const visibleAddress = pane\.displayId \|\| pane\.visibleAddress \|\| pane\.label/);
   assert.match(source, /windowLabel\.hidden = !visibleWindowLabel/);
   assert.doesNotMatch(source, /windowLabel\.hidden = true/);
+  assert.match(source, /createLucideIcon\("wifi-off"\)/);
+  assert.match(source, /disconnectedGlyph\.hidden = latestState\?\.connectionBar !== "disconnected"/);
   assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);
   assert.match(source, /` window \$\{visibleWindowLabel\}`/);
   assert.match(source, /`Surf Ace\$\{visibleWindowLabel/);
@@ -521,6 +523,7 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.doesNotMatch(source, /visibleAddress:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
 
   assert.doesNotMatch(styles, /\.pane-label__sender\s*\{/);
+  assert.match(styles, /\.pane-label__disconnected\s*\{[\s\S]*color:\s*rgba\(239,\s*68,\s*68,\s*0\.35\);/);
   assert.match(styles, /\.navigation-pill__owner\s*\{[\s\S]*font-size:\s*calc\(13px \+ 3pt\)/);
 });
 

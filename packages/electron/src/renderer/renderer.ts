@@ -688,7 +688,9 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   return button;
 }
 
-function createLucideIcon(name: "chevron-left" | "chevron-right" | "pen-line" | "rotate-cw" | "x"): SVGSVGElement {
+type LucideIconName = "chevron-left" | "chevron-right" | "pen-line" | "rotate-cw" | "wifi-off" | "x";
+
+function createLucideIcon(name: LucideIconName): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("class", `lucide lucide-${name}`);
@@ -715,6 +717,15 @@ function createLucideIcon(name: "chevron-left" | "chevron-right" | "pen-line" | 
       "M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1.06 6.63 2.92",
       "M21 3v6h-6",
     ],
+    "wifi-off": [
+      "M12 20h.01",
+      "M8.5 16.429a5 5 0 0 1 7 0",
+      "M5 12.859a10 10 0 0 1 5.17-2.69",
+      "M19 12.859a10 10 0 0 0-2.007-1.523",
+      "M2 8.82a15 15 0 0 1 4.177-2.643",
+      "M22 8.82a15 15 0 0 0-11.288-3.764",
+      "m2 2 20 20",
+    ],
     x: [
       "M18 6 6 18",
       "m6 6 12 12",
@@ -728,7 +739,7 @@ function createLucideIcon(name: "chevron-left" | "chevron-right" | "pen-line" | 
   return svg;
 }
 
-function createIconButton(iconName: "chevron-left" | "chevron-right" | "pen-line" | "rotate-cw" | "x", accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
+function createIconButton(iconName: LucideIconName, accessibleLabel: string, className: string, disabled = false): HTMLButtonElement {
   const button = document.createElement("button");
   button.className = `control-button icon-button ${className}`;
   button.disabled = disabled;
@@ -1020,9 +1031,12 @@ function ensurePaneView(paneId: number): PaneView {
   surfAceOverlay(labelEl, "pane-label");
   const windowLabelEl = document.createElement("span");
   windowLabelEl.className = "pane-label__window";
+  const disconnectedGlyphEl = createLucideIcon("wifi-off");
+  disconnectedGlyphEl.classList.add("pane-label__disconnected");
+  disconnectedGlyphEl.setAttribute("aria-hidden", "true");
   const labelTextEl = document.createElement("span");
   labelTextEl.className = "pane-label__number";
-  labelEl.append(windowLabelEl, labelTextEl);
+  labelEl.append(windowLabelEl, disconnectedGlyphEl, labelTextEl);
   const focusOverlayEl = document.createElement("div");
   focusOverlayEl.className = "keyboard-focus-overlay";
   for (const edge of ["top", "right", "bottom", "left"]) {
@@ -2354,11 +2368,13 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   view.annotationShield.classList.toggle("enabled", pane.annotationBorderVisible);
   const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement;
   const windowLabel = labelWrap.querySelector(".pane-label__window") as HTMLSpanElement;
+  const disconnectedGlyph = labelWrap.querySelector(".pane-label__disconnected") as SVGSVGElement;
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
   const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
   const visibleWindowLabel = latestState?.windowLabel ?? "";
   windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
   windowLabel.hidden = !visibleWindowLabel;
+  disconnectedGlyph.hidden = latestState?.connectionBar !== "disconnected";
   label.textContent = visibleAddress.toUpperCase();
   labelWrap.hidden = !visibleAddress;
   labelWrap.title = [visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]

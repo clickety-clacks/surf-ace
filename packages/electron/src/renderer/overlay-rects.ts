@@ -1,6 +1,6 @@
 export type OverlayRect = { height: number; width: number; x: number; y: number };
 
-export const PANE_LABEL_VISIBLE_CHILD_SELECTOR = ".pane-label__window, .pane-label__number";
+export const PANE_LABEL_VISIBLE_CHILD_SELECTOR = ".pane-label__window, .pane-label__disconnected, .pane-label__number";
 
 export function elementRect(element: Element): OverlayRect | null {
   const rect = element.getBoundingClientRect();
