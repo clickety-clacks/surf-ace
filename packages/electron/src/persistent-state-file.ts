@@ -3,9 +3,12 @@ import path from "node:path";
 
 import type { PersistentSurfaceState } from "./surface-core.js";
 
+export type PersistentStateRecoverySource = "primary" | "backup" | "temporary";
+
 export type PersistentStateLoadResult =
   | {
       recoveredFromBackup: boolean;
+      recoverySource: PersistentStateRecoverySource;
       state: PersistentSurfaceState;
       writeGuard: false | "unrestorable-primary";
     }
@@ -30,6 +33,39 @@ function temporaryStateFileName(fileName: string): string {
 
 async function readStateFile(filePath: string): Promise<PersistentSurfaceState> {
   return JSON.parse(await fs.readFile(filePath, "utf8")) as PersistentSurfaceState;
+}
+
+function temporaryStateFilePattern(fileName: string): RegExp {
+  return new RegExp(`^${fileName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.\\d+\\.\\d+\\.[0-9a-f]+\\.tmp$`);
+}
+
+async function loadNewestTemporaryState(
+  stateDir: string,
+  fileName: string,
+): Promise<{ filePath: string; state: PersistentSurfaceState } | undefined> {
+  const pattern = temporaryStateFilePattern(fileName);
+  const entries = await fs.readdir(stateDir, { withFileTypes: true });
+  const candidates = entries
+    .filter((entry) => entry.isFile() && pattern.test(entry.name))
+    .map((entry) => path.join(stateDir, entry.name));
+  const newestFirst = await Promise.all(
+    candidates.map(async (filePath) => ({
+      filePath,
+      mtimeMs: (await fs.stat(filePath)).mtimeMs,
+    })),
+  );
+  newestFirst.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  for (const candidate of newestFirst) {
+    try {
+      return {
+        filePath: candidate.filePath,
+        state: await readStateFile(candidate.filePath),
+      };
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 export function shouldGuardUnrestorablePersistentState(
@@ -66,6 +102,7 @@ export async function loadPersistentStateFile(stateDir: string, fileName: string
   try {
     return {
       recoveredFromBackup: false,
+      recoverySource: "primary",
       state: await readStateFile(statePath),
       writeGuard: false,
     };
@@ -76,10 +113,25 @@ export async function loadPersistentStateFile(stateDir: string, fileName: string
       await atomicWriteFile(statePath, JSON.stringify(state, null, 2)).catch(() => {});
       return {
         recoveredFromBackup: true,
+        recoverySource: "backup",
         state,
         writeGuard: false,
       };
     } catch {
+      const temporaryRecovery = await loadNewestTemporaryState(stateDir, fileName).catch(() => undefined);
+      if (temporaryRecovery) {
+        await atomicWriteFile(statePath, JSON.stringify(temporaryRecovery.state, null, 2)).catch(() => {});
+        await atomicWriteFile(
+          path.join(stateDir, backupStateFileName(fileName)),
+          JSON.stringify(temporaryRecovery.state, null, 2),
+        ).catch(() => {});
+        return {
+          recoveredFromBackup: false,
+          recoverySource: "temporary",
+          state: temporaryRecovery.state,
+          writeGuard: false,
+        };
+      }
       if ((primaryError as NodeJS.ErrnoException).code === "ENOENT") {
         return {
           error: primaryError,
@@ -90,7 +142,7 @@ export async function loadPersistentStateFile(stateDir: string, fileName: string
       return {
         error: primaryError,
         state: undefined,
-        writeGuard: "corrupt-primary",
+        writeGuard: false,
       };
     }
   }

@@ -107,14 +107,49 @@ test("persistent state recovers last-good backup when primary JSON is truncated"
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8")), state);
 });
 
-test("persistent state returns corrupt-primary guard when primary is corrupt and no backup exists", async () => {
+test("persistent state recovers newest valid atomic temp snapshot when primary and backup are corrupt", async () => {
+  const stateDir = await temporaryStateDir();
+  const olderState = multiWindowState();
+  const newestState = {
+    ...multiWindowState(),
+    primarySurfaceId: "sf_newest" as never,
+    surfaces: [
+      {
+        ...multiWindowState().surfaces[0],
+        surfaceId: "sf_newest" as never,
+      },
+    ],
+  };
+  await fs.writeFile(path.join(stateDir, STATE_FILE_NAME), "");
+  await fs.writeFile(path.join(stateDir, backupStateFileName(STATE_FILE_NAME)), "{");
+  const olderTempPath = path.join(stateDir, `${STATE_FILE_NAME}.1.1000.abc.tmp`);
+  const newestTempPath = path.join(stateDir, `${STATE_FILE_NAME}.1.2000.def.tmp`);
+  await fs.writeFile(olderTempPath, JSON.stringify(olderState, null, 2));
+  await fs.writeFile(newestTempPath, JSON.stringify(newestState, null, 2));
+  await fs.utimes(olderTempPath, new Date(1_000), new Date(1_000));
+  await fs.utimes(newestTempPath, new Date(2_000), new Date(2_000));
+
+  const result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+
+  assert.equal(result.writeGuard, false);
+  assert.equal(result.recoveredFromBackup, false);
+  assert.equal(result.recoverySource, "temporary");
+  assert.deepEqual(result.state, newestState);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8")), newestState);
+  assert.deepEqual(
+    JSON.parse(await fs.readFile(path.join(stateDir, backupStateFileName(STATE_FILE_NAME)), "utf8")),
+    newestState,
+  );
+});
+
+test("persistent state leaves unrecoverable corrupt primary available for future valid writes", async () => {
   const stateDir = await temporaryStateDir();
   await fs.writeFile(path.join(stateDir, STATE_FILE_NAME), "{");
 
   const result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
 
   assert.equal(result.state, undefined);
-  assert.equal(result.writeGuard, "corrupt-primary");
+  assert.equal(result.writeGuard, false);
   assert.equal(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8"), "{");
 });
 

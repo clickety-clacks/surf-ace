@@ -374,6 +374,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
     clientInfo("state_restore_read_ok", {
       path: statePath,
       recovered_from_backup: result.recoveredFromBackup,
+      recovery_source: result.recoverySource,
       primary_surface_id: result.state.primarySurfaceId,
       surface_count: result.state.surfaces?.length ?? 0,
     });
