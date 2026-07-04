@@ -36,6 +36,11 @@ test("disconnected pane chrome replaces window and pane IDs with the wifi-off gl
   assert.match(updateSource, /label\.hidden = disconnected/);
   assert.match(updateSource, /labelWrap\.hidden = disconnected \? false : !visibleAddress/);
   assert.match(updateSource, /disconnected\s*\? "Surf Ace disconnected"/);
+  assert.match(source, /let latestChromeKey: string \| null = null/);
+  assert.match(source, /function chromeKey\(state: RendererWindowState\): string/);
+  assert.match(source, /const chromeStateChanged = latestChromeKey !== nextChromeKey/);
+  assert.match(source, /chromeStateChanged \|\| paneRenderKey\(previousState, previousPane\) !== paneRenderKey\(state, pane\)/);
+  assert.match(source, /latestChromeKey = nextChromeKey/);
   assert.match(
     styles,
     /\.pane-label\[hidden\],\s*\.pane-label__window\[hidden\],\s*\.pane-label__disconnected\[hidden\],\s*\.pane-label__number\[hidden\]\s*\{\s*display:\s*none;/,

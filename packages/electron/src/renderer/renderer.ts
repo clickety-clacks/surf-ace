@@ -257,6 +257,7 @@ const paneViews = new Map<number, PaneView>();
 let bootstrap: Bootstrap | null = null;
 let latestState: RendererWindowState | null = null;
 let latestLayoutKey: string | null = null;
+let latestChromeKey: string | null = null;
 let overlayRegionsFrame: number | null = null;
 let overlayRegionsTimer: number | null = null;
 let overlayRevision = 0;
@@ -2483,6 +2484,13 @@ function layoutKey(state: RendererWindowState): string {
   return JSON.stringify(state.layout);
 }
 
+function chromeKey(state: RendererWindowState): string {
+  return JSON.stringify({
+    connectionBar: state.connectionBar,
+    windowLabel: state.windowLabel,
+  });
+}
+
 function patchSameLayoutWindow(previousState: RendererWindowState, state: RendererWindowState): boolean {
   const wrapper = appRoot.firstElementChild as HTMLDivElement | null;
   if (!wrapper?.classList.contains("surface-window")) {
@@ -2494,6 +2502,8 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
   }
 
   wrapper.className = `surface-window connection-${state.connectionBar}`;
+  const nextChromeKey = chromeKey(state);
+  const chromeStateChanged = latestChromeKey !== nextChromeKey;
   const previousPanes = new Map(previousState.panes.map((pane) => [pane.paneId, pane]));
   const viewportChanged = JSON.stringify(previousState.viewport) !== JSON.stringify(state.viewport);
   const overlayStateChanged = previousState.geometryRevision !== state.geometryRevision ||
@@ -2507,11 +2517,12 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
     if (!previousPane || !view?.rootEl.isConnected) {
       return false;
     }
-    if (paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane)) {
+    if (chromeStateChanged || paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane)) {
       updatePane(view, pane);
       patchedPaneCount += 1;
     }
   }
+  latestChromeKey = nextChromeKey;
   if (viewportChanged) {
     setAllPaneChromeMetrics();
     refreshDynamicPaneFrames();
@@ -2526,7 +2537,7 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
     for (const pane of state.panes) {
       const previousPane = previousPanes.get(pane.paneId);
       const view = paneViews.get(pane.paneId);
-      if (previousPane && view && paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane)) {
+      if (previousPane && view && (chromeStateChanged || paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane))) {
         reportPaneSnapshot(view);
       }
     }
@@ -2554,6 +2565,7 @@ function renderWindow(state: RendererWindowState): void {
   }
   latestState = state;
   latestLayoutKey = layoutKey(state);
+  latestChromeKey = chromeKey(state);
   const panesById = new Map(state.panes.map((pane) => [pane.paneId, pane]));
   const wrapper = document.createElement("div");
   wrapper.className = `surface-window connection-${state.connectionBar}`;
