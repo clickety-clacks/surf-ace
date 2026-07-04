@@ -8,6 +8,7 @@ import {
   dialog,
   Menu,
   ipcMain,
+  nativeImage,
   screen,
   session,
   type ContextMenuParams,
@@ -1268,6 +1269,34 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
   const bounds = core.paneBounds(surfaceId, paneId);
   if (!bounds) {
     return null;
+  }
+  const compositorSocketPath = resolveCompositorControlSocketPath();
+  if (compositorSocketPath) {
+    const capturePath = path.join(
+      os.tmpdir(),
+      `surf-ace-pane-capture-${surfaceId}-${paneId}-${Date.now()}-${Math.random().toString(16).slice(2)}.png`,
+    );
+    try {
+      const response = await sendCompositorControl(compositorSocketPath, {
+        output_path: capturePath,
+        type: "capture_screen",
+      });
+      if (response.ok === true) {
+        const image = nativeImage.createFromPath(capturePath);
+        if (!image.isEmpty()) {
+          return image.crop({
+            height: Math.max(1, Math.floor(bounds.height)),
+            width: Math.max(1, Math.floor(bounds.width)),
+            x: Math.max(0, Math.floor(bounds.x)),
+            y: Math.max(0, Math.floor(bounds.y)),
+          }).toPNG().toString("base64");
+        }
+      }
+    } catch (error) {
+      console.warn(`[surf-ace] compositor pane capture failed: ${error}`);
+    } finally {
+      await fs.rm(capturePath, { force: true }).catch(() => {});
+    }
   }
   const image = await window.capturePage({
     height: Math.max(1, Math.floor(bounds.height)),

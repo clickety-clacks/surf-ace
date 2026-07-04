@@ -91,7 +91,12 @@ test("native pane bridge serializes host and overlay requests from protocol mate
   const input = materialization();
 
   assert.deepEqual(requestForCompositor(input), {
-    panes: input.panes,
+    panes: input.panes.map((pane) => ({
+      ...pane,
+      ...(pane.windowGroup?.launchIdentity.launchToken
+        ? { launchToken: pane.windowGroup.launchIdentity.launchToken }
+        : {}),
+    })),
     type: "native_pane.host",
   });
   assert.deepEqual(overlayRequestForCompositor(input), {
@@ -221,6 +226,49 @@ test("native pane bridge extracts pane-local window group diagnostics from compo
     })[0]?.paneId,
     "7",
   );
+  assert.deepEqual(nativePaneWindowGroupsFromCompositorStatus({
+    ok: true,
+    status: {
+      windowGroups: [{
+        acceptedSecondaryCount: 1,
+        clippingStatus: "clipped",
+        deniedReasons: [],
+        deniedToplevelCount: 0,
+        focusedWindowId: 9002,
+        launchToken: "sf:7:target:3",
+        members: [{
+          bounds: { height: 80, width: 120, x: 32, y: 40 },
+          clippedToPane: true,
+          focused: true,
+          role: "dialog",
+          windowId: 9002,
+        }],
+        paneId: 7,
+        paneInstanceId: "pl_7",
+        paneLocalBounds: { height: 200, width: 300, x: 0, y: 0 },
+        primaryWindowId: 9001,
+      }],
+    },
+  })[0], {
+    acceptedSecondaryCount: 1,
+    clippingStatus: "clipped",
+    deniedReasons: [],
+    deniedToplevelCount: 0,
+    focusedWindowId: "9002",
+    launchToken: "sf:7:target:3",
+    members: [{
+      bounds: { height: 80, width: 120, x: 32, y: 40 },
+      clippedToPane: true,
+      focused: true,
+      id: "9002",
+      lifecycle: "unknown",
+      role: "dialog",
+    }],
+    paneId: "7",
+    paneInstanceId: "pl_7",
+    paneLocalBounds: { height: 200, width: 300, x: 0, y: 0 },
+    primaryWindowId: "9001",
+  });
 });
 
 test("native pane bridge derives native overlay rectangles from pane geometry", () => {
