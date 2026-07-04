@@ -40,9 +40,17 @@ export type NativePaneLaunchIdentity = {
   targetId?: string;
 };
 
+export type NativePaneChromeInsets = {
+  bottom: number;
+  left: number;
+  right: number;
+  top: number;
+};
+
 export type NativePaneWindowGroupRequest = {
   launchIdentity: NativePaneLaunchIdentity;
   policy: {
+    chromeInsets: NativePaneChromeInsets;
     clipToPane: true;
     constrainToPane: true;
     denyForeignToplevels: true;
@@ -164,6 +172,10 @@ export type CompositorControlRequest =
     surfaceId: string;
     type: "overlay_regions.clear";
     windowId?: string;
+  }
+  | {
+    output_path: string;
+    type: "capture_screen";
   };
 
 export type CompositorControlResponse = Record<string, unknown>;
@@ -211,7 +223,10 @@ export function requestForCompositor(
       if (!pane.geometry.paneInstanceId || pane.geometry.topologyEpoch === undefined || !pane.geometry.surfaceEpoch || pane.geometry.geometryRevision === undefined) {
         throw new Error(`native pane ${pane.id} geometry missing canonical revision identity`);
       }
-      return pane;
+      return {
+        ...pane,
+        ...(pane.windowGroup?.launchIdentity.launchToken ? { launchToken: pane.windowGroup.launchIdentity.launchToken } : {}),
+      };
     }),
     type: materialization.op,
   };
@@ -501,9 +516,9 @@ export function nativePaneWindowGroupsFromCompositorStatus(
 ): NativePaneWindowGroupStatus[] {
   const status = response.status;
   const nestedSource = status && typeof status === "object"
-    ? (status as Record<string, unknown>).native_pane_window_groups
+    ? statusValue(status as Record<string, unknown>, "native_pane_window_groups", "nativePaneWindowGroups", "window_groups", "windowGroups")
     : undefined;
-  const source = nestedSource ?? response.native_pane_window_groups;
+  const source = nestedSource ?? statusValue(response, "native_pane_window_groups", "nativePaneWindowGroups", "window_groups", "windowGroups");
   if (!Array.isArray(source)) {
     return [];
   }
@@ -512,24 +527,24 @@ export function nativePaneWindowGroupsFromCompositorStatus(
       return [];
     }
     const record = group as Record<string, unknown>;
-    const paneId = statusText(record, "pane_id") ?? statusText(record, "paneId");
+    const paneId = statusText(record, "pane_id", "paneId");
     if (!paneId) {
       return [];
     }
     const deniedReasonsValue = record.denied_reasons ?? record.deniedReasons;
     const membersValue = record.members;
     return [{
-      acceptedSecondaryCount: statusCount(record, "accepted_secondary_count") ?? statusCount(record, "acceptedSecondaryCount") ?? 0,
-      clippingStatus: statusClipping(record.clipping_status ?? record.clippingStatus),
+      acceptedSecondaryCount: statusCount(record, "accepted_secondary_count", "acceptedSecondaryCount") ?? 0,
+      clippingStatus: statusClipping(statusValue(record, "clipping_status", "clippingStatus")),
       deniedReasons: Array.isArray(deniedReasonsValue) ? deniedReasonsValue.filter((reason): reason is string => typeof reason === "string") : [],
-      deniedToplevelCount: statusCount(record, "denied_toplevel_count") ?? statusCount(record, "deniedToplevelCount") ?? 0,
-      focusedWindowId: statusText(record, "focused_window_id") ?? statusText(record, "focusedWindowId"),
-      launchToken: statusText(record, "launch_token") ?? statusText(record, "launchToken"),
+      deniedToplevelCount: statusCount(record, "denied_toplevel_count", "deniedToplevelCount") ?? 0,
+      focusedWindowId: statusText(record, "focused_window_id", "focusedWindowId"),
+      launchToken: statusText(record, "launch_token", "launchToken"),
       members: Array.isArray(membersValue) ? membersValue.flatMap(nativePaneWindowGroupMemberFromStatus) : [],
       paneId,
-      paneInstanceId: statusText(record, "pane_instance_id") ?? statusText(record, "paneInstanceId"),
-      paneLocalBounds: statusRect(record.pane_local_bounds ?? record.paneLocalBounds),
-      primaryWindowId: statusText(record, "primary_window_id") ?? statusText(record, "primaryWindowId"),
+      paneInstanceId: statusText(record, "pane_instance_id", "paneInstanceId"),
+      paneLocalBounds: statusRect(statusValue(record, "pane_local_bounds", "paneLocalBounds")),
+      primaryWindowId: statusText(record, "primary_window_id", "primaryWindowId"),
     }];
   });
 }
@@ -539,17 +554,13 @@ function nativePaneWindowGroupMemberFromStatus(member: unknown): NativePaneWindo
     return [];
   }
   const record = member as Record<string, unknown>;
-  const id = statusText(record, "id");
+  const id = statusText(record, "id", "window_id", "windowId");
   if (!id) {
     return [];
   }
   return [{
-    bounds: statusRect(record.bounds),
-    clippedToPane: typeof record.clipped_to_pane === "boolean"
-      ? record.clipped_to_pane
-      : typeof record.clippedToPane === "boolean"
-        ? record.clippedToPane
-        : null,
+    bounds: statusRect(statusValue(record, "bounds", "pane_local_bounds", "paneLocalBounds")),
+    clippedToPane: statusBoolean(record, "clipped_to_pane", "clippedToPane"),
     focused: record.focused === true,
     id,
     lifecycle: statusLifecycle(record.lifecycle),
@@ -557,14 +568,31 @@ function nativePaneWindowGroupMemberFromStatus(member: unknown): NativePaneWindo
   }];
 }
 
-function statusText(record: Record<string, unknown>, field: string): string | null {
-  const value = record[field];
-  return typeof value === "string" && value.length > 0 ? value : null;
+function statusText(record: Record<string, unknown>, ...fields: string[]): string | null {
+  const value = statusValue(record, ...fields);
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : null;
 }
 
-function statusCount(record: Record<string, unknown>, field: string): number | null {
-  const value = record[field];
+function statusCount(record: Record<string, unknown>, ...fields: string[]): number | null {
+  const value = statusValue(record, ...fields);
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function statusBoolean(record: Record<string, unknown>, ...fields: string[]): boolean | null {
+  const value = statusValue(record, ...fields);
+  return typeof value === "boolean" ? value : null;
+}
+
+function statusValue(record: Record<string, unknown>, ...fields: string[]): unknown {
+  for (const field of fields) {
+    if (field in record) {
+      return record[field];
+    }
+  }
+  return undefined;
 }
 
 function statusRect(value: unknown): Rect | null {

@@ -43,7 +43,7 @@ import type {
   TopologyApplyResponse,
   TopologyRevision,
 } from "../../protocol/src/index.js";
-import type { NativePaneMaterialization } from "./native-pane-bridge.js";
+import type { NativePaneChromeInsets, NativePaneMaterialization } from "./native-pane-bridge.js";
 import type { NativePaneWindowGroupStatus } from "./native-pane-bridge.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
 
@@ -102,6 +102,13 @@ type PaneState = {
   pendingAnnotationCommit: boolean;
   snapshot: PaneSnapshot;
   toast: string | null;
+};
+
+const NATIVE_PANE_CHROME_REACHABILITY_INSETS: NativePaneChromeInsets = {
+  bottom: 44,
+  left: 44,
+  right: 44,
+  top: 44,
 };
 
 type LayoutNode =
@@ -678,8 +685,8 @@ export class SurfaceCore {
           externalNative: pane.externalNative,
           geometry,
           name: pane.name,
-          ...(pane.externalNative && pane.nativeHost
-            ? { nativeWindowGroup: pane.nativeWindowGroup ?? nativePaneWindowGroupDiagnosticForPane(pane, geometry) }
+          ...(pane.externalNative && pane.nativeWindowGroup
+            ? { nativeWindowGroup: pane.nativeWindowGroup }
             : {}),
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
@@ -748,6 +755,7 @@ export class SurfaceCore {
           targetId: payload.targetId,
         },
         policy: {
+          chromeInsets: NATIVE_PANE_CHROME_REACHABILITY_INSETS,
           clipToPane: true,
           constrainToPane: true,
           denyForeignToplevels: true,
@@ -780,6 +788,11 @@ export class SurfaceCore {
       if (typeof appId === "string") {
         const appArgs = Array.isArray(args) && args.every((arg) => typeof arg === "string") ? [...args] : [];
         const appLaunchMode = launchMode === "attach_or_launch" ? "attach_or_launch" : "new_instance";
+        const directNativeEnv = DIRECT_NATIVE_PANE_EXECUTABLE_ENV.get(appId);
+        const processEnv = {
+          ...(directNativeEnv ?? {}),
+          ...(isPlainRecord(env) && isStringRecord(env) ? env : {}),
+        };
         paneEntry.target = "native_app";
         paneEntry.nativeApp = {
           appId,
@@ -790,7 +803,7 @@ export class SurfaceCore {
           args: appArgs,
           command: appId,
           ...(typeof cwd === "string" ? { cwd } : {}),
-          ...(isPlainRecord(env) && isStringRecord(env) ? { env: { ...env } } : {}),
+          ...(Object.keys(processEnv).length > 0 ? { env: processEnv } : {}),
         };
       }
     }
@@ -1018,7 +1031,7 @@ export class SurfaceCore {
     for (const group of groups) {
       const paneId = Number(group.paneId);
       const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
-      if (!pane || !pane.nativeHost?.launchToken || group.launchToken !== pane.nativeHost.launchToken) {
+      if (!pane || !pane.nativeHost?.launchToken || !sameNativePaneWindowGroupIdentity(group, pane, paneGeometry.get(paneId))) {
         continue;
       }
       trustedGroups.set(paneId, group);
@@ -3170,34 +3183,6 @@ function nativePaneMaterializationFromProjectedPanes(
   };
 }
 
-function nativePaneWindowGroupDiagnosticForPane(
-  pane: PaneState,
-  geometry: PaneGeometryProjection,
-): NativePaneWindowGroupDiagnostic {
-  const bounds = compositorResolvedRect(geometry.contentViewport);
-  const primaryWindowId = pane.nativeHost?.bindingId ?? pane.nativeHost?.contentId ?? String(pane.paneId);
-  return {
-    acceptedSecondaryCount: 0,
-    clippingStatus: "unknown",
-    deniedReasons: [],
-    deniedToplevelCount: 0,
-    focusedWindowId: null,
-    launchToken: pane.nativeHost?.launchToken ?? null,
-    members: [{
-      bounds,
-      clippedToPane: null,
-      focused: false,
-      id: primaryWindowId,
-      lifecycle: "live",
-      role: "primary",
-    }],
-    paneId: pane.paneId as PaneId,
-    paneInstanceId: geometry.paneInstanceId,
-    paneLocalBounds: bounds,
-    primaryWindowId,
-  };
-}
-
 function nativePaneWindowGroupDiagnosticFromStatus(
   pane: PaneState,
   geometry: PaneGeometryProjection,
@@ -3232,12 +3217,32 @@ function sameNativePaneWindowGroupDiagnostic(
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function sameNativePaneWindowGroupIdentity(
+  group: NativePaneWindowGroupStatus,
+  pane: PaneState,
+  geometry: PaneGeometryProjection | undefined,
+): boolean {
+  if (pane.nativeHost?.launchToken) {
+    return group.launchToken === pane.nativeHost.launchToken;
+  }
+  if (group.paneInstanceId && geometry && group.paneInstanceId === geometry.paneInstanceId) {
+    return true;
+  }
+  const expectedPrimaryWindowIds = [
+    pane.nativeHost?.bindingId,
+    pane.nativeHost?.contentId,
+    String(pane.paneId),
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  return group.primaryWindowId !== null && expectedPrimaryWindowIds.includes(group.primaryWindowId);
+}
+
 function nativePaneLaunchToken(surfaceId: string, paneId: number, targetId: string, targetEpoch: number): string {
   return `${surfaceId}:${paneId}:${targetId}:${targetEpoch}`;
 }
 
 function nativePaneWindowGroupPolicy(): NonNullable<NativePaneMaterialization["panes"][number]["windowGroup"]>["policy"] {
   return {
+    chromeInsets: NATIVE_PANE_CHROME_REACHABILITY_INSETS,
     clipToPane: true,
     constrainToPane: true,
     denyForeignToplevels: true,
