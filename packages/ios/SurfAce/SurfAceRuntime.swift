@@ -1602,11 +1602,12 @@ final class SurfAceRuntime {
         }
 
         if !resumed {
-            resetProviderBootstrapTopology(
+            applyFreshProviderAdmissionTopology(
                 surface: surface,
                 windowLabel: providerWindowLabel,
                 initialPaneId: providerInitialPaneId,
-                initialPaneLabel: providerInitialPaneLabel
+                initialPaneLabel: providerInitialPaneLabel,
+                requestId: id
             )
         }
 
@@ -3365,6 +3366,41 @@ final class SurfAceRuntime {
         )
     }
 
+    private func applyFreshProviderAdmissionTopology(
+        surface: SurfAceSurfaceModel,
+        windowLabel: String,
+        initialPaneId: Int,
+        initialPaneLabel: Int,
+        requestId: String?
+    ) {
+        if hasRecoverablePairState(surface: surface) {
+            applyProviderWindowLabel(surface: surface, windowLabel: windowLabel)
+            persistSurfaceTopology(surfaceId: surface.surfaceId)
+            surfAceGatewayLog(
+                "event=pair_request_preserve_persisted_topology \(surfAceDiagnosticFields([("pane_count", surface.panes.count), ("request_id", requestId), ("surface_id", surface.surfaceId)]))"
+            )
+            return
+        }
+
+        resetProviderBootstrapTopology(
+            surface: surface,
+            windowLabel: windowLabel,
+            initialPaneId: initialPaneId,
+            initialPaneLabel: initialPaneLabel
+        )
+    }
+
+    private func hasRecoverablePairState(surface: SurfAceSurfaceModel) -> Bool {
+        let contentPaneCount = surface.panes.filter { pane in
+            pane.currentEntry.contentId != nil || pane.currentEntry.contentType != nil
+        }.count
+        let result = surface.topologyEpoch > 0 || surface.panes.count > 1 || contentPaneCount > 0
+        surfAceGatewayLog(
+            "event=pair_recoverable_state_decision \(surfAceDiagnosticFields([("content_pane_count", contentPaneCount), ("pane_count", surface.panes.count), ("result", result), ("surface_id", surface.surfaceId), ("topology_revision", surface.topologyEpoch)]))"
+        )
+        return result
+    }
+
     private func resetProviderBootstrapTopology(
         surface: SurfAceSurfaceModel,
         windowLabel: String,
@@ -3977,6 +4013,22 @@ extension SurfAceRuntime {
 
     func contentApplyForTesting(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
         await handleContentApply(id: id, payload: payload, surfaceId: surfaceId)
+    }
+
+    func freshProviderAdmissionTopologyForTesting(
+        surfaceId: String,
+        windowLabel: String,
+        initialPaneId: Int,
+        initialPaneLabel: Int
+    ) {
+        guard let surface = surfaceById[surfaceId] else { return }
+        applyFreshProviderAdmissionTopology(
+            surface: surface,
+            windowLabel: windowLabel,
+            initialPaneId: initialPaneId,
+            initialPaneLabel: initialPaneLabel,
+            requestId: "testing"
+        )
     }
 }
 #endif

@@ -954,6 +954,42 @@ test("ws server allows the lock owner to resume after disconnect", async () => {
   });
 });
 
+test("ws server keeps visible pane content during passive provider absence and obeys explicit clear", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(first.ok, true);
+    const pane = first.payload.state.panes[0]!;
+    const applied = await request(owner, contentApplyRequest(Number(pane.paneId), 1));
+    assert.equal(applied.ok, true);
+    assert.equal(core.pairState(surfaceId).panes[0]?.currentContentId, "ct_applied");
+
+    await closeSocket(owner, 1000, "provider_shutdown");
+    await waitForRendererConnectionBar(core, surfaceId, "disconnected");
+
+    assert.equal(core.pairState(surfaceId).panes[0]?.currentContentId, "ct_applied");
+
+    const replacement = await connect(url);
+    const admitted = await request(
+      replacement,
+      pairRequest(surfaceId, "pv_alpha", {
+        initialPaneId: 77,
+        initialPaneLabel: 77,
+      }),
+    );
+    assert.equal(admitted.ok, true);
+    assert.equal(admitted.op, "pair.request");
+    assert.equal(admitted.payload.state.panes[0]?.paneId, pane.paneId);
+    assert.equal(admitted.payload.state.panes[0]?.currentContentId, "ct_applied");
+
+    const cleared = await request(replacement, contentClearRequest(Number(pane.paneId), 2));
+    assert.equal(cleared.ok, true);
+    assert.equal(core.pairState(surfaceId).panes[0]?.currentContentId, null);
+
+    await closeSocket(replacement);
+  });
+});
+
 test("ws server recovers a resume-bearing admission after relaunch without clearing restored topology", async () => {
   await withServer(async ({ core, server, surfaceId, url }) => {
     const owner = await connect(url);
