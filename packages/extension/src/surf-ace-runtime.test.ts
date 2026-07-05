@@ -8845,6 +8845,73 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("surf_ace_push markdown recovers failed html materialization in pane 15", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        const initialPane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(initialPane);
+        initialPane.paneLabel = 15;
+      },
+      run: async ({ runtime, server }) => {
+        const paneId = await livePaneId(runtime, server.surfaceId, 15);
+        const htmlPush = await runtime.push({
+          content: "<main>pane 15 failed materialization</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId,
+        });
+        assert.equal(htmlPush.paneLabel, 15);
+        assert.equal(htmlPush.paneAddress, "15");
+
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const pane = surface.panes.get(paneId);
+        assert.ok(pane);
+        const target = surface.targetRecords.get(pane.currentTargetId);
+        assert.ok(target);
+        target.lastApplyEvidence = {
+          appliedAt: new Date(1_777_500).toISOString(),
+          errorCode: "materialization_failed",
+          message: "ATS blocked HTTP materialization",
+          requestId: "rq_t1385_failed_materialization",
+          status: "failed",
+        };
+        pane.lastRestoreBlockedReason = "materialization_failed";
+        await internalRuntime.persistSurfaceTargetState(surface, "test failed html materialization");
+        server.contentSetRequests.length = 0;
+
+        server.nextContentApplyError = {
+          code: "stale_revision",
+          details: { expectedRevision: 1 },
+          message: "revision mismatch",
+        };
+        const markdownPush = await runtime.push({
+          content: "# pane 15 recovered",
+          contentType: "markdown",
+          fingerprint: server.surfaceId,
+          paneId,
+        });
+
+        assert.equal(markdownPush.revision, 1);
+        assert.equal(markdownPush.paneId, paneId);
+        assert.equal(markdownPush.paneLabel, 15);
+        assert.equal(markdownPush.paneAddress, "15");
+        assert.deepEqual(server.contentSetRequests.map((request) => request.revision), [1]);
+
+        const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+        const listedPane = screen?.panes.find((candidate) => candidate.paneId === paneId);
+        assert.equal(screen?.authority.actionable, true);
+        assert.equal(listedPane?.paneLabel, 15);
+        assert.equal(listedPane?.paneAddress, "15");
+        assert.equal(listedPane?.activeContent?.contentId, markdownPush.contentId);
+        assert.equal(listedPane?.activeContent?.contentType, "markdown");
+        assert.equal(listedPane?.target?.targetKind, "markdown");
+        assert.equal(listedPane?.target?.blockedReason, null);
+      },
+    });
+  });
+
   await t.test("surf_ace_clear clears failed browser_url target without dropping actionability", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
