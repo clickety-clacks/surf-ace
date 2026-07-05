@@ -2115,6 +2115,44 @@ test("pane capture requests fresh rendered image and returns visual oracle metad
   });
 });
 
+test("batch push uses pane-scoped push authority and returns partial per-pane evidence", async () => {
+  await withRuntimeHarness({
+    run: async ({ runtime, server }) => {
+      const screen = (await runtime.listScreens())[0];
+      const paneId = screen?.panes[0]?.paneId;
+      assert.ok(paneId);
+
+      const result = await runtime.pushBatch({
+        pushes: [
+          {
+            content: "<main>batch-ok</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId,
+          },
+          {
+            content: "<main>batch-missing-pane</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: 999 as never,
+          },
+        ],
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.succeeded, 1);
+      assert.equal(result.failed, 1);
+      assert.equal(result.results[0]?.ok, true);
+      assert.equal(result.results[0]?.result?.fingerprint, server.surfaceId);
+      assert.equal(result.results[0]?.result?.paneId, paneId);
+      assert.equal(result.results[1]?.ok, false);
+      assert.equal(result.results[1]?.errorCode, "invalid_operation");
+      assert.match(result.results[1]?.message ?? "", /Unknown Surf Ace pane/);
+      assert.deepEqual(server.contentSetRequests.map((request) => request.paneId), [server.initialRemotePaneId]);
+    },
+  });
+});
+
 test("pane capture returns failure metadata when client cannot provide image bytes", async () => {
   await withRuntimeHarness({
     configureServer: (server) => {

@@ -9,6 +9,7 @@ import {
   type SurfAceReattemptConnectionsInput,
   type SurfAceSplitInput,
   type SurfAcePushInput,
+  type SurfAcePushBatchInput,
   type SurfAceScreenSummary,
   type SurfAceRuntime,
   type SurfAceRuntimeOptions,
@@ -19,6 +20,7 @@ export const surfAceToolNames = [
   "surf_ace_list",
   "surf_ace_authority_diagnostics",
   "surf_ace_push",
+  "surf_ace_push_batch",
   "surf_ace_launch_native_app",
   "surf_ace_clear",
   "surf_ace_relinquish",
@@ -313,6 +315,65 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_push",
+    },
+    {
+      description: "Push content or live browser URL targets to multiple exact live Surf Ace panes in one supported operation, preserving pane-scoped authority and returning per-pane evidence.",
+      execute: async (args: SurfAcePushBatchInput, context?: SurfAceToolContext) =>
+        await runtime.pushBatch(args, {
+          agentId: context?.agentId,
+          displayName: context?.displayName,
+          provenance: context?.provenance,
+          pushedBy: context?.pushedBy,
+          source: context?.source,
+          sourceProvenance: context?.sourceProvenance,
+          sessionDisplayName: context?.sessionDisplayName,
+          sessionKey: context?.sessionKey,
+          streamLabel: context?.streamLabel,
+        }),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          pushes: {
+            description: "Exact live pane pushes resolved from `surf_ace_list`. Each item is the same payload accepted by `surf_ace_push`.",
+            items: {
+              additionalProperties: false,
+              properties: {
+                content: {
+                  description: "Required content payload string. For browser_url this is the live URL to navigate; it is not static HTML.",
+                  type: "string",
+                },
+                contentType: {
+                  enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas", "browser_url"],
+                  type: "string",
+                },
+                diagnostic: {
+                  additionalProperties: false,
+                  properties: {
+                    derivedFromTargetId: { type: "string" },
+                    kind: { enum: ["placeholder", "status", "error"], type: "string" },
+                    summary: { type: "string" },
+                  },
+                  required: ["kind", "summary"],
+                  type: "object",
+                },
+                fingerprint: fingerprintParam,
+                paneId: paneIdParam,
+                sourcePath: {
+                  description: "Optional file path for file-backed content. When present, the surface reload control re-reads this path instead of repainting pushed bytes.",
+                  type: "string",
+                },
+              },
+              required: ["fingerprint", "paneId", "contentType", "content"],
+              type: "object",
+            },
+            minItems: 1,
+            type: "array",
+          },
+        },
+        required: ["pushes"],
+        type: "object",
+      },
+      name: "surf_ace_push_batch",
     },
     {
       description: "Launch a provider-owned native app/process target in a pane through Surf Ace native hosting, applying Surf Ace chrome/overlay regions. This is the primitive process launch surface. Requires confirmed:true. Native GUI/app product proof must use this provider path; direct compositor/native-pane hosting is diagnostic only.",
