@@ -186,6 +186,38 @@ function createStubRuntime(): SurfAceRuntime {
       paneLabel: 1,
       revision: 1,
     }),
+    pushBatch: async (input) => {
+      const results = await Promise.all(input.pushes.map(async (push) => {
+        if (String(push.paneId) === "9") {
+          return {
+            errorCode: "not_connected" as const,
+            message: "Surf Ace surface is not connected: sf_1",
+            ok: false,
+            push,
+          };
+        }
+        return {
+          ok: true,
+          push,
+          result: {
+            contentId: `ct_${push.paneId}`,
+            displayId: `b${push.paneId}`,
+            fingerprint: push.fingerprint,
+            paneAddress: `b${push.paneId}`,
+            paneId: push.paneId,
+            paneLabel: Number(push.paneId),
+            revision: 1,
+          },
+        };
+      }));
+      const succeeded = results.filter((result) => result.ok).length;
+      return {
+        failed: results.length - succeeded,
+        ok: succeeded === results.length,
+        results,
+        succeeded,
+      };
+    },
     read: async () => ({
       browserUrl: null,
       contentSnapshot: null,
@@ -256,6 +288,7 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_list",
     "surf_ace_authority_diagnostics",
     "surf_ace_push",
+    "surf_ace_push_batch",
     "surf_ace_launch_native_app",
     "surf_ace_clear",
     "surf_ace_relinquish",
@@ -420,6 +453,39 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.deepEqual(reattemptTool.inputSchema.required, undefined);
   assert.equal(reattemptTool.inputSchema.additionalProperties, false);
 
+});
+
+test("surf_ace_push_batch is a first-class batch surface with per-pane evidence", async () => {
+  const tools = createSurfAceTools(createStubRuntime());
+  const pushBatchTool = tools.find((tool) => tool.name === "surf_ace_push_batch");
+  assert.ok(pushBatchTool);
+  assert.deepEqual(Object.keys(pushBatchTool.inputSchema.properties as Record<string, unknown>), ["pushes"]);
+  assert.deepEqual(pushBatchTool.inputSchema.required, ["pushes"]);
+  assert.equal(pushBatchTool.inputSchema.additionalProperties, false);
+  const pushesSchema = (pushBatchTool.inputSchema.properties as Record<string, any>).pushes;
+  assert.equal(pushesSchema.type, "array");
+  assert.equal(pushesSchema.minItems, 1);
+  assert.deepEqual(
+    Object.keys(pushesSchema.items.properties as Record<string, unknown>).sort(),
+    ["content", "contentType", "diagnostic", "fingerprint", "paneId", "sourcePath"].sort(),
+  );
+  assert.deepEqual(pushesSchema.items.required, ["fingerprint", "paneId", "contentType", "content"]);
+
+  const result = await pushBatchTool.execute({
+    pushes: [
+      { content: "https://tars.tail4105e8.ts.net:19443/news.html?id=1", contentType: "browser_url", fingerprint: "sf_1", paneId: 4 },
+      { content: "https://tars.tail4105e8.ts.net:19443/news.html?id=2", contentType: "browser_url", fingerprint: "sf_1", paneId: 9 },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 1);
+  assert.equal(result.results[0].ok, true);
+  assert.equal(result.results[0].result.contentId, "ct_4");
+  assert.equal(result.results[1].ok, false);
+  assert.equal(result.results[1].errorCode, "not_connected");
+  assert.deepEqual(result.results.map((entry: any) => entry.push.paneId), [4, 9]);
 });
 
 test("surf_ace_realize_topologies forwards caller provenance for window lifecycle diagnostics", async () => {

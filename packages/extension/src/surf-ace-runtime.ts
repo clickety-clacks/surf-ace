@@ -470,6 +470,10 @@ export type SurfAcePushInput = {
   sourcePath?: string;
 };
 
+export type SurfAcePushBatchInput = {
+  pushes: SurfAcePushInput[];
+};
+
 type SurfAceContentPushInput = SurfAcePushInput & { contentType: ContentType };
 type SurfAceBrowserUrlPushInput = SurfAcePushInput & { contentType: "browser_url" };
 
@@ -510,6 +514,21 @@ export type SurfAcePushResult = {
   targetApplyEvidence?: ApplyEvidence;
   targetId?: string;
   targetKind?: TargetKind;
+};
+
+export type SurfAcePushBatchResult = {
+  failed: number;
+  ok: boolean;
+  results: SurfAcePushBatchPaneResult[];
+  succeeded: number;
+};
+
+export type SurfAcePushBatchPaneResult = {
+  errorCode?: SurfAceToolError["code"];
+  message?: string;
+  ok: boolean;
+  push: SurfAcePushInput;
+  result?: SurfAcePushResult;
 };
 
 export type SurfAceClearResult = {
@@ -838,6 +857,7 @@ export interface SurfAceRuntime {
   launchNativeApp(input: SurfAceLaunchNativeAppInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   providerAuthorityDiagnostics(): Promise<SurfAceProviderAuthorityProjection>;
   push(input: SurfAcePushInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
+  pushBatch(input: SurfAcePushBatchInput, context?: SurfAceSessionContext): Promise<SurfAcePushBatchResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
   realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult>;
   realizeTopologies(input: SurfAceRealizeTopologiesInput): Promise<SurfAceRealizeTopologiesResult>;
@@ -1338,6 +1358,11 @@ type OwnerControlCommand =
       context?: SurfAceSessionContext;
       input: SurfAcePushInput;
       op: "push";
+    }
+  | {
+      context?: SurfAceSessionContext;
+      input: SurfAcePushBatchInput;
+      op: "pushBatch";
     }
   | {
       context?: SurfAceSessionContext;
@@ -3430,6 +3455,47 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return await this.contentSet(surface, input, context);
     }
     throw new SurfAceToolError("unsupported_content_type", `Unsupported content type: ${String(input.contentType)}`);
+  }
+
+  async pushBatch(
+    input: SurfAcePushBatchInput,
+    context?: SurfAceSessionContext,
+  ): Promise<SurfAcePushBatchResult> {
+    await this.start();
+    if (!this.ownsRuntimeLease) {
+      return await this.forwardToRuntimeOwner<SurfAcePushBatchResult>({
+        context,
+        input,
+        op: "pushBatch",
+      });
+    }
+    if (!Array.isArray(input.pushes) || input.pushes.length === 0) {
+      throw new SurfAceToolError("invalid_operation", "Batch push requires at least one pane push.");
+    }
+
+    const results = await Promise.all(input.pushes.map(async (push): Promise<SurfAcePushBatchPaneResult> => {
+      try {
+        return {
+          ok: true,
+          push,
+          result: await this.push(push, context),
+        };
+      } catch (error) {
+        return {
+          errorCode: error instanceof SurfAceToolError ? error.code : "internal_error",
+          message: error instanceof Error ? error.message : String(error),
+          ok: false,
+          push,
+        };
+      }
+    }));
+    const succeeded = results.filter((result) => result.ok).length;
+    return {
+      failed: results.length - succeeded,
+      ok: succeeded === results.length,
+      results,
+      succeeded,
+    };
   }
 
   private async launchTerminal(
@@ -11183,6 +11249,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.launchTerminal(command.input, command.context);
       case "push":
         return await this.push(command.input, command.context);
+      case "pushBatch":
+        return await this.pushBatch(command.input, command.context);
       case "read":
         return await this.read(command.input);
       case "realizeTopology":
