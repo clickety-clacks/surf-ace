@@ -226,6 +226,7 @@ class FakeSurfAceWsServer {
     displayTitle?: string | null;
     historyOwnerToken: string;
     paneId: number;
+    reloadSource?: unknown;
     revision: number;
     restoredDrawings?: unknown;
   }> = [];
@@ -1301,6 +1302,7 @@ class FakeSurfAceWsServer {
           displayTitle: typeof message.payload?.display?.title === "string" ? message.payload.display.title : null,
           historyOwnerToken: String(message.payload?.historyOwnerToken ?? ""),
           paneId,
+          reloadSource: structuredClone(message.payload?.reloadSource),
           revision: pane.revision,
           restoredDrawings: structuredClone(message.payload?.restoredDrawings),
         });
@@ -7040,6 +7042,53 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(result.paneId, firstPaneId);
       assert.equal(server.contentSetRequests.length, 1);
       assert.equal(server.snapshotRequests.length, snapshotCountBefore);
+    });
+  });
+
+  await t.test("sourcePath html push materializes source bytes instead of placeholder content", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-sourcepath-"));
+    try {
+      const sourcePath = path.join(tempDir, "report.html");
+      await fs.writeFile(sourcePath, "<main>actual source bytes</main>", "utf8");
+      await withRuntimeHarness(async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+
+        const pushed = await runtime.push(
+          {
+            content: "<main>placeholder bytes</main>",
+            contentType: "html",
+            fingerprint: server.surfaceId,
+            paneId: firstPaneId,
+            sourcePath,
+          },
+          { sessionKey: "agent:test:sourcepath" },
+        );
+
+        assert.equal(pushed.paneId, firstPaneId);
+        assert.deepEqual(server.contentSetRequests.at(-1)?.content, { html: "<main>actual source bytes</main>" });
+        assert.equal(server.contentSetRequests.at(-1)?.reloadSource, undefined);
+        const read = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.deepEqual(read.contentSnapshot?.content, { html: "<main>actual source bytes</main>" });
+      });
+    } finally {
+      await fs.rm(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("sourcePath html push rejects unreadable source before pane mutation", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+      await assert.rejects(
+        runtime.push({
+          content: "<main>placeholder bytes</main>",
+          contentType: "html",
+          fingerprint: server.surfaceId,
+          paneId: firstPaneId,
+          sourcePath: path.join(os.tmpdir(), `surf-ace-missing-source-${Date.now()}.html`),
+        }),
+        /Unable to read sourcePath/,
+      );
+      assert.equal(server.contentSetRequests.length, 0);
     });
   });
 
@@ -14467,6 +14516,28 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       } finally {
         await replacementServer.close();
       }
+    });
+  });
+
+  await t.test("same websocket url with different fingerprint is not treated as the same provider", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const internalRuntime = runtime as any;
+      const originalSurface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(originalSurface);
+      assert.ok(originalSurface.client?.isOpen());
+      const originalEndpointId = originalSurface.endpointId;
+
+      const simulatorEndpoint = {
+        ...discoveryEndpoint(server.port, "sim12345"),
+        endpointId: `endpoint-${server.port}-sim12345`,
+        name: "Surf Ace - simulator proof",
+      };
+      internalRuntime.refreshEndpointTopology(simulatorEndpoint);
+
+      assert.equal(internalRuntime.surfaces.get(server.surfaceId), originalSurface);
+      assert.equal(originalSurface.endpointId, originalEndpointId);
+      assert.equal(originalSurface.fingerprintPrefix, "abcd1234");
+      assert.ok(internalRuntime.endpointProbes.get(simulatorEndpoint.endpointId));
     });
   });
 

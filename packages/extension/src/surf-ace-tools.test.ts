@@ -510,9 +510,23 @@ test("surf_ace_list supports bounded official fleet selection by surface and pan
     listScreens: async () => [
       {
         ...(await createStubRuntime().listScreens())[0],
-        _debug: largeDebug,
+        _debug: {
+          ...largeDebug,
+          endpointId: "Cyberbrain.local:19001/ws#vision",
+          localOwnership: {
+            acceptedAt: Date.now(),
+            endpointHost: "Cyberbrain.local",
+            endpointId: "Cyberbrain.local:19001/ws#vision",
+            endpointName: "Surf Ace - Apple Vision Pro",
+            endpointPort: 19001,
+            providerId: "pv_large",
+            sessionId: "sa_large",
+            source: "pair.response",
+            surfaceId: "sf_cyberbrain",
+          },
+        },
         fingerprint: "sf_cyberbrain",
-        name: "Cyberbrain",
+        name: "Surf Ace - Apple Vision Pro",
         panes: [
           {
             activeContent: null,
@@ -573,6 +587,7 @@ test("surf_ace_list supports bounded official fleet selection by surface and pan
   const cyberbrain = await listTool.execute({ actionableOnly: true, name: "Cyberbrain" });
   assert.deepEqual(cyberbrain.map((screen) => screen.fingerprint), ["sf_cyberbrain"]);
   assert.equal(cyberbrain[0]?.panes[0]?.displayId, "a1");
+  assert.equal(cyberbrain[0]?.name, "Surf Ace - Apple Vision Pro");
 
   const paneB9 = await listTool.execute({ paneAddress: "b9" });
   assert.deepEqual(paneB9.map((screen) => screen.fingerprint), ["sf_eezo"]);
@@ -606,6 +621,7 @@ test("surf_ace_push forwards markdown content through the first-class push path"
     contentType: "markdown",
     fingerprint: "sf_1",
     paneId: 1,
+    sourcePath: "/tmp/notes.md",
   });
 
   assert.deepEqual(captured, {
@@ -613,6 +629,7 @@ test("surf_ace_push forwards markdown content through the first-class push path"
     contentType: "markdown",
     fingerprint: "sf_1",
     paneId: 1,
+    sourcePath: "/tmp/notes.md",
   });
   assert.equal(result.contentId, "ct_markdown");
 });

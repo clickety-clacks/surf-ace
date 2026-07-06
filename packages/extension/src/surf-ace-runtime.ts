@@ -2522,6 +2522,59 @@ function normalizeContent(
   return content as ContentSetRequest["payload"]["content"];
 }
 
+async function materializeContentFromSourcePath(
+  contentType: ContentType,
+  sourcePath: string,
+  fallbackContent: unknown,
+): Promise<ContentSetRequest["payload"]["content"]> {
+  const readBytes = async (): Promise<Buffer> => {
+    try {
+      return await fs.readFile(sourcePath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new SurfAceToolError("invalid_operation", `Unable to read sourcePath ${sourcePath}: ${message}`);
+    }
+  };
+  const readText = async (): Promise<string> => (await readBytes()).toString("utf8");
+  const existing = normalizeContent(contentType, fallbackContent);
+  switch (contentType) {
+    case "html": {
+      const baseUrl = typeof existing === "object" && existing !== null && "baseUrl" in existing &&
+        typeof (existing as { baseUrl?: unknown }).baseUrl === "string"
+        ? { baseUrl: (existing as { baseUrl: string }).baseUrl }
+        : {};
+      return { ...baseUrl, html: await readText() };
+    }
+    case "markdown":
+      return { markdown: await readText() };
+    case "terminal": {
+      const scrollback = typeof existing === "object" && existing !== null && "scrollback" in existing &&
+        typeof (existing as { scrollback?: unknown }).scrollback === "number"
+        ? (existing as { scrollback: number }).scrollback
+        : 1000;
+      return {
+        lines: (await readText()).split(/\r?\n/),
+        scrollback,
+      };
+    }
+    case "image": {
+      const metadata = typeof existing === "object" && existing !== null ? existing as { alt?: unknown; mediaType?: unknown } : {};
+      return {
+        ...(typeof metadata.alt === "string" ? { alt: metadata.alt } : {}),
+        data: (await readBytes()).toString("base64"),
+        mediaType: typeof metadata.mediaType === "string" ? metadata.mediaType : "application/octet-stream",
+      };
+    }
+    case "pdf":
+      return { data: (await readBytes()).toString("base64") };
+    case "canvas":
+    case "video":
+      return normalizeContent(contentType, await readText());
+    default:
+      return existing;
+  }
+}
+
 function denormalizeContent(
   contentType: ContentType,
   content: ContentSetRequest["payload"]["content"],
@@ -2994,6 +3047,22 @@ function endpointProbeKey(endpoint: SurfAceDiscoveryEndpoint): string {
     return `fp:${fingerprintPrefix}`;
   }
   return `ws:${buildWsUrl(endpoint)}`;
+}
+
+function sameDiscoveredEndpoint(
+  left: SurfAceDiscoveryEndpoint,
+  right: SurfAceDiscoveryEndpoint,
+): boolean {
+  if (left.endpointId === right.endpointId) {
+    return true;
+  }
+  if (endpointProbeKey(left) === endpointProbeKey(right)) {
+    return true;
+  }
+  const leftFingerprint = left.fingerprintPrefix.trim();
+  const rightFingerprint = right.fingerprintPrefix.trim();
+  return (leftFingerprint.length === 0 || rightFingerprint.length === 0) &&
+    buildWsUrl(left) === buildWsUrl(right);
 }
 
 function isSocketClosedError(error: unknown): boolean {
@@ -4387,7 +4456,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const pane = this.requirePane(surface.surfaceId, input.paneId);
     await this.ensureCurrentPaneLineage(surface, pane);
     this.finalizeLiveFrame(surface, pane);
-    const normalizedContent = normalizeContent(input.contentType, input.content);
+    const normalizedContent = input.sourcePath
+      ? await materializeContentFromSourcePath(input.contentType, input.sourcePath, input.content)
+      : normalizeContent(input.contentType, input.content);
     const contentPreview = typeof normalizedContent === "string"
       ? normalizedContent.slice(0, 200)
       : JSON.stringify(normalizedContent).slice(0, 200);
@@ -4412,9 +4483,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       revision: asRevision((pane.currentRevision as number) + 1),
       topologyRevision: surface.topologyRevision as TopologyApplyRequest["payload"]["topologyRevision"],
     } as ContentSetPayload & { topologyRevision?: TopologyApplyRequest["payload"]["topologyRevision"] };
-    if (input.sourcePath) {
-      payload.reloadSource = { kind: "file", path: input.sourcePath };
-    }
     if (display) {
       payload.display = display;
     }
@@ -11314,23 +11382,16 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         surface_name: endpoint.name,
       }),
     );
-    const endpointKey = endpointProbeKey(endpoint);
     for (const candidate of [...this.surfaces.values()]) {
       if (candidate.stopRequested && candidate.endpointId === endpoint.endpointId) {
         this.removeManagedSurfaceFromRegistries(candidate);
       }
     }
     const matchingSurfaces = [...this.surfaces.values()].filter((candidate) =>
-      candidate.endpointId === endpoint.endpointId ||
-      buildWsUrl(candidate.endpoint) === buildWsUrl(endpoint) ||
-      endpointProbeKey(candidate.endpoint) === endpointKey
+      sameDiscoveredEndpoint(candidate.endpoint, endpoint)
     );
     for (const candidate of [...this.surfaces.values()]) {
-      if (
-        candidate.endpointId === endpoint.endpointId ||
-        buildWsUrl(candidate.endpoint) === buildWsUrl(endpoint) ||
-        endpointProbeKey(candidate.endpoint) === endpointKey
-      ) {
+      if (sameDiscoveredEndpoint(candidate.endpoint, endpoint)) {
         this.assignEndpoint(candidate, endpoint);
         this.ensureSurfaceWorker(candidate);
       }
@@ -11367,14 +11428,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   }
 
   private ownedSurfacesForEndpoint(endpoint: SurfAceDiscoveryEndpoint): ManagedSurface[] {
-    const endpointKey = endpointProbeKey(endpoint);
     return [...this.surfaces.values()].filter((surface) =>
       this.hasOwnedEndpointWorker(surface) &&
-      (
-        surface.endpointId === endpoint.endpointId ||
-        buildWsUrl(surface.endpoint) === buildWsUrl(endpoint) ||
-        endpointProbeKey(surface.endpoint) === endpointKey
-      )
+      sameDiscoveredEndpoint(surface.endpoint, endpoint)
     );
   }
 
