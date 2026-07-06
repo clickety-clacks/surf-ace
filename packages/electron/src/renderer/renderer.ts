@@ -224,11 +224,13 @@ type PaneView = {
   currentWebViewResizeObserver: ResizeObserver | null;
   duplicateRepushEl: HTMLDivElement;
   dismissedDuplicateRepushKey: string | null;
+  dockEl: HTMLButtonElement;
   lastNavigation: NavigationMemo | null;
   paneId: number;
   rootEl: HTMLDivElement;
   scale: number;
   scrollEl: HTMLDivElement;
+  toolbarCollapsed: boolean;
   toastTimeout: number | null;
 };
 
@@ -259,6 +261,8 @@ let latestState: RendererWindowState | null = null;
 let latestLayoutKey: string | null = null;
 let latestChromeKey: string | null = null;
 let overlayRegionsFrame: number | null = null;
+const WEB_CONTENT_BASE_SCALE = 0.85;
+let openFontSizePaneId: number | null = null;
 let overlayRegionsTimer: number | null = null;
 let overlayRevision = 0;
 let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
@@ -685,11 +689,24 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   const button = document.createElement("button");
   button.className = `control-button ${className}`;
   button.disabled = disabled;
-  button.textContent = label;
+  const labelEl = document.createElement("span");
+  labelEl.className = "control-button__label";
+  labelEl.textContent = label;
+  button.appendChild(labelEl);
   return button;
 }
 
-type LucideIconName = "chevron-left" | "chevron-right" | "pen-line" | "rotate-cw" | "wifi-off" | "x";
+type LucideIconName =
+  | "chevron-left"
+  | "chevron-right"
+  | "minus"
+  | "panel-bottom-open"
+  | "pen-line"
+  | "plus"
+  | "rotate-cw"
+  | "text"
+  | "wifi-off"
+  | "x";
 
 function createLucideIcon(name: LucideIconName): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -710,13 +727,33 @@ function createLucideIcon(name: LucideIconName): SVGSVGElement {
     "chevron-right": [
       "m9 18 6-6-6-6",
     ],
+    minus: [
+      "M5 12h14",
+    ],
+    "panel-bottom-open": [
+      "M3 5h18",
+      "M3 19h18",
+      "M3 5v14",
+      "M21 5v14",
+      "M8 14h8",
+      "M8 14l4-4 4 4",
+    ],
     "pen-line": [
       "M12 20h9",
       "M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z",
     ],
+    plus: [
+      "M5 12h14",
+      "M12 5v14",
+    ],
     "rotate-cw": [
       "M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1.06 6.63 2.92",
       "M21 3v6h-6",
+    ],
+    text: [
+      "M4 7V4h16v3",
+      "M9 20h6",
+      "M12 4v16",
     ],
     "wifi-off": [
       "M12 20h.01",
@@ -983,11 +1020,19 @@ function bindDrawing(view: PaneView): void {
   canvas.addEventListener("pointercancel", finishStroke);
 }
 
+function isPaneChromeTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest(".control-cluster, .toolbar-dock"));
+}
+
 function attachCommonEvents(view: PaneView): void {
-  view.rootEl.addEventListener("pointerdown", () => {
+  view.rootEl.addEventListener("pointerdown", (event) => {
     rememberPaneContext(view.paneId);
+    if (!isPaneChromeTarget(event.target)) {
+      collapsePaneToolbar(view);
+    }
   });
   view.scrollEl.addEventListener("scroll", () => {
+    collapsePaneToolbar(view);
     reportPaneSnapshot(view);
     view.currentScrollHandler?.();
     window.surfAce.command({
@@ -1008,6 +1053,33 @@ function attachCommonEvents(view: PaneView): void {
     }
     reportPaneSnapshot(view);
   });
+}
+
+function rebuildPaneControls(paneId: number): void {
+  const view = paneViews.get(paneId);
+  const pane = latestState?.panes.find((candidate) => candidate.paneId === paneId);
+  if (!view || !pane) {
+    return;
+  }
+  buildControls(view, pane);
+}
+
+function collapsePaneToolbar(view: PaneView): void {
+  if (view.toolbarCollapsed || paneStateFor(view)?.annotationBorderVisible) {
+    return;
+  }
+  view.toolbarCollapsed = true;
+  view.rootEl.classList.add("toolbar-collapsed");
+  if (openFontSizePaneId === view.paneId) {
+    openFontSizePaneId = null;
+  }
+  rebuildPaneControls(view.paneId);
+}
+
+function restorePaneToolbar(view: PaneView): void {
+  view.toolbarCollapsed = false;
+  view.rootEl.classList.remove("toolbar-collapsed");
+  rebuildPaneControls(view.paneId);
 }
 
 function ensurePaneView(paneId: number): PaneView {
@@ -1050,6 +1122,17 @@ function ensurePaneView(paneId: number): PaneView {
   const controlsEl = document.createElement("div");
   controlsEl.className = "control-cluster";
   surfAceOverlay(controlsEl, "pane-handle");
+  const dockEl = document.createElement("button");
+  dockEl.className = "toolbar-dock control-button icon-button";
+  dockEl.type = "button";
+  dockEl.title = "Restore toolbar";
+  dockEl.setAttribute("aria-label", "Restore toolbar");
+  dockEl.appendChild(createLucideIcon("panel-bottom-open"));
+  dockEl.addEventListener("click", (event) => {
+    event.stopPropagation();
+    rememberPaneContext(paneId);
+    restorePaneToolbar(view);
+  });
   const toastEl = document.createElement("div");
   toastEl.className = "pane-toast";
   toastEl.hidden = true;
@@ -1057,7 +1140,7 @@ function ensurePaneView(paneId: number): PaneView {
   duplicateRepushEl.className = "duplicate-repush-overlay";
   duplicateRepushEl.hidden = true;
 
-  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, toastEl, duplicateRepushEl);
+  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, dockEl, toastEl, duplicateRepushEl);
 
   const view: PaneView = {
     annotationCanvas: canvas,
@@ -1072,12 +1155,14 @@ function ensurePaneView(paneId: number): PaneView {
     currentScrollHandler: null,
     currentWebViewResizeObserver: null,
     dismissedDuplicateRepushKey: null,
+    dockEl,
     duplicateRepushEl,
     lastNavigation: null,
     paneId,
     rootEl,
     scale: CONTENT_SCALE_DEFAULT,
     scrollEl,
+    toolbarCollapsed: false,
     toastTimeout: null,
   };
   bindDrawing(view);
@@ -1109,6 +1194,9 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
+  view.controlsEl.classList.toggle("collapsed", view.toolbarCollapsed);
+  view.dockEl.hidden = !view.toolbarCollapsed;
+  view.dockEl.setAttribute("aria-expanded", String(view.toolbarCollapsed));
   const hasPushedContent = pane.content.contentId !== null;
   if (isBrowserUrlPane(pane) && !pane.showDone) {
     const browserPill = document.createElement("div");
@@ -1174,6 +1262,39 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   }
   const annotationPill = document.createElement("div");
   annotationPill.className = "control-pill annotation-pill";
+  const fontSizeToggle = surfAceOverlay(createIconButton("text", "Font Size", "font-size-toggle"), "annotation-control");
+  fontSizeToggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    rememberPaneContext(pane.paneId);
+    openFontSizePaneId = openFontSizePaneId === pane.paneId ? null : pane.paneId;
+    rebuildPaneControls(pane.paneId);
+  });
+  annotationPill.appendChild(fontSizeToggle);
+
+  if (openFontSizePaneId === pane.paneId) {
+    const fontSizePopover = document.createElement("div");
+    fontSizePopover.className = "font-size-popover";
+    fontSizePopover.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+    const decrease = surfAceOverlay(createIconButton("minus", "Decrease font size", "font-size-step"), "annotation-control");
+    decrease.addEventListener("click", (event) => {
+      event.stopPropagation();
+      scalePaneContent({ action: "decrease", paneId: pane.paneId, type: "content-scale" });
+    });
+    const reset = surfAceOverlay(createButton("100", "font-size-reset"), "annotation-control");
+    reset.addEventListener("click", (event) => {
+      event.stopPropagation();
+      scalePaneContent({ action: "reset", paneId: pane.paneId, type: "content-scale" });
+    });
+    const increase = surfAceOverlay(createIconButton("plus", "Increase font size", "font-size-step"), "annotation-control");
+    increase.addEventListener("click", (event) => {
+      event.stopPropagation();
+      scalePaneContent({ action: "increase", paneId: pane.paneId, type: "content-scale" });
+    });
+    fontSizePopover.append(decrease, reset, increase);
+    annotationPill.appendChild(fontSizePopover);
+  }
   const annotate = surfAceOverlay(createIconButton("pen-line", "Sketch", "annotate"), "annotation-control");
   annotate.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
@@ -1348,7 +1469,7 @@ function isRendererScalableContentType(pane: RendererPaneState | null): boolean 
 }
 
 function applyBrowserContentScale(view: PaneView, webview: BrowserUrlWebViewElement): void {
-  const scale = view.scale;
+  const scale = Math.round(WEB_CONTENT_BASE_SCALE * view.scale * 1000) / 1000;
   const scalePromise = webview.executeJavaScript?.(
     `(() => {
       const scale = ${JSON.stringify(scale)};
@@ -1380,6 +1501,7 @@ function scalePaneContent(intent: ContentScaleIntent): void {
   rememberPaneContext(intent.paneId);
   view.scale = nextContentScale(view.scale, intent.action);
   applyContentScale(view);
+  rebuildPaneControls(intent.paneId);
 }
 
 function scrollPaneByKeyboard(intent: KeyboardScrollIntent): void {
@@ -1852,6 +1974,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
       return;
     }
     if (payload.type === "scroll") {
+      collapsePaneToolbar(view);
       window.surfAce.command({
         paneId,
         type: "scroll",
@@ -1866,12 +1989,14 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
         visibleText: payload.visibleText,
       });
     } else if (payload.type === "selection") {
+      collapsePaneToolbar(view);
       window.surfAce.command({
         paneId,
         selection: payload.selection ?? null,
         type: "selection",
       });
     } else if (payload.type === "tap") {
+      collapsePaneToolbar(view);
       window.surfAce.command({
         kind: payload.kind,
         nearestContent: payload.nearestContent,
@@ -1880,8 +2005,10 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
         type: "tap",
       });
     } else if (payload.type === "focus") {
+      collapsePaneToolbar(view);
       rememberPaneContext(paneId);
     } else if (payload.type === "navigation") {
+      collapsePaneToolbar(view);
       sendNavigationIntent(view, paneId, String(payload.url ?? ""));
     } else if (payload.type === "ready") {
       window.surfAce.reportSnapshot({
@@ -2365,6 +2492,12 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   view.rootEl.classList.toggle("keyboard-active", pane.activeKeyboardPane);
   view.rootEl.classList.toggle("annotating", pane.annotationBorderVisible);
   view.rootEl.classList.toggle("flush-in-flight", pane.flushInFlight);
+  if (pane.annotationBorderVisible && view.toolbarCollapsed) {
+    restorePaneToolbar(view);
+  }
+  if (pane.annotationBorderVisible && openFontSizePaneId === pane.paneId) {
+    openFontSizePaneId = null;
+  }
   view.annotationCanvas.classList.toggle("enabled", pane.annotationBorderVisible);
   view.annotationShield.classList.toggle("enabled", pane.annotationBorderVisible);
   const labelWrap = view.rootEl.querySelector(".pane-label") as HTMLDivElement;
@@ -2638,6 +2771,19 @@ async function init(): Promise<void> {
     if (isContentScaleIntent(intent)) {
       scalePaneContent(intent);
     }
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    if (openFontSizePaneId === null) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest(".font-size-popover, .font-size-toggle")) {
+      return;
+    }
+    const paneId = openFontSizePaneId;
+    openFontSizePaneId = null;
+    rebuildPaneControls(paneId);
   });
 
   window.addEventListener("resize", () => {
