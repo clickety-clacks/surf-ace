@@ -16777,6 +16777,72 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
+  await t.test("pre-admission foreign-provider busy reclaims with takeover and preserves pair response", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        const firstPane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(firstPane);
+        firstPane.contentId = "ct_pre_admission_foreign_reclaim";
+        firstPane.contentType = "markdown";
+        firstPane.revision = 7;
+        server.panes.set(42, {
+          contentId: "ct_pre_admission_foreign_reclaim_second",
+          contentType: "markdown",
+          drawings: [],
+          frame: {
+            height: 768,
+            width: 512,
+            x: 512,
+            y: 0,
+          },
+          name: null,
+          paneLabel: 2,
+          paneLineageId: `${server.surfaceId}_pane_42`,
+          revision: 3,
+          viewport: {
+            height: 768,
+            scale: 2,
+            width: 512,
+          },
+        });
+        server.setTopologyLayout({
+          children: [
+            { paneId: server.initialRemotePaneId, type: "pane" },
+            { paneId: 42, type: "pane" },
+          ],
+          direction: "horizontal",
+          type: "split",
+        }, 4);
+        server.busyWithoutTakeoverResponsesRemaining = 1;
+        server.busyWithoutTakeoverMessage = "surface ownership lock is held by another provider";
+      },
+      run: async ({ runtime, server, warnings }) => {
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+        assert.deepEqual(
+          server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.takeover),
+          [false, true],
+        );
+        assert.deepEqual(
+          server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.resumeSessionId),
+          [null, null],
+        );
+        const screen = (await runtime.listScreens())[0];
+        assert.ok(screen);
+        assert.deepEqual(screen.panes.map((pane) => pane.paneLabel).sort(), [1, 2]);
+        assert.equal(
+          screen.panes.find((pane) => pane.paneLabel === 1)?.activeContent?.contentId,
+          "ct_pre_admission_foreign_reclaim",
+        );
+        assert.equal(
+          screen.panes.find((pane) => pane.paneLabel === 2)?.activeContent?.contentId,
+          "ct_pre_admission_foreign_reclaim_second",
+        );
+        assert.ok(warnings.some((warning) => warning.includes("ownership_foreign_reclaim")));
+      },
+    });
+  });
+
   await t.test("foreign-provider busy without durable self authority does not self-reclaim with takeover", async () => {
     await withRuntimeHarness(async ({ runtime, server, warnings }) => {
       const internalRuntime = runtime as any;

@@ -3081,6 +3081,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly tombstonedSurfaceIds = new Set<SurfaceId>();
   private readonly livePairedSelfRediscoveredSurfaceIds = new Set<string>();
   private readonly startupImportedOwnershipSurfaceIds = new Set<string>();
+  private readonly legacyDifferentProviderTargetSurfaceIds = new Set<string>();
   private readonly pendingGuardTopologyPublishSurfaceIds = new Set<string>();
   private lastDiscoveryUpdateLogAt = 0;
   private lastDiscoveryUpdateLogKey = "";
@@ -8691,6 +8692,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     this.persistentState.selfOwnedSurfaceIds ??= {};
     this.noteProviderLineage(this.persistentState.providerId, "current_state");
     this.startupImportedOwnershipSurfaceIds.clear();
+    this.legacyDifferentProviderTargetSurfaceIds.clear();
     this.importCurrentTargetOwnership();
     for (const surfaceId of Object.keys(this.persistentState.targetStateBySurfaceId ?? {})) {
       const hadSelfOwnedSurface = Boolean(this.persistentState.selfOwnedSurfaceIds?.[surfaceId]);
@@ -8733,6 +8735,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return;
     }
     if (legacyState.providerId !== this.persistentState.providerId) {
+      for (const surfaceId of Object.keys(legacyState.targetStateBySurfaceId ?? {})) {
+        this.legacyDifferentProviderTargetSurfaceIds.add(surfaceId);
+      }
       if (importedCurrentSnapshotOwnership) {
         await this.persistState();
       }
@@ -11822,6 +11827,11 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       resumeSessionId,
       sendPairRequest,
     );
+    response = await this.maybeRecoverStaleForeignOwnershipLock(
+      surface,
+      response,
+      sendPairRequest,
+    );
 
     if (isResumeSessionMismatch(response) && resumeSessionId) {
       this.noteResumeFailure(surface);
@@ -11882,9 +11892,10 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     if (isErrorResponse(response)) {
       if (response.error.code === "busy") {
-        this.logger.warn?.(
-          `[surf-ace:runtime] busy for ${surface.surfaceId}; backing off (takeover requires explicit user action)`,
-        );
+        const busyMessage = isForeignOwnershipLockResponse(response) && surface.selfOwnershipReclaimAttempted
+          ? `[surf-ace:runtime] busy for ${surface.surfaceId}; backing off after supported stale foreign ownership reclaim attempt`
+          : `[surf-ace:runtime] busy for ${surface.surfaceId}; backing off (takeover requires explicit user action)`;
+        this.logger.warn?.(busyMessage);
       }
       throw new SurfAceToolError(mutationErrorCode(response.error.code), response.error.message);
     }
@@ -12064,6 +12075,55 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return response;
     }
     return this.reclaimSelfOwnershipLock(surface, response, resumeSessionId, sendPairRequest);
+  }
+
+  private async maybeRecoverStaleForeignOwnershipLock(
+    surface: ManagedSurface,
+    response: Response,
+    sendPairRequest: (
+      takeover: boolean,
+      requestedResumeSessionId: SessionId | null,
+    ) => Promise<Response>,
+  ): Promise<Response> {
+    if (
+      !isErrorResponse(response) ||
+      response.error.code !== "busy" ||
+      !isForeignOwnershipLockResponse(response) ||
+      surface.hasPairedInGatewaySession ||
+      surface.sessionId ||
+      surface.localOwnership ||
+      this.hasAcceptedSurfaceTopology(surface) ||
+      this.hasDurableDifferentProviderOwnership(surface) ||
+      this.legacyDifferentProviderTargetSurfaceIds.has(surface.surfaceId) ||
+      this.hasPersistedSelfSignals(surface) ||
+      this.hasTrustedLineageSelfOwnership(surface)
+    ) {
+      return response;
+    }
+    if (surface.selfOwnershipReclaimAttempted) {
+      this.logger.warn?.(
+        runtimeDiagnostic("ownership_foreign_reclaim_blocked", {
+          provider_id: this.persistentState.providerId,
+          reason: "already_attempted",
+          surface_id: surface.surfaceId,
+        }),
+      );
+      return response;
+    }
+    this.logger.warn?.(
+      runtimeDiagnostic("ownership_foreign_reclaim", {
+        provider_id: this.persistentState.providerId,
+        reason: response.error.code,
+        surface_id: surface.surfaceId,
+      }),
+    );
+    surface.selfOwnershipReclaimAttempted = true;
+    try {
+      return await sendPairRequest(true, null);
+    } catch (error) {
+      surface.selfOwnershipReclaimAttempted = false;
+      throw error;
+    }
   }
 
   private async maybeRecoverSameInstallOwnershipLock(
