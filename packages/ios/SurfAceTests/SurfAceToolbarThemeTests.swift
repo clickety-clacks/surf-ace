@@ -21,8 +21,22 @@ final class SurfAceToolbarThemeTests: XCTestCase {
 
     func testPaneIdentityChromeReplacesLabelsWithDisconnectedGlyph() {
         XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: .connected))
-        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: .connecting))
+        XCTAssertFalse(surfAcePaneChromeShowsIdentityLabels(connectionState: .connecting))
         XCTAssertFalse(surfAcePaneChromeShowsIdentityLabels(connectionState: .disconnected))
+    }
+
+    func testPaneChromeConnectionPresentationHasOnePushCapableState() {
+        XCTAssertEqual(SurfAcePaneChromeConnectionPresentation(connectionState: .connected), .pushCapable)
+        XCTAssertEqual(SurfAcePaneChromeConnectionPresentation(connectionState: .connecting), .connecting)
+        XCTAssertEqual(SurfAcePaneChromeConnectionPresentation(connectionState: .disconnected), .disconnected)
+
+        XCTAssertTrue(SurfAcePaneChromeConnectionPresentation(connectionState: .connected).showsIdentityLabels)
+        XCTAssertFalse(SurfAcePaneChromeConnectionPresentation(connectionState: .connecting).showsIdentityLabels)
+        XCTAssertFalse(SurfAcePaneChromeConnectionPresentation(connectionState: .disconnected).showsIdentityLabels)
+
+        XCTAssertFalse(SurfAcePaneChromeConnectionPresentation(connectionState: .connected).disconnectedGlyphStrobes)
+        XCTAssertTrue(SurfAcePaneChromeConnectionPresentation(connectionState: .connecting).disconnectedGlyphStrobes)
+        XCTAssertFalse(SurfAcePaneChromeConnectionPresentation(connectionState: .disconnected).disconnectedGlyphStrobes)
     }
 }
 

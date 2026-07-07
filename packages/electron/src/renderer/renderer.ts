@@ -173,6 +173,37 @@ type RendererWindowState = {
   windowLabel: string;
 };
 
+type PaneChromeConnectionState = "push-capable" | "connecting" | "disconnected";
+
+function paneChromeConnectionState(state: RendererWindowState | null): PaneChromeConnectionState {
+  if (state?.connectionBar === "connected") {
+    return "push-capable";
+  }
+  if (state?.connectionBar === "connecting") {
+    return "connecting";
+  }
+  return "disconnected";
+}
+
+function paneChromeShowsIdentityLabels(chromeState: PaneChromeConnectionState): boolean {
+  return chromeState === "push-capable";
+}
+
+function paneChromeDisconnectedGlyphStrobes(chromeState: PaneChromeConnectionState): boolean {
+  return chromeState === "connecting";
+}
+
+function setElementHidden(element: HTMLElement | SVGElement, hidden: boolean): void {
+  element.hidden = hidden;
+  element.toggleAttribute("hidden", hidden);
+  element.classList.toggle("is-hidden", hidden);
+  if (hidden) {
+    element.style.setProperty("display", "none");
+  } else {
+    element.style.removeProperty("display");
+  }
+}
+
 type Bootstrap = {
   compositorHosted?: boolean;
   overlayDebugBorders?: boolean;
@@ -2373,25 +2404,30 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
   const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
   const visibleWindowLabel = latestState?.windowLabel ?? "";
-  const disconnected = latestState?.connectionBar === "disconnected";
+  const chromeState = paneChromeConnectionState(latestState);
+  const showIdentityLabels = paneChromeShowsIdentityLabels(chromeState);
+  const strobeDisconnectedGlyph = paneChromeDisconnectedGlyphStrobes(chromeState);
   windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
-  windowLabel.hidden = disconnected || !visibleWindowLabel;
-  disconnectedGlyph.hidden = !disconnected;
+  setElementHidden(windowLabel, !showIdentityLabels || !visibleWindowLabel);
+  setElementHidden(disconnectedGlyph, showIdentityLabels);
+  disconnectedGlyph.classList.toggle("is-connecting", strobeDisconnectedGlyph);
   label.textContent = visibleAddress.toUpperCase();
-  label.hidden = disconnected;
-  labelWrap.hidden = disconnected ? false : !visibleAddress;
-  labelWrap.title = disconnected
-    ? "Surf Ace disconnected"
-    : [visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]
+  setElementHidden(label, !showIdentityLabels);
+  setElementHidden(labelWrap, showIdentityLabels ? !visibleAddress : false);
+  labelWrap.classList.toggle("is-connecting", strobeDisconnectedGlyph);
+  labelWrap.classList.toggle("is-disconnected", chromeState === "disconnected");
+  labelWrap.title = showIdentityLabels
+    ? [visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]
       .filter(Boolean)
-      .join(" ");
+      .join(" ")
+    : "Surf Ace disconnected";
   labelWrap.setAttribute(
     "aria-label",
-    disconnected
-      ? "Surf Ace disconnected"
-      : visibleAddress
+    showIdentityLabels
+      ? visibleAddress
         ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}`
-        : "",
+        : ""
+      : "Surf Ace disconnected",
   );
   fitPaneLabelToVisibleBounds(view);
   buildControls(view, pane);

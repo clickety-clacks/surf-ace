@@ -28,14 +28,30 @@ test("disconnected pane chrome replaces window and pane IDs with the wifi-off gl
   const styles = await rendererStyles();
   const updateIndex = source.indexOf("function updatePane");
   const updateSource = source.slice(updateIndex, source.indexOf("function layoutWeight", updateIndex));
+  const adapterIndex = source.indexOf("type PaneChromeConnectionState");
+  const adapterSource = source.slice(adapterIndex, source.indexOf("type Bootstrap", adapterIndex));
 
   assert.ok(updateIndex > -1);
-  assert.match(updateSource, /const disconnected = latestState\?\.connectionBar === "disconnected"/);
-  assert.match(updateSource, /windowLabel\.hidden = disconnected \|\| !visibleWindowLabel/);
-  assert.match(updateSource, /disconnectedGlyph\.hidden = !disconnected/);
-  assert.match(updateSource, /label\.hidden = disconnected/);
-  assert.match(updateSource, /labelWrap\.hidden = disconnected \? false : !visibleAddress/);
-  assert.match(updateSource, /disconnected\s*\? "Surf Ace disconnected"/);
+  assert.ok(adapterIndex > -1);
+  assert.match(adapterSource, /type PaneChromeConnectionState = "push-capable" \| "connecting" \| "disconnected"/);
+  assert.match(adapterSource, /state\?\.connectionBar === "connected"[\s\S]*return "push-capable"/);
+  assert.match(adapterSource, /state\?\.connectionBar === "connecting"[\s\S]*return "connecting"/);
+  assert.match(adapterSource, /return "disconnected"/);
+  assert.match(adapterSource, /chromeState === "push-capable"/);
+  assert.match(adapterSource, /chromeState === "connecting"/);
+  assert.match(updateSource, /const chromeState = paneChromeConnectionState\(latestState\)/);
+  assert.match(updateSource, /const showIdentityLabels = paneChromeShowsIdentityLabels\(chromeState\)/);
+  assert.match(updateSource, /const strobeDisconnectedGlyph = paneChromeDisconnectedGlyphStrobes\(chromeState\)/);
+  assert.match(updateSource, /setElementHidden\(windowLabel, !showIdentityLabels \|\| !visibleWindowLabel\)/);
+  assert.match(updateSource, /setElementHidden\(disconnectedGlyph, showIdentityLabels\)/);
+  assert.match(updateSource, /disconnectedGlyph\.classList\.toggle\("is-connecting", strobeDisconnectedGlyph\)/);
+  assert.match(updateSource, /setElementHidden\(label, !showIdentityLabels\)/);
+  assert.match(updateSource, /setElementHidden\(labelWrap, showIdentityLabels \? !visibleAddress : false\)/);
+  assert.match(updateSource, /showIdentityLabels\s*\?/);
+  assert.match(updateSource, /"Surf Ace disconnected"/);
+  assert.match(source, /element\.toggleAttribute\("hidden", hidden\)/);
+  assert.match(source, /element\.classList\.toggle\("is-hidden", hidden\)/);
+  assert.match(source, /element\.style\.setProperty\("display", "none"\)/);
   assert.match(source, /let latestChromeKey: string \| null = null/);
   assert.match(source, /function chromeKey\(state: RendererWindowState\): string/);
   assert.match(source, /const chromeStateChanged = latestChromeKey !== nextChromeKey/);
@@ -43,8 +59,31 @@ test("disconnected pane chrome replaces window and pane IDs with the wifi-off gl
   assert.match(source, /latestChromeKey = nextChromeKey/);
   assert.match(
     styles,
-    /\.pane-label\[hidden\],\s*\.pane-label__window\[hidden\],\s*\.pane-label__disconnected\[hidden\],\s*\.pane-label__number\[hidden\]\s*\{\s*display:\s*none;/,
+    /\.pane-label\[hidden\],\s*\.pane-label__window\[hidden\],\s*\.pane-label__disconnected\[hidden\],\s*\.pane-label__number\[hidden\],\s*\.pane-label\.is-hidden,/,
   );
+  assert.match(styles, /@keyframes disconnected-glyph-strobe/);
+  assert.match(styles, /\.pane-label__disconnected\s*\{[\s\S]*color:\s*rgb\(239,\s*68,\s*68\);/);
+  assert.match(styles, /\.pane-label__disconnected\.is-connecting\s*\{[\s\S]*animation:\s*disconnected-glyph-strobe/);
+  assert.match(styles, /\.pane-label__disconnected\.is-connecting\s*\{[\s\S]*color:\s*rgb\(245,\s*158,\s*11\);/);
+});
+
+test("pane chrome treats every non-push-capable renderer state as ID-less disconnected chrome", async () => {
+  const source = await rendererSource();
+  const adapterIndex = source.indexOf("type PaneChromeConnectionState");
+  const updateIndex = source.indexOf("function updatePane");
+  const renderIndex = source.indexOf("function renderWindow");
+  const adapterSource = source.slice(adapterIndex, source.indexOf("type Bootstrap", adapterIndex));
+  const updateSource = source.slice(updateIndex, source.indexOf("function layoutWeight", updateIndex));
+  const renderSource = source.slice(renderIndex, source.indexOf("function handleMessage", renderIndex));
+
+  assert.match(adapterSource, /connectionBar === "connected"[\s\S]*"push-capable"/);
+  assert.match(adapterSource, /connectionBar === "connecting"[\s\S]*"connecting"/);
+  assert.match(adapterSource, /return "disconnected"/);
+  for (const reason of ["stale", "restored", "unadmitted", "authority-not-actionable", "socket-not-open", "gave-up"]) {
+    assert.match(updateSource, /showIdentityLabels\s*\?[\s\S]*pane \$\{visibleAddress\}[\s\S]*: "Surf Ace disconnected"/, reason);
+  }
+  assert.match(renderSource, /wrapper\.className = `surface-window connection-\$\{state\.connectionBar\}`/);
+  assert.match(source, /function chromeKey\(state: RendererWindowState\): string[\s\S]*connectionBar: state\.connectionBar[\s\S]*windowLabel: state\.windowLabel/);
 });
 
 test("browser_url webviews defer navigation until the pane has a measured frame", async () => {
@@ -536,11 +575,11 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.match(source, /connectionBar: state\.connectionBar/);
   assert.doesNotMatch(source, /const showProviderIdentity = latestState\?\.connectionBar === "connected"/);
   assert.match(source, /const visibleAddress = pane\.displayId \|\| pane\.visibleAddress \|\| pane\.label/);
-  assert.match(source, /windowLabel\.hidden = disconnected \|\| !visibleWindowLabel/);
-  assert.match(source, /label\.hidden = disconnected/);
+  assert.match(source, /setElementHidden\(windowLabel, !showIdentityLabels \|\| !visibleWindowLabel\)/);
+  assert.match(source, /setElementHidden\(label, !showIdentityLabels\)/);
   assert.doesNotMatch(source, /windowLabel\.hidden = true/);
   assert.match(source, /createLucideIcon\("wifi-off"\)/);
-  assert.match(source, /disconnectedGlyph\.hidden = !disconnected/);
+  assert.match(source, /setElementHidden\(disconnectedGlyph, showIdentityLabels\)/);
   assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);
   assert.match(source, /` window \$\{visibleWindowLabel\}`/);
   assert.match(source, /`Surf Ace\$\{visibleWindowLabel/);
@@ -549,7 +588,7 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.doesNotMatch(source, /visibleAddress:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
 
   assert.doesNotMatch(styles, /\.pane-label__sender\s*\{/);
-  assert.match(styles, /\.pane-label__disconnected\s*\{[\s\S]*color:\s*rgba\(239,\s*68,\s*68,\s*0\.35\);/);
+  assert.match(styles, /\.pane-label__disconnected\s*\{[\s\S]*color:\s*rgb\(239,\s*68,\s*68\);/);
   assert.match(styles, /\.navigation-pill__owner\s*\{[\s\S]*font-size:\s*calc\(13px \+ 3pt\)/);
 });
 

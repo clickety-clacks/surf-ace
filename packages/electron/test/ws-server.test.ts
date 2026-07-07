@@ -546,14 +546,20 @@ function heartbeatRequest(): Request {
 
 function authorityStateRequest(
   paired: Extract<Response, { op: "pair.request"; ok: true }>,
-  options: { paneLabel?: number; panes?: Array<{ paneId: number; paneLabel: number; paneLineageId: string }>; windowLabel?: string } = {},
+  options: {
+    actionable?: boolean;
+    paneLabel?: number;
+    panes?: Array<{ paneId: number; paneLabel: number; paneLineageId: string }>;
+    reason?: string | null;
+    windowLabel?: string;
+  } = {},
 ): Request {
   const pane = paired.payload.state.panes[0]!;
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "authority.state",
     payload: {
-      actionable: true,
+      actionable: options.actionable ?? true,
       ownershipEpoch: paired.payload.ownershipEpoch,
       panes: options.panes ?? [{
         paneId: pane.paneId,
@@ -561,7 +567,7 @@ function authorityStateRequest(
         paneLineageId: pane.paneLineageId,
       }],
       providerId: "pv_alpha" as never,
-      reason: null,
+      reason: options.reason ?? null,
       sessionId: paired.payload.sessionId,
       surfaceId: paired.payload.surfaceId,
       windowLabel: options.windowLabel ?? "a",
@@ -1741,6 +1747,46 @@ test("ws server clears green connection bar when accepted provider socket closes
 
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "disconnected");
     assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
+  });
+});
+
+test("ws server keeps authority-not-actionable providers in connecting state", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+
+    const authority = await request(owner, authorityStateRequest(
+      paired as Extract<Response, { op: "pair.request"; ok: true }>,
+      { actionable: false, reason: "not_visible_accepted_topology" },
+    ));
+
+    assert.equal(authority.ok, true);
+    assert.equal(authority.op, "authority.state");
+    assert.equal(authority.payload.accepted, false);
+    assert.equal(authority.payload.reason, "not_visible_accepted_topology");
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
+
+    await closeSocket(owner);
+  });
+});
+
+test("ws server scopes connected state to the actionable surface when same-client windows coexist", async () => {
+  await withServer(async ({ core, surfaceId, url }) => {
+    const staleSurface = core.createAdditionalSurface("Surf Ace B", { height: 800, scale: 2, width: 1200 });
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+
+    const authority = await request(owner, authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>));
+    assert.equal(authority.ok, true);
+
+    assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
+    assert.equal(core.getRendererWindowState(staleSurface.surfaceId).connectionBar, "disconnected");
+    assert.notEqual(core.getRendererWindowState(surfaceId).surfaceId, core.getRendererWindowState(staleSurface.surfaceId).surfaceId);
+
+    await closeSocket(owner);
   });
 });
 

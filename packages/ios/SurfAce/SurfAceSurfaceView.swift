@@ -908,6 +908,42 @@ struct SurfAcePaneChromeIdentityParts: Equatable {
     let windowLabel: String
 }
 
+enum SurfAcePaneChromeConnectionPresentation: Equatable {
+    case pushCapable
+    case connecting
+    case disconnected
+
+    init(connectionState: SurfAceConnectionBarState) {
+        switch connectionState {
+        case .connected:
+            self = .pushCapable
+        case .connecting:
+            self = .connecting
+        case .disconnected:
+            self = .disconnected
+        }
+    }
+
+    var showsIdentityLabels: Bool {
+        self == .pushCapable
+    }
+
+    var disconnectedGlyphStrobes: Bool {
+        self == .connecting
+    }
+
+    var disconnectedGlyphColor: Color {
+        switch self {
+        case .pushCapable:
+            return Color(red: 0.13, green: 0.77, blue: 0.37)
+        case .connecting:
+            return Color(red: 0.96, green: 0.65, blue: 0.04)
+        case .disconnected:
+            return Color(red: 0.94, green: 0.27, blue: 0.27)
+        }
+    }
+}
+
 @MainActor
 func surfAcePaneChromeIdentityParts(surface: SurfAceSurfaceModel, pane: SurfAcePaneModel) -> SurfAcePaneChromeIdentityParts {
     SurfAcePaneChromeIdentityParts(
@@ -917,7 +953,7 @@ func surfAcePaneChromeIdentityParts(surface: SurfAceSurfaceModel, pane: SurfAceP
 }
 
 func surfAcePaneChromeShowsIdentityLabels(connectionState: SurfAceConnectionBarState) -> Bool {
-    connectionState != .disconnected
+    SurfAcePaneChromeConnectionPresentation(connectionState: connectionState).showsIdentityLabels
 }
 
 private struct SurfAcePaneIdentityOverlay: View {
@@ -930,9 +966,13 @@ private struct SurfAcePaneIdentityOverlay: View {
         max(1, min(paneSize.width, paneSize.height) / 4)
     }
 
+    private var presentation: SurfAcePaneChromeConnectionPresentation {
+        SurfAcePaneChromeConnectionPresentation(connectionState: connectionState)
+    }
+
     var body: some View {
         HStack(alignment: .surfAceIdentityBaseline, spacing: fontSize * SurfAceRajdhaniMetrics.identitySpacingRatio) {
-            if surfAcePaneChromeShowsIdentityLabels(connectionState: connectionState) {
+            if presentation.showsIdentityLabels {
                 if !windowLabel.isEmpty {
                     Text(windowLabel.uppercased())
                         .font(.custom(SurfAceChromeFont.regularName, size: fontSize * SurfAceRajdhaniMetrics.windowTextRatio))
@@ -956,8 +996,9 @@ private struct SurfAcePaneIdentityOverlay: View {
             } else {
                 Image(systemName: "wifi.slash")
                     .font(.system(size: fontSize * 0.46, weight: .regular))
-                    .foregroundStyle(connectionColor.opacity(0.35))
+                    .foregroundStyle(presentation.disconnectedGlyphColor)
                     .symbolRenderingMode(.monochrome)
+                    .symbolEffect(.pulse, options: .repeating, isActive: presentation.disconnectedGlyphStrobes)
                     .accessibilityHidden(true)
                     .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
             }
