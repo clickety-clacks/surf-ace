@@ -2216,6 +2216,8 @@ final class SurfAceRuntime {
             targetEpoch: targetEpoch,
             restorePolicy: payload["restoreReason"] as? String == "initial_apply" ? "confirm" : "auto",
             currentState: "current",
+            targetHeader: payload["targetHeader"] as? [String: Any],
+            targetPayload: targetPayload,
             lastApplyEvidence: nil
         )
         pane.pendingSnapshotHintReason = "after_render"
@@ -3778,6 +3780,12 @@ final class SurfAceRuntime {
             "restorePolicy": target.restorePolicy,
             "currentState": target.currentState,
         ]
+        if let targetHeader = target.targetHeader {
+            payload["targetHeader"] = targetHeader
+        }
+        if let targetPayload = target.targetPayload {
+            payload["targetPayload"] = targetPayload
+        }
         if let lastApplyEvidence = target.lastApplyEvidence {
             payload["lastApplyEvidence"] = lastApplyEvidence
         }

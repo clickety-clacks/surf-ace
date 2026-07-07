@@ -483,7 +483,26 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             paneLineageId: "pl_content",
             targetEpoch: 2,
             restorePolicy: "auto",
-            currentState: "applied"
+            currentState: "applied",
+            targetHeader: [
+                "summary": "https://example.com/docs#intro",
+                "requiredCapabilities": ["target.browser_url.v1"],
+                "safetyClass": "network",
+                "replaySemantics": "navigate",
+                "payloadSchemaVersion": 1,
+                "safeToLogFields": ["url"],
+            ],
+            targetPayload: ["url": "https://example.com/docs#intro"],
+            lastApplyEvidence: [
+                "status": "applied",
+                "targetId": "tg_browser",
+                "targetEpoch": 2,
+                "materializedState": [
+                    "navigationStatus": "loaded",
+                    "replaySemantics": "navigate",
+                    "url": "https://example.com/docs#intro",
+                ],
+            ]
         )
         firstSurface.windowLabel = "a"
         firstSurface.panesById = [1: pane]
@@ -504,6 +523,16 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(restoredPane?.forwardStack.map(\.revision), [3])
         XCTAssertEqual(restoredPane?.currentTarget?.targetId, "tg_browser")
         XCTAssertEqual(restoredPane?.currentTarget?.targetKind, "browser_url")
+        XCTAssertEqual(restoredPane?.currentTarget?.targetHeader?["summary"] as? String, "https://example.com/docs#intro")
+        XCTAssertEqual(
+            restoredPane?.currentTarget?.targetHeader?["requiredCapabilities"] as? [String],
+            ["target.browser_url.v1"]
+        )
+        XCTAssertEqual(restoredPane?.currentTarget?.targetPayload?["url"] as? String, "https://example.com/docs#intro")
+        XCTAssertEqual(restoredPane?.currentTarget?.lastApplyEvidence?["status"] as? String, "applied")
+        let materializedState = restoredPane?.currentTarget?.lastApplyEvidence?["materializedState"] as? [String: Any]
+        XCTAssertEqual(materializedState?["navigationStatus"] as? String, "loaded")
+        XCTAssertEqual(materializedState?["url"] as? String, "https://example.com/docs#intro")
     }
 
     @MainActor

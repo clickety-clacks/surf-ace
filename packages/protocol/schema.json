@@ -326,6 +326,47 @@
         ]
       }
     },
+    "ApplyEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestId", "targetId", "paneLineageId", "targetEpoch", "status", "appliedAt"],
+      "properties": {
+        "requestId": { "$ref": "#/$defs/RequestId" },
+        "targetId": { "type": "string", "minLength": 1 },
+        "paneLineageId": { "type": "string", "minLength": 1 },
+        "targetEpoch": { "type": "integer", "minimum": 1 },
+        "status": {
+          "type": "string",
+          "enum": ["applied", "rejected", "failed"]
+        },
+        "errorCode": { "$ref": "#/$defs/TargetErrorCode" },
+        "message": { "type": "string" },
+        "materializedState": { "$ref": "#/$defs/TargetMaterializedState" },
+        "appliedAt": { "type": "string", "minLength": 1 }
+      }
+    },
+    "PaneCurrentTargetState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetId", "targetKind", "paneLineageId", "targetEpoch", "restorePolicy", "currentState"],
+      "properties": {
+        "targetId": { "type": "string", "minLength": 1 },
+        "targetKind": { "$ref": "#/$defs/TargetKind" },
+        "paneLineageId": { "type": "string", "minLength": 1 },
+        "targetEpoch": { "type": "integer", "minimum": 1 },
+        "restorePolicy": {
+          "type": "string",
+          "enum": ["auto", "confirm", "manual", "never"]
+        },
+        "currentState": {
+          "type": "string",
+          "enum": ["current", "stale", "superseded", "tombstoned"]
+        },
+        "targetHeader": { "$ref": "#/$defs/TargetHeader" },
+        "targetPayload": { "$ref": "#/$defs/TargetPayload" },
+        "lastApplyEvidence": { "$ref": "#/$defs/ApplyEvidence" }
+      }
+    },
     "TargetMaterializedState": {
       "oneOf": [
         {
@@ -2277,10 +2318,20 @@
                       "currentRevision": {
                         "$ref": "#/$defs/Revision"
                       },
-                      "contentType": {
-                        "oneOf": [
-                          {
+                  "contentType": {
+                    "oneOf": [
+                      {
                         "$ref": "#/$defs/ContentType"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "currentTarget": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/PaneCurrentTargetState"
                       },
                       {
                         "type": "null"
@@ -3841,6 +3892,16 @@
                     "oneOf": [
                       {
                         "$ref": "#/$defs/ContentType"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "currentTarget": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/PaneCurrentTargetState"
                       },
                       {
                         "type": "null"

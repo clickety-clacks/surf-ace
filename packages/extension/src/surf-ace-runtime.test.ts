@@ -40,6 +40,7 @@ function delay(ms: number): Promise<void> {
 type TestPane = {
   contentId: string | null;
   contentType: string | null;
+  currentTarget?: Record<string, unknown> | null;
   display?: {
     interactive?: boolean;
     provenance?: Record<string, unknown>;
@@ -97,6 +98,47 @@ function stableStringRecordDigest(value: Record<string, unknown> | undefined): s
     .sort()
     .map((key) => [key, value[key]]));
   return createHash("sha256").update(JSON.stringify(stableValue)).digest("hex");
+}
+
+function clientBrowserUrlTarget(input: {
+  paneLineageId: string;
+  targetEpoch?: number;
+  targetId?: string;
+  url: string;
+}): Record<string, unknown> {
+  const targetEpoch = input.targetEpoch ?? 1;
+  const targetId = input.targetId ?? "tg_client_browser_url";
+  const appliedAt = new Date().toISOString();
+  return {
+    currentState: "current",
+    lastApplyEvidence: {
+      appliedAt,
+      materializedState: {
+        navigationStatus: "loaded",
+        replaySemantics: "navigate",
+        url: input.url,
+      },
+      paneLineageId: input.paneLineageId,
+      requestId: `tr_${targetId}`,
+      status: "applied",
+      targetEpoch,
+      targetId,
+    },
+    paneLineageId: input.paneLineageId,
+    restorePolicy: "auto",
+    targetEpoch,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: input.url,
+    },
+    targetId,
+    targetKind: "browser_url",
+    targetPayload: { url: input.url },
+  };
 }
 
 async function launchInternalTerminal(runtime: unknown, input: Record<string, unknown>, context?: Record<string, unknown>) {
@@ -1016,6 +1058,7 @@ class FakeSurfAceWsServer {
               contentType: pane.contentType,
               currentContentId: pane.contentId,
               currentRevision: pane.revision,
+              ...(pane.currentTarget ? { currentTarget: structuredClone(pane.currentTarget) } : {}),
               ...(pane.display ? { display: structuredClone(pane.display) } : {}),
               paneId,
               ...(this.includePairPaneLineageIds ? { paneLineageId: pane.paneLineageId } : {}),
@@ -1195,6 +1238,7 @@ class FakeSurfAceWsServer {
           targetSurface.panes.set(paneState.paneId, {
             contentId: previousPane?.contentId ?? null,
             contentType: previousPane?.contentType ?? null,
+            currentTarget: previousPane?.currentTarget ? structuredClone(previousPane.currentTarget) : null,
             drawings: previousPane?.drawings ? [...previousPane.drawings] : [],
             frame: previousPane?.frame ?? {
               height: targetSurface.viewport.height,
@@ -1399,54 +1443,76 @@ class FakeSurfAceWsServer {
         const env = targetPayload.env && typeof targetPayload.env === "object" && !Array.isArray(targetPayload.env)
           ? targetPayload.env as Record<string, unknown>
           : undefined;
+        const responsePayload = {
+          appliedAt: new Date().toISOString(),
+          materializedState: isNativeHostTargetKind(targetKind)
+            ? {
+                inputFocus: "ready",
+                lifecycle: "running",
+                nativeHost: "applied",
+                nativeTarget: {
+                  ...(typeof targetPayload.appId === "string" ? { appId: targetPayload.appId } : {}),
+                  ...(Array.isArray(targetPayload.args) ? { args: targetPayload.args } : {}),
+                  ...(typeof targetPayload.command === "string" ? { command: targetPayload.command } : {}),
+                  ...(typeof targetPayload.cwd === "string" ? { cwd: targetPayload.cwd } : {}),
+                  ...(env ? { envDigest: stableStringRecordDigest(env), envKeys: Object.keys(env).sort() } : {}),
+                  ...(typeof targetPayload.launchMode === "string" ? { launchMode: targetPayload.launchMode } : {}),
+                  targetKind,
+                },
+                overlayRegions: "applied",
+                proof: {
+                  ...(typeof targetPayload.appId === "string" ? { appId: targetPayload.appId } : {}),
+                  ...(Array.isArray(targetPayload.args) ? { args: targetPayload.args } : { args: [] }),
+                  contentId: this.nativeTargetProofContentIdOverride === undefined
+                    ? String(message.payload?.targetId ?? "")
+                    : this.nativeTargetProofContentIdOverride,
+                  ...(typeof targetPayload.cwd === "string" ? { cwd: targetPayload.cwd } : {}),
+                  envDigest: stableStringRecordDigest(env) ?? stableStringRecordDigest({})!,
+                  launchMode: typeof targetPayload.launchMode === "string" ? targetPayload.launchMode : "new_instance",
+                  paneId: this.nativeTargetProofPaneIdOverride === undefined
+                    ? String(nativeHostPaneId ?? "")
+                    : this.nativeTargetProofPaneIdOverride,
+                },
+              }
+            : targetKind === "browser_url" && typeof targetPayload.url === "string"
+              ? this.browserUrlMaterializedStateOverride === undefined
+                ? {
+                  navigationStatus: "loaded",
+                  replaySemantics: "navigate",
+                  url: targetPayload.url,
+                }
+                : this.browserUrlMaterializedStateOverride
+              : { paneLineageId: String(message.payload?.paneLineageId ?? "") },
+          paneLineageId: String(message.payload?.paneLineageId ?? ""),
+          requestId: String(message.payload?.requestId ?? message.id),
+          status: "applied",
+          targetEpoch: Number(message.payload?.targetEpoch ?? 0),
+          targetId: String(message.payload?.targetId ?? ""),
+        };
+        if (targetKind === "browser_url") {
+          const targetSurface = this.requirePairedSurface(socket);
+          const pane = [...targetSurface.panes.values()].find((candidate) =>
+            candidate.paneLineageId === message.payload?.paneLineageId
+          );
+          if (pane) {
+            pane.contentId = null;
+            pane.contentType = null;
+            pane.currentTarget = {
+              currentState: "current",
+              lastApplyEvidence: structuredClone(responsePayload),
+              paneLineageId: String(message.payload?.paneLineageId ?? ""),
+              restorePolicy: "auto",
+              targetEpoch: Number(message.payload?.targetEpoch ?? 0),
+              targetHeader: structuredClone(message.payload?.targetHeader),
+              targetId: String(message.payload?.targetId ?? ""),
+              targetKind,
+              targetPayload: structuredClone(targetPayload),
+            };
+          }
+        }
         socket.send(
           JSON.stringify(
-            this.response(message.id, "target.apply.result", {
-              appliedAt: new Date().toISOString(),
-              materializedState: isNativeHostTargetKind(targetKind)
-                ? {
-                    inputFocus: "ready",
-                    lifecycle: "running",
-                    nativeHost: "applied",
-                    nativeTarget: {
-                      ...(typeof targetPayload.appId === "string" ? { appId: targetPayload.appId } : {}),
-                      ...(Array.isArray(targetPayload.args) ? { args: targetPayload.args } : {}),
-                      ...(typeof targetPayload.command === "string" ? { command: targetPayload.command } : {}),
-                      ...(typeof targetPayload.cwd === "string" ? { cwd: targetPayload.cwd } : {}),
-                      ...(env ? { envDigest: stableStringRecordDigest(env), envKeys: Object.keys(env).sort() } : {}),
-                      ...(typeof targetPayload.launchMode === "string" ? { launchMode: targetPayload.launchMode } : {}),
-                      targetKind,
-                    },
-                    overlayRegions: "applied",
-                    proof: {
-                      ...(typeof targetPayload.appId === "string" ? { appId: targetPayload.appId } : {}),
-                      ...(Array.isArray(targetPayload.args) ? { args: targetPayload.args } : { args: [] }),
-                      contentId: this.nativeTargetProofContentIdOverride === undefined
-                        ? String(message.payload?.targetId ?? "")
-                        : this.nativeTargetProofContentIdOverride,
-                      ...(typeof targetPayload.cwd === "string" ? { cwd: targetPayload.cwd } : {}),
-                      envDigest: stableStringRecordDigest(env) ?? stableStringRecordDigest({})!,
-                      launchMode: typeof targetPayload.launchMode === "string" ? targetPayload.launchMode : "new_instance",
-                      paneId: this.nativeTargetProofPaneIdOverride === undefined
-                        ? String(nativeHostPaneId ?? "")
-                        : this.nativeTargetProofPaneIdOverride,
-                    },
-                  }
-                : targetKind === "browser_url" && typeof targetPayload.url === "string"
-                  ? this.browserUrlMaterializedStateOverride === undefined
-                    ? {
-                      navigationStatus: "loaded",
-                      replaySemantics: "navigate",
-                      url: targetPayload.url,
-                    }
-                    : this.browserUrlMaterializedStateOverride
-                  : { paneLineageId: String(message.payload?.paneLineageId ?? "") },
-              paneLineageId: String(message.payload?.paneLineageId ?? ""),
-              requestId: String(message.payload?.requestId ?? message.id),
-              status: "applied",
-              targetEpoch: Number(message.payload?.targetEpoch ?? 0),
-              targetId: String(message.payload?.targetId ?? ""),
-            }),
+            this.response(message.id, "target.apply.result", responsePayload),
           ),
         );
         return;
@@ -1469,6 +1535,7 @@ class FakeSurfAceWsServer {
                 const paneState: Record<string, unknown> = {
                   activeContentId: pane.contentId,
                   contentType: pane.contentType,
+                  ...(pane.currentTarget ? { currentTarget: structuredClone(pane.currentTarget) } : {}),
                   ...(pane.display ? { display: structuredClone(pane.display) } : {}),
                   externalNative: pane.externalNative ?? false,
                   geometry: this.paneGeometry(targetSurface, paneId, pane),
@@ -2310,6 +2377,74 @@ test("restore flight recorder correlates pair attempt with pulled Spatial record
     assert.equal(artifact.providerSurface.surfaceId, server.surfaceId);
     assert.equal(artifact.providerDecision.pairPaneCount, 1);
     assert.deepEqual(artifact.spatialFlightRecorder.lines, server.flightRecorderLines);
+  });
+});
+
+test("pair current browser_url target survives provider target hydration", async () => {
+  await withRuntimeHarness({
+    configureServer: (server) => {
+      server.targetCapabilities = [
+        ...server.targetCapabilities,
+        "target.browser_url.v1",
+      ];
+      const serverPane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(serverPane);
+      serverPane.revision = 3;
+      serverPane.currentTarget = clientBrowserUrlTarget({
+        paneLineageId: serverPane.paneLineageId,
+        targetEpoch: 3,
+        targetId: "tg_pair_after_hydrate",
+        url: "https://pair-after-hydrate.example/",
+      });
+    },
+    waitForPair: false,
+    run: async ({ runtime, server }) => {
+      const serverPane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(serverPane);
+      const internalRuntime = runtime as any;
+      internalRuntime.persistentState.targetStateBySurfaceId = {
+        [server.surfaceId]: {
+          paneTargets: {
+            [serverPane.paneLineageId]: {
+              currentTargetId: "tg_pair_after_hydrate",
+              diagnosticContent: null,
+              lastRestoreBlockedReason: null,
+              nonDurableTargetDiagnostic: null,
+              paneLineageId: serverPane.paneLineageId,
+              targetEpoch: 1,
+            },
+          },
+          registeredTargetIdsByIdempotencyKey: {},
+          targetRecords: [{
+            appliedAt: new Date(Date.now() - 120_000).toISOString(),
+            currentState: "current",
+            ownerProviderId: internalRuntime.persistentState.providerId,
+            ownershipEpoch: 1,
+            ownershipSessionId: "sa_test_session",
+            paneIdAtApply: "pn_stale_pair_after_hydrate",
+            paneLabelAtApply: 1,
+            paneLineageId: serverPane.paneLineageId,
+            restorePolicy: "auto",
+            surfaceId: server.surfaceId,
+            surfaceInstanceId: null,
+            targetEpoch: 1,
+            targetHeader: structuredClone(serverPane.currentTarget.targetHeader),
+            targetId: "tg_pair_after_hydrate",
+            targetKind: "browser_url",
+            targetPayload: structuredClone(serverPane.currentTarget.targetPayload),
+          }],
+        },
+      };
+      await waitFor(() => server.pairedSocket !== null);
+      await waitFor(() => server.authorityStateRequests.some((request) => request.actionable === true));
+
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      const pane = paneByLabel(screen, 1);
+      assert.equal(pane?.target?.targetKind, "browser_url");
+      assert.equal(pane?.target?.targetPayload.url, "https://pair-after-hydrate.example/");
+      const read = await runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
+      assert.equal(read.browserUrl?.url, "https://pair-after-hydrate.example/");
+    },
   });
 });
 
@@ -7446,6 +7581,76 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           paneId: firstPaneId,
         });
         assert.equal(server.contentSetRequests.at(-1)?.revision, pushed.revision + 1);
+      },
+    });
+  });
+
+  await t.test("provider adopts client current browser_url target from pair state", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+        const pane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(pane);
+        pane.revision = 1;
+        pane.currentTarget = clientBrowserUrlTarget({
+          paneLineageId: pane.paneLineageId,
+          targetId: "tg_pair_browser_url",
+          url: "https://pair.example/",
+        });
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const pane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
+        assert.equal(pane?.target?.targetKind, "browser_url");
+        assert.equal(pane?.target?.targetPayload.url, "https://pair.example/");
+        const read = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(read.browserUrl?.url, "https://pair.example/");
+        assert.equal(server.contentSetRequests.length, 0);
+        assert.equal(server.targetApplyRequests.length, 0);
+      },
+    });
+  });
+
+  await t.test("provider adopts client current browser_url target from panes.list when provider record is missing", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        server.targetCapabilities = [
+          ...server.targetCapabilities,
+          "target.browser_url.v1",
+        ];
+      },
+      run: async ({ runtime, server }) => {
+        const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
+        const serverPane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(serverPane);
+        serverPane.revision = 2;
+        serverPane.currentTarget = clientBrowserUrlTarget({
+          paneLineageId: serverPane.paneLineageId,
+          targetEpoch: 2,
+          targetId: "tg_panes_list_browser_url",
+          url: "https://panes-list.example/",
+        });
+
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        assert.ok(surface);
+        const providerPane = surface.panes.get(firstPaneId);
+        assert.ok(providerPane);
+        surface.targetRecords.clear();
+        providerPane.currentTargetId = null;
+
+        await internalRuntime.syncRemotePaneList(surface);
+
+        const pane = (await runtime.listScreens())[0]?.panes.find((candidate) => candidate.paneId === firstPaneId);
+        assert.equal(pane?.target?.targetKind, "browser_url");
+        assert.equal(pane?.target?.targetPayload.url, "https://panes-list.example/");
+        const read = await runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+        assert.equal(read.browserUrl?.url, "https://panes-list.example/");
+        assert.equal(server.contentSetRequests.length, 0);
+        assert.equal(server.targetApplyRequests.length, 0);
       },
     });
   });
@@ -16774,6 +16979,72 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(
         warnings.some((warning) => warning.includes("ownership_self_reclaim") && warning.includes(server.surfaceId)),
       );
+    });
+  });
+
+  await t.test("pre-admission foreign-provider busy reclaims with takeover and preserves pair response", async () => {
+    await withRuntimeHarness({
+      configureServer: (server) => {
+        const firstPane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(firstPane);
+        firstPane.contentId = "ct_pre_admission_foreign_reclaim";
+        firstPane.contentType = "markdown";
+        firstPane.revision = 7;
+        server.panes.set(42, {
+          contentId: "ct_pre_admission_foreign_reclaim_second",
+          contentType: "markdown",
+          drawings: [],
+          frame: {
+            height: 768,
+            width: 512,
+            x: 512,
+            y: 0,
+          },
+          name: null,
+          paneLabel: 2,
+          paneLineageId: `${server.surfaceId}_pane_42`,
+          revision: 3,
+          viewport: {
+            height: 768,
+            scale: 2,
+            width: 512,
+          },
+        });
+        server.setTopologyLayout({
+          children: [
+            { paneId: server.initialRemotePaneId, type: "pane" },
+            { paneId: 42, type: "pane" },
+          ],
+          direction: "horizontal",
+          type: "split",
+        }, 4);
+        server.busyWithoutTakeoverResponsesRemaining = 1;
+        server.busyWithoutTakeoverMessage = "surface ownership lock is held by another provider";
+      },
+      run: async ({ runtime, server, warnings }) => {
+        await waitFor(async () => (await runtime.listScreens())[0]?.connectionState === "connected", 12_000);
+
+        assert.deepEqual(
+          server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.takeover),
+          [false, true],
+        );
+        assert.deepEqual(
+          server.pairAttemptDetails.slice(0, 2).map((attempt) => attempt.resumeSessionId),
+          [null, null],
+        );
+        const screen = (await runtime.listScreens())[0];
+        assert.ok(screen);
+        assert.deepEqual(screen.panes.map((pane) => pane.paneLabel).sort(), [1, 2]);
+        assert.equal(
+          screen.panes.find((pane) => pane.paneLabel === 1)?.activeContent?.contentId,
+          "ct_pre_admission_foreign_reclaim",
+        );
+        assert.equal(
+          screen.panes.find((pane) => pane.paneLabel === 2)?.activeContent?.contentId,
+          "ct_pre_admission_foreign_reclaim_second",
+        );
+        assert.ok(warnings.some((warning) => warning.includes("ownership_foreign_reclaim")));
+      },
     });
   });
 
