@@ -645,15 +645,19 @@ struct SurfAcePaneTargetState: Codable, Equatable {
     var targetEpoch: Int
     var restorePolicy: String
     var currentState: String
+    var targetHeader: [String: Any]?
+    var targetPayload: [String: Any]?
     var lastApplyEvidence: [String: Any]?
 
     private enum CodingKeys: String, CodingKey {
         case currentState
         case paneLineageId
         case restorePolicy
+        case targetHeader
         case targetEpoch
         case targetId
         case targetKind
+        case targetPayload
     }
 
     init(
@@ -663,6 +667,8 @@ struct SurfAcePaneTargetState: Codable, Equatable {
         targetEpoch: Int,
         restorePolicy: String,
         currentState: String,
+        targetHeader: [String: Any]? = nil,
+        targetPayload: [String: Any]? = nil,
         lastApplyEvidence: [String: Any]? = nil
     ) {
         self.targetId = targetId
@@ -671,6 +677,8 @@ struct SurfAcePaneTargetState: Codable, Equatable {
         self.targetEpoch = targetEpoch
         self.restorePolicy = restorePolicy
         self.currentState = currentState
+        self.targetHeader = targetHeader
+        self.targetPayload = targetPayload
         self.lastApplyEvidence = lastApplyEvidence
     }
 
@@ -682,6 +690,8 @@ struct SurfAcePaneTargetState: Codable, Equatable {
         self.targetEpoch = try container.decode(Int.self, forKey: .targetEpoch)
         self.restorePolicy = try container.decode(String.self, forKey: .restorePolicy)
         self.currentState = try container.decode(String.self, forKey: .currentState)
+        self.targetHeader = nil
+        self.targetPayload = nil
         self.lastApplyEvidence = nil
     }
 

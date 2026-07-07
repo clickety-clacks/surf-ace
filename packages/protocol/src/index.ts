@@ -146,6 +146,18 @@ export type ApplyEvidence = {
   appliedAt: string;
 };
 
+export type PaneCurrentTargetState = {
+  targetId: string;
+  targetKind: TargetKind;
+  paneLineageId: string;
+  targetEpoch: number;
+  restorePolicy: RestorePolicy;
+  currentState: "current" | "stale" | "superseded" | "tombstoned";
+  targetHeader?: TargetHeader;
+  targetPayload?: unknown;
+  lastApplyEvidence?: ApplyEvidence;
+};
+
 export type TargetErrorCode =
   | "capability_missing"
   | "policy_denied"
@@ -729,6 +741,7 @@ export type PairResponse = ResponseBase<"pair.request"> & {
         currentContentId: ContentId | null;
         currentRevision: Revision;
         contentType: ContentType | null;
+        currentTarget?: PaneCurrentTargetState | null;
         display?: ContentDisplay;
       }>;
       layout: TopologyLayoutNode;
@@ -832,6 +845,7 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
       name: string | null;
       activeContentId: ContentId | null;
       contentType: ContentType | null;
+      currentTarget?: PaneCurrentTargetState | null;
       display?: ContentDisplay;
       externalNative?: boolean;
       nativeWindowGroup?: NativePaneWindowGroupDiagnostic;

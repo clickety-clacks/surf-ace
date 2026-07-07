@@ -25,6 +25,7 @@ import type {
   PaneRemovedEvent,
   PaneRenamedEvent,
   PairResponse,
+  PaneCurrentTargetState,
   PanesListResponse,
   PaneGeometryProjection,
   Position,
@@ -679,9 +680,11 @@ export class SurfaceCore {
         if (!geometry) {
           throw new SurfaceCoreError("internal_error", `Pane ${paneId} is missing resolved geometry`);
         }
+        const currentTarget = currentTargetStateForEntry(pane, current);
         return {
           activeContentId: protocolContentId(current),
           contentType: protocolContentType(current),
+          ...(currentTarget ? { currentTarget } : {}),
           externalNative: pane.externalNative,
           geometry,
           name: pane.name,
@@ -1354,10 +1357,12 @@ export class SurfaceCore {
       panes: surface.paneOrder.map((paneId) => {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
+        const currentTarget = currentTargetStateForEntry(pane, current);
         return {
           contentType: protocolContentType(current),
           currentContentId: protocolContentId(current),
           currentRevision: current.revision as Revision,
+          ...(currentTarget ? { currentTarget } : {}),
           paneId: pane.paneId as PaneId,
           paneLabel: pane.paneLabel,
           paneLineageId: pane.paneLineageId,
@@ -2905,6 +2910,29 @@ function protocolContentId(entry: HistoryEntry): ContentId | null {
 
 function protocolContentType(entry: HistoryEntry): ContentType | null {
   return entry.contentType === "browser_url" ? null : entry.contentType as ContentType | null;
+}
+
+function currentTargetStateForEntry(pane: PaneState, entry: HistoryEntry): PaneCurrentTargetState | null {
+  if (entry.contentType !== "browser_url" || entry.contentId === null || entry.content === null || !("url" in entry.content)) {
+    return null;
+  }
+  return {
+    currentState: "current",
+    paneLineageId: pane.paneLineageId,
+    restorePolicy: "auto",
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: entry.content.url,
+    },
+    targetEpoch: entry.revision,
+    targetId: entry.contentId,
+    targetKind: "browser_url",
+    targetPayload: { url: entry.content.url },
+  };
 }
 
 function parseSafeBrowserUrl(value: string): URL | null {
