@@ -19,6 +19,59 @@ enum SurfAceContentType: String, Codable {
     case canvas
 }
 
+private struct SurfAceJSONValue: Codable {
+    let value: Any
+
+    init(_ value: Any) {
+        self.value = value
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            value = NSNull()
+        } else if let bool = try? container.decode(Bool.self) {
+            value = bool
+        } else if let int = try? container.decode(Int.self) {
+            value = int
+        } else if let double = try? container.decode(Double.self) {
+            value = double
+        } else if let string = try? container.decode(String.self) {
+            value = string
+        } else if let array = try? container.decode([SurfAceJSONValue].self) {
+            value = array.map(\.value)
+        } else {
+            let object = try container.decode([String: SurfAceJSONValue].self)
+            value = object.mapValues(\.value)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch value {
+        case is NSNull:
+            try container.encodeNil()
+        case let bool as Bool:
+            try container.encode(bool)
+        case let int as Int:
+            try container.encode(int)
+        case let double as Double:
+            try container.encode(double)
+        case let string as String:
+            try container.encode(string)
+        case let array as [Any]:
+            try container.encode(array.map(SurfAceJSONValue.init))
+        case let object as [String: Any]:
+            try container.encode(object.mapValues(SurfAceJSONValue.init))
+        default:
+            throw EncodingError.invalidValue(
+                value,
+                EncodingError.Context(codingPath: encoder.codingPath, debugDescription: "Unsupported JSON value")
+            )
+        }
+    }
+}
+
 enum SurfAceContentScaleAction {
     case decrease
     case increase
@@ -651,6 +704,7 @@ struct SurfAcePaneTargetState: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case currentState
+        case lastApplyEvidence
         case paneLineageId
         case restorePolicy
         case targetHeader
@@ -690,9 +744,9 @@ struct SurfAcePaneTargetState: Codable, Equatable {
         self.targetEpoch = try container.decode(Int.self, forKey: .targetEpoch)
         self.restorePolicy = try container.decode(String.self, forKey: .restorePolicy)
         self.currentState = try container.decode(String.self, forKey: .currentState)
-        self.targetHeader = nil
-        self.targetPayload = nil
-        self.lastApplyEvidence = nil
+        self.targetHeader = try container.decodeIfPresent(SurfAceJSONValue.self, forKey: .targetHeader)?.value as? [String: Any]
+        self.targetPayload = try container.decodeIfPresent(SurfAceJSONValue.self, forKey: .targetPayload)?.value as? [String: Any]
+        self.lastApplyEvidence = try container.decodeIfPresent(SurfAceJSONValue.self, forKey: .lastApplyEvidence)?.value as? [String: Any]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -703,6 +757,9 @@ struct SurfAcePaneTargetState: Codable, Equatable {
         try container.encode(targetEpoch, forKey: .targetEpoch)
         try container.encode(restorePolicy, forKey: .restorePolicy)
         try container.encode(currentState, forKey: .currentState)
+        try container.encodeIfPresent(targetHeader.map(SurfAceJSONValue.init), forKey: .targetHeader)
+        try container.encodeIfPresent(targetPayload.map(SurfAceJSONValue.init), forKey: .targetPayload)
+        try container.encodeIfPresent(lastApplyEvidence.map(SurfAceJSONValue.init), forKey: .lastApplyEvidence)
     }
 
     static func == (lhs: SurfAcePaneTargetState, rhs: SurfAcePaneTargetState) -> Bool {

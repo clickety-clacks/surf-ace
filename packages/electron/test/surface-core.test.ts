@@ -1314,6 +1314,12 @@ test("surface core records confirmed browser_url navigation success evidence", (
 
   assert.equal(result?.status, "applied");
   assert.equal(result?.materializedState?.navigationStatus, "loaded");
+  const pairTarget = core.pairState(surface.surfaceId).panes[0]!.currentTarget;
+  assert.equal(pairTarget?.lastApplyEvidence?.status, "applied");
+  assert.equal(pairTarget?.lastApplyEvidence?.materializedState?.navigationStatus, "loaded");
+  const listedTarget = core.panesList(surface.surfaceId).panes[0]!.currentTarget;
+  assert.equal(listedTarget?.lastApplyEvidence?.status, "applied");
+  assert.equal(listedTarget?.lastApplyEvidence?.materializedState?.navigationStatus, "loaded");
 });
 
 test("surface core records confirmed browser_url navigation failure evidence", () => {

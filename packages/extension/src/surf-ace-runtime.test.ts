@@ -2380,6 +2380,74 @@ test("restore flight recorder correlates pair attempt with pulled Spatial record
   });
 });
 
+test("pair current browser_url target survives provider target hydration", async () => {
+  await withRuntimeHarness({
+    configureServer: (server) => {
+      server.targetCapabilities = [
+        ...server.targetCapabilities,
+        "target.browser_url.v1",
+      ];
+      const serverPane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(serverPane);
+      serverPane.revision = 3;
+      serverPane.currentTarget = clientBrowserUrlTarget({
+        paneLineageId: serverPane.paneLineageId,
+        targetEpoch: 3,
+        targetId: "tg_pair_after_hydrate",
+        url: "https://pair-after-hydrate.example/",
+      });
+    },
+    waitForPair: false,
+    run: async ({ runtime, server }) => {
+      const serverPane = server.panes.get(server.initialRemotePaneId);
+      assert.ok(serverPane);
+      const internalRuntime = runtime as any;
+      internalRuntime.persistentState.targetStateBySurfaceId = {
+        [server.surfaceId]: {
+          paneTargets: {
+            [serverPane.paneLineageId]: {
+              currentTargetId: "tg_pair_after_hydrate",
+              diagnosticContent: null,
+              lastRestoreBlockedReason: null,
+              nonDurableTargetDiagnostic: null,
+              paneLineageId: serverPane.paneLineageId,
+              targetEpoch: 1,
+            },
+          },
+          registeredTargetIdsByIdempotencyKey: {},
+          targetRecords: [{
+            appliedAt: new Date(Date.now() - 120_000).toISOString(),
+            currentState: "current",
+            ownerProviderId: internalRuntime.persistentState.providerId,
+            ownershipEpoch: 1,
+            ownershipSessionId: "sa_test_session",
+            paneIdAtApply: "pn_stale_pair_after_hydrate",
+            paneLabelAtApply: 1,
+            paneLineageId: serverPane.paneLineageId,
+            restorePolicy: "auto",
+            surfaceId: server.surfaceId,
+            surfaceInstanceId: null,
+            targetEpoch: 1,
+            targetHeader: structuredClone(serverPane.currentTarget.targetHeader),
+            targetId: "tg_pair_after_hydrate",
+            targetKind: "browser_url",
+            targetPayload: structuredClone(serverPane.currentTarget.targetPayload),
+          }],
+        },
+      };
+      await waitFor(() => server.pairedSocket !== null);
+      await waitFor(() => server.authorityStateRequests.some((request) => request.actionable === true));
+
+      const screen = (await runtime.listScreens()).find((candidate) => candidate.fingerprint === server.surfaceId);
+      const pane = paneByLabel(screen, 1);
+      assert.equal(pane?.target?.targetKind, "browser_url");
+      assert.equal(pane?.target?.targetPayload.url, "https://pair-after-hydrate.example/");
+      const read = await runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
+      assert.equal(read.browserUrl?.url, "https://pair-after-hydrate.example/");
+    },
+  });
+});
+
 test("surf ace runtime creates durable provider identity and reuses it across state-root migrations", async () => {
   const previousStateDir = process.env.OPENCLAW_STATE_DIR;
   const previousOpenClawHome = process.env.OPENCLAW_HOME;

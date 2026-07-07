@@ -6824,6 +6824,20 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const existing = surface.targetRecords.get(currentTarget.targetId);
     if (existing?.currentState === "current" && pane.currentTargetId === existing.targetId) {
+      if (currentTarget.lastApplyEvidence && !existing.lastApplyEvidence) {
+        existing.appliedAt = currentTarget.lastApplyEvidence.appliedAt ?? existing.appliedAt;
+        existing.targetEpoch = currentTarget.targetEpoch;
+        existing.targetHeader = structuredClone(targetHeader);
+        existing.targetPayload = structuredClone(currentTarget.targetPayload);
+        existing.lastApplyEvidence = structuredClone(currentTarget.lastApplyEvidence);
+        if (currentTarget.lastApplyEvidence.status === "applied") {
+          existing.lastSuccessfulApplyEvidence = structuredClone(currentTarget.lastApplyEvidence);
+        }
+        this.runBackgroundTask(`persist client current target refresh (${reason})`, async () => {
+          await this.persistSurfaceTargetState(surface, reason);
+        });
+        return true;
+      }
       return false;
     }
     for (const target of surface.targetRecords.values()) {
@@ -6877,6 +6891,26 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       await this.persistSurfaceTargetState(surface, reason);
     });
     return true;
+  }
+
+  private adoptPairClientCurrentTargets(
+    surface: ManagedSurface,
+    paneStates: PairResponse["payload"]["state"]["panes"],
+  ): boolean {
+    let changed = false;
+    for (const paneState of paneStates) {
+      const pane = this.findPaneByRemoteId(surface, paneState.paneId);
+      if (!pane || (pane.externalNative && paneState.currentTarget?.targetKind === "browser_url")) {
+        continue;
+      }
+      changed = this.adoptClientCurrentTarget(
+        surface,
+        pane,
+        paneState.currentTarget,
+        "pair client current target after hydrate",
+      ) || changed;
+    }
+    return changed;
   }
 
   private hasProviderOwnedPaneAuthority(surface: ManagedSurface, pane: ManagedPane): boolean {
@@ -14325,6 +14359,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (options.prunePairClearedPaneTargets === true) {
         this.prunePairClearedPaneTargets(surface, response.payload.state.panes);
       }
+      if (options.skipPairPaneState !== true) {
+        this.adoptPairClientCurrentTargets(surface, response.payload.state.panes);
+      }
     } catch (error) {
       surface.name = previousName;
       surface.viewport = previousViewport;
@@ -14594,6 +14631,12 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     reason: string,
   ): boolean {
     if (paneState.currentContentId !== null) {
+      return false;
+    }
+    if (
+      paneState.currentTarget?.currentState === "current" &&
+      !(pane.externalNative && paneState.currentTarget.targetKind === "browser_url")
+    ) {
       return false;
     }
     if (options.ignoreEmptyPairContentAuthority === true) {

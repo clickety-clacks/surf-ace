@@ -60,6 +60,7 @@ type HistoryEntry = {
   contentId: string | null;
   contentType: RenderableContentType | null;
   display?: ContentDisplay;
+  lastApplyEvidence?: TargetApplyResponse["payload"];
   ownerToken: string | null;
   reloadSource?: ContentReloadSource;
   revision: number;
@@ -1787,6 +1788,7 @@ export class SurfaceCore {
         url: evidence.url,
       },
     );
+    entry.lastApplyEvidence = payload;
     this.emit({ surfaceId, type: "surface-changed" });
     return payload;
   }
@@ -2932,6 +2934,7 @@ function currentTargetStateForEntry(pane: PaneState, entry: HistoryEntry): PaneC
     targetId: entry.contentId,
     targetKind: "browser_url",
     targetPayload: { url: entry.content.url },
+    ...(entry.lastApplyEvidence ? { lastApplyEvidence: structuredClone(entry.lastApplyEvidence) } : {}),
   };
 }
 
