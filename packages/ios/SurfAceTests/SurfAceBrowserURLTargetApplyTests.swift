@@ -99,12 +99,12 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         XCTAssertEqual(surface.panes.first?.currentTarget?.lastApplyEvidence?["status"] as? String, "failed")
     }
 
-    func testBrowserURLTargetApplyClassifiesFrameLoadInterruptedAsPolicyDenied() async throws {
+    func testBrowserURLTargetApplyClassifiesWebKitFrameLoadInterruptedCodeAsPolicyDenied() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "browser-url-frame-interrupted")
         let pane = try XCTUnwrap(surface.panes.first)
         let bridge = ControlledPaneBridge(
-            result: SurfAceBrowserNavigationResult(errorMessage: "Frame load interrupted", status: "failed", url: "https://twitter.com")
+            result: SurfAceBrowserNavigationResult(errorMessage: "Frame load interrupted", errorDomain: "WebKitErrorDomain", errorCode: 102, status: "failed", url: "https://twitter.com")
         )
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
@@ -121,6 +121,27 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         XCTAssertEqual(payload["message"] as? String, "Frame load interrupted")
         XCTAssertEqual(materializedState["navigationStatus"] as? String, "failed")
         XCTAssertEqual(surface.panes.first?.currentTarget?.lastApplyEvidence?["errorCode"] as? String, "policy_denied")
+    }
+
+    func testBrowserURLTargetApplyDoesNotClassifyLocalizedMessageWithoutStableCode() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "browser-url-localized-message")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let bridge = ControlledPaneBridge(
+            result: SurfAceBrowserNavigationResult(errorMessage: "Carga del marco interrumpida", status: "failed", url: "https://twitter.com")
+        )
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        let response = await runtime.materializeTargetApplyForTesting(
+            id: "rq_twitter_localized",
+            payload: targetApplyPayload(surface: surface, pane: pane, targetId: "tg_twitter_localized", url: "https://twitter.com"),
+            surfaceId: surface.surfaceId
+        )
+        let payload = try XCTUnwrap(response["payload"] as? [String: Any])
+
+        XCTAssertEqual(payload["status"] as? String, "failed")
+        XCTAssertEqual(payload["errorCode"] as? String, "materialization_failed")
+        XCTAssertEqual(payload["message"] as? String, "Carga del marco interrumpida")
     }
 
     func testBrowserURLTargetApplyRejectsUnsafeSchemesWithoutBridgeMaterialization() async throws {

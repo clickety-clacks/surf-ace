@@ -2234,6 +2234,8 @@ final class SurfAceRuntime {
             url: navigationResult.url.isEmpty ? url : navigationResult.url,
             status: navigationResult.status,
             errorMessage: navigationResult.errorMessage,
+            errorDomain: navigationResult.errorDomain,
+            errorCode: navigationResult.errorCode,
             appliedAt: isoTimestampNow()
         )
         let response = [
@@ -3836,6 +3838,8 @@ final class SurfAceRuntime {
         url: String,
         status: String,
         errorMessage: String?,
+        errorDomain: String? = nil,
+        errorCode: Int? = nil,
         appliedAt: String
     ) -> [String: Any] {
         var payload: [String: Any] = [
@@ -3849,14 +3853,13 @@ final class SurfAceRuntime {
             "appliedAt": appliedAt,
         ]
         if status != "applied" {
-            payload["errorCode"] = browserURLNavigationErrorCode(errorMessage)
+            payload["errorCode"] = browserURLNavigationErrorCode(errorDomain: errorDomain, errorCode: errorCode)
         }
         return payload
     }
 
-    static func browserURLNavigationErrorCode(_ errorMessage: String?) -> String {
-        guard let errorMessage else { return "materialization_failed" }
-        if errorMessage.localizedCaseInsensitiveContains("Frame load interrupted") {
+    static func browserURLNavigationErrorCode(errorDomain: String?, errorCode: Int?) -> String {
+        if errorDomain == "WebKitErrorDomain", errorCode == 102 {
             return "policy_denied"
         }
         return "materialization_failed"

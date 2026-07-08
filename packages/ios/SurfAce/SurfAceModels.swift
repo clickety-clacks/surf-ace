@@ -1068,6 +1068,8 @@ extension SurfAcePaneBridging {
 
 struct SurfAceBrowserNavigationResult {
     var errorMessage: String?
+    var errorDomain: String? = nil
+    var errorCode: Int? = nil
     var status: String
     var url: String
 }
