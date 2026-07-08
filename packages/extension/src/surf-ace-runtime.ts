@@ -10270,30 +10270,13 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       expectedProviderPid,
     );
     return screens.map((screen) => {
-      const authorityBlockers = screen.authority?.blockers ?? [];
-      const durableBlockers = authorityBlockers.filter((blocker) => !PROVIDER_PROCESS_BLOCK_REASONS.has(blocker));
-      const processOnlyAuthority =
-        screen.authority?.actionable === false &&
-        (
-          (screen.authority.reason ? PROVIDER_PROCESS_BLOCK_REASONS.has(screen.authority.reason) : false) ||
-          authorityBlockers.some((blocker) => PROVIDER_PROCESS_BLOCK_REASONS.has(blocker))
-        ) &&
-        durableBlockers.length === 0;
-      const authority = processOnlyAuthority
-        ? {
-            actionable: true,
-            admitted: true,
-            blockers: [],
-            reason: null,
-          }
-        : durableBlockers.length !== authorityBlockers.length
-          ? {
-              actionable: false,
-              admitted: false,
-              blockers: durableBlockers,
-              reason: durableBlockers[0] ?? screen.authority.reason,
-            }
-          : screen.authority;
+      const persistedAuthority = screen.authority ?? {
+        actionable: false,
+        admitted: false,
+        blockers: ["persisted_authority_missing"],
+        reason: "persisted_authority_missing",
+      };
+      const authority = persistedAuthority;
       const connectionDiagnostics =
         screen.connectionDiagnostics?.reason &&
         PROVIDER_PROCESS_BLOCK_REASONS.has(screen.connectionDiagnostics.reason)
@@ -10306,7 +10289,9 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         ...screen,
         authority,
         connectionDiagnostics,
-        connectionState: processOnlyAuthority && screen.panes.length > 0 ? "connected" : screen.connectionState,
+        connectionState: screen.connectionState === "connected" && authority.actionable !== true
+          ? "connecting"
+          : screen.connectionState,
         _debug: screen._debug
           ? {
               ...screen._debug,

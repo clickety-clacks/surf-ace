@@ -2938,6 +2938,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
                     : null,
                 },
                 fingerprint: "sf_snapshot-a",
+                authority: {
+                  actionable: true,
+                  admitted: true,
+                  blockers: [],
+                  reason: null,
+                },
                 panes: activeScreen.panes.map((pane) => ({
                   ...pane,
                   paneLabel: 6242,
@@ -2956,6 +2962,12 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
                     : null,
                 },
                 fingerprint: "sf_snapshot-b",
+                authority: {
+                  actionable: true,
+                  admitted: true,
+                  blockers: [],
+                  reason: null,
+                },
                 panes: activeScreen.panes.map((pane) => ({
                   ...pane,
                   paneLabel: 6243,
@@ -13938,13 +13950,246 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
       assert.equal(screens.length, 1);
 	      assert.equal(screens[0]?.fingerprint, "sf_current_snapshot");
-	      assert.equal(screens[0]?.connectionState, "connected");
-	      assert.equal(screens[0]?.authority.actionable, true);
-	      assert.equal(screens[0]?.authority.reason, null);
-	      assert.deepEqual(screens[0]?.authority.blockers, []);
+	      assert.equal(screens[0]?.connectionState, "connecting");
+	      assert.equal(screens[0]?.authority.actionable, false);
+	      assert.equal(screens[0]?.authority.reason, "provider_process_lease_mismatch");
+	      assert.deepEqual(screens[0]?.authority.blockers, ["provider_process_lease_mismatch"]);
 	      assert.equal(screens[0]?.connectionDiagnostics.reason, null);
 	      assert.equal(observedExpectedProviderPid, activeOwnerPid);
       assert.equal(screens[0]?._debug?.providerAuthorityProjection.providerProcessBlockReason, null);
+    } finally {
+      await runtime.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("passive list does not show persisted Cyberbrain-style records as connected without authority", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-cyberbrain-false-green-"));
+    const now = Date.now();
+    const providerId = "pv_cyberbrain_false_green";
+    const sessionId = "sa_cyberbrain_false_green";
+    const runtime = createSurfAceRuntime({
+      discovery: new StaticDiscoveryService([]),
+      now: () => now,
+      stateDir,
+    });
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 2,
+            nextRemotePaneId: 2,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId,
+            version: 1,
+            windowLabels: {},
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-owner.lock"),
+        JSON.stringify(
+          {
+            controlPort: 0,
+            lastActiveAt: now,
+            pid: process.pid,
+            startedAt: now - 60_000,
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify(
+          {
+            screens: [
+              {
+                _debug: {
+                  autoRetryEnabled: true,
+                  endpointId: "cyberbrain-endpoint",
+                  hasPairedInGatewaySession: true,
+                  localOwnership: persistedLocalOwnership({
+                    endpointId: "cyberbrain-endpoint",
+                    providerId,
+                    sessionId,
+                    surfaceId: "sf_cyberbrain_persisted_only",
+                  }),
+                  ownershipRecovery: "active",
+                  reconnectAttempt: 0,
+                  sessionId,
+                  unreachableFailures: 0,
+                  wsOpen: false,
+                },
+                connectionDiagnostics: {
+                  circuitOpen: false,
+                  circuitState: "closed",
+                  failureCount: 0,
+                  givenUp: false,
+                  openedAt: null,
+                  reason: null,
+                  reconnectAttempt: 0,
+                },
+                connectionState: "connected",
+                fingerprint: "sf_cyberbrain_persisted_only",
+                lastSeenAt: now,
+                name: "Cyberbrain",
+                panes: [],
+                pendingEvents: 0,
+                topology: null,
+                topologyRevision: 0,
+                viewport: { height: 768, scale: 2, width: 1024 },
+                windowLabel: "c",
+              },
+            ],
+            updatedAt: now - 1,
+            version: 1,
+          },
+          null,
+          2,
+        ),
+      );
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.length, 1);
+      assert.equal(screens[0]?.fingerprint, "sf_cyberbrain_persisted_only");
+      assert.equal(screens[0]?.connectionState, "connecting");
+      assert.equal(screens[0]?.authority.actionable, false);
+      assert.equal(screens[0]?.authority.reason, "persisted_authority_missing");
+      assert.deepEqual(screens[0]?.authority.blockers, ["persisted_authority_missing"]);
+    } finally {
+      await runtime.stop();
+      await fs.rm(stateDir, { force: true, recursive: true });
+    }
+  });
+
+  await t.test("passive list does not show authority-blocked persisted records as connected", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-ext-authority-blocked-false-green-"));
+    const now = Date.now();
+    const providerId = "pv_authority_blocked_false_green";
+    const sessionId = "sa_authority_blocked_false_green";
+    const runtime = createSurfAceRuntime({
+      discovery: new StaticDiscoveryService([]),
+      now: () => now,
+      stateDir,
+    });
+
+    try {
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-state.json"),
+        JSON.stringify(
+          {
+            nextPaneLabel: 2,
+            nextRemotePaneId: 2,
+            nextWindowLabelIndex: 1,
+            paneLabelsByPaneId: {},
+            providerId,
+            version: 1,
+            windowLabels: {},
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-owner.lock"),
+        JSON.stringify(
+          {
+            controlPort: 0,
+            lastActiveAt: now,
+            pid: process.pid,
+            startedAt: now - 60_000,
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.writeFile(
+        path.join(stateDir, "surf-ace-runtime-screens.json"),
+        JSON.stringify(
+          {
+            screens: [
+              {
+                _debug: {
+                  autoRetryEnabled: true,
+                  endpointId: "blocked-endpoint",
+                  hasPairedInGatewaySession: true,
+                  localOwnership: persistedLocalOwnership({
+                    endpointId: "blocked-endpoint",
+                    providerId,
+                    sessionId,
+                    surfaceId: "sf_authority_blocked",
+                  }),
+                  ownershipRecovery: "active",
+                  reconnectAttempt: 0,
+                  sessionId,
+                  unreachableFailures: 0,
+                  wsOpen: false,
+                },
+                authority: {
+                  actionable: false,
+                  admitted: false,
+                  blockers: ["not_provider_admitted", "not_connected", "socket_not_open", "no_visible_panes"],
+                  reason: "not_provider_admitted",
+                },
+                connectionDiagnostics: {
+                  circuitOpen: false,
+                  circuitState: "closed",
+                  failureCount: 0,
+                  givenUp: false,
+                  openedAt: null,
+                  reason: "not_provider_admitted",
+                  reconnectAttempt: 0,
+                },
+                connectionState: "connected",
+                fingerprint: "sf_authority_blocked",
+                lastSeenAt: now,
+                name: "Aleph iPad",
+                panes: [
+                  {
+                    activeContent: null,
+                    historySummary: [],
+                    name: null,
+                    paneId: 1,
+                    paneLabel: 1,
+                    target: null,
+                    viewport: { height: 768, scale: 2, width: 1024 },
+                  },
+                ],
+                pendingEvents: 0,
+                topology: { paneId: 1, type: "pane" },
+                topologyRevision: 0,
+                viewport: { height: 768, scale: 2, width: 1024 },
+                windowLabel: "a",
+              },
+            ],
+            updatedAt: now - 1,
+            version: 1,
+          },
+          null,
+          2,
+        ),
+      );
+
+      const screens = await runtime.listScreens();
+
+      assert.equal(screens.length, 1);
+      assert.equal(screens[0]?.fingerprint, "sf_authority_blocked");
+      assert.equal(screens[0]?.connectionState, "connecting");
+      assert.equal(screens[0]?.authority.actionable, false);
+      assert.equal(screens[0]?.authority.reason, "not_provider_admitted");
+      assert.deepEqual(screens[0]?.authority.blockers, [
+        "not_provider_admitted",
+        "not_connected",
+        "socket_not_open",
+        "no_visible_panes",
+      ]);
     } finally {
       await runtime.stop();
       await fs.rm(stateDir, { force: true, recursive: true });
