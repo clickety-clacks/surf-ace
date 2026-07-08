@@ -3849,9 +3849,17 @@ final class SurfAceRuntime {
             "appliedAt": appliedAt,
         ]
         if status != "applied" {
-            payload["errorCode"] = "materialization_failed"
+            payload["errorCode"] = browserURLNavigationErrorCode(errorMessage)
         }
         return payload
+    }
+
+    static func browserURLNavigationErrorCode(_ errorMessage: String?) -> String {
+        guard let errorMessage else { return "materialization_failed" }
+        if errorMessage.localizedCaseInsensitiveContains("Frame load interrupted") {
+            return "policy_denied"
+        }
+        return "materialization_failed"
     }
 
     private func safeBrowserURL(_ value: String) -> URL? {

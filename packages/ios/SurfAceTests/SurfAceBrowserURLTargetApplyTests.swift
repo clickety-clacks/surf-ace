@@ -99,6 +99,30 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         XCTAssertEqual(surface.panes.first?.currentTarget?.lastApplyEvidence?["status"] as? String, "failed")
     }
 
+    func testBrowserURLTargetApplyClassifiesFrameLoadInterruptedAsPolicyDenied() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "browser-url-frame-interrupted")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let bridge = ControlledPaneBridge(
+            result: SurfAceBrowserNavigationResult(errorMessage: "Frame load interrupted", status: "failed", url: "https://twitter.com")
+        )
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        let response = await runtime.materializeTargetApplyForTesting(
+            id: "rq_twitter",
+            payload: targetApplyPayload(surface: surface, pane: pane, targetId: "tg_twitter", url: "https://twitter.com"),
+            surfaceId: surface.surfaceId
+        )
+        let payload = try XCTUnwrap(response["payload"] as? [String: Any])
+        let materializedState = try XCTUnwrap(payload["materializedState"] as? [String: Any])
+
+        XCTAssertEqual(payload["status"] as? String, "failed")
+        XCTAssertEqual(payload["errorCode"] as? String, "policy_denied")
+        XCTAssertEqual(payload["message"] as? String, "Frame load interrupted")
+        XCTAssertEqual(materializedState["navigationStatus"] as? String, "failed")
+        XCTAssertEqual(surface.panes.first?.currentTarget?.lastApplyEvidence?["errorCode"] as? String, "policy_denied")
+    }
+
     func testBrowserURLTargetApplyRejectsUnsafeSchemesWithoutBridgeMaterialization() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "browser-url-unsafe")
