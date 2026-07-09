@@ -98,10 +98,24 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             "initialPaneLabel": 0,
         ]))
         XCTAssertNil(surfAceValidatedProviderBootstrapIdentity(from: [
+            "windowLabel": "b",
+            "initialPaneId": 42,
+            "initialPaneLabel": "7",
+        ]))
+        XCTAssertNil(surfAceValidatedProviderBootstrapIdentity(from: [
             "windowLabel": "DOCS",
             "initialPaneId": 42,
             "initialPaneLabel": 7,
         ]))
+    }
+
+    func testProviderPaneSplitRequiresExplicitLengthMatchedPaneLabels() {
+        XCTAssertEqual(surfAceValidatedProviderNewPaneLabels(from: [7, 8], count: 3), [7, 8])
+
+        XCTAssertNil(surfAceValidatedProviderNewPaneLabels(from: nil, count: 2))
+        XCTAssertNil(surfAceValidatedProviderNewPaneLabels(from: [7], count: 3))
+        XCTAssertNil(surfAceValidatedProviderNewPaneLabels(from: [7, 8], count: 2))
+        XCTAssertNil(surfAceValidatedProviderNewPaneLabels(from: ["7"], count: 2))
     }
 
     func testAuthorityStateRequiresProviderActionabilityAndAdoptsSameProviderPaneIdentity() {

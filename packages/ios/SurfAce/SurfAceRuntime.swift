@@ -112,6 +112,15 @@ struct SurfAceAuthorityPaneIdentity {
     let paneLineageId: String
 }
 
+func surfAceValidatedProviderNewPaneLabels(from value: Any?, count: Int) -> [Int]? {
+    guard count >= 2,
+          let labels = value as? [Int],
+          labels.count == count - 1 else {
+        return nil
+    }
+    return labels
+}
+
 func surfAceValidatedProviderBootstrapIdentity(from payload: [String: Any]) -> SurfAceProviderBootstrapIdentity? {
     guard let windowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
           let initialPaneId = surfAceValidatedPositiveProviderIdentifier(from: payload["initialPaneId"]),
@@ -2259,10 +2268,9 @@ final class SurfAceRuntime {
               let directionRaw = payload["direction"] as? String,
               let direction = SurfAceLayoutDirection(rawValue: directionRaw),
               let newPaneIds = payload["newPaneIds"] as? [Int],
-              let newPaneLabels = payload["newPaneLabels"] as? [Int],
+              let newPaneLabels = surfAceValidatedProviderNewPaneLabels(from: payload["newPaneLabels"], count: count),
               count >= 2,
               newPaneIds.count == count - 1,
-              newPaneLabels.count == count - 1,
               let _ = surface.panesById[paneId] else {
             return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "invalid pane.split payload")
         }
