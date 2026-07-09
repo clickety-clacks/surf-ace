@@ -19,6 +19,12 @@ function applyProviderBootstrap(
   return core.getRendererWindowState(surfaceId).panes[0]!.paneId;
 }
 
+function resolvePaneSnapshot(core: SurfaceCore, surfaceId: string, paneId: number): void {
+  core.updatePaneSnapshot(surfaceId, paneId, {
+    bounds: { height: 800, width: 1200, x: 0, y: 0 },
+  });
+}
+
 test("surface core initializes with a bootstrap pane before provider topology arrives", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -55,6 +61,47 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.equal(windowState.panes[0]?.paneId, 7);
   assert.equal(windowState.panes[0]?.label, "7");
   assert.equal(windowState.panes[0]?.activeKeyboardPane, true);
+});
+
+test("surface core marks unresolved single-pane geometry as non-authoritative", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const listedPane = core.panesList(surface.surfaceId).panes[0]!;
+
+  assert.equal(listedPane.geometry.geometryUnavailable, true);
+  assert.equal(listedPane.geometry.unavailableReason, "missing_resolved_snapshot");
+  assert.equal(listedPane.geometry.geometryRevision, 0);
+  assert.deepEqual(core.missingResolvedPaneGeometry(surface.surfaceId, [paneId]), [paneId]);
+  assert.throws(
+    () => core.projectNativePaneMaterialization(surface.surfaceId, {
+      ownershipEpoch: 1,
+      ownershipSessionId: "sa_test" as never,
+      paneLineageId: listedPane.paneLineageId!,
+      requestId: "restore_btop",
+      restoreReason: "resume_restore",
+      surfaceId: surface.surfaceId as never,
+      targetEpoch: 3,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.terminal_app.v1"],
+        safeToLogFields: ["command", "args"],
+        safetyClass: "process",
+        summary: "btop",
+      },
+      targetId: "target_btop",
+      targetKind: "terminal_app",
+      targetPayload: { args: [], command: "btop", envPolicy: "surface_default", pty: true, restartPolicy: "manual_only" },
+    }),
+    /has no authoritative resolved Surf Ace geometry snapshot/,
+  );
 });
 
 test("surface core removes closed windows from live topology immediately", () => {
@@ -999,6 +1046,7 @@ test("surface core rejects browser_url targets while the pane is native-hosted",
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {
@@ -1067,6 +1115,7 @@ test("surface core rejects stale native materialization identity after geometry 
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {
@@ -1119,6 +1168,7 @@ test("surface core projects native topology overlay identity from accepted topol
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   core.markNativePaneMaterialized(surface.surfaceId, {
     op: "native_pane.host",
@@ -1175,6 +1225,7 @@ test("surface core resyncs native topology overlays on window relabel without ge
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   core.markNativePaneMaterialized(surface.surfaceId, {
     op: "native_pane.host",
@@ -1235,6 +1286,7 @@ test("surface core advances native overlay revision on label-only provider resum
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   core.markNativePaneMaterialized(surface.surfaceId, {
     op: "native_pane.host",
@@ -2022,7 +2074,8 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   });
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const pane = core.pairState(surface.surfaceId).panes[0]!;
 
   const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
@@ -2083,7 +2136,8 @@ for (const { command, processEnv } of [
     });
 
     const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-    applyProviderBootstrap(core, surface.surfaceId, 7);
+    const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+    resolvePaneSnapshot(core, surface.surfaceId, paneId);
     const pane = core.pairState(surface.surfaceId).panes[0]!;
 
     const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
@@ -2134,7 +2188,8 @@ test("surface core materializes KolourPaint native_app with direct native pane p
   });
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
-  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const pane = core.pairState(surface.surfaceId).panes[0]!;
 
   const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
@@ -2232,6 +2287,7 @@ test("surface core exposes native materialized panes to the renderer until conte
 
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {

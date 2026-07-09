@@ -711,7 +711,8 @@ export class SurfaceCore {
         continue;
       }
       seen.add(paneId);
-      if (!paneGeometry.has(paneId)) {
+      const geometry = paneGeometry.get(paneId);
+      if (!geometry || geometry.geometryUnavailable) {
         missing.push(paneId);
       }
     }
@@ -729,8 +730,8 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_payload", "target.apply pane lineage is not present on this surface");
     }
     const geometry = paneGeometry.get(lineagePane.paneId);
-    if (!geometry) {
-      throw new SurfaceCoreError("invalid_payload", `native pane ${lineagePane.paneId} is not present in the resolved Surf Ace layout`);
+    if (!geometry || geometry.geometryUnavailable) {
+      throw new SurfaceCoreError("invalid_payload", `native pane ${lineagePane.paneId} has no authoritative resolved Surf Ace geometry snapshot`);
     }
     const compositorViewport = compositorResolvedRect(geometry.contentViewport);
     const launchToken = nativePaneLaunchToken(surface.surfaceId, lineagePane.paneId, payload.targetId, payload.targetEpoch);
@@ -977,7 +978,7 @@ export class SurfaceCore {
       }
       const expected = paneGeometry.get(paneId)?.contentViewport;
       const expectedSnapshot = paneGeometry.get(paneId);
-      if (!expected || !expectedSnapshot) {
+      if (!expected || !expectedSnapshot || expectedSnapshot.geometryUnavailable) {
         return `native pane ${pane.id} is not present in the resolved Surf Ace layout`;
       }
       if (
@@ -1045,7 +1046,7 @@ export class SurfaceCore {
         continue;
       }
       const geometry = paneGeometry.get(paneId);
-      if (!geometry) {
+      if (!geometry || geometry.geometryUnavailable) {
         continue;
       }
       const trustedGroup = trustedGroups.get(paneId);
@@ -1079,7 +1080,7 @@ export class SurfaceCore {
         throw new SurfaceCoreError("invalid_operation", `Pane ${paneId} is not native-hosted`);
       }
       const geometry = resolvedGeometry.get(pane.paneId);
-      if (!geometry) {
+      if (!geometry || geometry.geometryUnavailable) {
         throw new SurfaceCoreError("invalid_payload", `native pane ${pane.paneId} has no resolved Surf Ace geometry snapshot`);
       }
       const compositorViewport = compositorResolvedRect(geometry.contentViewport);
@@ -3289,7 +3290,6 @@ function resolvePaneGeometrySnapshots(surface: SurfaceState, viewport: SurfaceVi
     y: 0,
   };
   const zeroInsets = { bottom: 0, left: 0, right: 0, top: 0 };
-  const allowSurfaceBoundsFallback = surface.paneOrder.length === 1 && surface.layout?.type === "pane";
   const projections: Array<[number, PaneGeometryProjection]> = [];
   for (const paneId of surface.paneOrder) {
     const pane = surface.panes.get(paneId);
@@ -3298,41 +3298,82 @@ function resolvePaneGeometrySnapshots(surface: SurfaceState, viewport: SurfaceVi
     }
     const paneFrame = pane.snapshot.bounds && isRenderableRect(pane.snapshot.bounds)
       ? { ...pane.snapshot.bounds }
-      : allowSurfaceBoundsFallback
-        ? { ...surfaceBounds }
-        : null;
-    if (!paneFrame) {
-      continue;
-    }
-    const contentViewport = { ...paneFrame };
+      : null;
     projections.push([
       paneId,
-      {
-        contentViewport,
-        coordinateSpace: "surface_logical",
-        geometryRevision: surface.geometryRevision as Revision,
-        paneFrame: { ...paneFrame },
-        paneId: pane.paneId as PaneId,
-        paneInstanceId: pane.paneLineageId,
-        protocolViewport: {
-          coordinateSpace: "protocol_viewport",
-          rect: { ...contentViewport },
-          viewport: {
-            height: contentViewport.height,
-            scale: surface.viewport.scale,
-            width: contentViewport.width,
-          },
-        },
-        safeAreaInsets: { ...zeroInsets },
-        scale: surface.viewport.scale,
-        splitSpacingInsets: { ...zeroInsets },
-        surfaceBounds: { ...surfaceBounds },
-        surfaceEpoch: surface.surfaceEpoch,
-        topologyEpoch: surface.topologyRevision as TopologyRevision,
-      },
+      paneFrame
+        ? authoritativePaneGeometryProjection(surface, pane, paneFrame, surfaceBounds, zeroInsets)
+        : unavailablePaneGeometryProjection(surface, pane, surfaceBounds, zeroInsets),
     ]);
   }
   return new Map(projections);
+}
+
+function authoritativePaneGeometryProjection(
+  surface: SurfaceState,
+  pane: PaneState,
+  paneFrame: Rect,
+  surfaceBounds: Rect,
+  zeroInsets: { bottom: number; left: number; right: number; top: number },
+): PaneGeometryProjection {
+  const contentViewport = { ...paneFrame };
+  return {
+    contentViewport,
+    coordinateSpace: "surface_logical",
+    geometryRevision: surface.geometryRevision as Revision,
+    paneFrame: { ...paneFrame },
+    paneId: pane.paneId as PaneId,
+    paneInstanceId: pane.paneLineageId,
+    protocolViewport: {
+      coordinateSpace: "protocol_viewport",
+      rect: { ...contentViewport },
+      viewport: {
+        height: contentViewport.height,
+        scale: surface.viewport.scale,
+        width: contentViewport.width,
+      },
+    },
+    safeAreaInsets: { ...zeroInsets },
+    scale: surface.viewport.scale,
+    splitSpacingInsets: { ...zeroInsets },
+    surfaceBounds: { ...surfaceBounds },
+    surfaceEpoch: surface.surfaceEpoch,
+    topologyEpoch: surface.topologyRevision as TopologyRevision,
+  };
+}
+
+function unavailablePaneGeometryProjection(
+  surface: SurfaceState,
+  pane: PaneState,
+  surfaceBounds: Rect,
+  zeroInsets: { bottom: number; left: number; right: number; top: number },
+): PaneGeometryProjection {
+  const placeholderRect = { ...surfaceBounds };
+  return {
+    contentViewport: { ...placeholderRect },
+    coordinateSpace: "surface_logical",
+    geometryRevision: 0 as Revision,
+    geometryUnavailable: true,
+    paneFrame: { ...placeholderRect },
+    paneId: pane.paneId as PaneId,
+    paneInstanceId: pane.paneLineageId,
+    protocolViewport: {
+      coordinateSpace: "protocol_viewport",
+      rect: { ...placeholderRect },
+      viewport: {
+        height: placeholderRect.height,
+        scale: surface.viewport.scale,
+        width: placeholderRect.width,
+      },
+    },
+    safeAreaInsets: { ...zeroInsets },
+    scale: surface.viewport.scale,
+    splitSpacingInsets: { ...zeroInsets },
+    surfaceBounds: { ...surfaceBounds },
+    surfaceEpoch: surface.surfaceEpoch,
+    topologyEpoch: surface.topologyRevision as TopologyRevision,
+    unavailableReason: "missing_resolved_snapshot",
+  };
 }
 
 function isRenderableRect(rect: Rect): boolean {

@@ -273,6 +273,12 @@ function seedHorizontalSplitSnapshots(core: SurfaceCore, surfaceId: string, topP
   });
 }
 
+function seedSinglePaneSnapshot(core: SurfaceCore, surfaceId: string, paneId = 1): void {
+  core.updatePaneSnapshot(surfaceId, paneId, {
+    bounds: { height: 800, width: 1200, x: 0, y: 0 },
+  });
+}
+
 async function waitForRendererPaneSet(core: SurfaceCore, surfaceId: string, paneIds: number[]): Promise<void> {
   const expected = new Set(paneIds);
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -1383,6 +1389,7 @@ test("ws server fresh same-provider admission clears native-hosted state for the
       const first = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(first.ok, true);
       const pane = first.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: first.payload.sessionId,
         paneLineageId: pane.paneLineageId,
@@ -2160,6 +2167,7 @@ test("ws server releases a native-hosted pane before browser_url replacement", a
       const owner = await connect(url);
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2246,6 +2254,7 @@ test("ws server rejects renderer replacement when native release overlay resync 
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2310,6 +2319,7 @@ test("ws server preserves native-hosted pane when browser_url release fails", as
       const owner = await connect(url);
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2385,6 +2395,7 @@ test("ws server releases native-hosted pane before renderer content.apply", asyn
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2463,6 +2474,7 @@ test("ws server preserves native-hosted pane when renderer content release fails
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2533,6 +2545,7 @@ test("ws server releases native-hosted pane for content.apply clear next revisio
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2601,6 +2614,7 @@ test("ws server does not release native-hosted pane before invalid topology.appl
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2683,6 +2697,7 @@ test("ws server preserves native-hosted pane for topology.apply with unchanged g
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2766,6 +2781,7 @@ test("ws server updates retained native-hosted panes after topology.apply change
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2845,6 +2861,7 @@ test("ws server rejects retained native topology.apply when compositor geometry 
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -2924,6 +2941,7 @@ test("ws server rolls back retained native topology geometry when overlay update
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3005,6 +3023,7 @@ test("ws server re-admits same-provider resume when native relabel overlay updat
       }));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3103,6 +3122,7 @@ test("ws server rolls back retained native topology geometry when source geometr
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3180,6 +3200,7 @@ test("ws server updates native-hosted pane after pane.split changes geometry", a
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3268,6 +3289,7 @@ test("ws server updates retained native-hosted panes before pane.close commits g
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3390,6 +3412,7 @@ test("ws server serializes native target.apply against renderer content replacem
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativePromise = request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3477,6 +3500,7 @@ test("ws server releases native host when ownership changes during native target
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
       triggerTakeover = () => {
         takeoverComplete = request(owner, pairRequest(surfaceId, "pv_bravo", { takeover: true })).then((takeover) => {
           assert.equal(takeover.ok, true);
@@ -3491,8 +3515,10 @@ test("ws server releases native host when ownership changes during native target
 
       assert.equal(rejected.ok, true);
       assert.equal(rejected.op, "target.apply.result");
-      assert.equal(rejected.payload.status, "rejected");
-      assert.equal(rejected.payload.errorCode, "ownership_session_mismatch");
+      assert.equal(rejected.payload.status, "failed");
+      assert.equal(rejected.payload.errorCode, "materialization_failed");
+      assert.equal(rejected.payload.materializedState?.nativeHost, "released_after_failure");
+      assert.equal(rejected.payload.materializedState?.overlayRegions, "not_requested");
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
         "native_pane.host",
@@ -3548,6 +3574,7 @@ test("ws server does not release native-hosted last pane before pane.close valid
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3621,6 +3648,7 @@ test("ws server does not release native-hosted pane for invalid browser_url payl
       const owner = await connect(url);
       const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const nativeApplied = await request(owner, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3871,6 +3899,7 @@ test("ws server derives target.apply native pane host materialization for compos
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const applyRequest = targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -3894,7 +3923,7 @@ test("ws server derives target.apply native pane host materialization for compos
         content_id: "target_top_118",
         geometry: {
           coordinateSpace: "compositor_logical",
-          geometryRevision: 2,
+          geometryRevision: 3,
           height: 800,
           paneInstanceId: hostPane.geometry && (hostPane.geometry as Record<string, unknown>).paneInstanceId,
           surfaceEpoch: `${surfaceId}:1`,
@@ -4059,10 +4088,11 @@ test("ws server derives native app readiness proof from matched compositor pane 
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const applied = await request(socket, nativeAppTargetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -4146,10 +4176,11 @@ test("ws server retries native pane overlay until compositor reports the hosted 
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const applied = await request(socket, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -4219,10 +4250,11 @@ test("ws server waits long enough for slower GUI native pane attachment before o
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const applied = await request(socket, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -4289,10 +4321,11 @@ test("ws server retries native pane overlay with live compositor pane instance a
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const applied = await request(socket, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -4513,11 +4546,12 @@ test("ws server updates native host geometry before committing viewport resize",
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ server, surfaceId, url }) => {
+    await withServer(async ({ core, server, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
 
       const applied = await request(socket, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -4526,6 +4560,9 @@ test("ws server updates native host geometry before committing viewport resize",
       }));
       assert.equal(applied.ok, true);
       received.length = 0;
+      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+        bounds: { height: 400, width: 600, x: 0, y: 0 },
+      });
 
       assert.equal(await server.setViewport(surfaceId, { height: 400, scale: 2, width: 600 }), true);
 
@@ -4537,7 +4574,7 @@ test("ws server updates native host geometry before committing viewport resize",
       const updatedPane = (received[1] as { panes: Array<Record<string, unknown>> }).panes[0]!;
       assert.deepEqual(updatedPane.geometry, {
         coordinateSpace: "compositor_logical",
-        geometryRevision: 3,
+        geometryRevision: 5,
         height: 400,
         paneInstanceId: pane.paneLineageId,
         surfaceEpoch: `${surfaceId}:2`,
@@ -4598,6 +4635,7 @@ test("ws server rejects and releases stale native host plan after async geometry
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
       const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
       mutateDuringHost = () => {
         core.contentSet(surfaceId, {
           content: { markdown: "# replacement" },
@@ -4690,10 +4728,11 @@ test("ws server reports compositor target.apply rejection as materialization fai
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const failed = await request(socket, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
@@ -4750,10 +4789,11 @@ test("ws server rejects target.apply geometry outside compositor logical status 
     compositor.once("error", reject);
   });
   try {
-    await withServer(async ({ surfaceId, url }) => {
+    await withServer(async ({ core, surfaceId, url }) => {
       const socket = await connect(url);
       const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
       assert.equal(paired.ok, true);
+      seedSinglePaneSnapshot(core, surfaceId, Number(paired.payload.state.panes[0]!.paneId));
 
       const failed = await request(socket, targetApplyRequest({
         ownershipSessionId: paired.payload.sessionId,
