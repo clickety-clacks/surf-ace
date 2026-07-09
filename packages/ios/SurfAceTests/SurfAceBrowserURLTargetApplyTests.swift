@@ -120,6 +120,32 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         XCTAssertNil(surface.panes.first?.currentTarget)
     }
 
+    func testBrowserURLTargetApplyRejectsUnsupportedExtraRequiredCapability() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "browser-url-unsupported-capability")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let bridge = ControlledPaneBridge()
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        var payload = targetApplyPayload(surface: surface, pane: pane, targetId: "tg_future", url: "https://example.com/")
+        var header = try XCTUnwrap(payload["targetHeader"] as? [String: Any])
+        header["requiredCapabilities"] = ["target.browser_url.v1", "target.future_only.v1"]
+        payload["targetHeader"] = header
+
+        let response = await runtime.materializeTargetApplyForTesting(
+            id: "rq_future",
+            payload: payload,
+            surfaceId: surface.surfaceId
+        )
+        let responsePayload = try XCTUnwrap(response["payload"] as? [String: Any])
+
+        XCTAssertEqual(response["op"] as? String, "target.apply.result")
+        XCTAssertEqual(responsePayload["status"] as? String, "rejected")
+        XCTAssertEqual(responsePayload["errorCode"] as? String, "capability_missing")
+        XCTAssertTrue(bridge.renderedBrowserURLEntries.isEmpty)
+        XCTAssertNil(surface.panes.first?.currentTarget)
+    }
+
     func testHTMLNavigationEventIsRejectedWhileAnnotationModeIsActive() throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "html-navigation-annotating")
