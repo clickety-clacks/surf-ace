@@ -7,7 +7,7 @@ import {
   REQUEST_MESSAGES,
 } from "./message-names.js";
 import { SURF_ACE_PROTOCOL_SCHEMAS } from "./schemas-manifest.js";
-import { annotationCommittedEventSchema, drawingFlushEventSchema } from "./schemas.js";
+import { annotationCommittedEventSchema, drawingFlushEventSchema, protocolSchemaDefs } from "./schemas.js";
 import { validateEnvelopeType } from "./validate.js";
 
 const authorityVectorSet = JSON.parse(
@@ -193,6 +193,18 @@ test("authority conformance vector set covers omnibus blocker contracts", () => 
     assert.ok(vector.contract.length > 0, `${id} must name the shared contract`);
     assert.ok(vector.expected.length > 0, `${id} must name expected behavior`);
   }
+});
+
+test("pane geometry schema exposes non-authoritative unresolved snapshot state", () => {
+  const paneGeometrySchema = protocolSchemaDefs.PaneGeometryProjection;
+  assert.equal(
+    (paneGeometrySchema.properties.geometryUnavailable as { const?: boolean } | undefined)?.const,
+    true,
+  );
+  assert.deepEqual(
+    (paneGeometrySchema.properties.unavailableReason as { enum?: string[] } | undefined)?.enum,
+    ["missing_resolved_snapshot"],
+  );
 });
 
 test("validateEnvelopeType accepts payloadless list requests and responses", () => {

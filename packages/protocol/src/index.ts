@@ -231,6 +231,8 @@ export type PaneGeometryProjection = {
   topologyEpoch: TopologyRevision;
   surfaceEpoch: string;
   geometryRevision: Revision;
+  geometryUnavailable?: true;
+  unavailableReason?: "missing_resolved_snapshot";
   coordinateSpace: "surface_logical";
   surfaceBounds: Rect;
   paneFrame: Rect;
