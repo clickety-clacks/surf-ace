@@ -2171,7 +2171,8 @@ final class SurfAceRuntime {
         }
         guard let header = payload["targetHeader"] as? [String: Any],
               let requiredCapabilities = header["requiredCapabilities"] as? [String],
-              requiredCapabilities == ["target.browser_url.v1"],
+              requiredCapabilities.contains("target.browser_url.v1"),
+              targetCapabilitiesSupport(requiredCapabilities),
               header["replaySemantics"] as? String == "navigate" else {
             return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "capability_missing", message: "required target capability is not advertised")
         }
@@ -2256,6 +2257,10 @@ final class SurfAceRuntime {
         ] as [String: Any]
         pane.currentTarget?.lastApplyEvidence = response["payload"] as? [String: Any]
         return response
+    }
+
+    private func targetCapabilitiesSupport(_ requiredCapabilities: [String]) -> Bool {
+        requiredCapabilities.allSatisfy { targetCapabilities.contains($0) }
     }
 
     private func handlePaneSplit(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {

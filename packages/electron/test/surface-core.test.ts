@@ -1403,6 +1403,44 @@ test("surface core rejects browser_url target when live browser capability is no
   assert.equal(result.errorCode, "capability_missing");
 });
 
+test("surface core rejects browser_url target with unsupported extra required capability", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  applyProviderBootstrap(core, surface.surfaceId, 7);
+  const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
+
+  const result = core.targetApply(surface.surfaceId, {
+    ownershipEpoch: 0,
+    ownershipSessionId: "sa_test",
+    paneLineageId,
+    requestId: "tr_test",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "navigate",
+      requiredCapabilities: ["target.browser_url.v1", "target.future_only.v1"],
+      safeToLogFields: ["url"],
+      safetyClass: "network",
+      summary: "https://example.com/",
+    },
+    targetId: "tg_future",
+    targetKind: "browser_url",
+    targetPayload: { url: "https://example.com/" },
+  });
+
+  assert.equal(result.status, "rejected");
+  assert.equal(result.errorCode, "capability_missing");
+  assert.equal(core.pairState(surface.surfaceId).panes[0]!.currentTarget ?? null, null);
+});
+
 test("surface core rejects browser_url targets for non-web schemes", () => {
   const core = new SurfaceCore({
     persistentState: {
