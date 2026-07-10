@@ -26,7 +26,8 @@ export function contentScalePercentage(scale: number): string {
 }
 
 export function projectContentScaleIndicator(indicator: Element, scale: number): void {
-  indicator.textContent = contentScalePercentage(scale);
+  const label = indicator.querySelector(".control-button__label") ?? indicator;
+  label.textContent = contentScalePercentage(scale);
 }
 
 export type ContentScaleAction = "decrease" | "increase" | "reset";

@@ -100,12 +100,13 @@ test("every non-push-capable renderer state projects glyph-only chrome through t
 });
 
 test("font-size indicator projects current pane scale through repeated changes, rebuild, and reset", () => {
-  const { document } = parseHTML(`<button class="font-size-reset"></button>`);
+  const { document } = parseHTML(`<button class="font-size-reset"><span class="control-button__label"></span></button>`);
   const indicator = document.querySelector(".font-size-reset")!;
 
   for (const [scale, expected] of [[1, "100"], [0.9, "90"], [0.8, "80"], [0.9, "90"], [1, "100"]] as const) {
     projectContentScaleIndicator(indicator, scale);
     assert.equal(indicator.textContent, expected);
+    assert.equal(indicator.querySelector(".control-button__label")?.textContent, expected);
   }
 
   const rebuilt = document.createElement("button");
