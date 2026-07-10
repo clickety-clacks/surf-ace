@@ -2178,15 +2178,24 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         finishPendingHTMLRender()
-        finishPendingBrowserNavigation(status: "failed", errorMessage: error.localizedDescription, navigation: navigation, url: pendingBrowserNavigationURL)
+        finishPendingBrowserNavigation(status: "failed", error: error, navigation: navigation, url: pendingBrowserNavigationURL)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         finishPendingHTMLRender()
-        finishPendingBrowserNavigation(status: "failed", errorMessage: error.localizedDescription, navigation: navigation, url: pendingBrowserNavigationURL)
+        finishPendingBrowserNavigation(status: "failed", error: error, navigation: navigation, url: pendingBrowserNavigationURL)
     }
 
     private func finishPendingBrowserNavigation(status: String, errorMessage: String?, navigation: WKNavigation? = nil, url: String?) {
+        finishPendingBrowserNavigation(status: status, errorMessage: errorMessage, errorDomain: nil, errorCode: nil, navigation: navigation, url: url)
+    }
+
+    private func finishPendingBrowserNavigation(status: String, error: Error, navigation: WKNavigation? = nil, url: String?) {
+        let nsError = error as NSError
+        finishPendingBrowserNavigation(status: status, errorMessage: error.localizedDescription, errorDomain: nsError.domain, errorCode: nsError.code, navigation: navigation, url: url)
+    }
+
+    private func finishPendingBrowserNavigation(status: String, errorMessage: String?, errorDomain: String?, errorCode: Int?, navigation: WKNavigation? = nil, url: String?) {
         guard let continuation = pendingBrowserNavigation else { return }
         if let navigation, pendingBrowserNavigationLoad !== navigation {
             return
@@ -2195,7 +2204,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         pendingBrowserNavigationLoad = nil
         let resolvedURL = url ?? pendingBrowserNavigationURL ?? ""
         pendingBrowserNavigationURL = nil
-        continuation.resume(returning: SurfAceBrowserNavigationResult(errorMessage: errorMessage, status: status, url: resolvedURL))
+        continuation.resume(returning: SurfAceBrowserNavigationResult(errorMessage: errorMessage, errorDomain: errorDomain, errorCode: errorCode, status: status, url: resolvedURL))
     }
 
     private func showWebView() {
