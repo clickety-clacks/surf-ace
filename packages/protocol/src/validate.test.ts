@@ -205,6 +205,58 @@ test("pane geometry schema exposes non-authoritative unresolved snapshot state",
     (paneGeometrySchema.properties.unavailableReason as { enum?: string[] } | undefined)?.enum,
     ["missing_resolved_snapshot"],
   );
+  assert.ok(Array.isArray(paneGeometrySchema.oneOf));
+});
+
+test("pane geometry unavailable markers are a coupled protocol state", () => {
+  const geometry = {
+    contentViewport: { height: 384, width: 1024, x: 0, y: 0 },
+    coordinateSpace: "surface_logical",
+    geometryRevision: 0,
+    paneFrame: { height: 384, width: 1024, x: 0, y: 0 },
+    paneId: 1,
+    paneInstanceId: "pl_1",
+    protocolViewport: {
+      coordinateSpace: "protocol_viewport",
+      rect: { height: 384, width: 1024, x: 0, y: 0 },
+      viewport: { height: 384, scale: 2, width: 1024 },
+    },
+    safeAreaInsets: { bottom: 0, left: 0, right: 0, top: 0 },
+    scale: 2,
+    splitSpacingInsets: { bottom: 0, left: 0, right: 0, top: 0 },
+    surfaceBounds: { height: 768, width: 1024, x: 0, y: 0 },
+    surfaceEpoch: "sf_1:1",
+    topologyEpoch: 2,
+  };
+  const validateGeometry = (candidate: Record<string, unknown>) => validateEnvelopeType("panes.list", {
+    id: "req_geometry_state",
+    ok: true,
+    op: "panes.list",
+    payload: {
+      panes: [{
+        activeContentId: null,
+        contentType: null,
+        externalNative: false,
+        geometry: candidate,
+        name: null,
+        paneId: 1,
+        paneLabel: 1,
+        viewport: { height: 384, scale: 2, width: 1024 },
+      }],
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+
+  assert.deepEqual(validateGeometry(geometry), { ok: true });
+  assert.deepEqual(validateGeometry({
+    ...geometry,
+    geometryUnavailable: true,
+    unavailableReason: "missing_resolved_snapshot",
+  }), { ok: true });
+  assert.equal(validateGeometry({ ...geometry, geometryUnavailable: true }).ok, false);
+  assert.equal(validateGeometry({ ...geometry, unavailableReason: "missing_resolved_snapshot" }).ok, false);
 });
 
 test("validateEnvelopeType accepts payloadless list requests and responses", () => {

@@ -100,6 +100,8 @@ test("renderer reports pane snapshots after layout commits", async () => {
   assert.ok(immediateReportIndex > replaceIndex);
   assert.ok(rafIndex > immediateReportIndex);
   assert.ok(rafReportIndex > rafIndex);
+  assert.match(source, /function paneSnapshotGeometryIdentity[\s\S]*geometryRevision: latestState\.geometryRevision[\s\S]*surfaceEpoch: latestState\.surfaceEpoch[\s\S]*topologyRevision: latestState\.topologyRevision/);
+  assert.match(source, /reportCompositorOverlayRegions[\s\S]*revision: latestState\.geometryRevision[\s\S]*topologyEpoch: String\(latestState\.topologyRevision\)/);
 });
 
 test("main preserves omitted browser-hosted snapshot fields", async () => {
@@ -111,7 +113,7 @@ test("main preserves omitted browser-hosted snapshot fields", async () => {
   assert.ok(snapshotIndex > -1);
   assert.ok(pageIndex > snapshotIndex);
   assert.match(handlerSource, /const snapshot: Parameters<SurfaceCore\["updatePaneSnapshot"\]>\[2\] = \{\};/);
-  for (const key of ["bounds", "selection", "viewport", "visibleText"]) {
+  for (const key of ["bounds", "geometryRevision", "selection", "surfaceEpoch", "topologyRevision", "viewport", "visibleText"]) {
     assert.match(handlerSource, new RegExp(`if \\("${key}" in payload\\)`));
   }
   assert.doesNotMatch(handlerSource, /selection:\s*\(payload\.selection \?\? null\)/);
@@ -451,7 +453,7 @@ test("html content is loaded through the browser webview surface", async () => {
   assert.match(source.slice(browserUrlIndex), /allowPopups: true/);
   assert.doesNotMatch(source.slice(htmlIndex, browserUrlIndex), /allowPopups: true/);
   assert.match(source, /const blockStaticHtmlNavigation = \(event: Event\) =>[\s\S]*sendNavigationIntent\(view, pane\.paneId, nextUrl\)/);
-  assert.match(source, /window\.surfAce\.reportSnapshot\(\{\s*bounds: paneBounds\(view\),\s*paneId: view\.paneId,\s*\}\)/);
+  assert.match(source, /window\.surfAce\.reportSnapshot\(\{\s*bounds: paneBounds\(view\),\s*\.\.\.paneSnapshotGeometryIdentity\(\),\s*paneId: view\.paneId,\s*\}\)/);
   assert.match(source, /webview\.addEventListener\("ipc-message", onIpcMessage\)/);
   assert.match(guestPreload, /ipcRenderer\.sendToHost\("surf-ace-content", payload\)/);
   assert.match(guestPreload, /if \(window\.location\.protocol === "data:"\)[\s\S]*event\.preventDefault\(\)/);

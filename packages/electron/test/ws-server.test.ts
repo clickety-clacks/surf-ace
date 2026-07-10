@@ -265,17 +265,29 @@ function topologyApplyRequest(): Request {
 }
 
 function seedHorizontalSplitSnapshots(core: SurfaceCore, surfaceId: string, topPaneId = 1, bottomPaneId = 2): void {
-  core.updatePaneSnapshot(surfaceId, topPaneId, {
+  updateResolvedPaneSnapshot(core, surfaceId, topPaneId, {
     bounds: { height: 400, width: 1200, x: 0, y: 0 },
   });
-  core.updatePaneSnapshot(surfaceId, bottomPaneId, {
+  updateResolvedPaneSnapshot(core, surfaceId, bottomPaneId, {
     bounds: { height: 400, width: 1200, x: 0, y: 400 },
   });
 }
 
 function seedSinglePaneSnapshot(core: SurfaceCore, surfaceId: string, paneId = 1): void {
-  core.updatePaneSnapshot(surfaceId, paneId, {
+  updateResolvedPaneSnapshot(core, surfaceId, paneId, {
     bounds: { height: 800, width: 1200, x: 0, y: 0 },
+  });
+}
+
+function updateResolvedPaneSnapshot(
+  core: SurfaceCore,
+  surfaceId: string,
+  paneId: number,
+  snapshot: Parameters<SurfaceCore["updatePaneSnapshot"]>[2],
+): void {
+  core.updatePaneSnapshot(surfaceId, paneId, {
+    ...snapshot,
+    ...core.resolvedPaneGeometryIdentity(surfaceId),
   });
 }
 
@@ -289,6 +301,20 @@ async function waitForRendererPaneSet(core: SurfaceCore, surfaceId: string, pane
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   assert.fail(`renderer pane set did not include ${paneIds.join(",")}`);
+}
+
+async function waitForGeometryRevisionAfter(
+  core: SurfaceCore,
+  surfaceId: string,
+  previousRevision: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (core.resolvedPaneGeometryIdentity(surfaceId).geometryRevision > previousRevision) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail(`renderer geometry revision did not advance after ${previousRevision}`);
 }
 
 async function waitForRendererConnectionBar(
@@ -1826,6 +1852,91 @@ test("ws server adopts provider authority pane identity before showing green", a
   });
 });
 
+test("ws server applies adopted native pane identity from one resolved snapshot revision", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: Array<Record<string, unknown>> = [];
+  const compositor = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      const message = JSON.parse(String(chunk).trim()) as Record<string, unknown>;
+      received.push(message);
+      socket.write(`${JSON.stringify(message.type === "get_status"
+        ? {
+            ok: true,
+            status: {
+              logical_surface_height: 800,
+              logical_surface_width: 1200,
+              pane_geometry_coordinate_space: "compositor_logical",
+            },
+          }
+        : { ok: true })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ core, surfaceId, url }) => {
+      const owner = await connect(url);
+      const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+      assert.equal(paired.ok, true);
+      const pane = paired.payload.state.panes[0]!;
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
+      const applied = await request(owner, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: pane.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+      assert.equal(applied.ok, true);
+
+      received.length = 0;
+      const beforeRevision = core.resolvedPaneGeometryIdentity(surfaceId).geometryRevision;
+      const adoptedLineageId = "pl_authority_native_truth";
+      const authorityPromise = request(owner, authorityStateRequest(
+        paired as Extract<Response, { op: "pair.request"; ok: true }>,
+        {
+          panes: [{
+            paneId: Number(pane.paneId),
+            paneLabel: pane.paneLabel,
+            paneLineageId: adoptedLineageId,
+          }],
+        },
+      ));
+      await waitForGeometryRevisionAfter(core, surfaceId, beforeRevision);
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
+      const authority = await authorityPromise;
+      assert.equal(authority.ok, true);
+      assert.equal(authority.payload.accepted, true);
+
+      assert.deepEqual(received.map((message) => message.type), [
+        "get_status",
+        "native_pane.update",
+        "overlay_regions.set",
+      ]);
+      const listedGeometry = core.panesList(surfaceId).panes[0]!.geometry;
+      assert.ok(!("geometryUnavailable" in listedGeometry));
+      const nativeGeometry = (received[1] as { panes: Array<{ geometry: { geometryRevision: number; paneInstanceId: string } }> })
+        .panes[0]!.geometry;
+      const overlay = received[2] as {
+        regions: Array<{ rect: { height: number; width: number; x: number; y: number } }>;
+        revision: number;
+      };
+      assert.equal(nativeGeometry.geometryRevision, listedGeometry.geometryRevision);
+      assert.equal(nativeGeometry.paneInstanceId, adoptedLineageId);
+      assert.equal(overlay.revision, listedGeometry.geometryRevision);
+      assert.deepEqual(overlay.regions[0]!.rect, listedGeometry.contentViewport);
+
+      await closeSocket(owner);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
 test("ws server accepts provider authority panes independent of order", async () => {
   await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
@@ -2706,11 +2817,12 @@ test("ws server preserves native-hosted pane for topology.apply with unchanged g
       }));
       assert.equal(nativeApplied.payload.status, "applied");
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
-      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+      updateResolvedPaneSnapshot(core, surfaceId, Number(pane.paneId), {
         bounds: { height: 800, width: 1200, x: 0, y: 0 },
       });
 
-      const topology = await request(owner, {
+      const beforeTopologyRevision = core.resolvedPaneGeometryIdentity(surfaceId).geometryRevision;
+      const topologyPromise = request(owner, {
         id: `rq_${Math.random().toString(16).slice(2)}` as never,
         op: "topology.apply",
         payload: {
@@ -2725,10 +2837,16 @@ test("ws server preserves native-hosted pane for topology.apply with unchanged g
         type: "request",
         v: 1,
       });
+      await waitForGeometryRevisionAfter(core, surfaceId, beforeTopologyRevision);
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
+      const topology = await topologyPromise;
       assert.equal(topology.ok, true);
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
         "native_pane.host",
+        "overlay_regions.set",
+        "get_status",
+        "native_pane.update",
         "overlay_regions.set",
       ]);
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
@@ -2790,7 +2908,7 @@ test("ws server updates retained native-hosted panes after topology.apply change
       }));
       assert.equal(nativeApplied.payload.status, "applied");
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
-      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+      updateResolvedPaneSnapshot(core, surfaceId, Number(pane.paneId), {
         bounds: { height: 400, width: 1200, x: 0, y: 0 },
       });
 
@@ -2807,7 +2925,13 @@ test("ws server updates retained native-hosted panes after topology.apply change
         "native_pane.update",
         "overlay_regions.set",
       ]);
-      assert.equal((received[4] as { panes: Array<{ id: string }> }).panes[0]!.id, String(pane.paneId));
+      const splitGeometry = core.panesList(surfaceId).panes.find((candidate) => Number(candidate.paneId) === Number(pane.paneId))!.geometry;
+      const splitNativeUpdate = received[4] as { panes: Array<{ geometry: { geometryRevision: number }; id: string }> };
+      const splitOverlayUpdate = received[5] as { regions: Array<{ rect: unknown }>; revision: number };
+      assert.equal(splitNativeUpdate.panes[0]!.id, String(pane.paneId));
+      assert.equal(splitNativeUpdate.panes[0]!.geometry.geometryRevision, splitGeometry.geometryRevision);
+      assert.equal(splitOverlayUpdate.revision, splitGeometry.geometryRevision);
+      assert.deepEqual(splitOverlayUpdate.regions[0]!.rect, splitGeometry.contentViewport);
       assert.equal(core.getRendererWindowState(surfaceId).panes[0]!.externalNative, true);
       assert.equal(core.getRendererWindowState(surfaceId).panes.length, 2);
 
@@ -2870,7 +2994,10 @@ test("ws server rejects retained native topology.apply when compositor geometry 
       }));
       assert.equal(nativeApplied.payload.status, "applied");
 
-      const rejected = await request(owner, topologyApplyRequest());
+      const rejectedPromise = request(owner, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const rejected = await rejectedPromise;
       assert.equal(rejected.ok, false);
       assert.equal(rejected.error.code, "render_failed");
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
@@ -2950,7 +3077,10 @@ test("ws server rolls back retained native topology geometry when overlay update
       }));
       assert.equal(nativeApplied.payload.status, "applied");
 
-      const rejected = await request(owner, topologyApplyRequest());
+      const rejectedPromise = request(owner, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const rejected = await rejectedPromise;
       assert.equal(rejected.ok, false);
       assert.equal(rejected.error.code, "render_failed");
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
@@ -2977,7 +3107,7 @@ test("ws server rolls back retained native topology geometry when overlay update
   }
 });
 
-test("ws server re-admits same-provider resume when native relabel overlay update fails", async () => {
+test("ws server rejects same-provider resume when resolved native relabel update fails", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
@@ -3038,18 +3168,21 @@ test("ws server re-admits same-provider resume when native relabel overlay updat
       });
 
       const resumedSocket = await connect(url);
-      const admitted = await request(
+      const beforeRelabelRevision = core.resolvedPaneGeometryIdentity(surfaceId).geometryRevision;
+      const admittedPromise = request(
         resumedSocket,
         pairRequest(surfaceId, "pv_alpha", {
           resumeSessionId: paired.payload.sessionId,
           windowLabel: "a",
         }),
       );
+      await waitForGeometryRevisionAfter(core, surfaceId, beforeRelabelRevision);
+      seedSinglePaneSnapshot(core, surfaceId, Number(pane.paneId));
+      const admitted = await admittedPromise;
 
-      assert.equal(admitted.ok, true);
+      assert.equal(admitted.ok, false);
       assert.equal(admitted.op, "pair.request");
-      assert.equal(admitted.payload.resumed, true);
-      assert.equal(admitted.payload.sessionId, paired.payload.sessionId);
+      assert.equal(admitted.error.code, "render_failed");
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
         "native_pane.host",
@@ -3062,7 +3195,7 @@ test("ws server re-admits same-provider resume when native relabel overlay updat
         "overlay_regions.set",
       ]);
       const state = core.getRendererWindowState(surfaceId);
-      assert.equal(state.windowLabel, "a");
+      assert.equal(state.windowLabel, "h");
       assert.equal(state.panes.length, 1);
       assert.equal(state.panes[0]!.externalNative, true);
 
@@ -3134,7 +3267,10 @@ test("ws server rolls back retained native topology geometry when source geometr
         core.setViewport(surfaceId, { height: 800, scale: 2, width: 1300 });
       };
 
-      const rejected = await request(owner, topologyApplyRequest());
+      const rejectedPromise = request(owner, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const rejected = await rejectedPromise;
       assert.equal(rejected.ok, false);
       assert.equal(rejected.error.code, "render_failed");
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
@@ -3208,7 +3344,7 @@ test("ws server updates native-hosted pane after pane.split changes geometry", a
         surfaceId: paired.payload.surfaceId,
       }));
       assert.equal(nativeApplied.payload.status, "applied");
-      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+      updateResolvedPaneSnapshot(core, surfaceId, Number(pane.paneId), {
         bounds: { height: 400, width: 1200, x: 0, y: 0 },
       });
 
@@ -3249,7 +3385,7 @@ test("ws server updates native-hosted pane after pane.split changes geometry", a
   }
 });
 
-test("ws server updates retained native-hosted panes before pane.close commits geometry", async () => {
+test("ws server updates retained native-hosted panes from resolved pane.close geometry", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
@@ -3297,22 +3433,28 @@ test("ws server updates retained native-hosted panes before pane.close commits g
         surfaceId: paired.payload.surfaceId,
       }));
       assert.equal(nativeApplied.payload.status, "applied");
-      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+      updateResolvedPaneSnapshot(core, surfaceId, Number(pane.paneId), {
         bounds: { height: 400, width: 1200, x: 0, y: 0 },
       });
 
       const topologyPromise = request(owner, topologyApplyRequest());
       await waitForRendererPaneSet(core, surfaceId, [1, 2]);
-      core.updatePaneSnapshot(surfaceId, 2, {
+      updateResolvedPaneSnapshot(core, surfaceId, 2, {
         bounds: { height: 400, width: 1200, x: 0, y: 400 },
       });
-      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+      updateResolvedPaneSnapshot(core, surfaceId, Number(pane.paneId), {
         bounds: { height: 800, width: 1200, x: 0, y: 0 },
       });
       const topology = await topologyPromise;
       assert.equal(topology.ok, true);
 
-      const close = await request(owner, paneCloseRequest(2));
+      const beforeCloseRevision = core.resolvedPaneGeometryIdentity(surfaceId).geometryRevision;
+      const closePromise = request(owner, paneCloseRequest(2));
+      await waitForGeometryRevisionAfter(core, surfaceId, beforeCloseRevision);
+      updateResolvedPaneSnapshot(core, surfaceId, Number(pane.paneId), {
+        bounds: { height: 800, width: 1200, x: 0, y: 0 },
+      });
+      const close = await closePromise;
       assert.equal(close.ok, true);
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
@@ -3326,6 +3468,7 @@ test("ws server updates retained native-hosted panes before pane.close commits g
         "overlay_regions.set",
       ]);
       const update = received[7] as { panes: Array<{ geometry: { height: number; width: number; x: number; y: number }; id: string }> };
+      const closedGeometry = core.panesList(surfaceId).panes[0]!.geometry;
       assert.equal(update.panes[0]!.id, String(pane.paneId));
       assert.deepEqual({
         coordinateSpace: update.panes[0]!.geometry.coordinateSpace,
@@ -3339,7 +3482,7 @@ test("ws server updates retained native-hosted panes before pane.close commits g
         coordinateSpace: "compositor_logical",
         height: 800,
         paneInstanceId: pane.paneLineageId,
-        topologyEpoch: 7,
+        topologyEpoch: closedGeometry.topologyEpoch,
         width: 1200,
         x: 0,
         y: 0,
@@ -3918,12 +4061,14 @@ test("ws server derives target.apply native pane host materialization for compos
       assert.equal((received[2] as { topologyEpoch?: string }).topologyEpoch, "topology-hosted");
       assert.equal((received[2] as { regions: Array<{ kind: string }> }).regions[0]?.kind, "other");
       const hostPane = (received[1] as { panes: Array<Record<string, unknown>> }).panes[0]!;
+      const resolvedGeometry = core.panesList(surfaceId).panes[0]!.geometry;
+      assert.ok(!("geometryUnavailable" in resolvedGeometry));
       assert.deepEqual(hostPane, {
         binding_id: "1:target_top_118",
         content_id: "target_top_118",
         geometry: {
           coordinateSpace: "compositor_logical",
-          geometryRevision: 3,
+          geometryRevision: resolvedGeometry.geometryRevision,
           height: 800,
           paneInstanceId: hostPane.geometry && (hostPane.geometry as Record<string, unknown>).paneInstanceId,
           surfaceEpoch: `${surfaceId}:1`,
@@ -4414,13 +4559,15 @@ test("ws server derives target.apply native pane geometry from resolved topology
         "overlay_regions.set",
       ]);
       const hostPane = (received[1] as { panes: Array<Record<string, unknown>> }).panes[0]!;
+      const resolvedGeometry = core.panesList(surfaceId).panes.find((pane) => Number(pane.paneId) === 1)?.geometry;
+      assert.ok(resolvedGeometry && !("geometryUnavailable" in resolvedGeometry));
       assert.deepEqual(hostPane.geometry, {
         coordinateSpace: "compositor_logical",
-        geometryRevision: 5,
+        geometryRevision: resolvedGeometry.geometryRevision,
         height: 400,
         paneInstanceId: paneLineageId,
-        surfaceEpoch: `${surfaceId}:1`,
-        topologyEpoch: 7,
+        surfaceEpoch: resolvedGeometry.surfaceEpoch,
+        topologyEpoch: resolvedGeometry.topologyEpoch,
         width: 1200,
         x: 0,
         y: 0,
@@ -4493,13 +4640,15 @@ test("ws server derives target.apply native pane identity from pane lineage", as
       const hostPane = (received[1] as { panes: Array<Record<string, unknown>> }).panes[0]!;
       assert.equal(hostPane.id, "2");
       assert.equal(hostPane.binding_id, "2:target_top_118");
+      const resolvedGeometry = core.panesList(surfaceId).panes.find((pane) => Number(pane.paneId) === 2)?.geometry;
+      assert.ok(resolvedGeometry && !("geometryUnavailable" in resolvedGeometry));
       assert.deepEqual(hostPane.geometry, {
         coordinateSpace: "compositor_logical",
-        geometryRevision: 5,
+        geometryRevision: resolvedGeometry.geometryRevision,
         height: 400,
         paneInstanceId: secondPaneLineageId,
-        surfaceEpoch: `${surfaceId}:1`,
-        topologyEpoch: 7,
+        surfaceEpoch: resolvedGeometry.surfaceEpoch,
+        topologyEpoch: resolvedGeometry.topologyEpoch,
         width: 1200,
         x: 0,
         y: 400,
@@ -4513,7 +4662,100 @@ test("ws server derives target.apply native pane identity from pane lineage", as
   }
 });
 
-test("ws server updates native host geometry before committing viewport resize", async () => {
+test("ws server projects pane resize native, overlay, and panes.list geometry from one revision", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
+  const socketPath = path.join(tempDir, "compositor.sock");
+  const received: unknown[] = [];
+  const compositor = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        return;
+      }
+      const message = JSON.parse(buffer.slice(0, newlineIndex)) as Record<string, unknown>;
+      received.push(message);
+      socket.write(`${JSON.stringify(message.type === "get_status"
+        ? {
+            ok: true,
+            status: {
+              logical_surface_height: 800,
+              logical_surface_width: 1200,
+              pane_geometry_coordinate_space: "compositor_logical",
+            },
+          }
+        : { ok: true })}\n`);
+      socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.listen(socketPath, resolve);
+    compositor.once("error", reject);
+  });
+  try {
+    await withServer(async ({ core, server, surfaceId, url }) => {
+      const socket = await connect(url);
+      const paired = await request(socket, pairRequest(surfaceId, "pv_alpha"));
+      const topologyPromise = request(socket, topologyApplyRequest());
+      await waitForRendererPaneSet(core, surfaceId, [1, 2]);
+      seedHorizontalSplitSnapshots(core, surfaceId);
+      const topology = await topologyPromise;
+      assert.equal(topology.ok, true);
+      const nativePane = topology.payload.panes.find((pane) => Number(pane.paneId) === 1)!;
+      const applied = await request(socket, targetApplyRequest({
+        ownershipSessionId: paired.payload.sessionId,
+        paneLineageId: nativePane.paneLineageId,
+        surfaceId: paired.payload.surfaceId,
+      }));
+      assert.equal(applied.payload.status, "applied");
+      received.length = 0;
+
+      const beforeResizeRevision = core.resolvedPaneGeometryIdentity(surfaceId).geometryRevision;
+      const resizePromise = server.resizeSplit(surfaceId, [], [1, 3]);
+      await waitForGeometryRevisionAfter(core, surfaceId, beforeResizeRevision);
+      updateResolvedPaneSnapshot(core, surfaceId, 1, {
+        bounds: { height: 200, width: 1200, x: 0, y: 0 },
+      });
+      updateResolvedPaneSnapshot(core, surfaceId, 2, {
+        bounds: { height: 600, width: 1200, x: 0, y: 200 },
+      });
+      assert.equal(await resizePromise, true);
+
+      const listedGeometry = core.panesList(surfaceId).panes.find((pane) => Number(pane.paneId) === 1)!.geometry;
+      const nativeUpdate = received[1] as {
+        panes: Array<{ geometry: { geometryRevision: number; height: number; topologyEpoch: number; width: number; x: number; y: number } }>;
+      };
+      const overlayUpdate = received[2] as {
+        regions: Array<{ rect: { height: number; width: number; x: number; y: number } }>;
+        revision: number;
+        topologyEpoch: number;
+      };
+      assert.deepEqual(nativeUpdate.panes[0]!.geometry, {
+        coordinateSpace: "compositor_logical",
+        geometryRevision: listedGeometry.geometryRevision,
+        height: listedGeometry.contentViewport.height,
+        paneInstanceId: listedGeometry.paneInstanceId,
+        surfaceEpoch: listedGeometry.surfaceEpoch,
+        topologyEpoch: listedGeometry.topologyEpoch,
+        width: listedGeometry.contentViewport.width,
+        x: listedGeometry.contentViewport.x,
+        y: listedGeometry.contentViewport.y,
+      });
+      assert.equal(overlayUpdate.revision, listedGeometry.geometryRevision);
+      assert.equal(overlayUpdate.topologyEpoch, listedGeometry.topologyEpoch);
+      assert.deepEqual(overlayUpdate.regions[0]!.rect, listedGeometry.contentViewport);
+
+      await closeSocket(socket);
+    }, { compositorSocketPath: socketPath });
+  } finally {
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("ws server updates native host geometry from the resolved viewport snapshot", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "surf-ace-compositor-"));
   const socketPath = path.join(tempDir, "compositor.sock");
   const received: unknown[] = [];
@@ -4560,11 +4802,14 @@ test("ws server updates native host geometry before committing viewport resize",
       }));
       assert.equal(applied.ok, true);
       received.length = 0;
-      core.updatePaneSnapshot(surfaceId, Number(pane.paneId), {
+      const beforeViewportRevision = core.resolvedPaneGeometryIdentity(surfaceId).geometryRevision;
+      const viewportPromise = server.setViewport(surfaceId, { height: 400, scale: 2, width: 600 });
+      await waitForGeometryRevisionAfter(core, surfaceId, beforeViewportRevision);
+      updateResolvedPaneSnapshot(core, surfaceId, Number(pane.paneId), {
         bounds: { height: 400, width: 600, x: 0, y: 0 },
       });
 
-      assert.equal(await server.setViewport(surfaceId, { height: 400, scale: 2, width: 600 }), true);
+      assert.equal(await viewportPromise, true);
 
       assert.deepEqual(received.map((message) => (message as { type: string }).type), [
         "get_status",
@@ -4572,9 +4817,10 @@ test("ws server updates native host geometry before committing viewport resize",
         "overlay_regions.set",
       ]);
       const updatedPane = (received[1] as { panes: Array<Record<string, unknown>> }).panes[0]!;
+      const viewportGeometry = core.panesList(surfaceId).panes[0]!.geometry;
       assert.deepEqual(updatedPane.geometry, {
         coordinateSpace: "compositor_logical",
-        geometryRevision: 5,
+        geometryRevision: viewportGeometry.geometryRevision,
         height: 400,
         paneInstanceId: pane.paneLineageId,
         surfaceEpoch: `${surfaceId}:2`,

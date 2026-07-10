@@ -162,12 +162,13 @@ type LayoutNode =
 
 type RendererWindowState = {
   connectionBar: "connected" | "connecting" | "disconnected";
-  geometryRevision?: number;
+  geometryRevision: number;
   layout: LayoutNode | null;
   name: string;
   panes: RendererPaneState[];
   providerName: string | null;
   surfaceId: string;
+  surfaceEpoch: string;
   topologyRevision: number;
   viewport: { height: number; scale: number; width: number };
   windowLabel: string;
@@ -407,11 +408,27 @@ function paneBounds(view: PaneView) {
   };
 }
 
+function paneSnapshotGeometryIdentity(): {
+  geometryRevision: number;
+  surfaceEpoch: string;
+  topologyRevision: number;
+} {
+  if (!latestState) {
+    throw new Error("pane snapshot requires renderer window state");
+  }
+  return {
+    geometryRevision: latestState.geometryRevision,
+    surfaceEpoch: latestState.surfaceEpoch,
+    topologyRevision: latestState.topologyRevision,
+  };
+}
+
 function reportPaneSnapshot(view: PaneView): void {
   const frame = currentPaneFrameElement(view);
   if (frame?.matches("webview.content-browser-url-frame")) {
     window.surfAce.reportSnapshot({
       bounds: paneBounds(view),
+      ...paneSnapshotGeometryIdentity(),
       paneId: view.paneId,
     });
     return;
@@ -421,6 +438,7 @@ function reportPaneSnapshot(view: PaneView): void {
   const viewport = currentViewport(view);
   window.surfAce.reportSnapshot({
     bounds: paneBounds(view),
+    ...paneSnapshotGeometryIdentity(),
     paneId: view.paneId,
     selection,
     viewport,
@@ -538,7 +556,7 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
   window.surfAce.reportOverlayRegions({
     coordinateSpace: "surface_logical",
     regions,
-    revision: latestState.geometryRevision ?? overlayRevision,
+    revision: latestState.geometryRevision,
     topologyEpoch: String(latestState.topologyRevision),
     updateReason,
   });
@@ -1321,6 +1339,7 @@ function reportBrowserUrlKeyboardScroll(view: PaneView, result: BrowserUrlKeyboa
   });
   window.surfAce.reportSnapshot({
     bounds: paneBounds(view),
+    ...paneSnapshotGeometryIdentity(),
     paneId: view.paneId,
     selection: null,
     viewport: result.viewport,
@@ -1860,6 +1879,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
       });
       window.surfAce.reportSnapshot({
         bounds: paneBounds(view),
+        ...paneSnapshotGeometryIdentity(),
         paneId,
         selection: null,
         viewport: payload.viewport,
@@ -1886,6 +1906,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
     } else if (payload.type === "ready") {
       window.surfAce.reportSnapshot({
         bounds: paneBounds(view),
+        ...paneSnapshotGeometryIdentity(),
         paneId,
         selection: null,
         viewport: payload.viewport,

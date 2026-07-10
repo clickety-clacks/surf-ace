@@ -72,7 +72,10 @@ function persistedHistoryEntry(entry: HistoryEntry): HistoryEntry {
 
 type PaneSnapshot = {
   bounds: { height: number; width: number; x: number; y: number } | null;
+  geometryRevision: number | null;
   selection: Selection;
+  surfaceEpoch: string | null;
+  topologyRevision: number | null;
   viewport: SnapshotResponse["payload"]["viewport"];
   visibleText: string;
 };
@@ -249,9 +252,16 @@ export type RendererWindowState = {
   providerName: string | null;
   surfaceId: string;
   geometryRevision: number;
+  surfaceEpoch: string;
   topologyRevision: number;
   viewport: SurfaceViewport;
   windowLabel: string;
+};
+
+export type ResolvedPaneGeometryIdentity = {
+  geometryRevision: number;
+  surfaceEpoch: string;
+  topologyRevision: number;
 };
 
 export type ReloadEntryIdentity = {
@@ -488,6 +498,23 @@ export class SurfaceCore {
     return surface;
   }
 
+  resolvedPaneGeometryIdentity(surfaceId: string): ResolvedPaneGeometryIdentity {
+    const surface = this.getSurface(surfaceId);
+    return {
+      geometryRevision: surface.geometryRevision,
+      surfaceEpoch: surface.surfaceEpoch,
+      topologyRevision: surface.topologyRevision,
+    };
+  }
+
+  captureSurfaceMutationRollback(surfaceId: string): () => void {
+    const snapshot = structuredClone(this.getSurface(surfaceId));
+    return () => {
+      this.surfaces.set(surfaceId, structuredClone(snapshot));
+      this.emit({ surfaceId, type: "surface-changed" });
+    };
+  }
+
   setConnectionBar(surfaceId: string, state: SurfaceState["connectionBar"]): void {
     const surface = this.getSurface(surfaceId);
     if (surface.connectionBar === state && (state === "connected" || surface.providerName === null)) {
@@ -550,7 +577,8 @@ export class SurfaceCore {
       }),
       providerName: surface.providerName,
       surfaceId: surface.surfaceId,
-      geometryRevision: surface.geometryRevision + 1,
+      geometryRevision: surface.geometryRevision,
+      surfaceEpoch: surface.surfaceEpoch,
       topologyRevision: surface.topologyRevision,
       viewport: cloneViewport(surface.viewport),
       windowLabel: surface.windowLabel,
@@ -701,7 +729,11 @@ export class SurfaceCore {
     };
   }
 
-  missingResolvedPaneGeometry(surfaceId: string, paneIds: Iterable<number>): number[] {
+  missingResolvedPaneGeometry(
+    surfaceId: string,
+    paneIds: Iterable<number>,
+    expectedIdentity: ResolvedPaneGeometryIdentity = this.resolvedPaneGeometryIdentity(surfaceId),
+  ): number[] {
     const surface = this.getSurface(surfaceId);
     const paneGeometry = resolvePaneGeometrySnapshots(surface);
     const seen = new Set<number>();
@@ -712,7 +744,13 @@ export class SurfaceCore {
       }
       seen.add(paneId);
       const geometry = paneGeometry.get(paneId);
-      if (!geometry || geometry.geometryUnavailable) {
+      if (
+        !geometry ||
+        geometry.geometryUnavailable ||
+        geometry.geometryRevision !== expectedIdentity.geometryRevision ||
+        geometry.surfaceEpoch !== expectedIdentity.surfaceEpoch ||
+        geometry.topologyEpoch !== expectedIdentity.topologyRevision
+      ) {
         missing.push(paneId);
       }
     }
@@ -840,128 +878,9 @@ export class SurfaceCore {
     };
   }
 
-  projectNativePaneGeometryUpdate(surfaceId: string, paneIds: number[]): NativePaneMaterialization {
-    const surface = this.getSurface(surfaceId);
-    return this.projectNativePaneGeometryUpdateFromSnapshots(surface, paneIds, {
-      geometryRevision: surface.geometryRevision + 1,
-      topologyRevision: surface.topologyRevision,
-      windowLabel: surface.windowLabel,
-    });
-  }
-
   projectCurrentNativePaneGeometry(surfaceId: string, paneIds: number[]): NativePaneMaterialization {
     const surface = this.getSurface(surfaceId);
-    return this.projectNativePaneGeometryUpdateFromSnapshots(surface, paneIds, {
-      geometryRevision: surface.geometryRevision,
-      topologyRevision: surface.topologyRevision,
-      windowLabel: surface.windowLabel,
-    });
-  }
-
-  projectNativePaneGeometryUpdateForViewport(
-    surfaceId: string,
-    paneIds: number[],
-    viewport: SurfaceViewport,
-  ): NativePaneMaterialization {
-    const surface = this.getSurface(surfaceId);
-    return this.projectNativePaneGeometryUpdateFromSnapshots(surface, paneIds, {
-      geometryRevision: surface.geometryRevision + 1,
-      surfaceEpoch: `${surface.surfaceId}:${surface.surfaceEpochRevision + 1}`,
-      topologyRevision: surface.topologyRevision,
-      windowLabel: surface.windowLabel,
-    }, viewport);
-  }
-
-  projectNativePaneGeometryUpdateForTopologyApply(
-    surfaceId: string,
-    payload: TopologyApplyRequest["payload"],
-  ): NativePaneMaterialization | null {
-    const surface = this.getSurface(surfaceId);
-    assertValidWindowLabel(payload.windowLabel);
-    this.assertWindowLabelAvailable(surfaceId, payload.windowLabel);
-    const paneIds = this.nativeHostedPaneIdsForTopologyGeometryUpdate(surfaceId, payload);
-    if (paneIds.length === 0) {
-      return null;
-    }
-    const paneStateById = new Map<number, TopologyApplyRequest["payload"]["panes"][number]>();
-    for (const pane of payload.panes) {
-      paneStateById.set(Number(pane.paneId), pane);
-    }
-    const nextLayout = topologyLayoutToSurfaceLayout(payload.layout, paneStateById);
-    return this.projectNativePaneGeometryUpdateForLayout(surface, paneIds, nextLayout, {
-      geometryRevision: surface.geometryRevision + 1,
-      topologyRevision: Number(payload.topologyRevision),
-      windowLabel: payload.windowLabel,
-    });
-  }
-
-  projectNativePaneOverlayWindowLabelUpdate(surfaceId: string, windowLabel: string): NativePaneMaterialization | null {
-    assertValidWindowLabel(windowLabel);
-    this.assertWindowLabelAvailable(surfaceId, windowLabel);
-    const surface = this.getSurface(surfaceId);
-    const paneIds = [...surface.panes.values()]
-      .filter((pane) => pane.externalNative)
-      .map((pane) => pane.paneId);
-    if (paneIds.length === 0) {
-      return null;
-    }
-    return this.projectNativePaneGeometryUpdateForLayout(surface, paneIds, surface.layout!, {
-      geometryRevision: surface.geometryRevision + 1,
-      topologyRevision: surface.topologyRevision,
-      windowLabel,
-    });
-  }
-
-  projectNativePaneGeometryUpdateForPaneSplit(
-    surfaceId: string,
-    payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; newPaneLabels: number[]; paneId: number },
-  ): NativePaneMaterialization | null {
-    const surface = this.getSurface(surfaceId);
-    const paneIds = this.nativeHostedPaneIdsForPaneSplitGeometryUpdate(surfaceId, payload);
-    if (paneIds.length === 0) {
-      return null;
-    }
-    return this.projectNativePaneGeometryUpdateFromSnapshots(surface, paneIds, {
-      geometryRevision: surface.geometryRevision,
-      topologyRevision: surface.topologyRevision,
-      windowLabel: surface.windowLabel,
-    });
-  }
-
-  projectNativePaneGeometryUpdateForPaneClose(surfaceId: string, paneId: number): NativePaneMaterialization | null {
-    const surface = this.getSurface(surfaceId);
-    const paneIds = this.nativeHostedPaneIdsForPaneCloseGeometryUpdate(surfaceId, paneId);
-    if (paneIds.length === 0) {
-      return null;
-    }
-    return this.projectNativePaneGeometryUpdateFromSnapshots(surface, paneIds, {
-      geometryRevision: surface.geometryRevision,
-      topologyRevision: surface.topologyRevision,
-      windowLabel: surface.windowLabel,
-    });
-  }
-
-  projectNativePaneGeometryUpdateForResizeSplit(surfaceId: string, path: number[], weights: number[]): NativePaneMaterialization | null {
-    const surface = this.getSurface(surfaceId);
-    const nextLayout = updateSplitWeights(surface.layout!, path, weights);
-    const currentRects = layoutPaneRects(surface.layout!, surface.viewport);
-    const nextRects = layoutPaneRects(nextLayout, surface.viewport);
-    const paneIds = [...surface.panes.values()]
-      .filter((pane) => pane.externalNative)
-      .filter((pane) => {
-        const currentRect = currentRects.get(pane.paneId);
-        const nextRect = nextRects.get(pane.paneId);
-        return Boolean(currentRect && nextRect && !sameRect(currentRect, nextRect));
-      })
-      .map((pane) => pane.paneId);
-    if (paneIds.length === 0) {
-      return null;
-    }
-    return this.projectNativePaneGeometryUpdateForLayout(surface, paneIds, nextLayout, {
-      geometryRevision: surface.geometryRevision + 1,
-      topologyRevision: Math.max(1, surface.topologyRevision + 1),
-      windowLabel: surface.windowLabel,
-    });
+    return this.projectNativePaneGeometryUpdateFromSnapshots(surface, paneIds);
   }
 
 
@@ -1066,10 +985,8 @@ export class SurfaceCore {
   private projectNativePaneGeometryUpdateFromSnapshots(
     surface: SurfaceState,
     paneIds: number[],
-    revision: { geometryRevision: number; surfaceEpoch?: string; topologyRevision: number; windowLabel: string },
-    viewport: SurfaceViewport = surface.viewport,
   ): NativePaneMaterialization {
-    const resolvedGeometry = resolvePaneGeometrySnapshots(surface, viewport);
+    const resolvedGeometry = resolvePaneGeometrySnapshots(surface);
     const layoutOrder = flattenLayout(surface.layout);
     const panes = paneIds.map((paneId) => {
       const pane = surface.panes.get(paneId);
@@ -1089,17 +1006,17 @@ export class SurfaceCore {
         ...(pane.nativeHost?.contentId ? { content_id: pane.nativeHost.contentId } : {}),
         geometry: {
           coordinateSpace: "compositor_logical" as const,
-          geometryRevision: revision.geometryRevision as Revision,
+          geometryRevision: geometry.geometryRevision,
           height: compositorViewport.height,
-          paneInstanceId: pane.paneLineageId,
-          surfaceEpoch: revision.surfaceEpoch ?? surface.surfaceEpoch,
-          topologyEpoch: revision.topologyRevision as TopologyRevision,
+          paneInstanceId: geometry.paneInstanceId,
+          surfaceEpoch: geometry.surfaceEpoch,
+          topologyEpoch: geometry.topologyEpoch,
           width: compositorViewport.width,
           x: compositorViewport.x,
           y: compositorViewport.y,
         },
         id: String(pane.paneId),
-        revision: pane.nativeHost?.revision ?? revision.geometryRevision as Revision,
+        revision: pane.nativeHost?.revision ?? geometry.geometryRevision,
         ...(pane.nativeHost?.launchToken
           ? {
               windowGroup: {
@@ -1116,64 +1033,11 @@ export class SurfaceCore {
           : {}),
       };
     });
-    return nativePaneMaterializationFromProjectedPanes(surface, panes, layoutOrder, revision);
-  }
-
-  private projectNativePaneGeometryUpdateForLayout(
-    surface: SurfaceState,
-    paneIds: number[],
-    layout: LayoutNode,
-    revision: { geometryRevision: number; surfaceEpoch?: string; topologyRevision: number; windowLabel: string },
-    viewport: SurfaceViewport = surface.viewport,
-  ): NativePaneMaterialization {
-    const rects = layoutPaneRects(layout, viewport);
-    const layoutOrder = flattenLayout(layout);
-    const panes = paneIds.map((paneId) => {
-      const pane = surface.panes.get(paneId);
-      if (!pane) {
-        throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
-      }
-      if (!pane.externalNative) {
-        throw new SurfaceCoreError("invalid_operation", `Pane ${paneId} is not native-hosted`);
-      }
-      const rect = rects.get(pane.paneId);
-      if (!rect) {
-        throw new SurfaceCoreError("invalid_payload", `native pane ${pane.paneId} is not present in the resolved Surf Ace layout`);
-      }
-      const compositorViewport = compositorResolvedRect(rect);
-      return {
-        ...(pane.nativeHost?.bindingId ? { binding_id: pane.nativeHost.bindingId } : {}),
-        ...(pane.nativeHost?.contentId ? { content_id: pane.nativeHost.contentId } : {}),
-        geometry: {
-          coordinateSpace: "compositor_logical" as const,
-          geometryRevision: revision.geometryRevision as Revision,
-          height: compositorViewport.height,
-          paneInstanceId: pane.paneLineageId,
-          surfaceEpoch: revision.surfaceEpoch ?? surface.surfaceEpoch,
-          topologyEpoch: revision.topologyRevision as TopologyRevision,
-          width: compositorViewport.width,
-          x: compositorViewport.x,
-          y: compositorViewport.y,
-        },
-        id: String(pane.paneId),
-        revision: pane.nativeHost?.revision ?? revision.geometryRevision as Revision,
-        ...(pane.nativeHost?.launchToken
-          ? {
-              windowGroup: {
-                launchIdentity: {
-                  launchToken: pane.nativeHost.launchToken,
-                  paneId: String(pane.paneId),
-                  paneInstanceId: pane.paneLineageId,
-                  surfaceId: surface.surfaceId as SurfaceId,
-                  ...(pane.nativeHost.contentId ? { targetId: pane.nativeHost.contentId } : {}),
-                },
-                policy: nativePaneWindowGroupPolicy(),
-              },
-            }
-          : {}),
-      };
+    return nativePaneMaterializationFromProjectedPanes(surface, panes, layoutOrder, {
+      geometryRevision: surface.geometryRevision,
+      topologyRevision: surface.topologyRevision,
+      windowLabel: surface.windowLabel,
     });
-    return nativePaneMaterializationFromProjectedPanes(surface, panes, layoutOrder, revision);
   }
 
   nativeHostedPaneIdForLineage(surfaceId: string, paneLineageId: string): number | null {
@@ -1201,30 +1065,6 @@ export class SurfaceCore {
     return [...surface.panes.values()]
       .filter((pane) => pane.externalNative)
       .filter((pane) => !retainedPaneIds.has(pane.paneId))
-      .map((pane) => pane.paneId);
-  }
-
-  nativeHostedPaneIdsForTopologyGeometryUpdate(
-    surfaceId: string,
-    payload: TopologyApplyRequest["payload"],
-  ): number[] {
-    const surface = this.getSurface(surfaceId);
-    assertSingleSurfacePaneLabelPayload(payload.panes);
-    const paneStateById = new Map<number, TopologyApplyRequest["payload"]["panes"][number]>();
-    for (const pane of payload.panes) {
-      paneStateById.set(Number(pane.paneId), pane);
-    }
-    const nextLayout = topologyLayoutToSurfaceLayout(payload.layout, paneStateById);
-    const currentRects = layoutPaneRects(surface.layout!, surface.viewport);
-    const nextRects = layoutPaneRects(nextLayout, surface.viewport);
-    const windowLabelChanged = surface.windowLabel !== payload.windowLabel;
-    return [...surface.panes.values()]
-      .filter((pane) => pane.externalNative)
-      .filter((pane) => {
-        const currentRect = currentRects.get(pane.paneId);
-        const nextRect = nextRects.get(pane.paneId);
-        return Boolean(currentRect && nextRect && (windowLabelChanged || !sameRect(currentRect, nextRect)));
-      })
       .map((pane) => pane.paneId);
   }
 
@@ -1274,14 +1114,6 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
     }
     return pane.externalNative ? pane.paneId : null;
-  }
-
-  nativeHostedPaneIdsForPaneCloseGeometryUpdate(surfaceId: string, paneId: number): number[] {
-    const surface = this.getSurface(surfaceId);
-    this.nativeHostedPaneIdForPaneClose(surfaceId, paneId);
-    return [...surface.panes.values()]
-      .filter((pane) => pane.externalNative && pane.paneId !== paneId)
-      .map((pane) => pane.paneId);
   }
 
   nativeHostedPaneIdForContentApply(surfaceId: string, payload: ContentApplyRequest["payload"]): number | null {
@@ -1547,20 +1379,12 @@ export class SurfaceCore {
       orderedPanes.push(paneId);
     }
 
-    const previousRects = layoutPaneRects(surface.layout!, surface.viewport);
-    const nextRects = layoutPaneRects(layout, surface.viewport);
-    const geometryChanged = !samePaneRectSet(previousRects, nextRects);
-    const windowLabelChanged = surface.windowLabel !== payload.windowLabel;
-    const nativeWindowLabelChanged = windowLabelChanged && activePaneIds.some((paneId) => surface.panes.get(paneId)?.externalNative);
-
     surface.layout = layout;
     surface.windowLabel = payload.windowLabel;
     surface.paneOrder = orderedPanes;
     surface.panes = nextPanes;
     surface.topologyRevision = Number(payload.topologyRevision);
-    if (geometryChanged || nativeWindowLabelChanged) {
-      bumpGeometryRevision(surface);
-    }
+    bumpGeometryRevision(surface);
     this.ensureActiveKeyboardPane(surface);
     this.emit({ surfaceId, type: "surface-changed" });
 
@@ -1838,6 +1662,9 @@ export class SurfaceCore {
       }
     }
 
+    surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
+    bumpGeometryRevision(surface);
+
     this.emit({ surfaceId, type: "surface-changed" });
     for (const paneId of newPaneIds) {
       this.emit({
@@ -1892,6 +1719,8 @@ export class SurfaceCore {
     surface.panes.delete(paneId);
     surface.paneOrder = surface.paneOrder.filter((entry) => entry !== paneId);
     surface.layout = collapseLayout(removePaneFromLayout(surface.layout!, paneId));
+    surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
+    bumpGeometryRevision(surface);
     this.ensureActiveKeyboardPane(surface);
     this.emit({ surfaceId, type: "surface-changed" });
     this.emit({ paneId, surfaceId, type: "pane-removed" });
@@ -2142,15 +1971,36 @@ export class SurfaceCore {
       return;
     }
     const previousBounds = pane.snapshot.bounds;
+    const previousIdentity = paneSnapshotIdentity(pane.snapshot);
+    const reportedIdentity = snapshotGeometryIdentity(snapshot);
+    const acceptsBounds = snapshot.bounds === undefined || (
+      reportedIdentity !== null && sameGeometryIdentity(
+        reportedIdentity,
+        this.resolvedPaneGeometryIdentity(surfaceId),
+      )
+    );
     pane.snapshot = {
-      bounds: snapshot.bounds ?? pane.snapshot.bounds,
+      bounds: acceptsBounds && snapshot.bounds !== undefined ? snapshot.bounds : pane.snapshot.bounds,
+      geometryRevision: acceptsBounds && snapshot.bounds !== undefined
+        ? reportedIdentity!.geometryRevision
+        : pane.snapshot.geometryRevision,
       selection: snapshot.selection ?? pane.snapshot.selection,
+      surfaceEpoch: acceptsBounds && snapshot.bounds !== undefined
+        ? reportedIdentity!.surfaceEpoch
+        : pane.snapshot.surfaceEpoch,
+      topologyRevision: acceptsBounds && snapshot.bounds !== undefined
+        ? reportedIdentity!.topologyRevision
+        : pane.snapshot.topologyRevision,
       viewport: snapshot.viewport ?? pane.snapshot.viewport,
       visibleText: snapshot.visibleText ?? pane.snapshot.visibleText,
     };
     const nextBounds = pane.snapshot.bounds;
-    if (nextBounds && (!previousBounds || !sameRect(previousBounds, nextBounds))) {
-      bumpGeometryRevision(surface);
+    const nextIdentity = paneSnapshotIdentity(pane.snapshot);
+    if (
+      acceptsBounds &&
+      nextBounds &&
+      (!previousBounds || !sameRect(previousBounds, nextBounds) || !sameOptionalGeometryIdentity(previousIdentity, nextIdentity))
+    ) {
       this.emit({ paneIds: [pane.paneId], surfaceId, type: "pane-geometry-changed" });
     }
   }
@@ -2584,7 +2434,10 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     pendingAnnotationCommit: false,
     snapshot: {
       bounds: null,
+      geometryRevision: null,
       selection: null,
+      surfaceEpoch: null,
+      topologyRevision: null,
       viewport: {
         contentSize: { height: DEFAULT_VISIBLE_RECT.height, width: DEFAULT_VISIBLE_RECT.width },
         scrollOffset: { x: 0, y: 0 },
@@ -2678,7 +2531,20 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
       ? paneRecord.paneLineageId
       : pane.paneLineageId;
     pane.pendingAnnotationCommit = Boolean(paneRecord.pendingAnnotationCommit);
-    pane.snapshot = paneRecord.snapshot ? structuredClone(paneRecord.snapshot) : pane.snapshot;
+    pane.snapshot = paneRecord.snapshot
+      ? {
+          ...structuredClone(paneRecord.snapshot),
+          geometryRevision: Number.isInteger(paneRecord.snapshot.geometryRevision)
+            ? paneRecord.snapshot.geometryRevision
+            : null,
+          surfaceEpoch: typeof paneRecord.snapshot.surfaceEpoch === "string"
+            ? paneRecord.snapshot.surfaceEpoch
+            : null,
+          topologyRevision: Number.isInteger(paneRecord.snapshot.topologyRevision)
+            ? paneRecord.snapshot.topologyRevision
+            : null,
+        }
+      : pane.snapshot;
     pane.toast = typeof paneRecord.toast === "string" ? paneRecord.toast : null;
     panes.set(pane.paneId, pane);
     paneOrder.push(pane.paneId);
@@ -3126,62 +2992,6 @@ function collapseLayout(node: LayoutNode | null): LayoutNode {
   };
 }
 
-function layoutNodeWeight(node: { weight?: number }): number {
-  return typeof node.weight === "number" && Number.isFinite(node.weight) && node.weight > 0
-    ? node.weight
-    : 1;
-}
-
-function layoutPaneRects(
-  node: LayoutNode,
-  viewport: SurfaceViewport,
-): Map<number, Rect> {
-  const byPaneId = new Map<number, Rect>();
-
-  const visit = (current: LayoutNode, rect: Rect): void => {
-    if (current.type === "pane") {
-      byPaneId.set(current.paneId, {
-        height: rect.height,
-        width: rect.width,
-        x: rect.x,
-        y: rect.y,
-      });
-      return;
-    }
-
-    const totalWeight = Math.max(1, current.children.reduce((sum, child) => sum + layoutNodeWeight(child), 0));
-    let offset = 0;
-    current.children.forEach((child, index) => {
-      const childWeight = layoutNodeWeight(child);
-      visit(
-        child,
-        current.direction === "vertical"
-          ? {
-              height: rect.height,
-              width: index === current.children.length - 1 ? rect.width - offset : rect.width * (childWeight / totalWeight),
-              x: rect.x + offset,
-              y: rect.y,
-            }
-          : {
-              height: index === current.children.length - 1 ? rect.height - offset : rect.height * (childWeight / totalWeight),
-              width: rect.width,
-              x: rect.x,
-              y: rect.y + offset,
-            },
-      );
-      offset += (current.direction === "vertical" ? rect.width : rect.height) * (childWeight / totalWeight);
-    });
-  };
-
-  visit(node, {
-    height: viewport.height,
-    width: viewport.width,
-    x: 0,
-    y: 0,
-  });
-  return byPaneId;
-}
-
 function nativePaneMaterializationFromProjectedPanes(
   surface: SurfaceState,
   panes: NativePaneMaterialization["panes"],
@@ -3296,7 +3106,16 @@ function resolvePaneGeometrySnapshots(surface: SurfaceState, viewport: SurfaceVi
     if (!pane) {
       throw new SurfaceCoreError("internal_error", `Pane ${paneId} is missing state for resolved geometry`);
     }
-    const paneFrame = pane.snapshot.bounds && isRenderableRect(pane.snapshot.bounds)
+    const paneFrame = pane.snapshot.bounds &&
+      isRenderableRect(pane.snapshot.bounds) &&
+      sameOptionalGeometryIdentity(
+        paneSnapshotIdentity(pane.snapshot),
+        {
+          geometryRevision: surface.geometryRevision,
+          surfaceEpoch: surface.surfaceEpoch,
+          topologyRevision: surface.topologyRevision,
+        },
+      )
       ? { ...pane.snapshot.bounds }
       : null;
     projections.push([
@@ -3307,6 +3126,39 @@ function resolvePaneGeometrySnapshots(surface: SurfaceState, viewport: SurfaceVi
     ]);
   }
   return new Map(projections);
+}
+
+function snapshotGeometryIdentity(snapshot: Partial<PaneSnapshot>): ResolvedPaneGeometryIdentity | null {
+  return Number.isInteger(snapshot.geometryRevision) &&
+    typeof snapshot.surfaceEpoch === "string" &&
+    snapshot.surfaceEpoch.length > 0 &&
+    Number.isInteger(snapshot.topologyRevision)
+    ? {
+        geometryRevision: snapshot.geometryRevision!,
+        surfaceEpoch: snapshot.surfaceEpoch,
+        topologyRevision: snapshot.topologyRevision!,
+      }
+    : null;
+}
+
+function paneSnapshotIdentity(snapshot: PaneSnapshot): ResolvedPaneGeometryIdentity | null {
+  return snapshotGeometryIdentity(snapshot);
+}
+
+function sameGeometryIdentity(
+  left: ResolvedPaneGeometryIdentity,
+  right: ResolvedPaneGeometryIdentity,
+): boolean {
+  return left.geometryRevision === right.geometryRevision &&
+    left.surfaceEpoch === right.surfaceEpoch &&
+    left.topologyRevision === right.topologyRevision;
+}
+
+function sameOptionalGeometryIdentity(
+  left: ResolvedPaneGeometryIdentity | null,
+  right: ResolvedPaneGeometryIdentity | null,
+): boolean {
+  return left !== null && right !== null && sameGeometryIdentity(left, right);
 }
 
 function authoritativePaneGeometryProjection(
@@ -3416,19 +3268,6 @@ function sameRect(left: Rect, right: Rect): boolean {
     Math.abs(left.x - right.x) < 0.5 &&
     Math.abs(left.y - right.y) < 0.5
   );
-}
-
-function samePaneRectSet(left: Map<number, Rect>, right: Map<number, Rect>): boolean {
-  if (left.size !== right.size) {
-    return false;
-  }
-  for (const [paneId, rect] of left) {
-    const next = right.get(paneId);
-    if (!next || !sameRect(rect, next)) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function nearestPaneInDirection(

@@ -20,8 +20,20 @@ function applyProviderBootstrap(
 }
 
 function resolvePaneSnapshot(core: SurfaceCore, surfaceId: string, paneId: number): void {
-  core.updatePaneSnapshot(surfaceId, paneId, {
+  updateResolvedPaneSnapshot(core, surfaceId, paneId, {
     bounds: { height: 800, width: 1200, x: 0, y: 0 },
+  });
+}
+
+function updateResolvedPaneSnapshot(
+  core: SurfaceCore,
+  surfaceId: string,
+  paneId: number,
+  snapshot: Parameters<SurfaceCore["updatePaneSnapshot"]>[2],
+): void {
+  core.updatePaneSnapshot(surfaceId, paneId, {
+    ...snapshot,
+    ...core.resolvedPaneGeometryIdentity(surfaceId),
   });
 }
 
@@ -102,6 +114,48 @@ test("surface core marks unresolved single-pane geometry as non-authoritative", 
     }),
     /has no authoritative resolved Surf Ace geometry snapshot/,
   );
+});
+
+test("surface core rejects stale pane bounds until the current geometry revision resolves", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
+  const staleIdentity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
+
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [9],
+    newPaneLabels: [9],
+    paneId,
+  });
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    bounds: { height: 800, width: 1200, x: 0, y: 0 },
+    ...staleIdentity,
+  });
+
+  const stalePane = core.panesList(surface.surfaceId).panes[0]!;
+  assert.equal(stalePane.geometry.geometryUnavailable, true);
+  assert.equal(stalePane.geometry.unavailableReason, "missing_resolved_snapshot");
+
+  updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
+    bounds: { height: 400, width: 1200, x: 0, y: 0 },
+  });
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
+    bounds: { height: 400, width: 1200, x: 0, y: 400 },
+  });
+  const currentIdentity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
+  for (const pane of core.panesList(surface.surfaceId).panes) {
+    assert.equal(pane.geometry.geometryUnavailable, undefined);
+    assert.equal(pane.geometry.geometryRevision, currentIdentity.geometryRevision);
+    assert.equal(pane.geometry.topologyEpoch, currentIdentity.topologyRevision);
+  }
 });
 
 test("surface core removes closed windows from live topology immediately", () => {
@@ -389,13 +443,13 @@ test("surface core navigates the active keyboard pane by resolved geometry", () 
     newPaneLabels: [11],
     paneId: initialPaneId,
   });
-  core.updatePaneSnapshot(surface.surfaceId, initialPaneId, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, initialPaneId, {
     bounds: { height: 400, width: 600, x: 0, y: 0 },
   });
-  core.updatePaneSnapshot(surface.surfaceId, 11, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 11, {
     bounds: { height: 400, width: 600, x: 0, y: 400 },
   });
-  core.updatePaneSnapshot(surface.surfaceId, 9, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
     bounds: { height: 800, width: 600, x: 600, y: 0 },
   });
 
@@ -448,10 +502,10 @@ test("surface core preserves resize weights in topology and renderer geometry", 
       direction: "vertical",
       type: "split",
     });
-    core.updatePaneSnapshot(surface.surfaceId, 7, {
+    updateResolvedPaneSnapshot(core, surface.surfaceId, 7, {
       bounds: { height: 800, width: 900, x: 0, y: 0 },
     });
-    core.updatePaneSnapshot(surface.surfaceId, 9, {
+    updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
       bounds: { height: 800, width: 300, x: 900, y: 0 },
     });
     assert.deepEqual(
@@ -473,6 +527,12 @@ test("surface core preserves resize weights in topology and renderer geometry", 
       type: "split",
     });
     assert.ok(events.includes("topology-changed"));
+    updateResolvedPaneSnapshot(core, surface.surfaceId, 7, {
+      bounds: { height: 800, width: 300, x: 0, y: 0 },
+    });
+    updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
+      bounds: { height: 800, width: 900, x: 300, y: 0 },
+    });
 
     const nativePane = core.panesList(surface.surfaceId).panes.find((pane) => Number(pane.paneId) === 7)!;
     core.markNativePaneMaterialized(surface.surfaceId, {
@@ -500,10 +560,20 @@ test("surface core preserves resize weights in topology and renderer geometry", 
       ],
     });
 
-    const projectedResize = core.projectNativePaneGeometryUpdateForResizeSplit(surface.surfaceId, [], [2, 2]);
-    assert.equal(projectedResize?.panes[0]?.id, "7");
-    assert.equal(projectedResize?.panes[0]?.geometry.width, 600);
-    assert.equal(projectedResize?.overlaySet.topologyEpoch, 3);
+    core.resizeSplit(surface.surfaceId, [], [2, 2]);
+    updateResolvedPaneSnapshot(core, surface.surfaceId, 7, {
+      bounds: { height: 800, width: 600, x: 0, y: 0 },
+    });
+    updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
+      bounds: { height: 800, width: 600, x: 600, y: 0 },
+    });
+    const projectedResize = core.projectCurrentNativePaneGeometry(surface.surfaceId, [7]);
+    const resizedPane = core.panesList(surface.surfaceId).panes.find((pane) => Number(pane.paneId) === 7)!;
+    assert.equal(projectedResize.panes[0]?.id, "7");
+    assert.equal(projectedResize.panes[0]?.geometry.width, 600);
+    assert.equal(projectedResize.panes[0]?.geometry.geometryRevision, resizedPane.geometry.geometryRevision);
+    assert.equal(projectedResize.overlaySet.revision, resizedPane.geometry.geometryRevision);
+    assert.equal(projectedResize.overlaySet.topologyEpoch, resizedPane.geometry.topologyEpoch);
   } finally {
     unsubscribe();
   }
@@ -606,7 +676,7 @@ test("surface core ignores snapshot updates for stale pane ids", () => {
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
 
   assert.doesNotThrow(() => {
-    core.updatePaneSnapshot(surface.surfaceId, 819, {
+    updateResolvedPaneSnapshot(core, surface.surfaceId, 819, {
       visibleText: "stale",
     });
   });
@@ -632,7 +702,7 @@ test("surface core falls back to authoritative html text when renderer snapshot 
     paneId: paneId as never,
     revision: 1 as never,
   });
-  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
     visibleText: "",
   });
 
@@ -1151,6 +1221,7 @@ test("surface core rejects stale native materialization identity after geometry 
     paneId: paneId as never,
     revision: 1 as never,
   });
+  resolvePaneSnapshot(core, surface.surfaceId, paneId);
 
   assert.equal(
     core.validateNativePaneMaterializationLayout(surface.surfaceId, materialization),
@@ -1195,7 +1266,7 @@ test("surface core projects native topology overlay identity from accepted topol
     ],
   });
 
-  const projected = core.projectNativePaneGeometryUpdateForTopologyApply(surface.surfaceId, {
+  core.topologyApply(surface.surfaceId, {
     layout: {
       children: [
         { paneId: paneId as never, type: "pane" },
@@ -1211,8 +1282,15 @@ test("surface core projects native topology overlay identity from accepted topol
     topologyRevision: 2 as never,
     windowLabel: "docs",
   });
+  updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
+    bounds: { height: 400, width: 1200, x: 0, y: 0 },
+  });
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
+    bounds: { height: 400, width: 1200, x: 0, y: 400 },
+  });
+  const projected = core.projectCurrentNativePaneGeometry(surface.surfaceId, [paneId]);
 
-  assert.equal(projected?.overlaySet.windowId, "docs");
+  assert.equal(projected.overlaySet.windowId, "docs");
 });
 
 test("surface core resyncs native topology overlays on window relabel without geometry changes", () => {
@@ -1252,18 +1330,6 @@ test("surface core resyncs native topology overlays on window relabel without ge
     ],
   });
 
-  const projected = core.projectNativePaneGeometryUpdateForTopologyApply(surface.surfaceId, {
-    layout: { paneId: paneId as never, type: "pane" },
-    panes: [
-      { name: "Docs", paneId: paneId as never, paneLabel: 7 },
-    ],
-    topologyRevision: 2 as never,
-    windowLabel: "b",
-  });
-
-  assert.equal(projected?.overlaySet.windowId, "b");
-  assert.deepEqual(projected?.panes.map((pane) => pane.id), [String(paneId)]);
-
   const beforeRevision = core.panesList(surface.surfaceId).panes[0]!.geometry.geometryRevision;
   core.topologyApply(surface.surfaceId, {
     layout: { paneId: paneId as never, type: "pane" },
@@ -1273,6 +1339,14 @@ test("surface core resyncs native topology overlays on window relabel without ge
     topologyRevision: 2 as never,
     windowLabel: "b",
   });
+  updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
+    bounds: { height: 800, width: 1200, x: 0, y: 0 },
+  });
+  const projected = core.projectCurrentNativePaneGeometry(surface.surfaceId, [paneId]);
+
+  assert.equal(projected.overlaySet.windowId, "b");
+  assert.deepEqual(projected.panes.map((pane) => pane.id), [String(paneId)]);
+  assert.equal(projected.panes[0]!.geometry.geometryRevision, Number(beforeRevision) + 1);
   assert.equal(core.panesList(surface.surfaceId).panes[0]!.geometry.geometryRevision, Number(beforeRevision) + 1);
 });
 
@@ -1314,12 +1388,14 @@ test("surface core advances native overlay revision on label-only provider resum
   });
 
   const beforeRevision = core.panesList(surface.surfaceId).panes[0]!.geometry.geometryRevision;
-  const projected = core.projectNativePaneOverlayWindowLabelUpdate(surface.surfaceId, "b");
-
-  assert.equal(projected?.overlaySet.windowId, "b");
-  assert.equal(projected?.panes[0]?.geometry.geometryRevision, Number(beforeRevision) + 1);
-
   core.applyWindowLabelOnly(surface.surfaceId, "b");
+  updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
+    bounds: { height: 800, width: 1200, x: 0, y: 0 },
+  });
+  const projected = core.projectCurrentNativePaneGeometry(surface.surfaceId, [paneId]);
+
+  assert.equal(projected.overlaySet.windowId, "b");
+  assert.equal(projected.panes[0]?.geometry.geometryRevision, Number(beforeRevision) + 1);
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.windowLabel, "b");
@@ -1624,10 +1700,10 @@ test("surface core assigns pane history and split topology", () => {
   });
 
   assert.deepEqual(split.panes.map((pane) => pane.paneId), [initialPaneId, 9]);
-  core.updatePaneSnapshot(surface.surfaceId, initialPaneId, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, initialPaneId, {
     bounds: { height: 400, width: 1200, x: 0, y: 0 },
   });
-  core.updatePaneSnapshot(surface.surfaceId, 9, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
     bounds: { height: 400, width: 1200, x: 0, y: 400 },
   });
   const paneViewports = core.panesList(surface.surfaceId).panes.map((pane) => pane.viewport);
@@ -1885,7 +1961,7 @@ test("surface core rejects provider window relabels that collide with another li
     /Duplicate windowLabel in live surface set: a/,
   );
   assert.throws(
-    () => core.projectNativePaneOverlayWindowLabelUpdate(secondary.surfaceId, "a"),
+    () => core.assertProviderWindowLabelAvailable(secondary.surfaceId, "a"),
     /Duplicate windowLabel in live surface set: a/,
   );
   assert.throws(
@@ -1897,7 +1973,7 @@ test("surface core rejects provider window relabels that collide with another li
     /Duplicate windowLabel in live surface set: a/,
   );
   assert.throws(
-    () => core.projectNativePaneGeometryUpdateForTopologyApply(secondary.surfaceId, {
+    () => core.topologyApply(secondary.surfaceId, {
       layout: { paneId: secondaryPaneId as never, type: "pane" },
       panes: [
         { name: "Secondary", paneId: secondaryPaneId as never, paneLabel: secondaryPaneId },
@@ -2045,10 +2121,10 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
     newPaneLabels: [9],
     paneId,
   });
-  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
     bounds: { height: 400, width: 1200, x: 0, y: 0 },
   });
-  core.updatePaneSnapshot(surface.surfaceId, 9, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
     bounds: { height: 400, width: 1200, x: 0, y: 400 },
   });
 
@@ -2061,8 +2137,9 @@ test("surface core reports pane-scoped viewport data in panes.list", () => {
     viewport: { height: 400, scale: 2, width: 1200 },
   });
   assert.equal(listedPane.geometry.coordinateSpace, "surface_logical");
-  assert.equal(listedPane.geometry.geometryRevision, 4);
-  assert.equal(listedPane.geometry.topologyEpoch, 0);
+  const geometryIdentity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
+  assert.equal(listedPane.geometry.geometryRevision, geometryIdentity.geometryRevision);
+  assert.equal(listedPane.geometry.topologyEpoch, geometryIdentity.topologyRevision);
 });
 
 test("surface core materializes terminal_app targets through Surf Ace terminal host", () => {
@@ -2240,7 +2317,7 @@ test("surface core snaps terminal native geometry to compositor integer bounds",
     newPaneLabels: [7],
     paneId: topPaneId,
   });
-  core.updatePaneSnapshot(surface.surfaceId, 7, {
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 7, {
     bounds: { height: 1920.5, width: 2160, x: 0, y: 1919.5 },
   });
   const bottomPane = core.pairState(surface.surfaceId).panes.find((pane) => pane.paneId === 7)!;

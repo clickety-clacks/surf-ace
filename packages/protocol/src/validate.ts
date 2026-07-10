@@ -140,6 +140,22 @@ function validateObjectAgainstSchema(
       if (minItems !== null && propertyValue.length < minItems) {
         return `min_items:${key}`;
       }
+      const itemSchema = isObject(propertySchema.items) ? propertySchema.items : null;
+      if (itemSchema) {
+        const resolvedItemSchema = resolveLocalSchemaRef(itemSchema);
+        const itemProperties = isObject(resolvedItemSchema.properties) ? resolvedItemSchema.properties : null;
+        const geometrySchema = itemProperties && isObject(itemProperties.geometry)
+          ? resolveLocalSchemaRef(itemProperties.geometry)
+          : null;
+        for (const item of propertyValue) {
+          if (geometrySchema && isObject(item) && isObject(item.geometry)) {
+            const geometryFailure = validateObjectAgainstSchema(geometrySchema, item.geometry);
+            if (geometryFailure) {
+              return geometryFailure;
+            }
+          }
+        }
+      }
     }
   }
 

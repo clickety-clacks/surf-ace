@@ -758,6 +758,19 @@
     "PaneGeometryProjection": {
       "type": "object",
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "not": {
+            "anyOf": [
+              { "required": ["geometryUnavailable"] },
+              { "required": ["unavailableReason"] }
+            ]
+          }
+        },
+        {
+          "required": ["geometryUnavailable", "unavailableReason"]
+        }
+      ],
       "required": [
         "paneId",
         "paneInstanceId",

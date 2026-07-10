@@ -225,14 +225,12 @@ export type SurfaceViewport = {
   scale: number;
 };
 
-export type PaneGeometryProjection = {
+type PaneGeometryProjectionBase = {
   paneId: PaneId;
   paneInstanceId: string;
   topologyEpoch: TopologyRevision;
   surfaceEpoch: string;
   geometryRevision: Revision;
-  geometryUnavailable?: true;
-  unavailableReason?: "missing_resolved_snapshot";
   coordinateSpace: "surface_logical";
   surfaceBounds: Rect;
   paneFrame: Rect;
@@ -256,6 +254,17 @@ export type PaneGeometryProjection = {
   };
   scale: number;
 };
+
+export type PaneGeometryProjection = PaneGeometryProjectionBase & (
+  | {
+      geometryUnavailable?: never;
+      unavailableReason?: never;
+    }
+  | {
+      geometryUnavailable: true;
+      unavailableReason: "missing_resolved_snapshot";
+    }
+);
 
 export type Selection =
   | null
