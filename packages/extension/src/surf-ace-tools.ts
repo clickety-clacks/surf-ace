@@ -110,10 +110,36 @@ function screenMatchesSurfAceListInput(screen: SurfAceScreenSummary, input: Surf
   if (input.windowLabel !== undefined && screen.windowLabel !== input.windowLabel) {
     return false;
   }
-  if (input.name !== undefined && !screen.name.toLowerCase().includes(input.name.toLowerCase())) {
+  if (input.name !== undefined && !screenMatchesNameFilter(screen, input.name)) {
     return false;
   }
   return true;
+}
+
+function normalizedSearchText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function screenSearchAliases(screen: SurfAceScreenSummary): string[] {
+  const aliases = [
+    screen.name,
+    screen.fingerprint,
+    screen.windowLabel,
+    screen._debug?.endpointId,
+    screen._debug?.localOwnership?.endpointHost,
+    screen._debug?.localOwnership?.endpointName,
+    screen._debug?.remoteOwnership?.endpointHost,
+    screen._debug?.remoteOwnership?.endpointName,
+  ];
+  return aliases.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0);
+}
+
+function screenMatchesNameFilter(screen: SurfAceScreenSummary, filter: string): boolean {
+  const needle = normalizedSearchText(filter);
+  if (!needle) {
+    return true;
+  }
+  return screenSearchAliases(screen).some((alias) => normalizedSearchText(alias).includes(needle));
 }
 
 function paneMatchesSurfAceListInput(
