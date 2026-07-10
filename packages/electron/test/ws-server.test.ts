@@ -6,8 +6,10 @@ import path from "node:path";
 import test from "node:test";
 
 import WebSocket from "ws";
+import { parseHTML } from "linkedom";
 
 import type { PairRequest, Request, Response, RuntimeAppBindingDiagnostics } from "../../protocol/src/index.js";
+import { projectConnectionChrome } from "../src/renderer/ui-projection.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { SurfaceWsServer, __test } from "../src/ws-server.js";
 
@@ -331,6 +333,36 @@ async function waitForRendererConnectionBar(
   assert.fail(`renderer connection bar did not become ${connectionBar}`);
 }
 
+function assertRendererConnectionChrome(
+  state: ReturnType<SurfaceCore["getRendererWindowState"]>,
+  expected: "connected" | "connecting" | "disconnected",
+  source: string,
+): void {
+  const { document } = parseHTML(`
+    <div class="pane-label">
+      <span class="pane-label__window"></span>
+      <svg class="pane-label__disconnected"></svg>
+      <span class="pane-label__number"></span>
+    </div>
+  `);
+  const windowLabel = document.querySelector(".pane-label__window")!;
+  const disconnectedGlyph = document.querySelector(".pane-label__disconnected")!;
+  const paneLabel = document.querySelector(".pane-label__number")!;
+  projectConnectionChrome(
+    { disconnectedGlyph, paneLabel, windowLabel },
+    state.connectionBar,
+    Boolean(state.panes[0]?.displayId),
+    Boolean(state.windowLabel),
+  );
+
+  assert.equal(state.connectionBar, expected, `${source}: authoritative state`);
+  assert.equal(disconnectedGlyph.hasAttribute("hidden"), expected === "connected", `${source}: glyph`);
+  assert.equal(paneLabel.hasAttribute("hidden"), expected !== "connected", `${source}: pane identity`);
+  assert.equal(windowLabel.hasAttribute("hidden"), expected !== "connected", `${source}: window identity`);
+  assert.equal(disconnectedGlyph.classList.contains("is-connecting"), expected === "connecting", `${source}: connecting class`);
+  assert.equal(disconnectedGlyph.classList.contains("is-disconnected"), expected === "disconnected", `${source}: disconnected class`);
+}
+
 function contentApplyRequest(paneId: number, revision: number): Request {
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
@@ -578,14 +610,20 @@ function heartbeatRequest(): Request {
 
 function authorityStateRequest(
   paired: Extract<Response, { op: "pair.request"; ok: true }>,
-  options: { paneLabel?: number; panes?: Array<{ paneId: number; paneLabel: number; paneLineageId: string }>; windowLabel?: string } = {},
+  options: {
+    actionable?: boolean;
+    paneLabel?: number;
+    panes?: Array<{ paneId: number; paneLabel: number; paneLineageId: string }>;
+    reason?: string | null;
+    windowLabel?: string;
+  } = {},
 ): Request {
   const pane = paired.payload.state.panes[0]!;
   return {
     id: `rq_${Math.random().toString(16).slice(2)}` as never,
     op: "authority.state",
     payload: {
-      actionable: true,
+      actionable: options.actionable ?? true,
       ownershipEpoch: paired.payload.ownershipEpoch,
       panes: options.panes ?? [{
         paneId: pane.paneId,
@@ -593,7 +631,7 @@ function authorityStateRequest(
         paneLineageId: pane.paneLineageId,
       }],
       providerId: "pv_alpha" as never,
-      reason: null,
+      reason: options.reason ?? null,
       sessionId: paired.payload.sessionId,
       surfaceId: paired.payload.surfaceId,
       windowLabel: options.windowLabel ?? "a",
@@ -1791,6 +1829,53 @@ test("ws server exposes providerName while connected and clears it on relinquish
     assert.equal(core.getRendererWindowState(surfaceId).providerName, null);
 
     await closeSocket(owner);
+  });
+});
+
+test("production connection sources project the complete mutually exclusive chrome matrix", async () => {
+  await withServer(async ({ core, server, surfaceId, url }) => {
+    assertRendererConnectionChrome(core.getRendererWindowState(surfaceId), "disconnected", "unadmitted");
+
+    const owner = await connect(url);
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha"));
+    assert.equal(paired.ok, true);
+    assertRendererConnectionChrome(core.getRendererWindowState(surfaceId), "connecting", "pair connecting");
+
+    const notActionable = await request(
+      owner,
+      authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>, {
+        actionable: false,
+        reason: "provider_not_actionable",
+      }),
+    );
+    assert.equal(notActionable.ok, true);
+    assert.equal(notActionable.op, "authority.state");
+    assert.equal(notActionable.payload.accepted, false);
+    assertRendererConnectionChrome(core.getRendererWindowState(surfaceId), "connecting", "authority not actionable");
+
+    const accepted = await request(
+      owner,
+      authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>),
+    );
+    assert.equal(accepted.ok, true);
+    assertRendererConnectionChrome(core.getRendererWindowState(surfaceId), "connected", "push capable");
+
+    const staleWindow = core.createAdditionalSurface("Surf Ace B", { height: 800, scale: 2, width: 1200 });
+    assertRendererConnectionChrome(core.getRendererWindowState(surfaceId), "connected", "same client admitted window");
+    assertRendererConnectionChrome(core.getRendererWindowState(staleWindow.surfaceId), "disconnected", "same client stale window");
+
+    await closeSocket(owner, 1001, "network_lost");
+    await waitForRendererConnectionBar(core, surfaceId, "disconnected");
+    assertRendererConnectionChrome(core.getRendererWindowState(surfaceId), "disconnected", "socket not open");
+
+    server.disconnectSurface(surfaceId, "gave_up");
+    assertRendererConnectionChrome(core.getRendererWindowState(surfaceId), "disconnected", "gave up");
+
+    const restoredCore = new SurfaceCore({ persistentState: core.getPersistentState() });
+    const restored = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+    const restoredSurface = restored.find((surface) => surface.surfaceId === surfaceId)!;
+    assert.ok(restoredSurface);
+    assertRendererConnectionChrome(restoredCore.getRendererWindowState(surfaceId), "disconnected", "restored");
   });
 });
 

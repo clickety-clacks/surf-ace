@@ -30,12 +30,9 @@ test("disconnected pane chrome replaces window and pane IDs with the wifi-off gl
   const updateSource = source.slice(updateIndex, source.indexOf("function layoutWeight", updateIndex));
 
   assert.ok(updateIndex > -1);
-  assert.match(updateSource, /const disconnected = latestState\?\.connectionBar === "disconnected"/);
-  assert.match(updateSource, /windowLabel\.hidden = disconnected \|\| !visibleWindowLabel/);
-  assert.match(updateSource, /disconnectedGlyph\.hidden = !disconnected/);
-  assert.match(updateSource, /label\.hidden = disconnected/);
-  assert.match(updateSource, /labelWrap\.hidden = disconnected \? false : !visibleAddress/);
-  assert.match(updateSource, /disconnected\s*\? "Surf Ace disconnected"/);
+  assert.match(updateSource, /projectConnectionChrome\(/);
+  assert.doesNotMatch(updateSource, /disconnectedGlyph\.hidden/);
+  assert.match(updateSource, /const showsIdentity = connectionBar === "connected"/);
   assert.match(source, /let latestChromeKey: string \| null = null/);
   assert.match(source, /function chromeKey\(state: RendererWindowState\): string/);
   assert.match(source, /const chromeStateChanged = latestChromeKey !== nextChromeKey/);
@@ -434,10 +431,11 @@ test("toolbar font-size popover persists for repeated scale taps and dismisses e
   assert.ok(scaleIndex > buildIndex);
   assert.match(source, /let openFontSizePaneId: number \| null = null/);
   assert.match(source.slice(buildIndex, scaleIndex), /createIconButton\("text", "Font Size", "font-size-toggle"\)/);
-  assert.match(source.slice(buildIndex, scaleIndex), /openFontSizePaneId === pane\.paneId \? null : pane\.paneId/);
+  assert.match(source.slice(buildIndex, scaleIndex), /toggleContentScalePopup\(openFontSizePaneId, pane\.paneId\)/);
   assert.match(source.slice(buildIndex, scaleIndex), /fontSizePopover\.className = "font-size-popover"/);
-  assert.match(source.slice(buildIndex, scaleIndex), /scalePaneContent\(\{ action: "decrease", paneId: pane\.paneId, type: "content-scale" \}\)/);
-  assert.match(source.slice(buildIndex, scaleIndex), /scalePaneContent\(\{ action: "increase", paneId: pane\.paneId, type: "content-scale" \}\)/);
+  assert.match(source.slice(buildIndex, scaleIndex), /bindContentScaleControls\(\{/);
+  assert.match(source.slice(buildIndex, scaleIndex), /onScale: \(action\) => scalePaneContent\(\{ action, paneId: pane\.paneId, type: "content-scale" \}\)/);
+  assert.match(source.slice(buildIndex, scaleIndex), /for \(const paneId of popup\.rebuildPaneIds\)/);
   assert.match(source.slice(scaleIndex), /applyContentScale\(view\);[\s\S]*rebuildPaneControls\(intent\.paneId\)/);
   assert.match(source.slice(initIndex), /target\?\.closest\("\.font-size-popover, \.font-size-toggle"\)/);
 });
@@ -619,11 +617,10 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.match(source, /connectionBar: state\.connectionBar/);
   assert.doesNotMatch(source, /const showProviderIdentity = latestState\?\.connectionBar === "connected"/);
   assert.match(source, /const visibleAddress = pane\.displayId \|\| pane\.visibleAddress \|\| pane\.label/);
-  assert.match(source, /windowLabel\.hidden = disconnected \|\| !visibleWindowLabel/);
-  assert.match(source, /label\.hidden = disconnected/);
+  assert.match(source, /projectConnectionChrome\(/);
   assert.doesNotMatch(source, /windowLabel\.hidden = true/);
   assert.match(source, /createLucideIcon\("wifi-off"\)/);
-  assert.match(source, /disconnectedGlyph\.hidden = !disconnected/);
+  assert.match(source, /projectConnectionChrome\(/);
   assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);
   assert.match(source, /` window \$\{visibleWindowLabel\}`/);
   assert.match(source, /`Surf Ace\$\{visibleWindowLabel/);
@@ -632,7 +629,7 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.doesNotMatch(source, /visibleAddress:\s*`\$\{surface\.windowLabel\}\$\{pane\.paneLabel\}`/);
 
   assert.doesNotMatch(styles, /\.pane-label__sender\s*\{/);
-  assert.match(styles, /\.pane-label__disconnected\s*\{[\s\S]*color:\s*rgba\(239,\s*68,\s*68,\s*0\.35\);/);
+  assert.match(styles, /\.pane-label__disconnected\s*\{[\s\S]*color:\s*rgb\(239,\s*68,\s*68\);/);
   assert.match(styles, /\.navigation-pill__owner\s*\{[\s\S]*font-size:\s*calc\(13px \+ 3pt\)/);
 });
 

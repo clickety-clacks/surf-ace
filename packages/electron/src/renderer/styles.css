@@ -237,6 +237,17 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   }
 }
 
+@keyframes disconnected-glyph-strobe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.18;
+  }
+}
+
 .pane-label {
   position: absolute;
   right: clamp(28px, 3.2vw, 96px);
@@ -278,8 +289,13 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   flex: none;
   width: calc(var(--pane-number-size) * 0.46);
   height: calc(var(--pane-number-size) * 0.46);
-  color: rgba(239, 68, 68, 0.35);
+  color: rgb(239, 68, 68);
   transform: translateY(calc(var(--pane-number-size) * -0.02));
+}
+
+.pane-label__disconnected.is-connecting {
+  animation: disconnected-glyph-strobe 0.82s steps(2, end) infinite;
+  color: rgb(245, 158, 11);
 }
 
 .connection-connected .pane-label__window {
