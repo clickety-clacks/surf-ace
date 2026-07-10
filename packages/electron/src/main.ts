@@ -1519,8 +1519,17 @@ function installIpc(): void {
       if ("bounds" in payload) {
         snapshot.bounds = payload.bounds as { height: number; width: number; x: number; y: number } | null;
       }
+      if ("geometryRevision" in payload) {
+        snapshot.geometryRevision = Number(payload.geometryRevision);
+      }
       if ("selection" in payload) {
         snapshot.selection = (payload.selection ?? null) as never;
+      }
+      if ("surfaceEpoch" in payload) {
+        snapshot.surfaceEpoch = String(payload.surfaceEpoch ?? "");
+      }
+      if ("topologyRevision" in payload) {
+        snapshot.topologyRevision = Number(payload.topologyRevision);
       }
       if ("viewport" in payload) {
         snapshot.viewport = payload.viewport as never;

@@ -1458,22 +1458,7 @@ export class SurfaceWsServer {
     source: "authority.state" | "pair.resume",
     requestId: string,
   ): Promise<void> {
-    try {
-      await this.adoptProviderWindowLabel(surfaceId, windowLabel, source, requestId);
-    } catch (error) {
-      if (!(error instanceof SurfaceCoreError) || error.code !== "render_failed") {
-        throw error;
-      }
-      persistentServerDiagnostic("warn", "provider_window_label_repair_deferred", {
-        request_id: requestId,
-        source,
-        surface_id: surfaceId,
-        ...errorDiagnosticFields(error),
-      });
-      const currentWindowLabel = this.core.surfaceWindowLabel(surfaceId);
-      this.recordProviderWindowRelabel(surfaceId, currentWindowLabel, windowLabel, source, requestId);
-      this.core.applyWindowLabelOnly(surfaceId, windowLabel);
-    }
+    await this.adoptProviderWindowLabel(surfaceId, windowLabel, source, requestId);
   }
 
   private handleRelinquish(socket: WebSocket, request: RelinquishRequest): Response {
@@ -1601,7 +1586,8 @@ export class SurfaceWsServer {
     if (uniquePaneIds.length === 0) {
       return;
     }
-    let missing = this.core.missingResolvedPaneGeometry(surfaceId, uniquePaneIds);
+    const expectedIdentity = this.core.resolvedPaneGeometryIdentity(surfaceId);
+    let missing = this.core.missingResolvedPaneGeometry(surfaceId, uniquePaneIds, expectedIdentity);
     if (missing.length === 0) {
       return;
     }
@@ -1614,7 +1600,7 @@ export class SurfaceWsServer {
       };
       const check = (): void => {
         try {
-          missing = this.core.missingResolvedPaneGeometry(surfaceId, uniquePaneIds);
+          missing = this.core.missingResolvedPaneGeometry(surfaceId, uniquePaneIds, expectedIdentity);
         } catch (error) {
           cleanup();
           reject(error);
@@ -1630,6 +1616,9 @@ export class SurfaceWsServer {
         persistentServerDiagnostic("warn", "pane_geometry_ready_timeout", {
           missing_pane_ids: missing.join(","),
           operation,
+          expected_geometry_revision: expectedIdentity.geometryRevision,
+          expected_surface_epoch: expectedIdentity.surfaceEpoch,
+          expected_topology_revision: expectedIdentity.topologyRevision,
           surface_id: surfaceId,
         });
         reject(new SurfaceCoreError(
@@ -1658,33 +1647,46 @@ export class SurfaceWsServer {
         this.core.setViewport(surfaceId, viewport);
         return true;
       }
+      const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
       const rollbackMaterialization = this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds);
-      const materialization = this.core.projectNativePaneGeometryUpdateForViewport(surfaceId, nativePaneIds, viewport);
-      const updateResult = await this.applyNativePaneGeometryToCompositor(materialization);
-      if (updateResult.failure) {
-        if (updateResult.updated) {
-          await this.rollbackNativePaneGeometry(surfaceId, rollbackMaterialization, "viewport", updateResult.failure);
-        }
+      try {
+        this.core.setViewport(surfaceId, viewport);
+        await this.waitForResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), "viewport");
+        const materialization = this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds);
+        await this.applyResolvedNativePaneGeometry(surfaceId, materialization, "viewport", rollbackMaterialization);
+        this.markUpdatedNativePaneGeometry(surfaceId, materialization);
+        return true;
+      } catch (error) {
+        rollbackSurface();
+        persistentServerDiagnostic("warn", "viewport_resize_failed", {
+          surface_id: surfaceId,
+          ...errorDiagnosticFields(error),
+        });
         return false;
       }
-      this.core.setViewport(surfaceId, viewport);
-      this.markUpdatedNativePaneGeometry(surfaceId, materialization);
-      return true;
     });
   }
 
   async resizeSplit(surfaceId: string, path: number[], weights: number[]): Promise<boolean> {
     return await this.runSurfaceMutation(surfaceId, async () => {
-      const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForResizeSplit(surfaceId, path, weights);
-      const rollbackNativeGeometry = nativeGeometryUpdate
-        ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+      const nativePaneIds = this.core.panesList(surfaceId).panes
+        .filter((pane) => pane.externalNative)
+        .map((pane) => Number(pane.paneId));
+      const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
+      const rollbackNativeGeometry = nativePaneIds.length > 0
+        ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds)
         : null;
       try {
-        await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.resize", rollbackNativeGeometry);
         this.core.resizeSplit(surfaceId, path, weights);
+        await this.waitForResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), "pane.resize");
+        const nativeGeometryUpdate = nativePaneIds.length > 0
+          ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds)
+          : null;
+        await this.applyResolvedNativePaneGeometry(surfaceId, nativeGeometryUpdate, "pane.resize", rollbackNativeGeometry);
         this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
         return true;
       } catch (error) {
+        rollbackSurface();
         persistentServerDiagnostic("warn", "pane_resize_failed", {
           surface_id: surfaceId,
           ...errorDiagnosticFields(error),
@@ -1767,33 +1769,47 @@ export class SurfaceWsServer {
     }
     const payload = await this.runProviderWindowLabelMutation(() => this.runSurfaceMutation(surfaceId, async () => {
       const previousWindowLabel = this.core.surfaceWindowLabel(surfaceId);
-      const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
-      const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForTopologyApply(surfaceId, request.payload);
-      const rollbackNativeGeometry = nativeGeometryUpdate
-        ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+      const removedNativePaneIds = this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
+      const retainedPaneIds = new Set(request.payload.panes.map((pane) => Number(pane.paneId)));
+      const retainedNativePaneIds = this.core.panesList(surfaceId).panes
+        .filter((pane) => pane.externalNative && retainedPaneIds.has(Number(pane.paneId)))
+        .map((pane) => Number(pane.paneId));
+      const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
+      const rollbackNativeGeometry = retainedNativePaneIds.length > 0
+        ? this.core.projectCurrentNativePaneGeometry(surfaceId, retainedNativePaneIds)
         : null;
-      this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
-      await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "topology.apply", rollbackNativeGeometry);
-      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
-        surfaceId,
-        nativeHostedPaneIds,
-        "topology.apply",
-      );
-      if (releaseFailure) {
-        await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "topology.apply", releaseFailure);
-        throw new SurfaceCoreError("render_failed", releaseFailure);
-      }
-      const result = this.core.topologyApply(surfaceId, request.payload);
-      this.recordProviderWindowRelabel(surfaceId, previousWindowLabel, request.payload.windowLabel, "topology.apply", request.id);
-      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
-      if (previousWindowLabel === request.payload.windowLabel) {
+      try {
+        const result = this.core.topologyApply(surfaceId, request.payload);
         await this.waitForResolvedPaneGeometry(
           surfaceId,
           result.panes.map((pane) => Number(pane.paneId)),
           "topology.apply",
         );
+        const nativeGeometryUpdate = retainedNativePaneIds.length > 0
+          ? this.core.projectCurrentNativePaneGeometry(surfaceId, retainedNativePaneIds)
+          : null;
+        await this.applyResolvedNativePaneGeometry(
+          surfaceId,
+          nativeGeometryUpdate,
+          "topology.apply",
+          rollbackNativeGeometry,
+        );
+        const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
+          surfaceId,
+          removedNativePaneIds,
+          "topology.apply",
+        );
+        if (releaseFailure) {
+          await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "topology.apply", releaseFailure);
+          throw new SurfaceCoreError("render_failed", releaseFailure);
+        }
+        this.recordProviderWindowRelabel(surfaceId, previousWindowLabel, request.payload.windowLabel, "topology.apply", request.id);
+        this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+        return result;
+      } catch (error) {
+        rollbackSurface();
+        throw error;
       }
-      return result;
     }));
     persistentServerDiagnostic(
       "info",
@@ -2537,7 +2553,7 @@ export class SurfaceWsServer {
     return null;
   }
 
-  private async updateNativePaneGeometryBeforeLayout(
+  private async applyResolvedNativePaneGeometry(
     surfaceId: string,
     materialization: NativePaneMaterialization | null,
     operation: string,
@@ -2549,6 +2565,10 @@ export class SurfaceWsServer {
     if (!this.compositorSocketPath) {
       throw new SurfaceCoreError("render_failed", `${operation} cannot update live native-hosted pane geometry without native pane update support`);
     }
+    const layoutFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
+    if (layoutFailure) {
+      throw new SurfaceCoreError("render_failed", layoutFailure);
+    }
     const updateResult = await this.applyNativePaneGeometryToCompositor(materialization);
     if (updateResult.failure) {
       if (updateResult.updated) {
@@ -2556,17 +2576,12 @@ export class SurfaceWsServer {
       }
       throw new SurfaceCoreError("render_failed", updateResult.failure);
     }
-    const staleSourceFailure = rollbackMaterialization
-      ? this.core.validateNativePaneMaterializationLayout(surfaceId, rollbackMaterialization)
-      : null;
+    const staleSourceFailure = this.core.validateNativePaneMaterializationLayout(surfaceId, materialization);
     if (staleSourceFailure) {
-      const currentMaterialization = rollbackMaterialization
-        ? this.core.projectCurrentNativePaneGeometry(surfaceId, rollbackMaterialization.panes.map((pane) => Number(pane.id)))
-        : null;
-      await this.rollbackNativePaneGeometry(surfaceId, currentMaterialization, operation, staleSourceFailure);
+      await this.rollbackNativePaneGeometry(surfaceId, rollbackMaterialization, operation, staleSourceFailure);
       throw new SurfaceCoreError("render_failed", staleSourceFailure);
     }
-	  }
+  }
 
   private async applyNativePaneGeometryToCompositor(
     materialization: NativePaneMaterialization,
@@ -2702,14 +2717,60 @@ export class SurfaceWsServer {
     if (windowLabel === currentWindowLabel) {
       return;
     }
-    const nativeOverlayUpdate = this.core.projectNativePaneOverlayWindowLabelUpdate(surfaceId, windowLabel);
-    const rollbackNativeGeometry = nativeOverlayUpdate
-      ? this.core.projectNativePaneGeometryUpdate(surfaceId, nativeOverlayUpdate.panes.map((pane) => Number(pane.id)))
+    this.core.assertProviderWindowLabelAvailable(surfaceId, windowLabel);
+    const nativePaneIds = this.core.panesList(surfaceId).panes
+      .filter((pane) => pane.externalNative)
+      .map((pane) => Number(pane.paneId));
+    const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
+    const rollbackNativeGeometry = nativePaneIds.length > 0
+      ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds)
       : null;
-    await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeOverlayUpdate, source, rollbackNativeGeometry);
-    this.recordProviderWindowRelabel(surfaceId, currentWindowLabel, windowLabel, source, requestId);
-    this.core.applyWindowLabelOnly(surfaceId, windowLabel);
-    this.markUpdatedNativePaneGeometry(surfaceId, nativeOverlayUpdate);
+    try {
+      this.core.applyWindowLabelOnly(surfaceId, windowLabel);
+      let nativeOverlayUpdate: NativePaneMaterialization | null = null;
+      if (nativePaneIds.length > 0) {
+        await this.waitForResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), source);
+        nativeOverlayUpdate = this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds);
+        await this.applyResolvedNativePaneGeometry(surfaceId, nativeOverlayUpdate, source, rollbackNativeGeometry);
+      }
+      this.recordProviderWindowRelabel(surfaceId, currentWindowLabel, windowLabel, source, requestId);
+      this.markUpdatedNativePaneGeometry(surfaceId, nativeOverlayUpdate);
+    } catch (error) {
+      rollbackSurface();
+      throw error;
+    }
+  }
+
+  private async adoptProviderAuthorityPaneIdentities(
+    surfaceId: string,
+    panes: AuthorityStateRequest["payload"]["panes"],
+  ): Promise<boolean> {
+    const nativePaneIds = this.core.panesList(surfaceId).panes
+      .filter((pane) => pane.externalNative)
+      .map((pane) => Number(pane.paneId));
+    const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
+    const rollbackNativeGeometry = nativePaneIds.length > 0
+      ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds)
+      : null;
+    const adopted = this.core.adoptProviderAuthorityPaneIdentities(surfaceId, panes);
+    if (!adopted || nativePaneIds.length === 0) {
+      return adopted;
+    }
+    try {
+      await this.waitForResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), "authority.state");
+      const nativeGeometry = this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds);
+      await this.applyResolvedNativePaneGeometry(
+        surfaceId,
+        nativeGeometry,
+        "authority.state",
+        rollbackNativeGeometry,
+      );
+      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometry);
+      return true;
+    } catch (error) {
+      rollbackSurface();
+      throw error;
+    }
   }
 
   private recordProviderWindowRelabel(
@@ -2828,29 +2889,28 @@ export class SurfaceWsServer {
       paneId: Number(request.payload.paneId),
     };
     const payload = await this.runSurfaceMutation(surfaceId, async () => {
-      const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForPaneSplit(surfaceId, splitPayload);
-      const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForPaneSplit(surfaceId, splitPayload);
-      const rollbackNativeGeometry = nativeGeometryUpdate
-        ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+      const nativeHostedPaneIds = this.core.nativeHostedPaneIdsForPaneSplitGeometryUpdate(surfaceId, splitPayload);
+      const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
+      const rollbackNativeGeometry = nativeHostedPaneIds.length > 0
+        ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeHostedPaneIds)
         : null;
-      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
-        surfaceId,
-        nativeHostedPaneIds,
-        "pane.split",
-      );
-      if (releaseFailure) {
-        throw new SurfaceCoreError("render_failed", releaseFailure);
+      try {
+        const result = this.core.paneSplit(surfaceId, splitPayload);
+        await this.waitForResolvedPaneGeometry(
+          surfaceId,
+          result.panes.map((pane) => Number(pane.paneId)),
+          "pane.split",
+        );
+        const nativeGeometryUpdate = nativeHostedPaneIds.length > 0
+          ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeHostedPaneIds)
+          : null;
+        await this.applyResolvedNativePaneGeometry(surfaceId, nativeGeometryUpdate, "pane.split", rollbackNativeGeometry);
+        this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+        return result;
+      } catch (error) {
+        rollbackSurface();
+        throw error;
       }
-      this.core.nativeHostedPaneIdsForPaneSplit(surfaceId, splitPayload);
-      await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.split", rollbackNativeGeometry);
-      const result = this.core.paneSplit(surfaceId, splitPayload);
-      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
-      await this.waitForResolvedPaneGeometry(
-        surfaceId,
-        result.panes.map((pane) => Number(pane.paneId)),
-        "pane.split",
-      );
-      return result;
     });
     return {
       id: request.id,
@@ -2885,28 +2945,39 @@ export class SurfaceWsServer {
     const payload = await this.runSurfaceMutation(surfaceId, async () => {
       const paneId = Number(request.payload.paneId);
       const nativeHostedPaneId = this.core.nativeHostedPaneIdForPaneClose(surfaceId, paneId);
-      const nativeGeometryUpdate = this.core.projectNativePaneGeometryUpdateForPaneClose(surfaceId, paneId);
-      const rollbackNativeGeometry = nativeGeometryUpdate
-        ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeGeometryUpdate.panes.map((pane) => Number(pane.id)))
+      const retainedNativePaneIds = this.core.panesList(surfaceId).panes
+        .filter((pane) => pane.externalNative && Number(pane.paneId) !== paneId)
+        .map((pane) => Number(pane.paneId));
+      const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
+      const rollbackNativeGeometry = retainedNativePaneIds.length > 0
+        ? this.core.projectCurrentNativePaneGeometry(surfaceId, retainedNativePaneIds)
         : null;
-      await this.updateNativePaneGeometryBeforeLayout(surfaceId, nativeGeometryUpdate, "pane.close", rollbackNativeGeometry);
-      const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
-        surfaceId,
-        [nativeHostedPaneId],
-        "pane.close",
-      );
-      if (releaseFailure) {
-        await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "pane.close", releaseFailure);
-        throw new SurfaceCoreError("render_failed", releaseFailure);
+      try {
+        const result = this.core.paneClose(surfaceId, paneId);
+        await this.waitForResolvedPaneGeometry(
+          surfaceId,
+          this.core.activePaneIds(surfaceId),
+          "pane.close",
+        );
+        const nativeGeometryUpdate = retainedNativePaneIds.length > 0
+          ? this.core.projectCurrentNativePaneGeometry(surfaceId, retainedNativePaneIds)
+          : null;
+        await this.applyResolvedNativePaneGeometry(surfaceId, nativeGeometryUpdate, "pane.close", rollbackNativeGeometry);
+        const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
+          surfaceId,
+          [nativeHostedPaneId],
+          "pane.close",
+        );
+        if (releaseFailure) {
+          await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "pane.close", releaseFailure);
+          throw new SurfaceCoreError("render_failed", releaseFailure);
+        }
+        this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
+        return result;
+      } catch (error) {
+        rollbackSurface();
+        throw error;
       }
-      const result = this.core.paneClose(surfaceId, paneId);
-      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
-      await this.waitForResolvedPaneGeometry(
-        surfaceId,
-        this.core.getRendererWindowState(surfaceId).panes.map((pane) => pane.paneId),
-        "pane.close",
-      );
-      return result;
     });
     return {
       id: request.id,
@@ -3108,7 +3179,10 @@ export class SurfaceWsServer {
         }));
       }
       if (!reason) {
-        const adoptedPaneIdentities = this.core.adoptProviderAuthorityPaneIdentities(surfaceId, payload.panes);
+        const adoptedPaneIdentities = await this.runSurfaceMutation(
+          surfaceId,
+          () => this.adoptProviderAuthorityPaneIdentities(surfaceId, payload.panes),
+        );
         if (!adoptedPaneIdentities) {
           persistentServerDiagnostic("info", "authority_state_provider_topology_pending", {
             pane_count: payload.panes.length,

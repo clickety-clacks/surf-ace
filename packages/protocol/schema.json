@@ -758,6 +758,19 @@
     "PaneGeometryProjection": {
       "type": "object",
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "not": {
+            "anyOf": [
+              { "required": ["geometryUnavailable"] },
+              { "required": ["unavailableReason"] }
+            ]
+          }
+        },
+        {
+          "required": ["geometryUnavailable", "unavailableReason"]
+        }
+      ],
       "required": [
         "paneId",
         "paneInstanceId",
@@ -779,6 +792,8 @@
         "topologyEpoch": { "$ref": "#/$defs/TopologyRevision" },
         "surfaceEpoch": { "type": "string", "minLength": 1 },
         "geometryRevision": { "$ref": "#/$defs/Revision" },
+        "geometryUnavailable": { "const": true },
+        "unavailableReason": { "enum": ["missing_resolved_snapshot"] },
         "coordinateSpace": { "const": "surface_logical" },
         "surfaceBounds": { "$ref": "#/$defs/Rect" },
         "paneFrame": { "$ref": "#/$defs/Rect" },
