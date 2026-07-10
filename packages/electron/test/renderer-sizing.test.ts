@@ -431,11 +431,11 @@ test("toolbar font-size popover persists for repeated scale taps and dismisses e
   assert.ok(scaleIndex > buildIndex);
   assert.match(source, /let openFontSizePaneId: number \| null = null/);
   assert.match(source.slice(buildIndex, scaleIndex), /createIconButton\("text", "Font Size", "font-size-toggle"\)/);
-  assert.match(source.slice(buildIndex, scaleIndex), /openFontSizePaneId === pane\.paneId \? null : pane\.paneId/);
+  assert.match(source.slice(buildIndex, scaleIndex), /toggleContentScalePopup\(openFontSizePaneId, pane\.paneId\)/);
   assert.match(source.slice(buildIndex, scaleIndex), /fontSizePopover\.className = "font-size-popover"/);
-  assert.match(source.slice(buildIndex, scaleIndex), /projectContentScaleIndicator\(reset, view\.scale\)/);
-  assert.match(source.slice(buildIndex, scaleIndex), /scalePaneContent\(\{ action: "decrease", paneId: pane\.paneId, type: "content-scale" \}\)/);
-  assert.match(source.slice(buildIndex, scaleIndex), /scalePaneContent\(\{ action: "increase", paneId: pane\.paneId, type: "content-scale" \}\)/);
+  assert.match(source.slice(buildIndex, scaleIndex), /bindContentScaleControls\(\{/);
+  assert.match(source.slice(buildIndex, scaleIndex), /onScale: \(action\) => scalePaneContent\(\{ action, paneId: pane\.paneId, type: "content-scale" \}\)/);
+  assert.match(source.slice(buildIndex, scaleIndex), /for \(const paneId of popup\.rebuildPaneIds\)/);
   assert.match(source.slice(scaleIndex), /applyContentScale\(view\);[\s\S]*rebuildPaneControls\(intent\.paneId\)/);
   assert.match(source.slice(initIndex), /target\?\.closest\("\.font-size-popover, \.font-size-toggle"\)/);
 });

@@ -4,9 +4,11 @@ import test from "node:test";
 import { parseHTML } from "linkedom";
 
 import {
+  bindContentScaleControls,
   contentScalePercentage,
   projectConnectionChrome,
   projectContentScaleIndicator,
+  toggleContentScalePopup,
 } from "../src/renderer/ui-projection.js";
 
 function connectionChromeFixture() {
@@ -78,6 +80,25 @@ test("same-client panes can render connected and disconnected chrome without mix
   );
 });
 
+test("every non-push-capable renderer state projects glyph-only chrome through the shared DOM path", () => {
+  const cases = [
+    ["connecting", "connecting"],
+    ["gave-up", "disconnected"],
+    ["restored", "disconnected"],
+    ["unadmitted", "disconnected"],
+    ["authority-not-actionable", "connecting"],
+    ["socket-not-open", "disconnected"],
+  ] as const;
+
+  for (const [source, connectionBar] of cases) {
+    const chrome = connectionChromeFixture();
+    projectConnectionChrome(chrome, connectionBar, true, true);
+    assert.equal(chrome.windowLabel.hasAttribute("hidden"), true, `${source}: window identity`);
+    assert.equal(chrome.paneLabel.hasAttribute("hidden"), true, `${source}: pane identity`);
+    assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), false, `${source}: glyph`);
+  }
+});
+
 test("font-size indicator projects current pane scale through repeated changes, rebuild, and reset", () => {
   const { document } = parseHTML(`<button class="font-size-reset"></button>`);
   const indicator = document.querySelector(".font-size-reset")!;
@@ -91,4 +112,89 @@ test("font-size indicator projects current pane scale through repeated changes, 
   projectContentScaleIndicator(rebuilt, 0.8);
   assert.equal(rebuilt.textContent, "80");
   assert.equal(contentScalePercentage(1), "100");
+});
+
+test("real font-size controls keep one pane popup open, synchronized, isolated, and dismissible", () => {
+  const { document } = parseHTML(`<main><section id="pane-1"></section><section id="pane-2"></section></main>`);
+  const scales = new Map([[1, 1], [2, 0.8]]);
+  let openPaneId: number | null = null;
+
+  function scalePane(paneId: number, action: "decrease" | "increase" | "reset"): void {
+    const current = scales.get(paneId)!;
+    const next = action === "reset"
+      ? 1
+      : Math.round((current + (action === "increase" ? 0.1 : -0.1)) * 10) / 10;
+    scales.set(paneId, next);
+    renderPane(paneId);
+  }
+
+  function renderPane(paneId: number): void {
+    const root = document.querySelector(`#pane-${paneId}`)!;
+    root.replaceChildren();
+    const annotationPill = document.createElement("div");
+    const toggle = document.createElement("button");
+    toggle.className = "font-size-toggle";
+    const popupOpen = openPaneId === paneId;
+    const popover = popupOpen ? document.createElement("div") : null;
+    if (popover) popover.className = "font-size-popover";
+    const decrease = popupOpen ? document.createElement("button") : null;
+    if (decrease) decrease.className = "decrease";
+    const reset = popupOpen ? document.createElement("button") : null;
+    if (reset) reset.className = "font-size-reset";
+    const increase = popupOpen ? document.createElement("button") : null;
+    if (increase) increase.className = "increase";
+    bindContentScaleControls({
+      annotationPill,
+      decrease,
+      fontSizePopover: popover,
+      fontSizeToggle: toggle,
+      increase,
+      onScale: (action) => scalePane(paneId, action),
+      onToggle: () => {
+        const popup = toggleContentScalePopup(openPaneId, paneId);
+        openPaneId = popup.openPaneId;
+        for (const affectedPaneId of popup.rebuildPaneIds) renderPane(affectedPaneId);
+      },
+      reset,
+      scale: scales.get(paneId)!,
+    });
+    root.appendChild(annotationPill);
+  }
+
+  function closePopup(): void {
+    const paneId = openPaneId;
+    openPaneId = null;
+    if (paneId !== null) renderPane(paneId);
+  }
+
+  renderPane(1);
+  renderPane(2);
+  (document.querySelector("#pane-1 .font-size-toggle") as HTMLElement).click();
+  assert.equal(document.querySelector("#pane-1 .font-size-reset")?.textContent, "100");
+
+  (document.querySelector("#pane-1 .decrease") as HTMLElement).click();
+  assert.equal(document.querySelector("#pane-1 .font-size-reset")?.textContent, "90");
+  (document.querySelector("#pane-1 .decrease") as HTMLElement).click();
+  assert.equal(document.querySelector("#pane-1 .font-size-reset")?.textContent, "80");
+  assert.ok(document.querySelector("#pane-1 .font-size-popover"));
+
+  (document.querySelector("#pane-2 .font-size-toggle") as HTMLElement).click();
+  assert.equal(document.querySelector("#pane-1 .font-size-popover"), null);
+  assert.equal(document.querySelector("#pane-2 .font-size-reset")?.textContent, "80");
+
+  (document.querySelector("#pane-2 .increase") as HTMLElement).click();
+  assert.equal(document.querySelector("#pane-2 .font-size-reset")?.textContent, "90");
+  (document.querySelector("#pane-2 .font-size-reset") as HTMLElement).click();
+  assert.equal(document.querySelector("#pane-2 .font-size-reset")?.textContent, "100");
+  assert.ok(document.querySelector("#pane-2 .font-size-popover"));
+
+  closePopup();
+  assert.equal(document.querySelector(".font-size-popover"), null);
+  (document.querySelector("#pane-1 .font-size-toggle") as HTMLElement).click();
+  assert.equal(document.querySelector("#pane-1 .font-size-reset")?.textContent, "80");
+
+  scalePane(1, "increase");
+  assert.equal(document.querySelector("#pane-1 .font-size-reset")?.textContent, "90");
+  closePopup();
+  assert.equal(document.querySelector(".font-size-popover"), null);
 });

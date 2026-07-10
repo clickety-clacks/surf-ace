@@ -3,7 +3,11 @@ import {
   visibleOverlayRect,
 } from "./overlay-rects.js";
 import { markdownToHtml } from "./markdown.js";
-import { projectConnectionChrome, projectContentScaleIndicator } from "./ui-projection.js";
+import {
+  bindContentScaleControls,
+  projectConnectionChrome,
+  toggleContentScalePopup,
+} from "./ui-projection.js";
 
 type Selection =
   | null
@@ -1283,39 +1287,35 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   const annotationPill = document.createElement("div");
   annotationPill.className = "control-pill annotation-pill";
   const fontSizeToggle = surfAceOverlay(createIconButton("text", "Font Size", "font-size-toggle"), "annotation-control");
-  fontSizeToggle.addEventListener("click", (event) => {
-    event.stopPropagation();
-    rememberPaneContext(pane.paneId);
-    openFontSizePaneId = openFontSizePaneId === pane.paneId ? null : pane.paneId;
-    rebuildPaneControls(pane.paneId);
-  });
-  annotationPill.appendChild(fontSizeToggle);
-
-  if (openFontSizePaneId === pane.paneId) {
-    const fontSizePopover = document.createElement("div");
+  const popupOpen = openFontSizePaneId === pane.paneId;
+  const fontSizePopover = popupOpen ? document.createElement("div") : null;
+  if (fontSizePopover) {
     fontSizePopover.className = "font-size-popover";
-    fontSizePopover.addEventListener("click", (event) => {
-      event.stopPropagation();
-    });
-    const decrease = surfAceOverlay(createIconButton("minus", "Decrease font size", "font-size-step"), "annotation-control");
-    decrease.addEventListener("click", (event) => {
-      event.stopPropagation();
-      scalePaneContent({ action: "decrease", paneId: pane.paneId, type: "content-scale" });
-    });
-    const reset = surfAceOverlay(createButton("", "font-size-reset"), "annotation-control");
-    projectContentScaleIndicator(reset, view.scale);
-    reset.addEventListener("click", (event) => {
-      event.stopPropagation();
-      scalePaneContent({ action: "reset", paneId: pane.paneId, type: "content-scale" });
-    });
-    const increase = surfAceOverlay(createIconButton("plus", "Increase font size", "font-size-step"), "annotation-control");
-    increase.addEventListener("click", (event) => {
-      event.stopPropagation();
-      scalePaneContent({ action: "increase", paneId: pane.paneId, type: "content-scale" });
-    });
-    fontSizePopover.append(decrease, reset, increase);
-    annotationPill.appendChild(fontSizePopover);
   }
+  bindContentScaleControls({
+    annotationPill,
+    decrease: popupOpen
+      ? surfAceOverlay(createIconButton("minus", "Decrease font size", "font-size-step"), "annotation-control")
+      : null,
+    fontSizePopover,
+    fontSizeToggle,
+    increase: popupOpen
+      ? surfAceOverlay(createIconButton("plus", "Increase font size", "font-size-step"), "annotation-control")
+      : null,
+    onScale: (action) => scalePaneContent({ action, paneId: pane.paneId, type: "content-scale" }),
+    onToggle: () => {
+      rememberPaneContext(pane.paneId);
+      const popup = toggleContentScalePopup(openFontSizePaneId, pane.paneId);
+      openFontSizePaneId = popup.openPaneId;
+      for (const paneId of popup.rebuildPaneIds) {
+        rebuildPaneControls(paneId);
+      }
+    },
+    reset: popupOpen
+      ? surfAceOverlay(createButton("", "font-size-reset"), "annotation-control")
+      : null,
+    scale: view.scale,
+  });
   const annotate = surfAceOverlay(createIconButton("pen-line", "Sketch", "annotate"), "annotation-control");
   annotate.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
