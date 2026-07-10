@@ -10,6 +10,14 @@ private let surfAceSurfaceCoordinateSpaceName = "SurfAce.surface.logical"
 
 private enum SurfAcePaneChromeLayout {
     static let bottomInset: CGFloat = 28
+    static let toolbarVisualScale: CGFloat = 2.0 / 3.0
+    static let controlHitSize: CGFloat = 44
+    static let controlVisualSize: CGFloat = 30
+    static let dockInset: CGFloat = 22
+}
+
+private enum SurfAceWebContentScale {
+    static let base: CGFloat = 0.85
 }
 
 func surfAceRootContentIgnoredSafeAreaEdges() -> Edge.Set {
@@ -521,6 +529,7 @@ private struct SurfAcePaneView: View {
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
     let surfaceBounds: CGRect
+    @State private var toolbarCollapsed = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -532,10 +541,20 @@ private struct SurfAcePaneView: View {
                         SurfAcePaneRepresentable(
                             runtime: runtime,
                             surfaceId: surface.surfaceId,
-                            paneId: pane.paneId
+                            paneId: pane.paneId,
+                            onInteractionBegan: {
+                                collapseToolbarForPaneInteraction()
+                            }
                         )
                         .id("\(surface.surfaceId):\(pane.paneId)")
                         .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(
+                            TapGesture().onEnded {
+                                collapseToolbarForPaneInteraction()
+                            },
+                            including: .gesture
+                        )
 
                         if showsSpatialEmptyPaneChrome {
                             SurfAceSpatialEmptyPaneFill()
@@ -578,10 +597,39 @@ private struct SurfAcePaneView: View {
                     if !showsSpatialEmptyPaneChrome {
                         VStack {
                             Spacer()
-                            SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
-                                .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
-                                .surfAceSpatialChromeDepthOffset()
+                            if !toolbarCollapsed {
+                                SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
+                                    .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
+                                    .surfAceSpatialChromeDepthOffset()
+                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                            }
                         }
+                        .zIndex(20_000)
+                    }
+
+                    if !showsSpatialEmptyPaneChrome && toolbarCollapsed {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Button {
+                                    runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        toolbarCollapsed = false
+                                    }
+                                } label: {
+                                    Image(systemName: "dock.rectangle")
+                                }
+                                .buttonStyle(SurfAceGlassButtonStyle())
+                                .accessibilityLabel("Restore toolbar")
+                                .padding(.leading, SurfAcePaneChromeLayout.dockInset)
+                                .padding(.bottom, SurfAcePaneChromeLayout.dockInset)
+                                .surfAceSpatialChromeDepthOffset()
+
+                                Spacer()
+                            }
+                        }
+                        .zIndex(20_001)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
                 .overlay {
@@ -623,13 +671,34 @@ private struct SurfAcePaneView: View {
             .onChange(of: surface.topologyEpoch) { _, _ in
                 publishGeometrySnapshot(paneFrame: paneFrame)
             }
+            .onChange(of: scrollCollapseKey) { _, _ in
+                guard !pane.annotationMode, !toolbarCollapsed else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    toolbarCollapsed = true
+                }
+            }
+            .onChange(of: pane.annotationMode) { _, annotationMode in
+                guard annotationMode, toolbarCollapsed else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    toolbarCollapsed = false
+                }
+            }
         }
         .contentShape(Rectangle())
         .simultaneousGesture(
             TapGesture().onEnded {
                 runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
-            }
+            },
+            including: .gesture
         )
+    }
+
+    private func collapseToolbarForPaneInteraction() {
+        runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
+        guard !pane.annotationMode, !toolbarCollapsed else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            toolbarCollapsed = true
+        }
     }
 
     private func publishGeometrySnapshot(paneFrame: CGRect) {
@@ -640,6 +709,10 @@ private struct SurfAcePaneView: View {
             contentViewport: paneFrame,
             splitSpacing: surfAcePaneSplitSpacing
         )
+    }
+
+    private var scrollCollapseKey: String {
+        "\(pane.lastViewport.scrollOffset.x):\(pane.lastViewport.scrollOffset.y)"
     }
 }
 
@@ -1026,9 +1099,10 @@ private struct SurfAcePaneControls: View {
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
     @Environment(\.colorScheme) private var colorScheme
+    @State private var fontSizePopoverVisible = false
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 7) {
             if pane.drawingRestoreWarningVisible {
                 SurfAceWarningIndicator()
             }
@@ -1038,7 +1112,7 @@ private struct SurfAcePaneControls: View {
             }
 
             if hasNavigationContext && (ownerName != nil || pane.canGoBack || pane.canGoForward) {
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     if pane.canGoBack {
                         Button {
                             runtime.navigateHistory(
@@ -1078,8 +1152,46 @@ private struct SurfAcePaneControls: View {
                 .surfAceControlPillChrome()
             }
 
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Button {
+                    runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
+                    fontSizePopoverVisible.toggle()
+                } label: {
+                    Image(systemName: "textformat.size")
+                }
+                .buttonStyle(SurfAceGlassButtonStyle())
+                .accessibilityLabel("Font size")
+                .accessibilityIdentifier("FontSize")
+                .popover(isPresented: $fontSizePopoverVisible, attachmentAnchor: .point(.top), arrowEdge: .bottom) {
+                    HStack(spacing: 4) {
+                        Button {
+                            runtime.scalePaneContent(surfaceId: surface.surfaceId, paneId: pane.paneId, action: .decrease)
+                        } label: {
+                            Image(systemName: "minus")
+                        }
+                        .buttonStyle(SurfAceGlassButtonStyle())
+                        .accessibilityLabel("Decrease font size")
+
+                        Button("100") {
+                            runtime.scalePaneContent(surfaceId: surface.surfaceId, paneId: pane.paneId, action: .reset)
+                        }
+                        .buttonStyle(SurfAceGlassButtonStyle())
+                        .accessibilityLabel("Reset font size")
+
+                        Button {
+                            runtime.scalePaneContent(surfaceId: surface.surfaceId, paneId: pane.paneId, action: .increase)
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .buttonStyle(SurfAceGlassButtonStyle())
+                        .accessibilityLabel("Increase font size")
+                    }
+                    .padding(4)
+                    .presentationCompactAdaptation(.popover)
+                }
+
+                Button {
+                    fontSizePopoverVisible = false
                     runtime.setAnnotationMode(
                         surfaceId: surface.surfaceId,
                         paneId: pane.paneId,
@@ -1090,6 +1202,8 @@ private struct SurfAcePaneControls: View {
                     Image(systemName: "hand.draw")
                 }
                 .buttonStyle(SurfAceGlassButtonStyle())
+                .accessibilityLabel("Sketch")
+                .accessibilityIdentifier("hand.draw")
 
                 if pane.annotationMode {
                     Button("Done") {
@@ -1101,6 +1215,7 @@ private struct SurfAcePaneControls: View {
                         )
                     }
                     .buttonStyle(SurfAceGlassButtonStyle())
+                    .accessibilityIdentifier("Done")
                 }
             }
             .surfAceControlPillChrome()
@@ -1157,10 +1272,10 @@ private struct SurfAceBrowserControlsPill: View {
 private struct SurfAceWarningIndicator: View {
     var body: some View {
         Image(systemName: "exclamationmark.triangle.fill")
-            .font(.custom(SurfAceChromeFont.regularName, size: 18))
+            .font(.custom(SurfAceChromeFont.regularName, size: 12))
             .foregroundStyle(Color.yellow)
-            .frame(minWidth: 44, minHeight: 44)
-            .padding(.horizontal, 10)
+            .frame(minWidth: SurfAcePaneChromeLayout.controlHitSize, minHeight: SurfAcePaneChromeLayout.controlHitSize)
+            .padding(.horizontal, 3)
             .background(.black.opacity(0.58), in: Capsule())
             .accessibilityLabel("Drawing restore warning")
     }
@@ -1173,15 +1288,19 @@ private struct SurfAceGlassButtonStyle: ButtonStyle {
         let foregroundColor = surfAceToolbarForegroundColor(for: colorScheme)
 
         configuration.label
-            .font(.custom(SurfAceChromeFont.regularName, size: 18))
+            .font(.custom(SurfAceChromeFont.regularName, size: 12))
             .foregroundStyle(foregroundColor)
-            .frame(minWidth: 44, minHeight: 44)
-            .padding(.horizontal, 10)
-            .surfAceGlassBackground(interactive: true)
+            .frame(minWidth: SurfAcePaneChromeLayout.controlVisualSize, minHeight: SurfAcePaneChromeLayout.controlVisualSize)
+            .background {
+                Capsule()
+                    .fill(.regularMaterial)
+            }
             .overlay {
                 Capsule()
                     .strokeBorder(foregroundColor.opacity(configuration.isPressed ? 0.32 : 0.18), lineWidth: 1)
             }
+            .frame(minWidth: SurfAcePaneChromeLayout.controlHitSize, minHeight: SurfAcePaneChromeLayout.controlHitSize)
+            .contentShape(Capsule())
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -1200,7 +1319,7 @@ private struct SurfAceControlPillChrome: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .padding(6)
+            .padding(4)
             .surfAceGlassBackground(interactive: false)
             .overlay {
                 Capsule()
@@ -1220,7 +1339,7 @@ private extension View {
         self.background(.regularMaterial, in: Capsule())
         #else
         if interactive {
-            self.glassEffect(.regular.interactive(), in: Capsule())
+            self.background(.regularMaterial, in: Capsule())
         } else {
             self.glassEffect(.regular, in: Capsule())
         }
@@ -1303,9 +1422,10 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
     let runtime: SurfAceRuntime
     let surfaceId: String
     let paneId: Int
+    let onInteractionBegan: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(runtime: runtime, surfaceId: surfaceId, paneId: paneId)
+        Coordinator(runtime: runtime, surfaceId: surfaceId, paneId: paneId, onInteractionBegan: onInteractionBegan)
     }
 
     func makeUIView(context: Context) -> SurfAceSurfaceHostView {
@@ -1316,6 +1436,7 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {
+        context.coordinator.onInteractionBegan = onInteractionBegan
         context.coordinator.updateBinding(surfaceId: surfaceId, paneId: paneId, hostView: uiView)
     }
 
@@ -1329,18 +1450,20 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
         private let runtime: SurfAceRuntime
         private var surfaceId: String
         private var paneId: Int
+        var onInteractionBegan: () -> Void
 
-        init(runtime: SurfAceRuntime, surfaceId: String, paneId: Int) {
+        init(runtime: SurfAceRuntime, surfaceId: String, paneId: Int, onInteractionBegan: @escaping () -> Void) {
             self.runtime = runtime
             self.surfaceId = surfaceId
             self.paneId = paneId
+            self.onInteractionBegan = onInteractionBegan
         }
 
         func attach(hostView: SurfAceSurfaceHostView) {
             self.hostView = hostView
             hostView.onInteractionBegan = { [weak self] in
                 guard let self else { return }
-                self.runtime.activateKeyboardPane(surfaceId: self.surfaceId, paneId: self.paneId)
+                self.onInteractionBegan()
             }
             hostView.onPencilContact = { [weak self] in
                 guard let self else { return }
@@ -1527,7 +1650,12 @@ private final class SurfAceWeakScriptMessageHandler: NSObject, WKScriptMessageHa
 @MainActor
 private final class SurfAceAnnotationCanvasView: PKCanvasView {
     var annotationMode = false
+    var fingerDrawEnabled = false
     var onPencilContact: (() -> Void)?
+    var onFingerStroke: ((PKStroke) -> Void)?
+    private var activeFingerTouch: UITouch?
+    private var activeFingerStartTime: TimeInterval = 0
+    private var activeFingerPoints: [PKStrokePoint] = []
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard super.point(inside: point, with: event) else {
@@ -1543,7 +1671,99 @@ private final class SurfAceAnnotationCanvasView: PKCanvasView {
         if touches.contains(where: { $0.type == .pencil }) {
             onPencilContact?()
         }
+        if beginFingerStrokeIfNeeded(touches) {
+            return
+        }
         super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if appendFingerStrokePointIfNeeded(touches) {
+            return
+        }
+        super.touchesMoved(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if finishFingerStrokeIfNeeded(touches) {
+            return
+        }
+        super.touchesEnded(touches, with: event)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if cancelFingerStrokeIfNeeded(touches) {
+            return
+        }
+        super.touchesCancelled(touches, with: event)
+    }
+
+    private func beginFingerStrokeIfNeeded(_ touches: Set<UITouch>) -> Bool {
+        guard annotationMode, fingerDrawEnabled, activeFingerTouch == nil,
+              let touch = touches.first(where: { $0.type == .direct }) else {
+            return false
+        }
+        activeFingerTouch = touch
+        activeFingerStartTime = touch.timestamp
+        activeFingerPoints = [strokePoint(for: touch)]
+        return true
+    }
+
+    private func appendFingerStrokePointIfNeeded(_ touches: Set<UITouch>) -> Bool {
+        guard let activeFingerTouch,
+              touches.contains(where: { $0 === activeFingerTouch }) else {
+            return false
+        }
+        activeFingerPoints.append(strokePoint(for: activeFingerTouch))
+        return true
+    }
+
+    private func finishFingerStrokeIfNeeded(_ touches: Set<UITouch>) -> Bool {
+        guard let activeFingerTouch,
+              touches.contains(where: { $0 === activeFingerTouch }) else {
+            return false
+        }
+        activeFingerPoints.append(strokePoint(for: activeFingerTouch))
+        let points = activeFingerPoints
+        resetFingerStroke()
+        guard points.count >= 2 else {
+            return true
+        }
+        onFingerStroke?(
+            PKStroke(
+                ink: PKInk(.pen, color: .systemOrange),
+                path: PKStrokePath(controlPoints: points, creationDate: Date())
+            )
+        )
+        return true
+    }
+
+    private func cancelFingerStrokeIfNeeded(_ touches: Set<UITouch>) -> Bool {
+        guard let activeFingerTouch,
+              touches.contains(where: { $0 === activeFingerTouch }) else {
+            return false
+        }
+        resetFingerStroke()
+        return true
+    }
+
+    private func resetFingerStroke() {
+        activeFingerTouch = nil
+        activeFingerStartTime = 0
+        activeFingerPoints = []
+    }
+
+    private func strokePoint(for touch: UITouch) -> PKStrokePoint {
+        let location = touch.location(in: self)
+        return PKStrokePoint(
+            location: location,
+            timeOffset: max(0, touch.timestamp - activeFingerStartTime),
+            size: CGSize(width: 4, height: 4),
+            opacity: 1,
+            force: max(1, touch.force),
+            azimuth: 0,
+            altitude: .pi / 2
+        )
     }
 }
 
@@ -2081,6 +2301,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         canvasView.onPencilContact = { [weak self] in
             self?.onPencilContact?()
         }
+        canvasView.onFingerStroke = { [weak self] stroke in
+            self?.handleFingerStroke(stroke)
+        }
         canvasView.tool = PKInkingTool(.pen, color: .systemOrange, width: 4)
 
         addSubview(webView)
@@ -2146,8 +2369,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private func applyCurrentInteractionState() {
         let entryScrollable = currentEntry?.scrollable ?? true
         let entryInteractive = currentEntry?.interactive ?? true
-        canvasView.isUserInteractionEnabled = true
+        canvasView.isUserInteractionEnabled = annotationMode
         canvasView.annotationMode = annotationMode
+        canvasView.fingerDrawEnabled = fingerDrawEnabled
         if annotationMode {
             webView.scrollView.isScrollEnabled = false
             webView.isUserInteractionEnabled = false
@@ -2268,9 +2492,16 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     private func applyWebContentScale() async {
         guard !webView.isHidden else { return }
+        let baseScale: CGFloat = switch currentEntry?.payload {
+        case .html, .browserURL:
+            SurfAceWebContentScale.base
+        case .image, .terminal, .markdown, .video, .canvas, .pdf, nil:
+            1
+        }
+        let effectiveScale = (baseScale * contentScale * 1000).rounded() / 1000
         let script = """
         (() => {
-          const scale = \(contentScale);
+          const scale = \(effectiveScale);
           document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
           document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
         })();
@@ -2334,6 +2565,15 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         isApplyingProgrammaticDrawingChange = true
         canvasView.drawing = PKDrawing(strokes: strokes)
         isApplyingProgrammaticDrawingChange = false
+    }
+
+    private func handleFingerStroke(_ stroke: PKStroke) {
+        let strokes = canvasView.drawing.strokes + [stroke]
+        applyDrawing(strokes: strokes)
+        let changed = syncTrackedStrokes(with: canvasView.drawing.strokes, emitChanges: true)
+        guard !changed.isEmpty else { return }
+        onInteractionBegan?()
+        onStrokeBatch?(changed, canvasView.drawing.dataRepresentation())
     }
 
     private func preserveDrawingAlignmentAfterCanvasResize() {

@@ -251,11 +251,11 @@ test("keyboard shortcuts route pane navigation and focused pane scroll intents",
 
   assert.ok(shortcutIndex > -1);
   assert.ok(windowWireIndex > shortcutIndex);
-  assert.match(source.slice(shortcutIndex, windowWireIndex), /focusedPaneId && focusedPaneId > 0[\s\S]*core\.setActiveKeyboardPane\(surfaceId, focusedPaneId\)/);
   assert.match(source.slice(shortcutIndex), /keyboardDirectionForPhysicalKey\(input\.code\)/);
   assert.match(source.slice(shortcutIndex), /command && input\.alt && input\.shift && !input\.control && paneNavigationDirection/);
   assert.match(source.slice(shortcutIndex), /core\.navigateActiveKeyboardPane\(surfaceId, paneNavigationDirection\)/);
   assert.match(source.slice(shortcutIndex), /core\.navigateActiveKeyboardPane\(surfaceId, paneNavigationDirection\);[\s\S]*event\.preventDefault\(\);[\s\S]*return;/);
+  assert.match(source.slice(shortcutIndex, windowWireIndex), /focusedPaneId && focusedPaneId > 0[\s\S]*core\.setActiveKeyboardPane\(surfaceId, focusedPaneId\)/);
   assert.match(source.slice(shortcutIndex), /activePane\.annotationBorderVisible/);
   assert.match(source.slice(shortcutIndex), /command && !input\.alt && !input\.shift && !input\.control && vimDirection/);
   assert.match(source.slice(shortcutIndex), /sendKeyboardScrollIntent\(window, activePaneId, vimDirection, "line"\)/);
@@ -416,10 +416,91 @@ test("html and browser_url content scale through guest document zoom", async () 
 
   assert.ok(scaleIndex > -1);
   assert.ok(renderBrowserIndex > scaleIndex);
+  assert.match(source, /const WEB_CONTENT_BASE_SCALE = 0\.85/);
+  assert.match(source.slice(scaleIndex, renderBrowserIndex), /WEB_CONTENT_BASE_SCALE \* view\.scale/);
   assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.documentElement\.style\.zoom = scale === 1 \? "" : String\(scale\)/);
   assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.body\?\.style\.setProperty\("--surf-ace-content-scale", String\(scale\)\)/);
   assert.match(source.slice(renderBrowserIndex, renderPaneIndex), /reportBrowserUrlDiagnostics\(view, browserView, "did-attach"\);[\s\S]*applyBrowserContentScale\(view, browserView\)/);
   assert.match(source.slice(renderBrowserIndex, renderPaneIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\);[\s\S]*applyBrowserContentScale\(view, browserView\)/);
+});
+
+test("toolbar font-size popover persists for repeated scale taps and dismisses explicitly", async () => {
+  const source = await rendererSource();
+  const buildIndex = source.indexOf("function buildControls");
+  const scaleIndex = source.indexOf("function scalePaneContent");
+  const initIndex = source.indexOf("async function init");
+
+  assert.ok(buildIndex > -1);
+  assert.ok(scaleIndex > buildIndex);
+  assert.match(source, /let openFontSizePaneId: number \| null = null/);
+  assert.match(source.slice(buildIndex, scaleIndex), /createIconButton\("text", "Font Size", "font-size-toggle"\)/);
+  assert.match(source.slice(buildIndex, scaleIndex), /openFontSizePaneId === pane\.paneId \? null : pane\.paneId/);
+  assert.match(source.slice(buildIndex, scaleIndex), /fontSizePopover\.className = "font-size-popover"/);
+  assert.match(source.slice(buildIndex, scaleIndex), /scalePaneContent\(\{ action: "decrease", paneId: pane\.paneId, type: "content-scale" \}\)/);
+  assert.match(source.slice(buildIndex, scaleIndex), /scalePaneContent\(\{ action: "increase", paneId: pane\.paneId, type: "content-scale" \}\)/);
+  assert.match(source.slice(scaleIndex), /applyContentScale\(view\);[\s\S]*rebuildPaneControls\(intent\.paneId\)/);
+  assert.match(source.slice(initIndex), /target\?\.closest\("\.font-size-popover, \.font-size-toggle"\)/);
+});
+
+test("toolbar chrome shrinks visually while button hit targets stay at least 44px", async () => {
+  const styles = await rendererStyles();
+  const pillRule = styles.match(/\.control-pill\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body ?? "";
+  const buttonRule = styles.match(/\.control-button\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body ?? "";
+  const visualRule = styles.match(/\.control-button::before\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body ?? "";
+  const iconRule = styles.match(/\.control-button \.lucide,\s*\.control-button__label\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body ?? "";
+
+  assert.match(pillRule, /min-height:\s*44px;/);
+  assert.match(buttonRule, /min-width:\s*44px;/);
+  assert.match(buttonRule, /height:\s*44px;/);
+  assert.match(visualRule, /inset:\s*7px;/);
+  assert.match(iconRule, /width:\s*16px;/);
+  assert.match(iconRule, /height:\s*16px;/);
+});
+
+test("scrolling collapses toolbar into a bottom-left dock icon that restores controls", async () => {
+  const source = await rendererSource();
+  const styles = await rendererStyles();
+  const chromeTargetIndex = source.indexOf("function isPaneChromeTarget");
+  const attachIndex = source.indexOf("function attachCommonEvents");
+  const collapseIndex = source.indexOf("function collapsePaneToolbar");
+  const restoreIndex = source.indexOf("function restorePaneToolbar");
+  const ensureIndex = source.indexOf("function ensurePaneView");
+  const buildIndex = source.indexOf("function buildControls");
+
+  assert.ok(chromeTargetIndex > -1);
+  assert.ok(attachIndex > -1);
+  assert.ok(collapseIndex > attachIndex);
+  assert.ok(restoreIndex > collapseIndex);
+  assert.match(source.slice(chromeTargetIndex, attachIndex), /\.control-cluster, \.toolbar-dock/);
+  assert.match(source.slice(attachIndex, collapseIndex), /view\.rootEl\.addEventListener\("pointerdown", \(event\)[\s\S]*!isPaneChromeTarget\(event\.target\)[\s\S]*collapsePaneToolbar\(view\)/);
+  assert.match(source.slice(attachIndex, collapseIndex), /view\.scrollEl\.addEventListener\("scroll"[\s\S]*collapsePaneToolbar\(view\)/);
+  assert.match(source.slice(collapseIndex, restoreIndex), /view\.toolbarCollapsed = true/);
+  assert.match(source.slice(restoreIndex, ensureIndex), /view\.toolbarCollapsed = false/);
+  assert.match(source.slice(ensureIndex, buildIndex), /dockEl\.className = "toolbar-dock control-button icon-button"/);
+  assert.match(source.slice(ensureIndex, buildIndex), /restorePaneToolbar\(view\)/);
+  assert.match(source.slice(buildIndex), /view\.controlsEl\.classList\.toggle\("collapsed", view\.toolbarCollapsed\)/);
+  assert.match(source.slice(buildIndex), /view\.dockEl\.hidden = !view\.toolbarCollapsed/);
+  assert.match(styles, /\.toolbar-dock\s*\{[\s\S]*left:\s*22px;[\s\S]*bottom:\s*22px;/);
+  assert.match(styles, /\.control-cluster\.collapsed\s*\{[\s\S]*pointer-events:\s*none;/);
+});
+
+test("browser guest scroll and direct content events collapse the pane toolbar", async () => {
+  const source = await rendererSource();
+  const guestPreload = await guestPreloadSource();
+  const chromeTargetIndex = source.indexOf("function isPaneChromeTarget");
+  const wireIndex = source.indexOf("function wireBrowserContentEvents");
+  const renderCenteredIndex = source.indexOf("function renderCenteredState");
+  const wireSource = source.slice(wireIndex, renderCenteredIndex);
+
+  assert.ok(chromeTargetIndex > -1);
+  assert.ok(wireIndex > -1);
+  assert.match(source.slice(chromeTargetIndex, wireIndex), /\.control-cluster, \.toolbar-dock/);
+  assert.match(wireSource, /if \(payload\.type === "scroll"\) \{\s*collapsePaneToolbar\(view\);[\s\S]*type: "scroll"/);
+  assert.match(wireSource, /else if \(payload\.type === "tap"\) \{\s*collapsePaneToolbar\(view\);[\s\S]*type: "tap"/);
+  assert.match(wireSource, /else if \(payload\.type === "focus"\) \{\s*collapsePaneToolbar\(view\);[\s\S]*rememberPaneContext\(paneId\)/);
+  assert.match(guestPreload, /window\.addEventListener\("scroll"[\s\S]*emit\(\{ type: "scroll"/);
+  assert.match(guestPreload, /document\.addEventListener\("pointerdown"[\s\S]*emit\(\{ type: "focus" \}\)/);
+  assert.match(guestPreload, /document\.addEventListener\("pointerup"[\s\S]*type: "tap"/);
 });
 
 test("html and browser_url frames have a non-auto CSS height fallback", async () => {
