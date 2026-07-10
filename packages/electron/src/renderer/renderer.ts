@@ -3,6 +3,7 @@ import {
   visibleOverlayRect,
 } from "./overlay-rects.js";
 import { markdownToHtml } from "./markdown.js";
+import { projectConnectionChrome, projectContentScaleIndicator } from "./ui-projection.js";
 
 type Selection =
   | null
@@ -1125,6 +1126,7 @@ function ensurePaneView(paneId: number): PaneView {
   const disconnectedGlyphEl = createLucideIcon("wifi-off");
   disconnectedGlyphEl.classList.add("pane-label__disconnected");
   disconnectedGlyphEl.setAttribute("aria-hidden", "true");
+  disconnectedGlyphEl.setAttribute("hidden", "");
   const labelTextEl = document.createElement("span");
   labelTextEl.className = "pane-label__number";
   labelEl.append(windowLabelEl, disconnectedGlyphEl, labelTextEl);
@@ -1300,7 +1302,8 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
       event.stopPropagation();
       scalePaneContent({ action: "decrease", paneId: pane.paneId, type: "content-scale" });
     });
-    const reset = surfAceOverlay(createButton("100", "font-size-reset"), "annotation-control");
+    const reset = surfAceOverlay(createButton("", "font-size-reset"), "annotation-control");
+    projectContentScaleIndicator(reset, view.scale);
     reset.addEventListener("click", (event) => {
       event.stopPropagation();
       scalePaneContent({ action: "reset", paneId: pane.paneId, type: "content-scale" });
@@ -2527,25 +2530,28 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
   const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
   const visibleWindowLabel = latestState?.windowLabel ?? "";
-  const disconnected = latestState?.connectionBar === "disconnected";
+  const connectionBar = latestState?.connectionBar ?? "disconnected";
   windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
-  windowLabel.hidden = disconnected || !visibleWindowLabel;
-  disconnectedGlyph.hidden = !disconnected;
   label.textContent = visibleAddress.toUpperCase();
-  label.hidden = disconnected;
-  labelWrap.hidden = disconnected ? false : !visibleAddress;
-  labelWrap.title = disconnected
-    ? "Surf Ace disconnected"
-    : [visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]
+  projectConnectionChrome(
+    { disconnectedGlyph, paneLabel: label, windowLabel },
+    connectionBar,
+    Boolean(visibleAddress),
+    Boolean(visibleWindowLabel),
+  );
+  const showsIdentity = connectionBar === "connected";
+  labelWrap.title = showsIdentity
+    ? [visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]
       .filter(Boolean)
-      .join(" ");
+      .join(" ")
+    : "Surf Ace disconnected";
   labelWrap.setAttribute(
     "aria-label",
-    disconnected
-      ? "Surf Ace disconnected"
-      : visibleAddress
+    showsIdentity
+      ? visibleAddress
         ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}`
-        : "",
+        : ""
+      : "Surf Ace disconnected",
   );
   fitPaneLabelToVisibleBounds(view);
   buildControls(view, pane);
