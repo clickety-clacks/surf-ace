@@ -1064,6 +1064,7 @@ type PersistedRestartContentEntry = {
   remotePaneId?: number;
   revision: number;
   sessionKey: string | null;
+  targetId?: string | null;
 };
 
 type PersistedPaneTargetState = {
@@ -10789,7 +10790,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         historyOwnerToken: entry.historyOwnerToken,
         revision: entry.revision as Revision,
         sessionKey: entry.sessionKey,
-        targetId: null,
+        targetId: entry.targetId ?? null,
       });
       pane.buffer.liveFrame = entry.liveFrame ? structuredClone(entry.liveFrame) : null;
       pane.buffer.liveDirtyStrokeIds = entry.liveDirtyStrokeIds ? [...entry.liveDirtyStrokeIds] : [];
@@ -11030,6 +11031,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           remotePaneId: Number(pane.remotePaneId),
           revision: entry.revision,
           sessionKey: entry.sessionKey,
+          targetId: entry.targetId,
         };
       })
       .filter((entry): entry is PersistedRestartContentEntry => entry !== null);

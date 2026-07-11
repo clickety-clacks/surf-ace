@@ -11039,10 +11039,19 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const initialTargetApplyCount = server.targetApplyRequests.length;
         const initialTopologyApplyCount = server.topologyApplyRequests.length;
         const internalRuntime = runtime as any;
+        const liveSurface = internalRuntime.surfaces.get(server.surfaceId);
+        const htmlTargetId = liveSurface?.panes.get(paneIds[0]!)?.currentTargetId;
+        assert.equal(typeof htmlTargetId, "string");
+        await internalRuntime.persistScreenSnapshot();
         const persistedAfterOfficialSetup = JSON.parse(
           await fs.readFile(path.join(stateDir, "surf-ace-runtime-screens.json"), "utf8"),
         ) as {
-          contentContinuity?: Record<string, Array<{ contentId?: string; contentValue?: unknown; paneLabel?: number }>>;
+          contentContinuity?: Record<string, Array<{
+            contentId?: string;
+            contentValue?: unknown;
+            paneLabel?: number;
+            targetId?: string | null;
+          }>>;
           screens?: Array<{ fingerprint?: string; panes?: Array<{ paneLabel?: number }> }>;
         };
         assert.equal(
@@ -11056,7 +11065,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           persistedAfterOfficialSetup.contentContinuity?.[server.surfaceId]?.some((entry) =>
             entry.contentId === htmlPush.contentId &&
             entry.paneLabel === 1 &&
-            entry.contentValue === "<main>restored html</main>"
+            entry.contentValue === "<main>restored html</main>" &&
+            entry.targetId === htmlTargetId
           ),
           true,
         );
@@ -11148,7 +11158,10 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           const htmlPane = screen.panes.find((pane) => pane.paneLabel === 1);
           const browserPane = screen.panes.find((pane) => pane.paneLabel === 2);
           assert.equal(htmlPane?.activeContent?.contentId, htmlPush.contentId);
+          assert.equal(htmlPane?.target?.targetId, htmlTargetId);
+          assert.equal(htmlPane?.target?.targetKind, "html");
           assert.equal(browserPane?.target?.targetKind, "browser_url");
+          assert.equal(browserPane?.target?.targetId, browserPush.targetId);
           assert.equal(browserPane?.target?.blockedReason, null);
           const restoredHtmlApply = server.contentSetRequests
             .slice(initialContentApplyCount)
@@ -11156,6 +11169,16 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           assert.deepEqual(
             (restoredHtmlApply?.restoredDrawings as Array<{ strokeId: string }> | undefined)?.map((stroke) => stroke.strokeId),
             ["stroke_restart_paint"],
+          );
+          assert.equal(
+            server.targetApplyRequests
+              .slice(initialTargetApplyCount)
+              .some((request) =>
+                request.targetId === browserPush.targetId &&
+                request.targetKind === "browser_url" &&
+                request.restoreReason === "resume_restore"
+              ),
+            true,
           );
           const restoredRead = await restartedRuntime.read({ fingerprint: server.surfaceId, paneId: htmlPane!.paneId });
           assert.deepEqual(restoredRead.liveFrame?.strokes.map((stroke) => stroke.strokeId), ["stroke_restart_paint"]);
@@ -12572,12 +12595,15 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
           remotePaneId: number;
           revision: number;
           sessionKey: string | null;
+          targetId?: string | null;
         }>>;
       };
       const continuityEntry = snapshot.contentContinuity?.[server.surfaceId]?.[0];
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       const firstPane = surface?.panes.get(firstPaneId);
       assert.ok(firstPane);
+      const target = firstPane.currentTargetId ? surface?.targetRecords.get(firstPane.currentTargetId) : null;
+      assert.ok(target);
       firstPane.paneLabel = Number(firstPane.remotePaneId);
       await internalRuntime.persistScreenSnapshot();
       let projectedSnapshot: {
@@ -12606,6 +12632,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.equal(continuityEntry?.remotePaneId, Number(firstPane.remotePaneId));
       assert.equal(continuityEntry?.revision, pushed.revision);
       assert.equal(continuityEntry?.sessionKey, "agent:test:restart-persist");
+      assert.equal(continuityEntry?.targetId, target.targetId);
       assert.equal(projectedContinuityEntry?.paneLabel, 1);
       assert.equal(firstPane.paneLabel, 1);
     });
@@ -12843,7 +12870,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("restart content snapshot restores pane content before replay", async () => {
+  await t.test("legacy restart content snapshot without target pointer restores content with null target", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
       const pushed = await runtime.push(
@@ -12863,9 +12890,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       assert.ok(pane);
 
       internalRuntime.clearVisiblePaneContent(pane, 0);
-        internalRuntime.restartContentBySurface = new Map([
-          [
-            server.surfaceId,
+      internalRuntime.restartContentBySurface = new Map([
+        [
+          server.surfaceId,
           [
             {
               contentId: pushed.contentId,
@@ -12885,6 +12912,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       const screens = await runtime.listScreens();
       assert.equal(screens[0]?.panes[0]?.activeContent?.contentId, pushed.contentId);
       assert.equal(screens[0]?.panes[0]?.activeContent?.revision, pushed.revision);
+      assert.equal(screens[0]?.panes[0]?.target, null);
       const read = await runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
       assert.equal(read.contentSnapshot?.contentId, pushed.contentId);
       assert.equal(read.contentSnapshot?.contentType, "markdown");
