@@ -156,6 +156,10 @@ type RendererPaneState = {
   paneId: number;
   displayId: string;
   provenanceName: string | null;
+  provenance: {
+    controllerProductName: string | null;
+    friendlyChatName: string | null;
+  } | null;
   visibleAddress: string;
   showDone: boolean;
   toast: string | null;
@@ -261,7 +265,12 @@ type PdfPage = {
 };
 
 const appRoot = document.querySelector("#app") as HTMLDivElement;
+const provenanceAnnouncer = document.querySelector(
+  "#provenance-announcer",
+) as HTMLDivElement | null;
 const paneViews = new Map<number, PaneView>();
+const pendingHistoryAnnouncements = new Map<number, string>();
+const provenanceLabels = new Set<HTMLElement>();
 let bootstrap: Bootstrap | null = null;
 let latestState: RendererWindowState | null = null;
 let latestLayoutKey: string | null = null;
@@ -376,6 +385,7 @@ function paneRenderKey(state: RendererWindowState, pane: RendererPaneState): str
     name: pane.name,
     ownerName: pane.ownerName,
     provenanceName: pane.provenanceName,
+    provenance: pane.provenance,
     reloadable: pane.content.reloadable,
     showDone: pane.showDone,
     toast: pane.toast,
@@ -717,6 +727,312 @@ function createButton(label: string, className: string, disabled = false): HTMLB
   labelEl.textContent = label;
   button.appendChild(labelEl);
   return button;
+}
+
+type ProvenanceStrings = {
+  pushedBy: (chat: string, provider: string) => string;
+  unknownChat: string;
+  unknownProvider: string;
+};
+
+type ResolvedProvenance = {
+  accessibleName: string;
+  chat: string;
+  provider: string;
+};
+
+const PROVENANCE_WIDTH_CLASSES = [
+  "navigation-pill__provenance--composite",
+  "navigation-pill__provenance--collapsed",
+  "navigation-pill__provenance--zero-width",
+] as const;
+
+const BIDI_ISOLATE_START = "\u2068";
+const BIDI_ISOLATE_END = "\u2069";
+let provenanceResizeObserver: ResizeObserver | null = null;
+let provenanceMetricObserversInstalled = false;
+let observedProvenanceLanguage = "";
+
+function activeProvenanceLanguage(): string {
+  return (
+    document.documentElement.lang ||
+    globalThis.navigator?.language ||
+    "en"
+  ).toLowerCase();
+}
+
+function provenanceStrings(): ProvenanceStrings {
+  const language = activeProvenanceLanguage();
+  if (language.startsWith("es")) {
+    return {
+      pushedBy: (chat, provider) =>
+        `Enviado por ${chat}, usando ${provider}`,
+      unknownChat: "Chat desconocido",
+      unknownProvider: "Proveedor desconocido",
+    };
+  }
+  if (language.startsWith("fr")) {
+    return {
+      pushedBy: (chat, provider) =>
+        `Envoyé par ${chat}, avec ${provider}`,
+      unknownChat: "Discussion inconnue",
+      unknownProvider: "Fournisseur inconnu",
+    };
+  }
+  if (language.startsWith("de")) {
+    return {
+      pushedBy: (chat, provider) =>
+        `Gesendet von ${chat}, mit ${provider}`,
+      unknownChat: "Unbekannter Chat",
+      unknownProvider: "Unbekannter Anbieter",
+    };
+  }
+  if (language.startsWith("ja")) {
+    return {
+      pushedBy: (chat, provider) =>
+        `${chat} が ${provider} を使用して送信`,
+      unknownChat: "不明なチャット",
+      unknownProvider: "不明なプロバイダー",
+    };
+  }
+  return {
+    pushedBy: (chat, provider) =>
+      `Pushed by ${chat}, using ${provider}`,
+    unknownChat: "Unknown chat",
+    unknownProvider: "Unknown provider",
+  };
+}
+
+function trimUnicodeWhitespace(value: string | null | undefined): string {
+  return value?.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "") ?? "";
+}
+
+function bidiIsolate(value: string): string {
+  return `${BIDI_ISOLATE_START}${value}${BIDI_ISOLATE_END}`;
+}
+
+function resolveProvenance(
+  provenance: RendererPaneState["provenance"],
+): ResolvedProvenance {
+  const strings = provenanceStrings();
+  const suppliedChat = trimUnicodeWhitespace(provenance?.friendlyChatName);
+  const suppliedProvider = trimUnicodeWhitespace(
+    provenance?.controllerProductName,
+  );
+  const chat = suppliedChat || strings.unknownChat;
+  const provider = suppliedProvider || strings.unknownProvider;
+  return {
+    accessibleName: strings.pushedBy(
+      bidiIsolate(chat),
+      bidiIsolate(provider),
+    ),
+    chat,
+    provider,
+  };
+}
+
+function measuredTextWidth(element: HTMLElement, text: string): number {
+  const style = getComputedStyle(element);
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) return text.length * 8;
+  context.font = [
+    style.fontStyle,
+    style.fontWeight,
+    style.fontSize,
+    style.fontFamily,
+  ].join(" ");
+  return context.measureText(text).width;
+}
+
+function updateProvenanceWidthClass(element: HTMLElement): void {
+  for (const className of PROVENANCE_WIDTH_CLASSES) {
+    element.classList.remove(className);
+  }
+  const components = element.querySelectorAll<HTMLElement>(
+    ".navigation-pill__provenance-component",
+  );
+  for (const component of components) {
+    component.style.removeProperty("flex-basis");
+    component.style.removeProperty("inline-size");
+    component.style.removeProperty("max-inline-size");
+  }
+
+  const width = element.getBoundingClientRect().width;
+  const ellipsisWidth = measuredTextWidth(element, "…");
+  const separatorWidth = measuredTextWidth(element, " — ");
+  const compositeMinimumWidth = ellipsisWidth * 2 + separatorWidth;
+  element.dataset.collapsedMinimumWidth = String(ellipsisWidth);
+  element.dataset.compositeMinimumWidth = String(compositeMinimumWidth);
+
+  if (width < ellipsisWidth) {
+    element.classList.add("navigation-pill__provenance--zero-width");
+    return;
+  }
+  if (width < compositeMinimumWidth) {
+    element.classList.add("navigation-pill__provenance--collapsed");
+    return;
+  }
+
+  element.classList.add("navigation-pill__provenance--composite");
+  const chatElement = components[0];
+  const providerElement = components[1];
+  if (!chatElement || !providerElement) {
+    return;
+  }
+  const distributableWidth = Math.max(0, width - separatorWidth);
+  const equalShare = distributableWidth / 2;
+  const chatWidth = measuredTextWidth(element, chatElement.textContent ?? "");
+  const providerWidth = measuredTextWidth(
+    element,
+    providerElement.textContent ?? "",
+  );
+  let chatShare = equalShare;
+  let providerShare = equalShare;
+  if (chatWidth < equalShare && providerWidth < equalShare) {
+    chatShare = chatWidth;
+    providerShare = providerWidth;
+  } else if (chatWidth < equalShare) {
+    chatShare = chatWidth;
+    providerShare = distributableWidth - chatShare;
+  } else if (providerWidth < equalShare) {
+    providerShare = providerWidth;
+    chatShare = distributableWidth - providerShare;
+  }
+  for (const [component, share] of [
+    [chatElement, chatShare],
+    [providerElement, providerShare],
+  ] as const) {
+    const pixels = `${Math.max(0, share)}px`;
+    component.style.setProperty("flex-basis", pixels);
+    component.style.setProperty("inline-size", pixels);
+    component.style.setProperty("max-inline-size", pixels);
+  }
+}
+
+function refreshProvenanceWidths(): void {
+  for (const label of provenanceLabels) {
+    if (!label.isConnected) {
+      provenanceLabels.delete(label);
+      continue;
+    }
+    updateProvenanceWidthClass(label);
+  }
+}
+
+function registerProvenanceLabel(label: HTMLElement): void {
+  provenanceLabels.add(label);
+  queueMicrotask(() => {
+    if (!label.isConnected) {
+      provenanceLabels.delete(label);
+      return;
+    }
+    updateProvenanceWidthClass(label);
+    if (typeof ResizeObserver !== "undefined") {
+      provenanceResizeObserver ??= new ResizeObserver(() => {
+        refreshProvenanceWidths();
+      });
+      provenanceResizeObserver.observe(label.parentElement ?? label);
+    }
+  });
+}
+
+function rebuildAllPaneControls(): void {
+  for (const paneId of paneViews.keys()) {
+    rebuildPaneControls(paneId);
+  }
+}
+
+function installProvenanceMetricObservers(): void {
+  if (provenanceMetricObserversInstalled) {
+    return;
+  }
+  provenanceMetricObserversInstalled = true;
+  observedProvenanceLanguage = activeProvenanceLanguage();
+  if (typeof MutationObserver !== "undefined") {
+    const observer = new MutationObserver(() => {
+      const language = activeProvenanceLanguage();
+      if (language !== observedProvenanceLanguage) {
+        observedProvenanceLanguage = language;
+        rebuildAllPaneControls();
+        return;
+      }
+      refreshProvenanceWidths();
+    });
+    observer.observe(document.documentElement, {
+      attributeFilter: ["class", "dir", "lang", "style"],
+      attributes: true,
+    });
+    observer.observe(document.body, {
+      attributeFilter: ["class", "style"],
+      attributes: true,
+    });
+  }
+  const fonts = document.fonts;
+  if (fonts) {
+    void fonts.ready.then(() => refreshProvenanceWidths());
+    fonts.addEventListener("loadingdone", refreshProvenanceWidths);
+  }
+}
+
+function createProvenanceLabel(
+  paneId: number,
+  provenance: RendererPaneState["provenance"],
+): HTMLElement {
+  const resolved = resolveProvenance(provenance);
+  const label = document.createElement("span");
+  label.className = "navigation-pill__provenance";
+  label.id = `pane-${paneId}-provenance`;
+  label.setAttribute("aria-label", resolved.accessibleName);
+  label.setAttribute("role", "group");
+  const chatElement = document.createElement("bdi");
+  chatElement.className = "navigation-pill__provenance-component";
+  chatElement.dir = "auto";
+  chatElement.setAttribute("aria-hidden", "true");
+  chatElement.textContent = resolved.chat;
+  const separator = document.createElement("span");
+  separator.className = "navigation-pill__provenance-separator";
+  separator.setAttribute("aria-hidden", "true");
+  separator.textContent = " — ";
+  const providerElement = document.createElement("bdi");
+  providerElement.className = "navigation-pill__provenance-component";
+  providerElement.dir = "auto";
+  providerElement.setAttribute("aria-hidden", "true");
+  providerElement.textContent = resolved.provider;
+  label.append(chatElement, separator, providerElement);
+  return label;
+}
+
+function historyEntrySignature(pane: RendererPaneState): string {
+  return JSON.stringify({
+    content: contentKey(pane),
+    provenance: pane.provenance,
+  });
+}
+
+function queueHistoryAnnouncement(pane: RendererPaneState): void {
+  pendingHistoryAnnouncements.set(pane.paneId, historyEntrySignature(pane));
+}
+
+function announceReachedHistoryEntries(state: RendererWindowState): void {
+  for (const pane of state.panes) {
+    const previousSignature = pendingHistoryAnnouncements.get(pane.paneId);
+    if (
+      previousSignature === undefined ||
+      previousSignature === historyEntrySignature(pane)
+    ) {
+      continue;
+    }
+    pendingHistoryAnnouncements.delete(pane.paneId);
+    if (!provenanceAnnouncer) {
+      continue;
+    }
+    const announcement = resolveProvenance(pane.provenance).accessibleName;
+    provenanceAnnouncer.textContent = "";
+    window.setTimeout(() => {
+      provenanceAnnouncer.textContent = announcement;
+    }, 0);
+  }
 }
 
 type LucideIconName =
@@ -1259,7 +1575,9 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     }
     if (pane.canGoBack) {
       const back = surfAceOverlay(createButton("◀", "back"), "history-back");
+      back.setAttribute("aria-label", "Back");
       back.addEventListener("click", () => {
+        queueHistoryAnnouncement(pane);
         rememberPaneContext(pane.paneId);
         window.surfAce.command({ direction: "back", paneId: pane.paneId, type: "history" });
       });
@@ -1267,17 +1585,25 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     }
     if (pane.canGoForward) {
       const forward = surfAceOverlay(createButton("▶", "forward"), "history-forward");
+      forward.setAttribute("aria-label", "Forward");
       forward.addEventListener("click", () => {
+        queueHistoryAnnouncement(pane);
         rememberPaneContext(pane.paneId);
         window.surfAce.command({ direction: "forward", paneId: pane.paneId, type: "history" });
       });
       navigationPill.appendChild(forward);
     }
-    const navigationOwnerName = pane.provenanceName;
-    if (navigationOwnerName) {
+    if (hasPushedContent) {
+      const provenanceLabel = createProvenanceLabel(
+        pane.paneId,
+        pane.provenance,
+      );
+      navigationPill.appendChild(provenanceLabel);
+      registerProvenanceLabel(provenanceLabel);
+    } else if (pane.provenanceName) {
       const ownerName = document.createElement("span");
       ownerName.className = "navigation-pill__owner";
-      ownerName.textContent = navigationOwnerName;
+      ownerName.textContent = pane.provenanceName;
       navigationPill.appendChild(ownerName);
     }
     if (navigationPill.childElementCount > 0) {
@@ -2716,6 +3042,7 @@ function renderWindow(state: RendererWindowState): void {
     surfaceId: state.surfaceId,
     windowLabel: state.windowLabel,
   });
+  announceReachedHistoryEntries(state);
   const previousState = latestState;
   if (previousState) {
     latestState = state;
@@ -2779,6 +3106,7 @@ async function init(): Promise<void> {
     document.documentElement.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
     document.body.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
     document.body.classList.toggle("overlay-debug-borders", Boolean(bootstrap.overlayDebugBorders));
+    installProvenanceMetricObservers();
     latestState = bootstrap.state;
     renderWindow(bootstrap.state);
   } catch (error) {
@@ -2814,6 +3142,7 @@ async function init(): Promise<void> {
   });
 
   window.addEventListener("resize", () => {
+    refreshProvenanceWidths();
     if (!latestState) {
       return;
     }

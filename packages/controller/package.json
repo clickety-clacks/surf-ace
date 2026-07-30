@@ -1,5 +1,5 @@
 {
-  "name": "@surf-ace/protocol",
+  "name": "@surf-ace/controller",
   "version": "0.1.0",
   "private": false,
   "type": "module",
@@ -15,8 +15,14 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "dependencies": {
+    "@surf-ace/protocol": "workspace:*",
+    "ws": "^8.18.0"
+  },
   "devDependencies": {
-    "tsx": "^4.20.5",
+    "@types/node": "^24.3.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.2"
   }
 }

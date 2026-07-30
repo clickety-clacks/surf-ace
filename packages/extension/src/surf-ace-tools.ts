@@ -27,6 +27,11 @@ export const surfAceToolNames = [
   "surf_ace_realize_topology",
   "surf_ace_realize_topologies",
   "surf_ace_close_pane",
+  "surf_ace_rename_pane",
+  "surf_ace_restore_pane",
+  "surf_ace_surface_intent",
+  "surf_ace_target_register",
+  "surf_ace_target_apply",
   "surf_ace_read",
   "surf_ace_capture_pane",
   "surf_ace_annotations_remove",
@@ -555,17 +560,112 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
     },
     {
       description: "Close an existing Surf Ace pane.",
-      execute: async (args: { fingerprint: string; paneId: PaneId }) => await runtime.closePane(args),
+      execute: async (args: { expectedTopologyRevision: number; fingerprint: string; paneId: PaneId }) =>
+        await runtime.closePane(args),
       inputSchema: {
         additionalProperties: false,
         properties: {
           fingerprint: fingerprintParam,
           paneId: paneIdParam,
+          expectedTopologyRevision: {
+            description: "Required in lockless mode; use topologyRevision from the latest surf_ace_list.",
+            minimum: 0,
+            type: "integer",
+          },
+        },
+        required: ["fingerprint", "paneId", "expectedTopologyRevision"],
+        type: "object",
+      },
+      name: "surf_ace_close_pane",
+    },
+    {
+      description: "Rename a pane using the latest client topology revision.",
+      execute: async (args: Parameters<SurfAceRuntime["renamePane"]>[0]) =>
+        await runtime.renamePane(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          expectedTopologyRevision: { minimum: 0, type: "integer" },
+          fingerprint: fingerprintParam,
+          name: { type: ["string", "null"] },
+          paneId: paneIdParam,
+        },
+        required: ["fingerprint", "paneId", "name", "expectedTopologyRevision"],
+        type: "object",
+      },
+      name: "surf_ace_rename_pane",
+    },
+    {
+      description: "Restore a retained pane tombstone beside an existing anchor pane.",
+      execute: async (args: Parameters<SurfAceRuntime["restorePane"]>[0]) =>
+        await runtime.restorePane(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          anchorPaneId: paneIdParam,
+          direction: { enum: ["horizontal", "vertical"], type: "string" },
+          expectedTopologyRevision: { minimum: 0, type: "integer" },
+          fingerprint: fingerprintParam,
+          tombstoneId: { type: "string" },
+        },
+        required: ["fingerprint", "anchorPaneId", "direction", "expectedTopologyRevision", "tombstoneId"],
+        type: "object",
+      },
+      name: "surf_ace_restore_pane",
+    },
+    {
+      description: "Open, recoverably close, or restore a Surf Ace surface through its endpoint lifecycle connection.",
+      execute: async (args: Parameters<SurfAceRuntime["surfaceIntent"]>[0]) =>
+        await runtime.surfaceIntent(args),
+      inputSchema: {
+        additionalProperties: true,
+        properties: {
+          action: { enum: ["open", "close", "restore"], type: "string" },
+          endpointId: { type: "string" },
+          expectedSurfaceSetRevision: { minimum: 0, type: "integer" },
+          expectedTopologyRevision: { minimum: 0, type: "integer" },
+          fingerprint: fingerprintParam,
+          tombstoneId: { type: "string" },
+        },
+        required: ["action", "expectedSurfaceSetRevision"],
+        type: "object",
+      },
+      name: "surf_ace_surface_intent",
+    },
+    {
+      description: "Register client-restorable target material without legacy ownership fields.",
+      execute: async (
+        args: Parameters<SurfAceRuntime["registerTarget"]>[0],
+      ) => await runtime.registerTarget(args),
+      inputSchema: {
+        additionalProperties: true,
+        properties: {
+          fingerprint: fingerprintParam,
+          idempotencyKey: { minLength: 1, type: "string" },
+          paneId: paneIdParam,
+        },
+        required: ["fingerprint", "paneId", "idempotencyKey"],
+        type: "object",
+      },
+      name: "surf_ace_target_register",
+    },
+    {
+      description: "Apply or restore a registered target through the client-owned target lifecycle.",
+      execute: async (
+        args: Parameters<SurfAceRuntime["restoreTarget"]>[0],
+      ) => await runtime.restoreTarget(args),
+      inputSchema: {
+        additionalProperties: false,
+        properties: {
+          confirmed: { type: "boolean" },
+          fingerprint: fingerprintParam,
+          paneId: paneIdParam,
+          targetId: { minLength: 1, type: "string" },
         },
         required: ["fingerprint", "paneId"],
         type: "object",
       },
-      name: "surf_ace_close_pane",
+      name: "surf_ace_target_apply",
     },
     {
       description: "Read the local Surf Ace buffer for a pane, including the current cached content snapshot and locally known pushed content. No live network call is made.",

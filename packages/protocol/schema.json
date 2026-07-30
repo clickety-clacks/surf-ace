@@ -5,6 +5,15 @@
   "type": "object",
   "oneOf": [
     {
+      "$ref": "#/$defs/LocklessRequest"
+    },
+    {
+      "$ref": "#/$defs/LocklessResponse"
+    },
+    {
+      "$ref": "#/$defs/LocklessEvent"
+    },
+    {
       "$ref": "#/$defs/SurfacesListRequest"
     },
     {
@@ -4881,6 +4890,146 @@
             }
           }
         }
+      }
+    },
+    "LocklessRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": {
+          "enum": [
+            "pair.request",
+            "surfaces.list",
+            "panes.list",
+            "consumable.ack",
+            "consumable.sync",
+            "content.set",
+            "content.append",
+            "content.patch",
+            "content.clear",
+            "pane.split",
+            "pane.close",
+            "pane.rename",
+            "pane.restore",
+            "surface.window.open",
+            "surface.window.close",
+            "surface.window.restore",
+            "topology.apply",
+            "target.apply",
+            "target.register",
+            "annotations.remove",
+            "snapshot.get",
+            "heartbeat.ping"
+          ]
+        },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": { "type": "object" }
+      }
+    },
+    "LocklessResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": {
+          "enum": [
+            "pair.request",
+            "surfaces.list",
+            "panes.list",
+            "consumable.ack",
+            "consumable.sync",
+            "content.set",
+            "content.append",
+            "content.patch",
+            "content.clear",
+            "pane.split",
+            "pane.close",
+            "pane.rename",
+            "pane.restore",
+            "surface.window.open",
+            "surface.window.close",
+            "surface.window.restore",
+            "topology.apply",
+            "target.apply",
+            "target.register",
+            "annotations.remove",
+            "snapshot.get",
+            "heartbeat.ping"
+          ]
+        },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "type": "boolean" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {},
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "enum": [
+                "capability_mismatch",
+                "controller_capacity",
+                "duplicate_controller_instance",
+                "internal_error",
+                "invalid_controller_instance",
+                "invalid_operation",
+                "invalid_payload",
+                "not_paired",
+                "pane_capacity",
+                "pane_state_capacity",
+                "stale_content",
+                "stale_surface_set",
+                "stale_topology",
+                "surface_state_capacity",
+                "tombstone_capacity",
+                "tombstone_not_found",
+                "unsupported_operation"
+              ]
+            },
+            "message": { "type": "string" },
+            "details": {}
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["payload"],
+          "properties": { "ok": { "const": true } }
+        },
+        {
+          "required": ["error"],
+          "properties": { "ok": { "const": false } }
+        }
+      ]
+    },
+    "LocklessEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": {
+          "enum": [
+            "event.lockless_content_committed",
+            "event.lockless_scope_snapshot",
+            "event.lockless_consumable_delta",
+            "event.consumable_available",
+            "event.consumable_overflow",
+            "event.controller_retention_reclaimed",
+            "event.tombstone_reclaimed"
+          ]
+        },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": { "type": "object" }
       }
     }
   }

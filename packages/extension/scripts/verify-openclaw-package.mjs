@@ -32,8 +32,15 @@ assertFile("surf-ace.ts");
 assertFile("dist/surf-ace.js");
 assertFile("dist/extension/src/index.js");
 assertFile("dist/protocol/schema.json");
+assertFile("node_modules/@surf-ace/controller/dist/index.js");
+assertFile("node_modules/@surf-ace/protocol/dist/index.js");
+assertFile("node_modules/@surf-ace/protocol/schema.json");
 assertFile("node_modules/bonjour-service/package.json");
 assertFile("node_modules/ws/package.json");
+
+await import(
+  pathToFileURL(packagePath("dist/extension/src/openclaw-lockless-controller.js")).href
+);
 
 const runtimeEntry = readFileSync(packagePath("dist/extension/src/index.js"), "utf8");
 assert.match(

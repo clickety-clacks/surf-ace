@@ -147,6 +147,7 @@ function configurePlatformWebAuthn(): void {
 configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
+const programmaticSurfaceCloses = new Set<string>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const browserUrlWebContentsPanes = new Map<number, { paneId: number; surfaceId: string }>();
 const readyWindows = new Set<string>();
@@ -1226,6 +1227,21 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     syncWindowPlacement(surfaceId, window);
   });
   window.on("closed", () => {
+    const programmaticClose = programmaticSurfaceCloses.delete(surfaceId);
+    if (programmaticClose) {
+      windows.delete(surfaceId);
+      pendingWindowStates.delete(surfaceId);
+      readyWindows.delete(surfaceId);
+      setTimeout(
+        () =>
+          server.disconnectLocklessSurfaceSessions(
+            surfaceId,
+            "surface_closed",
+          ),
+        0,
+      );
+      return;
+    }
     clientInfo("window_closed", {
       is_quitting: isQuitting,
       pane_ids: core.activePaneIds(surfaceId).join(","),
@@ -1245,9 +1261,8 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
             console.warn(`[surf-ace] compositor overlay region clear failed: ${overlayError}`);
           });
         }
-        void server.broadcastSurfaceRemoved(surfaceId);
         server.disconnectSurface(surfaceId, "provider_shutdown");
-        core.removeSurface(surfaceId);
+        await server.closeSurfaceFromLocalUser(surfaceId);
         void persistState();
       })();
     }
@@ -1383,10 +1398,8 @@ async function contentPayloadFromFile(
 }
 
 async function createAdditionalWindow(): Promise<void> {
-  const surface = core.createAdditionalSurface(endpointName(), displayViewport());
+  core.createAdditionalSurface(endpointName(), displayViewport());
   await persistState();
-  await createWindowForSurface(surface.surfaceId);
-  await server.broadcastSurfaceAppeared(surface.surfaceId);
 }
 
 function installMenu(): void {
@@ -1704,7 +1717,10 @@ async function boot(): Promise<void> {
     state_dir: stateDir,
   });
 
-  core = new SurfaceCore({ persistentState });
+  core = new SurfaceCore({
+    clientIdentity: identityFingerprint,
+    persistentState,
+  });
   const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
   if (shouldGuardUnrestorablePersistentState(persistentState, restoredSurfaces.length)) {
     persistentStateWriteGuard = "unrestorable-primary";
@@ -1713,11 +1729,18 @@ async function boot(): Promise<void> {
       write_guard: persistentStateWriteGuard,
     });
   }
-  const primarySurface = restoredSurfaces.find((surface) => surface.surfaceId === persistentState?.primarySurfaceId)
-    ?? restoredSurfaces[0]
-    ?? core.ensurePrimarySurface(endpointName(), displayViewport());
+  const retainedSurfaceTombstones =
+    core.locklessAuthority.listTombstones("surface");
+  const primarySurface =
+    restoredSurfaces.find(
+      (surface) => surface.surfaceId === persistentState?.primarySurfaceId,
+    ) ??
+    restoredSurfaces[0] ??
+    (retainedSurfaceTombstones.length === 0
+      ? core.ensurePrimarySurface(endpointName(), displayViewport())
+      : null);
   clientInfo("surface_restore_result", {
-    primary_surface_id: primarySurface.surfaceId,
+    primary_surface_id: primarySurface?.surfaceId ?? "nil",
     restored_surface_summary: restoredSurfaceDiagnosticSummary(),
     restored_surface_ids: restoredSurfaces.map((surface) => surface.surfaceId).join(","),
     restored_surface_count: restoredSurfaces.length,
@@ -1727,8 +1750,26 @@ async function boot(): Promise<void> {
   server = serverStart.server;
 
   core.subscribe((coreEvent) => {
+    if (coreEvent.type === "lockless-authority-changed") {
+      void persistState();
+      return;
+    }
     if (coreEvent.type === "surface-changed") {
       broadcastSurfaceState(coreEvent.surfaceId);
+      void persistState();
+      return;
+    }
+    if (coreEvent.type === "surface-created") {
+      void createWindowForSurface(coreEvent.surfaceId);
+      void persistState();
+      return;
+    }
+    if (coreEvent.type === "surface-removed") {
+      const window = windows.get(coreEvent.surfaceId);
+      if (window && !window.isDestroyed()) {
+        programmaticSurfaceCloses.add(coreEvent.surfaceId);
+        window.close();
+      }
       void persistState();
     }
   });
@@ -1757,7 +1798,7 @@ async function boot(): Promise<void> {
   for (const surface of surfacesToOpen) {
     await createWindowForSurface(surface.surfaceId);
   }
-  if (surfacesToOpen.length === 0) {
+  if (surfacesToOpen.length === 0 && primarySurface) {
     await createWindowForSurface(primarySurface.surfaceId);
   }
   clientInfo("app_ready", {

@@ -264,6 +264,11 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
     "surf_ace_realize_topology",
     "surf_ace_realize_topologies",
     "surf_ace_close_pane",
+    "surf_ace_rename_pane",
+    "surf_ace_restore_pane",
+    "surf_ace_surface_intent",
+    "surf_ace_target_register",
+    "surf_ace_target_apply",
     "surf_ace_read",
     "surf_ace_capture_pane",
     "surf_ace_annotations_remove",
@@ -397,9 +402,13 @@ test("CLU tool surface matches DESIGN.md exactly", () => {
   assert.ok(closePaneTool);
   assert.deepEqual(
     Object.keys(closePaneTool.inputSchema.properties as Record<string, unknown>).sort(),
-    ["fingerprint", "paneId"].sort(),
+    ["expectedTopologyRevision", "fingerprint", "paneId"].sort(),
   );
-  assert.deepEqual(closePaneTool.inputSchema.required, ["fingerprint", "paneId"]);
+  assert.deepEqual(closePaneTool.inputSchema.required, [
+    "fingerprint",
+    "paneId",
+    "expectedTopologyRevision",
+  ]);
   assert.equal(closePaneTool.inputSchema.additionalProperties, false);
 
   const relinquishTool = tools.find((tool) => tool.name === "surf_ace_relinquish");

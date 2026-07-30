@@ -21,6 +21,8 @@ SURF_ACE_CONTINUITY_PROTECT_FILTERS := $(foreach file,$(SURF_ACE_CONTINUITY_FILE
 .PHONY: package verify-package verify-deploy-state-preservation deploy-tars guard-tars-extension-deploy clean
 
 package:
+	pnpm --dir ../protocol build
+	pnpm --dir ../controller build
 	pnpm exec tsc -p tsconfig.json
 	rm -rf $(PKG_DIR)
 	mkdir -p $(PKG_DIR)/extension/src $(PKG_DIR)/protocol/src $(PKG_DIR)/dist/protocol $(PKG_DIR)/skills
@@ -36,6 +38,12 @@ package:
 	cp ../protocol/schema.json $(PKG_DIR)/protocol/schema.json
 	rsync -a skills/ $(PKG_DIR)/skills/
 	npm install --prefix $(PKG_DIR) --omit=dev --silent
+	mkdir -p $(PKG_DIR)/node_modules/@surf-ace/controller $(PKG_DIR)/node_modules/@surf-ace/protocol
+	cp ../controller/package.json $(PKG_DIR)/node_modules/@surf-ace/controller/package.json
+	rsync -a ../controller/dist/ $(PKG_DIR)/node_modules/@surf-ace/controller/dist/
+	cp ../protocol/package.json $(PKG_DIR)/node_modules/@surf-ace/protocol/package.json
+	cp ../protocol/schema.json $(PKG_DIR)/node_modules/@surf-ace/protocol/schema.json
+	rsync -a ../protocol/dist/ $(PKG_DIR)/node_modules/@surf-ace/protocol/dist/
 
 verify-package: package
 	node scripts/verify-openclaw-package.mjs

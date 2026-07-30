@@ -602,15 +602,24 @@ test("split flex children do not force every pane to full window height", async 
   assert.match(splitChildRule, /min-height:\s*0;/);
 });
 
-test("renderer chrome keeps session names in navigation chrome, not pane identity overlay", async () => {
+test("renderer chrome keeps entry-bound composite provenance in navigation chrome", async () => {
   const source = await rendererSource();
   const styles = await rendererStyles();
 
   assert.match(source, /provenanceName: string \| null/);
+  assert.match(
+    source,
+    /provenance:\s*\{\s*controllerProductName: string \| null;\s*friendlyChatName: string \| null;\s*\} \| null;/,
+  );
   assert.match(source, /ownerName: string \| null/);
-  assert.match(source, /const navigationOwnerName = pane\.provenanceName/);
+  assert.match(source, /createProvenanceLabel\(\s*pane\.paneId,\s*pane\.provenance/);
+  assert.match(source, /trimUnicodeWhitespace/);
+  assert.match(source, /\\p\{White_Space\}/);
+  assert.match(source, /bidiIsolate/);
+  assert.match(source, /announceReachedHistoryEntries\(state\)/);
+  assert.match(source, /queueHistoryAnnouncement\(pane\)/);
   assert.match(source, /ownerName\.className = "navigation-pill__owner"/);
-  assert.match(source, /ownerName\.textContent = navigationOwnerName/);
+  assert.match(source, /ownerName\.textContent = pane\.provenanceName/);
   assert.doesNotMatch(source, /pane-label__sender/);
   assert.doesNotMatch(source, /provenanceLabelEl/);
   assert.match(source, /labelEl\.append\(windowLabelEl, disconnectedGlyphEl, labelTextEl\)/);
@@ -631,6 +640,9 @@ test("renderer chrome keeps session names in navigation chrome, not pane identit
   assert.doesNotMatch(styles, /\.pane-label__sender\s*\{/);
   assert.match(styles, /\.pane-label__disconnected\s*\{[\s\S]*color:\s*rgb\(239,\s*68,\s*68\);/);
   assert.match(styles, /\.navigation-pill__owner\s*\{[\s\S]*font-size:\s*calc\(13px \+ 3pt\)/);
+  assert.match(styles, /\.navigation-pill__provenance--composite\s*\{/);
+  assert.match(styles, /\.navigation-pill__provenance--collapsed::after\s*\{[\s\S]*content:\s*"…"/);
+  assert.match(styles, /\.navigation-pill__provenance--zero-width\s*\{[\s\S]*flex:\s*0 0 0;[\s\S]*width:\s*0;/);
 });
 
 test("renderer fits pane identity labels inside pane bounds for native and renderer panes", async () => {

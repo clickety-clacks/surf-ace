@@ -687,6 +687,76 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   white-space: nowrap;
 }
 
+.navigation-pill__provenance {
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  min-width: 0;
+  max-width: min(34vw, 340px);
+  overflow: hidden;
+  padding: 0;
+  color: rgba(238, 244, 255, 0.86);
+  font-family: var(--ui-font-family);
+  font-size: calc(13px + 3pt);
+  font-weight: 550;
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.navigation-pill__provenance-component {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  unicode-bidi: isolate;
+  white-space: nowrap;
+}
+
+.navigation-pill__provenance-separator {
+  flex: 0 0 auto;
+  white-space: pre;
+}
+
+.navigation-pill__provenance--composite {
+  min-width: 0;
+}
+
+.navigation-pill__provenance--collapsed
+  .navigation-pill__provenance-component,
+.navigation-pill__provenance--collapsed
+  .navigation-pill__provenance-separator {
+  display: none;
+}
+
+.navigation-pill__provenance--collapsed::after {
+  content: "…";
+}
+
+.navigation-pill__provenance--zero-width {
+  flex: 0 0 0;
+  width: 0;
+  max-width: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.navigation-pill__provenance--zero-width
+  .navigation-pill__provenance-component,
+.navigation-pill__provenance--zero-width
+  .navigation-pill__provenance-separator {
+  visibility: hidden;
+}
+
+.provenance-announcer {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .control-button {
   appearance: none;
   position: relative;

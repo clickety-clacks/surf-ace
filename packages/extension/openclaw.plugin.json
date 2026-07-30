@@ -22,6 +22,11 @@
     "surf_ace_realize_topology",
     "surf_ace_realize_topologies",
     "surf_ace_close_pane",
+    "surf_ace_rename_pane",
+    "surf_ace_restore_pane",
+    "surf_ace_surface_intent",
+    "surf_ace_target_register",
+    "surf_ace_target_apply",
     "surf_ace_read",
     "surf_ace_capture_pane",
     "surf_ace_annotations_remove"
@@ -39,6 +44,11 @@
       "surf_ace_realize_topology",
       "surf_ace_realize_topologies",
       "surf_ace_close_pane",
+      "surf_ace_rename_pane",
+      "surf_ace_restore_pane",
+      "surf_ace_surface_intent",
+      "surf_ace_target_register",
+      "surf_ace_target_apply",
       "surf_ace_read",
       "surf_ace_capture_pane",
       "surf_ace_annotations_remove"

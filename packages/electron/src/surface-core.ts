@@ -46,6 +46,19 @@ import type {
 } from "../../protocol/src/index.js";
 import type { NativePaneChromeInsets, NativePaneMaterialization } from "./native-pane-bridge.js";
 import type { NativePaneWindowGroupStatus } from "./native-pane-bridge.js";
+import {
+  LocklessAuthorityError,
+  LocklessClientAuthority,
+  type PersistentLocklessClientState,
+} from "./lockless-client-authority.js";
+import {
+  locklessPaneScopeId,
+  locklessSurfaceScopeId,
+  type LocklessContentCommit,
+  type LocklessContentPush,
+  type LocklessEntryProvenance,
+  type LocklessPairPayload,
+} from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
@@ -60,8 +73,16 @@ type HistoryEntry = {
   contentId: string | null;
   contentType: RenderableContentType | null;
   display?: ContentDisplay;
+  historyEntryId?: string;
+  lastVisibleSequence?: number;
   lastApplyEvidence?: TargetApplyResponse["payload"];
   ownerToken: string | null;
+  provenance?: LocklessEntryProvenance;
+  registeredTarget?: PaneCurrentTargetState & {
+    idempotencyKey: string;
+    launchedAt: string;
+    registrationState: "before_attach" | "attached";
+  };
   reloadSource?: ContentReloadSource;
   revision: number;
 };
@@ -94,6 +115,7 @@ type PaneState = {
   lastSuccessfulFlushAt: number | null;
   latestContentEventAt: number;
   name: string | null;
+  nextRevision: number;
   nativeHost: {
     bindingId?: string;
     contentId?: string;
@@ -172,6 +194,7 @@ const DIRECT_NATIVE_PANE_EXECUTABLE_ENV = new Map<string, Record<string, string>
 export type PaneNavigationDirection = "down" | "left" | "right" | "up";
 
 export type PersistentSurfaceState = {
+  lockless?: PersistentLocklessClientState;
   primarySurfaceId: string | null;
   surfaces?: PersistentSurfaceRecord[];
   version: 1;
@@ -207,6 +230,7 @@ type PersistentPaneRecord = {
   lastSuccessfulFlushAt: number | null;
   latestContentEventAt: number;
   name: string | null;
+  nextRevision?: number;
   paneId: number;
   paneLabel: number;
   paneLineageId: string;
@@ -239,6 +263,7 @@ export type RendererPaneState = {
   paneId: number;
   displayId: string;
   provenanceName: string | null;
+  provenance: LocklessEntryProvenance | null;
   visibleAddress: string;
   showDone: boolean;
   toast: string | null;
@@ -273,6 +298,7 @@ export type ReloadEntryIdentity = {
 };
 
 export type CoreEvent =
+  | { type: "lockless-authority-changed" }
   | { surfaceId: string; type: "surface-changed" }
   | { surfaceId: string; type: "surface-created" }
   | { surfaceId: string; type: "surface-removed" }
@@ -325,6 +351,17 @@ function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
   return paneLabel > 0 ? String(paneLabel) : "";
 }
 
+function alphabeticLabel(ordinal: number): string {
+  let remaining = Math.max(1, Math.trunc(ordinal));
+  let result = "";
+  while (remaining > 0) {
+    remaining -= 1;
+    result = String.fromCharCode(97 + (remaining % 26)) + result;
+    remaining = Math.floor(remaining / 26);
+  }
+  return result;
+}
+
 function provenanceDisplayName(display: ContentDisplay | undefined): string | null {
   return display?.senderDisplayName ??
     display?.provenance?.displayName ??
@@ -348,13 +385,16 @@ const SUPPORTED_TARGET_CAPABILITIES = [
 ] as const;
 
 export class SurfaceCore {
+  readonly locklessAuthority: LocklessClientAuthority;
   private readonly surfaces = new Map<string, SurfaceState>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
+  private pendingEvents: CoreEvent[] | null = null;
   private readonly logger: { warn?: (message: string) => void };
   private readonly now: () => number;
   private persistentState: PersistentSurfaceState;
 
   constructor(options?: {
+    clientIdentity?: string;
     logger?: { warn?: (message: string) => void };
     now?: () => number;
     persistentState?: PersistentSurfaceState;
@@ -365,6 +405,11 @@ export class SurfaceCore {
       primarySurfaceId: null,
       version: 1,
     };
+    this.locklessAuthority = new LocklessClientAuthority(
+      this.persistentState.lockless,
+      this.now,
+      options?.clientIdentity ?? null,
+    );
   }
 
   subscribe(listener: (event: CoreEvent) => void): () => void {
@@ -374,11 +419,173 @@ export class SurfaceCore {
     };
   }
 
+  transaction<T>(operation: () => T): T {
+    if (this.pendingEvents) return operation();
+    this.pendingEvents = [];
+    try {
+      const result = operation();
+      const events = this.pendingEvents;
+      this.pendingEvents = null;
+      for (const event of events) this.deliver(event);
+      return result;
+    } catch (error) {
+      this.pendingEvents = null;
+      throw error;
+    }
+  }
+
   getPersistentState(): PersistentSurfaceState {
     return {
       ...structuredClone(this.persistentState),
+      lockless: this.locklessAuthority.exportState(),
       surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
     };
+  }
+
+  markLocklessAuthorityChanged(surfaceId?: string): void {
+    this.emit({ type: "lockless-authority-changed" });
+    const targetSurfaceId =
+      surfaceId ??
+      this.persistentState.primarySurfaceId ??
+      this.listSurfaces()[0]?.surfaceId;
+    if (targetSurfaceId) {
+      this.emit({ surfaceId: targetSurfaceId, type: "surface-changed" });
+    }
+  }
+
+  admitSurfaceToLockless(
+    surfaceId: string,
+    migrationMaterial?: LocklessPairPayload["migrationMaterial"],
+    controllerInstanceId?: string,
+  ): void {
+    if (this.locklessAuthority.surfaceMode(surfaceId) === "lockless") {
+      if (migrationMaterial) {
+        throw new LocklessAuthorityError(
+          "invalid_operation",
+          "Legacy migration material is accepted only during first lockless admission",
+        );
+      }
+      return;
+    }
+    const surface = this.getSurface(surfaceId);
+    const rollback = serializeSurface(surface);
+    const hadLegacyOwnership = surface.providerOwnership !== null;
+    const usedLabels = new Set<number>();
+    let nextLabel = 1;
+    try {
+      surface.providerOwnership = null;
+      const bootstrapPane = surface.panes.get(BOOTSTRAP_PANE_ID);
+      if (
+        surface.panes.size === 1 &&
+        surface.layout?.type === "pane" &&
+        surface.layout.paneId === BOOTSTRAP_PANE_ID &&
+        bootstrapPane &&
+        isPristineProviderBootstrapPane(bootstrapPane, true)
+      ) {
+        const identity = this.locklessAuthority.allocatePaneIdentity([], []);
+        this.ensureInitialPane(
+          surface,
+          identity.paneId,
+          identity.paneLabel,
+        );
+      }
+      if (!isValidWindowLabel(surface.windowLabel)) {
+        const usedWindowLabels = new Set(
+          this.listSurfaces()
+            .filter((candidate) => candidate.surfaceId !== surfaceId)
+            .map((candidate) => candidate.windowLabel)
+            .filter(isValidWindowLabel),
+        );
+        let ordinal = 1;
+        let candidate = alphabeticLabel(ordinal);
+        while (usedWindowLabels.has(candidate)) {
+          candidate = alphabeticLabel(++ordinal);
+        }
+        surface.windowLabel = candidate;
+      }
+      for (const paneId of surface.paneOrder) {
+        const pane = surface.panes.get(paneId)!;
+        if (pane.paneLabel <= 0 || usedLabels.has(pane.paneLabel)) {
+          while (usedLabels.has(nextLabel)) nextLabel += 1;
+          pane.paneLabel = nextLabel;
+        }
+        usedLabels.add(pane.paneLabel);
+      }
+      const prospective = serializeSurface(surface);
+      const surfaceBase = ({
+        panes: _panes,
+        ...base
+      }: PersistentSurfaceRecord) => base;
+      this.locklessAuthority.assertSurfaceRecoverableBaseCapacity(
+        surfaceBase(rollback),
+        surfaceBase(prospective),
+      );
+      for (const pane of prospective.panes) {
+        this.locklessAuthority.assertPaneRecoverableCapacity(
+          rollback.panes.find((entry) => entry.paneId === pane.paneId) ?? pane,
+          pane,
+          pane.history.map((entry) => entry.annotations),
+        );
+      }
+      const retainedPaneCount = this.locklessAuthority
+        .listTombstones("pane")
+        .filter((entry) => entry.surfaceId === surfaceId).length;
+      if (
+        surface.panes.size + retainedPaneCount >
+        this.locklessAuthority.limits.maxPanesPerSurface +
+          this.locklessAuthority.limits.maxRetainedTombstones
+      ) {
+        throw new LocklessAuthorityError(
+          "pane_capacity",
+          "Legacy surface exceeds lockless live-plus-tombstone envelope",
+        );
+      }
+      if (hadLegacyOwnership && !migrationMaterial) {
+        throw new LocklessAuthorityError(
+          "capability_mismatch",
+          "Legacy provider-local unread state requires explicit migration material",
+        );
+      }
+      if (migrationMaterial) {
+        if (!controllerInstanceId) {
+          throw new LocklessAuthorityError(
+            "invalid_controller_instance",
+            "Legacy migration requires the stable controller instance",
+          );
+        }
+        const admittedScopeIds = new Set([
+          locklessSurfaceScopeId(surfaceId),
+          ...this.activePaneIds(surfaceId).map((paneId) =>
+            locklessPaneScopeId(surfaceId, paneId),
+          ),
+          ...this.locklessAuthority
+            .retainedPaneIds(surfaceId)
+            .map((paneId) => locklessPaneScopeId(surfaceId, paneId)),
+        ]);
+        const foreignScope = migrationMaterial.scopes.find(
+          (candidate) => !admittedScopeIds.has(candidate.scopeId),
+        );
+        if (foreignScope) {
+          throw new LocklessAuthorityError(
+            "invalid_payload",
+            "Legacy migration scope does not belong to the paired surface",
+            { scopeId: foreignScope.scopeId, surfaceId },
+          );
+        }
+        this.locklessAuthority.importLegacyMigrationMaterial(
+          controllerInstanceId,
+          migrationMaterial,
+        );
+      }
+      this.locklessAuthority.convertSurfaceToLocklessMode(surfaceId);
+      this.emit({ surfaceId, type: "surface-changed" });
+    } catch (error) {
+      const restored = deserializeSurface(rollback, this.now());
+      if (restored) {
+        this.surfaces.set(surfaceId, restored);
+      }
+      throw error;
+    }
   }
 
   getWindowPlacement(surfaceId: string): WindowPlacement | null {
@@ -431,7 +638,15 @@ export class SurfaceCore {
       return existing;
     }
 
-    const surfaceId = existingId ?? `sf_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const retainedSurfaceIds = new Set(
+      this.locklessAuthority
+        .listTombstones("surface")
+        .map((entry) => entry.surfaceId),
+    );
+    const surfaceId =
+      existingId && !retainedSurfaceIds.has(existingId)
+        ? existingId
+        : `sf_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
     const surface = this.createSurface(surfaceId, name, viewport);
     this.persistentState.primarySurfaceId = surface.surfaceId;
     return surface;
@@ -443,6 +658,79 @@ export class SurfaceCore {
       name,
       viewport,
     );
+  }
+
+  createLocklessSurface(
+    name: string,
+    viewport: SurfaceViewport,
+  ): SurfaceState {
+    const surface = this.createAdditionalSurface(name, viewport);
+    try {
+      const identity = this.locklessAuthority.allocatePaneIdentity([], []);
+      this.applyProviderBootstrapTopology(surface.surfaceId, {
+        initialPaneId: identity.paneId,
+        initialPaneLabel: identity.paneLabel,
+        windowLabel: surface.windowLabel,
+      });
+      this.admitSurfaceToLockless(surface.surfaceId);
+      return surface;
+    } catch (error) {
+      this.surfaces.delete(surface.surfaceId);
+      throw error;
+    }
+  }
+
+  captureSurfaceTombstonePayload(
+    surfaceId: string,
+  ): PersistentSurfaceRecord {
+    return serializeSurface(this.getSurface(surfaceId));
+  }
+
+  captureSurfaceRecoverableBase(
+    surfaceId: string,
+  ): Omit<PersistentSurfaceRecord, "panes"> {
+    const { panes: _panes, ...base } = serializeSurface(
+      this.getSurface(surfaceId),
+    );
+    return base;
+  }
+
+  restoreSurfaceTombstone(
+    record: PersistentSurfaceRecord,
+  ): SurfaceState {
+    if (this.surfaces.has(record.surfaceId)) {
+      throw new SurfaceCoreError(
+        "invalid_operation",
+        `Surface is already live: ${record.surfaceId}`,
+      );
+    }
+    const prospective = structuredClone(record);
+    const usedWindowLabels = new Set(
+      this.listSurfaces().map((surface) => surface.windowLabel),
+    );
+    if (
+      !isValidWindowLabel(prospective.windowLabel) ||
+      usedWindowLabels.has(prospective.windowLabel)
+    ) {
+      let ordinal = 1;
+      let candidate = alphabeticLabel(ordinal);
+      while (usedWindowLabels.has(candidate)) {
+        candidate = alphabeticLabel(++ordinal);
+      }
+      prospective.windowLabel = candidate;
+    }
+    const surface = deserializeSurface(prospective, this.now());
+    if (!surface) {
+      throw new SurfaceCoreError(
+        "invalid_payload",
+        "Surface tombstone payload is invalid",
+      );
+    }
+    surface.providerOwnership = null;
+    this.surfaces.set(surface.surfaceId, surface);
+    this.emit({ surfaceId: surface.surfaceId, type: "surface-created" });
+    this.emit({ surfaceId: surface.surfaceId, type: "surface-changed" });
+    return surface;
   }
 
   restorePersistedSurfaces(name: string, viewport: SurfaceViewport): SurfaceState[] {
@@ -511,7 +799,6 @@ export class SurfaceCore {
     const snapshot = structuredClone(this.getSurface(surfaceId));
     return () => {
       this.surfaces.set(surfaceId, structuredClone(snapshot));
-      this.emit({ surfaceId, type: "surface-changed" });
     };
   }
 
@@ -570,6 +857,9 @@ export class SurfaceCore {
           paneId,
           displayId: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
           provenanceName: provenanceDisplayName(current.display),
+          provenance: current.provenance
+            ? structuredClone(current.provenance)
+            : null,
           visibleAddress: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
           showDone: pane.annotating,
           toast: pane.toast,
@@ -668,6 +958,13 @@ export class SurfaceCore {
       pane.historyIndex += 1;
     } else {
       return;
+    }
+    if (currentEntry(pane).historyEntryId) {
+      currentEntry(pane).lastVisibleSequence =
+        Math.max(
+          0,
+          ...pane.history.map((entry) => entry.lastVisibleSequence ?? 0),
+        ) + 1;
     }
 
     pane.toast = null;
@@ -1387,6 +1684,22 @@ export class SurfaceCore {
     bumpGeometryRevision(surface);
     this.ensureActiveKeyboardPane(surface);
     this.emit({ surfaceId, type: "surface-changed" });
+    for (const paneId of activePaneIds) {
+      if (existingPanes.has(paneId)) continue;
+      const pane = nextPanes.get(paneId)!;
+      this.emit({
+        fromSplit: false,
+        paneId,
+        paneLabel: pane.paneLabel,
+        parentPaneId: null,
+        surfaceId,
+        type: "pane-created",
+      });
+    }
+    for (const paneId of existingPanes.keys()) {
+      if (nextPanes.has(paneId)) continue;
+      this.emit({ paneId, surfaceId, type: "pane-removed" });
+    }
 
     return {
       panes: orderedPanes.map((paneId) => {
@@ -1537,6 +1850,60 @@ export class SurfaceCore {
       replaySemantics: "navigate",
       url: url.toString(),
     });
+  }
+
+  registerLocklessTarget(
+    surfaceId: string,
+    paneId: number,
+    payload: {
+      idempotencyKey: string;
+      launchedAt: string;
+      registrationState: "before_attach" | "attached";
+      restorePolicy?: string;
+      targetHeader: Record<string, unknown>;
+      targetKind: string;
+      targetPayload: unknown;
+    },
+  ): PaneCurrentTargetState {
+    const pane = this.expectPane(surfaceId, paneId);
+    const entry = currentEntry(pane);
+    if (entry.registeredTarget?.idempotencyKey === payload.idempotencyKey) {
+      return structuredClone(entry.registeredTarget);
+    }
+    const previous = currentTargetStateForEntry(pane, entry);
+    const target: NonNullable<HistoryEntry["registeredTarget"]> = {
+      currentState: "current",
+      idempotencyKey: payload.idempotencyKey,
+      launchedAt: payload.launchedAt,
+      paneLineageId: pane.paneLineageId,
+      registrationState: payload.registrationState,
+      restorePolicy: locklessTargetRestorePolicy(
+        payload.restorePolicy,
+        payload.targetKind,
+        payload.targetHeader,
+      ),
+      targetEpoch: (previous?.targetEpoch ?? 0) + 1,
+      targetHeader: structuredClone(payload.targetHeader) as never,
+      targetId: `tg_${randomBytes(8).toString("hex")}`,
+      targetKind: payload.targetKind as PaneCurrentTargetState["targetKind"],
+      targetPayload: structuredClone(payload.targetPayload),
+    };
+    entry.registeredTarget = target;
+    this.emit({ surfaceId, type: "surface-changed" });
+    return structuredClone(target);
+  }
+
+  locklessTargetRegistration(
+    surfaceId: string,
+    paneId: number,
+    idempotencyKey: string,
+  ): PaneCurrentTargetState | null {
+    const target = currentEntry(
+      this.expectPane(surfaceId, paneId),
+    ).registeredTarget;
+    return target?.idempotencyKey === idempotencyKey
+      ? structuredClone(target)
+      : null;
   }
 
   browserUrlTargetPreflight(
@@ -1693,6 +2060,19 @@ export class SurfaceCore {
     return { name, paneId };
   }
 
+  locklessPaneRename(
+    surfaceId: string,
+    paneId: number,
+    name: string | null,
+  ): { name: string | null; paneId: number; topologyRevision: number } {
+    const result = this.paneRename(surfaceId, paneId, name);
+    const surface = this.getSurface(surfaceId);
+    surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
+    bumpGeometryRevision(surface);
+    this.emit({ surfaceId, type: "topology-changed" });
+    return { ...result, topologyRevision: surface.topologyRevision };
+  }
+
   resizeSplit(surfaceId: string, path: number[], weights: number[]): void {
     const surface = this.getSurface(surfaceId);
     if (!surface.layout) {
@@ -1780,6 +2160,178 @@ export class SurfaceCore {
     this.emit({ surfaceId, type: "surface-changed" });
 
     return currentMutationAck(pane);
+  }
+
+  locklessContentPush(
+    surfaceId: string,
+    payload: LocklessContentPush,
+    controllerProductName: string | null,
+  ): LocklessContentCommit {
+    const surface = this.getSurface(surfaceId);
+    const pane = this.expectPane(surfaceId, payload.paneId);
+    if (!SUPPORTED_CONTENT_TYPES.includes(payload.contentType as ContentType)) {
+      throw new SurfaceCoreError(
+        "unsupported_content_type",
+        `Unsupported content type: ${payload.contentType}`,
+      );
+    }
+    if (pane.annotating) {
+      throw new SurfaceCoreError(
+        "invalid_operation",
+        "Cannot replace content while annotating",
+      );
+    }
+    const historyEntryId = `he_${randomUUID().replaceAll("-", "")}`;
+    const revision = Math.max(
+      pane.nextRevision,
+      Math.max(0, ...pane.history.map((entry) => entry.revision)) + 1,
+    );
+    pane.nextRevision = revision + 1;
+    if (pane.historyIndex < pane.history.length - 1) {
+      pane.history = pane.history.slice(0, pane.historyIndex + 1);
+    }
+    const friendlyChatName = payload.friendlyChatName?.trim() || null;
+    const productName = controllerProductName?.trim() || null;
+    const visibleSequence =
+      Math.max(0, ...pane.history.map((entry) => entry.lastVisibleSequence ?? 0)) +
+      1;
+    pane.history.push({
+      annotations: [],
+      content: cloneContent(payload.content as ContentPayload),
+      contentId: payload.contentId,
+      contentType: payload.contentType as ContentType,
+      display: {
+        ...(payload.display as ContentDisplay | undefined),
+        senderDisplayName: `${friendlyChatName ?? "Unknown chat"} — ${productName ?? "Unknown provider"}`,
+      },
+      historyEntryId,
+      lastVisibleSequence: visibleSequence,
+      ownerToken: null,
+      provenance: {
+        controllerProductName: productName,
+        friendlyChatName,
+      },
+      revision,
+    });
+    pane.historyIndex = pane.history.length - 1;
+    while (pane.history.length > MAX_HISTORY_DEPTH + 1) {
+      const victim = pane.history
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ index }) => index !== pane.historyIndex)
+        .sort(
+          (left, right) =>
+            (left.entry.lastVisibleSequence ?? 0) -
+            (right.entry.lastVisibleSequence ?? 0),
+        )[0];
+      if (!victim) break;
+      pane.history.splice(victim.index, 1);
+      if (victim.index < pane.historyIndex) pane.historyIndex -= 1;
+    }
+    pane.toast = null;
+    pane.externalNative = false;
+    pane.nativeHost = null;
+    pane.nativeWindowGroup = null;
+    pane.latestContentEventAt = this.now();
+    clearDirtyState(pane);
+    bumpGeometryRevision(surface);
+    this.emit({ surfaceId, type: "surface-changed" });
+    return {
+      contentId: payload.contentId,
+      historyEntryId,
+      paneId: payload.paneId,
+      revision,
+    };
+  }
+
+  capturePaneTombstonePayload(
+    surfaceId: string,
+    paneId: number,
+  ): { pane: PersistentPaneRecord; paneOrderIndex: number } {
+    const record = serializeSurface(this.getSurface(surfaceId));
+    const pane = record.panes.find((candidate) => candidate.paneId === paneId);
+    if (!pane) {
+      throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
+    }
+    return {
+      pane: structuredClone(pane),
+      paneOrderIndex: record.paneOrder.indexOf(paneId),
+    };
+  }
+
+  restorePaneTombstone(
+    surfaceId: string,
+    tombstonePayload: { pane: PersistentPaneRecord; paneOrderIndex: number },
+    anchorPaneId: number,
+    direction: "horizontal" | "vertical",
+  ): { paneId: number; paneLabel: number; topologyRevision: number } {
+    const surface = this.getSurface(surfaceId);
+    this.expectPane(surfaceId, anchorPaneId);
+    let payload = structuredClone(tombstonePayload);
+    if (surface.panes.has(payload.pane.paneId)) {
+      throw new SurfaceCoreError(
+        "invalid_operation",
+        `Pane is already live: ${payload.pane.paneId}`,
+      );
+    }
+    if (
+      [...surface.panes.values()].some(
+        (pane) => pane.paneLabel === payload.pane.paneLabel,
+      )
+    ) {
+      const usedLabels = new Set(
+        [...surface.panes.values()].map((pane) => pane.paneLabel),
+      );
+      let nextLabel = 1;
+      while (usedLabels.has(nextLabel)) nextLabel += 1;
+      payload.pane.paneLabel = nextLabel;
+    }
+    const serialized = serializeSurface(surface);
+    const restoredSurface = deserializeSurface(
+      {
+        ...serialized,
+        activeKeyboardPaneId: payload.pane.paneId,
+        layout: { paneId: payload.pane.paneId, type: "pane" },
+        paneOrder: [payload.pane.paneId],
+        panes: [payload.pane],
+      },
+      this.now(),
+    );
+    const pane = restoredSurface?.panes.get(payload.pane.paneId);
+    if (!pane) {
+      throw new SurfaceCoreError(
+        "invalid_payload",
+        "Pane tombstone payload is invalid",
+      );
+    }
+    surface.panes.set(pane.paneId, pane);
+    const insertionIndex = Math.min(
+      Math.max(0, payload.paneOrderIndex),
+      surface.paneOrder.length,
+    );
+    surface.paneOrder.splice(insertionIndex, 0, pane.paneId);
+    surface.layout = splitLayoutNode(
+      surface.layout!,
+      anchorPaneId,
+      direction,
+      [anchorPaneId, pane.paneId],
+    );
+    surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
+    bumpGeometryRevision(surface);
+    this.emit({ surfaceId, type: "surface-changed" });
+    this.emit({
+      fromSplit: false,
+      paneId: pane.paneId,
+      paneLabel: pane.paneLabel,
+      parentPaneId: anchorPaneId,
+      surfaceId,
+      type: "pane-created",
+    });
+    this.emit({ surfaceId, type: "topology-changed" });
+    return {
+      paneId: pane.paneId,
+      paneLabel: pane.paneLabel,
+      topologyRevision: surface.topologyRevision,
+    };
   }
 
   contentClear(surfaceId: string, payload: ContentClearRequest["payload"]): MutationAckResponse["payload"] {
@@ -2384,6 +2936,14 @@ export class SurfaceCore {
   }
 
   private emit(event: CoreEvent): void {
+    if (this.pendingEvents) {
+      this.pendingEvents.push(structuredClone(event));
+      return;
+    }
+    this.deliver(event);
+  }
+
+  private deliver(event: CoreEvent): void {
     for (const listener of this.listeners) {
       listener(event);
     }
@@ -2426,6 +2986,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     lastSuccessfulFlushAt: now,
     latestContentEventAt: now,
     name: null,
+    nextRevision: 1,
     nativeHost: null,
     nativeWindowGroup: null,
     paneId,
@@ -2474,6 +3035,7 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         lastSuccessfulFlushAt: pane.lastSuccessfulFlushAt,
         latestContentEventAt: pane.latestContentEventAt,
         name: pane.name,
+        nextRevision: pane.nextRevision,
         paneId: pane.paneId,
         paneLabel: pane.paneLabel,
         paneLineageId: pane.paneLineageId,
@@ -2525,6 +3087,14 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     pane.lastSuccessfulFlushAt = typeof paneRecord.lastSuccessfulFlushAt === "number" ? paneRecord.lastSuccessfulFlushAt : now;
     pane.latestContentEventAt = typeof paneRecord.latestContentEventAt === "number" ? paneRecord.latestContentEventAt : now;
     pane.name = typeof paneRecord.name === "string" ? paneRecord.name : null;
+    pane.nextRevision =
+      Number.isSafeInteger(paneRecord.nextRevision) &&
+      Number(paneRecord.nextRevision) > 0
+        ? Number(paneRecord.nextRevision)
+        : Math.max(
+            0,
+            ...pane.history.map((entry) => entry.revision),
+          ) + 1;
     pane.nativeHost = null;
     pane.nativeWindowGroup = null;
     pane.paneLineageId = typeof paneRecord.paneLineageId === "string" && paneRecord.paneLineageId.length > 0
@@ -2629,7 +3199,10 @@ function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
 }
 
-function isPristineProviderBootstrapPane(pane: PaneState): boolean {
+function isPristineProviderBootstrapPane(
+  pane: PaneState,
+  allowResolvedGeometry = false,
+): boolean {
   const entry = currentEntry(pane);
   return pane.history.length === 1 &&
     pane.historyIndex === 0 &&
@@ -2643,7 +3216,7 @@ function isPristineProviderBootstrapPane(pane: PaneState): boolean {
     pane.name === null &&
     pane.nativeHost === null &&
     !pane.pendingAnnotationCommit &&
-    pane.snapshot.bounds === null &&
+    (allowResolvedGeometry || pane.snapshot.bounds === null) &&
     pane.snapshot.selection === null &&
     pane.snapshot.visibleText === "" &&
     pane.toast === null &&
@@ -2782,6 +3355,9 @@ function protocolContentType(entry: HistoryEntry): ContentType | null {
 }
 
 function currentTargetStateForEntry(pane: PaneState, entry: HistoryEntry): PaneCurrentTargetState | null {
+  if (entry.registeredTarget) {
+    return structuredClone(entry.registeredTarget);
+  }
   if (entry.contentType !== "browser_url" || entry.contentId === null || entry.content === null || !("url" in entry.content)) {
     return null;
   }
@@ -2803,6 +3379,31 @@ function currentTargetStateForEntry(pane: PaneState, entry: HistoryEntry): PaneC
     targetPayload: { url: entry.content.url },
     ...(entry.lastApplyEvidence ? { lastApplyEvidence: structuredClone(entry.lastApplyEvidence) } : {}),
   };
+}
+
+function locklessTargetRestorePolicy(
+  requested: string | undefined,
+  targetKind: string,
+  targetHeader: Record<string, unknown>,
+): PaneCurrentTargetState["restorePolicy"] {
+  if (
+    requested === "auto" ||
+    requested === "confirm" ||
+    requested === "manual" ||
+    requested === "never"
+  ) {
+    return requested;
+  }
+  if (targetHeader.safetyClass === "privileged") return "manual";
+  if (
+    targetKind === "terminal_app" ||
+    targetKind === "native_app" ||
+    targetKind === "compositor_app"
+  ) {
+    return "confirm";
+  }
+  if (targetKind === "video") return "never";
+  return "auto";
 }
 
 function parseSafeBrowserUrl(value: string): URL | null {

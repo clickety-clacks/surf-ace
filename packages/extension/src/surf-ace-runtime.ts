@@ -23,6 +23,8 @@ import type {
   ContentSetPayload,
   ContentSetRequest,
   ContentType,
+  ConsumableGap,
+  ConsumableRecord,
   DrawingFlushConfig,
   DrawingFlushEvent,
   EpochMs,
@@ -82,6 +84,7 @@ import type {
   RestorePolicy,
   PageEvent,
   TopologyApplyRequest,
+  LocklessPairPayload,
 } from "../../protocol/src/index.js";
 import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
@@ -98,6 +101,11 @@ export type SurfAceConnectionState = "connected" | "connecting" | "unreachable";
 export type SurfAceConnectionCircuitState = "closed" | "open" | "given_up";
 type Brand<T, TName extends string> = T & { readonly __brand: TName };
 export type PaneId = Brand<string, "PaneId">;
+export type SurfAceOperationReceipt = {
+  clientResultIds: Record<string, number | string>;
+  operation: string;
+  requestId: string | null;
+};
 
 export type SurfAceConnectionDiagnostics = {
   circuitOpen: boolean;
@@ -237,6 +245,7 @@ export type SurfAceScreenSummary = {
   authority: SurfAceProviderAuthorityDecision;
   connectionDiagnostics: SurfAceConnectionDiagnostics;
   connectionState: SurfAceConnectionState;
+  endpointId?: string;
   fingerprint: string;
   lastSeenAt: number;
   name: string;
@@ -264,6 +273,11 @@ export type SurfAceScreenSummary = {
     unreachableFailures: number;
     wsOpen: boolean;
   };
+};
+
+export type SurfAceLegacyLocklessMigration = {
+  material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
+  token: string;
 };
 
 type EndpointProvenance = {
@@ -321,6 +335,7 @@ export type SurfAceFrame = {
 };
 
 export type SurfAceReadResult = {
+  acknowledgementPending?: boolean;
   browserUrl: SurfAceBrowserUrlSemanticEvidence | null;
   contentSnapshot: {
     cachedAt: number;
@@ -344,7 +359,11 @@ export type SurfAceReadResult = {
   liveDirtyStrokeIds: string[];
   liveFrame: SurfAceFrame | null;
   liveSeq: number | null;
-  overflowed: boolean;
+  cacheStatus?: "current" | "unsynchronized";
+  consumableGap?: ConsumableGap | null;
+  consumableLoss?: ConsumableGap | null;
+  consumableRecords?: ConsumableRecord[];
+  overflowed?: boolean;
   page: {
     pageCount: number;
     pageLabel?: string;
@@ -357,6 +376,7 @@ export type SurfAceReadResult = {
   playbackPosition: number | null;
   playbackState: "ended" | "paused" | "playing" | null;
   readAt: number;
+  repairScheduled?: boolean;
   scrollPosition:
     | {
         visibleRect: Viewport["visibleRect"];
@@ -412,6 +432,7 @@ export type SurfAceSnapshotResult = {
     viewport: Viewport;
     visibleText?: string;
   } | null;
+  operationReceipt?: SurfAceOperationReceipt;
 };
 
 export type SurfAceAnnotateRemoveInput = {
@@ -442,6 +463,7 @@ export type SurfAcePaneCaptureResult = {
     visibleContentId: ContentId | null;
     windowLabel: string;
   };
+  operationReceipt?: SurfAceOperationReceipt;
 };
 
 export type SurfAceAnnotateRemoveResult = {
@@ -453,6 +475,7 @@ export type SurfAceAnnotateRemoveResult = {
   paneLabel: number;
   remainingStrokeCount: number;
   removedStrokeIds: string[];
+  operationReceipt?: SurfAceOperationReceipt;
 };
 
 export type SurfAcePushContentType = ContentType | "browser_url";
@@ -507,6 +530,7 @@ export type SurfAcePushResult = {
   paneId: PaneId;
   paneLabel: number;
   revision: number;
+  operationReceipt?: SurfAceOperationReceipt;
   targetApplyEvidence?: ApplyEvidence;
   targetId?: string;
   targetKind?: TargetKind;
@@ -519,9 +543,10 @@ export type SurfAceClearResult = {
   paneId: PaneId;
   paneLabel: number;
   revision: number;
+  operationReceipt?: SurfAceOperationReceipt;
 };
 
-type SurfAceSessionContext = {
+export type SurfAceSessionContext = {
   agentId?: string;
   displayName?: string;
   provenance?: PusherProvenance;
@@ -666,6 +691,7 @@ export type SurfAceOpenSurfaceWindowResult = {
 export type SurfAceSplitInput = {
   count: number;
   direction?: "horizontal" | "vertical";
+  expectedTopologyRevision?: number;
   fingerprint: string;
   paneId: PaneId;
 };
@@ -675,6 +701,7 @@ export type SurfAceSplitResult = Array<{
   paneAddress: string;
   paneId: PaneId;
   paneLabel: number;
+  operationReceipt?: SurfAceOperationReceipt;
 }>;
 
 export type SurfAceRealizeTopologyNode =
@@ -720,6 +747,11 @@ export type SurfAceRealizeTopologiesInput = {
 export type SurfAceRealizeTopologyResult = {
   createdPaneIds: PaneId[];
   destroyedPaneIds: PaneId[];
+  destroyedPaneTombstones: Array<{
+    closedSequence: number;
+    paneId: PaneId;
+    tombstoneId: string;
+  }>;
   ok: true;
   panes: Array<{
     activeContentId: string | null;
@@ -734,6 +766,7 @@ export type SurfAceRealizeTopologyResult = {
   target: SurfAceRealizeTopologyInput["target"];
   topology: SurfAceTopologySummaryNode;
   topologyRevision: number;
+  operationReceipt?: SurfAceOperationReceipt;
 };
 
 export type SurfAceRealizeTopologyOperationResult = SurfAceRealizeTopologyResult & {
@@ -783,6 +816,7 @@ export type SurfAceClosePaneResult = {
   paneAddress: string;
   paneId: PaneId;
   paneLabel: number;
+  operationReceipt?: SurfAceOperationReceipt;
 };
 
 export type SurfAceLocalEvent =
@@ -833,12 +867,20 @@ export interface SurfAceRuntime {
   annotateRemove(input: SurfAceAnnotateRemoveInput): Promise<SurfAceAnnotateRemoveResult>;
   capturePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAcePaneCaptureResult>;
   clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult>;
+  acceptLegacyLocklessMigration(token: string): Promise<void>;
+  discardLegacyLocklessMigration(token: string): Promise<void>;
+  exportLegacyLocklessMigration(
+    endpointId: string,
+    surfaceId: string,
+  ): Promise<SurfAceLegacyLocklessMigration | null>;
   closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult>;
   listScreens(): Promise<SurfAceScreenSummary[]>;
   launchNativeApp(input: SurfAceLaunchNativeAppInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   providerAuthorityDiagnostics(): Promise<SurfAceProviderAuthorityProjection>;
   push(input: SurfAcePushInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
   read(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceReadResult>;
+  renamePane(input: { expectedTopologyRevision: number; fingerprint: string; name: string | null; paneId: PaneId }): Promise<unknown>;
+  restorePane(input: { anchorPaneId: PaneId; direction: "horizontal" | "vertical"; expectedTopologyRevision: number; fingerprint: string; tombstoneId: string }): Promise<unknown>;
   realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult>;
   realizeTopologies(input: SurfAceRealizeTopologiesInput): Promise<SurfAceRealizeTopologiesResult>;
   registerTarget(input: SurfAceTargetRegisterInput): Promise<SurfAceTargetRegisterResult>;
@@ -847,6 +889,7 @@ export interface SurfAceRuntime {
   restoreTarget(input: { confirmed?: boolean; fingerprint: string; paneId: PaneId; targetId?: string }): Promise<SurfAceTargetRestoreResult>;
   split(input: SurfAceSplitInput): Promise<SurfAceSplitResult>;
   snapshot(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceSnapshotResult>;
+  surfaceIntent(input: Record<string, unknown> & { action: "open" | "close" | "restore" }): Promise<unknown>;
   start(): Promise<void>;
   stop(): Promise<void>;
   subscribe(listener: (event: SurfAceLocalEvent) => void): () => void;
@@ -975,6 +1018,8 @@ type ManagedSurface = {
   sessionId: SessionId | null;
   ownershipEpoch: number;
   snapshotBufferedEvents: Event[];
+  snapshotBufferOverflowGeneration: number;
+  snapshotBufferOverflowed: boolean;
   snapshotSyncInFlight: boolean;
   stopRequested: boolean;
   surfaceId: SurfaceId;
@@ -1524,6 +1569,60 @@ function createPaneBuffer(): MutablePaneBuffer {
   };
 }
 
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function commonFramePrefixLength(
+  current: SurfAceFrame[],
+  migrated: SurfAceFrame[],
+): number {
+  let count = 0;
+  while (
+    count < current.length &&
+    count < migrated.length &&
+    sameJson(current[count], migrated[count])
+  ) {
+    count += 1;
+  }
+  return count;
+}
+
+function commonTapPrefixLength(
+  current: SurfAceReadResult["taps"],
+  migrated: SurfAceReadResult["taps"],
+): number {
+  let count = 0;
+  while (
+    count < current.length &&
+    count < migrated.length &&
+    sameJson(current[count], migrated[count])
+  ) {
+    count += 1;
+  }
+  return count;
+}
+
+function legacyAnnotationFramePayload(
+  frame: SurfAceFrame,
+): Record<string, unknown> {
+  return {
+    contentId: frame.contentId,
+    firstStrokeAt: frame.openedAt,
+    flushId: frame.frameId,
+    image: frame.image,
+    lastStrokeAt: frame.updatedAt,
+    legacyFrame: structuredClone(frame),
+    strokes: frame.strokes.map((stroke) => ({
+      points: stroke.points.map((point) => ({
+        ...point,
+        timestamp: stroke.startedAt,
+      })),
+      strokeId: stroke.strokeId,
+    })),
+  };
+}
+
 function createPane(
   paneId: PaneId,
   paneLabel: number,
@@ -1615,6 +1714,8 @@ function createManagedSurface(
     sessionId: null,
     ownershipEpoch: 0,
     snapshotBufferedEvents: [],
+    snapshotBufferOverflowGeneration: 0,
+    snapshotBufferOverflowed: false,
     snapshotSyncInFlight: false,
     stopRequested: false,
     surfaceId,
@@ -3160,6 +3261,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private readonly startupImportedOwnershipSurfaceIds = new Set<string>();
   private readonly legacyDifferentProviderTargetSurfaceIds = new Set<string>();
   private readonly pendingGuardTopologyPublishSurfaceIds = new Set<string>();
+  private readonly pendingLocklessMigrations = new Map<string, {
+    buffers: Array<{
+      pane: ManagedPane;
+      snapshot: MutablePaneBuffer;
+    }>;
+    snapshotBufferOverflowGeneration: number;
+    snapshotBufferOverflowed: boolean;
+    surface: ManagedSurface;
+  }>();
   private lastDiscoveryUpdateLogAt = 0;
   private lastDiscoveryUpdateLogKey = "";
   private persistentState: RuntimeStateFile = {
@@ -3369,6 +3479,226 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     };
   }
 
+  async exportLegacyLocklessMigration(
+    endpointId: string,
+    surfaceId: string,
+  ): Promise<SurfAceLegacyLocklessMigration | null> {
+    const surface = this.allManagedSurfaces().find((candidate) =>
+      candidate.endpointId === endpointId &&
+      String(candidate.surfaceId) === surfaceId
+    );
+    if (!surface) {
+      return null;
+    }
+    if (surface.snapshotSyncInFlight || surface.snapshotBufferedEvents.length > 0) {
+      return null;
+    }
+    const buffers = [...surface.panes.values()].map((pane) => ({
+      pane,
+      snapshot: structuredClone(pane.buffer),
+    }));
+    const scopes: NonNullable<
+      LocklessPairPayload["migrationMaterial"]
+    >["scopes"] = [{
+      records: [],
+      scopeId: `surface:${encodeURIComponent(surfaceId)}`,
+      scopeKind: "surface",
+    }];
+    const gaps: NonNullable<
+      LocklessPairPayload["migrationMaterial"]
+    >["gaps"] = [];
+    if (surface.snapshotBufferOverflowed) {
+      gaps.push({
+        gap: {
+          cause: "legacy_overflow",
+          droppedBytes: null,
+          droppedEventCount: null,
+          droppedFrameCount: null,
+          droppedRecordCount: null,
+          firstLostSequence: null,
+          lastLostSequence: null,
+          lossExtent: "unknown",
+          recordClasses: [],
+        },
+        scopeId: `surface:${encodeURIComponent(surfaceId)}`,
+      });
+    }
+    for (const { pane, snapshot } of buffers) {
+      const scopeId =
+        `pane:${encodeURIComponent(surfaceId)}:${encodeURIComponent(String(pane.remotePaneId))}`;
+      const records: NonNullable<
+        LocklessPairPayload["migrationMaterial"]
+      >["scopes"][number]["records"] = [];
+      for (const frame of snapshot.closedFrames) {
+        records.push({
+          payload: legacyAnnotationFramePayload(frame),
+          recordClass: "annotation_frame",
+        });
+      }
+      for (const tap of snapshot.taps) {
+        records.push({
+          payload: {
+            kind: tap.kind,
+            legacyEventId: tap.eventId,
+            nearestContent: tap.nearestText,
+            position: { x: tap.x, y: tap.y },
+            timestamp: tap.timestamp,
+          },
+          recordClass: "tap",
+        });
+      }
+      if (snapshot.scrollPosition) {
+        records.push({
+          payload: {
+            viewport: {
+              visibleRect: structuredClone(
+                snapshot.scrollPosition.visibleRect,
+              ),
+            },
+          },
+          recordClass: "scroll",
+        });
+      }
+      if (snapshot.selection) {
+        records.push({
+          payload: { selection: structuredClone(snapshot.selection) },
+          recordClass: "selection",
+        });
+      }
+      if (snapshot.page) {
+        records.push({
+          payload: {
+            page: snapshot.page.pageNumber,
+            pageText: snapshot.page.pageLabel,
+            totalPages: snapshot.page.pageCount,
+          },
+          recordClass: "page",
+        });
+      }
+      if (
+        snapshot.playbackPosition !== null ||
+        snapshot.playbackState !== null
+      ) {
+        records.push({
+          payload: {
+            playbackPosition: snapshot.playbackPosition,
+            playbackState: snapshot.playbackState,
+          },
+          recordClass: "playback",
+        });
+      }
+      if (snapshot.lastNavigation) {
+        records.push({
+          payload: structuredClone(snapshot.lastNavigation),
+          recordClass: "navigation",
+        });
+      }
+      scopes.push({
+        liveFrames: snapshot.liveFrame
+          ? [{
+              frameId: snapshot.liveFrame.frameId,
+              payload: legacyAnnotationFramePayload(snapshot.liveFrame),
+            }]
+          : undefined,
+        records,
+        scopeId,
+        scopeKind: "pane",
+      });
+      if (snapshot.overflowed) {
+        gaps.push({
+          gap: {
+            cause: "legacy_overflow",
+            droppedBytes: null,
+            droppedEventCount: null,
+            droppedFrameCount: null,
+            droppedRecordCount: null,
+            firstLostSequence: null,
+            lastLostSequence: null,
+            lossExtent: "unknown",
+            recordClasses: ["tap"],
+          },
+          scopeId,
+        });
+      }
+    }
+    const token = `legacy_migration_${randomUUID()}`;
+    this.pendingLocklessMigrations.set(token, {
+      buffers,
+      snapshotBufferOverflowGeneration:
+        surface.snapshotBufferOverflowGeneration,
+      snapshotBufferOverflowed: surface.snapshotBufferOverflowed,
+      surface,
+    });
+    return {
+      material: {
+        gaps: gaps.length > 0 ? gaps : undefined,
+        scopes,
+      },
+      token,
+    };
+  }
+
+  async acceptLegacyLocklessMigration(token: string): Promise<void> {
+    const pending = this.pendingLocklessMigrations.get(token);
+    if (!pending) {
+      throw new Error("unknown_legacy_lockless_migration");
+    }
+    this.pendingLocklessMigrations.delete(token);
+    if (
+      pending.snapshotBufferOverflowed &&
+      pending.surface.snapshotBufferOverflowed &&
+      pending.surface.snapshotBufferOverflowGeneration ===
+        pending.snapshotBufferOverflowGeneration
+    ) {
+      pending.surface.snapshotBufferOverflowed = false;
+    }
+    for (const { pane, snapshot } of pending.buffers) {
+      const bufferUnchanged = sameJson(pane.buffer, snapshot);
+      pane.buffer.closedFrames.splice(
+        0,
+        commonFramePrefixLength(pane.buffer.closedFrames, snapshot.closedFrames),
+      );
+      pane.buffer.taps.splice(
+        0,
+        commonTapPrefixLength(pane.buffer.taps, snapshot.taps),
+      );
+      if (
+        sameJson(pane.buffer.liveFrame, snapshot.liveFrame) &&
+        sameJson(
+          pane.buffer.liveDirtyStrokeIds,
+          snapshot.liveDirtyStrokeIds,
+        )
+      ) {
+        pane.buffer.liveFrame = null;
+        pane.buffer.liveDirtyStrokeIds = [];
+      }
+      if (sameJson(pane.buffer.lastNavigation, snapshot.lastNavigation)) {
+        pane.buffer.lastNavigation = null;
+      }
+      if (sameJson(pane.buffer.page, snapshot.page)) pane.buffer.page = null;
+      if (
+        sameJson(pane.buffer.scrollPosition, snapshot.scrollPosition)
+      ) pane.buffer.scrollPosition = null;
+      if (sameJson(pane.buffer.selection, snapshot.selection)) {
+        pane.buffer.selection = null;
+      }
+      if (
+        pane.buffer.playbackPosition === snapshot.playbackPosition &&
+        pane.buffer.playbackState === snapshot.playbackState
+      ) {
+        pane.buffer.playbackPosition = null;
+        pane.buffer.playbackState = null;
+      }
+      if (bufferUnchanged) {
+        pane.buffer.overflowed = false;
+      }
+    }
+  }
+
+  async discardLegacyLocklessMigration(token: string): Promise<void> {
+    this.pendingLocklessMigrations.delete(token);
+  }
+
   async listScreens(): Promise<SurfAceScreenSummary[]> {
     await this.start();
     if (!this.ownsRuntimeLease) {
@@ -3499,11 +3829,15 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (response.op !== "surface.window.open") {
       throw new SurfAceToolError("invalid_operation", `Unexpected response for surface.window.open: ${response.op}`);
     }
+    const responsePayload = response.payload as {
+      accepted: boolean;
+      surfaceId?: string;
+    };
     return {
-      accepted: response.payload.accepted,
+      accepted: responsePayload.accepted,
       fingerprint: surface.surfaceId,
-      openedSurfaceId: response.payload.surfaceId,
-      message: response.payload.accepted
+      openedSurfaceId: responsePayload.surfaceId,
+      message: responsePayload.accepted
         ? "Surf Ace surface window open request accepted."
         : "Surf Ace surface window open request was not accepted.",
       windowLabel: surface.windowLabel,
@@ -3524,10 +3858,14 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (response.op !== "surface.window.close") {
       throw new SurfAceToolError("invalid_operation", `Unexpected response for surface.window.close: ${response.op}`);
     }
+    const responsePayload = response.payload as {
+      closed: boolean;
+      surfaceId: string;
+    };
     return {
       action: "closeWindow",
-      closed: response.payload.closed,
-      fingerprint: response.payload.surfaceId,
+      closed: responsePayload.closed,
+      fingerprint: responsePayload.surfaceId,
       windowLabel: surface.windowLabel,
     };
   }
@@ -3539,6 +3877,27 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     const surface = await this.requireActionableSurface(input.fingerprint);
     return await this.paneSplit(surface, input);
+  }
+
+  async renamePane(_input: { expectedTopologyRevision: number; fingerprint: string; name: string | null; paneId: PaneId }): Promise<unknown> {
+    throw new SurfAceToolError(
+      "invalid_operation",
+      "Pane rename requires the lockless controller capability.",
+    );
+  }
+
+  async restorePane(_input: { anchorPaneId: PaneId; direction: "horizontal" | "vertical"; expectedTopologyRevision: number; fingerprint: string; tombstoneId: string }): Promise<unknown> {
+    throw new SurfAceToolError(
+      "invalid_operation",
+      "Pane restore requires the lockless controller capability.",
+    );
+  }
+
+  async surfaceIntent(_input: Record<string, unknown> & { action: "open" | "close" | "restore" }): Promise<unknown> {
+    throw new SurfAceToolError(
+      "invalid_operation",
+      "Surface lifecycle intent requires the lockless controller capability.",
+    );
   }
 
   async realizeTopology(input: SurfAceRealizeTopologyInput): Promise<SurfAceRealizeTopologyResult> {
@@ -4387,6 +4746,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return {
       createdPaneIds,
       destroyedPaneIds,
+      destroyedPaneTombstones: [],
       ok: true,
       panes: this.visiblePanes(surface).map((pane) => ({
         activeContentId: pane.activeContentId,
@@ -5605,6 +5965,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       surface.snapshotBufferedEvents.push(event);
       if (surface.snapshotBufferedEvents.length > MAX_PENDING_EVENTS_DURING_SNAPSHOT) {
         surface.snapshotBufferedEvents.shift();
+        surface.snapshotBufferOverflowGeneration += 1;
+        surface.snapshotBufferOverflowed = true;
         this.logger.warn?.(
           `[surf-ace:runtime] snapshot event buffer overflow for ${surface.surfaceId}; dropping oldest event`,
         );

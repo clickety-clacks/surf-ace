@@ -13,6 +13,12 @@ import {
   surfAceToolContextFromOpenClawContext,
 } from "./openclaw-tool-context.js";
 import { evaluateProviderHostGuard } from "./provider-host-guard.js";
+import {
+  acquireSharedRuntime,
+  releaseSharedRuntime,
+  sharedRuntimeRegistry,
+  startSharedRuntime,
+} from "./shared-runtime.js";
 import { SurfAceWireClient } from "./surf-ace-server.js";
 
 test("Surf Ace extension does not inject static instructions through prompt-build hooks", () => {
@@ -22,6 +28,45 @@ test("Surf Ace extension does not inject static instructions through prompt-buil
   assert.equal(indexSource.includes("before_prompt_build"), false);
   assert.equal(instructionSource.includes("prependContext"), false);
   assert.equal(instructionSource.includes("prependSystemContext"), false);
+});
+
+test("Surf Ace plugin registrations share one state-root runtime and release it once", async () => {
+  const stateDir = `/tmp/surf-ace-shared-runtime-${crypto.randomUUID()}`;
+  let createCount = 0;
+  let startCount = 0;
+  let stopCount = 0;
+  const runtime = {
+    start: async () => {
+      startCount += 1;
+    },
+    stop: async () => {
+      stopCount += 1;
+    },
+  };
+  const create = () => {
+    createCount += 1;
+    return runtime as never;
+  };
+
+  const first = acquireSharedRuntime(stateDir, create);
+  const second = acquireSharedRuntime(stateDir, create);
+
+  assert.equal(first, second);
+  assert.equal(createCount, 1);
+  await Promise.all([
+    startSharedRuntime(first),
+    startSharedRuntime(second),
+  ]);
+  assert.equal(startCount, 1);
+
+  await releaseSharedRuntime(stateDir, first);
+  assert.equal(stopCount, 0);
+  await releaseSharedRuntime(stateDir, second);
+  assert.equal(stopCount, 1);
+  assert.equal(
+    sharedRuntimeRegistry().has(stateDir),
+    false,
+  );
 });
 
 test("Surf Ace plugin tool registration preserves OpenClaw session provenance", () => {

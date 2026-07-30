@@ -1,3 +1,9 @@
+import type {
+  LocklessEvent,
+  LocklessRequest,
+  LocklessResponse,
+} from "./lockless.js";
+
 type Brand<T, TName extends string> = T & {
   readonly __brand: TName;
 };
@@ -1163,7 +1169,8 @@ export type Request =
   | PanesListRequest
   | PaneSplitRequest
   | PaneRenameRequest
-  | PaneCloseRequest;
+  | PaneCloseRequest
+  | LocklessRequest;
 
 export type Response =
   | SurfacesListResponse
@@ -1186,7 +1193,8 @@ export type Response =
   | PaneSplitResponse
   | PaneRenameResponse
   | PaneCloseResponse
-  | ErrorResponse;
+  | ErrorResponse
+  | LocklessResponse;
 
 export type Event =
   | DrawingFlushEvent
@@ -1204,10 +1212,12 @@ export type Event =
   | SnapshotHintEvent
   | PaneCreatedEvent
   | PaneRemovedEvent
-  | PaneRenamedEvent;
+  | PaneRenamedEvent
+  | LocklessEvent;
 
 export * from "./message-names.js";
 export * from "./messages.js";
 export * from "./schemas.js";
 export * from "./schemas-manifest.js";
 export * from "./pair-example.js";
+export * from "./lockless.js";
