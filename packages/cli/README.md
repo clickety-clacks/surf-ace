@@ -14,8 +14,14 @@ surf-ace \
   --state-root /path/to/controller-state \
   --endpoint ws://surf-ace.example:3210 \
   --product-label Clawline \
-  push --input-json '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"text","content":"hello","friendlyChatName":"CLU"}'
+  push --input-json '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"Hello"},"friendlyChatName":"CLU"}'
 ```
+
+`push` validates the protocol's discriminated content value: `html` uses
+`{"html":"..."}`, `image` uses `{"data":"...","mediaType":"..."}`, `pdf`
+uses `{"data":"..."}`, `terminal` uses `{"lines":["..."],"scrollback":0}`,
+`markdown` uses `{"markdown":"..."}`, `video` uses a string, and `canvas`
+uses `""` or an object with optional `color` and `grid` fields.
 
 The complete command set is `list`, `push`, `read`, `topology-intent`,
 `topology-realize`, `clear`, `annotations-remove`, `capture-pane`,

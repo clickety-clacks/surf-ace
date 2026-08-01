@@ -1,7 +1,7 @@
 {
   "requests": [
     {"id":"rq-0","op":"surfaces.list","payload":{},"sentAt":1785619273922,"type":"request","v":1},
-    {"id":"rq-1","op":"content.set","payload":{"surfaceId":"sf_1","paneId":1,"contentId":"c_1","contentType":"text","content":"hi","friendlyChatName":"CLU"},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-1","op":"content.set","payload":{"surfaceId":"sf_1","paneId":1,"contentId":"c_1","contentType":"markdown","content":{"markdown":"hi"},"friendlyChatName":"CLU"},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-2","op":"pane.split","payload":{"surfaceId":"sf_1","paneId":1,"count":2,"direction":"horizontal","expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-3","op":"pane.close","payload":{"surfaceId":"sf_1","paneId":1,"expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-4","op":"pane.restore","payload":{"surfaceId":"sf_1","anchorPaneId":1,"tombstoneId":"pt_1","direction":"vertical","expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},

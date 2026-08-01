@@ -123,9 +123,9 @@ impl Command {
                 required_string(input, "surfaceId")?;
                 positive_integer(input, "paneId")?;
                 required_string(input, "contentId")?;
-                required_string(input, "contentType")?;
-                required(input, "content")?;
+                content_value(input)?;
                 optional_object(input, "display")?;
+                optional_string(input, "friendlyChatName")?;
             }
             Self::Read => {
                 exact_fields(input, &["scopeId"], &[])?;
@@ -525,6 +525,105 @@ fn nonempty_string_array(input: &Map<String, Value>, key: &str) -> Result<(), St
         .all(|value| value.as_str().is_some_and(|string| !string.is_empty()))
     {
         return Err(format!("invalid_input:{key}"));
+    }
+    Ok(())
+}
+
+fn content_value(input: &Map<String, Value>) -> Result<(), String> {
+    let content_type = required_string(input, "contentType")?;
+    let content = required(input, "content")?;
+    match content_type {
+        "html" => {
+            let value = content_object(content)?;
+            exact_content_fields(value, &["html"], &["baseUrl"])?;
+            content_string(value, "html")?;
+            optional_content_string(value, "baseUrl")
+        }
+        "image" => {
+            let value = content_object(content)?;
+            exact_content_fields(value, &["data", "mediaType"], &["alt"])?;
+            content_string(value, "data")?;
+            content_string(value, "mediaType")?;
+            optional_content_string(value, "alt")
+        }
+        "pdf" => {
+            let value = content_object(content)?;
+            exact_content_fields(value, &["data"], &[])?;
+            content_string(value, "data").map(|_| ())
+        }
+        "terminal" => {
+            let value = content_object(content)?;
+            exact_content_fields(value, &["lines", "scrollback"], &[])?;
+            if !value
+                .get("lines")
+                .and_then(Value::as_array)
+                .is_some_and(|lines| lines.iter().all(Value::is_string))
+            {
+                return Err("invalid_input:content".into());
+            }
+            nonnegative_integer(value, "scrollback")?;
+            Ok(())
+        }
+        "markdown" => {
+            let value = content_object(content)?;
+            exact_content_fields(value, &["markdown"], &[])?;
+            content_string(value, "markdown").map(|_| ())
+        }
+        "video" => {
+            if content.is_string() {
+                Ok(())
+            } else {
+                Err("invalid_input:content".into())
+            }
+        }
+        "canvas" => match content {
+            Value::String(value) if value.is_empty() => Ok(()),
+            Value::Object(value) => {
+                exact_content_fields(value, &[], &["color", "grid"])?;
+                optional_content_string(value, "color")?;
+                if value.contains_key("grid") && !matches!(value.get("grid"), Some(Value::Bool(_)))
+                {
+                    return Err("invalid_input:content".into());
+                }
+                Ok(())
+            }
+            _ => Err("invalid_input:content".into()),
+        },
+        _ => Err("invalid_input:contentType".into()),
+    }
+}
+
+fn content_object(value: &Value) -> Result<&Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| "invalid_input:content".to_owned())
+}
+
+fn exact_content_fields(
+    value: &Map<String, Value>,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<(), String> {
+    if required.iter().any(|key| !value.contains_key(*key))
+        || value
+            .keys()
+            .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+    {
+        return Err("invalid_input:content".into());
+    }
+    Ok(())
+}
+
+fn content_string<'a>(value: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| "invalid_input:content".to_owned())
+}
+
+fn optional_content_string(value: &Map<String, Value>, key: &str) -> Result<(), String> {
+    if value.contains_key(key) {
+        content_string(value, key)?;
     }
     Ok(())
 }

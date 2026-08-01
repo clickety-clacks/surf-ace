@@ -22,6 +22,25 @@ Supply all runtime facts explicitly:
 - `--input-json` contains one command input object. Treat stdout as the sole
   machine-readable result.
 
+For `push`, send the protocol's typed JSON value; do not send a bare text string
+or use `contentType: "text"`. The accepted pairs are:
+
+- `html`: `"content":{"html":"..."}` (optional `baseUrl`)
+- `image`: `"content":{"data":"...","mediaType":"..."}` (optional `alt`)
+- `pdf`: `"content":{"data":"..."}`
+- `terminal`: `"content":{"lines":["..."],"scrollback":0}`
+- `markdown`: `"content":{"markdown":"..."}`
+- `video`: a string content value
+- `canvas`: `"content":""` or an object with optional `color` and `grid`
+
+For example:
+
+```sh
+surf-ace --state-root "$STATE_ROOT" --endpoint "$SURF_ACE_ENDPOINT" \
+  --product-label Clawline push --input-json \
+  '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"# Visible result"},"friendlyChatName":"CLU"}'
+```
+
 Commands are exactly: `list`, `push`, `read`, `topology-intent`,
 `topology-realize`, `clear`, `annotations-remove`, `capture-pane`,
 `surface-intent`, `target-register`, and `target-apply`.

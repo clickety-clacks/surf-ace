@@ -21,6 +21,11 @@ test("Tight Beam consumes the unchanged general surf-ace executable", async () =
 
   assert.equal(fixture.attachment.executable, "surf-ace");
   assert.match(skill, /installed `surf-ace` executable/);
+  assert.match(skill, /do not send a bare text string/);
+  assert.match(skill, /"contentType":"markdown","content":\{"markdown":"# Visible result"\}/);
+  for (const contentType of ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"]) {
+    assert.match(skill, new RegExp("- `" + contentType + "`:"));
+  }
   assert.match(manifest, /name = "surf-ace-cli"/);
   assert.match(manifest, /name = "surf-ace"/);
   assert.doesNotMatch(manifest.toLowerCase(), /tightbeam/);

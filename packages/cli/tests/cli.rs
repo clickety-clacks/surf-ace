@@ -316,7 +316,7 @@ fn rust_validation_matches_the_shared_production_boundary_vector() {
     )
     .unwrap();
     let cases = shared["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 60);
+    assert_eq!(cases.len(), 74);
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let command = Command::parse(case["command"].as_str().unwrap()).unwrap();
@@ -357,7 +357,7 @@ fn canonical_network_cases() -> Vec<(Command, Value, &'static str)> {
         (Command::List, json!({}), "surfaces.list"),
         (
             Command::Push,
-            json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "text", "content": "hi", "friendlyChatName": "CLU" }),
+            json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "markdown", "content": { "markdown": "hi" }, "friendlyChatName": "CLU" }),
             "content.set",
         ),
         (
@@ -820,7 +820,7 @@ fn post_send_interruption_is_durable_unknown_then_exact_receipt_is_replayed_and_
     let mut first = FakeWire::ordinary();
     first.fail_after_send_on = Some("content.set".into());
     let error = execute_with_wire(
-        invocation(&temp, Command::Push, json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "text", "content": "hello" })),
+        invocation(&temp, Command::Push, json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "markdown", "content": { "markdown": "hello" } })),
         &mut first,
     )
     .unwrap_err();
@@ -868,8 +868,8 @@ fn accepted_receipt_ack_interruption_replays_then_releases_without_losing_termin
                 "surfaceId": "sf_1",
                 "paneId": 1,
                 "contentId": "c_ack_crash",
-                "contentType": "text",
-                "content": "hello"
+                "contentType": "markdown",
+                "content": { "markdown": "hello" }
             }),
         ),
         &mut first,
@@ -1149,8 +1149,8 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
             "surfaceId": "sf_1",
             "paneId": 1,
             "contentId": "c_1",
-            "contentType": "text",
-            "content": "hello",
+            "contentType": "markdown",
+            "content": { "markdown": "hello" },
             "friendlyChatName": "CLU"
         }),
     );

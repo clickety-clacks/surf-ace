@@ -2000,6 +2000,15 @@ export class SurfaceWsServer {
       });
     }
     if (request.op === "surfaces.list") {
+      for (const surface of this.core.listSurfaces()) {
+        if (
+          this.core
+            .activePaneIds(surface.surfaceId)
+            .some((paneId) => paneId < 1)
+        ) {
+          this.requireLocklessSurface(surface.surfaceId);
+        }
+      }
       return locklessSuccess(request, {
         admissionAvailable:
           this.core.locklessAuthority.liveControllerIds().length <

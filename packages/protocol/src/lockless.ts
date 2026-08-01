@@ -887,6 +887,42 @@ function optionalBoolean(
   return !(key in payload) || typeof payload[key] === "boolean";
 }
 
+function validContentValue(contentType: unknown, content: unknown): boolean {
+  if (contentType === "video") return typeof content === "string";
+  if (contentType === "canvas") {
+    return content === "" ||
+      (plainRecord(content) &&
+        hasExactKeys(content, [], ["color", "grid"]) &&
+        (content.color === undefined || typeof content.color === "string") &&
+        (content.grid === undefined || typeof content.grid === "boolean"));
+  }
+  if (!plainRecord(content)) return false;
+  switch (contentType) {
+    case "html":
+      return hasExactKeys(content, ["html"], ["baseUrl"]) &&
+        typeof content.html === "string" &&
+        (content.baseUrl === undefined || typeof content.baseUrl === "string");
+    case "image":
+      return hasExactKeys(content, ["data", "mediaType"], ["alt"]) &&
+        typeof content.data === "string" &&
+        typeof content.mediaType === "string" &&
+        (content.alt === undefined || typeof content.alt === "string");
+    case "pdf":
+      return hasExactKeys(content, ["data"]) &&
+        typeof content.data === "string";
+    case "terminal":
+      return hasExactKeys(content, ["lines", "scrollback"]) &&
+        Array.isArray(content.lines) &&
+        content.lines.every((line) => typeof line === "string") &&
+        revision(content.scrollback);
+    case "markdown":
+      return hasExactKeys(content, ["markdown"]) &&
+        typeof content.markdown === "string";
+    default:
+      return false;
+  }
+}
+
 function validDesiredTopology(value: unknown): boolean {
   if (!plainRecord(value)) return false;
   if (value.type === "pane") {
@@ -1384,7 +1420,9 @@ function validateLocklessRequestPayload(
     case "content.set":
       return paneAndSurface() &&
         nonemptyString(payload.contentId) &&
-        nonemptyString(payload.contentType) &&
+        validContentValue(payload.contentType, payload.content) &&
+        (payload.friendlyChatName === undefined ||
+          typeof payload.friendlyChatName === "string") &&
         (payload.display === undefined || plainRecord(payload.display))
         ? null
         : "invalid_content_set";

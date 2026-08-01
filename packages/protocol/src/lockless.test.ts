@@ -69,7 +69,7 @@ test("production validation matches the shared Rust CLI boundary vector", () => 
       operation: string;
     }>;
   };
-  assert.equal(vector.cases.length, 60);
+  assert.equal(vector.cases.length, 74);
   for (const entry of vector.cases) {
     const { action: _action, ...payload } = entry.input;
     const envelope = request(entry.operation, payload);
@@ -476,6 +476,63 @@ test("receipt sync and ack responses validate all public outcomes", () => {
     type: "response",
     v: 1,
   }), { ok: true });
+});
+
+test("lockless content.set enforces canonical typed content values", () => {
+  const contentCases = [
+    ["html", { html: "<p>hello</p>", baseUrl: "https://example.com" }],
+    ["image", { alt: "proof", data: "AA==", mediaType: "image/png" }],
+    ["pdf", { data: "AA==" }],
+    ["terminal", { lines: ["hello"], scrollback: 0 }],
+    ["markdown", { markdown: "hello" }],
+    ["video", "https://example.com/proof.mp4"],
+    ["canvas", ""],
+    ["canvas", { color: "#fff", grid: true }],
+  ] as const;
+  for (const [contentType, content] of contentCases) {
+    assert.deepEqual(
+      validateLocklessEnvelope(request("content.set", {
+        content,
+        contentId: `content-${contentType}`,
+        contentType,
+        paneId: 1,
+        surfaceId: "surface-a",
+      })),
+      { ok: true },
+      contentType,
+    );
+  }
+
+  for (const [contentType, content] of [
+    ["text", "hello"],
+    ["markdown", "hello"],
+    ["markdown", { html: "hello" }],
+    ["terminal", { lines: ["hello"], scrollback: -1 }],
+    ["canvas", { color: "#fff", unexpected: true }],
+  ] as const) {
+    assert.deepEqual(
+      validateLocklessEnvelope(request("content.set", {
+        content,
+        contentId: "content-invalid",
+        contentType,
+        paneId: 1,
+        surfaceId: "surface-a",
+      })),
+      { ok: false, reason: "invalid_content_set" },
+      contentType,
+    );
+  }
+  assert.deepEqual(
+    validateLocklessEnvelope(request("content.set", {
+      content: { markdown: "hello" },
+      contentId: "content-invalid-friendly-name",
+      contentType: "markdown",
+      friendlyChatName: 7,
+      paneId: 1,
+      surfaceId: "surface-a",
+    })),
+    { ok: false, reason: "invalid_content_set" },
+  );
 });
 
 test("lockless request rejects legacy authority and allocation fields", () => {

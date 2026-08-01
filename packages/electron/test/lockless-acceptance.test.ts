@@ -220,6 +220,36 @@ test("AC-MIG-02: renderer geometry does not preserve the non-positive bootstrap 
   });
 });
 
+test("lockless lifecycle list replaces the renderer bootstrap pane before exposing topology", async () => {
+  const core = coreWithLimits();
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  assert.deepEqual(core.activePaneIds(surface.surfaceId), [0]);
+
+  await withServer(core, async ({ url }) => {
+    const socket = await connect(url);
+    try {
+      const admission = await pair(socket, "ctl_tight_list_bootstrap");
+      assert.equal(admission.ok, true);
+
+      const listed = await request(socket, "surfaces.list", {});
+      assert.equal(listed.ok, true);
+      const listedSurface = listed.payload.surfaces.find(
+        (candidate: Record<string, any>) =>
+          candidate.surfaceId === surface.surfaceId,
+      );
+      assert(listedSurface);
+      assert.equal(listedSurface.topology.panes.length, 1);
+      assert.equal(listedSurface.topology.panes[0].paneId > 0, true);
+      assert.equal(listedSurface.topology.layout.paneId > 0, true);
+      assert.deepEqual(core.activePaneIds(surface.surfaceId), [
+        listedSurface.topology.panes[0].paneId,
+      ]);
+    } finally {
+      socket.close();
+    }
+  });
+});
+
 test("AC-CAP-03 AC-SURF-06: SURF-12 is exact and rejects a one-byte-short recoverable envelope", () => {
   const exact = acceptanceLimits({
     maxAdmittedControllerEntries: 3,
