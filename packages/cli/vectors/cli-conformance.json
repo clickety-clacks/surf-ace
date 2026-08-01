@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "capability": "surf-ace.lockless-multi-controller.v1",
+  "commands": [
+    "list",
+    "push",
+    "read",
+    "topology-intent",
+    "topology-realize",
+    "clear",
+    "annotations-remove",
+    "capture-pane",
+    "surface-intent",
+    "target-register",
+    "target-apply"
+  ],
+  "receiptOperations": ["operation.receipt.sync", "operation.receipt.ack"],
+  "receiptLimits": [
+    "maxPendingOperationReceiptsPerController",
+    "maxPendingOperationReceiptBytesPerController"
+  ],
+  "receiptResolutionOutcomes": [
+    "resolved_success",
+    "resolved_failure",
+    "not_committed",
+    "still_pending",
+    "receipt_unavailable"
+  ],
+  "stableErrors": ["outcome_unknown", "receipt_capacity", "still_pending", "receipt_unavailable"]
+}
+

@@ -15,6 +15,10 @@ import {
   type LocklessEntryProvenance,
   type LocklessErrorCode,
   type LocklessPairPayload,
+  type LocklessOperationReceipt,
+  type LocklessReceiptResolution,
+  type LocklessTargetApplyIntent,
+  type LocklessTargetApplyResult,
 } from "../../protocol/src/lockless.js";
 
 export const DEFAULT_LOCKLESS_LIMITS: LocklessCapacityLimits = {
@@ -35,6 +39,8 @@ export const DEFAULT_LOCKLESS_LIMITS: LocklessCapacityLimits = {
   maxAdmittedControllerEntries: 16,
   maxDormantControllerEntries: 12,
   maxDormantControllerBytes: 64 * 1024 * 1024,
+  maxPendingOperationReceiptsPerController: 128,
+  maxPendingOperationReceiptBytesPerController: 8 * 1024 * 1024,
 };
 
 export type LocklessHistoryEntry<T> = {
@@ -71,7 +77,38 @@ export type PersistentControllerEntry = {
   disconnectedAt: number | null;
   dormantSequence: number | null;
   projectionCapacityBytes: number;
+  pendingOperationReceipts: Record<string, PersistentOperationReceipt>;
   status: "dormant" | "live";
+};
+
+export type PersistentOperationReceipt =
+  | {
+      bytes: number;
+      operation: string;
+      requestId: string;
+      status: "pending";
+    }
+  | {
+      bytes: number;
+      operation: string;
+      operationReceipt: LocklessOperationReceipt;
+      outcome: "resolved_success" | "resolved_failure";
+      requestId: string;
+      status: "acked" | "terminal";
+      terminalResponse: unknown;
+    };
+
+export type PersistentTargetApplyWorkItem = {
+  bytes: number;
+  controllerInstanceId: ControllerInstanceId;
+  intentCommitSequence: number;
+  operationRequestId: string;
+  request: LocklessTargetApplyIntent;
+  state: "intent_committed" | "materializing";
+  surfaceId: string;
+  targetEpoch: number;
+  targetId: string;
+  targetRequestId: string;
 };
 
 export type PersistentTombstone = {
@@ -94,6 +131,7 @@ export type PersistentLocklessClientState = {
   nextDormantSequence: number;
   scopes: Record<string, PersistentConsumableScope>;
   surfaceSetRevision: number;
+  targetApplyWorkItems: Record<string, PersistentTargetApplyWorkItem>;
   tombstones: PersistentTombstone[];
   version: 1;
 };
@@ -126,6 +164,8 @@ export type AuthorityEvent =
       maxDormantControllerEntries: number;
       reason: "dormant_capacity" | "entry_capacity";
       registryBytes: number;
+      receiptBytes: number;
+      receiptCount: number;
       scopeCount: number;
       surfaceCount: number;
       tombstoneCount: number;
@@ -150,6 +190,13 @@ export type AuthorityEvent =
       type: "event.tombstone_reclaimed";
       unreadBytesDiscarded: number;
       unreadFrameCount: number;
+    }
+  | {
+      record: ConsumableRecord;
+      result: LocklessTargetApplyResult;
+      retained: boolean;
+      scopeId: string;
+      type: "event.target_apply_result";
     };
 
 export class LocklessAuthorityError extends Error {
@@ -168,6 +215,17 @@ function saturatingAdd(left: number, right: number): number {
 
 export function exactDurableBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function exactVersionedReceiptBytes(
+  value: Record<string, unknown>,
+): number {
+  let bytes = 0;
+  for (;;) {
+    const next = exactDurableBytes({ version: 1, bytes, ...value });
+    if (next === bytes) return next;
+    bytes = next;
+  }
 }
 
 function clone<T>(value: T): T {
@@ -211,6 +269,13 @@ function newOpaqueId(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "")}`;
 }
 
+function targetApplyWorkItemKey(
+  controllerInstanceId: string,
+  operationRequestId: string,
+): string {
+  return JSON.stringify([controllerInstanceId, operationRequestId]);
+}
+
 function validControllerInstanceId(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -234,6 +299,7 @@ export function createEmptyLocklessClientState(
     nextDormantSequence: 1,
     scopes: {},
     surfaceSetRevision: 0,
+    targetApplyWorkItems: {},
     tombstones: [],
     version: 1,
   };
@@ -258,10 +324,15 @@ export function migrateLocklessClientState(
     );
   }
   const state = clone(value as PersistentLocklessClientState);
+  state.limits.maxPendingOperationReceiptsPerController ??=
+    DEFAULT_LOCKLESS_LIMITS.maxPendingOperationReceiptsPerController;
+  state.limits.maxPendingOperationReceiptBytesPerController ??=
+    DEFAULT_LOCKLESS_LIMITS.maxPendingOperationReceiptBytesPerController;
   assertLocklessCapacityLimits(state.limits);
   state.controllers ??= {};
   state.modeBySurfaceId ??= {};
   state.scopes ??= {};
+  state.targetApplyWorkItems ??= {};
   state.tombstones ??= [];
   for (const tombstone of state.tombstones) {
     tombstone.scopes ??= {};
@@ -276,6 +347,7 @@ export function migrateLocklessClientState(
   for (const controller of Object.values(state.controllers).sort((left, right) =>
     left.controllerInstanceId.localeCompare(right.controllerInstanceId),
   )) {
+    controller.pendingOperationReceipts ??= {};
     controller.status = "dormant";
     controller.disconnectedAt ??= 0;
     controller.dormantSequence ??= state.nextDormantSequence++;
@@ -380,6 +452,7 @@ export function navigateLocklessHistory<T>(
 }
 
 export class LocklessClientAuthority {
+  private authorityWorkTail: Promise<void> = Promise.resolve();
   private readonly connectionTokens = new Map<
     string,
     Map<string, string>
@@ -402,9 +475,115 @@ export class LocklessClientAuthority {
     return () => this.listeners.delete(listener);
   }
 
+  private async serializeAuthorityWork<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.authorityWorkTail;
+    let release = (): void => {};
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.catch(() => undefined).then(() => current);
+    this.authorityWorkTail = queued;
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.authorityWorkTail === queued) {
+        this.authorityWorkTail = Promise.resolve();
+      }
+    }
+  }
+
   transaction<T>(operation: () => T): T {
-    if (this.pendingEvents) {
-      return operation();
+    const ownsEvents = this.pendingEvents === null;
+    const beforeEventCount = this.pendingEvents?.length ?? 0;
+    const beforeState = clone(this.state);
+    const beforeTokens = new Map(
+      [...this.connectionTokens].map(([controllerId, slots]) => [
+        controllerId,
+        new Map(slots),
+      ]),
+    );
+    if (ownsEvents) this.pendingEvents = [];
+    try {
+      const result = operation();
+      if (ownsEvents) {
+        const events = this.pendingEvents!;
+        this.pendingEvents = null;
+        for (const event of events) this.deliver(event);
+      }
+      return result;
+    } catch (error) {
+      this.state = beforeState;
+      this.connectionTokens.clear();
+      for (const [key, value] of beforeTokens) {
+        this.connectionTokens.set(key, value);
+      }
+      if (ownsEvents) this.pendingEvents = null;
+      else this.pendingEvents?.splice(beforeEventCount);
+      throw error;
+    }
+  }
+
+  async transactionAsync<T>(operation: () => Promise<T>): Promise<T> {
+    return await this.serializeAuthorityWork(async () => {
+      return await this.transactionAsyncExclusive(operation);
+    });
+  }
+
+  private async transactionAsyncExclusive<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const ownsEvents = this.pendingEvents === null;
+    const beforeEventCount = this.pendingEvents?.length ?? 0;
+    const beforeState = clone(this.state);
+    const beforeTokens = new Map(
+      [...this.connectionTokens].map(([controllerId, slots]) => [
+        controllerId,
+        new Map(slots),
+      ]),
+    );
+    if (ownsEvents) this.pendingEvents = [];
+    try {
+      const result = await operation();
+      if (ownsEvents) {
+        const events = this.pendingEvents!;
+        this.pendingEvents = null;
+        for (const event of events) this.deliver(event);
+      }
+      return result;
+    } catch (error) {
+      this.state = beforeState;
+      this.connectionTokens.clear();
+      for (const [key, value] of beforeTokens) {
+        this.connectionTokens.set(key, value);
+      }
+      if (ownsEvents) this.pendingEvents = null;
+      else this.pendingEvents?.splice(beforeEventCount);
+      throw error;
+    }
+  }
+
+  async transactionPersisted<T>(
+    operation: () => T,
+    persist: () => Promise<void>,
+  ): Promise<T> {
+    return await this.serializeAuthorityWork(async () => {
+      return await this.transactionPersistedExclusive(operation, persist);
+    });
+  }
+
+  private async transactionPersistedExclusive<T>(
+    operation: () => T,
+    persist: () => Promise<void>,
+  ): Promise<T> {
+    if (this.pendingEvents !== null) {
+      throw new LocklessAuthorityError(
+        "internal_error",
+        "Durable authority transaction cannot be nested",
+      );
     }
     const beforeState = clone(this.state);
     const beforeTokens = new Map(
@@ -416,6 +595,7 @@ export class LocklessClientAuthority {
     this.pendingEvents = [];
     try {
       const result = operation();
+      await persist();
       const events = this.pendingEvents;
       this.pendingEvents = null;
       for (const event of events) this.deliver(event);
@@ -429,6 +609,11 @@ export class LocklessClientAuthority {
       this.pendingEvents = null;
       throw error;
     }
+  }
+
+  restorePersistentState(state: PersistentLocklessClientState): void {
+    this.state = clone(state);
+    this.assertPersistentInvariants();
   }
 
   exportState(): PersistentLocklessClientState {
@@ -545,6 +730,8 @@ export class LocklessClientAuthority {
       disconnectedAt: null,
       dormantSequence: null,
       projectionCapacityBytes: admission.projectionCapacityBytes,
+      pendingOperationReceipts:
+        existing?.pendingOperationReceipts ?? {},
       status: "live",
     };
     const slots = liveSlots ?? new Map<string, string>();
@@ -601,11 +788,323 @@ export class LocklessClientAuthority {
       .map((entry) => entry.controllerInstanceId);
   }
 
+  hasController(controllerInstanceId: string): boolean {
+    return Boolean(this.state.controllers[controllerInstanceId]);
+  }
+
   controllerProductName(controllerInstanceId: string): string | null {
     return (
       this.state.controllers[controllerInstanceId]?.controllerProductName ??
       null
     );
+  }
+
+  beginOperationReceipt(
+    controllerInstanceId: string,
+    requestId: string,
+    operation: string,
+  ): void {
+    const controller = this.state.controllers[controllerInstanceId];
+    if (!controller) {
+      throw new LocklessAuthorityError(
+        "not_paired",
+        "Operation receipt reservation requires an admitted controller",
+      );
+    }
+    const receipts = controller.pendingOperationReceipts;
+    const existing = receipts[requestId];
+    if (existing) {
+      throw new LocklessAuthorityError(
+        "invalid_operation",
+        "Request ID already has receipt state",
+        { requestId, status: existing.status },
+      );
+    }
+    const blocking = Object.values(receipts).find(
+      (receipt) => receipt.status === "pending",
+    );
+    if (blocking) {
+      throw new LocklessAuthorityError(
+        "invalid_operation",
+        "An earlier mutation receipt is still pending",
+        { pendingRequestId: blocking.requestId },
+      );
+    }
+    const candidate = {
+      bytes: 0,
+      operation,
+      requestId,
+      status: "pending" as const,
+    };
+    candidate.bytes = exactVersionedReceiptBytes({
+      operation,
+      requestId,
+      status: "pending",
+    });
+    this.assertReceiptCapacity(controller, candidate.bytes, 1);
+    receipts[requestId] = candidate;
+  }
+
+  completeOperationReceipt(
+    controllerInstanceId: string,
+    requestId: string,
+    operation: string,
+    outcome: "resolved_success" | "resolved_failure",
+    terminalResponse: unknown,
+    operationReceipt: LocklessOperationReceipt,
+  ): void {
+    const controller = this.state.controllers[controllerInstanceId];
+    const pending = controller?.pendingOperationReceipts[requestId];
+    if (!controller || pending?.status !== "pending") {
+      throw new LocklessAuthorityError(
+        "invalid_operation",
+        "Operation receipt was not reserved",
+        { requestId },
+      );
+    }
+    const terminalWithoutBytes = {
+      operation,
+      operationReceipt: clone(operationReceipt),
+      outcome,
+      requestId,
+      status: "terminal" as const,
+      terminalResponse: clone(terminalResponse),
+    };
+    const bytes = exactVersionedReceiptBytes(terminalWithoutBytes);
+    this.assertReceiptCapacity(controller, bytes - pending.bytes, 0);
+    controller.pendingOperationReceipts[requestId] = {
+      bytes,
+      ...terminalWithoutBytes,
+    };
+  }
+
+  resolveOperationReceipts(
+    controllerInstanceId: string,
+    requestIds: string[],
+    controllerWasReclaimed = false,
+  ): LocklessReceiptResolution[] {
+    const controller = this.state.controllers[controllerInstanceId];
+    return requestIds.map((requestId) => {
+      if (!controller || controllerWasReclaimed) {
+        return {
+          cause: "controller_reclaimed" as const,
+          outcome: "receipt_unavailable" as const,
+          requestId,
+        };
+      }
+      const receipt = controller.pendingOperationReceipts[requestId];
+      if (!receipt) return { outcome: "not_committed" as const, requestId };
+      if (receipt.status === "pending") {
+        return { outcome: "still_pending" as const, requestId };
+      }
+      return {
+        operationReceipt: clone(receipt.operationReceipt),
+        outcome: receipt.outcome,
+        requestId,
+        terminalResponse: clone(receipt.terminalResponse),
+      };
+    });
+  }
+
+  acknowledgeOperationReceipt(
+    controllerInstanceId: string,
+    requestId: string,
+    release = false,
+  ): boolean {
+    const receipts = this.state.controllers[controllerInstanceId]
+      ?.pendingOperationReceipts;
+    if (!receipts) return release;
+    const receipt = receipts[requestId];
+    if (release) {
+      if (receipt?.status === "terminal") return false;
+      if (receipt?.status === "acked") delete receipts[requestId];
+      return true;
+    }
+    if (!receipt || receipt.status === "pending") return false;
+    if (receipt.status === "terminal") {
+      receipt.status = "acked";
+      receipt.bytes = exactVersionedReceiptBytes({
+        operation: receipt.operation,
+        operationReceipt: receipt.operationReceipt,
+        outcome: receipt.outcome,
+        requestId: receipt.requestId,
+        status: receipt.status,
+        terminalResponse: receipt.terminalResponse,
+      });
+    }
+    return true;
+  }
+
+  operationReceiptBytes(controllerInstanceId: string): number {
+    return Object.values(
+      this.state.controllers[controllerInstanceId]
+        ?.pendingOperationReceipts ?? {},
+    ).reduce((total, receipt) => total + receipt.bytes, 0);
+  }
+
+  admitTargetApplyWorkItem(input: {
+    controllerInstanceId: string;
+    currentSurfaceBase: unknown;
+    intentCommitSequence: number;
+    operationRequestId: string;
+    request: LocklessTargetApplyIntent;
+  }): PersistentTargetApplyWorkItem {
+    const key = targetApplyWorkItemKey(
+      input.controllerInstanceId,
+      input.operationRequestId,
+    );
+    if (this.state.targetApplyWorkItems[key]) {
+      throw new LocklessAuthorityError(
+        "invalid_operation",
+        "Target apply work item already exists",
+        { operationRequestId: input.operationRequestId },
+      );
+    }
+    const withoutBytes = {
+      controllerInstanceId: input.controllerInstanceId,
+      intentCommitSequence: input.intentCommitSequence,
+      operationRequestId: input.operationRequestId,
+      request: clone(input.request),
+      state: "intent_committed" as const,
+      surfaceId: input.request.surfaceId,
+      targetEpoch: input.request.targetEpoch,
+      targetId: input.request.targetId,
+      targetRequestId: input.request.requestId,
+    };
+    const item: PersistentTargetApplyWorkItem = {
+      bytes: exactVersionedReceiptBytes(withoutBytes),
+      ...withoutBytes,
+    };
+    const currentBytes =
+      exactDurableBytes(input.currentSurfaceBase) +
+      Object.values(this.state.targetApplyWorkItems)
+        .filter((candidate) => candidate.surfaceId === item.surfaceId)
+        .reduce((total, candidate) => total + candidate.bytes, 0);
+    const prospectiveBytes = currentBytes + item.bytes;
+    if (
+      prospectiveBytes >
+      this.state.limits.maxSurfaceRecoverableBaseBytes
+    ) {
+      throw new LocklessAuthorityError(
+        "surface_state_capacity",
+        "Target apply work item exceeds surface recoverable base capacity",
+        {
+          currentBytes,
+          maximumBytes:
+            this.state.limits.maxSurfaceRecoverableBaseBytes,
+          prospectiveBytes,
+        },
+      );
+    }
+    this.state.targetApplyWorkItems[key] = item;
+    return clone(item);
+  }
+
+  targetApplyWorkItems(): PersistentTargetApplyWorkItem[] {
+    return Object.values(this.state.targetApplyWorkItems)
+      .sort(
+        (left, right) =>
+          left.intentCommitSequence - right.intentCommitSequence,
+      )
+      .map(clone);
+  }
+
+  markTargetApplyMaterializing(
+    controllerInstanceId: string,
+    operationRequestId: string,
+  ): PersistentTargetApplyWorkItem | null {
+    const item = this.state.targetApplyWorkItems[
+      targetApplyWorkItemKey(controllerInstanceId, operationRequestId)
+    ];
+    if (!item) return null;
+    if (item.state !== "intent_committed") {
+      return null;
+    }
+    item.state = "materializing";
+    item.bytes = exactVersionedReceiptBytes({
+      controllerInstanceId: item.controllerInstanceId,
+      intentCommitSequence: item.intentCommitSequence,
+      operationRequestId: item.operationRequestId,
+      request: item.request,
+      state: item.state,
+      surfaceId: item.surfaceId,
+      targetEpoch: item.targetEpoch,
+      targetId: item.targetId,
+      targetRequestId: item.targetRequestId,
+    });
+    return clone(item);
+  }
+
+  completeTargetApplyWorkItem(
+    controllerInstanceId: string,
+    operationRequestId: string,
+    result: Omit<
+      LocklessTargetApplyResult,
+      "intentCommitSequence" | "operationRequestId" | "surfaceId" |
+        "targetEpoch" | "targetId" | "targetRequestId"
+    >,
+  ): {
+    record: ConsumableRecord;
+    result: LocklessTargetApplyResult;
+    retained: boolean;
+  } | null {
+    const key = targetApplyWorkItemKey(
+      controllerInstanceId,
+      operationRequestId,
+    );
+    const item = this.state.targetApplyWorkItems[key];
+    if (!item) return null;
+    if (item.state !== "materializing") {
+      throw new LocklessAuthorityError(
+        "invalid_operation",
+        "Target apply cannot terminalize before materializing",
+        { operationRequestId, state: item.state },
+      );
+    }
+    const terminal: LocklessTargetApplyResult = {
+      ...clone(result),
+      intentCommitSequence: item.intentCommitSequence,
+      operationRequestId: item.operationRequestId,
+      surfaceId: item.surfaceId,
+      targetEpoch: item.targetEpoch,
+      targetId: item.targetId,
+      targetRequestId: item.targetRequestId,
+    };
+    const occurrence = this.appendConsumableOccurrence({
+      payload: terminal,
+      recordClass: "target_result",
+      scopeId: `surface:${encodeURIComponent(item.surfaceId)}`,
+      scopeKind: "surface",
+      triggerOperation: "target.apply.materialization",
+    });
+    delete this.state.targetApplyWorkItems[key];
+    this.acceptAudit(
+      newOpaqueId("target_result"),
+      "target.apply.materialization",
+      controllerInstanceId,
+      item.surfaceId,
+      {
+        intentCommitSequence: item.intentCommitSequence,
+        operationRequestId: item.operationRequestId,
+        recordId: occurrence.record.recordId,
+        status: terminal.status,
+        targetEpoch: item.targetEpoch,
+        targetId: item.targetId,
+        targetRequestId: item.targetRequestId,
+      },
+    );
+    this.emit({
+      record: clone(occurrence.record),
+      result: clone(terminal),
+      retained: occurrence.retained,
+      scopeId: `surface:${encodeURIComponent(item.surfaceId)}`,
+      type: "event.target_apply_result",
+    });
+    return {
+      record: clone(occurrence.record),
+      result: clone(terminal),
+      retained: occurrence.retained,
+    };
   }
 
   ensureScope(
@@ -642,6 +1141,17 @@ export class LocklessClientAuthority {
     scopeKind: "pane" | "surface";
     triggerOperation: string;
   }): ConsumableRecord | null {
+    const occurrence = this.appendConsumableOccurrence(input);
+    return occurrence.retained ? clone(occurrence.record) : null;
+  }
+
+  private appendConsumableOccurrence(input: {
+    payload: unknown;
+    recordClass: ConsumableRecordClass;
+    scopeId: string;
+    scopeKind: "pane" | "surface";
+    triggerOperation: string;
+  }): { record: ConsumableRecord; retained: boolean } {
     const scope = this.ensureScope(input.scopeId, input.scopeKind);
     const sequence = scope.nextSequence++;
     const candidateWithoutBytes = {
@@ -673,7 +1183,7 @@ export class LocklessClientAuthority {
         "record_oversize",
         input.triggerOperation,
       );
-      return null;
+      return { record: clone(candidate), retained: false };
     }
     scope.records.push(candidate);
     const victims: ConsumableRecord[] = [];
@@ -702,7 +1212,12 @@ export class LocklessClientAuthority {
       }
     }
     this.enforceDormantBounds("consumable_ingress");
-    return clone(candidate);
+    return {
+      record: clone(candidate),
+      retained: scope.records.some(
+        (record) => record.recordId === candidate.recordId,
+      ),
+    };
   }
 
   importLegacyMigrationMaterial(
@@ -1308,8 +1823,8 @@ export class LocklessClientAuthority {
     controllerInstanceId: string | null,
     errorCode: LocklessErrorCode,
     surfaceId: string | null,
-  ): void {
-    this.rejectAudit(
+  ): LocklessAuditRecord {
+    return this.rejectAudit(
       requestId,
       operation,
       controllerInstanceId,
@@ -1320,6 +1835,66 @@ export class LocklessClientAuthority {
 
   private assertPersistentInvariants(): void {
     assertLocklessCapacityLimits(this.state.limits);
+    for (const controller of Object.values(this.state.controllers)) {
+      controller.pendingOperationReceipts ??= {};
+      const receipts = Object.values(controller.pendingOperationReceipts);
+      const bytes = receipts.reduce((total, receipt) => {
+        const exact = exactDurableBytes({ version: 1, ...receipt });
+        if (receipt.bytes !== exact) {
+          throw new LocklessAuthorityError(
+            "capability_mismatch",
+            "Persisted operation receipt byte accounting is invalid",
+            { requestId: receipt.requestId },
+          );
+        }
+        return total + exact;
+      }, 0);
+      if (
+        receipts.length >
+          this.state.limits.maxPendingOperationReceiptsPerController ||
+        bytes >
+          this.state.limits.maxPendingOperationReceiptBytesPerController
+      ) {
+        throw new LocklessAuthorityError(
+          "capability_mismatch",
+          "Persisted operation receipt ledger exceeds advertised limits",
+          { bytes, count: receipts.length },
+        );
+      }
+    }
+    for (const [key, item] of Object.entries(
+      this.state.targetApplyWorkItems,
+    )) {
+      const exact = exactDurableBytes({
+        version: 1,
+        bytes: item.bytes,
+        controllerInstanceId: item.controllerInstanceId,
+        intentCommitSequence: item.intentCommitSequence,
+        operationRequestId: item.operationRequestId,
+        request: item.request,
+        state: item.state,
+        surfaceId: item.surfaceId,
+        targetEpoch: item.targetEpoch,
+        targetId: item.targetId,
+        targetRequestId: item.targetRequestId,
+      });
+      if (
+        item.bytes !== exact ||
+        key !==
+          targetApplyWorkItemKey(
+            item.controllerInstanceId,
+            item.operationRequestId,
+          ) ||
+        (item.state !== "intent_committed" &&
+          item.state !== "materializing")
+      ) {
+        throw new LocklessAuthorityError(
+          "capability_mismatch",
+          "Persisted target apply work item is invalid",
+          { operationRequestId: item.operationRequestId },
+        );
+      }
+    }
     for (const scope of this.allScopes()) {
       scope.records.sort((left, right) => left.sequence - right.sequence);
       scope.nextSequence = Math.max(
@@ -1565,6 +2140,41 @@ export class LocklessClientAuthority {
       );
   }
 
+  private assertReceiptCapacity(
+    controller: PersistentControllerEntry,
+    addedBytes: number,
+    addedCount: number,
+  ): void {
+    const receipts = Object.values(controller.pendingOperationReceipts);
+    const currentBytes = receipts.reduce(
+      (total, receipt) => total + receipt.bytes,
+      0,
+    );
+    const prospectiveBytes = currentBytes + addedBytes;
+    const prospectiveCount = receipts.length + addedCount;
+    if (
+      prospectiveCount >
+        this.state.limits.maxPendingOperationReceiptsPerController ||
+      prospectiveBytes >
+        this.state.limits.maxPendingOperationReceiptBytesPerController
+    ) {
+      throw new LocklessAuthorityError(
+        "receipt_capacity",
+        "Pending operation receipt ledger is at capacity",
+        {
+          currentBytes,
+          currentCount: receipts.length,
+          maxBytes:
+            this.state.limits.maxPendingOperationReceiptBytesPerController,
+          maxCount:
+            this.state.limits.maxPendingOperationReceiptsPerController,
+          prospectiveBytes,
+          prospectiveCount,
+        },
+      );
+    }
+  }
+
   private dormantBytes(): number {
     const dormantIds = new Set(
       this.dormantEntries().map((entry) => entry.controllerInstanceId),
@@ -1646,6 +2256,11 @@ export class LocklessClientAuthority {
       );
     });
     const registryBytes = exactDurableBytes(victim);
+    const receiptBytes = Object.values(victim.pendingOperationReceipts).reduce(
+      (total, receipt) => total + receipt.bytes,
+      0,
+    );
+    const receiptCount = Object.keys(victim.pendingOperationReceipts).length;
     const affectedSurfaceIds = new Set(
       affectedScopes
         .map((scope) => scopeSurfaceId(scope.scopeId))
@@ -1689,6 +2304,8 @@ export class LocklessClientAuthority {
         ? "entry_capacity"
         : "dormant_capacity",
       registryBytes,
+      receiptBytes,
+      receiptCount,
       scopeCount: affectedScopes.length,
       surfaceCount: affectedSurfaceIds.size,
       tombstoneCount: affectedTombstoneCount,
@@ -1759,10 +2376,8 @@ export class LocklessClientAuthority {
     controllerInstanceId: string | null,
     errorCode: LocklessErrorCode,
     surfaceId: string | null = null,
-  ): void {
-    this.emit({
-      type: "diagnostic.lockless_audit",
-      record: {
+  ): LocklessAuditRecord {
+    const record: LocklessAuditRecord = {
       commitSequence: this.state.nextCommitSequence++,
       controllerInstanceId,
       errorCode,
@@ -1772,7 +2387,11 @@ export class LocklessClientAuthority {
       resultCorrelation: null,
       surfaceId,
       timestamp: this.now(),
-      },
+    };
+    this.emit({
+      type: "diagnostic.lockless_audit",
+      record,
     });
+    return clone(record);
   }
 }

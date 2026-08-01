@@ -7,11 +7,13 @@ import {
   appendLocklessHistory,
   createEmptyLocklessClientState,
   createLocklessHistory,
+  exactDurableBytes,
   navigateLocklessHistory,
   type PersistentLocklessClientState,
 } from "../src/lockless-client-authority.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
+  locklessRecoverableSurfaceMinimumBytes,
   type LocklessCapacityLimits,
 } from "../../protocol/src/lockless.js";
 
@@ -33,6 +35,8 @@ const limits: LocklessCapacityLimits = {
   maxAdmittedControllerEntries: 2,
   maxDormantControllerEntries: 1,
   maxDormantControllerBytes: 2_048,
+  maxPendingOperationReceiptsPerController: 2,
+  maxPendingOperationReceiptBytesPerController: 2_048,
 };
 
 function authority(): LocklessClientAuthority {
@@ -141,6 +145,253 @@ test("same controller may hold one lifecycle and one per-surface slot", () => {
     "surface:surface-a",
   );
   assert.deepEqual(target.liveControllerIds(), []);
+});
+
+test("operation receipts survive connections until explicit acknowledgement", () => {
+  const target = authority();
+  admit(target, "controller-a");
+  target.beginOperationReceipt("controller-a", "mutation-a", "content.set");
+  target.completeOperationReceipt(
+    "controller-a",
+    "mutation-a",
+    "content.set",
+    "resolved_success",
+    { id: "mutation-a", ok: true, payload: { revision: 2 } },
+    { commitSequence: 7, requestId: "mutation-a" },
+  );
+  const stored = target.exportState().controllers["controller-a"]!
+    .pendingOperationReceipts["mutation-a"]!;
+  assert.equal(stored.bytes, exactDurableBytes({ version: 1, ...stored }));
+  assert.deepEqual(
+    target.resolveOperationReceipts("controller-a", ["mutation-a"]),
+    [{
+      operationReceipt: { commitSequence: 7, requestId: "mutation-a" },
+      outcome: "resolved_success",
+      requestId: "mutation-a",
+      terminalResponse: {
+        id: "mutation-a",
+        ok: true,
+        payload: { revision: 2 },
+      },
+    }],
+  );
+  target.disconnect("controller-a", "controller-a");
+  const restored = new LocklessClientAuthority(target.exportState());
+  assert.equal(
+    restored.resolveOperationReceipts("controller-a", ["mutation-a"])[0]
+      ?.outcome,
+    "resolved_success",
+  );
+  assert.equal(
+    restored.acknowledgeOperationReceipt("controller-a", "mutation-a"),
+    true,
+  );
+  assert.equal(
+    restored.resolveOperationReceipts("controller-a", ["mutation-a"])[0]
+      ?.outcome,
+    "resolved_success",
+  );
+  assert.equal(
+    restored.acknowledgeOperationReceipt("controller-a", "mutation-a", true),
+    true,
+  );
+  assert.deepEqual(
+    restored.resolveOperationReceipts("controller-a", ["mutation-a"]),
+    [{ outcome: "not_committed", requestId: "mutation-a" }],
+  );
+  assert.equal(
+    restored.acknowledgeOperationReceipt("controller-a", "mutation-a", true),
+    true,
+  );
+});
+
+test("receipt resolution distinguishes failure, no commit, pending, and reclaimed", () => {
+  const target = authority();
+  admit(target, "controller-a");
+  target.beginOperationReceipt("controller-a", "failed", "pane.close");
+  target.completeOperationReceipt(
+    "controller-a",
+    "failed",
+    "pane.close",
+    "resolved_failure",
+    { error: { code: "stale_topology" }, id: "failed", ok: false },
+    { commitSequence: 8, requestId: "failed" },
+  );
+  target.beginOperationReceipt("controller-a", "pending", "content.set");
+  assert.deepEqual(
+    target.resolveOperationReceipts("controller-a", [
+      "failed",
+      "missing",
+      "pending",
+    ]).map((resolution) => resolution.outcome),
+    ["resolved_failure", "not_committed", "still_pending"],
+  );
+  assert.deepEqual(
+    target.resolveOperationReceipts("controller-a", ["pending"], true),
+    [{
+      cause: "controller_reclaimed",
+      outcome: "receipt_unavailable",
+      requestId: "pending",
+    }],
+  );
+});
+
+test("receipt capacity refuses a new reservation without evicting stored receipts", () => {
+  const target = authority();
+  admit(target, "controller-a");
+  for (const [index, requestId] of ["one", "two"].entries()) {
+    target.beginOperationReceipt("controller-a", requestId, "content.set");
+    target.completeOperationReceipt(
+      "controller-a",
+      requestId,
+      "content.set",
+      "resolved_success",
+      { id: requestId, ok: true },
+      { commitSequence: index + 1, requestId },
+    );
+  }
+  assert.throws(
+    () => target.beginOperationReceipt("controller-a", "three", "content.set"),
+    (error) =>
+      error instanceof LocklessAuthorityError &&
+      error.code === "receipt_capacity",
+  );
+  assert.deepEqual(
+    target.resolveOperationReceipts("controller-a", ["one", "two"])
+      .map((resolution) => resolution.outcome),
+    ["resolved_success", "resolved_success"],
+  );
+});
+
+test("target apply work survives restart and terminalizes as correlated append-only surface truth", () => {
+  const roomyLimits: LocklessCapacityLimits = {
+    ...limits,
+    maxConsumableRecordBytes: 2_000,
+    maxSurfaceConsumableBytes: 4_000,
+    maxSurfaceRecoverableBaseBytes: 4_000,
+  };
+  roomyLimits.maxRecoverableSurfaceBytes =
+    locklessRecoverableSurfaceMinimumBytes(roomyLimits);
+  roomyLimits.maxRetainedTombstoneBytes = Math.max(
+    roomyLimits.maxRetainedTombstoneBytes,
+    roomyLimits.maxRecoverableSurfaceBytes,
+  );
+  const target = new LocklessClientAuthority(
+    createEmptyLocklessClientState(roomyLimits),
+  );
+  target.admit(
+    {
+      controllerInstanceId: "controller-a",
+      projectionCapacityBytes: 10_000,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+    },
+    "controller-a",
+    "admit-controller-a",
+  );
+  const admitted = target.admitTargetApplyWorkItem({
+    controllerInstanceId: "controller-a",
+    currentSurfaceBase: { panes: [{ paneId: 1 }] },
+    intentCommitSequence: 11,
+    operationRequestId: "operation-a",
+    request: {
+      paneId: 1,
+      requestId: "materialization-a",
+      restoreReason: "initial",
+      surfaceId: "surface-a",
+      targetEpoch: 3,
+      targetHeader: {},
+      targetId: "target-a",
+      targetKind: "browser_url",
+      targetPayload: { url: "https://example.com" },
+    },
+  });
+  assert.equal(admitted.state, "intent_committed");
+  assert.equal(
+    admitted.bytes,
+    exactDurableBytes({ version: 1, ...admitted }),
+  );
+
+  const restored = new LocklessClientAuthority(target.exportState());
+  assert.equal(restored.targetApplyWorkItems()[0]?.state, "intent_committed");
+  restored.markTargetApplyMaterializing("controller-a", "operation-a");
+  assert.equal(
+    restored.markTargetApplyMaterializing("controller-a", "operation-a"),
+    null,
+  );
+  const materializingState = restored.exportState();
+  const afterMaterializationCrash = new LocklessClientAuthority(
+    materializingState,
+  );
+  assert.equal(
+    afterMaterializationCrash.targetApplyWorkItems()[0]?.state,
+    "materializing",
+  );
+  const events: Array<Record<string, unknown>> = [];
+  afterMaterializationCrash.subscribe((event) =>
+    events.push(event as unknown as Record<string, unknown>),
+  );
+  const completed = afterMaterializationCrash.completeTargetApplyWorkItem(
+    "controller-a",
+    "operation-a",
+    { errorCode: "materialization_outcome_unknown", status: "failed" },
+  );
+  assert.equal(completed?.record.recordClass, "target_result");
+  assert.deepEqual(completed?.result, {
+    errorCode: "materialization_outcome_unknown",
+    intentCommitSequence: 11,
+    operationRequestId: "operation-a",
+    status: "failed",
+    surfaceId: "surface-a",
+    targetEpoch: 3,
+    targetId: "target-a",
+    targetRequestId: "materialization-a",
+  });
+  assert.deepEqual(afterMaterializationCrash.targetApplyWorkItems(), []);
+  assert.equal(
+    afterMaterializationCrash.scopeSnapshot(
+      "controller-a",
+      "surface:surface-a",
+    ).records[0]?.recordClass,
+    "target_result",
+  );
+  const resultEvent = events.find(
+    (event) => event.type === "event.target_apply_result",
+  );
+  assert.equal(resultEvent?.scopeId, "surface:surface-a");
+  assert.deepEqual(resultEvent?.result, completed?.result);
+});
+
+test("target apply surface capacity refusal leaves no durable work item", () => {
+  const constrained = new LocklessClientAuthority(
+    createEmptyLocklessClientState({
+      ...limits,
+      maxSurfaceRecoverableBaseBytes: 64,
+    }),
+  );
+  admit(constrained, "controller-a");
+  assert.throws(
+    () =>
+      constrained.admitTargetApplyWorkItem({
+        controllerInstanceId: "controller-a",
+        currentSurfaceBase: {},
+        intentCommitSequence: 1,
+        operationRequestId: "operation-too-large",
+        request: {
+          requestId: "materialization-too-large",
+          restoreReason: "initial",
+          surfaceId: "surface-a",
+          targetEpoch: 1,
+          targetHeader: {},
+          targetId: "target-a",
+          targetKind: "native_app",
+          targetPayload: {},
+        },
+      }),
+    (error) =>
+      error instanceof LocklessAuthorityError &&
+      error.code === "surface_state_capacity",
+  );
+  assert.deepEqual(constrained.targetApplyWorkItems(), []);
 });
 
 test("bounded consumables preserve independent cursors and sticky structured gaps", () => {
@@ -535,4 +786,82 @@ test("persistent export restores authoritative limits and scopes without retaini
     1,
   );
   assert.equal("audit" in restored.exportState(), false);
+});
+
+test("authority FIFO isolates persisted work, ordinary mutations, failure rollback, and restart", async () => {
+  const target = authority();
+  admit(target, "controller-a");
+  let releaseFirst = (): void => {};
+  let firstPersistStarted = (): void => {};
+  const firstStarted = new Promise<void>((resolve) => {
+    firstPersistStarted = resolve;
+  });
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const order: string[] = [];
+  const first = target.transactionPersisted(
+    () => {
+      order.push("first-mutation");
+      target.setSurfaceMode("surface-a", "lockless");
+    },
+    async () => {
+      order.push("first-persist-start");
+      firstPersistStarted();
+      await firstGate;
+      order.push("first-persist-end");
+    },
+  );
+  await firstStarted;
+  const ordinary = target.transactionAsync(async () => {
+    order.push("ordinary-mutation");
+    target.appendConsumable({
+      payload: { value: "queued" },
+      recordClass: "tap",
+      scopeId: "surface:surface-b",
+      scopeKind: "surface",
+      triggerOperation: "test.ordinary",
+    });
+  });
+  const second = target.transactionPersisted(
+    () => {
+      order.push("second-mutation");
+      target.setSurfaceMode("surface-b", "lockless");
+    },
+    async () => {
+      order.push("second-persist");
+    },
+  );
+  await Promise.resolve();
+  assert.deepEqual(order, ["first-mutation", "first-persist-start"]);
+  releaseFirst();
+  await Promise.all([first, ordinary, second]);
+  assert.deepEqual(order, [
+    "first-mutation",
+    "first-persist-start",
+    "first-persist-end",
+    "ordinary-mutation",
+    "second-mutation",
+    "second-persist",
+  ]);
+
+  await assert.rejects(
+    target.transactionPersisted(
+      () => target.setSurfaceMode("surface-failed", "lockless"),
+      async () => {
+        throw new Error("persist failed");
+      },
+    ),
+    /persist failed/,
+  );
+  await target.transactionPersisted(
+    () => target.setSurfaceMode("surface-after-failure", "lockless"),
+    async () => {},
+  );
+  assert.equal(target.surfaceMode("surface-failed"), null);
+  assert.equal(target.surfaceMode("surface-after-failure"), "lockless");
+  const restored = new LocklessClientAuthority(target.exportState());
+  assert.equal(restored.surfaceMode("surface-a"), "lockless");
+  assert.equal(restored.surfaceMode("surface-b"), "lockless");
+  assert.equal(restored.scopeSnapshot("controller-a", "surface:surface-b").records.length, 1);
 });

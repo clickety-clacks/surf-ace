@@ -49,6 +49,7 @@ import {
   type LocklessPairPayload,
   type LocklessRequest,
   type LocklessResponse,
+  type LocklessTargetApplyResult,
   type LocklessTopologyRealizeResult,
 } from "../../protocol/src/lockless.js";
 import {
@@ -78,8 +79,10 @@ import { isValidWindowLabel, SurfaceCore, SurfaceCoreError, type CoreEvent } fro
 import {
   LocklessAuthorityError,
   type AuthorityEvent,
+  type PersistentTargetApplyWorkItem,
   type PersistentTombstone,
 } from "./lockless-client-authority.js";
+import { PersistentStateOutcomeUnknownError } from "./persistent-state-file.js";
 
 type SocketCacheEntry = {
   payloadHash: string;
@@ -137,9 +140,10 @@ type LocklessTransportSession = {
 
 type PendingBrowserUrlApply = {
   appliedAt: string;
+  committedLocklessIntent: boolean;
   request: TargetApplyRequest;
   resolve: (payload: TargetApplyResponse["payload"]) => void;
-  socket: WebSocket;
+  socket: WebSocket | null;
   timeout: NodeJS.Timeout;
 };
 
@@ -174,6 +178,7 @@ export type SurfaceWsServerOptions = {
   onBusyChanged?: () => void;
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
+  persistLocklessState?: () => Promise<void>;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -280,6 +285,7 @@ export class SurfaceWsServer {
   private readonly onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   private readonly port: number;
   private readonly protocolVersion: number;
+  private readonly persistLocklessState: () => Promise<void>;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
   private readonly pendingBrowserUrlApplies = new Map<string, PendingBrowserUrlApply>();
@@ -296,6 +302,7 @@ export class SurfaceWsServer {
   private lifecycleMutationQueue: Promise<void> = Promise.resolve();
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
+  private persistenceOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
 
   constructor(options: SurfaceWsServerOptions) {
     this.bindAddress = options.bindAddress ?? "0.0.0.0";
@@ -314,6 +321,18 @@ export class SurfaceWsServer {
     this.onNativeMaterialized = options.onNativeMaterialized;
     this.onNativeReleased = options.onNativeReleased;
     this.port = options.port;
+    const persistLocklessState = options.persistLocklessState ?? (async () => {});
+    this.persistLocklessState = async () => {
+      if (this.persistenceOutcomeUnknown) throw this.persistenceOutcomeUnknown;
+      try {
+        await persistLocklessState();
+      } catch (error) {
+        if (error instanceof PersistentStateOutcomeUnknownError) {
+          this.failStopPersistence(error);
+        }
+        throw error;
+      }
+    };
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
@@ -330,6 +349,10 @@ export class SurfaceWsServer {
     this.wss = new WebSocketServer({ noServer: true });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
+      if (this.persistenceOutcomeUnknown) {
+        socket.destroy();
+        return;
+      }
       if (request.url !== this.wsPath) {
         persistentServerDiagnostic(
           "warn",
@@ -420,6 +443,7 @@ export class SurfaceWsServer {
         ws_path: this.wsPath,
       },
     );
+    await this.resumeTargetApplyWorkItems();
     await new Promise<void>((resolve, reject) => {
       this.httpServer.listen(this.port, this.bindAddress, () => resolve());
       this.httpServer.once("error", reject);
@@ -471,6 +495,17 @@ export class SurfaceWsServer {
       });
     });
     persistentServerDiagnostic("info", "server_stop_ok");
+  }
+
+  failStopPersistence(error: PersistentStateOutcomeUnknownError): void {
+    if (this.persistenceOutcomeUnknown) return;
+    this.persistenceOutcomeUnknown = error;
+    persistentServerDiagnostic("error", "persistence_outcome_unknown_fail_stop", {
+      ...errorDiagnosticFields(error.cause),
+    });
+    for (const socket of this.wss.clients) {
+      socket.close(1011, "persistence_outcome_unknown");
+    }
   }
 
   advertisedTxt(fingerprintPrefix: string): Record<string, string> {
@@ -700,18 +735,22 @@ export class SurfaceWsServer {
     payload: unknown,
     triggerOperation: string,
   ): Promise<void> {
-    if (this.core.locklessAuthority.surfaceMode(surfaceId) !== "lockless") {
-      return;
-    }
     const scopeId = locklessPaneScopeId(surfaceId, paneId);
-    const record = this.core.locklessAuthority.appendConsumable({
-      payload,
-      recordClass,
-      scopeId,
-      scopeKind: "pane",
-      triggerOperation,
+    const record = await this.core.locklessAuthority.transactionAsync(async () => {
+      if (this.core.locklessAuthority.surfaceMode(surfaceId) !== "lockless") {
+        return null;
+      }
+      const appended = this.core.locklessAuthority.appendConsumable({
+        payload,
+        recordClass,
+        scopeId,
+        scopeKind: "pane",
+        triggerOperation,
+      });
+      this.core.markLocklessAuthorityChanged(surfaceId);
+      await this.persistLocklessState();
+      return appended;
     });
-    this.core.markLocklessAuthorityChanged(surfaceId);
     if (record) {
       await this.broadcastLocklessDelta(scopeId, [record]);
     }
@@ -723,18 +762,22 @@ export class SurfaceWsServer {
     payload: unknown,
     triggerOperation: string,
   ): Promise<void> {
-    if (this.core.locklessAuthority.surfaceMode(surfaceId) !== "lockless") {
-      return;
-    }
     const scopeId = `surface:${encodeURIComponent(surfaceId)}`;
-    const record = this.core.locklessAuthority.appendConsumable({
-      payload,
-      recordClass,
-      scopeId,
-      scopeKind: "surface",
-      triggerOperation,
+    const record = await this.core.locklessAuthority.transactionAsync(async () => {
+      if (this.core.locklessAuthority.surfaceMode(surfaceId) !== "lockless") {
+        return null;
+      }
+      const appended = this.core.locklessAuthority.appendConsumable({
+        payload,
+        recordClass,
+        scopeId,
+        scopeKind: "surface",
+        triggerOperation,
+      });
+      this.core.markLocklessAuthorityChanged(surfaceId);
+      await this.persistLocklessState();
+      return appended;
     });
-    this.core.markLocklessAuthorityChanged(surfaceId);
     if (record) {
       await this.broadcastLocklessDelta(scopeId, [record]);
     }
@@ -756,13 +799,17 @@ export class SurfaceWsServer {
     if (!payload) return;
     const scopeId = locklessPaneScopeId(surfaceId, paneId);
     const frameId = `annotation:${payload.contentId}`;
-    const record = this.core.locklessAuthority.updateLiveFrame({
-      frameId,
-      payload: { ...payload, flushId: frameId },
-      scopeId,
-      triggerOperation: "renderer.annotation_live",
+    const record = await this.core.locklessAuthority.transactionAsync(async () => {
+      const updated = this.core.locklessAuthority.updateLiveFrame({
+        frameId,
+        payload: { ...payload, flushId: frameId },
+        scopeId,
+        triggerOperation: "renderer.annotation_live",
+      });
+      this.core.markLocklessAuthorityChanged(surfaceId);
+      await this.persistLocklessState();
+      return updated;
     });
-    this.core.markLocklessAuthorityChanged(surfaceId);
     if (record) {
       await this.broadcastLocklessDelta(scopeId, [record]);
     }
@@ -803,8 +850,8 @@ export class SurfaceWsServer {
     surfaceSetRevision: number;
     tombstoneId: string;
   }> {
-    const result = await this.runLifecycleTransaction(
-      () => {
+    const result = await this.core.locklessAuthority.transactionAsync(async () => {
+      const committed = await this.runLifecycleTransaction(() => {
         const record = this.core.captureSurfaceTombstonePayload(surfaceId);
         const paneTombstones =
           this.core.locklessAuthority.takePaneTombstonesForSurface(
@@ -822,9 +869,10 @@ export class SurfaceWsServer {
             this.core.locklessAuthority.advanceSurfaceSetRevision(),
           tombstoneId: tombstone.tombstoneId,
         };
-      },
-      surfaceId,
-    );
+      }, surfaceId);
+      await this.persistLocklessState();
+      return committed;
+    });
     this.core.markLocklessAuthorityChanged();
     return result;
   }
@@ -1192,14 +1240,17 @@ export class SurfaceWsServer {
     if (!validation.ok) {
       const session = this.locklessSessions.get(socket);
       if (session && locklessOperationMutates(request.op)) {
-        this.core.locklessAuthority.auditRejected(
-          request.id,
-          request.op,
-          session.controllerInstanceId,
-          "invalid_payload",
-          session.surfaceId,
-        );
-        this.core.markLocklessAuthorityChanged(session.surfaceId ?? undefined);
+        await this.core.locklessAuthority.transactionAsync(async () => {
+          this.core.locklessAuthority.auditRejected(
+            request.id,
+            request.op,
+            session.controllerInstanceId,
+            "invalid_payload",
+            session.surfaceId,
+          );
+          this.core.markLocklessAuthorityChanged(session.surfaceId ?? undefined);
+          await this.persistLocklessState();
+        });
       }
       await this.send(
         socket,
@@ -1223,16 +1274,19 @@ export class SurfaceWsServer {
       if (cached.payloadHash !== payloadHash) {
         const session = this.locklessSessions.get(socket);
         if (session && locklessOperationMutates(request.op)) {
-          this.core.locklessAuthority.auditRejected(
-            request.id,
-            request.op,
-            session.controllerInstanceId,
-            "invalid_payload",
-            session.surfaceId,
-          );
-          this.core.markLocklessAuthorityChanged(
-            session.surfaceId ?? undefined,
-          );
+          await this.core.locklessAuthority.transactionAsync(async () => {
+            this.core.locklessAuthority.auditRejected(
+              request.id,
+              request.op,
+              session.controllerInstanceId,
+              "invalid_payload",
+              session.surfaceId,
+            );
+            this.core.markLocklessAuthorityChanged(
+              session.surfaceId ?? undefined,
+            );
+            await this.persistLocklessState();
+          });
         }
         await this.send(
           socket,
@@ -1251,34 +1305,56 @@ export class SurfaceWsServer {
       return;
     }
 
-    let response: Response;
-    let rejectionCode: LocklessErrorCode | null = null;
-    try {
-      response = (await this.dispatchLocklessRequest(
-        socket,
-        request,
-      )) as Response;
-    } catch (error) {
-      if (error instanceof LocklessAuthorityError) {
-        rejectionCode = error.code;
-        response = errorResponse(
-          request.op,
-          request.id as never,
-          error.code,
-          error.message,
-          error.details,
+    if (request.op === "target.apply") {
+      const session = this.locklessSessions.get(socket);
+      if (session) {
+        await this.handleLocklessTargetApply(
+          socket,
+          meta,
+          session,
+          request,
+          payloadHash,
         );
-      } else if (error instanceof SurfaceCoreError) {
-        rejectionCode = locklessAuditErrorCode(error.code);
-        response = errorResponse(
-          request.op,
-          request.id as never,
-          error.code,
-          error.message,
-          error.details,
-        );
-      } else {
-        rejectionCode = "internal_error";
+        return;
+      }
+    }
+
+    const dispatch = async (): Promise<{
+      rejectionCode: LocklessErrorCode | null;
+      response: Response;
+    }> => {
+      try {
+        return {
+          rejectionCode: null,
+          response: (await this.dispatchLocklessRequest(
+            socket,
+            request,
+          )) as Response,
+        };
+      } catch (error) {
+        if (error instanceof LocklessAuthorityError) {
+          return {
+            rejectionCode: error.code,
+            response: errorResponse(
+              request.op,
+              request.id as never,
+              error.code,
+              error.message,
+              error.details,
+            ),
+          };
+        } else if (error instanceof SurfaceCoreError) {
+          return {
+            rejectionCode: locklessAuditErrorCode(error.code),
+            response: errorResponse(
+              request.op,
+              request.id as never,
+              error.code,
+              error.message,
+              error.details,
+            ),
+          };
+        }
         persistentServerDiagnostic(
           "warn",
           "lockless_request_error",
@@ -1288,58 +1364,450 @@ export class SurfaceWsServer {
             ...errorDiagnosticFields(error),
           },
         );
-        response = errorResponse(
-          request.op,
-          request.id as never,
-          "internal_error",
-          "Unhandled lockless surface error",
-        );
+        return {
+          rejectionCode: "internal_error",
+          response: errorResponse(
+            request.op,
+            request.id as never,
+            "internal_error",
+            "Unhandled lockless surface error",
+          ),
+        };
       }
-    }
+    };
+    let response: Response;
     const session = this.locklessSessions.get(socket);
     if (
       request.op !== "pair.request" &&
       session &&
       locklessOperationMutates(request.op)
     ) {
-      if (response.ok) {
-        const correlation = locklessResultCorrelation(response.payload);
-        const audit = this.core.locklessAuthority.auditAccepted(
-          request.id,
-          request.op,
-          session.controllerInstanceId,
-          session.surfaceId,
-          correlation,
+      try {
+        response = await this.core.locklessAuthority.transactionAsync(() =>
+          this.core.transactionAsync(async () => {
+            this.core.locklessAuthority.beginOperationReceipt(
+              session.controllerInstanceId,
+              request.id,
+              request.op,
+            );
+            const result = await dispatch();
+            response = result.response;
+            let operationReceipt: { commitSequence: number; requestId: string };
+            if (response.ok) {
+              const correlation = locklessResultCorrelation(response.payload);
+              const audit = this.core.locklessAuthority.auditAccepted(
+                request.id,
+                request.op,
+                session.controllerInstanceId,
+                session.surfaceId,
+                correlation,
+              );
+              if (
+                response.payload &&
+                typeof response.payload === "object" &&
+                !Array.isArray(response.payload)
+              ) {
+                (response as Response & {
+                  payload: Record<string, unknown>;
+                }).payload = {
+                  ...(response.payload as Record<string, unknown>),
+                  operationReceipt: {
+                    commitSequence: audit.commitSequence,
+                    requestId: request.id,
+                  },
+                };
+              }
+              operationReceipt = {
+                commitSequence: audit.commitSequence,
+                requestId: request.id,
+              };
+            } else {
+              const audit = this.core.locklessAuthority.auditRejected(
+                request.id,
+                request.op,
+                session.controllerInstanceId,
+                result.rejectionCode ?? "internal_error",
+                session.surfaceId,
+              );
+              operationReceipt = {
+                commitSequence: audit.commitSequence,
+                requestId: request.id,
+              };
+            }
+            this.core.locklessAuthority.completeOperationReceipt(
+              session.controllerInstanceId,
+              request.id,
+              request.op,
+              response.ok ? "resolved_success" : "resolved_failure",
+              response,
+              operationReceipt,
+            );
+            this.core.markLocklessAuthorityChanged(
+              session.surfaceId ?? undefined,
+            );
+            await this.persistLocklessState();
+            return response;
+          }),
         );
-        if (
-          response.payload &&
-          typeof response.payload === "object" &&
-          !Array.isArray(response.payload)
-        ) {
-          (response as Response & {
-            payload: Record<string, unknown>;
-          }).payload = {
-            ...(response.payload as Record<string, unknown>),
-            receipt: {
-              commitSequence: audit.commitSequence,
-              requestId: request.id,
-            },
-          };
-        }
-      } else {
-        this.core.locklessAuthority.auditRejected(
-          request.id,
-          request.op,
-          session.controllerInstanceId,
-          rejectionCode ?? "internal_error",
-          session.surfaceId,
-        );
+      } catch (error) {
+        if (!(error instanceof LocklessAuthorityError)) throw error;
+        response = await this.core.locklessAuthority.transactionAsync(async () => {
+          this.core.locklessAuthority.auditRejected(
+            request.id,
+            request.op,
+            session.controllerInstanceId,
+            error.code,
+            session.surfaceId,
+          );
+          this.core.markLocklessAuthorityChanged(session.surfaceId ?? undefined);
+          await this.persistLocklessState();
+          return errorResponse(
+            request.op,
+            request.id as never,
+            error.code,
+            error.message,
+            error.details,
+          );
+        });
       }
-      this.core.markLocklessAuthorityChanged(session.surfaceId ?? undefined);
+    } else {
+      response = await this.core.locklessAuthority.transactionAsync(async () => {
+        const result = await dispatch();
+        if (
+          request.op === "consumable.ack" ||
+          request.op === "operation.receipt.ack"
+        ) {
+          await this.persistLocklessState();
+        }
+        return result.response;
+      });
     }
     meta.cache.set(request.id, { payloadHash, response });
     trimCache(meta.cache);
     await this.send(socket, JSON.stringify(response));
+  }
+
+  private async handleLocklessTargetApply(
+    socket: WebSocket,
+    meta: SocketMeta,
+    session: LocklessTransportSession,
+    request: Extract<LocklessRequest, { op: "target.apply" }>,
+    payloadHash: string,
+  ): Promise<void> {
+    let converted: TargetApplyRequest | null = null;
+    let response: Response;
+    try {
+      response = await this.core.locklessAuthority.transactionPersisted(
+        () => {
+          converted = this.preflightLocklessTargetApply(socket, session, request);
+          this.core.locklessAuthority.beginOperationReceipt(
+            session.controllerInstanceId,
+            request.id,
+            request.op,
+          );
+          const audit = this.core.locklessAuthority.auditAccepted(
+            request.id,
+            request.op,
+            session.controllerInstanceId,
+            request.payload.surfaceId,
+            {
+              operationRequestId: request.id,
+              targetEpoch: request.payload.targetEpoch,
+              targetId: request.payload.targetId,
+              targetRequestId: request.payload.requestId,
+            },
+          );
+          const operationReceipt = {
+            commitSequence: audit.commitSequence,
+            requestId: request.id,
+          };
+          const committed = locklessSuccess(request, {
+            operationReceipt,
+            operationRequestId: request.id,
+            status: "intent_committed",
+            surfaceId: request.payload.surfaceId,
+            targetEpoch: request.payload.targetEpoch,
+            targetId: request.payload.targetId,
+            targetRequestId: request.payload.requestId,
+          }) as Response;
+          this.core.locklessAuthority.completeOperationReceipt(
+            session.controllerInstanceId,
+            request.id,
+            request.op,
+            "resolved_success",
+            committed,
+            operationReceipt,
+          );
+          this.core.locklessAuthority.admitTargetApplyWorkItem({
+            controllerInstanceId: session.controllerInstanceId,
+            currentSurfaceBase:
+              this.core.captureSurfaceTombstonePayload(
+                request.payload.surfaceId,
+              ),
+            intentCommitSequence: audit.commitSequence,
+            operationRequestId: request.id,
+            request: {
+              ...request.payload,
+              paneLineageId: converted.payload.paneLineageId,
+            },
+          });
+          return committed;
+        },
+        this.persistLocklessState,
+      );
+    } catch (error) {
+      if (
+        !(error instanceof LocklessAuthorityError) &&
+        !(error instanceof SurfaceCoreError)
+      ) {
+        throw error;
+      }
+      const rejectionCode = error instanceof LocklessAuthorityError
+        ? error.code
+        : locklessAuditErrorCode(error.code);
+      response = await this.core.locklessAuthority.transactionAsync(async () => {
+        this.core.locklessAuthority.auditRejected(
+          request.id,
+          request.op,
+          session.controllerInstanceId,
+          rejectionCode,
+          request.payload.surfaceId,
+        );
+        this.core.markLocklessAuthorityChanged(request.payload.surfaceId);
+        await this.persistLocklessState();
+        return errorResponse(
+          request.op,
+          request.id as never,
+          error.code,
+          error.message,
+          error.details,
+        );
+      });
+    }
+    this.core.markLocklessAuthorityChanged(request.payload.surfaceId);
+    meta.cache.set(request.id, { payloadHash, response });
+    trimCache(meta.cache);
+    if (!response.ok) {
+      await this.send(socket, JSON.stringify(response));
+      return;
+    }
+    if (!converted) {
+      throw new Error("target.apply committed without a validated request");
+    }
+    try {
+      await this.send(socket, JSON.stringify(response));
+    } finally {
+      await this.continueTargetApplyWorkItem(
+        session.controllerInstanceId,
+        request.id,
+        converted,
+        socket,
+      );
+    }
+  }
+
+  private preflightLocklessTargetApply(
+    socket: WebSocket,
+    session: LocklessTransportSession,
+    request: Extract<LocklessRequest, { op: "target.apply" }>,
+  ): TargetApplyRequest {
+    if (
+      session.surfaceId !== request.payload.surfaceId ||
+      this.locklessSessions.get(socket) !== session
+    ) {
+      throw new LocklessAuthorityError(
+        "not_paired",
+        "target.apply requires the target surface connection",
+      );
+    }
+    this.requireLocklessSurface(request.payload.surfaceId);
+    const pane = this.resolveLocklessTargetPane(
+      request.payload.surfaceId,
+      request.payload.paneId,
+      request.payload.paneLineageId,
+    );
+    const converted: TargetApplyRequest = {
+      id: request.id,
+      op: "target.apply",
+      payload: {
+        display:
+          request.payload.display as TargetApplyRequest["payload"]["display"],
+        ownershipEpoch: 0,
+        ownershipSessionId: "",
+        paneLineageId: pane.paneLineageId,
+        requestId: request.payload.requestId,
+        restoreReason:
+          request.payload.restoreReason as TargetApplyRequest["payload"]["restoreReason"],
+        surfaceId:
+          request.payload.surfaceId as TargetApplyRequest["payload"]["surfaceId"],
+        targetEpoch: request.payload.targetEpoch,
+        targetHeader:
+          request.payload.targetHeader as TargetApplyRequest["payload"]["targetHeader"],
+        targetId: request.payload.targetId,
+        targetKind:
+          request.payload.targetKind as TargetApplyRequest["payload"]["targetKind"],
+        targetPayload: request.payload.targetPayload,
+      },
+      sentAt: request.sentAt,
+      type: "request",
+      v: 1,
+    };
+    if (converted.payload.targetKind === "browser_url") {
+      const failure = this.core.browserUrlTargetIntentPreflight(
+        request.payload.surfaceId,
+        converted.payload,
+      );
+      if (failure) {
+        throw new LocklessAuthorityError(
+          "invalid_payload",
+          failure.message ?? "target.apply intent was rejected",
+          { targetErrorCode: failure.errorCode },
+        );
+      }
+    } else if (isNativeHostTargetKind(converted.payload.targetKind)) {
+      this.core.projectNativePaneMaterialization(
+        request.payload.surfaceId,
+        converted.payload,
+      );
+    } else {
+      throw new LocklessAuthorityError(
+        "unsupported_operation",
+        `Unsupported target kind: ${converted.payload.targetKind}`,
+      );
+    }
+    return converted;
+  }
+
+  private async resumeTargetApplyWorkItems(): Promise<void> {
+    for (const item of this.core.locklessAuthority.targetApplyWorkItems()) {
+      if (item.state === "materializing") {
+        await this.terminalizeTargetApplyWorkItem(item, {
+          errorCode: "materialization_outcome_unknown",
+          status: "failed",
+        });
+        continue;
+      }
+      await this.continueTargetApplyWorkItem(
+        item.controllerInstanceId,
+        item.operationRequestId,
+        this.targetApplyRequestFromWorkItem(item),
+        null,
+      );
+    }
+  }
+
+  private targetApplyRequestFromWorkItem(
+    item: PersistentTargetApplyWorkItem,
+  ): TargetApplyRequest {
+    const payload = item.request;
+    if (!payload.paneLineageId) {
+      throw new LocklessAuthorityError(
+        "capability_mismatch",
+        "Persisted target apply work item lacks pane lineage",
+        { operationRequestId: item.operationRequestId },
+      );
+    }
+    return {
+      id: item.operationRequestId as never,
+      op: "target.apply",
+      payload: {
+        display: payload.display as TargetApplyRequest["payload"]["display"],
+        ownershipEpoch: 0,
+        ownershipSessionId: "",
+        paneLineageId: payload.paneLineageId as never,
+        requestId: payload.requestId,
+        restoreReason:
+          payload.restoreReason as TargetApplyRequest["payload"]["restoreReason"],
+        surfaceId: payload.surfaceId as never,
+        targetEpoch: payload.targetEpoch as never,
+        targetHeader:
+          payload.targetHeader as TargetApplyRequest["payload"]["targetHeader"],
+        targetId: payload.targetId,
+        targetKind:
+          payload.targetKind as TargetApplyRequest["payload"]["targetKind"],
+        targetPayload: payload.targetPayload,
+      },
+      sentAt: Date.now() as never,
+      type: "request",
+      v: 1,
+    };
+  }
+
+  private async continueTargetApplyWorkItem(
+    controllerInstanceId: string,
+    operationRequestId: string,
+    request: TargetApplyRequest,
+    socket: WebSocket | null,
+  ): Promise<void> {
+    const item = await this.core.locklessAuthority.transactionPersisted(
+      () =>
+        this.core.locklessAuthority.markTargetApplyMaterializing(
+          controllerInstanceId,
+          operationRequestId,
+        ),
+      this.persistLocklessState,
+    );
+    if (!item) return;
+    this.core.markLocklessAuthorityChanged(item.surfaceId);
+    let result: Omit<
+      LocklessTargetApplyResult,
+      "intentCommitSequence" | "operationRequestId" | "surfaceId" |
+        "targetEpoch" | "targetId" | "targetRequestId"
+    >;
+    try {
+      const response = await this.handleTargetApplyForSurface(
+        item.surfaceId,
+        socket,
+        request,
+        true,
+      );
+      if (!response.ok) {
+        result = {
+          errorCode: response.error.code,
+          status: "failed",
+        };
+      } else {
+        const payload = (response as TargetApplyResponse).payload;
+        result = {
+          ...(payload.errorCode ? { errorCode: payload.errorCode } : {}),
+          ...(payload.materializedState
+            ? { materializedState: payload.materializedState }
+            : {}),
+          status: payload.status === "applied" ? "applied" : "failed",
+        };
+      }
+    } catch (error) {
+      result = {
+        errorCode:
+          error instanceof LocklessAuthorityError
+            ? error.code
+            : "materialization_failed",
+        status: "failed",
+      };
+    }
+    await this.terminalizeTargetApplyWorkItem(item, result);
+  }
+
+  private async terminalizeTargetApplyWorkItem(
+    item: PersistentTargetApplyWorkItem,
+    result: Omit<
+      LocklessTargetApplyResult,
+      "intentCommitSequence" | "operationRequestId" | "surfaceId" |
+        "targetEpoch" | "targetId" | "targetRequestId"
+    >,
+  ): Promise<void> {
+    const completed = await this.core.locklessAuthority.transactionPersisted(
+      () =>
+        this.core.locklessAuthority.completeTargetApplyWorkItem(
+          item.controllerInstanceId,
+          item.operationRequestId,
+          result,
+        ),
+      this.persistLocklessState,
+    );
+    if (completed) {
+      this.core.markLocklessAuthorityChanged(completed.result.surfaceId);
+    }
   }
 
   private async dispatchLocklessRequest(
@@ -1379,6 +1847,10 @@ export class SurfaceWsServer {
       const connectionSlot = surfaceId
         ? `surface:${surfaceId}`
         : "lifecycle";
+      const controllerWasKnown =
+        this.core.locklessAuthority.hasController(
+          request.payload.controllerInstanceId,
+        );
       const admission = this.core.transaction(() =>
         this.core.locklessAuthority.transaction(() => {
         const admitted = this.core.locklessAuthority.admit(
@@ -1443,6 +1915,13 @@ export class SurfaceWsServer {
           scopeId,
         ),
       );
+      const receiptResolutions =
+        this.core.locklessAuthority.resolveOperationReceipts(
+          request.payload.controllerInstanceId,
+          request.payload.resume?.unresolvedRequestIds ?? [],
+          !controllerWasKnown &&
+            (request.payload.resume?.unresolvedRequestIds?.length ?? 0) > 0,
+        );
       return {
         id: request.id,
         ok: true,
@@ -1458,6 +1937,7 @@ export class SurfaceWsServer {
               }
             : {}),
           mode: "lockless",
+          receiptResolutions,
           resumed: admission.resumed,
           scopes,
           sessionId: `lockless_${request.payload.controllerInstanceId}`,
@@ -1483,6 +1963,40 @@ export class SurfaceWsServer {
       return locklessSuccess(request, {
         nonce: request.payload.nonce,
         receivedAt: Date.now(),
+      });
+    }
+    if (request.op === "operation.receipt.sync") {
+      return locklessSuccess(request, {
+        resolutions:
+          this.core.locklessAuthority.resolveOperationReceipts(
+            session.controllerInstanceId,
+            request.payload.requestIds,
+          ),
+      });
+    }
+    if (request.op === "operation.receipt.ack") {
+      const accepted =
+        this.core.locklessAuthority.acknowledgeOperationReceipt(
+          session.controllerInstanceId,
+          request.payload.requestId,
+          request.payload.release ?? false,
+        );
+      this.core.locklessAuthority.auditAccepted(
+        request.id,
+        request.op,
+        session.controllerInstanceId,
+        session.surfaceId,
+        {
+          accepted,
+          acknowledgedRequestId: request.payload.requestId,
+          release: request.payload.release ?? false,
+        },
+      );
+      this.core.markLocklessAuthorityChanged(session.surfaceId ?? undefined);
+      return locklessSuccess(request, {
+        accepted,
+        release: request.payload.release ?? false,
+        requestId: request.payload.requestId,
       });
     }
     if (request.op === "surfaces.list") {
@@ -3505,11 +4019,27 @@ export class SurfaceWsServer {
 
   private async handleTargetApply(socket: WebSocket, request: TargetApplyRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
+    return await this.handleTargetApplyForSurface(
+      surfaceId,
+      socket,
+      request,
+      false,
+    );
+  }
+
+  private async handleTargetApplyForSurface(
+    surfaceId: string,
+    socket: WebSocket | null,
+    request: TargetApplyRequest,
+    committedLocklessIntent: boolean,
+  ): Promise<Response> {
     const appliedAt = new Date().toISOString();
     if (request.payload.surfaceId !== surfaceId) {
       return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply surfaceId does not match paired surface");
     }
-    const sessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+    const sessionFailure = committedLocklessIntent
+      ? null
+      : this.targetApplySessionFailure(surfaceId, socket!, request, appliedAt);
     if (sessionFailure) {
       return sessionFailure;
     }
@@ -3555,7 +4085,9 @@ export class SurfaceWsServer {
         };
       }
       const releaseResult = await this.runSurfaceMutation(surfaceId, async () => {
-        const currentSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+        const currentSessionFailure = committedLocklessIntent
+          ? null
+          : this.targetApplySessionFailure(surfaceId, socket!, request, appliedAt);
         if (currentSessionFailure) {
           return {
             response: currentSessionFailure,
@@ -3574,7 +4106,9 @@ export class SurfaceWsServer {
         if (postReleasePreflightFailure) {
           return { payload: postReleasePreflightFailure };
         }
-        const postReleaseSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+        const postReleaseSessionFailure = committedLocklessIntent
+          ? null
+          : this.targetApplySessionFailure(surfaceId, socket!, request, appliedAt);
         if (postReleaseSessionFailure) {
           return { response: postReleaseSessionFailure };
         }
@@ -3627,7 +4161,14 @@ export class SurfaceWsServer {
         result.errorCode === "materialization_failed" &&
         result.materializedState?.navigationStatus === "started_unverified";
       const payload = shouldWaitForBrowserUrl
-        ? await this.waitForBrowserUrlNavigation(surfaceId, Number(paneId), request, socket, appliedAt)
+        ? await this.waitForBrowserUrlNavigation(
+            surfaceId,
+            Number(paneId),
+            request,
+            socket,
+            appliedAt,
+            committedLocklessIntent,
+          )
         : result;
       persistentServerDiagnostic(
         "info",
@@ -3679,7 +4220,9 @@ export class SurfaceWsServer {
       };
     }
     return await this.runSurfaceMutation(surfaceId, async () => {
-      const currentSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+      const currentSessionFailure = committedLocklessIntent
+        ? null
+        : this.targetApplySessionFailure(surfaceId, socket!, request, appliedAt);
       if (currentSessionFailure) {
         return currentSessionFailure;
       }
@@ -3785,7 +4328,9 @@ export class SurfaceWsServer {
         if (postHostLayoutFailure) {
           throw new Error(postHostLayoutFailure);
         }
-        const postHostSessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+        const postHostSessionFailure = committedLocklessIntent
+          ? null
+          : this.targetApplySessionFailure(surfaceId, socket!, request, appliedAt);
         if (postHostSessionFailure) {
           const releasedAfterFailure = await this.releaseNativePaneAfterFailedHost(surfaceId, materialization);
           if (!releasedAfterFailure) {
@@ -3814,7 +4359,9 @@ export class SurfaceWsServer {
         if (postOverlayLayoutFailure) {
           throw new Error(postOverlayLayoutFailure);
         }
-        const postOverlaySessionFailure = this.targetApplySessionFailure(surfaceId, socket, request, appliedAt);
+        const postOverlaySessionFailure = committedLocklessIntent
+          ? null
+          : this.targetApplySessionFailure(surfaceId, socket!, request, appliedAt);
         if (postOverlaySessionFailure) {
           const releasedAfterFailure = await this.releaseNativePaneAfterFailedHost(surfaceId, materialization);
           if (!releasedAfterFailure) {
@@ -4037,8 +4584,9 @@ export class SurfaceWsServer {
     surfaceId: string,
     paneId: number,
     request: TargetApplyRequest,
-    socket: WebSocket,
+    socket: WebSocket | null,
     appliedAt: string,
+    committedLocklessIntent: boolean,
   ): Promise<TargetApplyResponse["payload"]> {
     return await new Promise((resolve) => {
       const key = browserUrlApplyKey(surfaceId, paneId);
@@ -4073,6 +4621,7 @@ export class SurfaceWsServer {
         this.earlyBrowserUrlNavigationEvidence.delete(evidenceKey);
         resolve(this.browserUrlNavigationPayload(surfaceId, paneId, {
           appliedAt,
+          committedLocklessIntent,
           request,
           resolve,
           socket,
@@ -4082,7 +4631,14 @@ export class SurfaceWsServer {
       const timeout = setTimeout(() => {
         this.pendingBrowserUrlApplies.delete(key);
         this.earlyBrowserUrlNavigationEvidence.delete(evidenceKey);
-        const sessionFailure = this.targetApplySessionFailurePayload(surfaceId, socket, request, appliedAt);
+        const sessionFailure = committedLocklessIntent || !socket
+          ? null
+          : this.targetApplySessionFailurePayload(
+              surfaceId,
+              socket,
+              request,
+              appliedAt,
+            );
         if (sessionFailure) {
           resolve(sessionFailure);
           return;
@@ -4104,6 +4660,7 @@ export class SurfaceWsServer {
       }, BROWSER_URL_NAVIGATION_TIMEOUT_MS);
       this.pendingBrowserUrlApplies.set(key, {
         appliedAt,
+        committedLocklessIntent,
         request,
         resolve,
         socket,
@@ -4118,12 +4675,15 @@ export class SurfaceWsServer {
     pending: Omit<PendingBrowserUrlApply, "timeout">,
     evidence: BrowserUrlNavigationEvidence,
   ): TargetApplyResponse["payload"] {
-    const sessionFailure = this.targetApplySessionFailurePayload(
-      surfaceId,
-      pending.socket,
-      pending.request,
-      pending.appliedAt,
-    );
+    const sessionFailure =
+      pending.committedLocklessIntent || !pending.socket
+        ? null
+        : this.targetApplySessionFailurePayload(
+            surfaceId,
+            pending.socket,
+            pending.request,
+            pending.appliedAt,
+          );
     if (sessionFailure) {
       return sessionFailure;
     }
@@ -5017,6 +5577,25 @@ export class SurfaceWsServer {
       );
       return;
     }
+    if (event.type === "event.target_apply_result") {
+      const projected: LocklessEvent = {
+        eventId: makeEventId(),
+        op: "event.target_apply_result",
+        payload: {
+          ...event.result,
+          consumableSequence: event.record.sequence,
+          recordId: event.record.recordId,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      };
+      await this.broadcastLockless(projected);
+      if (event.retained) {
+        await this.broadcastLocklessDelta(event.scopeId, [event.record]);
+      }
+      return;
+    }
     if (event.type === "event.controller_retention_reclaimed") {
       persistentServerDiagnostic(
         "info",
@@ -5125,14 +5704,17 @@ export class SurfaceWsServer {
     const locklessSession = this.locklessSessions.get(socket);
     if (locklessSession) {
       this.locklessSessions.delete(socket);
-      this.core.locklessAuthority.disconnect(
-        locklessSession.controllerInstanceId,
-        locklessSession.connectionToken,
-        locklessSession.connectionSlot,
-      );
-      this.core.markLocklessAuthorityChanged(
-        locklessSession.surfaceId ?? undefined,
-      );
+      void this.core.locklessAuthority.transactionAsync(async () => {
+        this.core.locklessAuthority.disconnect(
+          locklessSession.controllerInstanceId,
+          locklessSession.connectionToken,
+          locklessSession.connectionSlot,
+        );
+        this.core.markLocklessAuthorityChanged(
+          locklessSession.surfaceId ?? undefined,
+        );
+        await this.persistLocklessState();
+      }).catch(() => {});
       if (
         locklessSession.surfaceId &&
         this.core.listSurfaces().some(
@@ -5283,16 +5865,20 @@ export class SurfaceWsServer {
       const snapshot = this.tryCaptureSnapshot(surfaceId, paneId);
       if (!snapshot?.contentId) return;
       const scopeId = locklessPaneScopeId(surfaceId, paneId);
-      const record = this.core.locklessAuthority.finalizeLiveFrame(
-        scopeId,
-        `annotation:${snapshot.contentId}`,
-        "renderer.annotation_finalized",
-      );
-      if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
-        this.core.markDrawingFlushSent(surfaceId, paneId);
-      }
-      this.core.markAnnotationCommittedSent(surfaceId, paneId);
-      this.core.markLocklessAuthorityChanged(surfaceId);
+      const record = await this.core.locklessAuthority.transactionAsync(async () => {
+        const finalized = this.core.locklessAuthority.finalizeLiveFrame(
+          scopeId,
+          `annotation:${snapshot.contentId}`,
+          "renderer.annotation_finalized",
+        );
+        if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
+          this.core.markDrawingFlushSent(surfaceId, paneId);
+        }
+        this.core.markAnnotationCommittedSent(surfaceId, paneId);
+        this.core.markLocklessAuthorityChanged(surfaceId);
+        await this.persistLocklessState();
+        return finalized;
+      });
       if (record) {
         await this.broadcastLocklessDelta(scopeId, [record]);
       }
@@ -5525,7 +6111,10 @@ function locklessOperationMutates(op: LocklessRequest["op"]): boolean {
     "panes.list",
     "snapshot.get",
     "surfaces.list",
+    "consumable.ack",
     "consumable.sync",
+    "operation.receipt.ack",
+    "operation.receipt.sync",
   ]).has(op);
 }
 

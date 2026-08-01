@@ -26,6 +26,8 @@ const limits: LocklessCapacityLimits = {
   maxAdmittedControllerEntries: 1,
   maxDormantControllerEntries: 1,
   maxDormantControllerBytes: 1,
+  maxPendingOperationReceiptsPerController: 1,
+  maxPendingOperationReceiptBytesPerController: 1,
 };
 
 function request(op: string, payload: Record<string, unknown>) {
@@ -57,7 +59,87 @@ test("lockless schema exports request, response, and event branches", () => {
       "event.consumable_overflow",
       "event.controller_retention_reclaimed",
       "event.tombstone_reclaimed",
+      "event.target_apply_result",
     ],
+  );
+});
+
+test("target apply result event requires exact durable correlation", () => {
+  const valid = {
+    eventId: "ev-target-result",
+    op: "event.target_apply_result",
+    payload: {
+      consumableSequence: 9,
+      intentCommitSequence: 7,
+      materializedState: { url: "https://example.com" },
+      operationRequestId: "rq-target-apply",
+      recordId: "record-target-result",
+      status: "applied",
+      surfaceId: "surface-a",
+      targetEpoch: 2,
+      targetId: "target-a",
+      targetRequestId: "materialize-a",
+    },
+    sentAt: 1,
+    type: "event",
+    v: 1,
+  };
+  assert.deepEqual(validateLocklessEnvelope(valid), { ok: true });
+  const { intentCommitSequence: _missing, ...incomplete } = valid.payload;
+  assert.deepEqual(
+    validateLocklessEnvelope({ ...valid, payload: incomplete }),
+    { ok: false, reason: "invalid_lockless_event" },
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      ...valid,
+      payload: { ...valid.payload, unexpected: true },
+    }),
+    { ok: false, reason: "invalid_lockless_event" },
+  );
+});
+
+test("target apply response proves only the exact committed intent", () => {
+  const response = {
+    id: "rq-target-apply",
+    ok: true,
+    op: "target.apply",
+    payload: {
+      operationReceipt: {
+        commitSequence: 7,
+        requestId: "rq-target-apply",
+      },
+      operationRequestId: "rq-target-apply",
+      status: "intent_committed",
+      surfaceId: "surface-a",
+      targetEpoch: 2,
+      targetId: "target-a",
+      targetRequestId: "materialization-a",
+    },
+    sentAt: 1,
+    type: "response",
+    v: 1,
+  };
+  assert.deepEqual(validateLocklessEnvelope(response), { ok: true });
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      ...response,
+      payload: { ...response.payload, status: "applied" },
+    }),
+    { ok: false, reason: "invalid_target_apply_response" },
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      ...response,
+      payload: {
+        ...response.payload,
+        operationReceipt: {
+          ...response.payload.operationReceipt,
+          requestId: "wrong-request",
+        },
+      },
+    }),
+    { ok: false, reason: "invalid_target_apply_response" },
   );
 });
 
@@ -117,6 +199,9 @@ test("lockless validator accepts every converted and new request shape", () => {
     request("panes.list", { surfaceId: "surface-a" }),
     request("consumable.ack", { cursor: 2, scopeId: "pane:surface-a:1" }),
     request("consumable.sync", { scopeIds: ["pane:surface-a:1"] }),
+    request("operation.receipt.sync", { requestIds: ["mutation-a"] }),
+    request("operation.receipt.ack", { requestId: "mutation-a" }),
+    request("operation.receipt.ack", { release: true, requestId: "mutation-a" }),
     request("content.set", {
       content: { markdown: "hello" },
       contentId: "content-a",
@@ -270,6 +355,7 @@ test("lockless pair and discovery require exact capability and finite limits", (
       controllerInstanceId: "controller-a",
       limits,
       mode: "lockless",
+      receiptResolutions: [],
       resumed: false,
       scopes: [],
       sessionId: "lockless_controller-a",
@@ -297,6 +383,59 @@ test("lockless pair and discovery require exact capability and finite limits", (
     }).ok,
     false,
   );
+});
+
+test("receipt sync and ack responses validate all public outcomes", () => {
+  const sync = {
+    id: "rq-receipt-sync",
+    ok: true,
+    op: "operation.receipt.sync",
+    payload: {
+      resolutions: [
+        {
+          operationReceipt: { commitSequence: 4, requestId: "success" },
+          outcome: "resolved_success",
+          requestId: "success",
+          terminalResponse: { id: "success", ok: true },
+        },
+        {
+          operationReceipt: { commitSequence: 5, requestId: "failure" },
+          outcome: "resolved_failure",
+          requestId: "failure",
+          terminalResponse: { id: "failure", ok: false },
+        },
+        { outcome: "not_committed", requestId: "missing" },
+        { outcome: "still_pending", requestId: "pending" },
+        {
+          cause: "controller_reclaimed",
+          outcome: "receipt_unavailable",
+          requestId: "reclaimed",
+        },
+      ],
+    },
+    sentAt: 1,
+    type: "response",
+    v: 1,
+  };
+  assert.deepEqual(validateLocklessEnvelope(sync), { ok: true });
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      ...sync,
+      payload: {
+        resolutions: [{ outcome: "receipt_unavailable", requestId: "bad" }],
+      },
+    }),
+    { ok: false, reason: "invalid_operation_receipt_sync_response" },
+  );
+  assert.deepEqual(validateLocklessEnvelope({
+    id: "rq-receipt-ack",
+    ok: true,
+    op: "operation.receipt.ack",
+    payload: { accepted: true, requestId: "success" },
+    sentAt: 1,
+    type: "response",
+    v: 1,
+  }), { ok: true });
 });
 
 test("lockless request rejects legacy authority and allocation fields", () => {

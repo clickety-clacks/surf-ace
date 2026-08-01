@@ -34,6 +34,8 @@ export type LocklessCapacityLimits = {
   maxAdmittedControllerEntries: number;
   maxDormantControllerEntries: number;
   maxDormantControllerBytes: number;
+  maxPendingOperationReceiptsPerController: number;
+  maxPendingOperationReceiptBytesPerController: number;
 };
 
 export type LocklessControllerAdmission = {
@@ -58,7 +60,8 @@ export type ConsumableRecordClass =
   | "selection"
   | "page"
   | "playback"
-  | "navigation";
+  | "navigation"
+  | "target_result";
 
 export type ConsumableRecord = {
   bytes: number;
@@ -177,6 +180,7 @@ export type LocklessConsumableAck = {
 
 export type LocklessResumeState = {
   pendingAcks: LocklessConsumableAck[];
+  unresolvedRequestIds?: string[];
   scopes: Record<
     LocklessScopeId,
     {
@@ -185,6 +189,28 @@ export type LocklessResumeState = {
     }
   >;
 };
+
+export type LocklessOperationReceipt = {
+  commitSequence: number;
+  requestId: string;
+};
+
+export type LocklessReceiptResolution =
+  | {
+      operationReceipt: LocklessOperationReceipt;
+      outcome: "resolved_success" | "resolved_failure";
+      requestId: string;
+      terminalResponse: unknown;
+    }
+  | {
+      outcome: "not_committed" | "still_pending";
+      requestId: string;
+    }
+  | {
+      cause: "controller_reclaimed";
+      outcome: "receipt_unavailable";
+      requestId: string;
+    };
 
 export type LocklessPairPayload = LocklessControllerAdmission & {
   migrationMaterial?: {
@@ -220,6 +246,7 @@ type LocklessPairResultBase = {
   state: unknown | null;
   surfaceId: string | null;
   surfaceSetRevision: number;
+  receiptResolutions: LocklessReceiptResolution[];
 };
 
 export type LocklessPairResult = LocklessPairResultBase &
@@ -299,6 +326,45 @@ export type LocklessTargetApplyIntent = {
   targetPayload: unknown;
 };
 
+export type LocklessTargetApplyAccepted = {
+  operationReceipt: LocklessOperationReceipt;
+  operationRequestId: string;
+  status: "intent_committed";
+  surfaceId: string;
+  targetEpoch: number;
+  targetId: string;
+  targetRequestId: string;
+};
+
+export type LocklessTargetApplyResult = {
+  errorCode?: string;
+  intentCommitSequence: number;
+  materializedState?: unknown;
+  operationRequestId: string;
+  status: "applied" | "failed";
+  surfaceId: string;
+  targetEpoch: number;
+  targetId: string;
+  targetRequestId: string;
+};
+
+export type LocklessTargetApplyWorkItem = {
+  controllerInstanceId: ControllerInstanceId;
+  intentCommitSequence: number;
+  operationRequestId: string;
+  request: LocklessTargetApplyIntent;
+  state: "intent_committed" | "materializing";
+  surfaceId: string;
+  targetEpoch: number;
+  targetId: string;
+  targetRequestId: string;
+};
+
+export type LocklessTargetApplyResultEvent = LocklessTargetApplyResult & {
+  consumableSequence: number;
+  recordId: string;
+};
+
 export type LocklessTargetRegisterIntent = {
   expectedPreviousTargetEpoch: number | null;
   idempotencyKey: string;
@@ -346,6 +412,14 @@ export type LocklessRequest =
       {
         scopeIds: LocklessScopeId[];
       }
+    >
+  | LocklessWireRequest<
+      "operation.receipt.sync",
+      { requestIds: string[] }
+    >
+  | LocklessWireRequest<
+      "operation.receipt.ack",
+      { release?: boolean; requestId: string }
     >
   | LocklessWireRequest<
       "content.set",
@@ -437,6 +511,10 @@ export type LocklessEvent =
   | LocklessWireEvent<
       "event.tombstone_reclaimed",
       Record<string, unknown>
+    >
+  | LocklessWireEvent<
+      "event.target_apply_result",
+      LocklessTargetApplyResultEvent
     >;
 
 export type LocklessResponse = {
@@ -458,6 +536,7 @@ export type LocklessErrorCode =
   | "invalid_operation"
   | "invalid_payload"
   | "not_paired"
+  | "receipt_capacity"
   | "pane_capacity"
   | "pane_state_capacity"
   | "stale_content"
@@ -553,6 +632,8 @@ const LOCKLESS_REQUEST_FIELDS: Record<
     required: ["cursor", "scopeId"],
   },
   "consumable.sync": { required: ["scopeIds"] },
+  "operation.receipt.sync": { required: ["requestIds"] },
+  "operation.receipt.ack": { optional: ["release"], required: ["requestId"] },
   "content.set": {
     optional: ["display", "friendlyChatName"],
     required: [
@@ -683,6 +764,7 @@ const LOCKLESS_EVENT_OPS = new Set<LocklessEvent["op"]>([
   "event.consumable_overflow",
   "event.controller_retention_reclaimed",
   "event.tombstone_reclaimed",
+  "event.target_apply_result",
 ]);
 
 const LOCKLESS_ERROR_CODES = new Set<LocklessErrorCode>([
@@ -694,6 +776,7 @@ const LOCKLESS_ERROR_CODES = new Set<LocklessErrorCode>([
   "invalid_operation",
   "invalid_payload",
   "not_paired",
+  "receipt_capacity",
   "pane_capacity",
   "pane_state_capacity",
   "stale_content",
@@ -870,7 +953,67 @@ const CONSUMABLE_RECORD_CLASSES = new Set<ConsumableRecordClass>([
   "page",
   "playback",
   "navigation",
+  "target_result",
 ]);
+
+function validTargetApplyResult(value: unknown): value is LocklessTargetApplyResult {
+  if (
+    !plainRecord(value) ||
+    !hasExactKeys(
+      value,
+      [
+        "intentCommitSequence",
+        "operationRequestId",
+        "status",
+        "surfaceId",
+        "targetEpoch",
+        "targetId",
+        "targetRequestId",
+      ],
+      ["errorCode", "materializedState"],
+    )
+  ) {
+    return false;
+  }
+  return (
+    positiveInteger(value.intentCommitSequence) &&
+    nonemptyString(value.operationRequestId) &&
+    (value.status === "applied" || value.status === "failed") &&
+    nonemptyString(value.surfaceId) &&
+    positiveInteger(value.targetEpoch) &&
+    nonemptyString(value.targetId) &&
+    nonemptyString(value.targetRequestId) &&
+    (value.errorCode === undefined || nonemptyString(value.errorCode))
+  );
+}
+
+function validTargetApplyAccepted(
+  value: unknown,
+  envelopeRequestId: string,
+): value is LocklessTargetApplyAccepted {
+  return (
+    plainRecord(value) &&
+    hasExactKeys(value, [
+      "operationReceipt",
+      "operationRequestId",
+      "status",
+      "surfaceId",
+      "targetEpoch",
+      "targetId",
+      "targetRequestId",
+    ]) &&
+    plainRecord(value.operationReceipt) &&
+    hasExactKeys(value.operationReceipt, ["commitSequence", "requestId"]) &&
+    positiveInteger(value.operationReceipt.commitSequence) &&
+    value.operationReceipt.requestId === envelopeRequestId &&
+    value.operationRequestId === envelopeRequestId &&
+    value.status === "intent_committed" &&
+    nonemptyString(value.surfaceId) &&
+    positiveInteger(value.targetEpoch) &&
+    nonemptyString(value.targetId) &&
+    nonemptyString(value.targetRequestId)
+  );
+}
 
 function validConsumableGap(
   value: unknown,
@@ -1041,6 +1184,14 @@ function validateLocklessEventPayload(
     case "event.controller_retention_reclaimed":
     case "event.tombstone_reclaimed":
       return true;
+    case "event.target_apply_result": {
+      const { consumableSequence, recordId, ...result } = payload;
+      return (
+        positiveInteger(consumableSequence) &&
+        nonemptyString(recordId) &&
+        validTargetApplyResult(result)
+      );
+    }
   }
 }
 
@@ -1121,12 +1272,44 @@ function validMigrationMaterial(value: unknown): boolean {
   });
 }
 
+function validReceiptResolution(value: unknown): boolean {
+  if (!plainRecord(value) || !nonemptyString(value.requestId)) return false;
+  if (value.outcome === "not_committed" || value.outcome === "still_pending") {
+    return hasExactKeys(value, ["outcome", "requestId"]);
+  }
+  if (value.outcome === "receipt_unavailable") {
+    return hasExactKeys(value, ["cause", "outcome", "requestId"]) &&
+      value.cause === "controller_reclaimed";
+  }
+  if (value.outcome !== "resolved_success" && value.outcome !== "resolved_failure") {
+    return false;
+  }
+  if (
+    !hasExactKeys(value, [
+      "operationReceipt",
+      "outcome",
+      "requestId",
+      "terminalResponse",
+    ]) ||
+    !plainRecord(value.operationReceipt)
+  ) {
+    return false;
+  }
+  return hasExactKeys(value.operationReceipt, ["commitSequence", "requestId"]) &&
+    revision(value.operationReceipt.commitSequence) &&
+    value.operationReceipt.requestId === value.requestId;
+}
+
 function validateLocklessRequestPayload(
   op: LocklessRequest["op"],
   payload: Record<string, unknown>,
 ): string | null {
   const paneAndSurface = () =>
     positiveInteger(payload.paneId) && nonemptyString(payload.surfaceId);
+  const requestIds = (value: unknown) =>
+    Array.isArray(value) &&
+    value.every(nonemptyString) &&
+    new Set(value).size === value.length;
   switch (op) {
     case "pair.request":
       return nonemptyString(payload.controllerInstanceId) &&
@@ -1167,6 +1350,15 @@ function validateLocklessRequestPayload(
         )
         ? null
         : "invalid_consumable_sync";
+    case "operation.receipt.sync":
+      return requestIds(payload.requestIds)
+        ? null
+        : "invalid_operation_receipt_sync";
+    case "operation.receipt.ack":
+      return nonemptyString(payload.requestId) &&
+        (payload.release === undefined || typeof payload.release === "boolean")
+        ? null
+        : "invalid_operation_receipt_ack";
     case "content.set":
       return paneAndSurface() &&
         nonemptyString(payload.contentId) &&
@@ -1440,6 +1632,7 @@ export function validateLocklessEnvelope(
             "controllerInstanceId",
             "limits",
             "mode",
+            "receiptResolutions",
             "resumed",
             "scopes",
             "sessionId",
@@ -1451,6 +1644,8 @@ export function validateLocklessEnvelope(
         ) ||
         !nonemptyString(envelope.payload.controllerInstanceId) ||
         typeof envelope.payload.resumed !== "boolean" ||
+        !Array.isArray(envelope.payload.receiptResolutions) ||
+        !envelope.payload.receiptResolutions.every(validReceiptResolution) ||
         !Array.isArray(envelope.payload.scopes) ||
         !envelope.payload.scopes.every(validScopeSnapshot) ||
         !nonemptyString(envelope.payload.sessionId) ||
@@ -1534,6 +1729,32 @@ export function validateLocklessEnvelope(
         ok: false,
         reason: "invalid_topology_realize_response",
       };
+    }
+    if (
+      envelope.op === "target.apply" &&
+      !validTargetApplyAccepted(envelope.payload, envelope.id)
+    ) {
+      return { ok: false, reason: "invalid_target_apply_response" };
+    }
+    if (envelope.op === "operation.receipt.sync") {
+      if (
+        !plainRecord(envelope.payload) ||
+        !hasExactKeys(envelope.payload, ["resolutions"]) ||
+        !Array.isArray(envelope.payload.resolutions) ||
+        !envelope.payload.resolutions.every(validReceiptResolution)
+      ) {
+        return { ok: false, reason: "invalid_operation_receipt_sync_response" };
+      }
+    }
+    if (envelope.op === "operation.receipt.ack") {
+      if (
+        !plainRecord(envelope.payload) ||
+        !hasExactKeys(envelope.payload, ["accepted", "requestId"]) ||
+        typeof envelope.payload.accepted !== "boolean" ||
+        !nonemptyString(envelope.payload.requestId)
+      ) {
+        return { ok: false, reason: "invalid_operation_receipt_ack_response" };
+      }
     }
     return { ok: true };
   }

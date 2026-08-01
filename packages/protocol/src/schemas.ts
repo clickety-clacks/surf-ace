@@ -3,6 +3,12 @@ import { readFileSync } from "node:fs";
 type JsonSchema = Readonly<Record<string, unknown>>;
 
 type ProtocolSchemaDefName =
+  | "LocklessOperationReceipt"
+  | "LocklessReceiptResolution"
+  | "LocklessTargetApplyAccepted"
+  | "LocklessTargetApplyResult"
+  | "LocklessTargetApplyWorkItem"
+  | "LocklessTargetApplyResultEvent"
   | "LocklessRequest"
   | "LocklessResponse"
   | "LocklessEvent"
@@ -72,6 +78,12 @@ function getSchemaDef(name: ProtocolSchemaDefName): JsonSchema {
 }
 
 export const protocolSchemaDefs = protocolSchemaDocument.$defs;
+export const locklessOperationReceiptSchema = getSchemaDef("LocklessOperationReceipt");
+export const locklessReceiptResolutionSchema = getSchemaDef("LocklessReceiptResolution");
+export const locklessTargetApplyAcceptedSchema = getSchemaDef("LocklessTargetApplyAccepted");
+export const locklessTargetApplyResultSchema = getSchemaDef("LocklessTargetApplyResult");
+export const locklessTargetApplyWorkItemSchema = getSchemaDef("LocklessTargetApplyWorkItem");
+export const locklessTargetApplyResultEventSchema = getSchemaDef("LocklessTargetApplyResultEvent");
 export const locklessRequestSchema = getSchemaDef("LocklessRequest");
 export const locklessResponseSchema = getSchemaDef("LocklessResponse");
 export const locklessEventSchema = getSchemaDef("LocklessEvent");

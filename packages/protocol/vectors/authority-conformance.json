@@ -61,6 +61,42 @@
       "requirements": ["D11", "C3"],
       "contract": "user-closed iOS scene identities are tombstoned and cannot resurrect stale targetable surfaces",
       "expected": "unregistered scene reconnects as a fresh surface unless explicit OS restoration metadata exists"
+    },
+    {
+      "id": "lockless-receipt-cross-connection-resolution",
+      "requirements": ["R11-F1", "CORR-03", "CORR-05", "CORR-07"],
+      "contract": "operation.receipt.sync returns terminal mutation responses and operation receipts retained in the durable controller bundle without request execution",
+      "expected": "sync returns resolved_success, resolved_failure, not_committed, still_pending, or receipt_unavailable with cause controller_reclaimed; the exact terminal receipt remains stable until operation.receipt.ack"
+    },
+    {
+      "id": "lockless-receipt-capacity-precommit",
+      "requirements": ["R11-F1", "CORR-05", "AC-CLI-07"],
+      "contract": "finite advertised maxPendingOperationReceiptsPerController and maxPendingOperationReceiptBytesPerController limits use exact versioned serialized bytes before mutation commit",
+      "expected": "receipt_capacity commits nothing and never evicts an individual pending or terminal receipt"
+    },
+    {
+      "id": "lockless-receipt-replay-not-request-replay",
+      "requirements": ["R11-F1", "CORR-07", "TOPO-8"],
+      "contract": "operation.receipt.sync is the only cross-connection replay path while request-id idempotency remains connection-scoped",
+      "expected": "receipt resolution returns stored terminal material and never re-executes or populates another connection's request cache"
+    },
+    {
+      "id": "lockless-target-apply-intent-before-side-effect",
+      "requirements": ["DEC-TA-01A", "CORR-03", "CORR-05"],
+      "contract": "target.apply commits the exact intent_committed response, operation receipt, and bounded durable work item before the response send attempt and before materialization",
+      "expected": "receipt_capacity, surface_state_capacity, and validation rejection invoke zero materialization callbacks; an accepted response contains operationRequestId, targetRequestId, surfaceId, targetId, and targetEpoch and proves intent only"
+    },
+    {
+      "id": "lockless-target-apply-materialization-crash-state",
+      "requirements": ["DEC-TA-01A", "CORR-07", "OPS-4"],
+      "contract": "durable target work progresses exactly intent_committed to materializing to terminal",
+      "expected": "restart from intent_committed invokes once after persisting materializing; restart from materializing invokes zero times and emits failed materialization_outcome_unknown; no-work-item completion is a no-op"
+    },
+    {
+      "id": "lockless-target-result-surface-append",
+      "requirements": ["DEC-TA-01A", "CORR-07", "LIVEBUF-3"],
+      "contract": "event.target_apply_result is one separately correlated append-only target_result occurrence in the percent-encoded surface scope",
+      "expected": "normal success, normal failure, and uncertain-outcome failure preserve operation request, intent commit, target request, target, and epoch correlation and use ordinary surface snapshot/delta/gap/deduplication/consumable.ack semantics without changing the operation receipt"
     }
   ]
 }

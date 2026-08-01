@@ -1,0 +1,1176 @@
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
+use std::fs;
+use std::net::TcpListener;
+use std::process::Command as ProcessCommand;
+use std::thread;
+use std::time::Duration;
+use surf_ace_cli::command::{Command, Invocation};
+use surf_ace_cli::controller::{execute, execute_with_wire, CliError};
+use surf_ace_cli::state::{CorrelationPhase, LockedStateRoot, UnresolvedCorrelation};
+use surf_ace_cli::wire::{DirectWire, Envelope, WireFailure, WireResponse};
+use tempfile::TempDir;
+use tungstenite::{accept, Message};
+
+struct FakeWire {
+    ack_accepted: bool,
+    operations: Vec<String>,
+    fail_after_send_on: Option<String>,
+    receipt_capacity_on: Option<String>,
+    committed_rejection_on: Option<String>,
+    resolutions: Vec<Value>,
+    scopes: Vec<Value>,
+    response_events: BTreeMap<String, Vec<Envelope>>,
+}
+
+impl FakeWire {
+    fn ordinary() -> Self {
+        Self {
+            ack_accepted: true,
+            operations: vec![],
+            fail_after_send_on: None,
+            receipt_capacity_on: None,
+            committed_rejection_on: None,
+            resolutions: vec![],
+            scopes: vec![],
+            response_events: BTreeMap::new(),
+        }
+    }
+
+    fn response(id: &str, op: &str, payload: Value) -> WireResponse {
+        WireResponse {
+            response: Envelope {
+                id: Some(id.into()),
+                op: op.into(),
+                payload: Some(payload),
+                envelope_type: "response".into(),
+                v: 1,
+                ok: Some(true),
+                error: None,
+            },
+            events: vec![],
+        }
+    }
+}
+
+impl DirectWire for FakeWire {
+    fn request(
+        &mut self,
+        id: &str,
+        op: &str,
+        payload: Value,
+        sent: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<WireResponse, WireFailure> {
+        self.operations.push(op.into());
+        sent().map_err(|code| WireFailure::AfterSend { code })?;
+        if self.fail_after_send_on.as_deref() == Some(op) {
+            return Err(WireFailure::AfterSend {
+                code: "test_disconnect".into(),
+            });
+        }
+        if self.receipt_capacity_on.as_deref() == Some(op) {
+            return Ok(WireResponse {
+                response: Envelope {
+                    id: Some(id.into()),
+                    op: format!("{op}.result"),
+                    payload: Some(json!({})),
+                    envelope_type: "response".into(),
+                    v: 1,
+                    ok: Some(false),
+                    error: Some(json!({ "code": "receipt_capacity" })),
+                },
+                events: vec![],
+            });
+        }
+        if self.committed_rejection_on.as_deref() == Some(op) {
+            let response = Envelope {
+                id: Some(id.into()),
+                op: op.into(),
+                payload: None,
+                envelope_type: "response".into(),
+                v: 1,
+                ok: Some(false),
+                error: Some(json!({ "code": "stale_content" })),
+            };
+            self.resolutions = vec![json!({
+                "operationReceipt": { "commitSequence": 8, "requestId": id },
+                "outcome": "resolved_failure",
+                "requestId": id,
+                "terminalResponse": serde_json::to_value(&response).unwrap()
+            })];
+            return Ok(WireResponse {
+                response,
+                events: self.response_events.remove(op).unwrap_or_default(),
+            });
+        }
+        let mut response = match op {
+            "pair.request" => Self::response(
+                id,
+                "pair.response",
+                json!({
+                    "capabilities": {},
+                    "controllerInstanceId": payload["controllerInstanceId"],
+                    "limits": {
+                        "maxPendingOperationReceiptBytesPerController": 65536,
+                        "maxPendingOperationReceiptsPerController": 16
+                    },
+                    "mode": "lockless",
+                    "receiptResolutions": self.resolutions,
+                    "resumed": false,
+                    "scopes": self.scopes.clone(),
+                    "sessionId": "session_test",
+                    "state": null,
+                    "surfaceId": payload.get("surfaceId").cloned().unwrap_or(Value::Null),
+                    "surfaceSetRevision": 1
+                }),
+            ),
+            "operation.receipt.sync" => Self::response(
+                id,
+                "operation.receipt.sync.result",
+                json!({ "resolutions": self.resolutions }),
+            ),
+            "operation.receipt.ack" => Self::response(
+                id,
+                "operation.receipt.ack.result",
+                json!({ "accepted": self.ack_accepted }),
+            ),
+            "consumable.ack" => {
+                Self::response(id, "consumable.ack.result", json!({ "accepted": true }))
+            }
+            "surfaces.list" => Self::response(
+                id,
+                "surfaces.list.result",
+                json!({ "surfaces": [{ "surfaceId": "sf_1" }] }),
+            ),
+            "snapshot.get" => {
+                Self::response(id, "snapshot.result", json!({ "snapshotId": "sn_1" }))
+            }
+            "target.apply" => Self::response(
+                id,
+                "target.apply.result",
+                json!({
+                    "operationReceipt": {
+                        "commitSequence": 7,
+                        "operation": op,
+                        "requestId": id
+                    },
+                    "operationRequestId": id,
+                    "status": "intent_committed",
+                    "surfaceId": payload["surfaceId"],
+                    "targetEpoch": payload["targetEpoch"],
+                    "targetId": payload["targetId"],
+                    "targetRequestId": payload["requestId"]
+                }),
+            ),
+            _ => Self::response(
+                id,
+                &format!("{op}.result"),
+                json!({
+                    "operationReceipt": {
+                        "commitSequence": 7,
+                        "operation": op,
+                        "requestId": id
+                    },
+                    "revision": 7
+                }),
+            ),
+        };
+        response.events = self.response_events.remove(op).unwrap_or_default();
+        Ok(response)
+    }
+
+    fn close(&mut self) -> Result<(), WireFailure> {
+        Ok(())
+    }
+}
+
+fn invocation(temp: &TempDir, command: Command, input: Value) -> Invocation {
+    Invocation {
+        command,
+        endpoint: Some("ws://unused.test".into()),
+        input: input.as_object().cloned().unwrap_or_else(Map::new),
+        product_label: Some("Clawline".into()),
+        projection_capacity_bytes: 1024 * 1024,
+        state_root: temp.path().into(),
+    }
+}
+
+fn event(op: &str, payload: Value) -> Envelope {
+    Envelope {
+        id: None,
+        op: op.into(),
+        payload: Some(payload),
+        envelope_type: "event".into(),
+        v: 1,
+        ok: None,
+        error: None,
+    }
+}
+
+#[test]
+fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let package: Value = serde_json::from_slice(
+        &fs::read(manifest_dir.join("vectors/cli-conformance.json")).unwrap(),
+    )
+    .unwrap();
+    let expected = Command::ALL
+        .iter()
+        .map(|command| command.name())
+        .collect::<Vec<_>>();
+    assert_eq!(expected.len(), 11);
+    assert_eq!(package["commands"], json!(expected));
+    assert_eq!(
+        package["receiptResolutionOutcomes"],
+        json!([
+            "resolved_success",
+            "resolved_failure",
+            "not_committed",
+            "still_pending",
+            "receipt_unavailable"
+        ])
+    );
+    let canonical: Value = serde_json::from_slice(
+        &fs::read(manifest_dir.join("../protocol/vectors/authority-conformance.json")).unwrap(),
+    )
+    .unwrap();
+    let vector_ids = canonical["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|vector| vector["id"].as_str())
+        .collect::<Vec<_>>();
+    for id in [
+        "lockless-receipt-cross-connection-resolution",
+        "lockless-receipt-capacity-precommit",
+        "lockless-receipt-replay-not-request-replay",
+    ] {
+        assert!(vector_ids.contains(&id), "canonical vectors omit {id}");
+    }
+    let encoded = serde_json::to_string(&canonical).unwrap();
+    assert!(encoded.contains("operation.receipt.sync"));
+    assert!(encoded.contains("operation.receipt.ack"));
+    assert!(encoded.contains("maxPendingOperationReceiptsPerController"));
+    assert!(encoded.contains("maxPendingOperationReceiptBytesPerController"));
+    for outcome in package["receiptResolutionOutcomes"].as_array().unwrap() {
+        assert!(encoded.contains(outcome.as_str().unwrap()));
+    }
+}
+
+#[test]
+fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
+    let cases = [
+        (Command::List, json!({}), "surfaces.list"),
+        (
+            Command::Push,
+            json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "text", "content": "hi", "friendlyChatName": "CLU" }),
+            "content.set",
+        ),
+        (
+            Command::TopologyIntent,
+            json!({ "surfaceId": "sf_1", "action": "split", "paneId": 1, "count": 2, "direction": "horizontal", "expectedTopologyRevision": 1 }),
+            "pane.split",
+        ),
+        (
+            Command::TopologyRealize,
+            json!({ "surfaceId": "sf_1", "expectedTopologyRevision": 1, "target": { "root": true }, "desired": {}, "allowDestroyPaneIds": [] }),
+            "topology.apply",
+        ),
+        (
+            Command::Clear,
+            json!({ "surfaceId": "sf_1", "paneId": 1, "expectedRevision": 1 }),
+            "content.clear",
+        ),
+        (
+            Command::AnnotationsRemove,
+            json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "strokeIds": ["st_1"] }),
+            "annotations.remove",
+        ),
+        (
+            Command::CapturePane,
+            json!({ "surfaceId": "sf_1", "paneId": 1 }),
+            "snapshot.get",
+        ),
+        (
+            Command::SurfaceIntent,
+            json!({ "action": "open", "expectedSurfaceSetRevision": 1, "requestedLabel": "Window" }),
+            "surface.window.open",
+        ),
+        (
+            Command::TargetRegister,
+            json!({ "surfaceId": "sf_1", "paneId": 1, "idempotencyKey": "idem_1", "targetKind": "native_app", "targetHeader": {}, "targetPayload": {} }),
+            "target.register",
+        ),
+        (
+            Command::TargetApply,
+            json!({ "surfaceId": "sf_1", "paneId": 1, "requestId": "target_request_1", "restoreReason": "initial", "targetId": "tg_1", "targetEpoch": 1, "targetKind": "native_app", "targetHeader": {}, "targetPayload": {} }),
+            "target.apply",
+        ),
+    ];
+    for (command, input, expected_operation) in cases {
+        let temp = TempDir::new().unwrap();
+        let mut wire = FakeWire::ordinary();
+        let output = execute_with_wire(invocation(&temp, command, input), &mut wire).unwrap();
+        assert!(output.ok);
+        assert!(wire.operations.contains(&expected_operation.into()));
+    }
+
+    let temp = TempDir::new().unwrap();
+    let mut local = invocation(&temp, Command::Read, json!({ "scopeId": "pane:sf_1:1" }));
+    local.endpoint = None;
+    local.product_label = None;
+    let output = execute(local).unwrap();
+    assert_eq!(output.result["cacheStatus"], "unsynchronized");
+}
+
+#[test]
+fn later_target_result_is_projected_from_client_authoritative_surface_state() {
+    let temp = TempDir::new().unwrap();
+    let result = json!({
+        "errorCode": "materialization_outcome_unknown",
+        "intentCommitSequence": 11,
+        "operationRequestId": "operation-a",
+        "status": "failed",
+        "surfaceId": "sf_1",
+        "targetEpoch": 3,
+        "targetId": "target-a",
+        "targetRequestId": "materialization-a"
+    });
+    let record = json!({
+        "bytes": 321,
+        "payload": result,
+        "recordClass": "target_result",
+        "recordId": "record-a",
+        "sequence": 1
+    });
+    let mut wire = FakeWire::ordinary();
+    wire.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 1,
+        "records": [record.clone()],
+        "scopeId": "surface:sf_1",
+        "version": 1
+    })];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut wire).unwrap();
+    let state: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["scopes"]["surface:sf_1"]["records"][0], record);
+}
+
+#[test]
+fn receipt_ack_projects_direct_target_result_before_clearing_correlation() {
+    let temp = TempDir::new().unwrap();
+    let result = json!({
+        "intentCommitSequence": 7,
+        "operationRequestId": "operation-target",
+        "status": "applied",
+        "surfaceId": "sf_1",
+        "targetEpoch": 1,
+        "targetId": "tg_1",
+        "targetRequestId": "target_request_1"
+    });
+    let mut wire = FakeWire::ordinary();
+    wire.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 0,
+        "records": [],
+        "scopeId": "surface:sf_1",
+        "version": 1
+    })];
+    wire.response_events.insert(
+        "operation.receipt.ack".into(),
+        vec![event(
+            "event.target_apply_result",
+            json!({
+                "consumableSequence": 1,
+                "recordId": "target-result-1",
+                "intentCommitSequence": 7,
+                "operationRequestId": "operation-target",
+                "status": "applied",
+                "surfaceId": "sf_1",
+                "targetEpoch": 1,
+                "targetId": "tg_1",
+                "targetRequestId": "target_request_1"
+            }),
+        )],
+    );
+    execute_with_wire(
+        invocation(
+            &temp,
+            Command::TargetApply,
+            json!({
+                "paneId": 1,
+                "requestId": "target_request_1",
+                "restoreReason": "initial",
+                "surfaceId": "sf_1",
+                "targetEpoch": 1,
+                "targetHeader": {},
+                "targetId": "tg_1",
+                "targetKind": "native_app",
+                "targetPayload": {}
+            }),
+        ),
+        &mut wire,
+    )
+    .unwrap();
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["unresolved"], json!({}));
+    assert_eq!(
+        persisted["scopes"]["surface:sf_1"]["records"][0]["recordId"],
+        "target-result-1"
+    );
+    assert_eq!(
+        persisted["scopes"]["surface:sf_1"]["records"][0]["payload"],
+        result
+    );
+}
+
+#[test]
+fn receipt_ack_projection_failure_retains_correlation_and_marks_repair() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    wire.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 0,
+        "records": [],
+        "scopeId": "surface:sf_1",
+        "version": 1
+    })];
+    wire.response_events.insert(
+        "operation.receipt.ack".into(),
+        vec![event(
+            "event.lockless_consumable_delta",
+            json!({
+                "records": [{ "recordClass": "tap", "recordId": "bad-gap", "sequence": 2 }],
+                "scopeId": "surface:sf_1"
+            }),
+        )],
+    );
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Clear,
+            json!({ "expectedRevision": 1, "paneId": 1, "surfaceId": "sf_1" }),
+        ),
+        &mut wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::State(_) | CliError::Protocol(_)));
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["unresolved"].as_object().unwrap().len(), 1);
+    assert_eq!(persisted["scopes"]["surface:sf_1"]["synchronized"], false);
+
+    let mut restarted = FakeWire::ordinary();
+    restarted.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 0,
+        "records": [],
+        "scopeId": "surface:sf_1",
+        "version": 1
+    })];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut restarted).unwrap();
+    assert!(!restarted
+        .operations
+        .contains(&"operation.receipt.sync".into()));
+    let repaired: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(repaired["unresolved"], json!({}));
+    assert_eq!(repaired["scopes"]["surface:sf_1"]["synchronized"], true);
+}
+
+#[test]
+fn discovery_and_consumable_ack_events_commit_before_sync_and_outbox_clear() {
+    let temp = TempDir::new().unwrap();
+    let initial = json!({
+        "bytes": 32,
+        "payload": { "value": "initial" },
+        "recordClass": "tap",
+        "recordId": "record-1",
+        "sequence": 1
+    });
+    let mut first = FakeWire::ordinary();
+    first.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 1,
+        "records": [initial],
+        "scopeId": "surface:sf_1",
+        "version": 1
+    })];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut first).unwrap();
+    let mut local = invocation(&temp, Command::Read, json!({ "scopeId": "surface:sf_1" }));
+    local.endpoint = None;
+    local.product_label = None;
+    execute(local).unwrap();
+
+    let acknowledged = json!({
+        "bytes": 32,
+        "payload": { "value": "ack-response" },
+        "recordClass": "tap",
+        "recordId": "record-2",
+        "sequence": 2
+    });
+    let discovered = json!({
+        "bytes": 32,
+        "payload": { "value": "discovery-response" },
+        "recordClass": "tap",
+        "recordId": "record-3",
+        "sequence": 3
+    });
+    let mut second = FakeWire::ordinary();
+    second.scopes = first.scopes;
+    second.response_events.insert(
+        "consumable.ack".into(),
+        vec![event(
+            "event.lockless_consumable_delta",
+            json!({
+                "records": [acknowledged],
+                "scopeId": "surface:sf_1"
+            }),
+        )],
+    );
+    second.response_events.insert(
+        "surfaces.list".into(),
+        vec![event(
+            "event.lockless_consumable_delta",
+            json!({
+                "records": [discovered],
+                "scopeId": "surface:sf_1"
+            }),
+        )],
+    );
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut second).unwrap();
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["acknowledgementOutbox"], json!([]));
+    assert_eq!(
+        persisted["scopes"]["surface:sf_1"]["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| record["sequence"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(persisted["scopes"]["surface:sf_1"]["synchronized"], true);
+
+    let restored = LockedStateRoot::open(temp.path(), 1024 * 1024).unwrap();
+    assert_eq!(
+        restored.state().scopes["surface:sf_1"].last_retained_sequence,
+        3
+    );
+}
+
+#[test]
+fn oversize_gap_high_water_allows_the_next_ordered_delta() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    wire.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 0,
+        "records": [],
+        "scopeId": "surface:sf_1",
+        "version": 1
+    })];
+    wire.response_events.insert(
+        "surfaces.list".into(),
+        vec![
+            event(
+                "event.consumable_overflow",
+                json!({
+                    "firstRetainedSequence": 2,
+                    "gap": {
+                        "bytesDiscarded": 2048,
+                        "firstDiscardedSequence": 1,
+                        "generation": 1,
+                        "lastDiscardedSequence": 1,
+                        "reason": "record_oversize",
+                        "recordsDiscarded": 1,
+                        "triggerOperation": "target.apply.materialization"
+                    },
+                    "lastRetainedSequence": 1,
+                    "scopeId": "surface:sf_1"
+                }),
+            ),
+            event(
+                "event.lockless_consumable_delta",
+                json!({
+                    "records": [{
+                        "bytes": 32,
+                        "payload": { "value": "retained" },
+                        "recordClass": "tap",
+                        "recordId": "record-2",
+                        "sequence": 2
+                    }],
+                    "scopeId": "surface:sf_1"
+                }),
+            ),
+        ],
+    );
+
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut wire).unwrap();
+
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        persisted["scopes"]["surface:sf_1"]["records"][0]["recordId"],
+        "record-2"
+    );
+    assert_eq!(
+        persisted["scopes"]["surface:sf_1"]["lastRetainedSequence"],
+        2
+    );
+}
+
+#[test]
+fn committed_rejection_is_synced_persisted_and_acknowledged() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    wire.committed_rejection_on = Some("content.clear".into());
+
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Clear,
+            json!({ "expectedRevision": 1, "paneId": 1, "surfaceId": "sf_1" }),
+        ),
+        &mut wire,
+    )
+    .unwrap();
+
+    assert_eq!(output.result["ok"], false);
+    assert_eq!(output.result["error"]["code"], "stale_content");
+    assert_eq!(output.result["operationReceipt"]["commitSequence"], 8);
+    assert!(wire.operations.contains(&"operation.receipt.sync".into()));
+    assert!(wire.operations.contains(&"operation.receipt.ack".into()));
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["unresolved"], json!({}));
+}
+
+#[test]
+fn consumable_ack_projection_failure_keeps_outbox_and_unsynchronized_state() {
+    let temp = TempDir::new().unwrap();
+    let mut first = FakeWire::ordinary();
+    first.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 1,
+        "records": [{
+            "bytes": 32,
+            "payload": { "value": "initial" },
+            "recordClass": "tap",
+            "recordId": "record-1",
+            "sequence": 1
+        }],
+        "scopeId": "surface:sf_1",
+        "version": 1
+    })];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut first).unwrap();
+    let mut local = invocation(&temp, Command::Read, json!({ "scopeId": "surface:sf_1" }));
+    local.endpoint = None;
+    local.product_label = None;
+    execute(local).unwrap();
+
+    let mut second = FakeWire::ordinary();
+    second.scopes = first.scopes;
+    second.response_events.insert(
+        "consumable.ack".into(),
+        vec![event(
+            "event.lockless_consumable_delta",
+            json!({
+                "records": [{ "recordClass": "tap", "recordId": "gap", "sequence": 3 }],
+                "scopeId": "surface:sf_1"
+            }),
+        )],
+    );
+    assert!(execute_with_wire(invocation(&temp, Command::List, json!({})), &mut second).is_err());
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        persisted["acknowledgementOutbox"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(persisted["scopes"]["surface:sf_1"]["synchronized"], false);
+}
+
+#[test]
+fn post_send_interruption_is_durable_unknown_then_exact_receipt_is_replayed_and_acked() {
+    let temp = TempDir::new().unwrap();
+    let mut first = FakeWire::ordinary();
+    first.fail_after_send_on = Some("content.set".into());
+    let error = execute_with_wire(
+        invocation(&temp, Command::Push, json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "text", "content": "hello" })),
+        &mut first,
+    )
+    .unwrap_err();
+    let request_id = match error {
+        CliError::OutcomeUnknown { request_id, .. } => request_id,
+        other => panic!("unexpected error {other}"),
+    };
+
+    let terminal = json!({
+        "id": request_id,
+        "ok": true,
+        "op": "content.set.result",
+        "payload": { "operationReceipt": { "requestId": request_id, "operation": "content.set", "commitSequence": 9 } },
+        "type": "response",
+        "v": 1
+    });
+    let mut second = FakeWire::ordinary();
+    second.resolutions = vec![json!({
+        "outcome": "resolved_success",
+        "operationReceipt": { "requestId": request_id, "commitSequence": 9 },
+        "requestId": request_id,
+        "terminalResponse": terminal
+    })];
+    let output =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut second).unwrap();
+    assert_eq!(output.reconciliations[0]["outcome"], "resolved_success");
+    assert!(!second.operations.contains(&"operation.receipt.sync".into()));
+    assert!(second.operations.contains(&"operation.receipt.ack".into()));
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["unresolved"], json!({}));
+}
+
+#[test]
+fn accepted_receipt_ack_interruption_replays_then_releases_without_losing_terminal() {
+    let temp = TempDir::new().unwrap();
+    let mut first = FakeWire::ordinary();
+    first.fail_after_send_on = Some("operation.receipt.ack".into());
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Push,
+            json!({
+                "surfaceId": "sf_1",
+                "paneId": 1,
+                "contentId": "c_ack_crash",
+                "contentType": "text",
+                "content": "hello"
+            }),
+        ),
+        &mut first,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Wire(_)));
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    let (request_id, correlation) = persisted["unresolved"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .next()
+        .unwrap();
+    assert_eq!(correlation["phase"], "receipt_persisted");
+    let terminal = correlation["terminalResponse"].clone();
+
+    let mut restarted = FakeWire::ordinary();
+    restarted.resolutions = vec![json!({
+        "outcome": "resolved_success",
+        "operationReceipt": terminal["payload"]["operationReceipt"],
+        "requestId": request_id,
+        "terminalResponse": terminal
+    })];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut restarted).unwrap();
+    assert_eq!(
+        restarted
+            .operations
+            .iter()
+            .filter(|operation| operation.as_str() == "operation.receipt.ack")
+            .count(),
+        2
+    );
+    let repaired: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(repaired["unresolved"], json!({}));
+}
+
+#[test]
+fn receipt_ack_requires_explicit_acceptance_before_local_cleanup() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    wire.ack_accepted = false;
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Clear,
+            json!({ "expectedRevision": 1, "paneId": 1, "surfaceId": "sf_1" }),
+        ),
+        &mut wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Protocol(ref code) if code == "receipt_ack_not_accepted"));
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        persisted["unresolved"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()["phase"],
+        "receipt_persisted"
+    );
+}
+
+#[test]
+fn all_five_receipt_resolution_outcomes_are_deterministic() {
+    for outcome in [
+        "resolved_success",
+        "resolved_failure",
+        "not_committed",
+        "still_pending",
+        "receipt_unavailable",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let request_id = "rq_uncertain";
+        let mut state = LockedStateRoot::open(temp.path(), 1024 * 1024).unwrap();
+        state
+            .mutate(|state| {
+                state.unresolved.insert(
+                    request_id.into(),
+                    UnresolvedCorrelation {
+                        operation: "content.set".into(),
+                        payload_digest: "digest".into(),
+                        phase: CorrelationPhase::Sent,
+                        terminal_response: None,
+                    },
+                );
+            })
+            .unwrap();
+        drop(state);
+        let mut resolution = json!({ "outcome": outcome, "requestId": request_id });
+        if outcome.starts_with("resolved_") {
+            resolution["operationReceipt"] =
+                json!({ "requestId": request_id, "commitSequence": 2 });
+            resolution["terminalResponse"] = json!({
+                "id": request_id,
+                "ok": outcome == "resolved_success",
+                "op": "content.set.result",
+                "payload": { "operationReceipt": { "requestId": request_id, "operation": "content.set", "commitSequence": 2 } },
+                "type": "response",
+                "v": 1
+            });
+        }
+        if outcome == "receipt_unavailable" {
+            resolution["cause"] = json!("controller_reclaimed");
+        }
+        let mut wire = FakeWire::ordinary();
+        wire.resolutions = vec![resolution];
+        let output =
+            execute_with_wire(invocation(&temp, Command::List, json!({})), &mut wire).unwrap();
+        assert_eq!(output.reconciliations[0]["outcome"], outcome);
+        assert_eq!(
+            wire.operations.contains(&"operation.receipt.ack".into()),
+            outcome.starts_with("resolved_")
+        );
+    }
+}
+
+#[test]
+fn still_pending_blocks_a_later_mutation() {
+    let temp = TempDir::new().unwrap();
+    let mut state = LockedStateRoot::open(temp.path(), 1024 * 1024).unwrap();
+    state
+        .mutate(|state| {
+            state.unresolved.insert(
+                "rq_pending".into(),
+                UnresolvedCorrelation {
+                    operation: "content.set".into(),
+                    payload_digest: "digest".into(),
+                    phase: CorrelationPhase::Sent,
+                    terminal_response: None,
+                },
+            );
+        })
+        .unwrap();
+    drop(state);
+    let mut wire = FakeWire::ordinary();
+    wire.resolutions = vec![json!({ "outcome": "still_pending", "requestId": "rq_pending" })];
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Clear,
+            json!({ "surfaceId": "sf_1", "paneId": 1, "expectedRevision": 1 }),
+        ),
+        &mut wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::StillPending));
+    assert!(!wire.operations.contains(&"content.clear".into()));
+}
+
+#[test]
+fn receipt_capacity_is_a_definitive_no_commit_without_correlation_or_ack() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    wire.receipt_capacity_on = Some("content.clear".into());
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Clear,
+            json!({ "surfaceId": "sf_1", "paneId": 1, "expectedRevision": 1 }),
+        ),
+        &mut wire,
+    )
+    .unwrap();
+    assert_eq!(output.result["error"]["code"], "receipt_capacity");
+    assert!(!wire.operations.contains(&"operation.receipt.ack".into()));
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["unresolved"], json!({}));
+}
+
+#[test]
+fn sequential_process_model_reuses_identity() {
+    let temp = TempDir::new().unwrap();
+    let mut first = FakeWire::ordinary();
+    let first_id = execute_with_wire(invocation(&temp, Command::List, json!({})), &mut first)
+        .unwrap()
+        .controller_instance_id;
+    let mut second = FakeWire::ordinary();
+    let second_id = execute_with_wire(invocation(&temp, Command::List, json!({})), &mut second)
+        .unwrap()
+        .controller_instance_id;
+    assert_eq!(first_id, second_id);
+}
+
+#[test]
+fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (lifecycle_stream, _) = listener.accept().unwrap();
+        let mut lifecycle = accept(lifecycle_stream).unwrap();
+        let pair = read_request(&mut lifecycle);
+        assert_eq!(pair["op"], "pair.request");
+        assert_eq!(
+            pair["payload"]["protocolFeatures"][0],
+            "surf-ace.lockless-multi-controller.v1"
+        );
+        assert_eq!(pair["payload"]["controllerProductName"], "Clawline");
+        assert!(pair["payload"].get("surfaceId").is_none());
+        send_response(
+            &mut lifecycle,
+            pair["id"].as_str().unwrap(),
+            "pair.response",
+            pair_payload(pair["payload"]["controllerInstanceId"].clone()),
+        );
+        let list = read_request(&mut lifecycle);
+        assert_eq!(list["op"], "surfaces.list");
+        send_response(
+            &mut lifecycle,
+            list["id"].as_str().unwrap(),
+            "surfaces.list.result",
+            json!({ "surfaces": [{ "surfaceId": "sf_1" }] }),
+        );
+
+        let (surface_stream, _) = listener.accept().unwrap();
+        let mut surface = accept(surface_stream).unwrap();
+        let pair = read_request(&mut surface);
+        assert_eq!(pair["payload"]["surfaceId"], "sf_1");
+        let mut surface_pair = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        surface_pair["surfaceId"] = json!("sf_1");
+        send_response(
+            &mut surface,
+            pair["id"].as_str().unwrap(),
+            "pair.response",
+            surface_pair,
+        );
+        let push = read_request(&mut surface);
+        assert_eq!(push["op"], "content.set");
+        assert_eq!(push["payload"]["friendlyChatName"], "CLU");
+        let push_id = push["id"].as_str().unwrap();
+        send_response(
+            &mut surface,
+            push_id,
+            "content.set.result",
+            json!({
+                "operationReceipt": {
+                    "commitSequence": 11,
+                    "operation": "content.set",
+                    "requestId": push_id
+                }
+            }),
+        );
+        let ack = read_request(&mut surface);
+        assert_eq!(ack["op"], "operation.receipt.ack");
+        assert_eq!(ack["payload"]["requestId"], push_id);
+        send_response(
+            &mut surface,
+            ack["id"].as_str().unwrap(),
+            "operation.receipt.ack.result",
+            json!({ "accepted": true }),
+        );
+        let release = read_request(&mut surface);
+        assert_eq!(release["op"], "operation.receipt.ack");
+        assert_eq!(release["payload"]["requestId"], push_id);
+        assert_eq!(release["payload"]["release"], true);
+        send_response(
+            &mut surface,
+            release["id"].as_str().unwrap(),
+            "operation.receipt.ack.result",
+            json!({ "accepted": true, "release": true }),
+        );
+    });
+
+    let temp = TempDir::new().unwrap();
+    let mut call = invocation(
+        &temp,
+        Command::Push,
+        json!({
+            "surfaceId": "sf_1",
+            "paneId": 1,
+            "contentId": "c_1",
+            "contentType": "text",
+            "content": "hello",
+            "friendlyChatName": "CLU"
+        }),
+    );
+    call.endpoint = Some(endpoint);
+    let output = execute(call).unwrap();
+    assert_eq!(
+        output.result["payload"]["operationReceipt"]["commitSequence"],
+        11
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn state_root_os_lock_serializes_whole_cross_process_lifetime() {
+    let temp = TempDir::new().unwrap();
+    let first = LockedStateRoot::open(temp.path(), 1024 * 1024).unwrap();
+    let path = temp.path().to_owned();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+    let contender = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let second = LockedStateRoot::open(&path, 1024 * 1024).unwrap();
+        acquired_tx
+            .send(second.state().controller_instance_id.clone())
+            .unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(acquired_rx
+        .recv_timeout(Duration::from_millis(100))
+        .is_err());
+    let identity = first.state().controller_instance_id.clone();
+    drop(first);
+    assert_eq!(
+        acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        identity
+    );
+    contender.join().unwrap();
+}
+
+#[test]
+fn native_cli_stdout_is_one_deterministic_json_document() {
+    let temp = TempDir::new().unwrap();
+    let run = || {
+        ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+            .args([
+                "--state-root",
+                temp.path().to_str().unwrap(),
+                "read",
+                "--input-json",
+                r#"{"scopeId":"pane:sf_1:1"}"#,
+            ])
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    let second = run();
+    assert!(first.status.success());
+    assert_eq!(first.stdout, second.stdout);
+    assert!(!first.stdout.is_empty());
+    assert_eq!(
+        first.stdout.iter().filter(|byte| **byte == b'\n').count(),
+        1
+    );
+    let output: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(output["command"], "read");
+    assert_eq!(output["result"]["cacheStatus"], "unsynchronized");
+    assert!(output["result"].get("repairScheduled").is_none());
+}
+
+#[test]
+fn general_cli_manifest_uses_only_the_public_surf_ace_identity() {
+    let manifest =
+        fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .unwrap();
+    assert!(manifest.contains("name = \"surf-ace-cli\""));
+    assert!(manifest.contains("name = \"surf-ace\""));
+}
+
+fn read_request(socket: &mut tungstenite::WebSocket<std::net::TcpStream>) -> Value {
+    loop {
+        match socket.read().unwrap() {
+            Message::Text(text) => return serde_json::from_str(&text).unwrap(),
+            Message::Close(_) => panic!("connection closed before request"),
+            _ => {}
+        }
+    }
+}
+
+fn send_response(
+    socket: &mut tungstenite::WebSocket<std::net::TcpStream>,
+    id: &str,
+    op: &str,
+    payload: Value,
+) {
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&json!({
+                "id": id,
+                "ok": true,
+                "op": op,
+                "payload": payload,
+                "type": "response",
+                "v": 1
+            }))
+            .unwrap()
+            .into(),
+        ))
+        .unwrap();
+}
+
+fn pair_payload(controller_instance_id: Value) -> Value {
+    json!({
+        "capabilities": {},
+        "controllerInstanceId": controller_instance_id,
+        "limits": {
+            "maxPendingOperationReceiptBytesPerController": 65536,
+            "maxPendingOperationReceiptsPerController": 16
+        },
+        "mode": "lockless",
+        "receiptResolutions": [],
+        "resumed": false,
+        "scopes": [],
+        "sessionId": "session_test",
+        "state": null,
+        "surfaceId": null,
+        "surfaceSetRevision": 1
+    })
+}

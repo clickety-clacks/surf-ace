@@ -112,6 +112,30 @@ async function request(
   return response;
 }
 
+function nextEvent(
+  socket: WebSocket,
+  op: string,
+): Promise<Record<string, any>> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (raw: WebSocket.RawData) => {
+      const message = JSON.parse(String(raw)) as Record<string, any>;
+      if (message.type !== "event" || message.op !== op) return;
+      cleanup();
+      resolve(message);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
 async function pair(
   socket: WebSocket,
   controllerInstanceId: string,
@@ -389,13 +413,13 @@ test("AC-TOPO-01 AC-TOPO-02 AC-TOPO-05 AC-TOPO-06 AC-OPS-02: competing topology 
         winner.payload.topologyRevision,
       );
       assert.deepEqual(
-        winner.payload.receipt,
+        winner.payload.operationReceipt,
         {
-          commitSequence: winner.payload.receipt.commitSequence,
+          commitSequence: winner.payload.operationReceipt.commitSequence,
           requestId: winner.id,
         },
       );
-      assert.equal(Number.isSafeInteger(winner.payload.receipt.commitSequence), true);
+      assert.equal(Number.isSafeInteger(winner.payload.operationReceipt.commitSequence), true);
       assert.equal(core.activePaneIds(surface.surfaceId).length, 2);
 
       const winnerSocket = winner.id === alphaId ? alpha : beta;
@@ -715,6 +739,7 @@ test("CAP-3 websocket mutations reject exact surface and pane byte classes atomi
         paneLimitedCore.getPersistentState().surfaces,
         before.surfaces,
       );
+      const applyResult = nextEvent(socket, "event.target_apply_result");
       const apply = await request(socket, "target.apply", {
         paneId: pane.paneId,
         requestId: "oversize-apply",
@@ -735,8 +760,20 @@ test("CAP-3 websocket mutations reject exact surface and pane byte classes atomi
           url: `https://example.com/${"x".repeat(2_000)}`,
         },
       });
-      assert.equal(apply.ok, false);
-      assert.equal(apply.error.code, "pane_state_capacity");
+      assert.equal(apply.ok, true, JSON.stringify(apply));
+      assert.equal(apply.payload.status, "intent_committed");
+      assert.equal(apply.payload.targetRequestId, "oversize-apply");
+      const result = await applyResult;
+      assert.equal(result.payload.status, "failed");
+      assert.equal(result.payload.errorCode, "pane_state_capacity");
+      assert.equal(
+        result.payload.intentCommitSequence,
+        apply.payload.operationReceipt.commitSequence,
+      );
+      assert.equal(
+        result.payload.operationRequestId,
+        apply.payload.operationRequestId,
+      );
       assert.deepEqual(
         paneLimitedCore.getPersistentState().surfaces,
         before.surfaces,

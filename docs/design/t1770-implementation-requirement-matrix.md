@@ -4,23 +4,23 @@
 
 - Ticket: T1770 — Tight Beam support as an additional Surf Ace provider.
 - Canonical requirement authority: `/Users/mike/shared-workspace/surf-ace/specs/tight-beam-provider-support.html`.
-- Canonical artifact SHA-256: `110a4a14d37fe15f7c1fca3a40bf216ac9d2bd3202ba72981bf0445a15fe9ff4`.
-- Independent approval: `/Users/mike/shared-workspace/surf-ace/specs/reviews/tight-beam-provider-support-fable-review-rev10.md`.
+- Canonical Revision 11 + DEC-TA-01A + FLYNN-1770-02 SHA-256: `97a49241d4991a7e96bfe89bff720cbe2acb0742c9781d0d0bb697c2319ecafb`.
+- Independent approvals include `scratch/tight-beam-provider-support-codex-review-rev11-flynn-1770-02-delta.md` (SHA-256 `11c79d10a3d772258c1047378f636a97dddc427a155b0435587340af28488a6a`) for the general standalone CLI correction.
+- Accepted architecture bounceback: `scratch/T1770-whole-ticket-bounceback-report.md`, SHA-256 `007f741cddc6a74fda0826481e8b2a143ed6f013123bdf7c2ef23eaacae1b364`.
 - Parent recon: `/Users/mike/shared-workspace/surf-ace-compositor/reports/recon/T1769-surface-provider-decoupling-artifact-recon.html`; Revision 10 is authoritative wherever it differs from A1..A4 or the historical June namespace proposal.
 - Worktree base: `4a8294446ee8fbfd56ec4cbe7c68218b43fb8836`.
 - Janus REST item state at ingestion: `In Progress`.
-- Complete Janus migration-audit snapshot at ingestion: `2911faa11c4190873d90fc076e38b1c04cff10e879f34a409f8d9315c098b6de`.
-- Snapshot completeness: `complete=true`; 28 retained rows comprising 15 `ticket_history`, 13 `transition_events`, and 0 normal-visible `ticket_events`.
+- Complete Janus migration-audit snapshot used by the Revision 11 reviewer: 36/36 retained rows, `has_more=false`, including accepted bounceback `PP006813` and resume proof `PP006814`.
 
 This document is an implementation and review checklist derived from the canonical specification. It does not amend or replace that specification.
 
 ## Current gate snapshot
 
-- Canonical non-GUI verification is green: protocol 32/32, controller 11/11, Tightbeam adapter 3/3, Electron 307/307, OpenClaw extension 341/341, and packaged-extension verification.
+- The FLYNN-1770-02 delta independently passed review. The general standalone `surf-ace` CLI and separate reusable Tight Beam consumer-skill implementation are now in progress.
 - The production OpenClaw path has a correlated accepted mutation, exact client commit receipt, visible Markdown render, current local read, and accessibility capture. The supplied context produced the specified `Unknown chat — Clawline` fallback, not the exact `CLU — Clawline` example.
-- The official Tightbeam path is blocked before its first Surf Ace tool call: Claude returned its weekly quota error, while the available Codex Tightbeam agent exposed no Surf Ace MCP tools.
+- The earlier dedicated-archetype/MCP Tight Beam proof is rejected architecture evidence only. It does not block the corrected CLI route and supports no product claim.
 - Pending rows remain pending until their complete named proof exists. Green omnibus/unit coverage and diagnostic harness evidence do not promote official-path or `Both` rows by themselves.
-- The final independent combined-tree re-review passed with no blocking findings. No product-readiness claim is made because the official Tightbeam path and remaining named proof rows are still incomplete.
+- Shrdlu installation and official proof remain prohibited until the corrected combined source plus native macOS/Linux evidence pass the fresh independent CORR-09 review.
 
 ## Admitted-platform decision
 
@@ -111,15 +111,25 @@ OpenClaw also participates in every dual-controller and official-path row that n
 | AC-LIVEBUF-03 | OpenClaw controller | Build the bounded local projection from pair/resume snapshots and ordered deltas; present one alert per burst; keep ordinary `surf_ace_read` network-free while atomically persisting projected consumption and a background acknowledgement; reconcile cache/outbox/sequences/pending/gaps after restart; reject capability admission if the cache cannot hold the negotiated window. | Both | Pending |
 | AC-READ-01 | OpenClaw controller | Read independent retained frames through each controller's local projection; advance only the matching client cursor after background acknowledgement; preserve cursor/gap continuity across reconnect inside the retained window. | Official path | Pending |
 
-## Tight Beam agent-side adapter
+## General standalone Surf Ace CLI and Tight Beam consumer skill
 
 Tight Beam also participates in every dual-controller and official-path row that names both controllers.
 
 | AC ID | Primary lane | Required implementation and proof | Proof class | Status |
 |---|---|---|---|---|
-| AC-ID-01 | Tight Beam agent-side adapter | Concurrently admit OpenClaw and Tight Beam under distinct stable IDs; let both push and read the same pane; expose no lock, `busy`, designation, claim, takeover, or owner-only refusal. | Official path | Pending |
-| AC-ARCH-02 | Tight Beam agent-side adapter | Prove through product/config/source evidence that no coordinator or hard-coded deployment topology participates, Tight Beam remains agent-side, and the compositor receives only client-resolved state without sequencing mutations. | Both | Pending |
-| AC-MIG-04 | Tight Beam agent-side adapter | Exercise Tight Beam through its official agent-side surface and OpenClaw through its official controller surface; neither may read the other's private process/store or depend on a central coordinator. | Official path | Pending |
+| AC-ID-01 | Standalone CLI + Tight Beam consumer | Concurrently admit OpenClaw and Tight Beam under distinct stable IDs; let both push and read the same pane; expose no lock, `busy`, designation, claim, takeover, or owner-only refusal. | Official path | Pending |
+| AC-ARCH-02 | Standalone CLI + Tight Beam consumer | Prove no coordinator or hard-coded deployment topology participates, the CLI remains caller-neutral Surf Ace infrastructure, Tight Beam remains a separate consumer, and the compositor receives only client-resolved state. | Both | Pending |
+| AC-MIG-04 | Standalone CLI + Tight Beam consumer | Exercise `surf-ace` directly from a non-Tight-Beam caller, then the identical executable through an unchanged ordinary Tight Beam archetype and reusable skill, plus OpenClaw's official surface. | Official path | Pending |
+| AC-CLI-01 | General standalone CLI | Build and run the same locked Rust source and complete test suite natively on macOS and Linux; canonical schema/conformance vectors and deterministic output fixtures match. | Source/unit | Pending |
+| AC-CLI-02 | General standalone CLI | Prove one `surf-ace` executable / `surf-ace-cli` crate and package, exactly eleven commands, no Tight-Beam-specific CLI identity or path, and no MCP/adapter/dedicated-archetype/parallel route. | Source/unit | Pending |
+| AC-CLI-03 | Standalone CLI + Tight Beam consumer | Invoke installed `surf-ace` directly without any skill/agent runtime, then prove the Tight Beam skill and fixtures use the exact same executable semantics without changing archetype identity or unrelated material. | Source/unit | Pending |
+| AC-CLI-04 | General standalone CLI | Reuse one durable controller ID across sequential processes and serialize concurrent processes over each complete networked invocation. | Source/unit | Pending |
+| AC-CLI-05 | General standalone CLI | Prove every specified crash window, exact committed success/failure replay, proven `not_committed`, blocking `still_pending`, duplicate-safe receipt replay, and deterministic `intent_committed → materializing → terminal` target work recovery. | Source/unit | Pending |
+| AC-CLI-06 | General standalone CLI | Instrument zero Surf Ace network access for locked local-only `read`, including atomic projected consumption and acknowledgement intent. | Source/unit | Pending |
+| AC-CLI-07 | General standalone CLI | Reconcile ordered projection/outbox state and all unresolved receipt IDs; apply response events durably before ack/outbox cleanup; clear client receipts only after accepted ack. | Source/unit | Pending |
+| AC-CLI-08 | General standalone CLI | Prove deterministic JSON for every networked command, exact receipt correlation, count/byte capacity, admission after ack, reclamation unavailability, zero target materialization on precommit refusal, committed-intent response before callback, separately correlated append-only target result, and external provenance. | Both | Pending |
+| AC-CLI-09 | Corrected-source review | Independently adjudicate the complete CORR-09 authority and invariant set against corrected source and native platform evidence before any Shrdlu installation. | Source/unit | Pending |
+| AC-CLI-10 | Official-path proof | Through the reversible Shrdlu test path, prove unchanged ordinary-archetype mutation, correlated receipt, exact `CLU — Clawline`, preserved OpenClaw, and no competing client/service/persistence path. | Official path | Pending |
 
 ## Migration, persistence, and rollback
 
@@ -135,7 +145,7 @@ Tight Beam also participates in every dual-controller and official-path row that
 | AC ID | Primary lane | Required implementation and proof | Proof class | Status |
 |---|---|---|---|---|
 | AC-MIG-03 | Official-path proof | Run the complete applicable check set on every admitted platform with no D1..D5, Q5R1..Q5R5, W1, local-read, structured-overflow, close, or retention carve-out. Permit controller lifecycle omission only where no controller product operation exists; always prove local-user recoverable close. | Official path | Pending |
-| AC-PROOF-01 | Official-path proof | Support every user-visible and product claim with official OpenClaw and Tight Beam paths on a production Surf Ace client build; label all harness-only evidence diagnostic. | Official path | Blocked — OpenClaw correlated production path passed; Tightbeam Claude session hit quota before first tool call and Codex session exposed no MCP tools |
+| AC-PROOF-01 | Official-path proof | Support every user-visible and product claim with official OpenClaw and Tight Beam paths on a production Surf Ace client build; label all harness-only evidence diagnostic. | Official path | Pending — corrected source review must pass before Shrdlu proof |
 | AC-PROOF-02 | Review gate | Before implementation review passes, land R6-AMD-1..8, R7-AMD-1..2, R8-AMD-1..2, and R9-AMD-1 in `DESIGN.md` and the compositor authority documents, including every specifically named section, and synchronize the canonical shared compositor artifact with its repository projection. | Source/unit | Passed — `DESIGN.md` SHA-256 `5523aa4a5c80912e2a4c99a7dbe6f2d2784c4ea7fee849312e45d92f0ef8c2c2`; canonical and repository compositor projections are byte-identical at SHA-256 `5600c9cb9b250c83330c62b4ab5156bff64c1fce8b4a82bdbdbddc6b04cefa04` |
 
 ## Count audit
@@ -146,7 +156,7 @@ Tight Beam also participates in every dual-controller and official-path row that
 | Electron client/product UI | 6 |
 | Apple clients | 0 |
 | OpenClaw controller | 3 |
-| Tight Beam agent-side adapter | 3 |
+| General standalone CLI + Tight Beam consumer skill (including AC-CLI-01..08) | 11 |
 | Migration/persistence/rollback | 4 |
-| Official-path proof/review gate | 3 |
-| **Total** | **62** |
+| Official-path proof/review gate (including AC-CLI-09..10) | 5 |
+| **Total** | **72** |

@@ -4892,6 +4892,163 @@
         }
       }
     },
+    "LocklessTargetApplyAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationReceipt",
+        "operationRequestId",
+        "status",
+        "surfaceId",
+        "targetEpoch",
+        "targetId",
+        "targetRequestId"
+      ],
+      "properties": {
+        "operationReceipt": { "$ref": "#/$defs/LocklessOperationReceipt" },
+        "operationRequestId": { "$ref": "#/$defs/RequestId" },
+        "status": { "const": "intent_committed" },
+        "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+        "targetEpoch": { "type": "integer", "minimum": 1 },
+        "targetId": { "type": "string", "minLength": 1 },
+        "targetRequestId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "LocklessTargetApplyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intentCommitSequence",
+        "operationRequestId",
+        "status",
+        "surfaceId",
+        "targetEpoch",
+        "targetId",
+        "targetRequestId"
+      ],
+      "properties": {
+        "errorCode": { "type": "string", "minLength": 1 },
+        "intentCommitSequence": { "type": "integer", "minimum": 1 },
+        "materializedState": {},
+        "operationRequestId": { "$ref": "#/$defs/RequestId" },
+        "status": { "enum": ["applied", "failed"] },
+        "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+        "targetEpoch": { "type": "integer", "minimum": 1 },
+        "targetId": { "type": "string", "minLength": 1 },
+        "targetRequestId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "LocklessTargetApplyWorkItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bytes",
+        "controllerInstanceId",
+        "intentCommitSequence",
+        "operationRequestId",
+        "request",
+        "state",
+        "surfaceId",
+        "targetEpoch",
+        "targetId",
+        "targetRequestId"
+      ],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 1 },
+        "controllerInstanceId": { "type": "string", "minLength": 1 },
+        "intentCommitSequence": { "type": "integer", "minimum": 1 },
+        "operationRequestId": { "$ref": "#/$defs/RequestId" },
+        "request": { "type": "object" },
+        "state": { "enum": ["intent_committed", "materializing"] },
+        "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+        "targetEpoch": { "type": "integer", "minimum": 1 },
+        "targetId": { "type": "string", "minLength": 1 },
+        "targetRequestId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "LocklessTargetApplyResultEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.target_apply_result" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "consumableSequence",
+            "intentCommitSequence",
+            "operationRequestId",
+            "recordId",
+            "status",
+            "surfaceId",
+            "targetEpoch",
+            "targetId",
+            "targetRequestId"
+          ],
+          "properties": {
+            "consumableSequence": { "type": "integer", "minimum": 1 },
+            "errorCode": { "type": "string", "minLength": 1 },
+            "intentCommitSequence": { "type": "integer", "minimum": 1 },
+            "materializedState": {},
+            "operationRequestId": { "$ref": "#/$defs/RequestId" },
+            "recordId": { "type": "string", "minLength": 1 },
+            "status": { "enum": ["applied", "failed"] },
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "targetEpoch": { "type": "integer", "minimum": 1 },
+            "targetId": { "type": "string", "minLength": 1 },
+            "targetRequestId": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "LocklessOperationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commitSequence", "requestId"],
+      "properties": {
+        "commitSequence": { "type": "integer", "minimum": 0 },
+        "requestId": { "$ref": "#/$defs/RequestId" }
+      }
+    },
+    "LocklessReceiptResolution": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operationReceipt", "outcome", "requestId", "terminalResponse"],
+          "properties": {
+            "operationReceipt": { "$ref": "#/$defs/LocklessOperationReceipt" },
+            "outcome": { "enum": ["resolved_success", "resolved_failure"] },
+            "requestId": { "$ref": "#/$defs/RequestId" },
+            "terminalResponse": {}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome", "requestId"],
+          "properties": {
+            "outcome": { "enum": ["not_committed", "still_pending"] },
+            "requestId": { "$ref": "#/$defs/RequestId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cause", "outcome", "requestId"],
+          "properties": {
+            "cause": { "const": "controller_reclaimed" },
+            "outcome": { "const": "receipt_unavailable" },
+            "requestId": { "$ref": "#/$defs/RequestId" }
+          }
+        }
+      ]
+    },
     "LocklessRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -4906,6 +5063,8 @@
             "panes.list",
             "consumable.ack",
             "consumable.sync",
+            "operation.receipt.sync",
+            "operation.receipt.ack",
             "content.set",
             "content.append",
             "content.patch",
@@ -4944,6 +5103,8 @@
             "panes.list",
             "consumable.ack",
             "consumable.sync",
+            "operation.receipt.sync",
+            "operation.receipt.ack",
             "content.set",
             "content.append",
             "content.patch",
@@ -4982,6 +5143,7 @@
                 "invalid_operation",
                 "invalid_payload",
                 "not_paired",
+                "receipt_capacity",
                 "pane_capacity",
                 "pane_state_capacity",
                 "stale_content",
@@ -5024,7 +5186,8 @@
             "event.consumable_available",
             "event.consumable_overflow",
             "event.controller_retention_reclaimed",
-            "event.tombstone_reclaimed"
+            "event.tombstone_reclaimed",
+            "event.target_apply_result"
           ]
         },
         "eventId": { "$ref": "#/$defs/EventId" },

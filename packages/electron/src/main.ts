@@ -28,6 +28,7 @@ import {
 import { loadOrCreateIdentity } from "./identity.js";
 import {
   loadPersistentStateFile,
+  PersistentStateOutcomeUnknownError,
   shouldGuardUnrestorablePersistentState,
   writePersistentStateFile,
   type PersistentStateLoadResult,
@@ -77,6 +78,7 @@ let runtimeAppBindingDiagnostics: RuntimeAppBindingDiagnostics | null = null;
 const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
 let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
+let persistentStateOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
 
 type WebAuthnAccountSelectionCallback = (credentialId?: string | null) => void;
 type ShortcutInput = {
@@ -218,6 +220,7 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
 	        await syncNativeOverlayRegionsAfterRelease(surfaceId, "native release");
 	        broadcastSurfaceState(surfaceId);
 	      },
+      persistLocklessState: persistState,
       port,
       viewport: () => displayViewport(),
     });
@@ -372,6 +375,9 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
   const statePath = path.join(stateDir, STATE_FILE_NAME);
   const result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
   persistentStateWriteGuard = result.writeGuard;
+  if (result.writeGuard === "ambiguous-persistence") {
+    throw new PersistentStateOutcomeUnknownError(result.error);
+  }
   if (result.state) {
     clientInfo("state_restore_read_ok", {
       path: statePath,
@@ -391,6 +397,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
 }
 
 async function persistState(): Promise<void> {
+  if (persistentStateOutcomeUnknown) throw persistentStateOutcomeUnknown;
   if (persistentStateWriteGuard) {
     clientWarn("state_persist_skipped_corrupt_restore", {
       path: path.join(stateDir, STATE_FILE_NAME),
@@ -403,7 +410,17 @@ async function persistState(): Promise<void> {
     .then(async () => {
       await writePersistentStateFile(stateDir, STATE_FILE_NAME, core.getPersistentState());
     });
-  await stateWrite;
+  try {
+    await stateWrite;
+  } catch (error) {
+    if (error instanceof PersistentStateOutcomeUnknownError) {
+      persistentStateOutcomeUnknown = error;
+      persistentStateWriteGuard = "ambiguous-persistence";
+      server?.failStopPersistence(error);
+      app.quit();
+    }
+    throw error;
+  }
 }
 
 function surfaceIdForSender(contents: WebContents): string | null {

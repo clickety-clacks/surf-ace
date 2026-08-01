@@ -14,6 +14,9 @@ import {
   heartbeatPongResponseSchema,
   mutationAckResponseSchema,
   navigationEventSchema,
+  locklessRequestSchema,
+  locklessResponseSchema,
+  locklessTargetApplyResultEventSchema,
   pageEventSchema,
   pairRequestSchema,
   pairResponseSchema,
@@ -52,6 +55,25 @@ import {
   surfacesListResponseSchema,
   tapEventSchema,
 } from "./schemas.js";
+
+export const SURF_ACE_LOCKLESS_RECEIPT_SCHEMAS = {
+  "operation.receipt.sync": {
+    request: locklessRequestSchema,
+    response: locklessResponseSchema,
+    errorResponse: locklessResponseSchema,
+  },
+  "operation.receipt.ack": {
+    request: locklessRequestSchema,
+    response: locklessResponseSchema,
+    errorResponse: locklessResponseSchema,
+  },
+} as const;
+
+export const SURF_ACE_LOCKLESS_TARGET_SCHEMAS = {
+  "event.target_apply_result": {
+    event: locklessTargetApplyResultEventSchema,
+  },
+} as const;
 
 export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "surfaces.list": {

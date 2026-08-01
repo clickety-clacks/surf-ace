@@ -49,6 +49,7 @@ import type { NativePaneWindowGroupStatus } from "./native-pane-bridge.js";
 import {
   LocklessAuthorityError,
   LocklessClientAuthority,
+  createEmptyLocklessClientState,
   type PersistentLocklessClientState,
 } from "./lockless-client-authority.js";
 import {
@@ -432,6 +433,35 @@ export class SurfaceCore {
       this.pendingEvents = null;
       throw error;
     }
+  }
+
+  async transactionAsync<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.pendingEvents) return await operation();
+    const before = this.getPersistentState();
+    this.pendingEvents = [];
+    try {
+      const result = await operation();
+      const events = this.pendingEvents;
+      this.pendingEvents = null;
+      for (const event of events) this.deliver(event);
+      return result;
+    } catch (error) {
+      this.restorePersistentState(before);
+      this.pendingEvents = null;
+      throw error;
+    }
+  }
+
+  private restorePersistentState(state: PersistentSurfaceState): void {
+    this.persistentState = structuredClone(state);
+    this.surfaces.clear();
+    for (const record of state.surfaces ?? []) {
+      const surface = deserializeSurface(record, this.now());
+      if (surface) this.surfaces.set(surface.surfaceId, surface);
+    }
+    this.locklessAuthority.restorePersistentState(
+      state.lockless ?? createEmptyLocklessClientState(),
+    );
   }
 
   getPersistentState(): PersistentSurfaceState {
@@ -1910,13 +1940,30 @@ export class SurfaceCore {
     surfaceId: string,
     payload: TargetApplyRequest["payload"],
   ): TargetApplyResponse["payload"] | null {
-    const validation = this.validateBrowserUrlTarget(surfaceId, payload);
+    const validation = this.validateBrowserUrlTarget(surfaceId, payload, true);
     return "result" in validation ? validation.result : null;
+  }
+
+  browserUrlTargetIntentPreflight(
+    surfaceId: string,
+    payload: TargetApplyRequest["payload"],
+  ): TargetApplyResponse["payload"] | null {
+    const validation = this.validateBrowserUrlTarget(surfaceId, payload, false);
+    if ("result" in validation) return validation.result;
+    return validation.pane.externalNative
+      ? targetApplyResult(
+          payload,
+          "rejected",
+          "materialization_failed",
+          "browser_url cannot replace a live native-hosted pane without native pane detach support",
+        )
+      : null;
   }
 
   private validateBrowserUrlTarget(
     surfaceId: string,
     payload: TargetApplyRequest["payload"],
+    mutatePolicyUi = true,
   ): BrowserUrlTargetValidation {
     const surface = this.getSurface(surfaceId);
     if (payload.surfaceId !== surface.surfaceId) {
@@ -1946,8 +1993,10 @@ export class SurfaceCore {
       return { result: targetApplyResult(payload, "rejected", "pane_lineage_missing", "pane lineage is unknown") };
     }
     if (pane.annotating) {
-      pane.toast = "Finish annotation (Done) to navigate";
-      this.emit({ surfaceId, type: "surface-changed" });
+      if (mutatePolicyUi) {
+        pane.toast = "Finish annotation (Done) to navigate";
+        this.emit({ surfaceId, type: "surface-changed" });
+      }
       return { result: targetApplyResult(payload, "rejected", "policy_denied", "annotation mode is active") };
     }
     return { pane, url };

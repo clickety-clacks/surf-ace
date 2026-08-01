@@ -186,6 +186,9 @@ test("authority conformance vector set covers omnibus blocker contracts", () => 
     "topology-apply-committed-truth-only",
     "content-apply-strict-revision",
     "ios-user-close-retires-identity",
+    "lockless-receipt-cross-connection-resolution",
+    "lockless-receipt-capacity-precommit",
+    "lockless-receipt-replay-not-request-replay",
   ]) {
     const vector = vectorsById.get(id);
     assert.ok(vector, `missing authority vector ${id}`);
