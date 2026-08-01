@@ -4764,6 +4764,7 @@
               }
             },
             "launchedAt": {
+              "format": "date-time",
               "type": "string"
             },
             "registrationState": {

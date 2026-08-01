@@ -393,12 +393,27 @@ fn string_value<'a>(input: &'a Map<String, Value>, key: &str) -> Result<&'a str,
 fn integer(input: &Map<String, Value>, key: &str) -> Result<i64, String> {
     let value = input
         .get(key)
-        .and_then(Value::as_i64)
+        .and_then(safe_integer)
         .ok_or_else(|| format!("invalid_input:{key}"))?;
-    if !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&value) {
-        return Err(format!("invalid_input:{key}"));
-    }
     Ok(value)
+}
+
+fn safe_integer(value: &Value) -> Option<i64> {
+    let number = value.as_number()?;
+    if let Some(integer) = number.as_i64() {
+        return (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER)
+            .contains(&integer)
+            .then_some(integer);
+    }
+    if let Some(integer) = number.as_u64() {
+        return (integer <= MAX_SAFE_INTEGER as u64).then_some(integer as i64);
+    }
+    let number = number.as_f64()?;
+    (number.is_finite()
+        && number.fract() == 0.0
+        && number >= -(MAX_SAFE_INTEGER as f64)
+        && number <= MAX_SAFE_INTEGER as f64)
+        .then_some(number as i64)
 }
 
 fn positive_integer(input: &Map<String, Value>, key: &str) -> Result<i64, String> {
@@ -497,9 +512,7 @@ fn optional_object(input: &Map<String, Value>, key: &str) -> Result<(), String> 
 
 fn positive_integer_array(input: &Map<String, Value>, key: &str) -> Result<(), String> {
     if !array(input, key)?.iter().all(|value| {
-        value
-            .as_i64()
-            .is_some_and(|integer| (1..=MAX_SAFE_INTEGER).contains(&integer))
+        safe_integer(value).is_some_and(|integer| (1..=MAX_SAFE_INTEGER).contains(&integer))
     }) {
         return Err(format!("invalid_input:{key}"));
     }
@@ -521,7 +534,7 @@ fn topology_target(input: &Map<String, Value>) -> Result<(), String> {
     if target.get("root") == Some(&Value::Bool(true))
         || target
             .get("paneId")
-            .and_then(Value::as_i64)
+            .and_then(safe_integer)
             .is_some_and(|pane_id| (1..=MAX_SAFE_INTEGER).contains(&pane_id))
     {
         return Ok(());
@@ -531,6 +544,9 @@ fn topology_target(input: &Map<String, Value>) -> Result<(), String> {
 
 fn launched_at(input: &Map<String, Value>) -> Result<(), String> {
     let value = required_string(input, "launchedAt")?;
+    if !matches!(value.as_bytes().get(10), Some(b'T' | b't')) {
+        return Err("invalid_input:launchedAt".to_owned());
+    }
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|_| ())
         .map_err(|_| "invalid_input:launchedAt".to_owned())

@@ -854,6 +854,28 @@ function revision(value: unknown): boolean {
   return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
+function rfc3339Timestamp(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8]);
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9]);
+  if (
+    month < 1 || month > 12 ||
+    hour > 23 || minute > 59 || second > 60 ||
+    offsetHour > 23 || offsetMinute > 59
+  ) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day >= 1 && day <= daysInMonth[month - 1];
+}
+
 function nonemptyString(value: unknown): boolean {
   return typeof value === "string" && value.length > 0;
 }
@@ -1468,8 +1490,7 @@ function validateLocklessRequestPayload(
     case "target.register":
       return nonemptyString(payload.surfaceId) &&
         nonemptyString(payload.idempotencyKey) &&
-        nonemptyString(payload.launchedAt) &&
-        !Number.isNaN(Date.parse(String(payload.launchedAt))) &&
+        rfc3339Timestamp(payload.launchedAt) &&
         (payload.expectedPreviousTargetEpoch === null ||
           revision(payload.expectedPreviousTargetEpoch)) &&
         (payload.registrationState === "before_attach" ||

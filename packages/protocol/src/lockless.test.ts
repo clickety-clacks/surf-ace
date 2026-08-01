@@ -69,7 +69,7 @@ test("production validation matches the shared Rust CLI boundary vector", () => 
       operation: string;
     }>;
   };
-  assert.equal(vector.cases.length, 34);
+  assert.equal(vector.cases.length, 60);
   for (const entry of vector.cases) {
     const { action: _action, ...payload } = entry.input;
     const envelope = request(entry.operation, payload);
