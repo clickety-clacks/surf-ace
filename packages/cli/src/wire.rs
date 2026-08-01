@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
@@ -17,10 +18,12 @@ pub struct Envelope {
     pub ok: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
+    #[serde(rename = "sentAt", skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<u64>,
 }
 
 impl Envelope {
-    pub fn request(id: String, op: &str, payload: Value) -> Self {
+    pub fn request(id: String, op: &str, payload: Value, sent_at: u64) -> Self {
         Self {
             id: Some(id),
             op: op.into(),
@@ -29,6 +32,7 @@ impl Envelope {
             v: 1,
             ok: None,
             error: None,
+            sent_at: Some(sent_at),
         }
     }
 }
@@ -71,7 +75,17 @@ impl DirectWire for WebSocketWire {
         payload: Value,
         sent: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<WireResponse, WireFailure> {
-        let request = Envelope::request(id.to_owned(), op, payload);
+        let sent_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| WireFailure::BeforeSend {
+                code: format!("request_clock:{error}"),
+            })?
+            .as_millis()
+            .try_into()
+            .map_err(|error| WireFailure::BeforeSend {
+                code: format!("request_clock:{error}"),
+            })?;
+        let request = Envelope::request(id.to_owned(), op, payload, sent_at);
         let serialized =
             serde_json::to_string(&request).map_err(|error| WireFailure::BeforeSend {
                 code: format!("request_encode:{error}"),

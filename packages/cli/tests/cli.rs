@@ -47,6 +47,7 @@ impl FakeWire {
                 v: 1,
                 ok: Some(true),
                 error: None,
+                sent_at: None,
             },
             events: vec![],
         }
@@ -78,6 +79,7 @@ impl DirectWire for FakeWire {
                     v: 1,
                     ok: Some(false),
                     error: Some(json!({ "code": "receipt_capacity" })),
+                    sent_at: None,
                 },
                 events: vec![],
             });
@@ -91,6 +93,7 @@ impl DirectWire for FakeWire {
                 v: 1,
                 ok: Some(false),
                 error: Some(json!({ "code": "stale_content" })),
+                sent_at: None,
             };
             self.resolutions = vec![json!({
                 "operationReceipt": { "commitSequence": 8, "requestId": id },
@@ -204,6 +207,7 @@ fn event(op: &str, payload: Value) -> Envelope {
         v: 1,
         ok: None,
         error: None,
+        sent_at: None,
     }
 }
 
@@ -1127,11 +1131,33 @@ fn general_cli_manifest_uses_only_the_public_surf_ace_identity() {
 fn read_request(socket: &mut tungstenite::WebSocket<std::net::TcpStream>) -> Value {
     loop {
         match socket.read().unwrap() {
-            Message::Text(text) => return serde_json::from_str(&text).unwrap(),
+            Message::Text(text) => {
+                let envelope: Value = serde_json::from_str(&text).unwrap();
+                assert_canonical_request_envelope(&envelope);
+                return envelope;
+            }
             Message::Close(_) => panic!("connection closed before request"),
             _ => {}
         }
     }
+}
+
+fn assert_canonical_request_envelope(envelope: &Value) {
+    let object = envelope.as_object().unwrap();
+    let actual = object
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = ["id", "op", "payload", "sentAt", "type", "v"]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    assert_eq!(envelope["v"], 1);
+    assert_eq!(envelope["type"], "request");
+    assert!(envelope["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(envelope["op"].as_str().is_some_and(|op| !op.is_empty()));
+    assert!(envelope["payload"].is_object());
+    assert!(envelope["sentAt"].as_u64().is_some());
 }
 
 fn send_response(
