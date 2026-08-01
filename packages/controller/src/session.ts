@@ -236,6 +236,9 @@ export class LocklessControllerSession {
       if (!Array.isArray(payload.scopes)) {
         throw new Error("invalid_lockless_pair_scopes");
       }
+      if (!Array.isArray(payload.receiptResolutions)) {
+        throw new Error("invalid_lockless_pair_receipt_resolutions");
+      }
       scopes = payload.scopes;
       await migration?.accept();
     } catch (error) {
@@ -267,6 +270,8 @@ export class LocklessControllerSession {
       controllerInstanceId: this.controllerInstanceId,
       limits: record(payload.limits) as LocklessPairResult["limits"],
       mode: "lockless" as const,
+      receiptResolutions:
+        payload.receiptResolutions as LocklessPairResult["receiptResolutions"],
       resumed: payload.resumed === true,
       scopes: scopes as ConsumableScopeSnapshot[],
       sessionId: String(payload.sessionId),

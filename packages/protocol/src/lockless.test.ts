@@ -55,6 +55,32 @@ test("production validator accepts every serialized Rust CLI network variant", (
   }
 });
 
+test("production validation matches the shared Rust CLI boundary vector", () => {
+  const vector = JSON.parse(
+    fs.readFileSync(
+      new URL("../../cli/vectors/network-validation-conformance.json", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    cases: Array<{
+      accepted: boolean;
+      id: string;
+      input: Record<string, unknown>;
+      operation: string;
+    }>;
+  };
+  assert.equal(vector.cases.length, 34);
+  for (const entry of vector.cases) {
+    const { action: _action, ...payload } = entry.input;
+    const envelope = request(entry.operation, payload);
+    assert.equal(
+      validateLocklessEnvelope(envelope).ok,
+      entry.accepted,
+      entry.id,
+    );
+  }
+});
+
 test("lockless schema exports request, response, and event branches", () => {
   assert.equal(protocolSchemaDefs.LocklessRequest?.type, "object");
   assert.equal(protocolSchemaDefs.LocklessResponse?.type, "object");

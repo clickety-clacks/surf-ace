@@ -1362,7 +1362,8 @@ function validateLocklessRequestPayload(
     case "content.set":
       return paneAndSurface() &&
         nonemptyString(payload.contentId) &&
-        nonemptyString(payload.contentType)
+        nonemptyString(payload.contentType) &&
+        (payload.display === undefined || plainRecord(payload.display))
         ? null
         : "invalid_content_set";
     case "content.append":
@@ -1453,10 +1454,12 @@ function validateLocklessRequestPayload(
     case "target.apply":
       return nonemptyString(payload.surfaceId) &&
         nonemptyString(payload.requestId) &&
+        typeof payload.restoreReason === "string" &&
         nonemptyString(payload.targetId) &&
         positiveInteger(payload.targetEpoch) &&
         nonemptyString(payload.targetKind) &&
         plainRecord(payload.targetHeader) &&
+        (payload.display === undefined || plainRecord(payload.display)) &&
         (payload.paneId === undefined || positiveInteger(payload.paneId)) &&
         (payload.paneLineageId === undefined ||
           nonemptyString(payload.paneLineageId))
@@ -1473,6 +1476,8 @@ function validateLocklessRequestPayload(
           payload.registrationState === "attached") &&
         nonemptyString(payload.targetKind) &&
         plainRecord(payload.targetHeader) &&
+        (payload.restorePolicy === undefined ||
+          typeof payload.restorePolicy === "string") &&
         (payload.paneId === undefined || positiveInteger(payload.paneId)) &&
         (payload.paneLineageId === undefined ||
           nonemptyString(payload.paneLineageId))

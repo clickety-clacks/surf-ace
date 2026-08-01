@@ -2,6 +2,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
+const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+const LEGACY_AUTHORITY_FIELDS: [&str; 12] = [
+    "connectionId",
+    "historyOwnerToken",
+    "initialPaneId",
+    "initialPaneLabel",
+    "newPaneIds",
+    "newPaneLabels",
+    "ownershipEpoch",
+    "ownershipSessionId",
+    "providerId",
+    "revision",
+    "takeover",
+    "windowLabel",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Command {
@@ -109,6 +125,7 @@ impl Command {
                 required_string(input, "contentId")?;
                 required_string(input, "contentType")?;
                 required(input, "content")?;
+                optional_object(input, "display")?;
             }
             Self::Read => {
                 exact_fields(input, &["scopeId"], &[])?;
@@ -287,7 +304,7 @@ impl Command {
                 required_string(input, "surfaceId")?;
                 required_string(input, "idempotencyKey")?;
                 nullable_nonnegative_integer(input, "expectedPreviousTargetEpoch")?;
-                required_string(input, "launchedAt")?;
+                launched_at(input)?;
                 match string(input, "registrationState")? {
                     "before_attach" | "attached" => {}
                     _ => return Err("invalid_input:registrationState".into()),
@@ -297,6 +314,7 @@ impl Command {
                 required(input, "targetPayload")?;
                 optional_positive_integer(input, "paneId")?;
                 optional_nonempty_string(input, "paneLineageId")?;
+                optional_string(input, "restorePolicy")?;
             }
             Self::TargetApply => {
                 exact_fields(
@@ -315,7 +333,7 @@ impl Command {
                 )?;
                 required_string(input, "surfaceId")?;
                 required_string(input, "requestId")?;
-                required_string(input, "restoreReason")?;
+                string_value(input, "restoreReason")?;
                 required_string(input, "targetId")?;
                 positive_integer(input, "targetEpoch")?;
                 required_string(input, "targetKind")?;
@@ -323,21 +341,15 @@ impl Command {
                 required(input, "targetPayload")?;
                 optional_positive_integer(input, "paneId")?;
                 optional_nonempty_string(input, "paneLineageId")?;
+                optional_object(input, "display")?;
             }
         }
         Ok(())
     }
 
     pub fn wire_payload(self, mut input: Map<String, Value>) -> Result<Value, String> {
-        for forbidden in [
-            "connectionId",
-            "ownershipEpoch",
-            "ownershipSessionId",
-            "providerId",
-        ] {
-            if input.contains_key(forbidden) {
-                return Err(format!("forbidden_legacy_field:{forbidden}"));
-            }
+        if let Some(path) = forbidden_legacy_path(&Value::Object(input.clone()), "payload", true) {
+            return Err(format!("forbidden_legacy_field:{path}"));
         }
         match self {
             Self::TopologyIntent => {
@@ -371,16 +383,27 @@ fn required_string<'a>(input: &'a Map<String, Value>, key: &str) -> Result<&'a s
     string(input, key)
 }
 
-fn integer(input: &Map<String, Value>, key: &str) -> Result<i64, String> {
+fn string_value<'a>(input: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
     input
         .get(key)
-        .and_then(Value::as_i64)
+        .and_then(Value::as_str)
         .ok_or_else(|| format!("invalid_input:{key}"))
+}
+
+fn integer(input: &Map<String, Value>, key: &str) -> Result<i64, String> {
+    let value = input
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("invalid_input:{key}"))?;
+    if !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&value) {
+        return Err(format!("invalid_input:{key}"));
+    }
+    Ok(value)
 }
 
 fn positive_integer(input: &Map<String, Value>, key: &str) -> Result<i64, String> {
     let value = integer(input, key)?;
-    if value < 1 {
+    if !(1..=MAX_SAFE_INTEGER).contains(&value) {
         return Err(format!("invalid_input:{key}"));
     }
     Ok(value)
@@ -388,7 +411,7 @@ fn positive_integer(input: &Map<String, Value>, key: &str) -> Result<i64, String
 
 fn nonnegative_integer(input: &Map<String, Value>, key: &str) -> Result<i64, String> {
     let value = integer(input, key)?;
-    if value < 0 {
+    if !(0..=MAX_SAFE_INTEGER).contains(&value) {
         return Err(format!("invalid_input:{key}"));
     }
     Ok(value)
@@ -420,14 +443,7 @@ fn exact_fields(
     }
     for key in input.keys() {
         if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
-            if [
-                "connectionId",
-                "ownershipEpoch",
-                "ownershipSessionId",
-                "providerId",
-            ]
-            .contains(&key.as_str())
-            {
+            if LEGACY_AUTHORITY_FIELDS.contains(&key.as_str()) {
                 return Err(format!("forbidden_legacy_field:{key}"));
             }
             return Err(format!("invalid_input:unknown_property:{key}"));
@@ -458,6 +474,13 @@ fn optional_nonempty_string(input: &Map<String, Value>, key: &str) -> Result<(),
     Ok(())
 }
 
+fn optional_string(input: &Map<String, Value>, key: &str) -> Result<(), String> {
+    if input.contains_key(key) {
+        string_value(input, key)?;
+    }
+    Ok(())
+}
+
 fn optional_boolean(input: &Map<String, Value>, key: &str) -> Result<(), String> {
     if input.contains_key(key) && !matches!(input.get(key), Some(Value::Bool(_))) {
         return Err(format!("invalid_input:{key}"));
@@ -473,10 +496,11 @@ fn optional_object(input: &Map<String, Value>, key: &str) -> Result<(), String> 
 }
 
 fn positive_integer_array(input: &Map<String, Value>, key: &str) -> Result<(), String> {
-    if !array(input, key)?
-        .iter()
-        .all(|value| value.as_i64().is_some_and(|integer| integer.is_positive()))
-    {
+    if !array(input, key)?.iter().all(|value| {
+        value
+            .as_i64()
+            .is_some_and(|integer| (1..=MAX_SAFE_INTEGER).contains(&integer))
+    }) {
         return Err(format!("invalid_input:{key}"));
     }
     Ok(())
@@ -498,11 +522,33 @@ fn topology_target(input: &Map<String, Value>) -> Result<(), String> {
         || target
             .get("paneId")
             .and_then(Value::as_i64)
-            .is_some_and(|pane_id| pane_id.is_positive())
+            .is_some_and(|pane_id| (1..=MAX_SAFE_INTEGER).contains(&pane_id))
     {
         return Ok(());
     }
     Err("invalid_input:target".into())
+}
+
+fn launched_at(input: &Map<String, Value>) -> Result<(), String> {
+    let value = required_string(input, "launchedAt")?;
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|_| ())
+        .map_err(|_| "invalid_input:launchedAt".to_owned())
+}
+
+fn forbidden_legacy_path(value: &Value, path: &str, root: bool) -> Option<String> {
+    match value {
+        Value::Array(values) => values.iter().enumerate().find_map(|(index, child)| {
+            forbidden_legacy_path(child, &format!("{path}[{index}]"), false)
+        }),
+        Value::Object(fields) => fields.iter().find_map(|(key, child)| {
+            if (root || key != "revision") && LEGACY_AUTHORITY_FIELDS.contains(&key.as_str()) {
+                return Some(format!("{path}.{key}"));
+            }
+            forbidden_legacy_path(child, &format!("{path}.{key}"), false)
+        }),
+        _ => None,
+    }
 }
 
 fn desired_topology(value: &Value) -> Result<(), String> {

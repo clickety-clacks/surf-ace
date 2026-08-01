@@ -309,6 +309,29 @@ fn every_serialized_network_command_variant_matches_the_shared_production_vector
 }
 
 #[test]
+fn rust_validation_matches_the_shared_production_boundary_vector() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let shared: Value = serde_json::from_slice(
+        &fs::read(manifest_dir.join("vectors/network-validation-conformance.json")).unwrap(),
+    )
+    .unwrap();
+    let cases = shared["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 34);
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+        let command = Command::parse(case["command"].as_str().unwrap()).unwrap();
+        let input = case["input"].as_object().unwrap();
+        let result = command.wire_operation(input).and_then(|operation| {
+            if operation != case["operation"].as_str().unwrap() {
+                return Err("operation_mismatch".to_owned());
+            }
+            command.wire_payload(input.clone()).map(|_| ())
+        });
+        assert_eq!(result.is_ok(), case["accepted"] == true, "{id}");
+    }
+}
+
+#[test]
 fn command_validation_rejects_the_three_reviewed_noncanonical_payloads() {
     let invalid = [
         (

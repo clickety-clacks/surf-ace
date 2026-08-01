@@ -65,6 +65,10 @@ test("operation receipt exposes the client commit sequence from the wire receipt
             controllerInstanceId: "ci_receipt",
             limits: {},
             mode: "lockless",
+            receiptResolutions: [{
+              outcome: "still_pending",
+              requestId: "rq_pending",
+            }],
             resumed: false,
             scopes: [],
             sessionId: "lockless_ci_receipt",
@@ -99,7 +103,11 @@ test("operation receipt exposes the client commit sequence from the wire receipt
     projection: new BoundedControllerProjection(new MemoryStore(), 4096),
     wire,
   });
-  await session.start();
+  const pair = await session.start();
+  assert.deepEqual(pair.receiptResolutions, [{
+    outcome: "still_pending",
+    requestId: "rq_pending",
+  }]);
   const response = await session.requestPublic("content.set") as {
     operationReceipt: {
       clientResultIds: Record<string, number | string>;
@@ -336,6 +344,7 @@ test("ordinary read queues repair without client I/O and background sync perform
             controllerInstanceId: "ci_local",
             limits: {},
             mode: "lockless",
+            receiptResolutions: [],
             resumed: false,
             scopes: [],
             sessionId: "lockless_ci_local",
@@ -485,6 +494,7 @@ test("failed admission closes its wire so the stable identity can retry", async 
           controllerInstanceId: pair.controllerInstanceId,
           limits: {},
           mode: "lockless",
+          receiptResolutions: [],
           resumed: false,
           scopes: [],
           sessionId: `lockless_${pair.controllerInstanceId}`,
@@ -549,6 +559,7 @@ test("transport loss marks projection unsynchronized and reconciles with the sam
             controllerInstanceId: pair.controllerInstanceId,
             limits: {},
             mode: "lockless",
+            receiptResolutions: [],
             resumed: connectCount > 1,
             scopes: [{
               cursor: { cursor: 1, gap: null, gapGeneration: 0 },
@@ -644,6 +655,11 @@ test("legacy migration clears only after an accepted receipt for the exact pair 
           migrationAccepted: true,
           migrationReceiptId: id,
           mode: "lockless",
+          receiptResolutions: [{
+            cause: "controller_reclaimed",
+            outcome: "receipt_unavailable",
+            requestId: "rq_reclaimed",
+          }],
           resumed: false,
           scopes: [],
           sessionId: "lockless_ci_migration",
@@ -673,7 +689,12 @@ test("legacy migration clears only after an accepted receipt for the exact pair 
     projection: new BoundedControllerProjection(new MemoryStore(), 4096),
     wire: acceptedWire,
   });
-  await acceptedSession.start();
+  const migrationPair = await acceptedSession.start();
+  assert.deepEqual(migrationPair.receiptResolutions, [{
+    cause: "controller_reclaimed",
+    outcome: "receipt_unavailable",
+    requestId: "rq_reclaimed",
+  }]);
   assert.match(observedPairId, /^rq_pair_/);
   assert.equal(accepted, 1);
   assert.equal(rejected, 0);
@@ -697,6 +718,7 @@ test("legacy migration clears only after an accepted receipt for the exact pair 
           migrationAccepted: true,
           migrationReceiptId: "rq_different",
           mode: "lockless",
+          receiptResolutions: [],
           resumed: false,
           scopes: [],
           sessionId: "lockless_ci_migration",

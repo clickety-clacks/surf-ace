@@ -6,6 +6,7 @@ license = "UNLICENSED"
 description = "General standalone native controller CLI for Surf Ace"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false }
 fs2 = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
