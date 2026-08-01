@@ -263,7 +263,74 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
 
 #[test]
 fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
-    let cases = [
+    for (command, input, expected_operation) in canonical_network_cases() {
+        let temp = TempDir::new().unwrap();
+        let mut wire = FakeWire::ordinary();
+        let output = execute_with_wire(invocation(&temp, command, input), &mut wire).unwrap();
+        assert!(output.ok);
+        assert!(wire.operations.contains(&expected_operation.into()));
+    }
+
+    let temp = TempDir::new().unwrap();
+    let mut local = invocation(&temp, Command::Read, json!({ "scopeId": "pane:sf_1:1" }));
+    local.endpoint = None;
+    local.product_label = None;
+    let output = execute(local).unwrap();
+    assert_eq!(output.result["cacheStatus"], "unsynchronized");
+}
+
+#[test]
+fn every_serialized_network_command_variant_matches_the_shared_production_vector() {
+    let envelopes = canonical_network_cases()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (command, input, expected_operation))| {
+            let operation = command.wire_operation(input.as_object().unwrap()).unwrap();
+            assert_eq!(operation, expected_operation);
+            let payload = command
+                .wire_payload(input.as_object().unwrap().clone())
+                .unwrap();
+            serde_json::to_value(Envelope::request(
+                format!("rq-{index}"),
+                operation,
+                payload,
+                1_785_619_273_922,
+            ))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let shared: Value = serde_json::from_slice(
+        &fs::read(manifest_dir.join("vectors/network-request-conformance.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(json!(envelopes), shared["requests"]);
+}
+
+#[test]
+fn command_validation_rejects_the_three_reviewed_noncanonical_payloads() {
+    let invalid = [
+        (
+            Command::TopologyRealize,
+            json!({ "surfaceId": "sf_1", "expectedTopologyRevision": 1, "target": { "root": true }, "desired": {}, "allowDestroyPaneIds": [] }),
+        ),
+        (
+            Command::SurfaceIntent,
+            json!({ "action": "open", "expectedSurfaceSetRevision": 1, "requestedLabel": "Window" }),
+        ),
+        (
+            Command::TargetRegister,
+            json!({ "surfaceId": "sf_1", "paneId": 1, "idempotencyKey": "idem_1", "targetKind": "native_app", "targetHeader": {}, "targetPayload": {} }),
+        ),
+    ];
+    for (command, input) in invalid {
+        assert!(command.validate(input.as_object().unwrap()).is_err());
+    }
+}
+
+fn canonical_network_cases() -> Vec<(Command, Value, &'static str)> {
+    vec![
         (Command::List, json!({}), "surfaces.list"),
         (
             Command::Push,
@@ -276,8 +343,23 @@ fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
             "pane.split",
         ),
         (
+            Command::TopologyIntent,
+            json!({ "surfaceId": "sf_1", "action": "close", "paneId": 1, "expectedTopologyRevision": 1 }),
+            "pane.close",
+        ),
+        (
+            Command::TopologyIntent,
+            json!({ "surfaceId": "sf_1", "action": "restore", "anchorPaneId": 1, "tombstoneId": "pt_1", "direction": "vertical", "expectedTopologyRevision": 1 }),
+            "pane.restore",
+        ),
+        (
+            Command::TopologyIntent,
+            json!({ "surfaceId": "sf_1", "action": "rename", "paneId": 1, "name": "Notes", "expectedTopologyRevision": 1 }),
+            "pane.rename",
+        ),
+        (
             Command::TopologyRealize,
-            json!({ "surfaceId": "sf_1", "expectedTopologyRevision": 1, "target": { "root": true }, "desired": {}, "allowDestroyPaneIds": [] }),
+            json!({ "surfaceId": "sf_1", "expectedTopologyRevision": 1, "target": { "root": true }, "desired": { "type": "pane" }, "allowDestroyPaneIds": [] }),
             "topology.apply",
         ),
         (
@@ -292,17 +374,27 @@ fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
         ),
         (
             Command::CapturePane,
-            json!({ "surfaceId": "sf_1", "paneId": 1 }),
+            json!({ "surfaceId": "sf_1", "paneId": 1, "includeDrawings": true }),
             "snapshot.get",
         ),
         (
             Command::SurfaceIntent,
-            json!({ "action": "open", "expectedSurfaceSetRevision": 1, "requestedLabel": "Window" }),
+            json!({ "action": "open", "expectedSurfaceSetRevision": 1, "placement": {} }),
             "surface.window.open",
         ),
         (
+            Command::SurfaceIntent,
+            json!({ "action": "close", "expectedSurfaceSetRevision": 1, "expectedTopologyRevision": 1, "surfaceId": "sf_1" }),
+            "surface.window.close",
+        ),
+        (
+            Command::SurfaceIntent,
+            json!({ "action": "restore", "expectedSurfaceSetRevision": 1, "tombstoneId": "st_1", "placement": {} }),
+            "surface.window.restore",
+        ),
+        (
             Command::TargetRegister,
-            json!({ "surfaceId": "sf_1", "paneId": 1, "idempotencyKey": "idem_1", "targetKind": "native_app", "targetHeader": {}, "targetPayload": {} }),
+            json!({ "surfaceId": "sf_1", "paneId": 1, "idempotencyKey": "idem_1", "expectedPreviousTargetEpoch": null, "launchedAt": "2026-07-30T00:00:00Z", "registrationState": "attached", "targetKind": "native_app", "targetHeader": {}, "targetPayload": {} }),
             "target.register",
         ),
         (
@@ -310,21 +402,7 @@ fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
             json!({ "surfaceId": "sf_1", "paneId": 1, "requestId": "target_request_1", "restoreReason": "initial", "targetId": "tg_1", "targetEpoch": 1, "targetKind": "native_app", "targetHeader": {}, "targetPayload": {} }),
             "target.apply",
         ),
-    ];
-    for (command, input, expected_operation) in cases {
-        let temp = TempDir::new().unwrap();
-        let mut wire = FakeWire::ordinary();
-        let output = execute_with_wire(invocation(&temp, command, input), &mut wire).unwrap();
-        assert!(output.ok);
-        assert!(wire.operations.contains(&expected_operation.into()));
-    }
-
-    let temp = TempDir::new().unwrap();
-    let mut local = invocation(&temp, Command::Read, json!({ "scopeId": "pane:sf_1:1" }));
-    local.endpoint = None;
-    local.product_label = None;
-    let output = execute(local).unwrap();
-    assert_eq!(output.result["cacheStatus"], "unsynchronized");
+    ]
 }
 
 #[test]

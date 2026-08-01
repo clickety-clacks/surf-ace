@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import {
@@ -40,6 +41,19 @@ function request(op: string, payload: Record<string, unknown>) {
     v: 1,
   };
 }
+
+test("production validator accepts every serialized Rust CLI network variant", () => {
+  const vector = JSON.parse(
+    fs.readFileSync(
+      new URL("../../cli/vectors/network-request-conformance.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { requests: unknown[] };
+  assert.equal(vector.requests.length, 15);
+  for (const envelope of vector.requests) {
+    assert.deepEqual(validateLocklessEnvelope(envelope), { ok: true });
+  }
+});
 
 test("lockless schema exports request, response, and event branches", () => {
   assert.equal(protocolSchemaDefs.LocklessRequest?.type, "object");

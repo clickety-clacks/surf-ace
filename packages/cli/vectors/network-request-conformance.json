@@ -1,0 +1,19 @@
+{
+  "requests": [
+    {"id":"rq-0","op":"surfaces.list","payload":{},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-1","op":"content.set","payload":{"surfaceId":"sf_1","paneId":1,"contentId":"c_1","contentType":"text","content":"hi","friendlyChatName":"CLU"},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-2","op":"pane.split","payload":{"surfaceId":"sf_1","paneId":1,"count":2,"direction":"horizontal","expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-3","op":"pane.close","payload":{"surfaceId":"sf_1","paneId":1,"expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-4","op":"pane.restore","payload":{"surfaceId":"sf_1","anchorPaneId":1,"tombstoneId":"pt_1","direction":"vertical","expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-5","op":"pane.rename","payload":{"surfaceId":"sf_1","paneId":1,"name":"Notes","expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-6","op":"topology.apply","payload":{"surfaceId":"sf_1","expectedTopologyRevision":1,"target":{"root":true},"desired":{"type":"pane"},"allowDestroyPaneIds":[]},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-7","op":"content.clear","payload":{"surfaceId":"sf_1","paneId":1,"expectedRevision":1},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-8","op":"annotations.remove","payload":{"surfaceId":"sf_1","paneId":1,"contentId":"c_1","strokeIds":["st_1"]},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-9","op":"snapshot.get","payload":{"surfaceId":"sf_1","paneId":1,"includeDrawings":true},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-10","op":"surface.window.open","payload":{"expectedSurfaceSetRevision":1,"placement":{}},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-11","op":"surface.window.close","payload":{"expectedSurfaceSetRevision":1,"expectedTopologyRevision":1,"surfaceId":"sf_1"},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-12","op":"surface.window.restore","payload":{"expectedSurfaceSetRevision":1,"tombstoneId":"st_1","placement":{}},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-13","op":"target.register","payload":{"surfaceId":"sf_1","paneId":1,"idempotencyKey":"idem_1","expectedPreviousTargetEpoch":null,"launchedAt":"2026-07-30T00:00:00Z","registrationState":"attached","targetKind":"native_app","targetHeader":{},"targetPayload":{}},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-14","op":"target.apply","payload":{"surfaceId":"sf_1","paneId":1,"requestId":"target_request_1","restoreReason":"initial","targetId":"tg_1","targetEpoch":1,"targetKind":"native_app","targetHeader":{},"targetPayload":{}},"sentAt":1785619273922,"type":"request","v":1}
+  ]
+}

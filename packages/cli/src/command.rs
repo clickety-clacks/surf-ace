@@ -99,6 +99,11 @@ impl Command {
                 }
             }
             Self::Push => {
+                exact_fields(
+                    input,
+                    &["content", "contentId", "contentType", "paneId", "surfaceId"],
+                    &["display", "friendlyChatName"],
+                )?;
                 required_string(input, "surfaceId")?;
                 positive_integer(input, "paneId")?;
                 required_string(input, "contentId")?;
@@ -106,6 +111,7 @@ impl Command {
                 required(input, "content")?;
             }
             Self::Read => {
+                exact_fields(input, &["scopeId"], &[])?;
                 required_string(input, "scopeId")?;
             }
             Self::TopologyIntent => {
@@ -113,6 +119,18 @@ impl Command {
                 nonnegative_integer(input, "expectedTopologyRevision")?;
                 match string(input, "action")? {
                     "split" => {
+                        exact_fields(
+                            input,
+                            &[
+                                "action",
+                                "count",
+                                "direction",
+                                "expectedTopologyRevision",
+                                "paneId",
+                                "surfaceId",
+                            ],
+                            &[],
+                        )?;
                         positive_integer(input, "paneId")?;
                         if integer(input, "count")? < 2 {
                             return Err("invalid_input:count".into());
@@ -120,14 +138,42 @@ impl Command {
                         direction(input)?;
                     }
                     "close" => {
+                        exact_fields(
+                            input,
+                            &["action", "expectedTopologyRevision", "paneId", "surfaceId"],
+                            &[],
+                        )?;
                         positive_integer(input, "paneId")?;
                     }
                     "restore" => {
+                        exact_fields(
+                            input,
+                            &[
+                                "action",
+                                "anchorPaneId",
+                                "direction",
+                                "expectedTopologyRevision",
+                                "surfaceId",
+                                "tombstoneId",
+                            ],
+                            &[],
+                        )?;
                         positive_integer(input, "anchorPaneId")?;
                         required_string(input, "tombstoneId")?;
                         direction(input)?;
                     }
                     "rename" => {
+                        exact_fields(
+                            input,
+                            &[
+                                "action",
+                                "expectedTopologyRevision",
+                                "name",
+                                "paneId",
+                                "surfaceId",
+                            ],
+                            &[],
+                        )?;
                         positive_integer(input, "paneId")?;
                         if !matches!(
                             input.get("name"),
@@ -140,49 +186,134 @@ impl Command {
                 }
             }
             Self::TopologyRealize => {
+                exact_fields(
+                    input,
+                    &[
+                        "allowDestroyPaneIds",
+                        "desired",
+                        "expectedTopologyRevision",
+                        "surfaceId",
+                        "target",
+                    ],
+                    &[],
+                )?;
                 required_string(input, "surfaceId")?;
                 nonnegative_integer(input, "expectedTopologyRevision")?;
-                object(input, "target")?;
-                object(input, "desired")?;
-                array(input, "allowDestroyPaneIds")?;
+                topology_target(input)?;
+                desired_topology(required(input, "desired")?)?;
+                positive_integer_array(input, "allowDestroyPaneIds")?;
             }
             Self::Clear => {
+                exact_fields(input, &["expectedRevision", "paneId", "surfaceId"], &[])?;
                 required_string(input, "surfaceId")?;
                 positive_integer(input, "paneId")?;
                 nonnegative_integer(input, "expectedRevision")?;
             }
             Self::AnnotationsRemove => {
+                exact_fields(
+                    input,
+                    &["contentId", "paneId", "strokeIds", "surfaceId"],
+                    &[],
+                )?;
                 required_string(input, "surfaceId")?;
                 positive_integer(input, "paneId")?;
                 required_string(input, "contentId")?;
-                array(input, "strokeIds")?;
+                nonempty_string_array(input, "strokeIds")?;
             }
             Self::CapturePane => {
+                exact_fields(
+                    input,
+                    &["paneId", "surfaceId"],
+                    &["includeDrawings", "includeImage", "includeVisibleText"],
+                )?;
                 required_string(input, "surfaceId")?;
                 positive_integer(input, "paneId")?;
+                for key in ["includeDrawings", "includeImage", "includeVisibleText"] {
+                    optional_boolean(input, key)?;
+                }
             }
             Self::SurfaceIntent => {
                 nonnegative_integer(input, "expectedSurfaceSetRevision")?;
                 match string(input, "action")? {
-                    "open" => {}
+                    "open" => {
+                        exact_fields(
+                            input,
+                            &["action", "expectedSurfaceSetRevision"],
+                            &["placement"],
+                        )?;
+                        optional_object(input, "placement")?;
+                    }
                     "close" => {
+                        exact_fields(
+                            input,
+                            &[
+                                "action",
+                                "expectedSurfaceSetRevision",
+                                "expectedTopologyRevision",
+                                "surfaceId",
+                            ],
+                            &[],
+                        )?;
                         required_string(input, "surfaceId")?;
                         nonnegative_integer(input, "expectedTopologyRevision")?;
                     }
                     "restore" => {
+                        exact_fields(
+                            input,
+                            &["action", "expectedSurfaceSetRevision", "tombstoneId"],
+                            &["placement"],
+                        )?;
                         required_string(input, "tombstoneId")?;
+                        optional_object(input, "placement")?;
                     }
                     _ => return Err("invalid_input:action".into()),
                 }
             }
             Self::TargetRegister => {
+                exact_fields(
+                    input,
+                    &[
+                        "expectedPreviousTargetEpoch",
+                        "idempotencyKey",
+                        "launchedAt",
+                        "registrationState",
+                        "surfaceId",
+                        "targetHeader",
+                        "targetKind",
+                        "targetPayload",
+                    ],
+                    &["paneId", "paneLineageId", "restorePolicy"],
+                )?;
                 required_string(input, "surfaceId")?;
-                positive_integer(input, "paneId")?;
                 required_string(input, "idempotencyKey")?;
+                nullable_nonnegative_integer(input, "expectedPreviousTargetEpoch")?;
+                required_string(input, "launchedAt")?;
+                match string(input, "registrationState")? {
+                    "before_attach" | "attached" => {}
+                    _ => return Err("invalid_input:registrationState".into()),
+                }
+                required_string(input, "targetKind")?;
+                object(input, "targetHeader")?;
+                required(input, "targetPayload")?;
+                optional_positive_integer(input, "paneId")?;
+                optional_nonempty_string(input, "paneLineageId")?;
             }
             Self::TargetApply => {
+                exact_fields(
+                    input,
+                    &[
+                        "requestId",
+                        "restoreReason",
+                        "surfaceId",
+                        "targetEpoch",
+                        "targetHeader",
+                        "targetId",
+                        "targetKind",
+                        "targetPayload",
+                    ],
+                    &["display", "paneId", "paneLineageId"],
+                )?;
                 required_string(input, "surfaceId")?;
-                positive_integer(input, "paneId")?;
                 required_string(input, "requestId")?;
                 required_string(input, "restoreReason")?;
                 required_string(input, "targetId")?;
@@ -190,6 +321,8 @@ impl Command {
                 required_string(input, "targetKind")?;
                 object(input, "targetHeader")?;
                 required(input, "targetPayload")?;
+                optional_positive_integer(input, "paneId")?;
+                optional_nonempty_string(input, "paneLineageId")?;
             }
         }
         Ok(())
@@ -273,6 +406,133 @@ fn array<'a>(input: &'a Map<String, Value>, key: &str) -> Result<&'a Vec<Value>,
         .get(key)
         .and_then(Value::as_array)
         .ok_or_else(|| format!("invalid_input:{key}"))
+}
+
+fn exact_fields(
+    input: &Map<String, Value>,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<(), String> {
+    for key in required {
+        if !input.contains_key(*key) {
+            return Err(format!("invalid_input:{key}"));
+        }
+    }
+    for key in input.keys() {
+        if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
+            if [
+                "connectionId",
+                "ownershipEpoch",
+                "ownershipSessionId",
+                "providerId",
+            ]
+            .contains(&key.as_str())
+            {
+                return Err(format!("forbidden_legacy_field:{key}"));
+            }
+            return Err(format!("invalid_input:unknown_property:{key}"));
+        }
+    }
+    Ok(())
+}
+
+fn nullable_nonnegative_integer(input: &Map<String, Value>, key: &str) -> Result<(), String> {
+    match required(input, key)? {
+        Value::Null => Ok(()),
+        Value::Number(_) => nonnegative_integer(input, key).map(|_| ()),
+        _ => Err(format!("invalid_input:{key}")),
+    }
+}
+
+fn optional_positive_integer(input: &Map<String, Value>, key: &str) -> Result<(), String> {
+    if input.contains_key(key) {
+        positive_integer(input, key)?;
+    }
+    Ok(())
+}
+
+fn optional_nonempty_string(input: &Map<String, Value>, key: &str) -> Result<(), String> {
+    if input.contains_key(key) {
+        required_string(input, key)?;
+    }
+    Ok(())
+}
+
+fn optional_boolean(input: &Map<String, Value>, key: &str) -> Result<(), String> {
+    if input.contains_key(key) && !matches!(input.get(key), Some(Value::Bool(_))) {
+        return Err(format!("invalid_input:{key}"));
+    }
+    Ok(())
+}
+
+fn optional_object(input: &Map<String, Value>, key: &str) -> Result<(), String> {
+    if input.contains_key(key) {
+        object(input, key)?;
+    }
+    Ok(())
+}
+
+fn positive_integer_array(input: &Map<String, Value>, key: &str) -> Result<(), String> {
+    if !array(input, key)?
+        .iter()
+        .all(|value| value.as_i64().is_some_and(|integer| integer.is_positive()))
+    {
+        return Err(format!("invalid_input:{key}"));
+    }
+    Ok(())
+}
+
+fn nonempty_string_array(input: &Map<String, Value>, key: &str) -> Result<(), String> {
+    if !array(input, key)?
+        .iter()
+        .all(|value| value.as_str().is_some_and(|string| !string.is_empty()))
+    {
+        return Err(format!("invalid_input:{key}"));
+    }
+    Ok(())
+}
+
+fn topology_target(input: &Map<String, Value>) -> Result<(), String> {
+    let target = object(input, "target")?;
+    if target.get("root") == Some(&Value::Bool(true))
+        || target
+            .get("paneId")
+            .and_then(Value::as_i64)
+            .is_some_and(|pane_id| pane_id.is_positive())
+    {
+        return Ok(());
+    }
+    Err("invalid_input:target".into())
+}
+
+fn desired_topology(value: &Value) -> Result<(), String> {
+    let desired = value
+        .as_object()
+        .ok_or_else(|| "invalid_input:desired".to_owned())?;
+    match desired.get("type").and_then(Value::as_str) {
+        Some("pane") => {
+            if desired.contains_key("paneId") {
+                positive_integer(desired, "paneId")?;
+            }
+            Ok(())
+        }
+        Some("split") => {
+            match desired.get("direction").and_then(Value::as_str) {
+                Some("horizontal" | "vertical") => {}
+                _ => return Err("invalid_input:desired".into()),
+            }
+            let children = desired
+                .get("children")
+                .and_then(Value::as_array)
+                .filter(|children| children.len() >= 2)
+                .ok_or_else(|| "invalid_input:desired".to_owned())?;
+            for child in children {
+                desired_topology(child)?;
+            }
+            Ok(())
+        }
+        _ => Err("invalid_input:desired".into()),
+    }
 }
 
 fn direction(input: &Map<String, Value>) -> Result<(), String> {
