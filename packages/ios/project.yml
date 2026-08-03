@@ -3,6 +3,7 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     iOS: "26.0"
+    macOS: "14.0"
     visionOS: "26.0"
 settings:
   base:
@@ -10,6 +11,15 @@ settings:
     DEVELOPMENT_TEAM: ""
     SUPPORTS_MACCATALYST: NO
     TARGETED_DEVICE_FAMILY: "1,2"
+schemes:
+  SurfAceLegacyRollback:
+    build:
+      targets:
+        SurfAceLegacyRollback: all
+        SurfAceLegacyRollbackTests: [test]
+    test:
+      targets:
+        - SurfAceLegacyRollbackTests
 targets:
   SurfAce:
     type: application
@@ -18,6 +28,7 @@ targets:
       - path: SurfAce
         excludes:
           - Info.plist
+          - SurfAceSpatialIcon.png
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAce
@@ -36,6 +47,7 @@ targets:
       - path: SurfAce
         excludes:
           - Info.plist
+          - SurfAceSpatialIcon.png
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAce.spatial
@@ -44,7 +56,7 @@ targets:
         MARKETING_VERSION: 0.1.0
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: Z7R59J7QV8
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_APPICON_NAME: SurfAceSpatialAppIcon
         INFOPLIST_FILE: SurfAceSpatial/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "7"
@@ -53,9 +65,35 @@ targets:
     platform: iOS
     sources:
       - path: SurfAceTests
+      - path: ../protocol/vectors/authority-conformance.json
+        buildPhase: resources
     dependencies:
       - target: SurfAce
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAceTests
+        GENERATE_INFOPLIST_FILE: YES
+  SurfAceLegacyRollback:
+    type: tool
+    platform: macOS
+    sources:
+      - path: SurfAce/SurfAceLocklessAuthority.swift
+      - path: SurfAce/SurfAceLocklessMigration.swift
+      - path: SurfAce/SurfAceLocklessTopologyCodec.swift
+      - path: HostTools/LegacyRollback
+    settings:
+      base:
+        PRODUCT_NAME: SurfAceLegacyRollback
+  SurfAceLegacyRollbackTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: SurfAce/SurfAceLocklessAuthority.swift
+      - path: SurfAce/SurfAceLocklessMigration.swift
+      - path: SurfAce/SurfAceLocklessTopologyCodec.swift
+      - path: HostTools/LegacyRollback/SurfAceAppleRollback.swift
+      - path: HostTools/LegacyRollbackTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAceLegacyRollbackTests
         GENERATE_INFOPLIST_FILE: YES

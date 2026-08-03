@@ -28,6 +28,7 @@ await build({
   ...shared,
   entryPoints: [
     path.join(srcDir, "guest-preload.ts"),
+    path.join(srcDir, "legacy-rollback-cli.ts"),
     path.join(srcDir, "main.ts"),
     path.join(srcDir, "preload.ts"),
   ],
@@ -58,6 +59,7 @@ await build({
     path.join(rootDir, "test", "identity.test.ts"),
     path.join(rootDir, "test", "lockless-acceptance.test.ts"),
     path.join(rootDir, "test", "lockless-client-authority.test.ts"),
+    path.join(rootDir, "test", "legacy-rollback-migration.test.ts"),
     path.join(rootDir, "test", "lockless-ws-server.test.ts"),
     path.join(rootDir, "test", "native-pane-bridge.test.ts"),
     path.join(rootDir, "test", "overlay-rects.test.ts"),

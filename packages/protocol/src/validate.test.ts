@@ -8,6 +8,7 @@ import {
 } from "./message-names.js";
 import { SURF_ACE_PROTOCOL_SCHEMAS } from "./schemas-manifest.js";
 import { annotationCommittedEventSchema, drawingFlushEventSchema, protocolSchemaDefs } from "./schemas.js";
+import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "./lockless.js";
 import { validateEnvelopeType } from "./validate.js";
 
 const authorityVectorSet = JSON.parse(
@@ -18,6 +19,7 @@ const authorityVectorSet = JSON.parse(
     expected: string;
     id: string;
     requirements: string[];
+    tokens?: string[];
   }>;
 };
 
@@ -186,6 +188,7 @@ test("authority conformance vector set covers omnibus blocker contracts", () => 
     "topology-apply-committed-truth-only",
     "content-apply-strict-revision",
     "ios-user-close-retires-identity",
+    "lockless-cross-language-wire-parity",
     "lockless-receipt-cross-connection-resolution",
     "lockless-receipt-capacity-precommit",
     "lockless-receipt-replay-not-request-replay",
@@ -196,6 +199,52 @@ test("authority conformance vector set covers omnibus blocker contracts", () => 
     assert.ok(vector.contract.length > 0, `${id} must name the shared contract`);
     assert.ok(vector.expected.length > 0, `${id} must name expected behavior`);
   }
+});
+
+test("authority conformance vector pins the cross-language lockless vocabulary", () => {
+  const vector = authorityVectorSet.vectors.find(
+    (candidate) => candidate.id === "lockless-cross-language-wire-parity",
+  );
+
+  assert.ok(vector);
+  assert.deepEqual(vector.tokens, [
+    SURF_ACE_LOCKLESS_V1_CAPABILITY,
+    "maxPanesPerSurface",
+    "maxSurfaceRecoverableBaseBytes",
+    "maxPaneRecoverableStateBytes",
+    "maxPaneAnnotationRestoreBytes",
+    "maxRetainedTombstones",
+    "maxRetainedTombstoneBytes",
+    "maxRecoverableSurfaceBytes",
+    "maxPaneConsumableRecords",
+    "maxPaneConsumableBytes",
+    "maxSurfaceConsumableRecords",
+    "maxSurfaceConsumableBytes",
+    "maxConsumableRecordBytes",
+    "maxConsumableCursorStateBytesPerScope",
+    "maxAdmittedControllerEntries",
+    "maxDormantControllerEntries",
+    "maxDormantControllerBytes",
+    "maxPendingOperationReceiptsPerController",
+    "maxPendingOperationReceiptBytesPerController",
+    "resolved_success",
+    "resolved_failure",
+    "not_committed",
+    "still_pending",
+    "receipt_unavailable",
+    "legacy_overflow",
+    "scope_capacity",
+    "record_oversize",
+    "cursor",
+    "gapGeneration",
+    "intent_committed",
+    "materializing",
+    "terminal",
+    "commitSequence",
+    "receipt_capacity",
+    "surface_state_capacity",
+    "materialization_outcome_unknown",
+  ]);
 });
 
 test("pane geometry schema exposes non-authoritative unresolved snapshot state", () => {

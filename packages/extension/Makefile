@@ -15,8 +15,16 @@ SURF_ACE_CONTINUITY_FILES := \
 	surf-ace-provider-identity.json \
 	surf-ace-runtime-state.json \
 	surf-ace-runtime-screens.json \
-	surf-ace-runtime-owner.lock
-SURF_ACE_CONTINUITY_PROTECT_FILTERS := $(foreach file,$(SURF_ACE_CONTINUITY_FILES),--filter='P /$(file)')
+	surf-ace-runtime-owner.lock \
+	lockless-controller-identity.json
+SURF_ACE_CONTINUITY_DIRECTORIES := lockless-endpoints
+SURF_ACE_CONTINUITY_PROTECT_FILTERS := \
+	$(foreach file,$(SURF_ACE_CONTINUITY_FILES),--filter='P /$(file)') \
+	$(foreach directory,$(SURF_ACE_CONTINUITY_DIRECTORIES),--filter='P /$(directory)/***')
+SURF_ACE_CONTINUITY_HIDE_FILTERS := \
+	$(foreach file,$(SURF_ACE_CONTINUITY_FILES),--filter='H /$(file)') \
+	$(foreach directory,$(SURF_ACE_CONTINUITY_DIRECTORIES),--filter='H /$(directory)/***')
+SURF_ACE_CONTINUITY_FILTERS := $(SURF_ACE_CONTINUITY_PROTECT_FILTERS) $(SURF_ACE_CONTINUITY_HIDE_FILTERS)
 
 .PHONY: package verify-package verify-deploy-state-preservation deploy-tars guard-tars-extension-deploy clean
 
@@ -51,36 +59,40 @@ verify-package: package
 verify-deploy-state-preservation:
 	@tmpdir=$$(mktemp -d); \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
-	mkdir -p "$$tmpdir/src/dist" "$$tmpdir/dest"; \
+	mkdir -p "$$tmpdir/src/dist" "$$tmpdir/src/lockless-endpoints/endpoint-a" \
+		"$$tmpdir/dest/lockless-endpoints/endpoint-a/projection" \
+		"$$tmpdir/dest/lockless-endpoints/endpoint-a/outbox" \
+		"$$tmpdir/dest/lockless-endpoints/endpoint-a/receipts" \
+		"$$tmpdir/dest/stale-package-directory"; \
 	printf 'current-build\n' > "$$tmpdir/src/dist/surf-ace.js"; \
 	for file in $(SURF_ACE_CONTINUITY_FILES); do \
 		printf 'preserve:%s\n' "$$file" > "$$tmpdir/dest/$$file"; \
 	done; \
+	printf 'must-not-replace\n' > "$$tmpdir/src/lockless-controller-identity.json"; \
+	printf 'must-not-replace\n' > "$$tmpdir/src/lockless-endpoints/endpoint-a/state.json"; \
+	printf 'projection-state\n' > "$$tmpdir/dest/lockless-endpoints/endpoint-a/projection/state.json"; \
+	printf 'outbox-state\n' > "$$tmpdir/dest/lockless-endpoints/endpoint-a/outbox/request.json"; \
+	printf 'receipt-state\n' > "$$tmpdir/dest/lockless-endpoints/endpoint-a/receipts/receipt.json"; \
+	cp -R "$$tmpdir/dest/lockless-endpoints" "$$tmpdir/expected-lockless-endpoints"; \
 	printf 'remove-me\n' > "$$tmpdir/dest/stale-build-artifact.txt"; \
-	rsync -a --delete $(SURF_ACE_CONTINUITY_PROTECT_FILTERS) "$$tmpdir/src/" "$$tmpdir/dest/"; \
+	printf 'remove-me-too\n' > "$$tmpdir/dest/stale-package-directory/artifact.js"; \
+	rsync -a --delete $(SURF_ACE_CONTINUITY_FILTERS) "$$tmpdir/src/" "$$tmpdir/dest/"; \
 	for file in $(SURF_ACE_CONTINUITY_FILES); do \
 		test "$$(cat "$$tmpdir/dest/$$file")" = "preserve:$$file" || { echo "Continuity file was not preserved: $$file" >&2; exit 1; }; \
 	done; \
+	diff -r "$$tmpdir/expected-lockless-endpoints" "$$tmpdir/dest/lockless-endpoints" || { echo "Lockless endpoint state tree was not preserved byte-for-byte" >&2; exit 1; }; \
 	test ! -e "$$tmpdir/dest/stale-build-artifact.txt" || { echo "Stale build artifact was not deleted" >&2; exit 1; }; \
+	test ! -e "$$tmpdir/dest/stale-package-directory" || { echo "Stale package directory was not deleted" >&2; exit 1; }; \
 	test "$$(cat "$$tmpdir/dest/dist/surf-ace.js")" = "current-build" || { echo "Build artifact was not synced" >&2; exit 1; }
 
 guard-tars-extension-deploy:
-	@case "$(SURF_ACE_EXTENSION_DEPLOY_HOST)" in \
-		tars|tars.tail4105e8.ts.net|mike@tars|mike@tars.tail4105e8.ts.net) ;; \
-		*) \
-			if [ "$$SURF_ACE_ALLOW_NON_TARS_PROVIDER" = "1" ]; then \
-				printf '%s\n' "WARNING: SURF_ACE_ALLOW_NON_TARS_PROVIDER=1 permits Surf Ace provider deploy to $(SURF_ACE_EXTENSION_DEPLOY_HOST)."; \
-			else \
-				printf '%s\n' "Refusing Surf Ace provider deploy to non-TARS host $(SURF_ACE_EXTENSION_DEPLOY_HOST)." >&2; \
-				printf '%s\n' "Provider identity/state belongs on TARS only. Use the Electron client on eezo for display/testing." >&2; \
-				printf '%s\n' "Set SURF_ACE_ALLOW_NON_TARS_PROVIDER=1 only for an explicit approved override." >&2; \
-				exit 1; \
-			fi; \
-			;; \
-	esac
+	@test "$(SURF_ACE_EXTENSION_DEPLOY_HOST)" = "$(TARS_EXTENSION_DEPLOY_HOST)" || { \
+		printf '%s\n' "Refusing Surf Ace provider deploy: destination must resolve exactly to $(TARS_EXTENSION_DEPLOY_HOST), got $(SURF_ACE_EXTENSION_DEPLOY_HOST)." >&2; \
+		exit 1; \
+	}
 
-deploy-tars: guard-tars-extension-deploy package
-	rsync -av --delete $(SURF_ACE_CONTINUITY_PROTECT_FILTERS) $(PKG_DIR)/ $(SURF_ACE_EXTENSION_DEPLOY_HOST):~/.openclaw/extensions/surf-ace/
+deploy-tars: guard-tars-extension-deploy verify-deploy-state-preservation package
+	rsync -av --delete $(SURF_ACE_CONTINUITY_FILTERS) $(PKG_DIR)/ $(SURF_ACE_EXTENSION_DEPLOY_HOST):~/.openclaw/extensions/surf-ace/
 
 clean:
 	rm -rf $(PKG_DIR)

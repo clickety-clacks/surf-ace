@@ -245,12 +245,59 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         .filter_map(|vector| vector["id"].as_str())
         .collect::<Vec<_>>();
     for id in [
+        "lockless-cross-language-wire-parity",
         "lockless-receipt-cross-connection-resolution",
         "lockless-receipt-capacity-precommit",
         "lockless-receipt-replay-not-request-replay",
     ] {
         assert!(vector_ids.contains(&id), "canonical vectors omit {id}");
     }
+    let parity_tokens = canonical["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|vector| vector["id"] == "lockless-cross-language-wire-parity")
+        .and_then(|vector| vector["tokens"].as_array())
+        .expect("canonical parity vector must expose tokens");
+    let expected_parity_tokens = json!([
+        "surf-ace.lockless-multi-controller.v1",
+        "maxPanesPerSurface",
+        "maxSurfaceRecoverableBaseBytes",
+        "maxPaneRecoverableStateBytes",
+        "maxPaneAnnotationRestoreBytes",
+        "maxRetainedTombstones",
+        "maxRetainedTombstoneBytes",
+        "maxRecoverableSurfaceBytes",
+        "maxPaneConsumableRecords",
+        "maxPaneConsumableBytes",
+        "maxSurfaceConsumableRecords",
+        "maxSurfaceConsumableBytes",
+        "maxConsumableRecordBytes",
+        "maxConsumableCursorStateBytesPerScope",
+        "maxAdmittedControllerEntries",
+        "maxDormantControllerEntries",
+        "maxDormantControllerBytes",
+        "maxPendingOperationReceiptsPerController",
+        "maxPendingOperationReceiptBytesPerController",
+        "resolved_success",
+        "resolved_failure",
+        "not_committed",
+        "still_pending",
+        "receipt_unavailable",
+        "legacy_overflow",
+        "scope_capacity",
+        "record_oversize",
+        "cursor",
+        "gapGeneration",
+        "intent_committed",
+        "materializing",
+        "terminal",
+        "commitSequence",
+        "receipt_capacity",
+        "surface_state_capacity",
+        "materialization_outcome_unknown",
+    ]);
+    assert_eq!(parity_tokens, expected_parity_tokens.as_array().unwrap());
     let encoded = serde_json::to_string(&canonical).unwrap();
     assert!(encoded.contains("operation.receipt.sync"));
     assert!(encoded.contains("operation.receipt.ack"));

@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import Observation
+import PencilKit
 import UIKit
 
 enum SurfAceConnectionBarState {
@@ -504,6 +505,60 @@ struct SurfAceStroke: Codable, Equatable {
     let strokeId: String
     let points: [SurfAceStrokePoint]
     let tool: String
+}
+
+enum SurfAceAnnotationTransformError: Error, Equatable {
+    case drawingStrokeCountMismatch(drawingCount: Int, serializedCount: Int)
+}
+
+struct SurfAceAnnotationRemovalResult: Equatable {
+    let drawingData: Data
+    let strokesById: [String: SurfAceStroke]
+    let removedStrokeIds: [String]
+    let notFoundStrokeIds: [String]
+}
+
+func surfAceRemovingAnnotationStrokes(
+    drawingData: Data,
+    strokesById: [String: SurfAceStroke],
+    requestedStrokeIds: [String]
+) throws -> SurfAceAnnotationRemovalResult {
+    let drawing = drawingData.isEmpty ? PKDrawing() : try PKDrawing(data: drawingData)
+    let orderedStrokeIds = strokesById.keys.sorted()
+    guard drawing.strokes.count == orderedStrokeIds.count else {
+        throw SurfAceAnnotationTransformError.drawingStrokeCountMismatch(
+            drawingCount: drawing.strokes.count,
+            serializedCount: orderedStrokeIds.count
+        )
+    }
+
+    var remainingStrokesById = strokesById
+    var removedStrokeIds: [String] = []
+    var notFoundStrokeIds: [String] = []
+    for strokeId in requestedStrokeIds {
+        if remainingStrokesById.removeValue(forKey: strokeId) != nil {
+            removedStrokeIds.append(strokeId)
+        } else {
+            notFoundStrokeIds.append(strokeId)
+        }
+    }
+
+    let transformedDrawingData: Data
+    if removedStrokeIds.isEmpty {
+        transformedDrawingData = drawingData
+    } else {
+        let removed = Set(removedStrokeIds)
+        let remainingDrawingStrokes = zip(orderedStrokeIds, drawing.strokes).compactMap { strokeId, stroke in
+            removed.contains(strokeId) ? nil : stroke
+        }
+        transformedDrawingData = PKDrawing(strokes: remainingDrawingStrokes).dataRepresentation()
+    }
+    return SurfAceAnnotationRemovalResult(
+        drawingData: transformedDrawingData,
+        strokesById: remainingStrokesById,
+        removedStrokeIds: removedStrokeIds,
+        notFoundStrokeIds: notFoundStrokeIds
+    )
 }
 
 struct SurfAceSurfaceSnapshot {

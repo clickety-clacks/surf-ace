@@ -7,38 +7,70 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0C3835F9F1C968FB6F328F10 /* SurfAceLocklessRuntimeAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B26D67F1579A50644D8413D /* SurfAceLocklessRuntimeAdapterTests.swift */; };
 		13C44D62BD51360ABEED9F46 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E130566A61C0DA77977D2E9C /* LaunchScreen.storyboard */; };
 		13EF6FFC169CB6EDFF47597E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2A8249A9765412039C07EDD5 /* Assets.xcassets */; };
+		171C713C4D716E94543EF082 /* SurfAceLocklessAuthority.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5609886F75FAB71C041A10D /* SurfAceLocklessAuthority.swift */; };
 		1729F8015A06323F42ACB6FA /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E130566A61C0DA77977D2E9C /* LaunchScreen.storyboard */; };
 		193398127694B8E96D1688F5 /* SurfAceViewportPreservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */; };
+		1DD1849E7D22E941FD96A2E2 /* SurfAceLocklessTopologyCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37FEDE84F0AEBB845A355545 /* SurfAceLocklessTopologyCodec.swift */; };
 		1FFF04D1B747F5A964BC374B /* SurfAceANSI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */; };
+		2890A01F42CD06AA9A198372 /* SurfAceLocklessConsumableOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2080FB152251AC9629AEB21 /* SurfAceLocklessConsumableOperations.swift */; };
+		2AB4BF1BD37E4FE96CC1D545 /* SurfAceAuthorityConformanceVectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D688CCDE92634F42E98A27AE /* SurfAceAuthorityConformanceVectorTests.swift */; };
 		2BCEA53CC04DAE493B9514BD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2A8249A9765412039C07EDD5 /* Assets.xcassets */; };
+		2EE5A3A4157C23BC30DEA2AB /* SurfAceLocklessTopologyCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37FEDE84F0AEBB845A355545 /* SurfAceLocklessTopologyCodec.swift */; };
 		322439B6C590133D8A53E250 /* OFL-Rajdhani.txt in Resources */ = {isa = PBXBuildFile; fileRef = CC41BFBBD135B6784905872F /* OFL-Rajdhani.txt */; };
+		3ACEEE574420B4A530D57F26 /* SurfAceLocklessMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3436E7F39EE699CD9F06FB58 /* SurfAceLocklessMigration.swift */; };
 		3B4E416E4A2D67F538AE5933 /* SurfAceHTTPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */; };
+		4036988D4651F0C568C6F9C7 /* SurfAceLocklessAuthorityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADB3646A9F5E90D276388CA8 /* SurfAceLocklessAuthorityTests.swift */; };
+		497FDEC0CF5E812D63608C36 /* SurfAceLocklessRuntimeAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BEF041256C9C503055927AA /* SurfAceLocklessRuntimeAdapter.swift */; };
+		4A0DCC90F47C261706FA946E /* SurfAceLocklessConsumableOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2080FB152251AC9629AEB21 /* SurfAceLocklessConsumableOperations.swift */; };
+		553F3D9BF13D7E9BC313D2B3 /* SurfAceLocklessContentOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6AC4EF7B07CB9DB42EDEA64 /* SurfAceLocklessContentOperations.swift */; };
+		567F4E9FBD2D0EA1044A2328 /* SurfAceAppleRollback.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5522455C6B5834FCAA27E26 /* SurfAceAppleRollback.swift */; };
 		5964DDDD0A9B7A881AECDA0C /* SurfAceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C230CE2F392C57A940FD796E /* SurfAceModels.swift */; };
 		635FAD5F64688C7E33FF32C1 /* Rajdhani-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 7407D4BC544155CEC96E6A32 /* Rajdhani-Regular.ttf */; };
 		637AA14421D231B97792EEAA /* SurfAceANSI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */; };
+		646E8A5C583D73A15FA163D9 /* SurfAceLocklessMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3436E7F39EE699CD9F06FB58 /* SurfAceLocklessMigration.swift */; };
 		6661F25504963451BE3CE25C /* SurfAceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */; };
 		68DC9BCC2BBCFA3ACA7A30AF /* SurfAceBrowserURLTargetApplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */; };
 		68F9D6A747EB7877AED1D73C /* SurfAceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C230CE2F392C57A940FD796E /* SurfAceModels.swift */; };
 		69E4A6C95D32B537DECECA46 /* SurfAceIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */; };
 		7440C200D139A9CDEB4071DA /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
 		753547CD61197747119287A7 /* SurfAceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */; };
+		7674785CB3F0CBB886EC822F /* SurfAceAppleRollbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7796366C2A56D816ECDA731 /* SurfAceAppleRollbackTests.swift */; };
 		78FE925CC623EE70BD36510C /* SurfAceSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */; };
+		8B0D46E02145506E619EEFA7 /* SurfAceLocklessWebSocketIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C9CB3316457E4F266DD2A8D /* SurfAceLocklessWebSocketIntegrationTests.swift */; };
 		8C4B9869FAB26DF1952F78FE /* Rajdhani-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = CDE40A8828491859D325E965 /* Rajdhani-Bold.ttf */; };
 		980E850E03917BE3AF575829 /* SurfAceBonjourPublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79E9224F46725D6F9372F987 /* SurfAceBonjourPublisherTests.swift */; };
+		995CAC303CA5C7EC4330AF06 /* authority-conformance.json in Resources */ = {isa = PBXBuildFile; fileRef = 776FCDDBF41668EDA41153A1 /* authority-conformance.json */; };
+		9D5F3C51B08F1C458BF94333 /* SurfAceLocklessAuthority.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5609886F75FAB71C041A10D /* SurfAceLocklessAuthority.swift */; };
+		9FB72F2E74248C18B77758F5 /* SurfAceToolbarThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75119B242504535ABDA32892 /* SurfAceToolbarThemeTests.swift */; };
+		A14D3A9D9D99B54639E60A6D /* SurfAceLocklessContentOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6AC4EF7B07CB9DB42EDEA64 /* SurfAceLocklessContentOperations.swift */; };
+		A2EB2BE2C3130CF859C822D8 /* SurfAceLocklessTopologyOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77FF41238EC93CA686FF0D87 /* SurfAceLocklessTopologyOperations.swift */; };
 		A4FCB41CE20836A13C0BEEB9 /* Rajdhani-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = CDE40A8828491859D325E965 /* Rajdhani-Bold.ttf */; };
 		AB13C11EA76DDA755EEEED0A /* SurfAceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */; };
 		ABB31C3B4EA5BEFBECFC7AA5 /* Rajdhani-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 7407D4BC544155CEC96E6A32 /* Rajdhani-Regular.ttf */; };
+		ACF850D4A4C6ED35F669C71F /* SurfAceLocklessRuntimeAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BEF041256C9C503055927AA /* SurfAceLocklessRuntimeAdapter.swift */; };
 		B1C21A3DBBA7214CE8444348 /* SurfAceSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */; };
+		B5375E4E54338700C609BA3A /* SurfAceLocklessTopologyOperationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 983A8752C94CB2B5C0201A1C /* SurfAceLocklessTopologyOperationsTests.swift */; };
 		B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */; };
+		BF6C8A7C9C1DDD55979F661C /* SurfAceLocklessContentOperationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8E71C758987FB7BBCD96EAC /* SurfAceLocklessContentOperationsTests.swift */; };
+		C4CE112AFC20A726E5DEE6C3 /* SurfAceAppleRollback.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5522455C6B5834FCAA27E26 /* SurfAceAppleRollback.swift */; };
+		C93B8E861C1BE7F1F0C4670B /* SurfAceLocklessTopologyOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77FF41238EC93CA686FF0D87 /* SurfAceLocklessTopologyOperations.swift */; };
 		C9FCE1B6A4992A0D0FD5FB68 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ABD815F8B22D9C2095F8BCF /* SurfAceSurfaceTopologyPersistenceTests.swift */; };
+		CDA9169098C0D1C6292C3ECD /* SurfAceLocklessConsumableOperationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87046210EFA9F81BBA3D0C2B /* SurfAceLocklessConsumableOperationsTests.swift */; };
+		D125855282D8BF7F9DDD591D /* SurfAceLocklessTopologyCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37FEDE84F0AEBB845A355545 /* SurfAceLocklessTopologyCodec.swift */; };
 		D3F94E7A626464718A5F683C /* SurfAceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */; };
 		D615F803FC49278657471A62 /* SurfAceIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */; };
+		D753DB4F6A33018888D84995 /* SurfAceLocklessAuthority.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5609886F75FAB71C041A10D /* SurfAceLocklessAuthority.swift */; };
+		DBF7D5535B7CC1F6C7E3DA0A /* SurfAceLocklessTopologyCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37FEDE84F0AEBB845A355545 /* SurfAceLocklessTopologyCodec.swift */; };
 		DE2D696D8BBC809006F83182 /* OFL-Rajdhani.txt in Resources */ = {isa = PBXBuildFile; fileRef = CC41BFBBD135B6784905872F /* OFL-Rajdhani.txt */; };
+		DE87D221418D7983D40B7206 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99A38CC26925AE82B3BDCC4A /* main.swift */; };
 		E2B2E9631F0835BD39E2B839 /* SurfAceHTTPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */; };
+		E884F344902AAA152AAEB5CF /* SurfAceLocklessAuthority.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5609886F75FAB71C041A10D /* SurfAceLocklessAuthority.swift */; };
+		EB3A312FE60EF54CF6902BFD /* SurfAceLocklessMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3436E7F39EE699CD9F06FB58 /* SurfAceLocklessMigration.swift */; };
 		EB9119D84B8BF489E271FDCE /* SurfAceMarkdownRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 217B21E95FFA04F89F813157 /* SurfAceMarkdownRenderingTests.swift */; };
-		ED1033C3D8877CE7B2A73009 /* SurfAceToolbarThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 547C46683532D8BF824676BD /* SurfAceToolbarThemeTests.swift */; };
+		F79A5F448CAC124C550FB99C /* SurfAceLocklessMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3436E7F39EE699CD9F06FB58 /* SurfAceLocklessMigration.swift */; };
 		FA0FE771EA157D8D3EB6DCF9 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */; };
 		FF9BF16CA4591B19760A2246 /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */; };
 /* End PBXBuildFile section */
@@ -61,19 +93,39 @@
 		2A8249A9765412039C07EDD5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceViewportPreservationTests.swift; sourceTree = "<group>"; };
 		314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
+		3436E7F39EE699CD9F06FB58 /* SurfAceLocklessMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessMigration.swift; sourceTree = "<group>"; };
+		37FEDE84F0AEBB845A355545 /* SurfAceLocklessTopologyCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessTopologyCodec.swift; sourceTree = "<group>"; };
 		3ABD815F8B22D9C2095F8BCF /* SurfAceSurfaceTopologyPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceSurfaceTopologyPersistenceTests.swift; sourceTree = "<group>"; };
+		4B26D67F1579A50644D8413D /* SurfAceLocklessRuntimeAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessRuntimeAdapterTests.swift; sourceTree = "<group>"; };
 		4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceSurfaceView.swift; sourceTree = "<group>"; };
-		547C46683532D8BF824676BD /* SurfAceToolbarThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceToolbarThemeTests.swift; sourceTree = "<group>"; };
 		71D9F8594AC862ED7A307F3B /* SurfAceANSI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceANSI.swift; sourceTree = "<group>"; };
 		7407D4BC544155CEC96E6A32 /* Rajdhani-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Rajdhani-Regular.ttf"; sourceTree = "<group>"; };
 		7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisher.swift; sourceTree = "<group>"; };
+		75119B242504535ABDA32892 /* SurfAceToolbarThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceToolbarThemeTests.swift; sourceTree = "<group>"; };
+		776FCDDBF41668EDA41153A1 /* authority-conformance.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "authority-conformance.json"; sourceTree = "<group>"; };
+		77FF41238EC93CA686FF0D87 /* SurfAceLocklessTopologyOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessTopologyOperations.swift; sourceTree = "<group>"; };
 		79E9224F46725D6F9372F987 /* SurfAceBonjourPublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisherTests.swift; sourceTree = "<group>"; };
+		87046210EFA9F81BBA3D0C2B /* SurfAceLocklessConsumableOperationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessConsumableOperationsTests.swift; sourceTree = "<group>"; };
 		900E30042618968CF5054D9D /* SurfAceSpatial.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SurfAceSpatial.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		983A8752C94CB2B5C0201A1C /* SurfAceLocklessTopologyOperationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessTopologyOperationsTests.swift; sourceTree = "<group>"; };
+		99A38CC26925AE82B3BDCC4A /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		9BEF041256C9C503055927AA /* SurfAceLocklessRuntimeAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessRuntimeAdapter.swift; sourceTree = "<group>"; };
+		9C1080A37D8D663C5F9A6E1A /* SurfAceLegacyRollback */ = {isa = PBXFileReference; includeInIndex = 0; path = SurfAceLegacyRollback; sourceTree = BUILT_PRODUCTS_DIR; };
+		9C9CB3316457E4F266DD2A8D /* SurfAceLocklessWebSocketIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessWebSocketIntegrationTests.swift; sourceTree = "<group>"; };
+		A2080FB152251AC9629AEB21 /* SurfAceLocklessConsumableOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessConsumableOperations.swift; sourceTree = "<group>"; };
 		AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServer.swift; sourceTree = "<group>"; };
+		ADB3646A9F5E90D276388CA8 /* SurfAceLocklessAuthorityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessAuthorityTests.swift; sourceTree = "<group>"; };
+		B5522455C6B5834FCAA27E26 /* SurfAceAppleRollback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAppleRollback.swift; sourceTree = "<group>"; };
+		B5609886F75FAB71C041A10D /* SurfAceLocklessAuthority.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessAuthority.swift; sourceTree = "<group>"; };
 		C230CE2F392C57A940FD796E /* SurfAceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceModels.swift; sourceTree = "<group>"; };
+		C8E71C758987FB7BBCD96EAC /* SurfAceLocklessContentOperationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessContentOperationsTests.swift; sourceTree = "<group>"; };
 		CC41BFBBD135B6784905872F /* OFL-Rajdhani.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-Rajdhani.txt"; sourceTree = "<group>"; };
 		CDE40A8828491859D325E965 /* Rajdhani-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Rajdhani-Bold.ttf"; sourceTree = "<group>"; };
+		D688CCDE92634F42E98A27AE /* SurfAceAuthorityConformanceVectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAuthorityConformanceVectorTests.swift; sourceTree = "<group>"; };
+		D6AC4EF7B07CB9DB42EDEA64 /* SurfAceLocklessContentOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessContentOperations.swift; sourceTree = "<group>"; };
+		D7796366C2A56D816ECDA731 /* SurfAceAppleRollbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAppleRollbackTests.swift; sourceTree = "<group>"; };
 		DA0B8CE0B10CC8BE7F94EC21 /* SurfAce.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SurfAce.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DAC37373DAF827EF4EFA7803 /* SurfAceLegacyRollbackTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SurfAceLegacyRollbackTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E1026649686E370A8442CA40 /* SurfAceTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SurfAceTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E130566A61C0DA77977D2E9C /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceRuntime.swift; sourceTree = "<group>"; };
@@ -84,10 +136,29 @@
 		12C64D57C62E67BEC852AF24 = {
 			isa = PBXGroup;
 			children = (
+				556A44A5E4A1DD789F724C1C /* HostTools */,
+				1F3A8CD9D6ADA0793B8A7A29 /* packages */,
 				4CF5D060294BE463D8CACA33 /* SurfAce */,
 				6897A8D003370E2CC8B694CB /* SurfAceTests */,
 				EE59F87F57539D75E6853D10 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		1F3A8CD9D6ADA0793B8A7A29 /* packages */ = {
+			isa = PBXGroup;
+			children = (
+				676213710F60C06C837AA433 /* protocol */,
+			);
+			name = packages;
+			path = ..;
+			sourceTree = "<group>";
+		};
+		3988A54C46470F3AF3AD829D /* LegacyRollbackTests */ = {
+			isa = PBXGroup;
+			children = (
+				D7796366C2A56D816ECDA731 /* SurfAceAppleRollbackTests.swift */,
+			);
+			path = LegacyRollbackTests;
 			sourceTree = "<group>";
 		};
 		4CF5D060294BE463D8CACA33 /* SurfAce */ = {
@@ -100,6 +171,13 @@
 				7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */,
 				AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */,
 				314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */,
+				B5609886F75FAB71C041A10D /* SurfAceLocklessAuthority.swift */,
+				A2080FB152251AC9629AEB21 /* SurfAceLocklessConsumableOperations.swift */,
+				D6AC4EF7B07CB9DB42EDEA64 /* SurfAceLocklessContentOperations.swift */,
+				3436E7F39EE699CD9F06FB58 /* SurfAceLocklessMigration.swift */,
+				9BEF041256C9C503055927AA /* SurfAceLocklessRuntimeAdapter.swift */,
+				37FEDE84F0AEBB845A355545 /* SurfAceLocklessTopologyCodec.swift */,
+				77FF41238EC93CA686FF0D87 /* SurfAceLocklessTopologyOperations.swift */,
 				C230CE2F392C57A940FD796E /* SurfAceModels.swift */,
 				E4B325903F9DF85A2A43F894 /* SurfAceRuntime.swift */,
 				4DB2FB59A2CE6B12EA9C8DFC /* SurfAceSurfaceView.swift */,
@@ -108,19 +186,60 @@
 			path = SurfAce;
 			sourceTree = "<group>";
 		};
+		556A44A5E4A1DD789F724C1C /* HostTools */ = {
+			isa = PBXGroup;
+			children = (
+				81E0FF96CE871A49F79FEBB8 /* LegacyRollback */,
+				3988A54C46470F3AF3AD829D /* LegacyRollbackTests */,
+			);
+			path = HostTools;
+			sourceTree = "<group>";
+		};
+		676213710F60C06C837AA433 /* protocol */ = {
+			isa = PBXGroup;
+			children = (
+				AA7CC5578E3437D1EE330F32 /* vectors */,
+			);
+			path = protocol;
+			sourceTree = "<group>";
+		};
 		6897A8D003370E2CC8B694CB /* SurfAceTests */ = {
 			isa = PBXGroup;
 			children = (
+				D688CCDE92634F42E98A27AE /* SurfAceAuthorityConformanceVectorTests.swift */,
 				79E9224F46725D6F9372F987 /* SurfAceBonjourPublisherTests.swift */,
 				04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */,
 				176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */,
+				ADB3646A9F5E90D276388CA8 /* SurfAceLocklessAuthorityTests.swift */,
+				87046210EFA9F81BBA3D0C2B /* SurfAceLocklessConsumableOperationsTests.swift */,
+				C8E71C758987FB7BBCD96EAC /* SurfAceLocklessContentOperationsTests.swift */,
+				4B26D67F1579A50644D8413D /* SurfAceLocklessRuntimeAdapterTests.swift */,
+				983A8752C94CB2B5C0201A1C /* SurfAceLocklessTopologyOperationsTests.swift */,
+				9C9CB3316457E4F266DD2A8D /* SurfAceLocklessWebSocketIntegrationTests.swift */,
 				217B21E95FFA04F89F813157 /* SurfAceMarkdownRenderingTests.swift */,
 				025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */,
 				3ABD815F8B22D9C2095F8BCF /* SurfAceSurfaceTopologyPersistenceTests.swift */,
-				547C46683532D8BF824676BD /* SurfAceToolbarThemeTests.swift */,
+				75119B242504535ABDA32892 /* SurfAceToolbarThemeTests.swift */,
 				2D5FA5C68B9A1945A11CCC0C /* SurfAceViewportPreservationTests.swift */,
 			);
 			path = SurfAceTests;
+			sourceTree = "<group>";
+		};
+		81E0FF96CE871A49F79FEBB8 /* LegacyRollback */ = {
+			isa = PBXGroup;
+			children = (
+				99A38CC26925AE82B3BDCC4A /* main.swift */,
+				B5522455C6B5834FCAA27E26 /* SurfAceAppleRollback.swift */,
+			);
+			path = LegacyRollback;
+			sourceTree = "<group>";
+		};
+		AA7CC5578E3437D1EE330F32 /* vectors */ = {
+			isa = PBXGroup;
+			children = (
+				776FCDDBF41668EDA41153A1 /* authority-conformance.json */,
+			);
+			path = vectors;
 			sourceTree = "<group>";
 		};
 		BF4AC0067B64067AB8353645 /* Fonts */ = {
@@ -137,6 +256,8 @@
 			isa = PBXGroup;
 			children = (
 				DA0B8CE0B10CC8BE7F94EC21 /* SurfAce.app */,
+				9C1080A37D8D663C5F9A6E1A /* SurfAceLegacyRollback */,
+				DAC37373DAF827EF4EFA7803 /* SurfAceLegacyRollbackTests.xctest */,
 				900E30042618968CF5054D9D /* SurfAceSpatial.app */,
 				E1026649686E370A8442CA40 /* SurfAceTests.xctest */,
 			);
@@ -151,6 +272,7 @@
 			buildConfigurationList = 8844C2C5F00C007C81697FD5 /* Build configuration list for PBXNativeTarget "SurfAceTests" */;
 			buildPhases = (
 				2CE0AE1F202FC9159047705E /* Sources */,
+				C1B280FC8E23F192CE61F281 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -162,6 +284,23 @@
 			);
 			productName = SurfAceTests;
 			productReference = E1026649686E370A8442CA40 /* SurfAceTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		8A5DB57341D6295DE88BACC2 /* SurfAceLegacyRollbackTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B267F914F436768B700E8D69 /* Build configuration list for PBXNativeTarget "SurfAceLegacyRollbackTests" */;
+			buildPhases = (
+				218CFFE819A2EEF6371274AB /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SurfAceLegacyRollbackTests;
+			packageProductDependencies = (
+			);
+			productName = SurfAceLegacyRollbackTests;
+			productReference = DAC37373DAF827EF4EFA7803 /* SurfAceLegacyRollbackTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 		A3F82FD6C105A9FB434006D5 /* SurfAceSpatial */ = {
@@ -181,6 +320,23 @@
 			productName = SurfAceSpatial;
 			productReference = 900E30042618968CF5054D9D /* SurfAceSpatial.app */;
 			productType = "com.apple.product-type.application";
+		};
+		ABEFC5BFFD670E7DB8F7E8A8 /* SurfAceLegacyRollback */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1006686236E48F50C23B6285 /* Build configuration list for PBXNativeTarget "SurfAceLegacyRollback" */;
+			buildPhases = (
+				B67245F8DA7D5C09637D688C /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SurfAceLegacyRollback;
+			packageProductDependencies = (
+			);
+			productName = SurfAceLegacyRollback;
+			productReference = 9C1080A37D8D663C5F9A6E1A /* SurfAceLegacyRollback */;
+			productType = "com.apple.product-type.tool";
 		};
 		E78D6E7B48D8F200079A1C31 /* SurfAce */ = {
 			isa = PBXNativeTarget;
@@ -212,9 +368,15 @@
 					67A9D8D88698454C7C5A7802 = {
 						DevelopmentTeam = "";
 					};
+					8A5DB57341D6295DE88BACC2 = {
+						DevelopmentTeam = "";
+					};
 					A3F82FD6C105A9FB434006D5 = {
 						DevelopmentTeam = Z7R59J7QV8;
 						ProvisioningStyle = Automatic;
+					};
+					ABEFC5BFFD670E7DB8F7E8A8 = {
+						DevelopmentTeam = "";
 					};
 					E78D6E7B48D8F200079A1C31 = {
 						DevelopmentTeam = Z7R59J7QV8;
@@ -237,6 +399,8 @@
 			projectRoot = "";
 			targets = (
 				E78D6E7B48D8F200079A1C31 /* SurfAce */,
+				ABEFC5BFFD670E7DB8F7E8A8 /* SurfAceLegacyRollback */,
+				8A5DB57341D6295DE88BACC2 /* SurfAceLegacyRollbackTests */,
 				A3F82FD6C105A9FB434006D5 /* SurfAceSpatial */,
 				67A9D8D88698454C7C5A7802 /* SurfAceTests */,
 			);
@@ -268,20 +432,47 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C1B280FC8E23F192CE61F281 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				995CAC303CA5C7EC4330AF06 /* authority-conformance.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		218CFFE819A2EEF6371274AB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C4CE112AFC20A726E5DEE6C3 /* SurfAceAppleRollback.swift in Sources */,
+				7674785CB3F0CBB886EC822F /* SurfAceAppleRollbackTests.swift in Sources */,
+				9D5F3C51B08F1C458BF94333 /* SurfAceLocklessAuthority.swift in Sources */,
+				646E8A5C583D73A15FA163D9 /* SurfAceLocklessMigration.swift in Sources */,
+				2EE5A3A4157C23BC30DEA2AB /* SurfAceLocklessTopologyCodec.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		2CE0AE1F202FC9159047705E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2AB4BF1BD37E4FE96CC1D545 /* SurfAceAuthorityConformanceVectorTests.swift in Sources */,
 				980E850E03917BE3AF575829 /* SurfAceBonjourPublisherTests.swift in Sources */,
 				68DC9BCC2BBCFA3ACA7A30AF /* SurfAceBrowserURLTargetApplyTests.swift in Sources */,
 				B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */,
+				4036988D4651F0C568C6F9C7 /* SurfAceLocklessAuthorityTests.swift in Sources */,
+				CDA9169098C0D1C6292C3ECD /* SurfAceLocklessConsumableOperationsTests.swift in Sources */,
+				BF6C8A7C9C1DDD55979F661C /* SurfAceLocklessContentOperationsTests.swift in Sources */,
+				0C3835F9F1C968FB6F328F10 /* SurfAceLocklessRuntimeAdapterTests.swift in Sources */,
+				B5375E4E54338700C609BA3A /* SurfAceLocklessTopologyOperationsTests.swift in Sources */,
+				8B0D46E02145506E619EEFA7 /* SurfAceLocklessWebSocketIntegrationTests.swift in Sources */,
 				EB9119D84B8BF489E271FDCE /* SurfAceMarkdownRenderingTests.swift in Sources */,
 				FA0FE771EA157D8D3EB6DCF9 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift in Sources */,
 				C9FCE1B6A4992A0D0FD5FB68 /* SurfAceSurfaceTopologyPersistenceTests.swift in Sources */,
-				ED1033C3D8877CE7B2A73009 /* SurfAceToolbarThemeTests.swift in Sources */,
+				9FB72F2E74248C18B77758F5 /* SurfAceToolbarThemeTests.swift in Sources */,
 				193398127694B8E96D1688F5 /* SurfAceViewportPreservationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -295,9 +486,28 @@
 				FF9BF16CA4591B19760A2246 /* SurfAceBonjourPublisher.swift in Sources */,
 				3B4E416E4A2D67F538AE5933 /* SurfAceHTTPServer.swift in Sources */,
 				69E4A6C95D32B537DECECA46 /* SurfAceIdentityStore.swift in Sources */,
+				171C713C4D716E94543EF082 /* SurfAceLocklessAuthority.swift in Sources */,
+				2890A01F42CD06AA9A198372 /* SurfAceLocklessConsumableOperations.swift in Sources */,
+				A14D3A9D9D99B54639E60A6D /* SurfAceLocklessContentOperations.swift in Sources */,
+				3ACEEE574420B4A530D57F26 /* SurfAceLocklessMigration.swift in Sources */,
+				ACF850D4A4C6ED35F669C71F /* SurfAceLocklessRuntimeAdapter.swift in Sources */,
+				D125855282D8BF7F9DDD591D /* SurfAceLocklessTopologyCodec.swift in Sources */,
+				C93B8E861C1BE7F1F0C4670B /* SurfAceLocklessTopologyOperations.swift in Sources */,
 				68F9D6A747EB7877AED1D73C /* SurfAceModels.swift in Sources */,
 				753547CD61197747119287A7 /* SurfAceRuntime.swift in Sources */,
 				B1C21A3DBBA7214CE8444348 /* SurfAceSurfaceView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B67245F8DA7D5C09637D688C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				567F4E9FBD2D0EA1044A2328 /* SurfAceAppleRollback.swift in Sources */,
+				D753DB4F6A33018888D84995 /* SurfAceLocklessAuthority.swift in Sources */,
+				F79A5F448CAC124C550FB99C /* SurfAceLocklessMigration.swift in Sources */,
+				1DD1849E7D22E941FD96A2E2 /* SurfAceLocklessTopologyCodec.swift in Sources */,
+				DE87D221418D7983D40B7206 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -310,6 +520,13 @@
 				7440C200D139A9CDEB4071DA /* SurfAceBonjourPublisher.swift in Sources */,
 				E2B2E9631F0835BD39E2B839 /* SurfAceHTTPServer.swift in Sources */,
 				D615F803FC49278657471A62 /* SurfAceIdentityStore.swift in Sources */,
+				E884F344902AAA152AAEB5CF /* SurfAceLocklessAuthority.swift in Sources */,
+				4A0DCC90F47C261706FA946E /* SurfAceLocklessConsumableOperations.swift in Sources */,
+				553F3D9BF13D7E9BC313D2B3 /* SurfAceLocklessContentOperations.swift in Sources */,
+				EB3A312FE60EF54CF6902BFD /* SurfAceLocklessMigration.swift in Sources */,
+				497FDEC0CF5E812D63608C36 /* SurfAceLocklessRuntimeAdapter.swift in Sources */,
+				DBF7D5535B7CC1F6C7E3DA0A /* SurfAceLocklessTopologyCodec.swift in Sources */,
+				A2EB2BE2C3130CF859C822D8 /* SurfAceLocklessTopologyOperations.swift in Sources */,
 				5964DDDD0A9B7A881AECDA0C /* SurfAceModels.swift in Sources */,
 				6661F25504963451BE3CE25C /* SurfAceRuntime.swift in Sources */,
 				78FE925CC623EE70BD36510C /* SurfAceSurfaceView.swift in Sources */,
@@ -418,6 +635,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -450,6 +668,22 @@
 				PRODUCT_NAME = SurfAce;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		4929424F4B29AB99A891B5CC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAceLegacyRollbackTests;
+				SDKROOT = macosx;
 			};
 			name = Release;
 		};
@@ -500,6 +734,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -526,6 +761,35 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SurfAce.app/SurfAce";
+			};
+			name = Release;
+		};
+		6F617C4B7ACEDEC40C50FE2C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAceLegacyRollbackTests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		77F913C4E5B00B18FC02F484 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_NAME = SurfAceLegacyRollback;
+				SDKROOT = macosx;
 			};
 			name = Release;
 		};
@@ -572,9 +836,31 @@
 			};
 			name = Debug;
 		};
+		DDBBA6F70E57C0D8B4A1C830 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_NAME = SurfAceLegacyRollback;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		1006686236E48F50C23B6285 /* Build configuration list for PBXNativeTarget "SurfAceLegacyRollback" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DDBBA6F70E57C0D8B4A1C830 /* Debug */,
+				77F913C4E5B00B18FC02F484 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		1AF7DA2C5103745993957DB9 /* Build configuration list for PBXProject "SurfAce" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -607,6 +893,15 @@
 			buildConfigurations = (
 				0F78BF2A3D58CDFA37F20E28 /* Debug */,
 				6202D685367E778C29D13B85 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B267F914F436768B700E8D69 /* Build configuration list for PBXNativeTarget "SurfAceLegacyRollbackTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6F617C4B7ACEDEC40C50FE2C /* Debug */,
+				4929424F4B29AB99A891B5CC /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

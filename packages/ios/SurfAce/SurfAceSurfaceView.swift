@@ -349,15 +349,18 @@ struct SurfAceRootView: View {
         }
         .ignoresSafeArea(.container, edges: surfAceRootContentIgnoredSafeAreaEdges())
         .background {
-            SurfAceSceneProbeRepresentable(
-                onConnect: { key, scene in
-                    Task { @MainActor in
-                        sceneKey = key
-                        let surface = runtime.registerSurface(sceneKey: key, scene: scene)
-                        surfaceId = surface.surfaceId
+            if runtime.isSceneAuthorityReady {
+                SurfAceSceneProbeRepresentable(
+                    onConnect: { key, scene in
+                        Task { @MainActor in
+                            sceneKey = key
+                            if let surface = await runtime.registerSurfaceForScene(sceneKey: key, scene: scene) {
+                                surfaceId = surface.surfaceId
+                            }
+                        }
                     }
-                }
-            )
+                )
+            }
         }
     }
 

@@ -16,17 +16,18 @@ This document is an implementation and review checklist derived from the canonic
 
 ## Current gate snapshot
 
-- The FLYNN-1770-02 delta independently passed review. The general standalone `surf-ace` CLI and separate reusable Tight Beam consumer-skill implementation are now in progress.
+- The verified T1770 Revision 11 source is acceptance input to T1778. T1778 now expands production admission to the native iPhone and iPad client; Apple implementation and proof remain in progress and do not inherit Electron product proof.
+- The independently approved T1778 Apple amendment is `/Users/mike/shared-workspace/surf-ace/specs/native-apple-lockless-client-authority.md`, SHA-256 `04b9e412f23f84a33b54825b8d09ac1763879a552e671d3fd50c72465fe5cc22`. The approved R1-R11 rollout plan is `/Users/mike/shared-workspace/surf-ace/specs/lockless-multi-controller-production-rollout.md`, SHA-256 `ffb6e9d388e6021db846b48fd5187e9b2d4d449a50c42582754309414ce412f4`.
 - The production OpenClaw path has a correlated accepted mutation, exact client commit receipt, visible Markdown render, current local read, and accessibility capture. The supplied context produced the specified `Unknown chat — Clawline` fallback, not the exact `CLU — Clawline` example.
 - The earlier dedicated-archetype/MCP Tight Beam proof is rejected architecture evidence only. It does not block the corrected CLI route and supports no product claim.
 - Pending rows remain pending until their complete named proof exists. Green omnibus/unit coverage and diagnostic harness evidence do not promote official-path or `Both` rows by themselves.
-- Shrdlu installation and official proof remain prohibited until the corrected combined source plus native macOS/Linux evidence pass the fresh independent CORR-09 review.
+- The temporary Shrdlu proof remains acceptance evidence only and is not T1778 deployment or fleet-soak evidence. T1778 R7/R8 actions and evidence must come exclusively from the shipped Rust CLI; the resident OpenClaw extension stays connected but passive.
 
 ## Admitted-platform decision
 
-The first lockless implementation slice admits Electron only. Electron must implement and prove every applicable requirement below without a semantic carve-out.
+The T1778 production slice admits Electron and the native `SurfAce` target on iPhone and iPad. Each must implement and prove every applicable requirement below without a semantic carve-out. Admission work remains in progress: this matrix does not authorize capability advertisement or claim any Apple gate passed.
 
-iOS, iPadOS, and visionOS remain legacy/non-admitted in this slice and must not advertise the lockless capability. There are no Apple-exclusive acceptance IDs. If a later release admits any Apple platform, `COMPAT-5` and `AC-MIG-03` activate the complete applicable 62-check contract for that platform. A platform may omit controller window lifecycle only where no such product operation exists; local-user recoverable close remains unconditional.
+`SurfAceSpatial` remains legacy/non-admitted in T1778 and must not advertise the lockless capability. There are no Apple-exclusive T1770 acceptance IDs; `APPLE-AC-01..10` below are an implementation/proof crosswalk, not replacement semantics or added wire requirements. `COMPAT-5` and `AC-MIG-03` activate the complete applicable T1770 check set separately for the iPhone and iPad production build. A platform may omit controller window lifecycle only where no such product operation exists; local-user recoverable close remains unconditional.
 
 ## Proof classes
 
@@ -99,7 +100,22 @@ Electron also owns the client realization of every shared-core row above.
 
 ## Apple clients
 
-No acceptance row is Apple-exclusive, and no Apple platform is admitted in this slice. The admission gate for a future Apple implementation is `AC-MIG-03`: the complete applicable matrix must pass on each admitted production client build, including shared core, provenance/accessibility, local-user recoverable close, persistence/restart, overflow, and live/dormant retention.
+The shared iOS/iPadOS source set is now admitted by T1778, but remains implementation-in-progress. Its native authority must satisfy all applicable shared-core rows above, `AC-PROV-01..06` through native presentation/accessibility, `AC-MIG-01..03`, `AC-MIG-05`, and `AC-OPS-01`. Controller-product rows remain obligations of their named controllers rather than native-client implementation. The canonical TypeScript/Rust/Swift vector is `packages/protocol/vectors/authority-conformance.json`; Swift consumes that exact resource through `SurfAceAuthorityConformanceVectorTests`, not an Apple copy.
+
+| T1778 crosswalk | Native implementation/proof mapping | Current status |
+|---|---|---|
+| APPLE-AC-01 | Explicit target admission gate; complete capability/finite limits on `SurfAce`; unchanged legacy on `SurfAceSpatial` and unupgraded binaries. | Pending — shared vocabulary conformance added; runtime gate not yet implemented |
+| APPLE-AC-02 | Pure-Foundation controller registry with distinct live IDs, duplicate-live rejection, dormant resume, and identity-blind reclamation. | Pending |
+| APPLE-AC-03 | One FIFO transaction seam for remote and local mutations, client allocations, exact receipts, history/provenance, persistence-before-response, and ordered fan-out. | Pending |
+| APPLE-AC-04 | Stable-ID topology stale/retry, exact pane/surface capacity, recoverable close/tombstones, restoration, and local-user close. | Pending |
+| APPLE-AC-05 | Controller-local snapshots, cursors, acknowledgements, retained records/live frames, structured gaps, ordering, and bounds. | Pending |
+| APPLE-AC-06 | Complete generation restore before admission across scene/background/foreground/process restart and zero-live discovery. | Pending |
+| APPLE-AC-07 | Durable target work `intent_committed -> materializing -> terminal`, crash-window recovery, and separately correlated result truth. | Pending |
+| APPLE-AC-08 | Exact legacy migration plus stopped-app host rollback preview/apply and byte-exact original-container restoration. | Pending |
+| APPLE-AC-09 | Exact reviewed/merged source, artifacts, device IDs, install/container/process chain, and executable rollback on Ansible and Aleph. | Pending — production proof gate |
+| APPLE-AC-10 | One canonical cross-language vector, iPhone/iPad tests, and a `SurfAceSpatial` regression build prevent semantic drift or premature advertisement. | In progress — canonical vector consumption is implemented; platform gates remain pending |
+
+R8 proof uses only the byte-identical shipped Rust `surf-ace` CLI as actor and evidence surface on Ansible and Aleph. XcodeBuildMCP device logs, screenshots, and container hashes may corroborate the CLI result but do not drive protocol actions. No OpenClaw tool, MCP adapter, direct WebSocket/provider call, fixture, test harness, or temporary proof client can satisfy these rows.
 
 ## OpenClaw controller
 
@@ -160,3 +176,5 @@ Tight Beam also participates in every dual-controller and official-path row that
 | Migration/persistence/rollback | 4 |
 | Official-path proof/review gate (including AC-CLI-09..10) | 5 |
 | **Total** | **72** |
+
+The ten `APPLE-AC` entries are crosswalk rows over the existing applicable T1770 acceptance set and therefore do not increase the 72-row count.

@@ -13,7 +13,7 @@ This package owns:
 
 Surf Ace OpenClaw extension/provider installs and provider identity/state belong on TARS only. Do not install or run this package under `~/.openclaw/extensions/surf-ace/` on eezo or other non-TARS hosts; eezo may run the Surf Ace Electron client for display/testing.
 
-Deploy provider changes with `make -C packages/extension deploy-tars`. The deploy target fails closed for non-TARS deploy hosts unless `SURF_ACE_ALLOW_NON_TARS_PROVIDER=1` is set for an explicit approved override. The runtime entrypoint enforces the same guard before resolving OpenClaw state or starting the provider.
+Deploy provider changes with `make -C packages/extension deploy-tars`. The deploy target accepts only the canonical `tars.tail4105e8.ts.net` destination and has no non-TARS override. It preserves the provider identity/runtime files, `lockless-controller-identity.json`, and the complete `lockless-endpoints/` state tree while deleting stale package artifacts. The runtime entrypoint separately enforces provider placement before resolving OpenClaw state or starting the provider.
 
 ## OpenClaw Tool Admission
 

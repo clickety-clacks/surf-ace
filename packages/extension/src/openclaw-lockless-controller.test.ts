@@ -124,17 +124,18 @@ class LocklessFakeWire implements ControllerWire {
         migrationAccepted: Boolean(pairPayload.migrationMaterial),
         migrationReceiptId: pairPayload.migrationMaterial ? id : null,
         mode: "lockless",
+        receiptResolutions: [],
         resumed: false,
-            scopes: this.surfaceConnection
-              ? [{
-                  cursor: { cursor: 1, gap: null, gapGeneration: 0 },
-                  firstRetainedSequence: 1,
-                  lastRetainedSequence: 10,
-                  records: consumableRecords(),
-                  scopeId: "pane:sf_1:1",
-                  version: 1,
-                }]
-              : [],
+        scopes: this.surfaceConnection
+          ? [{
+              cursor: { cursor: 1, gap: null, gapGeneration: 0 },
+              firstRetainedSequence: 1,
+              lastRetainedSequence: 10,
+              records: consumableRecords(),
+              scopeId: "pane:sf_1:1",
+              version: 1,
+            }]
+          : [],
         sessionId: `lockless_${request.controllerInstanceId}`,
         state: null,
         surfaceId: this.surfaceConnection ? "sf_1" : null,

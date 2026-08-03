@@ -6,6 +6,7 @@
   "main": "dist/main.cjs",
   "scripts": {
     "build": "node ./scripts/build.mjs",
+    "legacy-rollback": "node ./dist/legacy-rollback-cli.cjs",
     "launchd:install": "pnpm run build && node ./scripts/install-launch-agent.mjs",
     "launchd:uninstall": "node ./scripts/install-launch-agent.mjs --uninstall",
     "package": "pnpm run build && electron-builder --mac dir --arm64",

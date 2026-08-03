@@ -1,11 +1,91 @@
 import Foundation
+import PencilKit
 import SwiftUI
 import UIKit
 import XCTest
 @testable import SurfAce
 
+private func annotationDrawingData(strokeCount: Int) -> Data {
+    let strokes = (0..<strokeCount).map { index in
+        let point = PKStrokePoint(
+            location: CGPoint(x: index + 1, y: index + 2),
+            timeOffset: TimeInterval(index),
+            size: CGSize(width: 4, height: 4),
+            opacity: 1,
+            force: 1,
+            azimuth: 0,
+            altitude: .pi / 2
+        )
+        return PKStroke(
+            ink: PKInk(.pen, color: .black),
+            path: PKStrokePath(controlPoints: [point], creationDate: Date(timeIntervalSince1970: 1))
+        )
+    }
+    return PKDrawing(strokes: strokes).dataRepresentation()
+}
+
+private func annotationStrokesById(_ strokeIds: [String]) -> [String: SurfAceStroke] {
+    Dictionary(uniqueKeysWithValues: strokeIds.enumerated().map { index, strokeId in
+        (
+            strokeId,
+            SurfAceStroke(
+                strokeId: strokeId,
+                points: [SurfAceStrokePoint(x: Double(index), y: Double(index), pressure: 1, timestamp: Int64(index))],
+                tool: "pencil"
+            )
+        )
+    })
+}
+
 @MainActor
 final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
+    func testAnnotationRemovalRoundTripPreservesOpaqueDrawingWhenNothingIsRemoved() throws {
+        let drawingData = annotationDrawingData(strokeCount: 2)
+        let strokes = annotationStrokesById(["stroke-a", "stroke-b"])
+
+        let result = try surfAceRemovingAnnotationStrokes(
+            drawingData: drawingData,
+            strokesById: strokes,
+            requestedStrokeIds: ["stroke-missing"]
+        )
+
+        XCTAssertEqual(result.drawingData, drawingData)
+        XCTAssertEqual(result.strokesById, strokes)
+        XCTAssertEqual(result.removedStrokeIds, [])
+        XCTAssertEqual(result.notFoundStrokeIds, ["stroke-missing"])
+    }
+
+    func testAnnotationRemovalUpdatesOpaqueDrawingAndPreservesRequestOrderAndDuplicates() throws {
+        let drawingData = annotationDrawingData(strokeCount: 3)
+        let strokes = annotationStrokesById(["stroke-a", "stroke-b", "stroke-c"])
+
+        let result = try surfAceRemovingAnnotationStrokes(
+            drawingData: drawingData,
+            strokesById: strokes,
+            requestedStrokeIds: ["stroke-b", "stroke-missing", "stroke-b", "stroke-a"]
+        )
+
+        XCTAssertEqual(result.removedStrokeIds, ["stroke-b", "stroke-a"])
+        XCTAssertEqual(result.notFoundStrokeIds, ["stroke-missing", "stroke-b"])
+        XCTAssertEqual(Set(result.strokesById.keys), ["stroke-c"])
+        XCTAssertEqual(try PKDrawing(data: result.drawingData).strokes.count, 1)
+    }
+
+    func testAnnotationRemovalRejectsDrawingAndSerializedStrokeCountMismatch() throws {
+        XCTAssertThrowsError(
+            try surfAceRemovingAnnotationStrokes(
+                drawingData: annotationDrawingData(strokeCount: 1),
+                strokesById: annotationStrokesById(["stroke-a", "stroke-b"]),
+                requestedStrokeIds: ["stroke-a"]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SurfAceAnnotationTransformError,
+                .drawingStrokeCountMismatch(drawingCount: 1, serializedCount: 2)
+            )
+        }
+    }
+
     func testRootContentFillIgnoresBottomSafeAreaButKeepsTopStatusBarSafeArea() {
         let ignoredEdges = surfAceRootContentIgnoredSafeAreaEdges()
 
@@ -670,11 +750,136 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertNil(lastRenderCall)
     }
 
+    func testLocklessBackgroundForegroundRestoresAuthorityBeforeSceneAdmission() async throws {
+        let stateURL = try locklessStateURL()
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
+        XCTAssertFalse(runtime.isSceneAuthorityReady)
+
+        await runtime.prepareLocklessLifecycleForTesting()
+        let registeredSurface = await runtime.registerSurfaceForScene(sceneKey: "scene-lifecycle")
+        let surface = try XCTUnwrap(registeredSurface)
+        let beforeBackground = try await runtime.locklessReadinessForTesting()
+        XCTAssertTrue(beforeBackground.fullGenerationLoaded)
+        XCTAssertTrue(beforeBackground.readyForAdmission)
+
+        await runtime.enterBackgroundForTesting()
+        await runtime.enterForegroundForTesting()
+
+        let foreground = try await runtime.locklessReadinessForTesting()
+        XCTAssertTrue(foreground.fullGenerationLoaded)
+        XCTAssertTrue(foreground.targetWorkRecovered)
+        XCTAssertTrue(foreground.readyForAdmission)
+        XCTAssertEqual(foreground.state.liveSurfaces[surface.surfaceId]?.surfaceId, surface.surfaceId)
+    }
+
+    func testLocklessZeroLiveSurfaceRestoresExactSurfaceAndPaneIdentity() async throws {
+        let runtime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(),
+            locklessStateURL: try locklessStateURL()
+        )
+        await runtime.prepareLocklessLifecycleForTesting()
+        let registeredOriginal = await runtime.registerSurfaceForScene(sceneKey: "scene-zero-live")
+        let original = try XCTUnwrap(registeredOriginal)
+        let originalPaneIds = original.panes.map(\.paneId)
+
+        await runtime.unregisterSurfaceForScene(sceneKey: "scene-zero-live")
+        let closed = try await runtime.locklessReadinessForTesting()
+        XCTAssertTrue(closed.state.liveSurfaces.isEmpty)
+        XCTAssertEqual(closed.state.surfaceTombstones.map(\.surface.surfaceId), [original.surfaceId])
+        XCTAssertEqual(closed.state.sceneSurfaceIds["scene-zero-live"], original.surfaceId)
+
+        let registeredRestored = await runtime.registerSurfaceForScene(sceneKey: "scene-zero-live")
+        let restored = try XCTUnwrap(registeredRestored)
+        XCTAssertEqual(restored.surfaceId, original.surfaceId)
+        XCTAssertEqual(restored.panes.map(\.paneId), originalPaneIds)
+        let restoredState = try await runtime.locklessReadinessForTesting()
+        XCTAssertTrue(restoredState.state.surfaceTombstones.isEmpty)
+    }
+
+    func testLocklessProcessRestartLoadsGenerationBeforeRestoringTombstonedScene() async throws {
+        let stateURL = try locklessStateURL()
+        let firstRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
+        await firstRuntime.prepareLocklessLifecycleForTesting()
+        let registeredOriginal = await firstRuntime.registerSurfaceForScene(sceneKey: "scene-restart")
+        let original = try XCTUnwrap(registeredOriginal)
+        let originalPaneIds = original.panes.map(\.paneId)
+        await firstRuntime.unregisterSurfaceForScene(sceneKey: "scene-restart")
+
+        let restartedRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
+        XCTAssertFalse(restartedRuntime.isSceneAuthorityReady)
+        await restartedRuntime.prepareLocklessLifecycleForTesting(reason: "testing_process_restart")
+        XCTAssertTrue(restartedRuntime.isSceneAuthorityReady)
+        let readiness = try await restartedRuntime.locklessReadinessForTesting()
+        XCTAssertTrue(readiness.fullGenerationLoaded)
+        XCTAssertTrue(readiness.readyForAdmission)
+        XCTAssertTrue(readiness.state.liveSurfaces.isEmpty)
+
+        let registeredRestored = await restartedRuntime.registerSurfaceForScene(sceneKey: "scene-restart")
+        let restored = try XCTUnwrap(registeredRestored)
+        XCTAssertEqual(restored.surfaceId, original.surfaceId)
+        XCTAssertEqual(restored.panes.map(\.paneId), originalPaneIds)
+    }
+
+    func testLocalPaneCloseRestoreUsesSharedRecoverableTopologyAuthority() async throws {
+        let runtime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(),
+            locklessStateURL: try locklessStateURL()
+        )
+        await runtime.prepareLocklessLifecycleForTesting()
+        let registeredSurface = await runtime.registerSurfaceForScene(sceneKey: "scene-pane-close")
+        let surface = try XCTUnwrap(registeredSurface)
+        let surfaceId = surface.surfaceId
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let split = try await adapter.commitLocalMutation(operation: "testing.pane.split") { state, _ in
+            let result = try SurfAceLocklessTopologyOperations.paneSplit(
+                state: &state,
+                surfaceId: surfaceId,
+                paneId: 1,
+                count: 2,
+                direction: "horizontal",
+                expectedTopologyRevision: state.liveSurfaces[surfaceId]?.topologyRevision ?? -1
+            )
+            return .integer(result.newPaneIds[0])
+        }
+        guard case .integer(let createdPaneId) = split.result else {
+            return XCTFail("missing split pane identity")
+        }
+
+        let tombstoneId = try await runtime.closePaneLocally(
+            surfaceId: surfaceId,
+            paneId: Int(createdPaneId)
+        )
+        let closedState = try await runtime.locklessReadinessForTesting()
+        let closed = closedState.state.liveSurfaces[surfaceId]
+        XCTAssertNil(closed?.panes[String(createdPaneId)])
+        XCTAssertEqual(closed?.paneTombstones.map(\.tombstoneId), [tombstoneId])
+
+        let restoredPaneId = try await runtime.restorePaneLocally(
+            surfaceId: surfaceId,
+            tombstoneId: tombstoneId,
+            anchorPaneId: 1,
+            direction: "vertical"
+        )
+        XCTAssertEqual(restoredPaneId, Int(createdPaneId))
+        let restoredState = try await runtime.locklessReadinessForTesting()
+        let restored = restoredState.state.liveSurfaces[surfaceId]
+        XCTAssertNotNil(restored?.panes[String(createdPaneId)])
+        XCTAssertTrue(restored?.paneTombstones.isEmpty == true)
+    }
+
     private func isolatedUserDefaults() -> UserDefaults {
         let suiteName = "SurfAceRenderAndAnnotationDiagnosticsTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         return defaults
+    }
+
+    private func locklessStateURL() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceLifecycleTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return directory.appendingPathComponent("authority-v1.json")
     }
 
     private func htmlApplyPayload(paneId: Int, revision: Int, title: String? = nil) -> [String: Any] {
