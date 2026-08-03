@@ -204,6 +204,11 @@ enum SurfAceLocklessControllerStatus: String, Codable, Equatable, Sendable {
     case live
 }
 
+enum SurfAceLocklessNegotiatedMode: String, Codable, Equatable, Sendable {
+    case legacy
+    case lockless
+}
+
 enum SurfAceLocklessReceiptStatus: String, Codable, Equatable, Sendable {
     case acknowledged
     case pending
@@ -299,6 +304,7 @@ struct SurfAceLocklessTargetWorkItem: Codable, Equatable, Sendable {
 }
 
 struct SurfAceLocklessTargetResult: Codable, Equatable, Sendable {
+    var consumableSequence: Int64
     var errorCode: String?
     var intentCommitSequence: Int64
     var materializedState: SurfAceLocklessJSON?
@@ -325,6 +331,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var generation: Int64
     var limits: SurfAceLocklessCapacityLimits
     var liveSurfaces: [String: SurfAceLocklessSurfaceMaterial]
+    var negotiatedModes: [String: SurfAceLocklessNegotiatedMode]
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
     var sequences: SurfAceLocklessClientSequences
@@ -342,6 +349,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             generation: 0,
             limits: limits,
             liveSurfaces: [:],
+            negotiatedModes: [:],
             sceneSurfaceIds: [:],
             scopes: [:],
             sequences: SurfAceLocklessClientSequences(
@@ -374,20 +382,318 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
         guard allSequences.allSatisfy({ $0 > 0 }), surfaceSetRevision >= 0 else {
             throw SurfAceLocklessAuthorityError.invalidState("client_sequences")
         }
-        for (surfaceId, surface) in liveSurfaces {
-            guard surfaceId == surface.surfaceId else {
-                throw SurfAceLocklessAuthorityError.invalidState("surface_key")
-            }
-            guard Int64(surface.panes.count + surface.paneTombstones.count)
-                    <= limits.maxPanesPerSurface + limits.maxRetainedTombstones else {
-                throw SurfAceLocklessAuthorityError.invalidState("surface_recoverable_envelope")
-            }
-        }
+        try SurfAceLocklessTopologyOperations.validateRestoredRecoverableState(self)
         let tombstonedSurfaceIds = Set(surfaceTombstones.map(\.surface.surfaceId))
         guard tombstonedSurfaceIds.count == surfaceTombstones.count,
               tombstonedSurfaceIds.isDisjoint(with: liveSurfaces.keys) else {
             throw SurfAceLocklessAuthorityError.invalidState("surface_lifecycle_identity")
         }
+        guard Int64(controllers.count) <= limits.maxAdmittedControllerEntries else {
+            throw SurfAceLocklessAuthorityError.invalidState("admitted_controller_entries")
+        }
+        for (controllerId, controller) in controllers {
+            guard controllerId == controller.controllerInstanceId else {
+                throw SurfAceLocklessAuthorityError.invalidState("controller_key")
+            }
+            let receipts = Array(controller.pendingOperationReceipts.values)
+            guard Int64(receipts.count) <= limits.maxPendingOperationReceiptsPerController else {
+                throw SurfAceLocklessAuthorityError.invalidState("operation_receipt_entries:\(controllerId)")
+            }
+            var receiptBytes: Int64 = 0
+            for receipt in receipts {
+                guard controller.pendingOperationReceipts[receipt.requestId] == receipt else {
+                    throw SurfAceLocklessAuthorityError.invalidState("operation_receipt_key:\(controllerId)")
+                }
+                let exact = try SurfAceLocklessExactDurableAccounting.receiptBytes(receipt)
+                guard receipt.bytes == exact else {
+                    throw SurfAceLocklessAuthorityError.invalidState(
+                        "operation_receipt_exact_bytes:\(controllerId):\(receipt.requestId)"
+                    )
+                }
+                receiptBytes = SurfAceLocklessExactDurableAccounting.saturatingAdd(receiptBytes, exact)
+            }
+            guard receiptBytes <= limits.maxPendingOperationReceiptBytesPerController else {
+                throw SurfAceLocklessAuthorityError.invalidState("operation_receipt_bytes:\(controllerId)")
+            }
+        }
+        let dormant = controllers.values.filter { $0.status == .dormant }
+        guard dormant.allSatisfy({ ($0.dormantSequence ?? 0) > 0 }) else {
+            throw SurfAceLocklessAuthorityError.invalidState("dormant_controller_sequence")
+        }
+        let dormantSequences = dormant.compactMap(\.dormantSequence)
+        guard Set(dormantSequences).count == dormantSequences.count else {
+            throw SurfAceLocklessAuthorityError.invalidState("duplicate_dormant_controller_sequence")
+        }
+        let usage = try SurfAceLocklessDormantRetention.usage(in: self)
+        guard usage.entryCount <= limits.maxDormantControllerEntries else {
+            throw SurfAceLocklessAuthorityError.invalidState("dormant_controller_entries")
+        }
+        guard usage.bytes <= limits.maxDormantControllerBytes else {
+            throw SurfAceLocklessAuthorityError.invalidState("dormant_controller_bytes")
+        }
+        try SurfAceLocklessDormantRetention.validateCursorState(in: self)
+        for (path, scope) in SurfAceLocklessDormantRetention.allScopes(in: self) {
+            try SurfAceLocklessConsumableOperations.validateRestoredScope(
+                scope,
+                limits: limits,
+                path: path
+            )
+        }
+
+        var targetBytesBySurface: [String: Int64] = [:]
+        for (key, work) in targetApplyWorkItems {
+            guard key == work.operationRequestId else {
+                throw SurfAceLocklessAuthorityError.invalidState("target_work_key")
+            }
+            let exact = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
+            guard work.bytes == exact else {
+                throw SurfAceLocklessAuthorityError.invalidState("target_work_exact_bytes:\(work.operationRequestId)")
+            }
+            targetBytesBySurface[work.surfaceId] = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                targetBytesBySurface[work.surfaceId] ?? 0,
+                exact
+            )
+        }
+        for (surfaceId, targetBytes) in targetBytesBySurface {
+            guard let surface = liveSurfaces[surfaceId]
+                    ?? surfaceTombstones.first(where: { $0.surface.surfaceId == surfaceId })?.surface else {
+                throw SurfAceLocklessAuthorityError.invalidState("target_work_surface:\(surfaceId)")
+            }
+            let baseBytes = try SurfAceLocklessTopologyOperations.surfaceBaseBytes(surface)
+            guard SurfAceLocklessExactDurableAccounting.saturatingAdd(baseBytes, targetBytes)
+                    <= limits.maxSurfaceRecoverableBaseBytes else {
+                throw SurfAceLocklessAuthorityError.invalidState("target_work_bytes:\(surfaceId)")
+            }
+        }
+    }
+}
+
+enum SurfAceLocklessExactDurableAccounting {
+    private struct VersionedReceipt: Encodable {
+        var bytes: Int64
+        var commitSequence: Int64?
+        var operation: String
+        var outcome: String?
+        var requestId: String
+        var status: SurfAceLocklessReceiptStatus
+        var terminalResponse: SurfAceLocklessJSON?
+        let version = 1
+    }
+
+    private struct VersionedTargetWork: Encodable {
+        var bytes: Int64
+        var controllerInstanceId: String
+        var intentCommitSequence: Int64
+        var operationRequestId: String
+        var request: SurfAceLocklessJSON
+        var state: SurfAceLocklessTargetWorkState
+        var surfaceId: String
+        var targetEpoch: Int64
+        var targetId: String
+        var targetRequestId: String
+        let version = 1
+    }
+
+    static func receiptBytes(_ receipt: SurfAceLocklessOperationReceiptState) throws -> Int64 {
+        try fixedPointBytes { bytes in
+            VersionedReceipt(
+                bytes: bytes,
+                commitSequence: receipt.commitSequence,
+                operation: receipt.operation,
+                outcome: receipt.outcome,
+                requestId: receipt.requestId,
+                status: receipt.status,
+                terminalResponse: receipt.terminalResponse
+            )
+        }
+    }
+
+    static func targetWorkBytes(_ work: SurfAceLocklessTargetWorkItem) throws -> Int64 {
+        try fixedPointBytes { bytes in
+            VersionedTargetWork(
+                bytes: bytes,
+                controllerInstanceId: work.controllerInstanceId,
+                intentCommitSequence: work.intentCommitSequence,
+                operationRequestId: work.operationRequestId,
+                request: work.request,
+                state: work.state,
+                surfaceId: work.surfaceId,
+                targetEpoch: work.targetEpoch,
+                targetId: work.targetId,
+                targetRequestId: work.targetRequestId
+            )
+        }
+    }
+
+    static func saturatingAdd(_ left: Int64, _ right: Int64) -> Int64 {
+        let (sum, overflow) = left.addingReportingOverflow(right)
+        return overflow ? .max : sum
+    }
+
+    private static func fixedPointBytes<Value: Encodable>(
+        _ value: (Int64) -> Value
+    ) throws -> Int64 {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var bytes: Int64 = 0
+        while true {
+            let next = Int64(try encoder.encode(value(bytes)).count)
+            guard next != bytes else { return next }
+            bytes = next
+        }
+    }
+}
+
+struct SurfAceLocklessDormantRetentionUsage: Equatable, Sendable {
+    var bytes: Int64
+    var bytesByController: [String: Int64]
+    var entryCount: Int64
+}
+
+enum SurfAceLocklessDormantRetention {
+    private struct VersionedRegistryRecord: Encodable {
+        var bundle: SurfAceLocklessControllerBundle
+        let version = 1
+    }
+
+    private struct VersionedCursorRecord: Encodable {
+        var controllerInstanceId: String
+        var cursor: SurfAceLocklessConsumableCursor
+        var scopeId: String
+        let version = 1
+    }
+
+    static func usage(in state: SurfAceLocklessAuthorityState) throws -> SurfAceLocklessDormantRetentionUsage {
+        let dormant = state.controllers.values
+            .filter { $0.status == .dormant }
+            .sorted(by: retentionOrder)
+        var charges = Dictionary(uniqueKeysWithValues: dormant.map { ($0.controllerInstanceId, Int64(0)) })
+
+        for bundle in dormant {
+            charges[bundle.controllerInstanceId, default: 0] += try encodedBytes(
+                VersionedRegistryRecord(bundle: bundle)
+            )
+        }
+
+        for (scopeId, scope) in allScopes(in: state) {
+            for bundle in dormant {
+                guard let cursor = scope.cursors[bundle.controllerInstanceId] else { continue }
+                charges[bundle.controllerInstanceId, default: 0] += try encodedBytes(
+                    VersionedCursorRecord(
+                        controllerInstanceId: bundle.controllerInstanceId,
+                        cursor: cursor,
+                        scopeId: scopeId
+                    )
+                )
+            }
+            for record in scope.records + Array(scope.liveFrames.values) {
+                let readers = scope.cursors.compactMap { controllerId, cursor in
+                    cursor.cursor <= record.sequence ? state.controllers[controllerId] : nil
+                }
+                guard !readers.contains(where: { $0.status == .live }) else { continue }
+                guard let charged = readers
+                    .filter({ $0.status == .dormant })
+                    .sorted(by: retentionOrder)
+                    .first else { continue }
+                charges[charged.controllerInstanceId, default: 0] += record.bytes
+            }
+        }
+
+        return SurfAceLocklessDormantRetentionUsage(
+            bytes: charges.values.reduce(0, +),
+            bytesByController: charges,
+            entryCount: Int64(dormant.count)
+        )
+    }
+
+    static func validateCursorState(in state: SurfAceLocklessAuthorityState) throws {
+        for (scopeId, scope) in allScopes(in: state) {
+            guard Int64(scope.cursors.count) <= state.limits.maxAdmittedControllerEntries else {
+                throw SurfAceLocklessAuthorityError.invalidState("consumable_cursor_entries:\(scopeId)")
+            }
+            for (controllerId, cursor) in scope.cursors {
+                guard state.controllers[controllerId] != nil else {
+                    throw SurfAceLocklessAuthorityError.invalidState("consumable_cursor_controller:\(scopeId)")
+                }
+                let bytes = try encodedBytes(VersionedCursorRecord(
+                    controllerInstanceId: controllerId,
+                    cursor: cursor,
+                    scopeId: scopeId
+                ))
+                guard bytes <= state.limits.maxConsumableCursorStateBytesPerScope else {
+                    throw SurfAceLocklessAuthorityError.invalidState("consumable_cursor_bytes:\(scopeId)")
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    static func enforceBounds(in state: inout SurfAceLocklessAuthorityState) throws -> [String] {
+        var reclaimed: [String] = []
+        while true {
+            let current = try usage(in: state)
+            guard current.entryCount > state.limits.maxDormantControllerEntries
+                    || current.bytes > state.limits.maxDormantControllerBytes else {
+                return reclaimed
+            }
+            guard let victim = oldestDormantController(in: state) else {
+                throw SurfAceLocklessAuthorityError.invalidState("dormant_controller_bounds")
+            }
+            reclaim(victim.controllerInstanceId, in: &state)
+            reclaimed.append(victim.controllerInstanceId)
+        }
+    }
+
+    @discardableResult
+    static func reclaimOldest(in state: inout SurfAceLocklessAuthorityState) -> String? {
+        guard let victim = oldestDormantController(in: state) else { return nil }
+        reclaim(victim.controllerInstanceId, in: &state)
+        return victim.controllerInstanceId
+    }
+
+    private static func reclaim(_ controllerId: String, in state: inout SurfAceLocklessAuthorityState) {
+        state.controllers.removeValue(forKey: controllerId)
+        SurfAceLocklessConsumableOperations.reclaimController(controllerId, in: &state)
+    }
+
+    private static func oldestDormantController(
+        in state: SurfAceLocklessAuthorityState
+    ) -> SurfAceLocklessControllerBundle? {
+        state.controllers.values.filter { $0.status == .dormant }.sorted(by: retentionOrder).first
+    }
+
+    private static func retentionOrder(
+        _ left: SurfAceLocklessControllerBundle,
+        _ right: SurfAceLocklessControllerBundle
+    ) -> Bool {
+        (left.dormantSequence ?? .max, left.controllerInstanceId)
+            < (right.dormantSequence ?? .max, right.controllerInstanceId)
+    }
+
+    static func allScopes(
+        in state: SurfAceLocklessAuthorityState
+    ) -> [(String, SurfAceLocklessConsumableScope)] {
+        var result = state.scopes.map { ($0.key, $0.value) }
+        for surface in state.liveSurfaces.values {
+            result += surface.paneTombstones.map {
+                ("pane-tombstone:\(surface.surfaceId):\($0.tombstoneId):\($0.scope.scopeId)", $0.scope)
+            }
+        }
+        for tombstone in state.surfaceTombstones {
+            result += tombstone.scopes.map {
+                ("surface-tombstone:\(tombstone.tombstoneId):\($0.key)", $0.value)
+            }
+            result += tombstone.surface.paneTombstones.map {
+                ("surface-tombstone:\(tombstone.tombstoneId):pane-tombstone:\($0.tombstoneId):\($0.scope.scopeId)", $0.scope)
+            }
+        }
+        return result.sorted { $0.0 < $1.0 }
+    }
+
+    private static func encodedBytes<T: Encodable>(_ value: T) throws -> Int64 {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return Int64(try encoder.encode(value).count)
     }
 }
 
@@ -459,6 +765,7 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                 var candidate = self.state
                 do {
                     let result = try operation(&candidate)
+                    try SurfAceLocklessDormantRetention.enforceBounds(in: &candidate)
                     candidate.generation += 1
                     try candidate.validate()
                     try self.store.save(candidate)

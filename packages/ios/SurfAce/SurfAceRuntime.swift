@@ -4,6 +4,12 @@ import Observation
 import Network
 import UIKit
 
+struct SurfAceLocklessProtocolError: Equatable, Sendable {
+    var code: String
+    var details: [String: Int64]
+    var message: String
+}
+
 private func surfAceDiagnosticValue(_ value: CustomStringConvertible) -> String {
     let text = String(describing: value)
     return text.range(of: #"^[A-Za-z0-9_./:@%-]+$"#, options: .regularExpression) != nil
@@ -365,6 +371,49 @@ final class SurfAceSceneDisconnectObserver {
 @MainActor
 @Observable
 final class SurfAceRuntime {
+    nonisolated static func locklessProtocolError(
+        for error: SurfAceLocklessRuntimeAdapterError
+    ) -> SurfAceLocklessProtocolError {
+        switch error {
+        case .receiptCapacity(
+            let currentBytes,
+            let currentCount,
+            let prospectiveBytes,
+            let prospectiveCount,
+            let maxBytes,
+            let maxCount
+        ):
+            return SurfAceLocklessProtocolError(
+                code: "receipt_capacity",
+                details: [
+                    "currentBytes": currentBytes,
+                    "currentCount": currentCount,
+                    "maxBytes": maxBytes,
+                    "maxCount": maxCount,
+                    "prospectiveBytes": prospectiveBytes,
+                    "prospectiveCount": prospectiveCount,
+                ],
+                message: "Pending operation receipt ledger is at capacity"
+            )
+        case .surfaceStateCapacity(let current, let prospective, let maximum):
+            return SurfAceLocklessProtocolError(
+                code: "surface_state_capacity",
+                details: [
+                    "currentBytes": current,
+                    "maximumBytes": maximum,
+                    "prospectiveBytes": prospective,
+                ],
+                message: "Target apply work item exceeds surface recoverable base capacity"
+            )
+        default:
+            return SurfAceLocklessProtocolError(
+                code: "invalid_payload",
+                details: [:],
+                message: String(describing: error)
+            )
+        }
+    }
+
     private let fixedServerPort: UInt16 = 19_001
     var screenName: String
     var fingerprint: String
@@ -381,7 +430,6 @@ final class SurfAceRuntime {
     @ObservationIgnored private let surfaceTopologyStoreKey = "SurfAce.SurfaceTopologyMapping"
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private let locklessStateURLOverride: URL?
-    @ObservationIgnored private let allowIncompleteLocklessAdmissionForTesting: Bool
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
@@ -397,6 +445,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var persistedSurfaceTopologies: [String: SurfAcePersistedSurfaceTopology] = [:]
     @ObservationIgnored private var heartbeatWatchdogTask: Task<Void, Never>?
     @ObservationIgnored private var locklessAdapter: SurfAceLocklessRuntimeAdapter?
+    @ObservationIgnored private var legacyNegotiatedSurfaceIds: Set<String> = []
     @ObservationIgnored private var locklessConnectionsByConnectionUUID: [String: (
         controllerInstanceId: String,
         sender: SurfAceOutboundSender,
@@ -414,7 +463,7 @@ final class SurfAceRuntime {
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
-    private let targetCapabilities = [
+    let targetCapabilities = [
         "target.browser_url.v1",
     ]
     private let eventTypes = [
@@ -438,12 +487,10 @@ final class SurfAceRuntime {
 
     init(
         userDefaults: UserDefaults = .standard,
-        locklessStateURL: URL? = nil,
-        allowIncompleteLocklessAdmissionForTesting: Bool = false
+        locklessStateURL: URL? = nil
     ) {
         self.userDefaults = userDefaults
         self.locklessStateURLOverride = locklessStateURL
-        self.allowIncompleteLocklessAdmissionForTesting = allowIncompleteLocklessAdmissionForTesting
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
         let hostName = ProcessInfo.processInfo.hostName
@@ -480,7 +527,7 @@ final class SurfAceRuntime {
         guard !isStarted, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
-        await restoreLocklessAuthorityForLifecycle(reason: "process_start")
+        await restoreLocklessAuthority(reason: "process_start")
         isSceneAuthorityReady = true
         observeLifecycle()
         surfAceLifecycleLog(
@@ -613,6 +660,10 @@ final class SurfAceRuntime {
     }
 
     func registerSurfaceForScene(sceneKey: String, scene: UIScene? = nil) async -> SurfAceSurfaceModel? {
+        if let surfaceId = identityMapping.surfacesBySceneKey[sceneKey]?.surfaceId,
+           legacyNegotiatedSurfaceIds.contains(surfaceId) {
+            return registerSurface(sceneKey: sceneKey, scene: scene)
+        }
         guard let adapter = locklessAdapter else {
             return registerSurface(sceneKey: sceneKey, scene: scene)
         }
@@ -713,6 +764,11 @@ final class SurfAceRuntime {
     }
 
     func unregisterSurfaceForScene(sceneKey: String) async {
+        if let surfaceId = surfaceIdBySceneKey[sceneKey],
+           legacyNegotiatedSurfaceIds.contains(surfaceId) {
+            unregisterSurface(sceneKey: sceneKey)
+            return
+        }
         guard let adapter = locklessAdapter,
               let surfaceId = surfaceIdBySceneKey[sceneKey] else {
             unregisterSurface(sceneKey: sceneKey)
@@ -869,15 +925,33 @@ final class SurfAceRuntime {
         refreshBonjourTXT()
     }
 
-    private func restoreLocklessAuthorityForLifecycle(reason: String) async {
+    func restoreLocklessAuthority(reason: String) async {
         guard SurfAceLocklessTargetAdmission.platformPermitsLockless else { return }
         do {
             let adapter = try locklessAuthorityForLocalMutation()
+            let recovered = try await adapter.recoverTargetWork { [weak self] work in
+                guard let self else {
+                    return SurfAceLocklessMaterializationOutcome(
+                        errorCode: "materialization_failed", materializedState: nil, status: "failed"
+                    )
+                }
+                return await self.materializeLocklessTargetWork(work)
+            }
             let readiness = await adapter.readinessSnapshot()
             guard readiness.fullGenerationLoaded else {
                 throw SurfAceLocklessAuthorityError.invalidState("generation_not_loaded")
             }
+            guard readiness.targetWorkRecovered else {
+                throw SurfAceLocklessAuthorityError.invalidState("target_work_not_recovered")
+            }
+            applyNegotiatedModes(readiness.state)
             try projectLocklessAuthorityState(readiness.state)
+            for result in recovered {
+                await fanoutLocklessTargetResult(result)
+                await fanoutLocklessConsumable(
+                    scopeId: Self.locklessSurfaceScopeId(result.surfaceId), adapter: adapter
+                )
+            }
             surfAceLifecycleLog(
                 "event=lockless_authority_restored \(surfAceDiagnosticFields([("generation", readiness.state.generation), ("reason", reason), ("target_work_recovered", readiness.targetWorkRecovered)]))"
             )
@@ -921,7 +995,7 @@ final class SurfAceRuntime {
             surfaces.append(surface)
         }
 
-        for surface in surfaces {
+        for surface in surfaces where !legacyNegotiatedSurfaceIds.contains(surface.surfaceId) {
             guard let topology = topologies[surface.surfaceId] else { continue }
             project(topology: topology, onto: surface)
             if let authoritySurface = state.liveSurfaces[surface.surfaceId] {
@@ -1059,7 +1133,7 @@ final class SurfAceRuntime {
         fingerDrawEnabled: Bool,
         source: String? = nil
     ) {
-        if let adapter = locklessAdapter {
+        if let adapter = locklessAdapter, !legacyNegotiatedSurfaceIds.contains(surfaceId) {
             Task { @MainActor in
                 await commitLocalAnnotationMode(
                     adapter: adapter,
@@ -1104,7 +1178,7 @@ final class SurfAceRuntime {
     }
 
     func navigateHistory(surfaceId: String, paneId: Int, direction: HistoryDirection) {
-        if let adapter = locklessAdapter {
+        if let adapter = locklessAdapter, !legacyNegotiatedSurfaceIds.contains(surfaceId) {
             Task { @MainActor in
                 await commitLocalHistoryNavigation(
                     adapter: adapter,
@@ -1501,7 +1575,9 @@ final class SurfAceRuntime {
         strokes: [SurfAceStroke],
         drawingData: Data
     ) {
-        if let adapter = locklessAdapter, !strokes.isEmpty {
+        if let adapter = locklessAdapter,
+           !legacyNegotiatedSurfaceIds.contains(surfaceId),
+           !strokes.isEmpty {
             Task { @MainActor in
                 await commitLocalStrokes(
                     adapter: adapter,
@@ -1632,7 +1708,7 @@ final class SurfAceRuntime {
         }
     }
 
-    private func handleDidEnterBackground() async {
+    func handleDidEnterBackground() async {
         surfAceLifecycleLog(
             "event=app_background \(surfAceDiagnosticFields([("active_sessions", activeSessions.count), ("surface_count", surfaces.count)]))"
         )
@@ -1668,7 +1744,7 @@ final class SurfAceRuntime {
         )
         if locklessAdapter != nil {
             Task { @MainActor in
-                await restoreLocklessAuthorityForLifecycle(reason: "foreground")
+                await restoreLocklessAuthority(reason: "foreground")
                 publishBonjour()
                 for surfaceId in surfaceNeedsResumedEvent {
                     refreshConnectionState(surfaceId: surfaceId)
@@ -1882,7 +1958,9 @@ final class SurfAceRuntime {
         }
         switch op {
         case "surfaces.list":
-            return SurfAceProcessedRequestResult(responseObject: handleSurfacesList(id: id), postSendPairCommit: nil)
+            return SurfAceProcessedRequestResult(
+                responseObject: await handleSurfacesList(id: id), postSendPairCommit: nil
+            )
         case "pair.request":
             return await handlePairRequest(
                 id: id,
@@ -2012,8 +2090,45 @@ final class SurfAceRuntime {
         }
     }
 
-    private func handleSurfacesList(id: String) -> [String: Any] {
-        [
+    private func handleSurfacesList(id: String) async -> [String: Any] {
+        if let adapter = locklessAdapter {
+            let readiness = await adapter.readinessSnapshot()
+            if readiness.readyForAdmission {
+                let state = readiness.state
+                let limits = (try? Self.jsonObject(state.limits)) ?? [:]
+                let tombstones = (try? state.surfaceTombstones.map(Self.jsonObject)) ?? []
+                let liveControllerCount = state.controllers.values.filter { $0.status == .live }.count
+                return [
+                    "v": 1,
+                    "type": "response",
+                    "op": "surfaces.list",
+                    "id": id,
+                    "ok": true,
+                    "sentAt": timestampNow(),
+                    "payload": [
+                        "admissionAvailable": Int64(liveControllerCount) < state.limits.maxAdmittedControllerEntries,
+                        "capabilities": [
+                            "limits": limits,
+                            "protocolFeatures": SurfAceLocklessTargetAdmission.advertisedProtocolFeatures,
+                            "surfaceLifecycle": true,
+                        ],
+                        "surfaceSetRevision": state.surfaceSetRevision,
+                        "surfaceTombstones": tombstones,
+                        "surfaces": state.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }.map { surface in
+                            let runtimeSurface = surfaceById[surface.surfaceId]
+                            return [
+                                "surfaceId": surface.surfaceId,
+                                "name": surface.name,
+                                "viewport": runtimeSurface.map(viewportPayload(for:))
+                                    ?? ["width": 1, "height": 1, "scale": 1],
+                                "paired": false,
+                            ] as [String: Any]
+                        },
+                    ],
+                ]
+            }
+        }
+        return [
             "v": 1,
             "type": "response",
             "op": "surfaces.list",
@@ -2081,16 +2196,37 @@ final class SurfAceRuntime {
         }
         do {
             let adapter = try ensureLocklessAdapter()
+            let readiness = await adapter.readinessSnapshot()
+            guard readiness.readyForAdmission else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            let resume = try Self.locklessResumeState(from: payload["resume"])
+            let surfaceId = payload["surfaceId"] as? String
             let admission = try await adapter.admit(
                 controllerInstanceId: controllerInstanceId,
                 controllerProductName: payload["controllerProductName"] as? String,
                 connectionToken: connectionUUID,
                 projectionCapacityBytes: projectionCapacityBytes,
-                protocolFeatures: protocolFeatures
+                protocolFeatures: protocolFeatures,
+                surfaceId: surfaceId,
+                pendingAcks: resume.pendingAcks,
+                unresolvedRequestIds: resume.unresolvedRequestIds
             )
             locklessConnectionsByConnectionUUID[connectionUUID] = (controllerInstanceId, sender, socket)
+            applyNegotiatedModes(admission.state)
             let state = try Self.jsonObject(admission.state)
             let limits = try Self.jsonObject(admission.limits)
+            let admittedScopeIds: [String]
+            if let surfaceId, let surface = admission.state.liveSurfaces[surfaceId] {
+                admittedScopeIds = [Self.locklessSurfaceScopeId(surfaceId)] + surface.panes.values
+                    .sorted { $0.paneId < $1.paneId }
+                    .map { Self.locklessPaneScopeId(surfaceId: surfaceId, paneId: $0.paneId) }
+            } else {
+                admittedScopeIds = []
+            }
+            let scopes = try await adapter.consumableSnapshots(
+                connectionToken: connectionUUID, scopeIds: admittedScopeIds
+            ).map(Self.jsonObject)
             return SurfAceProcessedRequestResult(
                 responseObject: [
                     "v": 1,
@@ -2103,16 +2239,17 @@ final class SurfAceRuntime {
                         "capabilities": [
                             "protocolFeatures": [surfAceLocklessCapability],
                             "limits": limits,
+                            "surfaceLifecycle": true,
                         ],
                         "controllerInstanceId": controllerInstanceId,
                         "limits": limits,
                         "mode": "lockless",
-                        "receiptResolutions": [],
+                        "receiptResolutions": admission.receiptResolutions.map(Self.foundationJSON),
                         "resumed": admission.resumed,
-                        "scopes": [],
+                        "scopes": scopes,
                         "sessionId": connectionUUID,
                         "state": state,
-                        "surfaceId": (payload["surfaceId"] as? String) as Any? ?? NSNull(),
+                        "surfaceId": surfaceId as Any? ?? NSNull(),
                         "surfaceSetRevision": admission.state.surfaceSetRevision,
                     ],
                 ],
@@ -2123,6 +2260,7 @@ final class SurfAceRuntime {
             switch error {
             case .duplicateLiveController: code = "duplicate_controller_instance"
             case .controllerCapacity: code = "controller_capacity"
+            case .capabilityMismatch: code = "capability_mismatch"
             default: code = "invalid_payload"
             }
             return SurfAceProcessedRequestResult(
@@ -2150,6 +2288,33 @@ final class SurfAceRuntime {
             )
         }
         do {
+            if let surfaceId = payload["surfaceId"] as? String {
+                let authority = await adapter.snapshot()
+                if authority.negotiatedModes[surfaceId] != .lockless {
+                    return SurfAceProcessedRequestResult(
+                        responseObject: makeErrorResponse(
+                            op: op, id: id, code: "capability_mismatch",
+                            message: "surface is not negotiated in lockless mode"
+                        ),
+                        postSendPairCommit: nil
+                    )
+                }
+            } else if op == "surface.window.restore",
+                      let tombstoneId = payload["tombstoneId"] as? String {
+                let authority = await adapter.snapshot()
+                let retainedSurfaceId = authority.surfaceTombstones.first(where: {
+                    $0.tombstoneId == tombstoneId
+                })?.surface.surfaceId
+                if retainedSurfaceId.flatMap({ authority.negotiatedModes[$0] }) != .lockless {
+                    return SurfAceProcessedRequestResult(
+                        responseObject: makeErrorResponse(
+                            op: op, id: id, code: "capability_mismatch",
+                            message: "retained surface is not negotiated in lockless mode"
+                        ),
+                        postSendPairCommit: nil
+                    )
+                }
+            }
             let responsePayload: Any
             switch op {
             case "surfaces.list":
@@ -2190,7 +2355,7 @@ final class SurfAceRuntime {
                     throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
                 }
                 responsePayload = [
-                    "scopes": try await adapter.consumableSnapshots(
+                    "snapshots": try await adapter.consumableSnapshots(
                         connectionToken: connectionUUID, scopeIds: scopeIds
                     ).map(Self.jsonObject),
                 ]
@@ -2234,7 +2399,10 @@ final class SurfAceRuntime {
                     adapter: adapter
                 )
             case "heartbeat.ping":
-                responsePayload = ["alive": true]
+                guard let nonce = payload["nonce"] as? String, !nonce.isEmpty else {
+                    throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+                }
+                responsePayload = ["nonce": nonce]
             default:
                 return SurfAceProcessedRequestResult(
                     responseObject: makeErrorResponse(
@@ -2258,6 +2426,8 @@ final class SurfAceRuntime {
                 ],
                 postSendPairCommit: nil
             )
+        } catch let error as SurfAceLocklessRuntimeAdapterError {
+            return locklessAdapterErrorResult(op: op, id: id, error: error)
         } catch {
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(op: op, id: id, code: "invalid_payload", message: String(describing: error)),
@@ -2363,6 +2533,8 @@ final class SurfAceRuntime {
                 ],
                 postSendPairCommit: nil
             )
+        } catch let error as SurfAceLocklessRuntimeAdapterError {
+            return locklessAdapterErrorResult(op: "annotations.remove", id: id, error: error)
         } catch {
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(
@@ -2546,6 +2718,8 @@ final class SurfAceRuntime {
                 responseObject: makeErrorResponse(op: op, id: id, code: code, message: String(describing: error)),
                 postSendPairCommit: nil
             )
+        } catch let error as SurfAceLocklessRuntimeAdapterError {
+            return locklessAdapterErrorResult(op: op, id: id, error: error)
         } catch {
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(op: op, id: id, code: "invalid_payload", message: String(describing: error)),
@@ -2718,6 +2892,8 @@ final class SurfAceRuntime {
                     }
                 }
             )
+        } catch let error as SurfAceLocklessRuntimeAdapterError {
+            return locklessAdapterErrorResult(op: "target.apply", id: id, error: error)
         } catch {
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(
@@ -2756,8 +2932,10 @@ final class SurfAceRuntime {
 
     private func fanoutLocklessTargetResult(_ result: SurfAceLocklessTargetResult) async {
         var event: [String: SurfAceLocklessJSON] = [
+            "consumableSequence": .integer(result.consumableSequence),
             "intentCommitSequence": .integer(result.intentCommitSequence),
             "operationRequestId": .string(result.operationRequestId),
+            "recordId": .string(result.recordId),
             "status": .string(result.status),
             "surfaceId": .string(result.surfaceId),
             "targetEpoch": .integer(result.targetEpoch),
@@ -2934,6 +3112,7 @@ final class SurfAceRuntime {
                     let result = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
                         state: &state, expectedSurfaceSetRevision: expected, placement: placement
                     )
+                    state.negotiatedModes[result.surface.surfaceId] = .lockless
                     let terminal: SurfAceLocklessJSON = .object([
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
                         "surface": try Self.locklessJSON(result.surface),
@@ -3075,6 +3254,8 @@ final class SurfAceRuntime {
                 responseObject: makeErrorResponse(op: op, id: id, code: code, message: String(describing: error)),
                 postSendPairCommit: nil
             )
+        } catch let error as SurfAceLocklessRuntimeAdapterError {
+            return locklessAdapterErrorResult(op: op, id: id, error: error)
         } catch {
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(op: op, id: id, code: "invalid_payload", message: String(describing: error)),
@@ -3092,6 +3273,10 @@ final class SurfAceRuntime {
 
     func locklessAuthorityForLocalMutation() throws -> SurfAceLocklessRuntimeAdapter {
         try ensureLocklessAdapter()
+    }
+
+    func locklessReadinessSnapshot() async throws -> SurfAceLocklessReadinessSnapshot {
+        try await locklessAuthorityForLocalMutation().readinessSnapshot()
     }
 
     func fanoutLocklessCommittedEvent(
@@ -3204,6 +3389,71 @@ final class SurfAceRuntime {
         return nil
     }
 
+    private struct LocklessResumeState {
+        var pendingAcks: [SurfAceLocklessConsumableAcknowledgementIntent]
+        var unresolvedRequestIds: [String]
+    }
+
+    private static func locklessResumeState(from value: Any?) throws -> LocklessResumeState {
+        guard let value else { return LocklessResumeState(pendingAcks: [], unresolvedRequestIds: []) }
+        guard let resume = value as? [String: Any],
+              let rawAcks = resume["pendingAcks"] as? [[String: Any]],
+              let scopes = resume["scopes"] as? [String: Any] else {
+            throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+        }
+        guard Set(resume.keys).isSubset(of: ["pendingAcks", "scopes", "unresolvedRequestIds"]),
+              scopes.allSatisfy({ scopeId, value in
+                  guard !scopeId.isEmpty,
+                        let cursor = value as? [String: Any],
+                        Set(cursor.keys) == ["cursor", "gapGeneration"],
+                        let position = int64(cursor["cursor"]), position > 0,
+                        let gapGeneration = int64(cursor["gapGeneration"]), gapGeneration >= 0 else {
+                      return false
+                  }
+                  return true
+              }) else {
+            throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+        }
+        let pendingAcks = try rawAcks.map { acknowledgement in
+            guard Set(acknowledgement.keys).isSubset(of: ["cursor", "gapGeneration", "scopeId"]) else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            guard let scopeId = acknowledgement["scopeId"] as? String,
+                  !scopeId.isEmpty,
+                  let cursor = int64(acknowledgement["cursor"]),
+                  cursor > 0 else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            let gapGeneration = int64(acknowledgement["gapGeneration"])
+            if let gapGeneration, gapGeneration < 0 {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            return SurfAceLocklessConsumableAcknowledgementIntent(
+                cursor: cursor, gapGeneration: gapGeneration, scopeId: scopeId
+            )
+        }
+        let unresolvedRequestIds: [String]
+        if let raw = resume["unresolvedRequestIds"] {
+            guard let ids = raw as? [String], ids.allSatisfy({ !$0.isEmpty }) else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            unresolvedRequestIds = ids
+        } else {
+            unresolvedRequestIds = []
+        }
+        return LocklessResumeState(
+            pendingAcks: pendingAcks, unresolvedRequestIds: unresolvedRequestIds
+        )
+    }
+
+    private func applyNegotiatedModes(_ state: SurfAceLocklessAuthorityState) {
+        legacyNegotiatedSurfaceIds = Set(
+            state.negotiatedModes.compactMap { surfaceId, mode in
+                mode == .legacy ? surfaceId : nil
+            }
+        )
+    }
+
     nonisolated private static func locklessSurfaceScopeId(_ surfaceId: String) -> String {
         let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
         let encoded = surfaceId.addingPercentEncoding(withAllowedCharacters: unreserved) ?? surfaceId
@@ -3223,8 +3473,7 @@ final class SurfAceRuntime {
     ) async -> SurfAceProcessedRequestResult {
         if SurfAceLocklessTargetAdmission.isLocklessRequest(payload) {
             guard SurfAceLocklessTargetAdmission.platformPermitsLockless,
-                  SurfAceLocklessTargetAdmission.implementationComplete
-                    || allowIncompleteLocklessAdmissionForTesting else {
+                  SurfAceLocklessTargetAdmission.implementationComplete else {
                 let reason = SurfAceLocklessTargetAdmission.platformPermitsLockless
                     ? "native_lockless_contract_incomplete"
                     : "target_not_admitted"
@@ -3271,7 +3520,6 @@ final class SurfAceRuntime {
                 postSendPairCommit: nil
             )
         }
-
         guard protocolVersion == 1 else {
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(
@@ -3332,6 +3580,29 @@ final class SurfAceRuntime {
                 ),
                 postSendPairCommit: nil
             )
+        }
+
+        if let adapter = locklessAdapter {
+            do {
+                let state = try await adapter.negotiateLegacySurface(surfaceId)
+                applyNegotiatedModes(state)
+            } catch SurfAceLocklessRuntimeAdapterError.capabilityMismatch {
+                return SurfAceProcessedRequestResult(
+                    responseObject: makeErrorResponse(
+                        op: "pair.request", id: id, code: "capability_mismatch",
+                        message: "surface is already negotiated in lockless mode"
+                    ),
+                    postSendPairCommit: nil
+                )
+            } catch {
+                return SurfAceProcessedRequestResult(
+                    responseObject: makeErrorResponse(
+                        op: "pair.request", id: id, code: "client_state_unavailable",
+                        message: error.localizedDescription
+                    ),
+                    postSendPairCommit: nil
+                )
+            }
         }
 
         let activeSession = activeSessions[surfaceId]
@@ -3716,7 +3987,7 @@ final class SurfAceRuntime {
         return await handleContentApply(id: id, payload: payload, surfaceId: surfaceId)
     }
 
-    private func handleContentApply(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
+    func handleContentApply(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
         guard let paneId = payload["paneId"] as? Int,
               let pane = pane(surfaceId: surfaceId, paneId: paneId),
               let revision = payload["revision"] as? Int else {
@@ -3916,7 +4187,7 @@ final class SurfAceRuntime {
         return await materializeTargetApply(id: id, payload: payload, surfaceId: surfaceId)
     }
 
-    private func materializeTargetApply(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
+    func materializeTargetApply(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
         func result(
             requestId: String,
             targetId: String,
@@ -4875,7 +5146,7 @@ final class SurfAceRuntime {
         guard case .split(_, let children, _) = target,
               weights.count == children.count else { return }
         let nextLayout = surface.paneLayout.updatingSplitWeights(path: path, weights: weights)
-        if let adapter = locklessAdapter {
+        if let adapter = locklessAdapter, !legacyNegotiatedSurfaceIds.contains(surfaceId) {
             do {
                 let topology = try canonicalTopologyJSON(
                     from: SurfAcePersistedPaneLayoutNode(from: nextLayout)
@@ -5230,7 +5501,7 @@ final class SurfAceRuntime {
         )
     }
 
-    private func applyFreshProviderAdmissionTopology(
+    func applyFreshProviderAdmissionTopology(
         surface: SurfAceSurfaceModel,
         windowLabel: String,
         initialPaneId: Int,
@@ -5630,6 +5901,24 @@ final class SurfAceRuntime {
         (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]).count) ?? 0
     }
 
+    private func locklessAdapterErrorResult(
+        op: String,
+        id: String,
+        error: SurfAceLocklessRuntimeAdapterError
+    ) -> SurfAceProcessedRequestResult {
+        let mapped = Self.locklessProtocolError(for: error)
+        return SurfAceProcessedRequestResult(
+            responseObject: makeErrorResponse(
+                op: op,
+                id: id,
+                code: mapped.code,
+                message: mapped.message,
+                details: mapped.details.isEmpty ? nil : mapped.details.mapValues { $0 as Any }
+            ),
+            postSendPairCommit: nil
+        )
+    }
+
     private func makeErrorResponse(
         op: String,
         id: String,
@@ -5879,73 +6168,6 @@ final class SurfAceRuntime {
         return string
     }
 }
-
-#if DEBUG
-extension SurfAceRuntime {
-    func startLocklessServerForTesting(port: UInt16) async throws -> UInt16 {
-        await prepareLocklessLifecycleForTesting()
-        let bound = try await server.startForTesting(
-            port: port,
-            webSocketPath: webSocketPath,
-            httpHandler: { [weak self] request in
-                guard let self else { return .empty(statusCode: 503) }
-                return await self.handleHTTP(request: request)
-            },
-            webSocketHandler: { [weak self] socket in
-                await self?.handleWebSocket(socket)
-            }
-        )
-        serverPort = Int(bound)
-        isStarted = true
-        return bound
-    }
-
-    func prepareLocklessLifecycleForTesting(reason: String = "testing_process_start") async {
-        await restoreLocklessAuthorityForLifecycle(reason: reason)
-        isSceneAuthorityReady = true
-    }
-
-    func enterBackgroundForTesting() async {
-        await handleDidEnterBackground()
-    }
-
-    func enterForegroundForTesting() async {
-        await restoreLocklessAuthorityForLifecycle(reason: "testing_foreground")
-    }
-
-    func locklessReadinessForTesting() async throws -> SurfAceLocklessReadinessSnapshot {
-        try await locklessAuthorityForLocalMutation().readinessSnapshot()
-    }
-
-    func targetCapabilitiesForTesting() -> [String] {
-        targetCapabilities
-    }
-
-    func materializeTargetApplyForTesting(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
-        await materializeTargetApply(id: id, payload: payload, surfaceId: surfaceId)
-    }
-
-    func contentApplyForTesting(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
-        await handleContentApply(id: id, payload: payload, surfaceId: surfaceId)
-    }
-
-    func freshProviderAdmissionTopologyForTesting(
-        surfaceId: String,
-        windowLabel: String,
-        initialPaneId: Int,
-        initialPaneLabel: Int
-    ) {
-        guard let surface = surfaceById[surfaceId] else { return }
-        applyFreshProviderAdmissionTopology(
-            surface: surface,
-            windowLabel: windowLabel,
-            initialPaneId: initialPaneId,
-            initialPaneLabel: initialPaneLabel,
-            requestId: "testing"
-        )
-    }
-}
-#endif
 
 private struct AnyEncodable: Encodable {
     private let encodeImpl: (Encoder) throws -> Void

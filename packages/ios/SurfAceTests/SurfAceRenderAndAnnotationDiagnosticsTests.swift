@@ -100,7 +100,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let surface = runtime.registerSurface(sceneKey: "render-pending")
         let pane = try XCTUnwrap(surface.panes.first)
 
-        let response = await runtime.contentApplyForTesting(
+        let response = await runtime.handleContentApply(
             id: "rq_render_pending",
             payload: htmlApplyPayload(paneId: pane.paneId, revision: 1),
             surfaceId: surface.surfaceId
@@ -127,7 +127,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let surface = runtime.registerSurface(sceneKey: "render-pending-image")
         let pane = try XCTUnwrap(surface.panes.first)
 
-        let response = await runtime.contentApplyForTesting(
+        let response = await runtime.handleContentApply(
             id: "rq_render_pending_image",
             payload: imageApplyPayload(paneId: pane.paneId, revision: 1),
             surfaceId: surface.surfaceId
@@ -151,7 +151,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let bridge = RecordingPaneBridge()
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
-        let response = await runtime.contentApplyForTesting(
+        let response = await runtime.handleContentApply(
             id: "rq_render_diagnostics",
             payload: htmlApplyPayload(paneId: pane.paneId, revision: 1, title: "flynn"),
             surfaceId: surface.surfaceId
@@ -174,7 +174,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let bridge = RecordingPaneBridge()
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
-        _ = await runtime.contentApplyForTesting(
+        _ = await runtime.handleContentApply(
             id: "rq_content_scale",
             payload: htmlApplyPayload(paneId: pane.paneId, revision: 1),
             surfaceId: surface.surfaceId
@@ -194,7 +194,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let firstPane = try XCTUnwrap(firstSurface.panes.first)
         let firstBridge = RecordingPaneBridge()
         runtime.attachPaneBridge(surfaceId: firstSurface.surfaceId, paneId: firstPane.paneId, bridge: firstBridge)
-        _ = await runtime.contentApplyForTesting(
+        _ = await runtime.handleContentApply(
             id: "rq_content_scale_first",
             payload: htmlApplyPayload(paneId: firstPane.paneId, revision: 1),
             surfaceId: firstSurface.surfaceId
@@ -204,7 +204,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let focusedPane = try XCTUnwrap(focusedSurface.panes.first)
         let focusedBridge = RecordingPaneBridge()
         runtime.attachPaneBridge(surfaceId: focusedSurface.surfaceId, paneId: focusedPane.paneId, bridge: focusedBridge)
-        _ = await runtime.contentApplyForTesting(
+        _ = await runtime.handleContentApply(
             id: "rq_content_scale_focused",
             payload: htmlApplyPayload(paneId: focusedPane.paneId, revision: 1),
             surfaceId: focusedSurface.surfaceId
@@ -230,7 +230,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(bridge.contentScales, [1])
         XCTAssertEqual(pane.contentScale, 1)
 
-        _ = await runtime.contentApplyForTesting(
+        _ = await runtime.handleContentApply(
             id: "rq_content_scale_annotation",
             payload: htmlApplyPayload(paneId: pane.paneId, revision: 1),
             surfaceId: surface.surfaceId
@@ -670,7 +670,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let bridge = RecordingPaneBridge()
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
-        let pushResponse = await runtime.contentApplyForTesting(
+        let pushResponse = await runtime.handleContentApply(
             id: "rq_t1206_initial_content",
             payload: htmlApplyPayload(paneId: pane.paneId, revision: 1, title: "Still visible"),
             surfaceId: surface.surfaceId
@@ -679,11 +679,12 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(pane.currentEntry.contentId, "ct_1234abcd")
         XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd"])
 
-        runtime.freshProviderAdmissionTopologyForTesting(
-            surfaceId: surface.surfaceId,
+        runtime.applyFreshProviderAdmissionTopology(
+            surface: surface,
             windowLabel: "b",
             initialPaneId: 77,
-            initialPaneLabel: 77
+            initialPaneLabel: 77,
+            requestId: "rq_provider_admission"
         )
 
         XCTAssertEqual(surface.windowLabel, "b")
@@ -693,7 +694,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(pane.currentEntry.contentType, .html)
         XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd"])
 
-        let replacementResponse = await runtime.contentApplyForTesting(
+        let replacementResponse = await runtime.handleContentApply(
             id: "rq_t1206_replacement",
             payload: imageApplyPayload(paneId: pane.paneId, revision: 2),
             surfaceId: surface.surfaceId
@@ -703,7 +704,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(pane.currentEntry.contentType, .image)
         XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd", "ct_1234abce"])
 
-        let clearResponse = await runtime.contentApplyForTesting(
+        let clearResponse = await runtime.handleContentApply(
             id: "rq_t1206_clear",
             payload: [
                 "clear": true,
@@ -725,7 +726,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let bridge = RecordingPaneBridge()
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
-        let pushResponse = await runtime.contentApplyForTesting(
+        let pushResponse = await runtime.handleContentApply(
             id: "rq_push_then_clear",
             payload: htmlApplyPayload(paneId: pane.paneId, revision: 1),
             surfaceId: surface.surfaceId
@@ -734,7 +735,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertFalse(surfAceEntryIsVisibleEmpty(pane.currentEntry))
         XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd"])
 
-        let clearResponse = await runtime.contentApplyForTesting(
+        let clearResponse = await runtime.handleContentApply(
             id: "rq_clear_after_push",
             payload: [
                 "clear": true,
@@ -755,17 +756,17 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
         XCTAssertFalse(runtime.isSceneAuthorityReady)
 
-        await runtime.prepareLocklessLifecycleForTesting()
+        await runtime.restoreLocklessAuthority(reason: "test_process_start")
         let registeredSurface = await runtime.registerSurfaceForScene(sceneKey: "scene-lifecycle")
         let surface = try XCTUnwrap(registeredSurface)
-        let beforeBackground = try await runtime.locklessReadinessForTesting()
+        let beforeBackground = try await runtime.locklessReadinessSnapshot()
         XCTAssertTrue(beforeBackground.fullGenerationLoaded)
         XCTAssertTrue(beforeBackground.readyForAdmission)
 
-        await runtime.enterBackgroundForTesting()
-        await runtime.enterForegroundForTesting()
+        await runtime.handleDidEnterBackground()
+        await runtime.restoreLocklessAuthority(reason: "test_foreground")
 
-        let foreground = try await runtime.locklessReadinessForTesting()
+        let foreground = try await runtime.locklessReadinessSnapshot()
         XCTAssertTrue(foreground.fullGenerationLoaded)
         XCTAssertTrue(foreground.targetWorkRecovered)
         XCTAssertTrue(foreground.readyForAdmission)
@@ -777,13 +778,13 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             userDefaults: isolatedUserDefaults(),
             locklessStateURL: try locklessStateURL()
         )
-        await runtime.prepareLocklessLifecycleForTesting()
+        await runtime.restoreLocklessAuthority(reason: "test_process_start")
         let registeredOriginal = await runtime.registerSurfaceForScene(sceneKey: "scene-zero-live")
         let original = try XCTUnwrap(registeredOriginal)
         let originalPaneIds = original.panes.map(\.paneId)
 
         await runtime.unregisterSurfaceForScene(sceneKey: "scene-zero-live")
-        let closed = try await runtime.locklessReadinessForTesting()
+        let closed = try await runtime.locklessReadinessSnapshot()
         XCTAssertTrue(closed.state.liveSurfaces.isEmpty)
         XCTAssertEqual(closed.state.surfaceTombstones.map(\.surface.surfaceId), [original.surfaceId])
         XCTAssertEqual(closed.state.sceneSurfaceIds["scene-zero-live"], original.surfaceId)
@@ -792,24 +793,25 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let restored = try XCTUnwrap(registeredRestored)
         XCTAssertEqual(restored.surfaceId, original.surfaceId)
         XCTAssertEqual(restored.panes.map(\.paneId), originalPaneIds)
-        let restoredState = try await runtime.locklessReadinessForTesting()
+        let restoredState = try await runtime.locklessReadinessSnapshot()
         XCTAssertTrue(restoredState.state.surfaceTombstones.isEmpty)
     }
 
     func testLocklessProcessRestartLoadsGenerationBeforeRestoringTombstonedScene() async throws {
         let stateURL = try locklessStateURL()
         let firstRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
-        await firstRuntime.prepareLocklessLifecycleForTesting()
+        await firstRuntime.restoreLocklessAuthority(reason: "test_process_start")
         let registeredOriginal = await firstRuntime.registerSurfaceForScene(sceneKey: "scene-restart")
         let original = try XCTUnwrap(registeredOriginal)
         let originalPaneIds = original.panes.map(\.paneId)
         await firstRuntime.unregisterSurfaceForScene(sceneKey: "scene-restart")
 
         let restartedRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
+        addTeardownBlock { await restartedRuntime.stop() }
         XCTAssertFalse(restartedRuntime.isSceneAuthorityReady)
-        await restartedRuntime.prepareLocklessLifecycleForTesting(reason: "testing_process_restart")
+        await restartedRuntime.start()
         XCTAssertTrue(restartedRuntime.isSceneAuthorityReady)
-        let readiness = try await restartedRuntime.locklessReadinessForTesting()
+        let readiness = try await restartedRuntime.locklessReadinessSnapshot()
         XCTAssertTrue(readiness.fullGenerationLoaded)
         XCTAssertTrue(readiness.readyForAdmission)
         XCTAssertTrue(readiness.state.liveSurfaces.isEmpty)
@@ -820,12 +822,68 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(restored.panes.map(\.paneId), originalPaneIds)
     }
 
+    func testLocklessProcessRestartRecoversPendingTargetWorkWithoutLiveSceneBeforeAdmission() async throws {
+        let stateURL = try locklessStateURL()
+        let firstRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
+        await firstRuntime.restoreLocklessAuthority(reason: "test_process_start")
+        let registeredSurface = await firstRuntime.registerSurfaceForScene(
+            sceneKey: "scene-pending-target"
+        )
+        let surface = try XCTUnwrap(registeredSurface)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let firstAdapter = try firstRuntime.locklessAuthorityForLocalMutation()
+        _ = try await firstAdapter.admit(
+            controllerInstanceId: "controller-target-recovery",
+            controllerProductName: "surf-ace",
+            connectionToken: "connection-target-recovery",
+            projectionCapacityBytes: 8 * 1_024 * 1_024,
+            protocolFeatures: [surfAceLocklessCapability],
+            surfaceId: surface.surfaceId
+        )
+        _ = try await firstAdapter.commitTargetIntent(
+            connectionToken: "connection-target-recovery",
+            operationRequestId: "operation-target-recovery",
+            targetRequestId: "target-request-recovery",
+            surfaceId: surface.surfaceId,
+            targetId: "target-recovery",
+            targetEpoch: 1,
+            request: .object([
+                "paneId": .integer(Int64(pane.paneId)),
+                "surfaceId": .string(surface.surfaceId),
+                "targetHeader": .object([:]),
+                "targetKind": .string("browser_url"),
+                "targetPayload": .object(["url": .string("https://example.com")]),
+            ])
+        )
+
+        let restartedRuntime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL
+        )
+        await restartedRuntime.restoreLocklessAuthority(reason: "test_pending_target_restart")
+        let recovered = try await restartedRuntime.locklessReadinessSnapshot()
+        XCTAssertTrue(recovered.readyForAdmission)
+        XCTAssertTrue(recovered.targetWorkRecovered)
+        XCTAssertTrue(recovered.state.targetApplyWorkItems.isEmpty)
+        let result = try XCTUnwrap(recovered.state.targetApplyResults["operation-target-recovery"])
+        XCTAssertEqual(result.status, "failed")
+        XCTAssertEqual(result.errorCode, "capability_missing")
+        XCTAssertGreaterThan(result.consumableSequence, 0)
+
+        let terminalRestart = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL
+        )
+        await terminalRestart.restoreLocklessAuthority(reason: "test_terminal_target_restart")
+        let terminal = try await terminalRestart.locklessReadinessSnapshot()
+        XCTAssertEqual(terminal.state.targetApplyResults["operation-target-recovery"], result)
+        XCTAssertTrue(terminal.state.targetApplyWorkItems.isEmpty)
+    }
+
     func testLocalPaneCloseRestoreUsesSharedRecoverableTopologyAuthority() async throws {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(),
             locklessStateURL: try locklessStateURL()
         )
-        await runtime.prepareLocklessLifecycleForTesting()
+        await runtime.restoreLocklessAuthority(reason: "test_process_start")
         let registeredSurface = await runtime.registerSurfaceForScene(sceneKey: "scene-pane-close")
         let surface = try XCTUnwrap(registeredSurface)
         let surfaceId = surface.surfaceId
@@ -849,7 +907,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             surfaceId: surfaceId,
             paneId: Int(createdPaneId)
         )
-        let closedState = try await runtime.locklessReadinessForTesting()
+        let closedState = try await runtime.locklessReadinessSnapshot()
         let closed = closedState.state.liveSurfaces[surfaceId]
         XCTAssertNil(closed?.panes[String(createdPaneId)])
         XCTAssertEqual(closed?.paneTombstones.map(\.tombstoneId), [tombstoneId])
@@ -861,7 +919,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             direction: "vertical"
         )
         XCTAssertEqual(restoredPaneId, Int(createdPaneId))
-        let restoredState = try await runtime.locklessReadinessForTesting()
+        let restoredState = try await runtime.locklessReadinessSnapshot()
         let restored = restoredState.state.liveSurfaces[surfaceId]
         XCTAssertNotNil(restored?.panes[String(createdPaneId)])
         XCTAssertTrue(restored?.paneTombstones.isEmpty == true)

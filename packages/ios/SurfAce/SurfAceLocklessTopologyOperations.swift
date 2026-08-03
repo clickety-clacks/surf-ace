@@ -443,6 +443,72 @@ enum SurfAceLocklessTopologyOperations {
             return .init(surface: surface, surfaceSetRevision: candidate.surfaceSetRevision, tombstoneId: tombstoneId)
         }
     }
+
+    static func surfaceBaseBytes(_ surface: SurfAceLocklessSurfaceMaterial) throws -> Int64 {
+        try encodedBytes(Versioned(value: surfaceBaseMaterial(surface)))
+    }
+
+    static func restoredSurfaceTombstoneBytes(
+        closedSequence: Int64,
+        scopes: [String: SurfAceLocklessConsumableScope],
+        surface: SurfAceLocklessSurfaceMaterial,
+        tombstoneId: String
+    ) throws -> Int64 {
+        try surfaceTombstoneBytes(
+            closedSequence: closedSequence,
+            scopes: scopes,
+            surface: surface,
+            tombstoneId: tombstoneId
+        )
+    }
+
+    static func validateRestoredRecoverableState(
+        _ state: SurfAceLocklessAuthorityState
+    ) throws {
+        for (surfaceId, surface) in state.liveSurfaces {
+            guard surfaceId == surface.surfaceId else {
+                throw SurfAceLocklessAuthorityError.invalidState("surface_key")
+            }
+            try validateRestoredSurface(surface, limits: state.limits, path: "live_surface:\(surfaceId)")
+        }
+
+        var tombstoneCount: Int64 = 0
+        var tombstoneBytes: Int64 = 0
+        for tombstone in state.surfaceTombstones {
+            try validateRestoredSurface(
+                tombstone.surface,
+                limits: state.limits,
+                path: "surface_tombstone:\(tombstone.tombstoneId)"
+            )
+            let exact = try surfaceTombstoneBytes(
+                closedSequence: tombstone.closedSequence,
+                scopes: tombstone.scopes,
+                surface: tombstone.surface,
+                tombstoneId: tombstone.tombstoneId
+            )
+            guard tombstone.bytes == exact else {
+                throw SurfAceLocklessAuthorityError.invalidState("surface_tombstone_exact_bytes:\(tombstone.tombstoneId)")
+            }
+            guard exact <= state.limits.maxRecoverableSurfaceBytes else {
+                throw SurfAceLocklessAuthorityError.invalidState("recoverable_surface_bytes:\(tombstone.tombstoneId)")
+            }
+            tombstoneCount += 1
+            tombstoneBytes = saturatingAdd(tombstoneBytes, exact)
+        }
+
+        for surface in state.liveSurfaces.values {
+            for tombstone in surface.paneTombstones {
+                tombstoneCount += 1
+                tombstoneBytes = saturatingAdd(tombstoneBytes, tombstone.bytes)
+            }
+        }
+        guard tombstoneCount <= state.limits.maxRetainedTombstones else {
+            throw SurfAceLocklessAuthorityError.invalidState("retained_tombstone_entries")
+        }
+        guard tombstoneBytes <= state.limits.maxRetainedTombstoneBytes else {
+            throw SurfAceLocklessAuthorityError.invalidState("retained_tombstone_bytes")
+        }
+    }
 }
 
 private extension SurfAceLocklessTopologyOperations {
@@ -503,7 +569,13 @@ private extension SurfAceLocklessTopologyOperations {
         for pane in surface.panes.values { try assertPaneCapacity(current: try paneBytes(pane), pane: pane, limits: limits) }
     }
     static func assertSurfaceBaseCapacity(_ surface: SurfAceLocklessSurfaceMaterial, limits: SurfAceLocklessCapacityLimits) throws {
-        let base: SurfAceLocklessJSON = .object([
+        let bytes = try surfaceBaseBytes(surface)
+        guard bytes <= limits.maxSurfaceRecoverableBaseBytes else {
+            throw Error.surfaceStateCapacity(current: bytes, prospective: bytes, maximum: limits.maxSurfaceRecoverableBaseBytes)
+        }
+    }
+    static func surfaceBaseMaterial(_ surface: SurfAceLocklessSurfaceMaterial) -> SurfAceLocklessJSON {
+        .object([
             "name": .string(surface.name), "nativeRestoreMaterial": surface.nativeRestoreMaterial,
             "nextPaneId": .integer(surface.nextPaneId), "nextPaneLabel": .integer(surface.nextPaneLabel),
             "paneIds": .array(surface.panes.values.map(\.paneId).sorted().map(SurfAceLocklessJSON.integer)),
@@ -512,10 +584,6 @@ private extension SurfAceLocklessTopologyOperations {
             "topology": surface.topology, "topologyRevision": .integer(surface.topologyRevision),
             "windowLabel": .string(surface.windowLabel),
         ])
-        let bytes = try encodedBytes(Versioned(value: base))
-        guard bytes <= limits.maxSurfaceRecoverableBaseBytes else {
-            throw Error.surfaceStateCapacity(current: bytes, prospective: bytes, maximum: limits.maxSurfaceRecoverableBaseBytes)
-        }
     }
     static func assertPaneCapacity(current: Int64, pane: SurfAceLocklessPaneMaterial, limits: SurfAceLocklessCapacityLimits) throws {
         let prospective = try paneBytes(pane)
@@ -539,6 +607,58 @@ private extension SurfAceLocklessTopologyOperations {
     }
     static func surfaceTombstoneBytes(closedSequence: Int64, scopes: [String: SurfAceLocklessConsumableScope], surface: SurfAceLocklessSurfaceMaterial, tombstoneId: String) throws -> Int64 {
         try encodedBytes(SurfaceTombstoneEncoding(closedSequence: closedSequence, scopes: scopes, surface: surface, tombstoneId: tombstoneId))
+    }
+
+    static func validateRestoredSurface(
+        _ surface: SurfAceLocklessSurfaceMaterial,
+        limits: SurfAceLocklessCapacityLimits,
+        path: String
+    ) throws {
+        guard Int64(surface.panes.count + surface.paneTombstones.count)
+                <= limits.maxPanesPerSurface + limits.maxRetainedTombstones else {
+            throw SurfAceLocklessAuthorityError.invalidState("surface_recoverable_envelope:\(path)")
+        }
+        do {
+            try assertSurfaceBaseCapacity(surface, limits: limits)
+        } catch {
+            throw SurfAceLocklessAuthorityError.invalidState("surface_base_bytes:\(path)")
+        }
+        for pane in surface.panes.values {
+            do {
+                try assertPaneCapacity(current: try paneBytes(pane), pane: pane, limits: limits)
+            } catch {
+                throw SurfAceLocklessAuthorityError.invalidState("pane_recoverable_bytes:\(path):\(pane.paneId)")
+            }
+        }
+        for tombstone in surface.paneTombstones {
+            do {
+                try assertPaneCapacity(
+                    current: try paneBytes(tombstone.pane),
+                    pane: tombstone.pane,
+                    limits: limits
+                )
+            } catch {
+                throw SurfAceLocklessAuthorityError.invalidState(
+                    "pane_tombstone_recoverable_bytes:\(path):\(tombstone.tombstoneId)"
+                )
+            }
+            let exact = try paneTombstoneBytes(
+                closedSequence: tombstone.closedSequence,
+                pane: tombstone.pane,
+                scope: tombstone.scope,
+                tombstoneId: tombstone.tombstoneId
+            )
+            guard tombstone.bytes == exact else {
+                throw SurfAceLocklessAuthorityError.invalidState(
+                    "pane_tombstone_exact_bytes:\(path):\(tombstone.tombstoneId)"
+                )
+            }
+        }
+    }
+
+    static func saturatingAdd(_ left: Int64, _ right: Int64) -> Int64 {
+        let (sum, overflow) = left.addingReportingOverflow(right)
+        return overflow ? .max : sum
     }
 
     static func emptyPane(surfaceId: String, paneId: Int64, paneLabel: Int64) -> SurfAceLocklessPaneMaterial {

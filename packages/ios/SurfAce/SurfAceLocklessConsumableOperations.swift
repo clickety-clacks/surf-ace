@@ -35,6 +35,12 @@ struct SurfAceLocklessConsumableAcknowledgement: Codable, Equatable, Sendable {
     var acceptedGapGeneration: Int64
 }
 
+struct SurfAceLocklessConsumableAcknowledgementIntent: Codable, Equatable, Sendable {
+    var cursor: Int64
+    var gapGeneration: Int64?
+    var scopeId: String
+}
+
 enum SurfAceLocklessConsumableOperations {
     private struct VersionedRecord: Encodable {
         var payload: SurfAceLocklessJSON
@@ -77,6 +83,15 @@ enum SurfAceLocklessConsumableOperations {
             scopeId: scopeId,
             scopeKind: scopeKind
         )
+    }
+
+    static func restoredRecordBytes(_ record: SurfAceLocklessConsumableRecord) throws -> Int64 {
+        try makeRecord(
+            payload: record.payload,
+            recordClass: record.recordClass,
+            recordId: record.recordId,
+            sequence: record.sequence
+        ).bytes
     }
 
     /// Adds the persistent cursor projection required when an identity is first admitted.
@@ -290,6 +305,87 @@ enum SurfAceLocklessConsumableOperations {
         )
     }
 
+    static func reclaimController(
+        _ controllerInstanceId: String,
+        in state: inout SurfAceLocklessAuthorityState
+    ) {
+        for scopeId in state.scopes.keys.sorted() {
+            guard var scope = state.scopes[scopeId] else { continue }
+            removeController(controllerInstanceId, from: &scope)
+            state.scopes[scopeId] = scope
+        }
+        for surfaceId in state.liveSurfaces.keys.sorted() {
+            guard var surface = state.liveSurfaces[surfaceId] else { continue }
+            for index in surface.paneTombstones.indices {
+                removeController(controllerInstanceId, from: &surface.paneTombstones[index].scope)
+            }
+            state.liveSurfaces[surfaceId] = surface
+        }
+        for surfaceIndex in state.surfaceTombstones.indices {
+            for scopeId in state.surfaceTombstones[surfaceIndex].scopes.keys.sorted() {
+                guard var scope = state.surfaceTombstones[surfaceIndex].scopes[scopeId] else { continue }
+                removeController(controllerInstanceId, from: &scope)
+                state.surfaceTombstones[surfaceIndex].scopes[scopeId] = scope
+            }
+            for paneIndex in state.surfaceTombstones[surfaceIndex].surface.paneTombstones.indices {
+                removeController(
+                    controllerInstanceId,
+                    from: &state.surfaceTombstones[surfaceIndex].surface.paneTombstones[paneIndex].scope
+                )
+            }
+        }
+    }
+
+    static func validateRestoredScope(
+        _ scope: SurfAceLocklessConsumableScope,
+        limits: SurfAceLocklessCapacityLimits,
+        path: String
+    ) throws {
+        guard scope.scopeKind == "pane" || scope.scopeKind == "surface" else {
+            throw SurfAceLocklessAuthorityError.invalidState("consumable_scope_kind:\(path)")
+        }
+        guard scope.nextSequence > 0 else {
+            throw SurfAceLocklessAuthorityError.invalidState("consumable_next_sequence:\(path)")
+        }
+        guard scope.scopeKind == "pane" || scope.liveFrames.isEmpty else {
+            throw SurfAceLocklessAuthorityError.invalidState("surface_live_frames:\(path)")
+        }
+        let retained = scope.records + Array(scope.liveFrames.values)
+        let recordLimit = scope.scopeKind == "pane"
+            ? limits.maxPaneConsumableRecords
+            : limits.maxSurfaceConsumableRecords
+        let byteLimit = scope.scopeKind == "pane"
+            ? limits.maxPaneConsumableBytes
+            : limits.maxSurfaceConsumableBytes
+        guard Int64(retained.count) <= recordLimit else {
+            throw SurfAceLocklessAuthorityError.invalidState("consumable_record_entries:\(path)")
+        }
+        guard Set(retained.map(\.recordId)).count == retained.count,
+              Set(retained.map(\.sequence)).count == retained.count,
+              retained.allSatisfy({ $0.sequence > 0 && $0.sequence < scope.nextSequence }) else {
+            throw SurfAceLocklessAuthorityError.invalidState("consumable_record_identity:\(path)")
+        }
+        var bytes: Int64 = 0
+        for record in retained {
+            let exact = try makeRecord(
+                payload: record.payload,
+                recordClass: record.recordClass,
+                recordId: record.recordId,
+                sequence: record.sequence
+            ).bytes
+            guard record.bytes == exact else {
+                throw SurfAceLocklessAuthorityError.invalidState("consumable_record_exact_bytes:\(path):\(record.recordId)")
+            }
+            guard exact <= limits.maxConsumableRecordBytes else {
+                throw SurfAceLocklessAuthorityError.invalidState("consumable_record_bytes:\(path):\(record.recordId)")
+            }
+            bytes = saturatingAdd(bytes, exact)
+        }
+        guard bytes <= byteLimit else {
+            throw SurfAceLocklessAuthorityError.invalidState("consumable_scope_bytes:\(path)")
+        }
+    }
+
     private static func makeRecord(
         payload: SurfAceLocklessJSON,
         recordClass: SurfAceLocklessConsumableRecordClass,
@@ -384,9 +480,19 @@ enum SurfAceLocklessConsumableOperations {
     private static func dropFullyConsumedRecords(from scope: inout SurfAceLocklessConsumableScope) {
         guard let floor = scope.cursors.values.map(\.cursor).min() else {
             scope.records.removeAll()
+            scope.liveFrames.removeAll()
             return
         }
         scope.records.removeAll { $0.sequence < floor }
+        scope.liveFrames = scope.liveFrames.filter { $0.value.sequence >= floor }
+    }
+
+    private static func removeController(
+        _ controllerInstanceId: String,
+        from scope: inout SurfAceLocklessConsumableScope
+    ) {
+        scope.cursors.removeValue(forKey: controllerInstanceId)
+        dropFullyConsumedRecords(from: &scope)
     }
 
     private static func orderedUnion(

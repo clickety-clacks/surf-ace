@@ -78,8 +78,10 @@ targets:
     platform: macOS
     sources:
       - path: SurfAce/SurfAceLocklessAuthority.swift
+      - path: SurfAce/SurfAceLocklessConsumableOperations.swift
       - path: SurfAce/SurfAceLocklessMigration.swift
       - path: SurfAce/SurfAceLocklessTopologyCodec.swift
+      - path: SurfAce/SurfAceLocklessTopologyOperations.swift
       - path: HostTools/LegacyRollback
     settings:
       base:
@@ -89,8 +91,10 @@ targets:
     platform: macOS
     sources:
       - path: SurfAce/SurfAceLocklessAuthority.swift
+      - path: SurfAce/SurfAceLocklessConsumableOperations.swift
       - path: SurfAce/SurfAceLocklessMigration.swift
       - path: SurfAce/SurfAceLocklessTopologyCodec.swift
+      - path: SurfAce/SurfAceLocklessTopologyOperations.swift
       - path: HostTools/LegacyRollback/SurfAceAppleRollback.swift
       - path: HostTools/LegacyRollbackTests
     settings:

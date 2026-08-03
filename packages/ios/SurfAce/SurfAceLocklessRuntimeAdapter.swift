@@ -40,12 +40,21 @@ enum SurfAceLocklessTargetAdmission {
 }
 
 enum SurfAceLocklessRuntimeAdapterError: Error, Equatable, Sendable {
+    case capabilityMismatch
     case controllerCapacity
     case duplicateLiveController
     case invalidAdmission
     case notPaired
-    case receiptCapacity
+    case receiptCapacity(
+        currentBytes: Int64,
+        currentCount: Int64,
+        prospectiveBytes: Int64,
+        prospectiveCount: Int64,
+        maxBytes: Int64,
+        maxCount: Int64
+    )
     case receiptUnavailable
+    case surfaceStateCapacity(current: Int64, prospective: Int64, maximum: Int64)
     case stillPending
 }
 
@@ -53,6 +62,7 @@ struct SurfAceLocklessAdmissionResult: Equatable, Sendable {
     var controllerInstanceId: String
     var limits: SurfAceLocklessCapacityLimits
     var resumed: Bool
+    var receiptResolutions: [SurfAceLocklessJSON]
     var state: SurfAceLocklessAuthorityState
 }
 
@@ -118,7 +128,9 @@ actor SurfAceLocklessRuntimeAdapter {
             state.sequences.nextDormantSequence += 1
             restoredLiveController = true
         }
-        if restoredLiveController || loadedState == nil {
+        let reclaimedRestoredController = try !SurfAceLocklessDormantRetention
+            .enforceBounds(in: &state).isEmpty
+        if restoredLiveController || reclaimedRestoredController || loadedState == nil {
             state.generation += 1
             try store.save(state)
         }
@@ -131,7 +143,10 @@ actor SurfAceLocklessRuntimeAdapter {
         controllerProductName: String?,
         connectionToken: String,
         projectionCapacityBytes: Int64,
-        protocolFeatures: [String]
+        protocolFeatures: [String],
+        surfaceId: String? = nil,
+        pendingAcks: [SurfAceLocklessConsumableAcknowledgementIntent] = [],
+        unresolvedRequestIds: [String] = []
     ) async throws -> SurfAceLocklessAdmissionResult {
         guard !controllerInstanceId.isEmpty,
               !connectionToken.isEmpty,
@@ -144,23 +159,31 @@ actor SurfAceLocklessRuntimeAdapter {
             throw SurfAceLocklessRuntimeAdapterError.duplicateLiveController
         }
 
-        let resumed = try await coordinator.transact { state in
+        let admission = try await coordinator.transact { state in
+            let requiredProjectionBytes = max(
+                state.limits.maxPaneConsumableBytes,
+                state.limits.maxSurfaceConsumableBytes
+            ) + state.limits.maxConsumableCursorStateBytesPerScope
+            guard projectionCapacityBytes >= requiredProjectionBytes else {
+                throw SurfAceLocklessRuntimeAdapterError.capabilityMismatch
+            }
+            if let surfaceId {
+                guard state.liveSurfaces[surfaceId] != nil else {
+                    throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+                }
+                guard state.negotiatedModes[surfaceId] != .legacy else {
+                    throw SurfAceLocklessRuntimeAdapterError.capabilityMismatch
+                }
+                state.negotiatedModes[surfaceId] = .lockless
+                try Self.ensureScopes(surfaceId: surfaceId, in: &state)
+            }
             if state.controllers[controllerInstanceId]?.status == .live {
                 throw SurfAceLocklessRuntimeAdapterError.duplicateLiveController
             }
             let resumed = state.controllers[controllerInstanceId] != nil
             if !resumed && Int64(state.controllers.count) >= state.limits.maxAdmittedControllerEntries {
-                let victim = state.controllers.values
-                    .filter { $0.status == .dormant }
-                    .sorted {
-                        ($0.dormantSequence ?? .max, $0.controllerInstanceId)
-                            < ($1.dormantSequence ?? .max, $1.controllerInstanceId)
-                    }
-                    .first
-                guard let victim else { throw SurfAceLocklessRuntimeAdapterError.controllerCapacity }
-                state.controllers.removeValue(forKey: victim.controllerInstanceId)
-                for scopeId in state.scopes.keys {
-                    state.scopes[scopeId]?.cursors.removeValue(forKey: victim.controllerInstanceId)
+                guard SurfAceLocklessDormantRetention.reclaimOldest(in: &state) != nil else {
+                    throw SurfAceLocklessRuntimeAdapterError.controllerCapacity
                 }
             }
             state.controllers[controllerInstanceId] = SurfAceLocklessControllerBundle(
@@ -173,16 +196,44 @@ actor SurfAceLocklessRuntimeAdapter {
                 status: .live
             )
             SurfAceLocklessConsumableOperations.admitController(controllerInstanceId, in: &state)
-            return resumed
+            for acknowledgement in pendingAcks {
+                _ = try SurfAceLocklessConsumableOperations.acknowledge(
+                    in: &state,
+                    controllerInstanceId: controllerInstanceId,
+                    scopeId: acknowledgement.scopeId,
+                    cursor: acknowledgement.cursor,
+                    gapGeneration: acknowledgement.gapGeneration
+                )
+            }
+            let resolutions = Self.receiptResolutions(
+                bundle: state.controllers[controllerInstanceId],
+                controllerWasKnown: resumed,
+                requestIds: unresolvedRequestIds
+            )
+            return (resumed, resolutions)
         }
         connectionByController[controllerInstanceId] = connectionToken
         controllerByConnection[connectionToken] = controllerInstanceId
         return SurfAceLocklessAdmissionResult(
             controllerInstanceId: controllerInstanceId,
             limits: (await coordinator.snapshot()).limits,
-            resumed: resumed,
+            resumed: admission.0,
+            receiptResolutions: admission.1,
             state: await coordinator.snapshot()
         )
+    }
+
+    func negotiateLegacySurface(_ surfaceId: String) async throws -> SurfAceLocklessAuthorityState {
+        try await coordinator.transact { state in
+            guard state.liveSurfaces[surfaceId] != nil else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            guard state.negotiatedModes[surfaceId] != .lockless else {
+                throw SurfAceLocklessRuntimeAdapterError.capabilityMismatch
+            }
+            state.negotiatedModes[surfaceId] = .legacy
+            return state
+        }
     }
 
     func disconnect(connectionToken: String, disconnectedAt: Int64) async throws {
@@ -221,10 +272,7 @@ actor SurfAceLocklessRuntimeAdapter {
             guard bundle.pendingOperationReceipts[requestId] == nil else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
-            let pending = bundle.pendingOperationReceipts.values.filter { $0.status != .acknowledged }
-            guard Int64(pending.count) < state.limits.maxPendingOperationReceiptsPerController else {
-                throw SurfAceLocklessRuntimeAdapterError.receiptCapacity
-            }
+            let pending = Array(bundle.pendingOperationReceipts.values)
             let commitSequence = state.sequences.nextCommitSequence
             let response = try mutate(&state, commitSequence)
             if let consumableScopeId, let consumableScopeKind, let consumableRecordClass {
@@ -245,9 +293,25 @@ actor SurfAceLocklessRuntimeAdapter {
                 requestId: requestId,
                 terminalResponse: response
             )
-            guard pending.reduce(Int64(0), { $0 + $1.bytes }) + receipt.bytes
-                    <= state.limits.maxPendingOperationReceiptBytesPerController else {
-                throw SurfAceLocklessRuntimeAdapterError.receiptCapacity
+            let currentReceiptBytes = pending.reduce(Int64(0)) {
+                SurfAceLocklessExactDurableAccounting.saturatingAdd($0, $1.bytes)
+            }
+            let currentReceiptCount = Int64(pending.count)
+            let prospectiveReceiptBytes = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                currentReceiptBytes,
+                receipt.bytes
+            )
+            let prospectiveReceiptCount = currentReceiptCount + 1
+            guard prospectiveReceiptCount <= state.limits.maxPendingOperationReceiptsPerController,
+                  prospectiveReceiptBytes <= state.limits.maxPendingOperationReceiptBytesPerController else {
+                throw SurfAceLocklessRuntimeAdapterError.receiptCapacity(
+                    currentBytes: currentReceiptBytes,
+                    currentCount: currentReceiptCount,
+                    prospectiveBytes: prospectiveReceiptBytes,
+                    prospectiveCount: prospectiveReceiptCount,
+                    maxBytes: state.limits.maxPendingOperationReceiptBytesPerController,
+                    maxCount: state.limits.maxPendingOperationReceiptsPerController
+                )
             }
             state.sequences.nextCommitSequence += 1
             bundle.pendingOperationReceipts[requestId] = receipt
@@ -441,8 +505,12 @@ actor SurfAceLocklessRuntimeAdapter {
             requestId: operationRequestId,
             operation: "target.apply"
         ) { state, sequence in
-            let work = SurfAceLocklessTargetWorkItem(
-                bytes: Int64(try Self.encodedBytes(request)),
+            guard let surface = state.liveSurfaces[surfaceId]
+                    ?? state.surfaceTombstones.first(where: { $0.surface.surfaceId == surfaceId })?.surface else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            var work = SurfAceLocklessTargetWorkItem(
+                bytes: 0,
                 controllerInstanceId: controllerId,
                 intentCommitSequence: sequence,
                 operationRequestId: operationRequestId,
@@ -453,6 +521,23 @@ actor SurfAceLocklessRuntimeAdapter {
                 targetId: targetId,
                 targetRequestId: targetRequestId
             )
+            work.bytes = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
+            let current = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                try SurfAceLocklessTopologyOperations.surfaceBaseBytes(surface),
+                state.targetApplyWorkItems.values
+                    .filter { $0.surfaceId == surfaceId }
+                    .reduce(Int64(0)) {
+                        SurfAceLocklessExactDurableAccounting.saturatingAdd($0, $1.bytes)
+                    }
+            )
+            let prospective = SurfAceLocklessExactDurableAccounting.saturatingAdd(current, work.bytes)
+            guard prospective <= state.limits.maxSurfaceRecoverableBaseBytes else {
+                throw SurfAceLocklessRuntimeAdapterError.surfaceStateCapacity(
+                    current: current,
+                    prospective: prospective,
+                    maximum: state.limits.maxSurfaceRecoverableBaseBytes
+                )
+            }
             state.targetApplyWorkItems[operationRequestId] = work
             return .object([
                 "operationReceipt": .object([
@@ -478,7 +563,32 @@ actor SurfAceLocklessRuntimeAdapter {
                   work.state == .intentCommitted else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
+            guard let surface = state.liveSurfaces[work.surfaceId]
+                    ?? state.surfaceTombstones.first(where: { $0.surface.surfaceId == work.surfaceId })?.surface else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            let current = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                try SurfAceLocklessTopologyOperations.surfaceBaseBytes(surface),
+                state.targetApplyWorkItems.values
+                    .filter { $0.surfaceId == work.surfaceId }
+                    .reduce(Int64(0)) {
+                        SurfAceLocklessExactDurableAccounting.saturatingAdd($0, $1.bytes)
+                    }
+            )
+            let previousBytes = work.bytes
             work.state = .materializing
+            work.bytes = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
+            let prospective = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                current - previousBytes,
+                work.bytes
+            )
+            guard prospective <= state.limits.maxSurfaceRecoverableBaseBytes else {
+                throw SurfAceLocklessRuntimeAdapterError.surfaceStateCapacity(
+                    current: current,
+                    prospective: prospective,
+                    maximum: state.limits.maxSurfaceRecoverableBaseBytes
+                )
+            }
             state.targetApplyWorkItems[operationRequestId] = work
             return work
         }
@@ -526,7 +636,8 @@ actor SurfAceLocklessRuntimeAdapter {
             guard state.targetApplyWorkItems[work.operationRequestId]?.state == .materializing else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
-            let result = SurfAceLocklessTargetResult(
+            var result = SurfAceLocklessTargetResult(
+                consumableSequence: 0,
                 errorCode: outcome.errorCode,
                 intentCommitSequence: work.intentCommitSequence,
                 materializedState: outcome.materializedState,
@@ -648,7 +759,6 @@ actor SurfAceLocklessRuntimeAdapter {
                 state.liveSurfaces[work.surfaceId] = surface
             }
             state.targetApplyWorkItems.removeValue(forKey: work.operationRequestId)
-            state.targetApplyResults[work.operationRequestId] = result
             var recordPayload: [String: SurfAceLocklessJSON] = [
                 "intentCommitSequence": .integer(result.intentCommitSequence),
                 "operationRequestId": .string(result.operationRequestId),
@@ -660,7 +770,7 @@ actor SurfAceLocklessRuntimeAdapter {
             ]
             recordPayload["errorCode"] = result.errorCode.map(SurfAceLocklessJSON.string)
             recordPayload["materializedState"] = result.materializedState
-            _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+            let occurrence = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
                 in: &state,
                 scopeId: Self.surfaceScopeId(result.surfaceId),
                 scopeKind: "surface",
@@ -668,6 +778,8 @@ actor SurfAceLocklessRuntimeAdapter {
                 recordClass: .targetResult,
                 payload: .object(recordPayload)
             )
+            result.consumableSequence = occurrence.record.sequence
+            state.targetApplyResults[work.operationRequestId] = result
             return result
         }
     }
@@ -701,6 +813,54 @@ actor SurfAceLocklessRuntimeAdapter {
         return try encoder.encode(value).count
     }
 
+    nonisolated private static func ensureScopes(
+        surfaceId: String,
+        in state: inout SurfAceLocklessAuthorityState
+    ) throws {
+        try SurfAceLocklessConsumableOperations.ensureScope(
+            in: &state, scopeId: surfaceScopeId(surfaceId), scopeKind: "surface"
+        )
+        guard let surface = state.liveSurfaces[surfaceId] else { return }
+        for pane in surface.panes.values {
+            try SurfAceLocklessConsumableOperations.ensureScope(
+                in: &state,
+                scopeId: paneScopeId(surfaceId: surfaceId, paneId: pane.paneId),
+                scopeKind: "pane"
+            )
+        }
+    }
+
+    nonisolated private static func receiptResolutions(
+        bundle: SurfAceLocklessControllerBundle?,
+        controllerWasKnown: Bool,
+        requestIds: [String]
+    ) -> [SurfAceLocklessJSON] {
+        requestIds.map { requestId in
+            guard controllerWasKnown else {
+                return .object([
+                    "cause": .string("controller_reclaimed"),
+                    "outcome": .string("receipt_unavailable"),
+                    "requestId": .string(requestId),
+                ])
+            }
+            guard let receipt = bundle?.pendingOperationReceipts[requestId] else {
+                return .object(["outcome": .string("not_committed"), "requestId": .string(requestId)])
+            }
+            if receipt.status == .pending {
+                return .object(["outcome": .string("still_pending"), "requestId": .string(requestId)])
+            }
+            return .object([
+                "operationReceipt": .object([
+                    "commitSequence": .integer(receipt.commitSequence ?? 0),
+                    "requestId": .string(requestId),
+                ]),
+                "outcome": .string(receipt.outcome ?? "resolved_failure"),
+                "requestId": .string(requestId),
+                "terminalResponse": receipt.terminalResponse ?? .null,
+            ])
+        }
+    }
+
     nonisolated private static func locklessJSON<T: Encodable>(
         _ value: T
     ) throws -> SurfAceLocklessJSON {
@@ -732,13 +892,8 @@ actor SurfAceLocklessRuntimeAdapter {
             status: .terminal,
             terminalResponse: terminalResponse
         )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        while true {
-            let bytes = Int64(try encoder.encode(receipt).count)
-            guard bytes != receipt.bytes else { return receipt }
-            receipt.bytes = bytes
-        }
+        receipt.bytes = try SurfAceLocklessExactDurableAccounting.receiptBytes(receipt)
+        return receipt
     }
 
     nonisolated private static func normalizeTopologies(

@@ -7,7 +7,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
     func testIOSAdvertisesLiveBrowserURLTargetCapability() {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
 
-        XCTAssertEqual(runtime.targetCapabilitiesForTesting(), ["target.browser_url.v1"])
+        XCTAssertEqual(runtime.targetCapabilities, ["target.browser_url.v1"])
     }
 
     func testBrowserURLTargetApplyWaitsForNavigationEvidenceBeforeReturningApplied() async throws {
@@ -21,7 +21,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
         let startedAt = Date()
-        let response = await runtime.materializeTargetApplyForTesting(
+        let response = await runtime.materializeTargetApply(
             id: "rq_google",
             payload: targetApplyPayload(surface: surface, pane: pane, targetId: "tg_google", url: "https://google.com/"),
             surfaceId: surface.surfaceId
@@ -60,7 +60,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
             ],
         ]
 
-        _ = await runtime.materializeTargetApplyForTesting(
+        _ = await runtime.materializeTargetApply(
             id: "rq_display",
             payload: payload,
             surfaceId: surface.surfaceId
@@ -82,7 +82,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         )
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
-        let response = await runtime.materializeTargetApplyForTesting(
+        let response = await runtime.materializeTargetApply(
             id: "rq_blocked",
             payload: targetApplyPayload(surface: surface, pane: pane, targetId: "tg_blocked", url: "https://blocked.invalid/"),
             surfaceId: surface.surfaceId
@@ -108,7 +108,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         )
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
-        let response = await runtime.materializeTargetApplyForTesting(
+        let response = await runtime.materializeTargetApply(
             id: "rq_twitter",
             payload: targetApplyPayload(surface: surface, pane: pane, targetId: "tg_twitter", url: "https://twitter.com"),
             surfaceId: surface.surfaceId
@@ -132,7 +132,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         )
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
-        let response = await runtime.materializeTargetApplyForTesting(
+        let response = await runtime.materializeTargetApply(
             id: "rq_twitter_localized",
             payload: targetApplyPayload(surface: surface, pane: pane, targetId: "tg_twitter_localized", url: "https://twitter.com"),
             surfaceId: surface.surfaceId
@@ -151,7 +151,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         let bridge = ControlledPaneBridge()
         runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
 
-        let response = await runtime.materializeTargetApplyForTesting(
+        let response = await runtime.materializeTargetApply(
             id: "rq_file",
             payload: targetApplyPayload(surface: surface, pane: pane, targetId: "tg_file", url: "file:///etc/passwd"),
             surfaceId: surface.surfaceId
@@ -177,7 +177,7 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         header["requiredCapabilities"] = ["target.browser_url.v1", "target.future_only.v1"]
         payload["targetHeader"] = header
 
-        let response = await runtime.materializeTargetApplyForTesting(
+        let response = await runtime.materializeTargetApply(
             id: "rq_future",
             payload: payload,
             surfaceId: surface.surfaceId

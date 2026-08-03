@@ -171,6 +171,7 @@ struct SurfAceLocklessMigration {
         }
         var omissions: [SurfAceLocklessRollbackOmission] = [
             .init(path: "/lockless/limits", reason: "legacy_format_has_no_lockless_limits"),
+            .init(path: "/lockless/negotiatedModes", reason: "legacy_format_has_no_negotiated_protocol_mode"),
             .init(path: "/lockless/sequences", reason: "legacy_format_has_no_client_allocation_sequences"),
             .init(path: "/lockless/surfaceSetRevision", reason: "legacy_format_has_no_client_surface_set_revision"),
         ]

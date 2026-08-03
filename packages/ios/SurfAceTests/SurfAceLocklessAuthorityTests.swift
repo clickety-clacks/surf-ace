@@ -124,6 +124,62 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         XCTAssertEqual(try store.load()?.sequences.nextCommitSequence, 5)
     }
 
+    func testDormantRetentionAcceptsExactEntryAndByteBoundaries() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.controllers = [
+            "controller-a": dormantBundle(id: "controller-a", sequence: 1),
+            "controller-b": dormantBundle(id: "controller-b", sequence: 2),
+        ]
+        state.scopes["surface:one"] = retentionScope(controllerIds: ["controller-a", "controller-b"])
+        let usage = try SurfAceLocklessDormantRetention.usage(in: state)
+        state.limits.maxDormantControllerEntries = usage.entryCount
+        state.limits.maxDormantControllerBytes = usage.bytes
+
+        XCTAssertNoThrow(try state.validate())
+
+        state.limits.maxDormantControllerEntries = usage.entryCount - 1
+        XCTAssertThrowsError(try state.validate()) { error in
+            XCTAssertEqual(error as? SurfAceLocklessAuthorityError, .invalidState("dormant_controller_entries"))
+        }
+        state.limits.maxDormantControllerEntries = usage.entryCount
+        state.limits.maxDormantControllerBytes = usage.bytes - 1
+        XCTAssertThrowsError(try state.validate()) { error in
+            XCTAssertEqual(error as? SurfAceLocklessAuthorityError, .invalidState("dormant_controller_bytes"))
+        }
+    }
+
+    func testGenerationLoadRejectsOverLimitDormantAndCursorStateWithoutTrimming() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceLocklessInvalidRestoreTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.controllers["controller-a"] = dormantBundle(id: "controller-a", sequence: 1)
+        state.scopes["surface:one"] = retentionScope(controllerIds: ["controller-a"])
+        let usage = try SurfAceLocklessDormantRetention.usage(in: state)
+        state.limits.maxDormantControllerBytes = usage.bytes - 1
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(state).write(to: store.stateURL)
+
+        XCTAssertThrowsError(try store.load()) { error in
+            XCTAssertEqual(error as? SurfAceLocklessAuthorityError, .invalidState("dormant_controller_bytes"))
+        }
+        XCTAssertEqual(state.controllers.count, 1)
+        XCTAssertEqual(state.scopes["surface:one"]?.cursors.count, 1)
+
+        state.limits.maxDormantControllerBytes = .max
+        state.limits.maxConsumableCursorStateBytesPerScope = 1
+        try encoder.encode(state).write(to: store.stateURL)
+        XCTAssertThrowsError(try store.load()) { error in
+            XCTAssertEqual(
+                error as? SurfAceLocklessAuthorityError,
+                .invalidState("consumable_cursor_bytes:surface:one")
+            )
+        }
+    }
+
     func testRollbackPreviewIsDeterministicAndDoesNotMutateAuthority() throws {
         var state = try SurfAceLocklessMigration.migrate(legacySnapshot())
         state.generation = 5
@@ -208,33 +264,66 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
     }
 
     private func controllerBundle() -> SurfAceLocklessControllerBundle {
-        SurfAceLocklessControllerBundle(
+        var receipt = SurfAceLocklessOperationReceiptState(
+            bytes: 0,
+            commitSequence: 11,
+            operation: "content.set",
+            outcome: "resolved_success",
+            requestId: "rq-1",
+            status: .terminal,
+            terminalResponse: .object(["ok": .bool(true)])
+        )
+        receipt.bytes = try! SurfAceLocklessExactDurableAccounting.receiptBytes(receipt)
+        return SurfAceLocklessControllerBundle(
             controllerInstanceId: "controller-a",
             controllerProductName: "surf-ace",
             disconnectedAt: 1_785_619_273_922,
             dormantSequence: 3,
-            pendingOperationReceipts: [
-                "rq-1": SurfAceLocklessOperationReceiptState(
-                    bytes: 128,
-                    commitSequence: 11,
-                    operation: "content.set",
-                    outcome: "resolved_success",
-                    requestId: "rq-1",
-                    status: .terminal,
-                    terminalResponse: .object(["ok": .bool(true)])
-                ),
-            ],
+            pendingOperationReceipts: ["rq-1": receipt],
             projectionCapacityBytes: 8 * 1_024 * 1_024,
             status: .dormant
         )
     }
 
+    private func dormantBundle(id: String, sequence: Int64) -> SurfAceLocklessControllerBundle {
+        SurfAceLocklessControllerBundle(
+            controllerInstanceId: id,
+            controllerProductName: nil,
+            disconnectedAt: sequence * 10,
+            dormantSequence: sequence,
+            pendingOperationReceipts: [:],
+            projectionCapacityBytes: 8 * 1_024 * 1_024,
+            status: .dormant
+        )
+    }
+
+    private func retentionScope(controllerIds: [String]) -> SurfAceLocklessConsumableScope {
+        var record = SurfAceLocklessConsumableRecord(
+            bytes: 0,
+            payload: .string("unread"),
+            recordClass: .content,
+            recordId: "record-1",
+            sequence: 1
+        )
+        record.bytes = try! SurfAceLocklessConsumableOperations.restoredRecordBytes(record)
+        return SurfAceLocklessConsumableScope(
+            cursors: Dictionary(uniqueKeysWithValues: controllerIds.map {
+                ($0, SurfAceLocklessConsumableCursor(cursor: 1, gap: nil, gapGeneration: 0))
+            }),
+            liveFrames: [:],
+            nextSequence: 2,
+            records: [record],
+            scopeId: "surface:one",
+            scopeKind: "surface"
+        )
+    }
+
     private func targetWork() -> SurfAceLocklessTargetWorkItem {
-        SurfAceLocklessTargetWorkItem(
-            bytes: 256,
+        var work = SurfAceLocklessTargetWorkItem(
+            bytes: 0,
             controllerInstanceId: "controller-a",
             intentCommitSequence: 11,
-            operationRequestId: "rq-1",
+            operationRequestId: "work-1",
             request: .object(["targetId": .string("target-1")]),
             state: .materializing,
             surfaceId: "sf_1",
@@ -242,10 +331,13 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
             targetId: "target-1",
             targetRequestId: "target-rq-1"
         )
+        work.bytes = try! SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
+        return work
     }
 
     private func targetResult() -> SurfAceLocklessTargetResult {
         SurfAceLocklessTargetResult(
+            consumableSequence: 1,
             errorCode: nil,
             intentCommitSequence: 11,
             materializedState: .object(["url": .string("https://example.com")]),
@@ -260,12 +352,19 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
     }
 
     private func surfaceTombstone(from surface: SurfAceLocklessSurfaceMaterial) -> SurfAceLocklessSurfaceTombstone {
-        SurfAceLocklessSurfaceTombstone(
-            bytes: 1_024,
+        var tombstone = SurfAceLocklessSurfaceTombstone(
+            bytes: 0,
             closedSequence: 4,
             scopes: [:],
             surface: surface,
             tombstoneId: "st_1"
         )
+        tombstone.bytes = try! SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+            closedSequence: tombstone.closedSequence,
+            scopes: tombstone.scopes,
+            surface: tombstone.surface,
+            tombstoneId: tombstone.tombstoneId
+        )
+        return tombstone
     }
 }

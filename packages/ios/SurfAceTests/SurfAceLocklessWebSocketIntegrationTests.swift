@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import XCTest
 @testable import SurfAce
@@ -15,13 +14,10 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             defaults.removePersistentDomain(forName: "SurfAceLocklessWebSocketIntegrationTests-\(identifier)")
             try? FileManager.default.removeItem(at: stateURL)
         }
-        let runtime = SurfAceRuntime(
-            userDefaults: defaults,
-            locklessStateURL: stateURL,
-            allowIncompleteLocklessAdmissionForTesting: true
-        )
-        let port = try availablePort()
-        _ = try await runtime.startLocklessServerForTesting(port: port)
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL)
+        await runtime.start()
+        XCTAssertNil(runtime.endpointError)
+        let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
         addTeardownBlock { await runtime.stop() }
         let registeredSurface = await runtime.registerSurfaceForScene(sceneKey: "integration-scene")
         let surface = try XCTUnwrap(registeredSurface)
@@ -31,10 +27,74 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let second = socket(port: port)
         first.resume()
         second.resume()
+        try await send(first, op: "surfaces.list", id: "discovery", payload: [:])
+        let discovery = try await receive(first, matchingId: "discovery")
+        let discoveryPayload = payload(discovery)
+        let discoveryCapabilities = try XCTUnwrap(discoveryPayload["capabilities"] as? [String: Any])
+        XCTAssertEqual(
+            discoveryCapabilities["protocolFeatures"] as? [String], [surfAceLocklessCapability]
+        )
+        XCTAssertEqual(discoveryCapabilities["surfaceLifecycle"] as? Bool, true)
+        let discoveryLimits = try XCTUnwrap(discoveryCapabilities["limits"] as? [String: Any])
+        XCTAssertGreaterThan((discoveryLimits["maxPanesPerSurface"] as? NSNumber)?.intValue ?? 0, 0)
+        XCTAssertNotNil(discoveryPayload["surfaceSetRevision"] as? NSNumber)
+        XCTAssertNotNil(discoveryPayload["surfaceTombstones"] as? [[String: Any]])
+
         let firstPair = try await pair(first, id: "pair-a", controllerId: "controller-a", surfaceId: surface.surfaceId)
         let secondPair = try await pair(second, id: "pair-b", controllerId: "controller-b", surfaceId: surface.surfaceId)
         XCTAssertEqual(payload(firstPair)["mode"] as? String, "lockless")
         XCTAssertEqual(payload(secondPair)["mode"] as? String, "lockless")
+        XCTAssertFalse((payload(firstPair)["scopes"] as? [[String: Any]])?.isEmpty ?? true)
+
+        let legacy = socket(port: port)
+        legacy.resume()
+        try await send(legacy, op: "pair.request", id: "legacy-pair", payload: [
+            "connectionId": "legacy-connection",
+            "initialPaneId": paneId,
+            "initialPaneLabel": 1,
+            "protocolVersion": 1,
+            "providerId": "legacy-provider",
+            "providerName": "Legacy integration client",
+            "surfaceId": surface.surfaceId,
+            "windowLabel": "legacy",
+        ])
+        let legacyPair = try await receive(legacy, matchingId: "legacy-pair")
+        XCTAssertEqual(legacyPair["ok"] as? Bool, false)
+        XCTAssertEqual((legacyPair["error"] as? [String: Any])?["code"] as? String, "capability_mismatch")
+        legacy.cancel(with: .normalClosure, reason: nil)
+
+        let malformedResume = socket(port: port)
+        malformedResume.resume()
+        try await send(malformedResume, op: "pair.request", id: "malformed-resume", payload: [
+            "controllerInstanceId": "controller-malformed",
+            "controllerProductName": "integration-client",
+            "projectionCapacityBytes": 8 * 1_024 * 1_024,
+            "protocolFeatures": [surfAceLocklessCapability],
+            "protocolVersion": 1,
+            "resume": [
+                "pendingAcks": [],
+                "scopes": ["surface:\(surface.surfaceId)": ["cursor": 1]],
+            ],
+            "surfaceId": surface.surfaceId,
+        ])
+        let malformedPair = try await receive(malformedResume, matchingId: "malformed-resume")
+        XCTAssertEqual(malformedPair["ok"] as? Bool, false)
+        XCTAssertEqual(
+            (malformedPair["error"] as? [String: Any])?["code"] as? String,
+            "invalid_payload"
+        )
+        malformedResume.cancel(with: .normalClosure, reason: nil)
+
+        try await send(first, op: "heartbeat.ping", id: "heartbeat", payload: ["nonce": "native-nonce"])
+        let heartbeat = try await receive(first, matchingId: "heartbeat")
+        XCTAssertEqual(payload(heartbeat)["nonce"] as? String, "native-nonce")
+        try await send(first, op: "heartbeat.ping", id: "heartbeat-empty", payload: ["nonce": ""])
+        let invalidHeartbeat = try await receive(first, matchingId: "heartbeat-empty")
+        XCTAssertEqual(invalidHeartbeat["ok"] as? Bool, false)
+        XCTAssertEqual(
+            (invalidHeartbeat["error"] as? [String: Any])?["code"] as? String,
+            "invalid_payload"
+        )
 
         try await send(first, op: "content.set", id: "mutation-a", payload: [
             "content": ["html": "<main>shared</main>"],
@@ -64,7 +124,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
 
         try await send(second, op: "consumable.sync", id: "sync-b", payload: ["scopeIds": [scopeId]])
         let secondSync = try await receive(second, matchingId: "sync-b")
-        let secondScopes = try XCTUnwrap(payload(secondSync)["scopes"] as? [[String: Any]])
+        let secondScopes = try XCTUnwrap(payload(secondSync)["snapshots"] as? [[String: Any]])
         let secondRecords = try XCTUnwrap(secondScopes.first?["records"] as? [[String: Any]])
         let nextCursor = ((secondRecords.last?["sequence"] as? NSNumber)?.int64Value ?? 0) + 1
         try await send(second, op: "consumable.ack", id: "ack-b", payload: [
@@ -73,8 +133,10 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         _ = try await receive(second, matchingId: "ack-b")
         try await send(first, op: "consumable.sync", id: "sync-a", payload: ["scopeIds": [scopeId]])
         let firstSync = try await receive(first, matchingId: "sync-a")
-        let firstScopes = try XCTUnwrap(payload(firstSync)["scopes"] as? [[String: Any]])
+        let firstScopes = try XCTUnwrap(payload(firstSync)["snapshots"] as? [[String: Any]])
         XCTAssertFalse((firstScopes.first?["records"] as? [[String: Any]])?.isEmpty ?? true)
+        let firstCursor = try XCTUnwrap(firstScopes.first?["cursor"] as? [String: Any])
+        let resumeCursor = try XCTUnwrap((firstCursor["cursor"] as? NSNumber)?.int64Value)
 
         try await send(first, op: "operation.receipt.sync", id: "receipt-sync", payload: [
             "requestIds": ["mutation-a", "missing"],
@@ -105,7 +167,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         _ = try await receive(second, matchingOp: "event.lockless_content_committed")
         try await send(second, op: "consumable.sync", id: "gap-sync-b", payload: ["scopeIds": [scopeId]])
         let gapSync = try await receive(second, matchingId: "gap-sync-b")
-        let gapScopes = try XCTUnwrap(payload(gapSync)["scopes"] as? [[String: Any]])
+        let gapScopes = try XCTUnwrap(payload(gapSync)["snapshots"] as? [[String: Any]])
         let gapCursor = try XCTUnwrap(gapScopes.first?["cursor"] as? [String: Any])
         XCTAssertEqual((gapCursor["gap"] as? [String: Any])?["cause"] as? String, "record_oversize")
 
@@ -114,17 +176,61 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let health = try XCTUnwrap(JSONSerialization.jsonObject(with: healthData) as? [String: Any])
         XCTAssertEqual((health["busy"] as? NSNumber)?.intValue, 0)
 
+        try await send(second, op: "target.apply", id: "target-operation", payload: [
+            "paneId": paneId,
+            "requestId": "target-request",
+            "surfaceId": surface.surfaceId,
+            "targetEpoch": 1,
+            "targetHeader": [:],
+            "targetId": "target-a",
+            "targetKind": "browser_url",
+            "targetPayload": ["url": "https://example.com"],
+        ])
+        let targetIntent = try await receive(second, matchingId: "target-operation")
+        XCTAssertEqual(payload(targetIntent)["status"] as? String, "intent_committed")
+        let targetResult = try await receive(second, matchingOp: "event.target_apply_result")
+        let targetResultPayload = payload(targetResult)
+        XCTAssertEqual(targetResultPayload["operationRequestId"] as? String, "target-operation")
+        XCTAssertFalse((targetResultPayload["recordId"] as? String)?.isEmpty ?? true)
+        XCTAssertGreaterThan(
+            (targetResultPayload["consumableSequence"] as? NSNumber)?.int64Value ?? 0, 0
+        )
+
         first.cancel(with: .goingAway, reason: nil)
         try await Task.sleep(for: .milliseconds(250))
         let resumed = socket(port: port)
         resumed.resume()
         let resumedPair = try await pair(
-            resumed, id: "pair-a-resume", controllerId: "controller-a", surfaceId: surface.surfaceId
+            resumed,
+            id: "pair-a-resume",
+            controllerId: "controller-a",
+            surfaceId: surface.surfaceId,
+            resume: [
+                "pendingAcks": [["cursor": resumeCursor, "scopeId": scopeId]],
+                "scopes": [scopeId: ["cursor": resumeCursor, "gapGeneration": 0]],
+                "unresolvedRequestIds": ["mutation-a", "missing-after-reconnect"],
+            ]
         )
         XCTAssertEqual(payload(resumedPair)["resumed"] as? Bool, true)
+        let resumedResolutions = try XCTUnwrap(
+            payload(resumedPair)["receiptResolutions"] as? [[String: Any]]
+        )
+        XCTAssertEqual(resumedResolutions.map { $0["outcome"] as? String }, [
+            "resolved_success", "not_committed",
+        ])
+        XCTAssertEqual(
+            ((resumedResolutions[0]["terminalResponse"] as? [String: Any])?["contentId"] as? String),
+            "content-a"
+        )
+        let resumedScopes = try XCTUnwrap(payload(resumedPair)["scopes"] as? [[String: Any]])
+        let resumedScope = try XCTUnwrap(resumedScopes.first { $0["scopeId"] as? String == scopeId })
+        XCTAssertGreaterThanOrEqual(
+            ((resumedScope["cursor"] as? [String: Any])?["cursor"] as? NSNumber)?.int64Value ?? 0,
+            resumeCursor
+        )
         try await send(resumed, op: "consumable.sync", id: "gap-sync-a-resumed", payload: ["scopeIds": [scopeId]])
         let resumedGapSync = try await receive(resumed, matchingId: "gap-sync-a-resumed")
-        let resumedGapScopes = try XCTUnwrap(payload(resumedGapSync)["scopes"] as? [[String: Any]])
+        let resumedGapScopes = try XCTUnwrap(payload(resumedGapSync)["snapshots"] as? [[String: Any]])
         let resumedGapCursor = try XCTUnwrap(resumedGapScopes.first?["cursor"] as? [String: Any])
         XCTAssertEqual(
             (resumedGapCursor["gap"] as? [String: Any])?["cause"] as? String,
@@ -132,6 +238,34 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         )
         resumed.cancel(with: .normalClosure, reason: nil)
         second.cancel(with: .normalClosure, reason: nil)
+        try await Task.sleep(for: .milliseconds(250))
+
+        await runtime.unregisterSurfaceForScene(sceneKey: "integration-scene")
+        let discoveryAfterLastSurface = socket(port: port)
+        discoveryAfterLastSurface.resume()
+        try await send(
+            discoveryAfterLastSurface,
+            op: "surfaces.list",
+            id: "discovery-zero-live",
+            payload: [:]
+        )
+        let zeroLiveDiscovery = try await receive(
+            discoveryAfterLastSurface,
+            matchingId: "discovery-zero-live"
+        )
+        let zeroLivePayload = payload(zeroLiveDiscovery)
+        XCTAssertEqual((zeroLivePayload["surfaces"] as? [[String: Any]])?.count, 0)
+        XCTAssertTrue(
+            (zeroLivePayload["surfaceTombstones"] as? [[String: Any]])?.contains(where: {
+                (($0["surface"] as? [String: Any])?["surfaceId"] as? String) == surface.surfaceId
+            }) ?? false
+        )
+        XCTAssertEqual(
+            ((zeroLivePayload["capabilities"] as? [String: Any])?["protocolFeatures"] as? [String]),
+            [surfAceLocklessCapability]
+        )
+        XCTAssertNotNil(zeroLivePayload["surfaceSetRevision"] as? NSNumber)
+        discoveryAfterLastSurface.cancel(with: .normalClosure, reason: nil)
     }
 
     private func socket(port: UInt16) -> URLSessionWebSocketTask {
@@ -144,16 +278,19 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         _ socket: URLSessionWebSocketTask,
         id: String,
         controllerId: String,
-        surfaceId: String
+        surfaceId: String,
+        resume: [String: Any]? = nil
     ) async throws -> [String: Any] {
-        try await send(socket, op: "pair.request", id: id, payload: [
+        var pairPayload: [String: Any] = [
             "controllerInstanceId": controllerId,
             "controllerProductName": "integration-client",
             "projectionCapacityBytes": 8 * 1_024 * 1_024,
             "protocolFeatures": [surfAceLocklessCapability],
             "protocolVersion": 1,
             "surfaceId": surfaceId,
-        ])
+        ]
+        pairPayload["resume"] = resume
+        try await send(socket, op: "pair.request", id: id, payload: pairPayload)
         return try await receive(socket, matchingId: id)
     }
 
@@ -207,25 +344,6 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         response["payload"] as? [String: Any] ?? [:]
     }
 
-    private func availablePort() throws -> UInt16 {
-        for candidate in UInt16(29_201)...UInt16(29_300) {
-            let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-            guard descriptor >= 0 else { continue }
-            defer { Darwin.close(descriptor) }
-            var address = sockaddr_in()
-            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-            address.sin_family = sa_family_t(AF_INET)
-            address.sin_port = candidate.bigEndian
-            address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-            let result = withUnsafePointer(to: &address) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-            if result == 0 { return candidate }
-        }
-        throw XCTSkip("No free TCP port available")
-    }
 }
 
 private enum SurfAceLocklessIntegrationError: Error {
