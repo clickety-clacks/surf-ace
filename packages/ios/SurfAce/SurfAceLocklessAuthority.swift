@@ -235,6 +235,39 @@ struct SurfAceLocklessControllerBundle: Codable, Equatable, Sendable {
     var status: SurfAceLocklessControllerStatus
 }
 
+struct SurfAceLocklessControllerRetentionReclamation: Codable, Equatable, Sendable {
+    var commitSequence: Int64
+    var controllerInstanceId: String
+    var cursorBytes: Int64
+    var cursorCount: Int64
+    var disconnectedAt: Int64?
+    var dormantSequence: Int64
+    var eventId: String
+    var liveCursorBytes: Int64
+    var liveCursorCount: Int64
+    var maxAdmittedControllerEntries: Int64
+    var maxDormantControllerBytes: Int64
+    var maxDormantControllerEntries: Int64
+    var reason: String
+    var receiptBytes: Int64
+    var receiptCount: Int64
+    var registryBytes: Int64
+    var scopeCount: Int64
+    var surfaceCount: Int64
+    var surfaceCursorBytes: Int64
+    var surfaceCursorCount: Int64
+    var tombstoneCount: Int64
+    var tombstoneCursorBytes: Int64
+    var tombstoneCursorCount: Int64
+    var trigger: String
+    var unreadBytes: Int64
+    var unreadBytesDiscarded: Int64
+    var unreadFrameCount: Int64
+    var unreadFrameCountDiscarded: Int64
+    var unreadRecordCount: Int64
+    var unreadRecordCountDiscarded: Int64
+}
+
 enum SurfAceLocklessConsumableRecordClass: String, Codable, Equatable, Sendable {
     case annotationFrame = "annotation_frame"
     case content
@@ -332,6 +365,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var limits: SurfAceLocklessCapacityLimits
     var liveSurfaces: [String: SurfAceLocklessSurfaceMaterial]
     var negotiatedModes: [String: SurfAceLocklessNegotiatedMode]
+    var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
     var sequences: SurfAceLocklessClientSequences
@@ -350,6 +384,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             limits: limits,
             liveSurfaces: [:],
             negotiatedModes: [:],
+            pendingControllerRetentionReclamations: [],
             sceneSurfaceIds: [:],
             scopes: [:],
             sequences: SurfAceLocklessClientSequences(
@@ -390,6 +425,11 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
         }
         guard Int64(controllers.count) <= limits.maxAdmittedControllerEntries else {
             throw SurfAceLocklessAuthorityError.invalidState("admitted_controller_entries")
+        }
+        let pendingReclamations = pendingControllerRetentionReclamations ?? []
+        guard Set(pendingReclamations.map(\.eventId)).count == pendingReclamations.count,
+              Set(pendingReclamations.map(\.commitSequence)).count == pendingReclamations.count else {
+            throw SurfAceLocklessAuthorityError.invalidState("controller_retention_reclamation_outbox")
         }
         for (controllerId, controller) in controllers {
             guard controllerId == controller.controllerInstanceId else {
@@ -551,6 +591,14 @@ struct SurfAceLocklessDormantRetentionUsage: Equatable, Sendable {
 }
 
 enum SurfAceLocklessDormantRetention {
+    private struct RetentionScope {
+        var path: String
+        var scope: SurfAceLocklessConsumableScope
+        var surfaceId: String
+        var tombstoneId: String?
+        var tombstoned: Bool
+    }
+
     private struct VersionedRegistryRecord: Encodable {
         var bundle: SurfAceLocklessControllerBundle
         let version = 1
@@ -628,32 +676,152 @@ enum SurfAceLocklessDormantRetention {
     }
 
     @discardableResult
-    static func enforceBounds(in state: inout SurfAceLocklessAuthorityState) throws -> [String] {
-        var reclaimed: [String] = []
+    static func enforceBounds(
+        in state: inout SurfAceLocklessAuthorityState,
+        trigger: String = "transaction_enforcement"
+    ) throws -> [SurfAceLocklessControllerRetentionReclamation] {
+        var reclaimed: [SurfAceLocklessControllerRetentionReclamation] = []
         while true {
             let current = try usage(in: state)
-            guard current.entryCount > state.limits.maxDormantControllerEntries
-                    || current.bytes > state.limits.maxDormantControllerBytes else {
+            let countExceeded = current.entryCount > state.limits.maxDormantControllerEntries
+            let bytesExceeded = current.bytes > state.limits.maxDormantControllerBytes
+            guard countExceeded || bytesExceeded else {
                 return reclaimed
             }
             guard let victim = oldestDormantController(in: state) else {
                 throw SurfAceLocklessAuthorityError.invalidState("dormant_controller_bounds")
             }
-            reclaim(victim.controllerInstanceId, in: &state)
-            reclaimed.append(victim.controllerInstanceId)
+            let reason = countExceeded && bytesExceeded
+                ? "count_and_byte_capacity"
+                : (countExceeded ? "count_capacity" : "byte_capacity")
+            reclaimed.append(try reclaim(victim, trigger: trigger, reason: reason, in: &state))
         }
     }
 
     @discardableResult
-    static func reclaimOldest(in state: inout SurfAceLocklessAuthorityState) -> String? {
+    static func reclaimOldest(
+        in state: inout SurfAceLocklessAuthorityState,
+        trigger: String = "controller_admission",
+        reason: String = "entry_capacity"
+    ) throws -> SurfAceLocklessControllerRetentionReclamation? {
         guard let victim = oldestDormantController(in: state) else { return nil }
-        reclaim(victim.controllerInstanceId, in: &state)
-        return victim.controllerInstanceId
+        return try reclaim(victim, trigger: trigger, reason: reason, in: &state)
     }
 
-    private static func reclaim(_ controllerId: String, in state: inout SurfAceLocklessAuthorityState) {
+    private static func reclaim(
+        _ victim: SurfAceLocklessControllerBundle,
+        trigger: String,
+        reason: String,
+        in state: inout SurfAceLocklessAuthorityState
+    ) throws -> SurfAceLocklessControllerRetentionReclamation {
+        let controllerId = victim.controllerInstanceId
+        let affected = retentionScopes(in: state).filter { $0.scope.cursors[controllerId] != nil }
+        var cursorBytes: Int64 = 0
+        var liveCursorBytes: Int64 = 0
+        var surfaceCursorBytes: Int64 = 0
+        var tombstoneCursorBytes: Int64 = 0
+        var liveCursorCount: Int64 = 0
+        var surfaceCursorCount: Int64 = 0
+        var tombstoneCursorCount: Int64 = 0
+        var unreadBytes: Int64 = 0
+        var unreadBytesDiscarded: Int64 = 0
+        var unreadFrameCount: Int64 = 0
+        var unreadFrameCountDiscarded: Int64 = 0
+        var unreadRecordCount: Int64 = 0
+        var unreadRecordCountDiscarded: Int64 = 0
+        for entry in affected {
+            guard let cursor = entry.scope.cursors[controllerId] else { continue }
+            let bytes = try encodedBytes(VersionedCursorRecord(
+                controllerInstanceId: controllerId,
+                cursor: cursor,
+                scopeId: entry.path
+            ))
+            cursorBytes = SurfAceLocklessExactDurableAccounting.saturatingAdd(cursorBytes, bytes)
+            if entry.tombstoned {
+                tombstoneCursorCount += 1
+                tombstoneCursorBytes = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                    tombstoneCursorBytes, bytes
+                )
+            } else {
+                liveCursorCount += 1
+                liveCursorBytes = SurfAceLocklessExactDurableAccounting.saturatingAdd(liveCursorBytes, bytes)
+            }
+            if entry.scope.scopeKind == "surface" {
+                surfaceCursorCount += 1
+                surfaceCursorBytes = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                    surfaceCursorBytes, bytes
+                )
+            }
+            for record in entry.scope.records where cursor.cursor <= record.sequence {
+                unreadRecordCount += 1
+                unreadBytes = SurfAceLocklessExactDurableAccounting.saturatingAdd(unreadBytes, record.bytes)
+                let retained = entry.scope.cursors.contains { otherId, otherCursor in
+                    otherId != controllerId && otherCursor.cursor <= record.sequence
+                }
+                if !retained {
+                    unreadRecordCountDiscarded += 1
+                    unreadBytesDiscarded = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                        unreadBytesDiscarded, record.bytes
+                    )
+                }
+            }
+            for record in entry.scope.liveFrames.values where cursor.cursor <= record.sequence {
+                unreadFrameCount += 1
+                unreadBytes = SurfAceLocklessExactDurableAccounting.saturatingAdd(unreadBytes, record.bytes)
+                let retained = entry.scope.cursors.contains { otherId, otherCursor in
+                    otherId != controllerId && otherCursor.cursor <= record.sequence
+                }
+                if !retained {
+                    unreadFrameCountDiscarded += 1
+                    unreadBytesDiscarded = SurfAceLocklessExactDurableAccounting.saturatingAdd(
+                        unreadBytesDiscarded, record.bytes
+                    )
+                }
+            }
+        }
+        let commitSequence = state.sequences.nextCommitSequence
+        let receipts = Array(victim.pendingOperationReceipts.values)
+        let diagnostic = SurfAceLocklessControllerRetentionReclamation(
+            commitSequence: commitSequence,
+            controllerInstanceId: controllerId,
+            cursorBytes: cursorBytes,
+            cursorCount: Int64(affected.count),
+            disconnectedAt: victim.disconnectedAt,
+            dormantSequence: victim.dormantSequence ?? 0,
+            eventId: "controller-reclamation:\(commitSequence)",
+            liveCursorBytes: liveCursorBytes,
+            liveCursorCount: liveCursorCount,
+            maxAdmittedControllerEntries: state.limits.maxAdmittedControllerEntries,
+            maxDormantControllerBytes: state.limits.maxDormantControllerBytes,
+            maxDormantControllerEntries: state.limits.maxDormantControllerEntries,
+            reason: reason,
+            receiptBytes: receipts.reduce(Int64(0)) {
+                SurfAceLocklessExactDurableAccounting.saturatingAdd($0, $1.bytes)
+            },
+            receiptCount: Int64(receipts.count),
+            registryBytes: try encodedBytes(VersionedRegistryRecord(bundle: victim)),
+            scopeCount: Int64(affected.count),
+            surfaceCount: Int64(Set(affected.map(\.surfaceId)).count),
+            surfaceCursorBytes: surfaceCursorBytes,
+            surfaceCursorCount: surfaceCursorCount,
+            tombstoneCount: Int64(Set(affected.compactMap(\.tombstoneId)).count),
+            tombstoneCursorBytes: tombstoneCursorBytes,
+            tombstoneCursorCount: tombstoneCursorCount,
+            trigger: trigger,
+            unreadBytes: unreadBytes,
+            unreadBytesDiscarded: unreadBytesDiscarded,
+            unreadFrameCount: unreadFrameCount,
+            unreadFrameCountDiscarded: unreadFrameCountDiscarded,
+            unreadRecordCount: unreadRecordCount,
+            unreadRecordCountDiscarded: unreadRecordCountDiscarded
+        )
+        var pending = state.pendingControllerRetentionReclamations ?? []
+        pending.append(diagnostic)
+        state.pendingControllerRetentionReclamations = pending
+        state.sequences.nextCommitSequence += 1
         state.controllers.removeValue(forKey: controllerId)
         SurfAceLocklessConsumableOperations.reclaimController(controllerId, in: &state)
+        return diagnostic
     }
 
     private static func oldestDormantController(
@@ -688,6 +856,48 @@ enum SurfAceLocklessDormantRetention {
             }
         }
         return result.sorted { $0.0 < $1.0 }
+    }
+
+    private static func retentionScopes(in state: SurfAceLocklessAuthorityState) -> [RetentionScope] {
+        var result: [RetentionScope] = []
+        for (scopeId, scope) in state.scopes {
+            let encodedSurfaceId = scopeId.split(separator: ":").dropFirst().first.map(String.init) ?? scopeId
+            let surfaceId = encodedSurfaceId.removingPercentEncoding ?? encodedSurfaceId
+            result.append(.init(
+                path: scopeId, scope: scope, surfaceId: surfaceId,
+                tombstoneId: nil, tombstoned: false
+            ))
+        }
+        for surface in state.liveSurfaces.values {
+            for tombstone in surface.paneTombstones {
+                let path = "pane-tombstone:\(surface.surfaceId):\(tombstone.tombstoneId):\(tombstone.scope.scopeId)"
+                result.append(.init(
+                    path: path, scope: tombstone.scope,
+                    surfaceId: surface.surfaceId,
+                    tombstoneId: "pane:\(tombstone.tombstoneId)", tombstoned: true
+                ))
+            }
+        }
+        for tombstone in state.surfaceTombstones {
+            for (scopeId, scope) in tombstone.scopes {
+                let path = "surface-tombstone:\(tombstone.tombstoneId):\(scopeId)"
+                result.append(.init(
+                    path: path, scope: scope,
+                    surfaceId: tombstone.surface.surfaceId,
+                    tombstoneId: "surface:\(tombstone.tombstoneId)", tombstoned: true
+                ))
+            }
+            for paneTombstone in tombstone.surface.paneTombstones {
+                let path = "surface-tombstone:\(tombstone.tombstoneId):pane-tombstone:\(paneTombstone.tombstoneId):\(paneTombstone.scope.scopeId)"
+                result.append(.init(
+                    path: path, scope: paneTombstone.scope,
+                    surfaceId: tombstone.surface.surfaceId,
+                    tombstoneId: "surface:\(tombstone.tombstoneId):pane:\(paneTombstone.tombstoneId)",
+                    tombstoned: true
+                ))
+            }
+        }
+        return result.sorted { $0.path < $1.path }
     }
 
     private static func encodedBytes<T: Encodable>(_ value: T) throws -> Int64 {
@@ -758,6 +968,7 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
     }
 
     func transact<Result: Sendable>(
+        trigger: String = "transaction_enforcement",
         _ operation: @escaping @Sendable (inout SurfAceLocklessAuthorityState) throws -> Result
     ) async throws -> Result {
         try await withCheckedThrowingContinuation { continuation in
@@ -765,7 +976,10 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                 var candidate = self.state
                 do {
                     let result = try operation(&candidate)
-                    try SurfAceLocklessDormantRetention.enforceBounds(in: &candidate)
+                    try SurfAceLocklessDormantRetention.enforceBounds(
+                        in: &candidate,
+                        trigger: trigger
+                    )
                     candidate.generation += 1
                     try candidate.validate()
                     try self.store.save(candidate)

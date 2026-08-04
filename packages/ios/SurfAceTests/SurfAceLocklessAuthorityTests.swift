@@ -180,6 +180,71 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         }
     }
 
+    func testReclamationCapturesExactLiveAndTombstoneUnreadDispositionBeforeDeletion() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.controllers["controller-dormant"] = dormantBundle(id: "controller-dormant", sequence: 1)
+        var live = dormantBundle(id: "controller-live", sequence: 2)
+        live.status = .live
+        live.disconnectedAt = nil
+        live.dormantSequence = nil
+        state.controllers["controller-live"] = live
+
+        let firstSurface = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        let firstSurfaceScopeId = "surface:\(firstSurface.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? firstSurface)"
+        _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+            in: &state,
+            scopeId: firstSurfaceScopeId,
+            scopeKind: "surface",
+            recordId: "discarded", recordClass: .content, payload: .string("discarded")
+        )
+        _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+            in: &state,
+            scopeId: firstSurfaceScopeId,
+            scopeKind: "surface",
+            recordId: "retained", recordClass: .content, payload: .string("retained")
+        )
+        state.scopes[firstSurfaceScopeId]?.cursors["controller-live"]?.cursor = 2
+        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &state, surfaceId: firstSurface, paneId: 1, count: 2,
+            direction: "horizontal", expectedTopologyRevision: 0
+        )
+        _ = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: firstSurface,
+            paneId: try XCTUnwrap(split.newPaneIds.first), expectedTopologyRevision: 1
+        )
+
+        let secondSurface = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 1
+        ).surface.surfaceId
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: secondSurface,
+            expectedSurfaceSetRevision: 2, expectedTopologyRevision: 0
+        )
+
+        let occurrence = try XCTUnwrap(try SurfAceLocklessDormantRetention.reclaimOldest(
+            in: &state, trigger: "test_pressure", reason: "byte_capacity"
+        ))
+        XCTAssertEqual(occurrence.scopeCount, 5)
+        XCTAssertEqual(occurrence.cursorCount, 5)
+        XCTAssertEqual(occurrence.liveCursorCount, 2)
+        XCTAssertEqual(occurrence.tombstoneCursorCount, 3)
+        XCTAssertEqual(occurrence.surfaceCursorCount, 2)
+        XCTAssertEqual(occurrence.surfaceCount, 2)
+        XCTAssertEqual(occurrence.tombstoneCount, 2)
+        XCTAssertEqual(occurrence.unreadRecordCount, 2)
+        XCTAssertEqual(occurrence.unreadRecordCountDiscarded, 1)
+        XCTAssertGreaterThan(occurrence.cursorBytes, 0)
+        XCTAssertGreaterThan(occurrence.liveCursorBytes, 0)
+        XCTAssertGreaterThan(occurrence.tombstoneCursorBytes, 0)
+        XCTAssertGreaterThan(occurrence.unreadBytes, occurrence.unreadBytesDiscarded)
+        XCTAssertNil(state.controllers["controller-dormant"])
+        XCTAssertNotNil(state.controllers["controller-live"])
+        XCTAssertEqual(state.scopes[firstSurfaceScopeId]?.records.map(\.recordId), ["retained"])
+        XCTAssertEqual(state.pendingControllerRetentionReclamations, [occurrence])
+    }
+
     func testRollbackPreviewIsDeterministicAndDoesNotMutateAuthority() throws {
         var state = try SurfAceLocklessMigration.migrate(legacySnapshot())
         state.generation = 5

@@ -4,6 +4,72 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    func testAdmissionProjectionPrecedesItsReclamationEventOnTheWire() async throws {
+        let identifier = UUID().uuidString
+        let suiteName = "SurfAceLocklessReclamationOrderTests-\(identifier)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let stateURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(suiteName).json")
+        let store = SurfAceLocklessGenerationStore(stateURL: stateURL)
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.limits.maxAdmittedControllerEntries = 2
+        try store.save(state)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL)
+        await runtime.start()
+        let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
+        addTeardownBlock { await runtime.stop() }
+        let registeredSurface = await runtime.registerSurfaceForScene(
+            sceneKey: "reclamation-order-scene"
+        )
+        let surface = try XCTUnwrap(registeredSurface)
+
+        let first = socket(port: port)
+        let second = socket(port: port)
+        let third = socket(port: port)
+        first.resume()
+        second.resume()
+        third.resume()
+        _ = try await pair(
+            first, id: "pair-order-a", controllerId: "controller-order-a",
+            surfaceId: surface.surfaceId
+        )
+        _ = try await pair(
+            second, id: "pair-order-b", controllerId: "controller-order-b",
+            surfaceId: surface.surfaceId
+        )
+        first.cancel(with: .goingAway, reason: nil)
+        try await Task.sleep(for: .milliseconds(250))
+
+        try await send(third, op: "pair.request", id: "pair-order-c", payload: [
+            "controllerInstanceId": "controller-order-c",
+            "controllerProductName": "integration-client",
+            "projectionCapacityBytes": 8 * 1_024 * 1_024,
+            "protocolFeatures": [surfAceLocklessCapability],
+            "protocolVersion": 1,
+            "surfaceId": surface.surfaceId,
+        ])
+        let firstOnThird = try await receive(third)
+        XCTAssertEqual(firstOnThird["id"] as? String, "pair-order-c")
+        XCTAssertEqual(payload(firstOnThird)["mode"] as? String, "lockless")
+        let reclamation = try await receive(
+            third, matchingOp: "event.controller_retention_reclaimed"
+        )
+        XCTAssertEqual(
+            payload(reclamation)["controllerInstanceId"] as? String,
+            "controller-order-a"
+        )
+        XCTAssertFalse((reclamation["eventId"] as? String)?.isEmpty ?? true)
+
+        second.cancel(with: .normalClosure, reason: nil)
+        third.cancel(with: .normalClosure, reason: nil)
+    }
+
     func testTwoControllersShareAuthorityReceiptsReadsEventsAndReconnectWithoutOwnership() async throws {
         let identifier = UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "SurfAceLocklessWebSocketIntegrationTests-\(identifier)"))
@@ -219,7 +285,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "resolved_success", "not_committed",
         ])
         XCTAssertEqual(
-            ((resumedResolutions[0]["terminalResponse"] as? [String: Any])?["contentId"] as? String),
+            ((resumedResolutions[0]["terminalResponse"] as? [String: Any])?["payload"] as? [String: Any])?["contentId"] as? String,
             "content-a"
         )
         let resumedScopes = try XCTUnwrap(payload(resumedPair)["scopes"] as? [[String: Any]])

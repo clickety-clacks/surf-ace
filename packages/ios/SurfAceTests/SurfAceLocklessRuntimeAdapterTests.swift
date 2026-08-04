@@ -172,6 +172,24 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(admitted.state.negotiatedModes["sf_1"], .lockless)
     }
 
+    func testAdmissionCapacityReclamationRecordsExactTriggerAndReason() async throws {
+        let fixture = try makeFixture { state in
+            state.limits.maxAdmittedControllerEntries = 2
+        }
+        _ = try await admit(fixture.adapter, id: "controller-a", token: "connection-a")
+        _ = try await admit(fixture.adapter, id: "controller-b", token: "connection-b")
+        try await fixture.adapter.disconnect(connectionToken: "connection-a", disconnectedAt: 9)
+        _ = try await admit(fixture.adapter, id: "controller-c", token: "connection-c")
+
+        let occurrence = try XCTUnwrap(
+            fixture.store.load()?.pendingControllerRetentionReclamations?.last
+        )
+        XCTAssertEqual(occurrence.controllerInstanceId, "controller-a")
+        XCTAssertEqual(occurrence.trigger, "controller_admission")
+        XCTAssertEqual(occurrence.reason, "entry_capacity")
+        XCTAssertEqual(try fixture.store.load()?.controllers.keys.sorted(), ["controller-b", "controller-c"])
+    }
+
     func testResumeAppliesPendingAcknowledgementsAndResolvesExactReceipts() async throws {
         let fixture = try makeFixture()
         let adapter = fixture.adapter
@@ -202,7 +220,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             projectionCapacityBytes: 8 * 1_024 * 1_024,
             protocolFeatures: [surfAceLocklessCapability],
             surfaceId: "sf_1",
-            pendingAcks: [.init(cursor: 1, gapGeneration: nil, scopeId: "surface:sf_1")],
+            pendingAcks: [.init(cursor: 1, gapGeneration: nil, scopeId: "surface:sf%5F1")],
             unresolvedRequestIds: ["request-1", "request-missing"]
         )
 
@@ -220,7 +238,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             .object(["outcome": .string("not_committed"), "requestId": .string("request-missing")]),
         ])
         XCTAssertEqual(
-            resumed.state.scopes["surface:sf_1"]?.cursors["controller-a"]?.cursor, 1
+            resumed.state.scopes["surface:sf%5F1"]?.cursors["controller-a"]?.cursor, 1
         )
     }
 
@@ -378,6 +396,10 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertNil(restored.controllers["controller-a"])
         XCTAssertEqual(restored.controllers["controller-z"]?.status, .dormant)
         XCTAssertEqual(restored.controllers["controller-z"]?.dormantSequence, 2)
+        XCTAssertEqual(
+            restored.pendingControllerRetentionReclamations?.first?.trigger,
+            "restored_state_enforcement"
+        )
     }
 
     func testMutationPersistsExactReceiptBeforeFanoutAndAckRemovesIt() async throws {
@@ -404,6 +426,12 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         }
         let stored = try XCTUnwrap(fixture.store.load())
         XCTAssertEqual(stored.surfaceSetRevision, 2)
+        guard case .object(let terminal) = committed.terminalResponse else {
+            return XCTFail("expected full success response")
+        }
+        XCTAssertEqual(terminal["id"], .string("request-1"))
+        XCTAssertEqual(terminal["ok"], .bool(true))
+        XCTAssertEqual(terminal["payload"], committed.responsePayload)
         XCTAssertEqual(
             stored.controllers["controller-a"]?.pendingOperationReceipts["request-1"]?.terminalResponse,
             committed.terminalResponse
@@ -426,6 +454,228 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             requestIds: ["request-1"]
         )
         XCTAssertNil(try fixture.store.load()?.controllers["controller-a"]?.pendingOperationReceipts["request-1"])
+    }
+
+    func testCommittedOperationFailurePersistsExactFullWireResponseAndReplaysAfterRestart() async throws {
+        let fixture = try makeFixture()
+        _ = try await admit(fixture.adapter, id: "controller-a", token: "connection-a")
+        let before = await fixture.adapter.snapshot()
+
+        let committed = try await fixture.adapter.commitMutation(
+            connectionToken: "connection-a",
+            requestId: "request-failure",
+            operation: "pane.rename"
+        ) { state, _ in
+            state.surfaceSetRevision += 100
+            throw SurfAceLocklessTopologyOperationError.staleTopology(
+                currentRevision: 7,
+                currentTopology: .object(["type": .string("pane"), "paneId": .integer(1)])
+            )
+        }
+
+        XCTAssertEqual(committed.outcome, "resolved_failure")
+        guard case .object(let response) = committed.terminalResponse else {
+            return XCTFail("expected full wire response")
+        }
+        XCTAssertEqual(response["ok"], .bool(false))
+        XCTAssertEqual(response["op"], .string("pane.rename"))
+        XCTAssertEqual(response["id"], .string("request-failure"))
+        XCTAssertEqual((response["error"]), .object([
+            "code": .string("stale_topology"),
+            "details": .object([
+                "currentRevision": .integer(7),
+                "currentTopology": .object(["type": .string("pane"), "paneId": .integer(1)]),
+            ]),
+            "message": .string("stale_topology"),
+        ]))
+        let stored = try XCTUnwrap(fixture.store.load())
+        XCTAssertEqual(stored.surfaceSetRevision, before.surfaceSetRevision)
+        XCTAssertEqual(
+            stored.controllers["controller-a"]?.pendingOperationReceipts["request-failure"]?.outcome,
+            "resolved_failure"
+        )
+        XCTAssertEqual(
+            stored.controllers["controller-a"]?.pendingOperationReceipts["request-failure"]?.terminalResponse,
+            committed.terminalResponse
+        )
+
+        let restored = try SurfAceLocklessRuntimeAdapter(
+            store: fixture.store,
+            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
+        )
+        let resumed = try await restored.admit(
+            controllerInstanceId: "controller-a",
+            controllerProductName: nil,
+            connectionToken: "connection-b",
+            projectionCapacityBytes: 8 * 1_024 * 1_024,
+            protocolFeatures: [surfAceLocklessCapability],
+            unresolvedRequestIds: ["request-failure"]
+        )
+        XCTAssertEqual(resumed.receiptResolutions.first, .object([
+            "operationReceipt": .object([
+                "commitSequence": .integer(committed.commitSequence),
+                "requestId": .string("request-failure"),
+            ]),
+            "outcome": .string("resolved_failure"),
+            "requestId": .string("request-failure"),
+            "terminalResponse": committed.terminalResponse,
+        ]))
+    }
+
+    func testPreDispatchFailureFinalizerPersistsTheExactProvidedWireResponse() async throws {
+        let fixture = try makeFixture()
+        _ = try await admit(fixture.adapter, id: "controller-a", token: "connection-a")
+        let before = await fixture.adapter.snapshot()
+        let response: SurfAceLocklessJSON = .object([
+            "error": .object([
+                "code": .string("invalid_payload"),
+                "message": .string("paneId is required"),
+            ]),
+            "id": .string("request-validation"),
+            "ok": .bool(false),
+            "op": .string("pane.rename"),
+            "sentAt": .integer(1234),
+            "type": .string("response"),
+            "v": .integer(1),
+        ])
+        let committed = try await fixture.adapter.commitFailedMutation(
+            connectionToken: "connection-a",
+            requestId: "request-validation",
+            operation: "pane.rename",
+            terminalResponse: response
+        )
+        XCTAssertEqual(committed.outcome, "resolved_failure")
+        XCTAssertEqual(committed.terminalResponse, response)
+        let after = try XCTUnwrap(fixture.store.load())
+        XCTAssertEqual(after.surfaceSetRevision, before.surfaceSetRevision)
+        XCTAssertEqual(
+            after.controllers["controller-a"]?.pendingOperationReceipts["request-validation"]?.terminalResponse,
+            response
+        )
+        let validationResolutions = try await fixture.adapter.resolveReceipts(
+            connectionToken: "connection-a", requestIds: ["request-validation"]
+        )
+        XCTAssertEqual(validationResolutions.first, .object([
+            "operationReceipt": .object([
+                "commitSequence": .integer(committed.commitSequence),
+                "requestId": .string("request-validation"),
+            ]),
+            "outcome": .string("resolved_failure"),
+            "requestId": .string("request-validation"),
+            "terminalResponse": response,
+        ]))
+    }
+
+    func testReclamationOccurrencePersistsAcrossRestartUntilAcknowledged() async throws {
+        let fixture = try makeFixture { state in
+            state.limits.maxDormantControllerBytes = 1
+        }
+        _ = try await admit(fixture.adapter, id: "controller-a", token: "connection-a")
+        _ = try await fixture.adapter.commitMutation(
+            connectionToken: "connection-a",
+            requestId: "request-retained",
+            operation: "content.set",
+            consumableScopeId: "surface:sf%5F1",
+            consumableScopeKind: "surface",
+            consumableRecordClass: .content
+        ) { _, _ in .object(["status": .string("accepted")]) }
+        try await fixture.adapter.disconnect(connectionToken: "connection-a", disconnectedAt: 42)
+
+        let persisted = try XCTUnwrap(fixture.store.load())
+        let occurrence = try XCTUnwrap(persisted.pendingControllerRetentionReclamations?.first)
+        XCTAssertEqual(occurrence.controllerInstanceId, "controller-a")
+        XCTAssertEqual(occurrence.disconnectedAt, 42)
+        XCTAssertEqual(occurrence.dormantSequence, 1)
+        XCTAssertEqual(occurrence.trigger, "disconnect")
+        XCTAssertEqual(occurrence.reason, "byte_capacity")
+        XCTAssertEqual(occurrence.eventId, "controller-reclamation:\(occurrence.commitSequence)")
+        XCTAssertGreaterThan(occurrence.registryBytes, 0)
+        XCTAssertEqual(occurrence.receiptCount, 1)
+        XCTAssertGreaterThan(occurrence.receiptBytes, 0)
+        XCTAssertEqual(occurrence.cursorCount, 2)
+        XCTAssertEqual(occurrence.liveCursorCount, 2)
+        XCTAssertEqual(occurrence.surfaceCursorCount, 1)
+        XCTAssertEqual(occurrence.tombstoneCursorCount, 0)
+        XCTAssertEqual(occurrence.surfaceCount, 1)
+        XCTAssertEqual(occurrence.unreadRecordCount, 1)
+        XCTAssertEqual(occurrence.unreadRecordCountDiscarded, 1)
+        XCTAssertGreaterThan(occurrence.unreadBytesDiscarded, 0)
+        XCTAssertEqual(occurrence.maxDormantControllerBytes, 1)
+
+        let restored = try SurfAceLocklessRuntimeAdapter(
+            store: fixture.store,
+            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
+        )
+        let pending = await restored.pendingControllerRetentionReclamations()
+        XCTAssertEqual(pending.records, [occurrence])
+        try await restored.acknowledgeControllerRetentionReclamations(eventIds: [occurrence.eventId])
+        XCTAssertEqual(try fixture.store.load()?.pendingControllerRetentionReclamations, [])
+    }
+
+    func testDeferredReclamationPressureDoesNotBlockLaterRetentionOrMutation() async throws {
+        let fixture = try makeFixture { state in
+            state.limits.maxAdmittedControllerEntries = 2
+            state.limits.maxDormantControllerEntries = 1
+            state.limits.maxDormantControllerBytes = 1
+        }
+
+        for index in 0..<5 {
+            let controllerId = "controller-deferred-\(index)"
+            let connectionToken = "connection-deferred-\(index)"
+            _ = try await admit(fixture.adapter, id: controllerId, token: connectionToken)
+            try await fixture.adapter.disconnect(
+                connectionToken: connectionToken,
+                disconnectedAt: Int64(index + 1)
+            )
+        }
+
+        let deferred = try XCTUnwrap(
+            fixture.store.load()?.pendingControllerRetentionReclamations
+        )
+        XCTAssertEqual(deferred.count, 5)
+        XCTAssertGreaterThan(
+            deferred.count,
+            Int(try XCTUnwrap(fixture.store.load()).limits.maxAdmittedControllerEntries)
+        )
+        XCTAssertEqual(deferred.map(\.commitSequence), deferred.map(\.commitSequence).sorted())
+        XCTAssertEqual(Set(deferred.map(\.eventId)).count, deferred.count)
+
+        _ = try await admit(
+            fixture.adapter,
+            id: "controller-mutation",
+            token: "connection-mutation"
+        )
+        let committed = try await fixture.adapter.commitMutation(
+            connectionToken: "connection-mutation",
+            requestId: "request-after-deferred-pressure",
+            operation: "surface.window.open"
+        ) { state, sequence in
+            state.surfaceSetRevision += 1
+            return .object([
+                "commitSequence": .integer(sequence),
+                "surfaceSetRevision": .integer(state.surfaceSetRevision),
+            ])
+        }
+        XCTAssertEqual(committed.outcome, "resolved_success")
+        XCTAssertEqual(
+            try fixture.store.load()?.pendingControllerRetentionReclamations,
+            deferred
+        )
+        try await fixture.adapter.disconnect(
+            connectionToken: "connection-mutation",
+            disconnectedAt: 6
+        )
+        let pendingAfterLaterRetention = try XCTUnwrap(
+            fixture.store.load()?.pendingControllerRetentionReclamations
+        )
+        XCTAssertEqual(pendingAfterLaterRetention.count, 6)
+
+        let restored = try SurfAceLocklessRuntimeAdapter(
+            store: fixture.store,
+            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
+        )
+        let restoredPending = await restored.pendingControllerRetentionReclamations().records
+        XCTAssertEqual(restoredPending, pendingAfterLaterRetention)
     }
 
     func testReceiptCapacityRefusalCommitsNoMutationOrSequence() async throws {
@@ -467,6 +717,13 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(after.surfaceSetRevision, before.surfaceSetRevision)
         XCTAssertEqual(after.sequences.nextCommitSequence, before.sequences.nextCommitSequence)
         XCTAssertNil(after.controllers["controller-a"]?.pendingOperationReceipts["request-capacity"])
+        let capacityResolutions = try await fixture.adapter.resolveReceipts(
+            connectionToken: "connection-a", requestIds: ["request-capacity"]
+        )
+        XCTAssertEqual(capacityResolutions, [.object([
+            "outcome": .string("not_committed"),
+            "requestId": .string("request-capacity"),
+        ])])
     }
 
     func testTargetWorkCapacityRefusalIsTypedAndSideEffectFree() async throws {
@@ -516,6 +773,13 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(after.sequences.nextCommitSequence, before.sequences.nextCommitSequence)
         XCTAssertNil(after.targetApplyWorkItems["operation-capacity"])
         XCTAssertNil(after.controllers["controller-a"]?.pendingOperationReceipts["operation-capacity"])
+        let targetCapacityResolutions = try await fixture.adapter.resolveReceipts(
+            connectionToken: "connection-a", requestIds: ["operation-capacity"]
+        )
+        XCTAssertEqual(targetCapacityResolutions, [.object([
+            "outcome": .string("not_committed"),
+            "requestId": .string("operation-capacity"),
+        ])])
     }
 
     func testTargetIntentAndMaterializingAreDurableBeforeExternalWork() async throws {
@@ -582,14 +846,15 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         surface.surfaceId = "sf_1"
         state.liveSurfaces.removeValue(forKey: originalId)
         state.liveSurfaces["sf_1"] = surface
-        let originalSurfaceScope = "surface:\(originalId)"
+        let encodedOriginalId = originalId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? originalId
+        let originalSurfaceScope = "surface:\(encodedOriginalId)"
         if var scope = state.scopes.removeValue(forKey: originalSurfaceScope) {
-            scope.scopeId = "surface:sf_1"
+            scope.scopeId = "surface:sf%5F1"
             state.scopes[scope.scopeId] = scope
         }
-        let originalPaneScope = "pane:\(originalId):1"
+        let originalPaneScope = "pane:\(encodedOriginalId):1"
         if var scope = state.scopes.removeValue(forKey: originalPaneScope) {
-            scope.scopeId = "pane:sf_1:1"
+            scope.scopeId = "pane:sf%5F1:1"
             state.scopes[scope.scopeId] = scope
         }
         try configure(&state)
