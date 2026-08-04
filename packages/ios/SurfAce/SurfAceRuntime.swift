@@ -242,12 +242,17 @@ actor SurfAceOutboundSender {
     }
 
     private let socket: SurfAceWebSocket
+    private let prepareSend: (@Sendable (String, Priority) async -> Void)?
     private var queue: [QueuedSend] = []
     private var nextSequence = 0
     private var isDraining = false
 
-    init(socket: SurfAceWebSocket) {
+    init(
+        socket: SurfAceWebSocket,
+        prepareSend: (@Sendable (String, Priority) async -> Void)? = nil
+    ) {
         self.socket = socket
+        self.prepareSend = prepareSend
     }
 
     func send(text: String, priority: Priority) async throws {
@@ -281,6 +286,9 @@ actor SurfAceOutboundSender {
         while !queue.isEmpty {
             let next = queue.removeFirst()
             do {
+                if let prepareSend {
+                    await prepareSend(next.text, next.priority)
+                }
                 try await socket.send(text: next.text)
                 next.continuation.resume()
             } catch {
@@ -452,6 +460,10 @@ final class SurfAceRuntime {
     @ObservationIgnored private let surfaceTopologyStoreKey = "SurfAce.SurfaceTopologyMapping"
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private let locklessStateURLOverride: URL?
+    @ObservationIgnored private let outboundSendPreparation: (@Sendable (
+        String, SurfAceOutboundSender.Priority
+    ) async -> Void)?
+    @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
@@ -512,10 +524,16 @@ final class SurfAceRuntime {
 
     init(
         userDefaults: UserDefaults = .standard,
-        locklessStateURL: URL? = nil
+        locklessStateURL: URL? = nil,
+        outboundSendPreparation: (@Sendable (
+            String, SurfAceOutboundSender.Priority
+        ) async -> Void)? = nil,
+        locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
         self.locklessStateURLOverride = locklessStateURL
+        self.outboundSendPreparation = outboundSendPreparation
+        self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
         let hostName = ProcessInfo.processInfo.hostName
@@ -1851,7 +1869,10 @@ final class SurfAceRuntime {
         surfAceGatewayLog(
             "event=socket_open \(surfAceDiagnosticFields([("connection_uuid", connectionUUID)]))"
         )
-        let sender = SurfAceOutboundSender(socket: socket)
+        let sender = SurfAceOutboundSender(
+            socket: socket,
+            prepareSend: outboundSendPreparation
+        )
         var replayCache: [String: SurfAceRequestReplayEntry] = [:]
         var replayOrder: [String] = []
         terminatedConnectionUUIDs.remove(connectionUUID)
@@ -3484,6 +3505,7 @@ final class SurfAceRuntime {
             || locklessAdmissionDeliveryBarriers.contains(where: { $0 != bypassingAdmissionBarrier }) {
             await withCheckedContinuation { continuation in
                 locklessDeliveryWaiters.append(continuation)
+                locklessDeliveryWaitObserver?()
             }
         }
         locklessDeliveryActive = true

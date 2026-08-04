@@ -66,7 +66,20 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             try? FileManager.default.removeItem(at: stateURL)
         }
 
-        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL)
+        let pairResponseGate = SurfAceLocklessPairResponseSendGate(
+            requestId: "pair-order-c"
+        )
+        let deliveryContention = expectation(description: "N+1 queued behind pair response")
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults,
+            locklessStateURL: stateURL,
+            outboundSendPreparation: { text, priority in
+                await pairResponseGate.prepareSend(text: text, priority: priority)
+            },
+            locklessDeliveryWaitObserver: {
+                deliveryContention.fulfill()
+            }
+        )
         await runtime.start()
         let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
         addTeardownBlock { await runtime.stop() }
@@ -101,6 +114,13 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "protocolVersion": 1,
             "surfaceId": surface.surfaceId,
         ])
+        await pairResponseGate.waitUntilHeld()
+        let afterReclamation = try await runtime.locklessReadinessSnapshot().state
+        let reclamationOccurrence = try XCTUnwrap(
+            afterReclamation.pendingControllerRetentionReclamations?.first
+        )
+        XCTAssertEqual(reclamationOccurrence.controllerInstanceId, "controller-order-a")
+
         try await send(second, op: "content.set", id: "mutation-after-reclamation", payload: [
             "content": ["html": "<main>after reclamation</main>"],
             "contentId": "content-after-reclamation",
@@ -109,6 +129,18 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "paneId": paneId,
             "surfaceId": surface.surfaceId,
         ])
+        await fulfillment(of: [deliveryContention], timeout: 2)
+        let whileDeliveryBlocked = try await runtime.locklessReadinessSnapshot().state
+        let mutationReceipt = try XCTUnwrap(
+            whileDeliveryBlocked.controllers["controller-order-b"]?
+                .pendingOperationReceipts["mutation-after-reclamation"]
+        )
+        XCTAssertGreaterThan(
+            try XCTUnwrap(mutationReceipt.commitSequence),
+            reclamationOccurrence.commitSequence
+        )
+        await pairResponseGate.release()
+
         let firstOnThird = try await receive(third)
         XCTAssertEqual(firstOnThird["id"] as? String, "pair-order-c")
         XCTAssertEqual(payload(firstOnThird)["mode"] as? String, "lockless")
@@ -126,6 +158,11 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertEqual(observerReclamation["eventId"] as? String, reclamation["eventId"] as? String)
         let laterCommit = try await receive(second, matchingOp: "event.lockless_content_committed")
         XCTAssertEqual(payload(laterCommit)["contentId"] as? String, "content-after-reclamation")
+        let mutationResponse = try await receive(second, matchingId: "mutation-after-reclamation")
+        XCTAssertEqual(
+            (payload(mutationResponse)["operationReceipt"] as? [String: Any])?["requestId"] as? String,
+            "mutation-after-reclamation"
+        )
 
         second.cancel(with: .normalClosure, reason: nil)
         third.cancel(with: .normalClosure, reason: nil)
@@ -499,5 +536,39 @@ private actor SurfAceLocklessTestGate {
         let pending = waiters
         waiters.removeAll()
         pending.forEach { $0.resume() }
+    }
+}
+
+private actor SurfAceLocklessPairResponseSendGate {
+    private let requestId: String
+    private var held = false
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    private let releaseGate = SurfAceLocklessTestGate()
+
+    init(requestId: String) {
+        self.requestId = requestId
+    }
+
+    func prepareSend(text: String, priority: SurfAceOutboundSender.Priority) async {
+        guard priority == .response,
+              let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["id"] as? String == requestId else { return }
+        held = true
+        let waiters = heldWaiters
+        heldWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await releaseGate.wait()
+    }
+
+    func waitUntilHeld() async {
+        guard !held else { return }
+        await withCheckedContinuation { continuation in
+            heldWaiters.append(continuation)
+        }
+    }
+
+    func release() async {
+        await releaseGate.open()
     }
 }
