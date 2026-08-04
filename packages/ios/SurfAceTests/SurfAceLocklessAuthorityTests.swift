@@ -180,6 +180,35 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         }
     }
 
+    func testGenerationLoadRejectsImpossibleReclamationDeliveredRecipient() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceLocklessInvalidDeliveryTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.controllers["controller-dormant"] = dormantBundle(id: "controller-dormant", sequence: 1)
+        var live = dormantBundle(id: "controller-live", sequence: 2)
+        live.status = .live
+        live.disconnectedAt = nil
+        live.dormantSequence = nil
+        state.controllers["controller-live"] = live
+        _ = try SurfAceLocklessDormantRetention.reclaimOldest(in: &state)
+        state.pendingControllerRetentionReclamations?[0].deliveredControllerInstanceIds = [
+            "controller-impossible"
+        ]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(state).write(to: store.stateURL)
+
+        XCTAssertThrowsError(try store.load()) { error in
+            XCTAssertEqual(
+                error as? SurfAceLocklessAuthorityError,
+                .invalidState("controller_retention_reclamation_delivery:controller-reclamation:1")
+            )
+        }
+    }
+
     func testReclamationCapturesExactLiveAndTombstoneUnreadDispositionBeforeDeletion() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
         state.controllers["controller-dormant"] = dormantBundle(id: "controller-dormant", sequence: 1)

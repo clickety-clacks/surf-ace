@@ -92,6 +92,11 @@ struct SurfAceLocklessFanout: Equatable, Sendable {
     var event: SurfAceLocklessJSON
 }
 
+struct SurfAceLocklessControllerRetentionDelivery: Equatable, Sendable {
+    var connectionTokensByControllerInstanceId: [String: String]
+    var record: SurfAceLocklessControllerRetentionReclamation
+}
+
 struct SurfAceLocklessMaterializationOutcome: Equatable, Sendable {
     var errorCode: String?
     var materializedState: SurfAceLocklessJSON?
@@ -162,6 +167,7 @@ actor SurfAceLocklessRuntimeAdapter {
         }
 
         let admission = try await coordinator.transact(trigger: "controller_admission") { state in
+            let pendingReclamationCount = state.pendingControllerRetentionReclamations?.count ?? 0
             let requiredProjectionBytes = max(
                 state.limits.maxPaneConsumableBytes,
                 state.limits.maxSurfaceConsumableBytes
@@ -201,6 +207,18 @@ actor SurfAceLocklessRuntimeAdapter {
                 projectionCapacityBytes: projectionCapacityBytes,
                 status: .live
             )
+            if var pending = state.pendingControllerRetentionReclamations,
+               pending.count > pendingReclamationCount {
+                for index in pendingReclamationCount..<pending.count {
+                    var recipients = pending[index].recipientControllerInstanceIds
+                    if !recipients.contains(controllerInstanceId) {
+                        recipients.append(controllerInstanceId)
+                        recipients.sort()
+                    }
+                    pending[index].recipientControllerInstanceIds = recipients
+                }
+                state.pendingControllerRetentionReclamations = pending
+            }
             SurfAceLocklessConsumableOperations.admitController(controllerInstanceId, in: &state)
             for acknowledgement in pendingAcks {
                 _ = try SurfAceLocklessConsumableOperations.acknowledge(
@@ -880,27 +898,39 @@ actor SurfAceLocklessRuntimeAdapter {
         )
     }
 
-    func pendingControllerRetentionReclamations() async -> (
-        records: [SurfAceLocklessControllerRetentionReclamation],
-        connectionTokens: [String]
-    ) {
+    func pendingControllerRetentionReclamations() async -> [SurfAceLocklessControllerRetentionDelivery] {
         let state = await coordinator.snapshot()
-        return (
-            (state.pendingControllerRetentionReclamations ?? []).sorted {
-                $0.commitSequence < $1.commitSequence
-            },
-            controllerByConnection.keys.sorted()
-        )
+        return (state.pendingControllerRetentionReclamations ?? []).sorted {
+            $0.commitSequence < $1.commitSequence
+        }.map { record in
+            let delivered = Set(record.deliveredControllerInstanceIds)
+            let recipients = Set(record.recipientControllerInstanceIds).subtracting(delivered)
+            let connections = Dictionary(uniqueKeysWithValues: recipients.compactMap { controllerId in
+                connectionByController[controllerId].map { (controllerId, $0) }
+            })
+            return SurfAceLocklessControllerRetentionDelivery(
+                connectionTokensByControllerInstanceId: connections,
+                record: record
+            )
+        }
     }
 
-    func acknowledgeControllerRetentionReclamations(eventIds: [String]) async throws {
-        let acknowledged = Set(eventIds)
-        guard !acknowledged.isEmpty else { return }
+    func acknowledgeControllerRetentionReclamation(
+        eventId: String,
+        deliveredControllerInstanceIds: [String]
+    ) async throws {
         try await coordinator.transact(trigger: "controller_reclamation_delivery_ack") { state in
-            state.pendingControllerRetentionReclamations =
-                (state.pendingControllerRetentionReclamations ?? []).filter {
-                    !acknowledged.contains($0.eventId)
-                }
+            var pending = state.pendingControllerRetentionReclamations ?? []
+            guard let index = pending.firstIndex(where: { $0.eventId == eventId }) else { return }
+            var delivered = Set(pending[index].deliveredControllerInstanceIds)
+            delivered.formUnion(deliveredControllerInstanceIds)
+            let recipients = Set(pending[index].recipientControllerInstanceIds)
+            if recipients.isSubset(of: delivered) {
+                pending.remove(at: index)
+            } else {
+                pending[index].deliveredControllerInstanceIds = delivered.sorted()
+            }
+            state.pendingControllerRetentionReclamations = pending
         }
     }
 

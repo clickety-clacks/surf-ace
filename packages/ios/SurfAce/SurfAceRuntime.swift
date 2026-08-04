@@ -473,6 +473,9 @@ final class SurfAceRuntime {
         sender: SurfAceOutboundSender,
         socket: SurfAceWebSocket
     )] = [:]
+    @ObservationIgnored private var locklessDeliveryActive = false
+    @ObservationIgnored private var locklessDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
+    @ObservationIgnored private var locklessAdmissionDeliveryBarriers: Set<String> = []
 
     private let maxMessageBytes = 12 * 1024 * 1024
     private let maxFrameBytes = 10 * 1024 * 1024
@@ -2227,6 +2230,7 @@ final class SurfAceRuntime {
                 postSendPairCommit: nil
             )
         }
+        await beginLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID)
         do {
             let adapter = try ensureLocklessAdapter()
             let readiness = await adapter.readinessSnapshot()
@@ -2289,11 +2293,17 @@ final class SurfAceRuntime {
                 ],
                 postSendPairCommit: nil,
                 postSendAction: { [weak self, weak adapter] in
-                    guard let self, let adapter else { return }
-                    await self.drainControllerRetentionReclamations(adapter: adapter)
+                    guard let self else { return }
+                    defer { self.endLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID) }
+                    guard let adapter else { return }
+                    await self.drainControllerRetentionReclamations(
+                        adapter: adapter,
+                        bypassingAdmissionBarrier: connectionUUID
+                    )
                 }
             )
         } catch let error as SurfAceLocklessRuntimeAdapterError {
+            endLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID)
             let code: String
             switch error {
             case .duplicateLiveController: code = "duplicate_controller_instance"
@@ -2306,6 +2316,7 @@ final class SurfAceRuntime {
                 postSendPairCommit: nil
             )
         } catch {
+            endLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID)
             return SurfAceProcessedRequestResult(
                 responseObject: makeErrorResponse(op: "pair.request", id: id, code: "client_state_unavailable", message: error.localizedDescription),
                 postSendPairCommit: nil
@@ -3315,31 +3326,47 @@ final class SurfAceRuntime {
         payload: SurfAceLocklessJSON
     ) async {
         guard let locklessAdapter else { return }
-        let fanout = await locklessAdapter.fanout(
-            afterCommitted: .object(["op": .string(op), "payload": payload])
-        )
-        let envelope: [String: Any] = [
-            "v": 1,
-            "type": "event",
-            "op": op,
-            "eventId": randomHex(prefix: "ev", byteCount: 8),
-            "sentAt": timestampNow(),
-            "payload": Self.foundationJSON(payload),
-        ]
-        guard let json = encodeJSON(envelope) else { return }
-        for connectionUUID in fanout.connectionTokens {
-            guard let connection = locklessConnectionsByConnectionUUID[connectionUUID] else { continue }
-            try? await connection.sender.send(text: json, priority: .event)
+        await withLocklessDeliveryTurn {
+            let blockedControllerIds = await drainControllerRetentionReclamationsInCurrentTurn(
+                adapter: locklessAdapter
+            )
+            let fanout = await locklessAdapter.fanout(
+                afterCommitted: .object(["op": .string(op), "payload": payload])
+            )
+            let envelope: [String: Any] = [
+                "v": 1,
+                "type": "event",
+                "op": op,
+                "eventId": randomHex(prefix: "ev", byteCount: 8),
+                "sentAt": timestampNow(),
+                "payload": Self.foundationJSON(payload),
+            ]
+            guard let json = encodeJSON(envelope) else { return }
+            for connectionUUID in fanout.connectionTokens {
+                guard let connection = locklessConnectionsByConnectionUUID[connectionUUID],
+                      !blockedControllerIds.contains(connection.controllerInstanceId) else { continue }
+                try? await connection.sender.send(text: json, priority: .event)
+            }
         }
     }
 
     private func drainControllerRetentionReclamations(
-        adapter: SurfAceLocklessRuntimeAdapter
+        adapter: SurfAceLocklessRuntimeAdapter,
+        bypassingAdmissionBarrier: String? = nil
     ) async {
+        await withLocklessDeliveryTurn(bypassingAdmissionBarrier: bypassingAdmissionBarrier) {
+            _ = await drainControllerRetentionReclamationsInCurrentTurn(adapter: adapter)
+        }
+    }
+
+    private func drainControllerRetentionReclamationsInCurrentTurn(
+        adapter: SurfAceLocklessRuntimeAdapter
+    ) async -> Set<String> {
         let pending = await adapter.pendingControllerRetentionReclamations()
-        guard !pending.records.isEmpty else { return }
-        var delivered: [String] = []
-        for record in pending.records {
+        guard !pending.isEmpty else { return [] }
+        var blockedControllerIds: Set<String> = []
+        for delivery in pending {
+            let record = delivery.record
             let diagnosticFields: [(String, CustomStringConvertible?)] = [
                 ("event_id", record.eventId),
                 ("commit_sequence", record.commitSequence),
@@ -3380,11 +3407,15 @@ final class SurfAceRuntime {
                 surfAceLifecycleLog(
                     "event=lockless_controller_retention_diagnostic_deferred \(error.localizedDescription)"
                 )
-                return
+                return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
             }
             guard let payload = try? Self.locklessJSON(record),
-                  case .object(var fields) = payload else { return }
+                  case .object(var fields) = payload else {
+                return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
+            }
             fields.removeValue(forKey: "eventId")
+            fields.removeValue(forKey: "deliveredControllerInstanceIds")
+            fields.removeValue(forKey: "recipientControllerInstanceIds")
             let envelope: [String: Any] = [
                 "v": 1,
                 "type": "event",
@@ -3393,25 +3424,80 @@ final class SurfAceRuntime {
                 "sentAt": timestampNow(),
                 "payload": Self.foundationJSON(.object(fields)),
             ]
-            guard let json = encodeJSON(envelope) else { return }
-            do {
-                for connectionToken in pending.connectionTokens {
-                    guard let connection = locklessConnectionsByConnectionUUID[connectionToken] else { continue }
-                    try await connection.sender.send(text: json, priority: .event)
-                }
-            } catch {
-                let deferredFields: [(String, CustomStringConvertible?)] = [
-                    ("event_id", record.eventId),
-                    ("error", error.localizedDescription),
-                ]
-                surfAceLifecycleLog(
-                    "event=lockless_controller_retention_delivery_deferred \(surfAceDiagnosticFields(deferredFields))"
-                )
-                return
+            guard let json = encodeJSON(envelope) else {
+                return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
             }
-            delivered.append(record.eventId)
+            var deliveredControllerIds: [String] = []
+            for controllerId in delivery.connectionTokensByControllerInstanceId.keys.sorted() {
+                guard !blockedControllerIds.contains(controllerId) else { continue }
+                guard let connectionToken = delivery.connectionTokensByControllerInstanceId[controllerId],
+                      let connection = locklessConnectionsByConnectionUUID[connectionToken] else { continue }
+                do {
+                    try await connection.sender.send(text: json, priority: .event)
+                    deliveredControllerIds.append(controllerId)
+                } catch {
+                    blockedControllerIds.insert(controllerId)
+                    let deferredFields: [(String, CustomStringConvertible?)] = [
+                        ("event_id", record.eventId),
+                        ("controller_instance_id", controllerId),
+                        ("error", error.localizedDescription),
+                    ]
+                    surfAceLifecycleLog(
+                        "event=lockless_controller_retention_delivery_deferred \(surfAceDiagnosticFields(deferredFields))"
+                    )
+                }
+            }
+            if !deliveredControllerIds.isEmpty || record.recipientControllerInstanceIds.isEmpty {
+                try? await adapter.acknowledgeControllerRetentionReclamation(
+                    eventId: record.eventId,
+                    deliveredControllerInstanceIds: deliveredControllerIds
+                )
+            }
         }
-        try? await adapter.acknowledgeControllerRetentionReclamations(eventIds: delivered)
+        return blockedControllerIds
+    }
+
+    func beginLocklessAdmissionDeliveryBarrier(connectionUUID: String) async {
+        await acquireLocklessDeliveryTurn()
+        locklessAdmissionDeliveryBarriers.insert(connectionUUID)
+        releaseLocklessDeliveryTurn()
+    }
+
+    func endLocklessAdmissionDeliveryBarrier(connectionUUID: String) {
+        guard locklessAdmissionDeliveryBarriers.remove(connectionUUID) != nil else { return }
+        resumeLocklessDeliveryWaiters()
+    }
+
+    func withLocklessDeliveryTurn(
+        bypassingAdmissionBarrier: String? = nil,
+        _ operation: () async -> Void
+    ) async {
+        await acquireLocklessDeliveryTurn(bypassingAdmissionBarrier: bypassingAdmissionBarrier)
+        await operation()
+        releaseLocklessDeliveryTurn()
+    }
+
+    private func acquireLocklessDeliveryTurn(
+        bypassingAdmissionBarrier: String? = nil
+    ) async {
+        while locklessDeliveryActive
+            || locklessAdmissionDeliveryBarriers.contains(where: { $0 != bypassingAdmissionBarrier }) {
+            await withCheckedContinuation { continuation in
+                locklessDeliveryWaiters.append(continuation)
+            }
+        }
+        locklessDeliveryActive = true
+    }
+
+    private func releaseLocklessDeliveryTurn() {
+        locklessDeliveryActive = false
+        resumeLocklessDeliveryWaiters()
+    }
+
+    private func resumeLocklessDeliveryWaiters() {
+        let waiters = locklessDeliveryWaiters
+        locklessDeliveryWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 
     private func commitLocalMutation(
@@ -3426,38 +3512,44 @@ final class SurfAceRuntime {
         scopeId: String,
         adapter: SurfAceLocklessRuntimeAdapter
     ) async {
-        for projection in await adapter.consumableProjections(scopeId: scopeId) {
-            guard let connection = locklessConnectionsByConnectionUUID[projection.connectionToken] else {
-                continue
-            }
-            var envelopes: [[String: Any]] = []
-            if !projection.delta.records.isEmpty {
+        await withLocklessDeliveryTurn {
+            let blockedControllerIds = await drainControllerRetentionReclamationsInCurrentTurn(
+                adapter: adapter
+            )
+            for projection in await adapter.consumableProjections(scopeId: scopeId) {
+                guard let connection = locklessConnectionsByConnectionUUID[projection.connectionToken],
+                      !blockedControllerIds.contains(connection.controllerInstanceId) else {
+                    continue
+                }
+                var envelopes: [[String: Any]] = []
+                if !projection.delta.records.isEmpty {
+                    envelopes.append([
+                        "v": 1, "type": "event", "op": "event.lockless_consumable_delta",
+                        "eventId": randomHex(prefix: "ev", byteCount: 8), "sentAt": timestampNow(),
+                        "payload": (try? Self.jsonObject(projection.delta)) ?? [:],
+                    ])
+                }
+                if let gap = projection.snapshot.cursor.gap {
+                    envelopes.append([
+                        "v": 1, "type": "event", "op": "event.consumable_overflow",
+                        "eventId": randomHex(prefix: "ev", byteCount: 8), "sentAt": timestampNow(),
+                        "payload": [
+                            "firstRetainedSequence": projection.snapshot.firstRetainedSequence,
+                            "gap": (try? Self.jsonObject(gap)) ?? [:],
+                            "lastRetainedSequence": projection.snapshot.lastRetainedSequence,
+                            "scopeId": scopeId,
+                        ],
+                    ])
+                }
                 envelopes.append([
-                    "v": 1, "type": "event", "op": "event.lockless_consumable_delta",
+                    "v": 1, "type": "event", "op": "event.consumable_available",
                     "eventId": randomHex(prefix: "ev", byteCount: 8), "sentAt": timestampNow(),
-                    "payload": (try? Self.jsonObject(projection.delta)) ?? [:],
+                    "payload": ["scopeId": scopeId],
                 ])
-            }
-            if let gap = projection.snapshot.cursor.gap {
-                envelopes.append([
-                    "v": 1, "type": "event", "op": "event.consumable_overflow",
-                    "eventId": randomHex(prefix: "ev", byteCount: 8), "sentAt": timestampNow(),
-                    "payload": [
-                        "firstRetainedSequence": projection.snapshot.firstRetainedSequence,
-                        "gap": (try? Self.jsonObject(gap)) ?? [:],
-                        "lastRetainedSequence": projection.snapshot.lastRetainedSequence,
-                        "scopeId": scopeId,
-                    ],
-                ])
-            }
-            envelopes.append([
-                "v": 1, "type": "event", "op": "event.consumable_available",
-                "eventId": randomHex(prefix: "ev", byteCount: 8), "sentAt": timestampNow(),
-                "payload": ["scopeId": scopeId],
-            ])
-            for envelope in envelopes {
-                guard let json = encodeJSON(envelope) else { continue }
-                try? await connection.sender.send(text: json, priority: .event)
+                for envelope in envelopes {
+                    guard let json = encodeJSON(envelope) else { continue }
+                    try? await connection.sender.send(text: json, priority: .event)
+                }
             }
         }
     }
@@ -5040,6 +5132,7 @@ final class SurfAceRuntime {
 
     private func handleSocketTermination(connectionUUID: String) async {
         terminatedConnectionUUIDs.insert(connectionUUID)
+        endLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID)
         if locklessConnectionsByConnectionUUID.removeValue(forKey: connectionUUID) != nil {
             try? await locklessAdapter?.disconnect(
                 connectionToken: connectionUUID,

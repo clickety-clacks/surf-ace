@@ -241,6 +241,7 @@ struct SurfAceLocklessControllerRetentionReclamation: Codable, Equatable, Sendab
     var cursorBytes: Int64
     var cursorCount: Int64
     var disconnectedAt: Int64?
+    var deliveredControllerInstanceIds: [String]
     var dormantSequence: Int64
     var eventId: String
     var liveCursorBytes: Int64
@@ -249,6 +250,7 @@ struct SurfAceLocklessControllerRetentionReclamation: Codable, Equatable, Sendab
     var maxDormantControllerBytes: Int64
     var maxDormantControllerEntries: Int64
     var reason: String
+    var recipientControllerInstanceIds: [String]
     var receiptBytes: Int64
     var receiptCount: Int64
     var registryBytes: Int64
@@ -430,6 +432,21 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
         guard Set(pendingReclamations.map(\.eventId)).count == pendingReclamations.count,
               Set(pendingReclamations.map(\.commitSequence)).count == pendingReclamations.count else {
             throw SurfAceLocklessAuthorityError.invalidState("controller_retention_reclamation_outbox")
+        }
+        for reclamation in pendingReclamations {
+            let recipients = reclamation.recipientControllerInstanceIds
+            let delivered = reclamation.deliveredControllerInstanceIds
+            guard recipients == recipients.sorted(),
+                  Set(recipients).count == recipients.count,
+                  recipients.allSatisfy({ !$0.isEmpty }),
+                  delivered == delivered.sorted(),
+                  Set(delivered).count == delivered.count,
+                  delivered.allSatisfy({ !$0.isEmpty }),
+                  Set(delivered).isSubset(of: Set(recipients)) else {
+                throw SurfAceLocklessAuthorityError.invalidState(
+                    "controller_retention_reclamation_delivery:\(reclamation.eventId)"
+                )
+            }
         }
         for (controllerId, controller) in controllers {
             guard controllerId == controller.controllerInstanceId else {
@@ -787,6 +804,7 @@ enum SurfAceLocklessDormantRetention {
             cursorBytes: cursorBytes,
             cursorCount: Int64(affected.count),
             disconnectedAt: victim.disconnectedAt,
+            deliveredControllerInstanceIds: [],
             dormantSequence: victim.dormantSequence ?? 0,
             eventId: "controller-reclamation:\(commitSequence)",
             liveCursorBytes: liveCursorBytes,
@@ -795,6 +813,10 @@ enum SurfAceLocklessDormantRetention {
             maxDormantControllerBytes: state.limits.maxDormantControllerBytes,
             maxDormantControllerEntries: state.limits.maxDormantControllerEntries,
             reason: reason,
+            recipientControllerInstanceIds: state.controllers.values
+                .filter { $0.status == .live }
+                .map(\.controllerInstanceId)
+                .sorted(),
             receiptBytes: receipts.reduce(Int64(0)) {
                 SurfAceLocklessExactDurableAccounting.saturatingAdd($0, $1.bytes)
             },

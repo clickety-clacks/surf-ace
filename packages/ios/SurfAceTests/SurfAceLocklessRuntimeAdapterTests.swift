@@ -607,8 +607,11 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
         )
         let pending = await restored.pendingControllerRetentionReclamations()
-        XCTAssertEqual(pending.records, [occurrence])
-        try await restored.acknowledgeControllerRetentionReclamations(eventIds: [occurrence.eventId])
+        XCTAssertEqual(pending.map(\.record), [occurrence])
+        try await restored.acknowledgeControllerRetentionReclamation(
+            eventId: occurrence.eventId,
+            deliveredControllerInstanceIds: []
+        )
         XCTAssertEqual(try fixture.store.load()?.pendingControllerRetentionReclamations, [])
     }
 
@@ -674,8 +677,51 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             store: fixture.store,
             legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
         )
-        let restoredPending = await restored.pendingControllerRetentionReclamations().records
+        let restoredPending = await restored.pendingControllerRetentionReclamations().map(\.record)
         XCTAssertEqual(restoredPending, pendingAfterLaterRetention)
+    }
+
+    func testReclamationDeliveryRetainsCommitTimeRecipientAcrossDisconnectAndResume() async throws {
+        let fixture = try makeFixture { state in
+            state.limits.maxAdmittedControllerEntries = 2
+        }
+        _ = try await admit(fixture.adapter, id: "controller-recipient", token: "connection-recipient")
+        _ = try await admit(fixture.adapter, id: "controller-victim", token: "connection-victim")
+        try await fixture.adapter.disconnect(connectionToken: "connection-victim", disconnectedAt: 1)
+
+        _ = try await admit(fixture.adapter, id: "controller-new", token: "connection-new")
+        let committed = try XCTUnwrap(fixture.store.load()?.pendingControllerRetentionReclamations?.first)
+        XCTAssertEqual(
+            committed.recipientControllerInstanceIds,
+            ["controller-new", "controller-recipient"]
+        )
+
+        try await fixture.adapter.disconnect(connectionToken: "connection-recipient", disconnectedAt: 2)
+        let whileDisconnected = await fixture.adapter.pendingControllerRetentionReclamations()
+        XCTAssertNil(
+            whileDisconnected.first?.connectionTokensByControllerInstanceId["controller-recipient"]
+        )
+        try await fixture.adapter.acknowledgeControllerRetentionReclamation(
+            eventId: committed.eventId,
+            deliveredControllerInstanceIds: ["controller-new"]
+        )
+        XCTAssertNotNil(try fixture.store.load()?.pendingControllerRetentionReclamations?.first)
+
+        _ = try await admit(
+            fixture.adapter,
+            id: "controller-recipient",
+            token: "connection-recipient-resumed"
+        )
+        let resumed = await fixture.adapter.pendingControllerRetentionReclamations()
+        XCTAssertEqual(
+            resumed.first?.connectionTokensByControllerInstanceId,
+            ["controller-recipient": "connection-recipient-resumed"]
+        )
+        try await fixture.adapter.acknowledgeControllerRetentionReclamation(
+            eventId: committed.eventId,
+            deliveredControllerInstanceIds: ["controller-recipient"]
+        )
+        XCTAssertEqual(try fixture.store.load()?.pendingControllerRetentionReclamations, [])
     }
 
     func testReceiptCapacityRefusalCommitsNoMutationOrSequence() async throws {

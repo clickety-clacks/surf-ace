@@ -4,6 +4,52 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    func testResumeBarrierCannotRegisterInsideAnActiveDeliveryTurn() async throws {
+        let suiteName = "SurfAceLocklessDeliveryGateTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults,
+            locklessStateURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("unused-delivery-gate-\(UUID().uuidString).json")
+        )
+        let activeTurnEntered = expectation(description: "active delivery turn entered")
+        let activeTurnRelease = SurfAceLocklessTestGate()
+        let probe = SurfAceLocklessDeliveryGateProbe()
+
+        let activeTurn = Task { @MainActor in
+            await runtime.withLocklessDeliveryTurn {
+                activeTurnEntered.fulfill()
+                await activeTurnRelease.wait()
+            }
+        }
+        await fulfillment(of: [activeTurnEntered], timeout: 1)
+
+        let resumeBarrier = Task { @MainActor in
+            await runtime.beginLocklessAdmissionDeliveryBarrier(connectionUUID: "resume-connection")
+            probe.resumeBarrierRegistered = true
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(probe.resumeBarrierRegistered)
+
+        await activeTurnRelease.open()
+        await activeTurn.value
+        await resumeBarrier.value
+        XCTAssertTrue(probe.resumeBarrierRegistered)
+
+        let laterDelivery = Task { @MainActor in
+            await runtime.withLocklessDeliveryTurn {
+                probe.laterDeliveryEntered = true
+            }
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(probe.laterDeliveryEntered)
+
+        runtime.endLocklessAdmissionDeliveryBarrier(connectionUUID: "resume-connection")
+        await laterDelivery.value
+        XCTAssertTrue(probe.laterDeliveryEntered)
+    }
+
     func testAdmissionProjectionPrecedesItsReclamationEventOnTheWire() async throws {
         let identifier = UUID().uuidString
         let suiteName = "SurfAceLocklessReclamationOrderTests-\(identifier)"
@@ -28,6 +74,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             sceneKey: "reclamation-order-scene"
         )
         let surface = try XCTUnwrap(registeredSurface)
+        let paneId = try XCTUnwrap(surface.panes.first?.paneId)
 
         let first = socket(port: port)
         let second = socket(port: port)
@@ -54,6 +101,14 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "protocolVersion": 1,
             "surfaceId": surface.surfaceId,
         ])
+        try await send(second, op: "content.set", id: "mutation-after-reclamation", payload: [
+            "content": ["html": "<main>after reclamation</main>"],
+            "contentId": "content-after-reclamation",
+            "contentType": "html",
+            "friendlyChatName": "Reclamation Order",
+            "paneId": paneId,
+            "surfaceId": surface.surfaceId,
+        ])
         let firstOnThird = try await receive(third)
         XCTAssertEqual(firstOnThird["id"] as? String, "pair-order-c")
         XCTAssertEqual(payload(firstOnThird)["mode"] as? String, "lockless")
@@ -65,6 +120,12 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "controller-order-a"
         )
         XCTAssertFalse((reclamation["eventId"] as? String)?.isEmpty ?? true)
+        let observerReclamation = try await receive(
+            second, matchingOp: "event.controller_retention_reclaimed"
+        )
+        XCTAssertEqual(observerReclamation["eventId"] as? String, reclamation["eventId"] as? String)
+        let laterCommit = try await receive(second, matchingOp: "event.lockless_content_committed")
+        XCTAssertEqual(payload(laterCommit)["contentId"] as? String, "content-after-reclamation")
 
         second.cancel(with: .normalClosure, reason: nil)
         third.cancel(with: .normalClosure, reason: nil)
@@ -414,4 +475,29 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
 
 private enum SurfAceLocklessIntegrationError: Error {
     case messageTimeout
+}
+
+@MainActor
+private final class SurfAceLocklessDeliveryGateProbe {
+    var laterDeliveryEntered = false
+    var resumeBarrierRegistered = false
+}
+
+private actor SurfAceLocklessTestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
 }
