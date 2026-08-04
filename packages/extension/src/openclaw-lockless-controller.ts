@@ -21,6 +21,7 @@ import {
   type SurfAceDiscoveryService,
   type SurfAceLogger,
 } from "./surf-ace-discovery.js";
+import { SurfAceToolError } from "./surf-ace-runtime.js";
 import type {
   PaneId,
   SurfAceAnnotateRemoveInput,
@@ -216,21 +217,21 @@ export class OpenClawLocklessController {
     const source = this.legacyMigrationSource;
     if (!source) throw new Error("migration_prepare_failed");
     const controllerInstanceId = await this.identity.loadOrCreate();
-    const resolved = this.findScreen(fingerprint);
-    if (resolved) {
-      const lookup = await source.lookupLegacyLocklessMigration(
-        resolved.endpoint.endpoint.endpointId,
-        resolved.surfaceId,
+    try {
+      return await source.prepareLegacyLocklessMigrationNow(
+        fingerprint,
         controllerInstanceId,
       );
-      if (lookup.kind === "no_legacy_source" || lookup.kind === "required_unprepared") {
-        throw new Error("migration_not_legacy");
+    } catch (error) {
+      if (
+        error instanceof SurfAceToolError &&
+        error.code === "screen_not_found" &&
+        this.findScreen(fingerprint)
+      ) {
+        throw new SurfAceToolError("migration_not_legacy", "migration_not_legacy");
       }
+      throw error;
     }
-    return await source.prepareLegacyLocklessMigrationNow(
-      fingerprint,
-      controllerInstanceId,
-    );
   }
 
   hasFingerprint(fingerprint: string): boolean {

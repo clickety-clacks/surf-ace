@@ -22,6 +22,7 @@ import {
 import { capabilityGatedPreparationRuntime } from "./capability-gated-preparation.js";
 import {
   DefaultSurfAceRuntime,
+  SurfAceToolError,
   type PaneId,
 } from "./surf-ace-runtime.js";
 import { createSurfAceTools, surfAceToolNames } from "./surf-ace-tools.js";
@@ -484,7 +485,7 @@ test("legacy migration lookup distinguishes clean and retained-unprepared state 
   await rm(stateDir, { force: true, recursive: true });
 });
 
-test("official preparation tool replays the durable terminal receipt after lockless admission and restart", async () => {
+test("official preparation tool replays durable prepared and terminal receipts after lockless admission and restart", async () => {
   const endpoint: SurfAceDiscoveryEndpoint = {
     busy: false,
     capabilitiesBitmask: 0,
@@ -500,24 +501,29 @@ test("official preparation tool replays the durable terminal receipt after lockl
     wsPath: "/ws",
   };
   const stores = new Map<string, MemoryStore>();
-  const receipt = {
+  const receiptIdentity = {
     compatibilityReadBoundarySha256: "a".repeat(64),
     controllerInstanceId: "ci_terminal",
     endpointId: endpoint.endpointId,
     fingerprint: "sf_1",
     materialSha256: "b".repeat(64),
     pairRequestId: "rq_pair_terminal",
-    phase: "complete",
     sourceSha256: "c".repeat(64),
     surfaceId: "sf_1",
   } as const;
+  let durablePhase: "prepared" | "complete" = "prepared";
+  const receipt = () => ({ ...receiptIdentity, phase: durablePhase });
+  let durableReceiptExists = true;
   const source = {
     async hydrateLegacyLocklessMigrationContinuity() {},
     async lookupLegacyLocklessMigration() {
-      return { kind: "complete_no_migration", receipt } as const;
+      return { kind: "no_legacy_source" } as const;
     },
     async prepareLegacyLocklessMigrationNow() {
-      return receipt;
+      if (!durableReceiptExists) {
+        throw new SurfAceToolError("screen_not_found", "Surf Ace screen not found.");
+      }
+      return receipt();
     },
   };
   const makeController = () => {
@@ -552,11 +558,25 @@ test("official preparation tool replays the durable terminal receipt after lockl
   };
 
   const first = makeController();
-  assert.deepEqual(await invokeOfficialTool(first), receipt);
+  assert.deepEqual(await invokeOfficialTool(first), receipt());
   await first.stop();
   const restarted = makeController();
-  assert.deepEqual(await invokeOfficialTool(restarted), receipt);
+  assert.deepEqual(await invokeOfficialTool(restarted), receipt());
   await restarted.stop();
+
+  durablePhase = "complete";
+  const terminal = makeController();
+  assert.deepEqual(await invokeOfficialTool(terminal), receipt());
+  await terminal.stop();
+
+  durableReceiptExists = false;
+  const cleanCapable = makeController();
+  await assert.rejects(
+    invokeOfficialTool(cleanCapable),
+    (error: unknown) => error instanceof SurfAceToolError &&
+      error.code === "migration_not_legacy",
+  );
+  await cleanCapable.stop();
 });
 
 test("legacy migration uses remote pane identity, preserves unknown tap loss, and waits for snapshot sync", async () => {
