@@ -8,11 +8,13 @@ const packageDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(packageDir, "..");
 const srcDir = path.join(rootDir, "src");
 const distDir = path.join(rootDir, "dist");
+const protocolSchemaPath = path.resolve(rootDir, "../protocol/schema.json");
 
 await fs.rm(distDir, { force: true, recursive: true });
 await fs.mkdir(path.join(distDir, "renderer"), { recursive: true });
 await fs.mkdir(path.join(distDir, "renderer", "fonts"), { recursive: true });
 await fs.mkdir(path.join(distDir, "test"), { recursive: true });
+await fs.copyFile(protocolSchemaPath, path.join(distDir, "schema.json"));
 
 const shared = {
   bundle: true,

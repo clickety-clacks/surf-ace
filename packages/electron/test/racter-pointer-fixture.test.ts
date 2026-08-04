@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 async function demoSource(): Promise<string> {
-  return fs.readFile(path.join(process.cwd(), "scripts", "racter-native-pane-demo.mjs"), "utf8");
+  return fs.readFile(path.join(packageDir, "scripts", "racter-native-pane-demo.mjs"), "utf8");
 }
 
 async function nativePointerSource(): Promise<string> {
-  return fs.readFile(path.join(process.cwd(), "scripts", "surf-ace-native-pointer-tester.mjs"), "utf8");
+  return fs.readFile(path.join(packageDir, "scripts", "surf-ace-native-pointer-tester.mjs"), "utf8");
 }
 
 test("Racter native pane demo cannot register production-trusted Surf Ace surfaces", async () => {
