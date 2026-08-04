@@ -316,7 +316,7 @@ export class OpenClawLocklessController {
     return {
       browserUrl: null,
       contentSnapshot: projected.contentSnapshot,
-      displayId: `${input.fingerprint}:${input.paneId}`,
+      displayId: pane.displayId,
       fingerprint: input.fingerprint,
       frames: projected.frames,
       lastNavigation: projected.lastNavigation,
@@ -324,9 +324,9 @@ export class OpenClawLocklessController {
       liveFrame: projected.liveFrame,
       liveSeq: projected.liveSeq,
       page: projected.page,
-      paneAddress: `${input.fingerprint}:${input.paneId}`,
-      paneId: input.paneId,
-      paneLabel: Number(input.paneId),
+      paneAddress: pane.paneAddress,
+      paneId: pane.paneId,
+      paneLabel: pane.paneLabel,
       pendingFrames: local.records.length,
       playbackPosition: projected.playbackPosition,
       playbackState: projected.playbackState,
@@ -823,6 +823,7 @@ export class OpenClawLocklessController {
     if (!Number.isSafeInteger(input.expectedTopologyRevision)) {
       throw new Error("expectedTopologyRevision is required in lockless mode");
     }
+    const pane = this.requirePane(resolved.screen, input.paneId);
     const response = asRecord(await resolved.endpoint.controller.closePane(
       resolved.surfaceId,
       {
@@ -832,11 +833,11 @@ export class OpenClawLocklessController {
     ));
     await this.refreshEndpoint(resolved.endpoint);
     return {
-      displayId: `${input.fingerprint}:${input.paneId}`,
+      displayId: pane.displayId,
       ok: true,
-      paneAddress: `${input.fingerprint}:${input.paneId}`,
-      paneId: input.paneId,
-      paneLabel: Number(input.paneId),
+      paneAddress: pane.paneAddress,
+      paneId: pane.paneId,
+      paneLabel: pane.paneLabel,
       operationReceipt: response.operationReceipt as never,
     };
   }

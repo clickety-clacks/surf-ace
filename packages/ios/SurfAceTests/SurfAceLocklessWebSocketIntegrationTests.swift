@@ -168,6 +168,97 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         third.cancel(with: .normalClosure, reason: nil)
     }
 
+    func testInvalidTargetIntentIsRejectedBeforeReceiptAndWorkAdmission() async throws {
+        let identifier = UUID().uuidString
+        let suiteName = "SurfAceLocklessTargetPreflightTests-\(identifier)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let stateURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(suiteName).json")
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL)
+        await runtime.start()
+        let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
+        addTeardownBlock { await runtime.stop() }
+        let registeredSurface = await runtime.registerSurfaceForScene(
+            sceneKey: "target-preflight-scene"
+        )
+        let surface = try XCTUnwrap(registeredSurface)
+        let paneId = try XCTUnwrap(surface.panes.first?.paneId)
+
+        let controller = socket(port: port)
+        controller.resume()
+        _ = try await pair(
+            controller,
+            id: "target-preflight-pair",
+            controllerId: "target-preflight-controller",
+            surfaceId: surface.surfaceId
+        )
+        let before = try await runtime.locklessReadinessSnapshot().state
+        let beforeReceipts = try XCTUnwrap(
+            before.controllers["target-preflight-controller"]?.pendingOperationReceipts
+        )
+        let beforeReceiptBytes = beforeReceipts.values.reduce(Int64(0)) { $0 + $1.bytes }
+        XCTAssertTrue(before.targetApplyWorkItems.isEmpty)
+        XCTAssertTrue(before.targetApplyResults.isEmpty)
+
+        try await send(controller, op: "target.apply", id: "invalid-target-operation", payload: [
+            "paneId": paneId,
+            "requestId": "invalid-target-request",
+            "restoreReason": "initial",
+            "surfaceId": surface.surfaceId,
+            "targetEpoch": 1,
+            "targetHeader": [
+                "replaySemantics": "navigate",
+                "requiredCapabilities": ["target.browser_url.v1"],
+            ],
+            "targetId": "invalid-target",
+            "targetKind": "browser_url",
+            "targetPayload": ["url": "file:///private/invalid-target"],
+        ])
+        let rejection = try await receive(controller, matchingId: "invalid-target-operation")
+        XCTAssertEqual(rejection["ok"] as? Bool, false)
+        XCTAssertEqual(
+            (rejection["error"] as? [String: Any])?["code"] as? String,
+            "invalid_payload"
+        )
+        XCTAssertEqual(
+            ((rejection["error"] as? [String: Any])?["details"] as? [String: Any])?["targetErrorCode"] as? String,
+            "unsafe_payload"
+        )
+        XCTAssertNil(payload(rejection)["operationReceipt"])
+
+        try await send(controller, op: "operation.receipt.sync", id: "target-preflight-sync", payload: [
+            "requestIds": ["invalid-target-operation"],
+        ])
+        let sync = try await receive(controller, matchingId: "target-preflight-sync")
+        let resolutions = try XCTUnwrap(payload(sync)["resolutions"] as? [[String: Any]])
+        XCTAssertEqual(resolutions.count, 1)
+        XCTAssertEqual(resolutions[0]["outcome"] as? String, "not_committed")
+
+        let after = try await runtime.locklessReadinessSnapshot().state
+        let afterReceipts = try XCTUnwrap(
+            after.controllers["target-preflight-controller"]?.pendingOperationReceipts
+        )
+        XCTAssertEqual(afterReceipts.count, beforeReceipts.count)
+        XCTAssertEqual(
+            afterReceipts.values.reduce(Int64(0)) { $0 + $1.bytes },
+            beforeReceiptBytes
+        )
+        XCTAssertNil(afterReceipts["invalid-target-operation"])
+        XCTAssertEqual(after.targetApplyWorkItems, before.targetApplyWorkItems)
+        XCTAssertEqual(after.targetApplyResults, before.targetApplyResults)
+        XCTAssertNil(
+            after.liveSurfaces[surface.surfaceId]?.panes[String(paneId)]?.target
+        )
+
+        controller.cancel(with: .normalClosure, reason: nil)
+    }
+
     func testTwoControllersShareAuthorityReceiptsReadsEventsAndReconnectWithoutOwnership() async throws {
         let identifier = UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "SurfAceLocklessWebSocketIntegrationTests-\(identifier)"))
@@ -343,9 +434,13 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         try await send(second, op: "target.apply", id: "target-operation", payload: [
             "paneId": paneId,
             "requestId": "target-request",
+            "restoreReason": "initial",
             "surfaceId": surface.surfaceId,
             "targetEpoch": 1,
-            "targetHeader": [:],
+            "targetHeader": [
+                "replaySemantics": "navigate",
+                "requiredCapabilities": ["target.browser_url.v1"],
+            ],
             "targetId": "target-a",
             "targetKind": "browser_url",
             "targetPayload": ["url": "https://example.com"],

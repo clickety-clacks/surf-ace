@@ -3,9 +3,18 @@ identity_dir = Path.join(base_dir, "identity")
 
 Tightbeam.Identity.init!(base_dir)
 
-skill_destination = Path.join([identity_dir, "skills", "surf-ace", "SKILL.md"])
-File.mkdir_p!(Path.dirname(skill_destination))
-File.cp!(skill_source, skill_destination)
+{:ok, _revision} =
+  Tightbeam.Identity.learn!(base_dir, "agentic-engineering", "T1778 consumer proof")
+
+skill_bytes = skill_source |> File.read!() |> String.trim_trailing()
+
+Tightbeam.Identity.edit!(
+  base_dir,
+  "surf-ace",
+  {:skill, "surf-ace", false},
+  skill_bytes,
+  "T1778 consumer proof"
+)
 
 for archetype <- ["coder", "reviewer"] do
   path = Path.join([identity_dir, "archetypes", "#{archetype}.toml"])
@@ -17,27 +26,24 @@ for archetype <- ["coder", "reviewer"] do
       "skills = [#{suffix}]"
     end)
 
-  File.write!(path, updated)
+  Tightbeam.Identity.edit!(
+    base_dir,
+    archetype,
+    :manifest,
+    updated,
+    "T1778 consumer proof"
+  )
 end
 
-File.write!(
-  Path.join([identity_dir, "archetypes", "future-unreleased-archetype.toml"]),
-  ~s(name = "future-unreleased-archetype"\nskills = ["surf-ace"]\n\n[guidance]\ntext = """\n#include "wisdom-core.md"\n"""\n)
+Tightbeam.Identity.edit!(
+  base_dir,
+  "future-unreleased-archetype",
+  :manifest,
+  ~s(name = "future-unreleased-archetype"\nskills = ["surf-ace"]\n\n[guidance]\ntext = """\n#include "wisdom-core.md"\n"""\n),
+  "T1778 consumer proof"
 )
 
-git = fn args ->
-  case System.cmd("git", args, cd: identity_dir, stderr_to_stdout: true) do
-    {_output, 0} -> :ok
-    {output, status} -> raise "git failed (#{status}): #{output}"
-  end
-end
-
-git.(["add", "-A"])
-git.(["-c", "user.name=T1770 proof", "-c", "user.email=t1770@invalid", "commit", "-m", "proof: elect surf-ace skill"])
-git.(["branch", "-f", "tightbeam/live", "main"])
-
 digest = :crypto.hash(:sha256, File.read!(executable)) |> Base.encode16(case: :lower)
-skill_bytes = skill_source |> File.read!() |> String.trim_trailing()
 skill_digest = :crypto.hash(:sha256, skill_bytes) |> Base.encode16(case: :lower)
 
 invoke = fn id, kind, cwd, materialized_skill ->
@@ -83,4 +89,9 @@ consumers =
     invoke.(archetype, "tightbeam-skill", cwd, materialized)
   end
 
-IO.puts(JSON.encode!(%{proof: "tightbeam-materialized-skill-identical-installed-bytes", records: [direct | consumers]}))
+IO.puts(
+  JSON.encode!(%{
+    proof: "tightbeam-materialized-skill-identical-installed-bytes",
+    records: [direct | consumers]
+  })
+)

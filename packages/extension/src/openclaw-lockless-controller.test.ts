@@ -73,7 +73,12 @@ class LocklessFakeWire implements ControllerWire {
   constructor(
     private readonly surfaceConnection = false,
     private readonly endpointState: {
+      displayId?: string;
       live: boolean;
+      paneAddress?: string;
+      paneId?: number;
+      paneLabel?: number;
+      paneLive?: boolean;
       staleTopologyOnce?: boolean;
       topologyRevision?: number;
     } = { live: true },
@@ -113,6 +118,7 @@ class LocklessFakeWire implements ControllerWire {
     if (op === "pair.request") {
       this.paired = true;
       const request = payload as { controllerInstanceId: string };
+      const paneId = this.endpointState.paneId ?? 1;
       const pairPayload = payload as {
         controllerInstanceId: string;
         migrationMaterial?: unknown;
@@ -132,7 +138,7 @@ class LocklessFakeWire implements ControllerWire {
               firstRetainedSequence: 1,
               lastRetainedSequence: 10,
               records: consumableRecords(),
-              scopeId: "pane:sf_1:1",
+              scopeId: `pane:sf_1:${paneId}`,
               version: 1,
             }]
           : [],
@@ -153,8 +159,9 @@ class LocklessFakeWire implements ControllerWire {
       });
     }
     if (op === "panes.list") {
+      const paneId = this.endpointState.paneId ?? 1;
       return response(op, {
-        panes: [{
+        panes: this.endpointState.paneLive === false ? [] : [{
           activeContentId: "ct_1",
           contentType: "html",
           currentTarget: {
@@ -165,8 +172,10 @@ class LocklessFakeWire implements ControllerWire {
             targetPayload: { appId: "com.example.App" },
           },
           currentRevision: 3,
-          paneId: 1,
-          paneLabel: 1,
+          displayId: this.endpointState.displayId,
+          paneAddress: this.endpointState.paneAddress,
+          paneId,
+          paneLabel: this.endpointState.paneLabel ?? paneId,
           paneLineageId: "pl_1",
           viewport: { height: 768, scale: 1, width: 1024 },
         }],
@@ -189,7 +198,14 @@ class LocklessFakeWire implements ControllerWire {
     }
     if (op === "pane.rename" || op === "pane.restore") {
       return response(op, {
-        paneId: 1,
+        paneId: this.endpointState.paneId ?? 1,
+        topologyRevision: 5,
+      }, id);
+    }
+    if (op === "pane.close") {
+      this.endpointState.paneLive = false;
+      return response(op, {
+        paneId: this.endpointState.paneId ?? 1,
         topologyRevision: 5,
       }, id);
     }
@@ -664,6 +680,87 @@ test("OpenClaw consumes canonical lockless clear, annotation, and snapshot opera
       tombstoneId: "ts_1",
     });
     assert.equal(wires.length, 3, "restore creates a fresh surface session");
+  } finally {
+    await controller.stop();
+  }
+});
+
+test("lockless read and close preserve restored pane identity after visible relabeling", async () => {
+  const endpoint: SurfAceDiscoveryEndpoint = {
+    busy: false,
+    capabilitiesBitmask: 0,
+    endpointId: "electron-restored-pane",
+    fingerprintPrefix: "sf",
+    host: "127.0.0.1",
+    instanceName: "Surf Ace",
+    lastSeenAt: 1,
+    name: "Studio",
+    port: 17_700,
+    protocolVersion: 1,
+    viewport: { height: 768, scale: 1, width: 1024 },
+    wsPath: "/ws",
+  };
+  const endpointState = {
+    displayId: "display:restored:visible-2",
+    live: true,
+    paneAddress: "pane:restored:visible-2",
+    paneId: 41,
+    paneLabel: 2,
+  };
+  const wires: LocklessFakeWire[] = [];
+  const controller = new OpenClawLocklessController({
+    discovery: new StaticDiscovery(endpoint),
+    stateDir: "/unused",
+    storeFactory: () => new MemoryStore(),
+    wireFactory: () => {
+      const wire = new LocklessFakeWire(wires.length > 0, endpointState);
+      wires.push(wire);
+      return wire;
+    },
+  });
+  await controller.start();
+  try {
+    const paneId = "41" as PaneId;
+    const read = await controller.read({ fingerprint: "sf_1", paneId });
+    assert.deepEqual({
+      displayId: read.displayId,
+      paneAddress: read.paneAddress,
+      paneId: read.paneId,
+      paneLabel: read.paneLabel,
+    }, {
+      displayId: "display:restored:visible-2",
+      paneAddress: "pane:restored:visible-2",
+      paneId,
+      paneLabel: 2,
+    });
+
+    const closed = await controller.closePane({
+      expectedTopologyRevision: 4,
+      fingerprint: "sf_1",
+      paneId,
+    });
+    assert.deepEqual(closed, {
+      displayId: "display:restored:visible-2",
+      ok: true,
+      operationReceipt: {
+        clientResultIds: { paneId: 41, topologyRevision: 5 },
+        operation: "pane.close",
+        requestId: "rq_pane.close",
+      },
+      paneAddress: "pane:restored:visible-2",
+      paneId,
+      paneLabel: 2,
+    });
+    assert.deepEqual(
+      wires.flatMap((wire) => wire.requests).find((request) =>
+        request.op === "pane.close"
+      )?.payload,
+      {
+        expectedTopologyRevision: 4,
+        paneId: 41,
+        surfaceId: "sf_1",
+      },
+    );
   } finally {
     await controller.stop();
   }
