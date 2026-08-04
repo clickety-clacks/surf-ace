@@ -79,7 +79,11 @@ await build({
     path.join(rootDir, "test", "window-placement.test.ts"),
     path.join(rootDir, "test", "ws-server.test.ts"),
   ],
-  external: ["bonjour-service", "ws"],
+  external: [
+    "@surf-ace/protocol",
+    "bonjour-service",
+    "ws",
+  ],
   format: "esm",
   outdir: path.join(distDir, "test"),
   platform: "node",

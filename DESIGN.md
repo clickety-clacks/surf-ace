@@ -2826,7 +2826,7 @@ Connection states visible to CLU (via `surf_ace_list`):
 
 CLU's tool surface has a strict read/write split:
 
-**Writes** go to the surface over the WS connection: pushing content, clearing content, removing annotations. These are explicit CLU intent.
+**Writes** either go to the surface over the WS connection (pushing content, clearing content, removing annotations) or, for the explicit legacy-to-lockless cutover preparation action, durably freeze a local migration boundary without network I/O. These are explicit CLU intent.
 
 **Reads** are always local projection transactions. The client owns authoritative bounded consumable scopes, cursor floors, pending truth, and structured gaps. Pair/resume snapshots plus ordered deltas received during OpenClaw's connection job or the standalone CLI's explicit networked invocations keep the controller projection current. An ordinary read returns cached data/loss/status, durably advances the projected cursor and queues an idempotent acknowledgement intent, and never triggers synchronous network I/O. Only client acceptance of the acknowledgement advances authoritative state.
 
@@ -2858,6 +2858,140 @@ pendingEvents     int       Count of buffered events not yet read by CLU
 ```
 
 **Errors:** none (always returns current known local state, possibly empty array)
+
+`surf_ace_list` never creates or refreshes a legacy migration transaction.
+Startup, discovery, capability probing, and later pair resolution likewise may
+hydrate or read an existing transaction but may not capture fresh legacy state.
+
+---
+
+#### `surf_ace_prepare_migration_now`
+
+Freeze the post-read legacy-to-lockless migration boundary for one current
+genuinely legacy surface. This is an explicit local product mutation. It makes
+no network request and does not pair, acquire ownership, clear source material,
+or contact a capable client.
+
+**Params:**
+```
+fingerprint    string   Required window-scoped legacy surface identity returned by surf_ace_list.
+```
+
+The registered OpenClaw input schema is an object with
+`additionalProperties: false`, one required `fingerprint` string property, and
+no other properties.
+
+**Returns:**
+```
+fingerprint            string   Requested window-scoped identity.
+endpointId             string   Persisted endpoint identity.
+surfaceId              string   Persisted surface identity.
+controllerInstanceId   string   Stable OpenClaw lockless controller identity.
+pairRequestId          string   Stable request/receipt identity reserved for the cutover pair.
+phase                  enum     "prepared" | "pair_sent" | "client_committed" | "source_cleared" | "complete"
+compatibilityReadBoundarySha256 string SHA-256 of the complete durable legacy pane-read boundary.
+sourceSha256           string   SHA-256 of canonical captured legacy source JSON.
+materialSha256         string   SHA-256 of canonical migration material JSON.
+```
+
+**Durable source classification:** The existing versioned
+`locklessMigrationContinuity` state contains a per-endpoint/per-surface
+`legacySourceRequirement` only when retained provider-local source exists. Its
+fields are `schemaVersion=1`, `endpointId`, `surfaceId`, and
+`sourceIdentitySha256`. The legacy-state persistence seam creates/updates it;
+capability, connection failure, ownership, and discovery never infer it. Clean
+Electron/iPhone/iPad endpoints have no record. Restart hydrates and validates
+it before transport. Compare-by-digest source clearing after client acceptance,
+or byte-exact baseline reset, removes it.
+
+**Durable complete-pane read boundary:** The same state contains a
+`legacyCompatibilityReadBoundary` with `schemaVersion=1`, `endpointId`,
+`surfaceId`, `paneInventorySha256`, sorted `requiredPaneIds`, sorted
+`completedPaneIds`, `panePostReadSha256` by completed pane, and `complete`.
+`paneInventorySha256` covers canonical sorted `{paneId,paneLineageId}` entries
+for the entire current surface. `compatibilityReadBoundarySha256` covers the
+canonical record excluding that digest.
+
+Each legacy `surf_ace_read` runs at the runtime's one state mutation seam. A
+missing or inventory-mismatched boundary is replaced with the complete current
+inventory and empty completion. After returned material is durably consumed, a
+read with no compatibility-readable pending material, including closed frames
+and consumable registers, records that pane's post-read source digest and
+completion, persists the updated boundary, and returns it. A pane/lineage/
+topology change invalidates the boundary. New material on an already-completed
+pane does not invalidate completion and is included by later preparation. The
+record survives shared-runtime owner forwarding and restart.
+
+**Ordering and mutation seam:** Preparation requires a matching source
+requirement, unchanged current inventory, and a complete boundary containing
+every required pane. Otherwise it returns `migration_read_incomplete` before
+transaction creation. The action then serializes behind the read commits,
+captures remaining source, requires its canonical identity to equal the source
+requirement's `sourceIdentitySha256`, derives migration material, and persists the
+complete per-endpoint/per-surface `prepared` record in the existing state file
+before returning. The transaction includes
+`compatibilityReadBoundarySha256`. Pre-boundary consumed material is excluded;
+post-read/preparation material is included. After preparation, legacy
+`surf_ace_read` returns `migration_already_prepared` without consuming until
+completion or byte-exact baseline reset. The boundary record is deleted only
+after `complete`, while its digest remains in the transaction.
+
+`prepareLegacyLocklessMigrationNow(fingerprint, controllerInstanceId)` is the
+only runtime method allowed to create a preparation record, and the public tool
+delegates to it. It looks up an existing record before testing current mode, so
+a retry can return a later durable phase even after the surface becomes
+lockless. List, read, startup, discovery, capability probing, and pair admission
+cannot invoke its creation branch. Pair admission calls only
+`lookupLegacyLocklessMigration(endpointId, surfaceId, controllerInstanceId)`,
+which returns exactly one of:
+
+- `prepared(record)` — a non-complete transaction; resolve/replay its immutable
+  migration request;
+- `complete_no_migration(record)` — retain the terminal transaction for audit,
+  but perform an ordinary lockless reconnect/resume with a fresh normal pair
+  request ID, existing controller state/cursors, and no migration material;
+- `required_unprepared` — a durable source requirement exists without a
+  transaction, so return `migration_not_prepared`; or
+- `no_legacy_source` — neither record exists, so perform ordinary lockless pair
+  with no migration material.
+
+The four-state result is hydrated from the existing state file and survives
+restart. `complete_no_migration` does not delete or mutate the complete
+transaction, recreate `legacySourceRequirement`, resend migration material, or
+replay a migration receipt. The preparation tool independently looks up the
+retained record and returns its immutable `phase="complete"` receipt on retry.
+Clean Electron and Apple lockless admission therefore does not invent a
+migration requirement, retained legacy source fails closed, and completed
+Electron/iPhone/iPad reconnect remains ordinary and actionable.
+
+**Idempotency and recovery:** A retry for an existing non-complete transaction
+validates controller/endpoint/surface/source/material identity and returns the
+same stable ID and digests without recapture. Before any phase advance, its JSON
+result is byte-for-byte identical. After a phase advance it reports the current
+durable phase while retaining the immutable identity and digests. At
+`complete`, tool retry still returns that immutable receipt, while later
+ordinary pairs use fresh normal request IDs and no migration material. Restart
+and forward redeployment of the same amended package retain the same record and
+receipt. The captured pre-amendment package is not same-ID compatible after any
+preparation record exists: rollback tooling must return
+`rollback_requires_full_reset` before replacing package bytes or restarting the
+gateway. The only rollback then allowed is the complete two-product byte-exact
+baseline reset, after which forward deployment may create a fresh ID. Before
+the first preparation record exists, ordinary package rollback remains allowed
+through the captured existing lifecycle.
+
+**Errors:**
+- `screen_not_found` — `fingerprint` resolves to neither a current surface nor an existing durable transaction.
+- `migration_not_legacy` — no transaction exists and the selected surface is lockless-capable or already admitted locklessly.
+- `migration_not_quiescent` — pending snapshot reconciliation prevents an atomic source boundary.
+- `migration_read_incomplete` — the complete-pane read boundary is absent, partial, or stale; no transaction is created.
+- `lockless_migration_continuity_mismatch` — an existing record disagrees with the stable controller, endpoint, surface, source, or material identity.
+- `migration_prepare_failed` — the durable write did not produce a readable committed record; success is not returned, and retry reads durable state before attempting creation.
+
+Every product validation error occurs before creation and returns no receipt.
+If a persistence attempt landed despite a lost response, the caller receives
+`migration_prepare_failed`; retry returns that record rather than generating
+another request ID.
 
 ---
 
@@ -3177,6 +3311,19 @@ lastNavigation    object?  HTML only: { url, navigatedAt } of most recent naviga
 consumableLoss    object?  Structured sticky client-authored loss/gap projected for this controller and scope.
 cacheStatus       string   "current" | "stale" | "repairing"; stale data remains local and schedules background repair.
 readAt            epochMs
+
+// Legacy-mode migration-read proof; omitted in lockless mode
+legacyCompatibilityReadBoundary object? {
+  schemaVersion                    1
+  endpointId                       string
+  surfaceId                        string
+  paneInventorySha256              string
+  requiredPaneIds                  string[]  Canonically sorted complete pane set.
+  completedPaneIds                 string[]  Canonically sorted panes with no compatibility-readable pending material after durable consumption.
+  panePostReadSha256               object    Map from completed pane id to canonical post-read source SHA-256.
+  complete                         bool      True only when completedPaneIds exactly equals requiredPaneIds.
+  compatibilityReadBoundarySha256 string    SHA-256 of the canonical fields above, excluding this digest.
+}
 ```
 
 **Read priority + dedupe contract:**
@@ -3187,15 +3334,21 @@ readAt            epochMs
 - Closed frames should still be processed even when some strokes were already seen live (frame image/context is authoritative).
 - A stroke may appear in both channels; dedupe by `strokeId` per `frameId`/`contextKey`.
 
-**Errors:** `screen_not_found`
+**Errors:** `screen_not_found`, `migration_already_prepared`
 
 `surf_ace_read` may be called regardless of connection state. It never synchronously repairs the cache; an unsynchronized projection returns explicit `cacheStatus` with available data and schedules background repair.
+
+In legacy mode, the read's consumptive update and
+`legacyCompatibilityReadBoundary` update are one durable transaction. When a
+non-complete migration transaction exists for the surface,
+`migration_already_prepared` returns before consumption so prepared material
+cannot later be consumed and replayed.
 
 **Migration notes (frame-queue-only → dual-channel):**
 - Existing callers that only read `frames[]` continue to work unchanged.
 - New callers should also inspect `liveFrame`/`liveDirtyStrokeIds` for near-real-time response while annotation is active.
 - Dedup is required when consuming both channels: use `strokeId`.
-- No new mandatory tool was introduced; `surf_ace_read_buffer` remains deprecated.
+- No new mandatory read tool was introduced; `surf_ace_read_buffer` remains deprecated.
 
 ---
 

@@ -13,6 +13,7 @@ import type { SurfAceDiscoveryEndpoint, SurfAceDiscoveryService } from "./surf-a
 import { SurfAceOwnershipRecoveryPolicy } from "./surf-ace-ownership-recovery-policy.js";
 import {
   createSurfAceRuntime as createSurfAceRuntimeBase,
+  DefaultSurfAceRuntime,
   providerProcessHealthFromProcessList,
   resolveDefaultSurfAceStateDir,
   type SurfAceProviderProcessHealth,
@@ -35,6 +36,20 @@ function createSurfAceRuntime(options: SurfAceRuntimeOptions = {}) {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function legacyReadFrame(index: number, viewport: { height: number; scale: number; width: number }) {
+  return {
+    contentId: `ct_gate6_${index}`,
+    contextKey: `gate6:${index}`,
+    frameId: `fr_gate6_${index}`,
+    image: `aGVsbG8t${index}`,
+    openedAt: 100 + index,
+    scrollOffset: { x: index, y: index },
+    strokes: [],
+    updatedAt: 200 + index,
+    viewport: { ...viewport },
+  };
 }
 
 type TestPane = {
@@ -98,6 +113,23 @@ function stableStringRecordDigest(value: Record<string, unknown> | undefined): s
     .sort()
     .map((key) => [key, value[key]]));
   return createHash("sha256").update(JSON.stringify(stableValue)).digest("hex");
+}
+
+function canonicalTestSha256(value: unknown): string {
+  const canonicalJson = (child: unknown): string => {
+    if (Array.isArray(child)) {
+      return `[${child.map(canonicalJson).join(",")}]`;
+    }
+    if (child && typeof child === "object") {
+      return `{${Object.entries(child as Record<string, unknown>)
+        .filter(([, nested]) => nested !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(child);
+  };
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
 function clientBrowserUrlTarget(input: {
@@ -340,8 +372,12 @@ class FakeSurfAceWsServer {
   nextContentApplyErrors: Array<{ code: string; details?: Record<string, unknown>; message: string }> = [];
   nextContentApplyError: { code: string; details?: Record<string, unknown>; message: string } | null = null;
   nextContentApplyRenderStatus: string | null = null;
+  contentApplyResponseGate: Promise<void> | null = null;
+  contentApplyResponses = 0;
   snapshotDelayMs = 0;
   snapshotImage = "aGVsbG8=";
+  snapshotResponseGate: Promise<void> | null = null;
+  snapshotResponses = 0;
   snapshotRequests: Array<{ includeImage: boolean; includeVisibleText: boolean; paneId: number }> = [];
   snapshotScrollOffset = { x: 0, y: 0 };
   targetApplyResultErrorCode: string | null = null;
@@ -804,6 +840,19 @@ class FakeSurfAceWsServer {
         eventId: `ev_${this.nextEventId++}`,
         op: "event.snapshot_hint",
         payload: { reason },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      }),
+    );
+  }
+
+  sendSurfaceResumed(): void {
+    this.pairedSocket?.send(
+      JSON.stringify({
+        eventId: `ev_${this.nextEventId++}`,
+        op: "event.surface_resumed",
+        payload: { surfaceId: this.surfaceId },
         sentAt: Date.now(),
         type: "event",
         v: 1,
@@ -1369,11 +1418,13 @@ class FakeSurfAceWsServer {
             status: renderStatus,
           };
         }
+        await this.contentApplyResponseGate;
         socket.send(
           JSON.stringify(
             this.response(message.id, "content.apply", responsePayload),
           ),
         );
+        this.contentApplyResponses += 1;
         return;
       }
       case "target.apply": {
@@ -1576,6 +1627,9 @@ class FakeSurfAceWsServer {
             setTimeout(resolve, this.snapshotDelayMs);
           });
         }
+        if (this.snapshotResponseGate) {
+          await this.snapshotResponseGate;
+        }
         socket.send(
           JSON.stringify(
             this.response(message.id, "snapshot.get", {
@@ -1599,6 +1653,7 @@ class FakeSurfAceWsServer {
             }),
           ),
         );
+        this.snapshotResponses += 1;
         return;
       }
       case "content.set": {
@@ -2204,6 +2259,676 @@ test("pane capture returns failure metadata when client cannot provide image byt
       assert.equal(result.capture.paneLabel, 1);
     },
   });
+});
+
+test("official post-read push and clear durably refresh migration source before preparation", async () => {
+  await withRuntimeHarness(async ({ runtime, server }) => {
+    const paneId = (await runtime.listScreens())[0]!.panes[0]!.paneId;
+    const internalRuntime = runtime as any;
+    const surface = internalRuntime.surfaces.get(server.surfaceId);
+    await runtime.read({ fingerprint: server.surfaceId, paneId });
+    const requirement = () => internalRuntime.persistentState.locklessMigrationContinuity
+      .endpoints[surface.endpointId].legacySourceRequirements[server.surfaceId]
+      .sourceIdentitySha256;
+    const beforePush = requirement();
+
+    await runtime.push({
+      content: "# post-boundary official push",
+      contentType: "markdown",
+      fingerprint: server.surfaceId,
+      paneId,
+    });
+    const afterPush = requirement();
+    assert.notEqual(afterPush, beforePush);
+    await runtime.clear({ fingerprint: server.surfaceId, paneId });
+    assert.notEqual(requirement(), afterPush);
+
+    const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+      server.surfaceId,
+      "ci_gate6_official_mutations" as never,
+    );
+    assert.equal(receipt.phase, "prepared");
+    const prepared = internalRuntime.persistentState.locklessMigrationContinuity
+      .endpoints[surface.endpointId].surfaces[server.surfaceId];
+    assert.equal(prepared.source.panes[0].content.activeContentId, null);
+  });
+});
+
+test("concurrent official push commits durable source before queued preparation", async () => {
+  await withRuntimeHarness(async ({ runtime, server }) => {
+    const paneId = (await runtime.listScreens())[0]!.panes[0]!.paneId;
+    const internalRuntime = runtime as any;
+    const surface = internalRuntime.surfaces.get(server.surfaceId);
+    await runtime.read({ fingerprint: server.surfaceId, paneId });
+    const endpointState = internalRuntime.persistentState.locklessMigrationContinuity
+      .endpoints[surface.endpointId];
+    const beforeDigest = endpointState.legacySourceRequirements[server.surfaceId]
+      .sourceIdentitySha256;
+    const repository = internalRuntime.stateRepository;
+    const originalSave = repository.save.bind(repository);
+    let releaseChangedSave = () => {};
+    let changedSaveEntered = false;
+    const changedSaveGate = new Promise<void>((resolve) => {
+      releaseChangedSave = resolve;
+    });
+    repository.save = async (state: any) => {
+      const digest = state.locklessMigrationContinuity?.endpoints[surface.endpointId]
+        ?.legacySourceRequirements?.[server.surfaceId]?.sourceIdentitySha256;
+      if (!changedSaveEntered && digest && digest !== beforeDigest) {
+        changedSaveEntered = true;
+        await changedSaveGate;
+      }
+      await originalSave(state);
+    };
+
+    const pushPromise = runtime.push({
+      content: "# concurrent official push",
+      contentType: "markdown",
+      fingerprint: server.surfaceId,
+      paneId,
+    });
+    await waitFor(() => changedSaveEntered);
+    let preparationSettled = false;
+    const preparationPromise = runtime.prepareLegacyLocklessMigrationNow(
+      server.surfaceId,
+      "ci_gate6_concurrent_push" as never,
+    ).finally(() => {
+      preparationSettled = true;
+    });
+    await delay(20);
+    assert.equal(preparationSettled, false);
+    releaseChangedSave();
+    await pushPromise;
+    const receipt = await preparationPromise;
+    repository.save = originalSave;
+
+    assert.equal(receipt.phase, "prepared");
+    const prepared = internalRuntime.persistentState.locklessMigrationContinuity
+      .endpoints[surface.endpointId].surfaces[server.surfaceId];
+    assert.deepEqual(prepared.source.panes[0].content.contentValue, {
+      markdown: "# concurrent official push",
+    });
+  });
+});
+
+test("delayed official content-target response commits before preparation or is ignored after preparation", async (t) => {
+  for (const ordering of ["response_before_prepare", "prepare_before_response"] as const) {
+    await t.test(ordering, async () => {
+      await withRuntimeHarness(async ({ runtime, server }) => {
+        const paneId = (await runtime.listScreens())[0]!.panes[0]!.paneId;
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        const pane = surface.panes.get(paneId);
+        assert.ok(surface);
+        assert.ok(pane);
+        await runtime.read({ fingerprint: server.surfaceId, paneId });
+        const endpointState = () => internalRuntime.persistentState
+          .locklessMigrationContinuity.endpoints[surface.endpointId];
+        const requirementBefore = structuredClone(
+          endpointState().legacySourceRequirements[server.surfaceId],
+        );
+        const registered = await runtime.registerTarget({
+          expectedPreviousTargetEpoch: null,
+          fingerprint: server.surfaceId,
+          idempotencyKey: `gate6-content-target-${ordering}`,
+          ...targetRegistrationOwnership(runtime, server.surfaceId, paneId),
+          paneId,
+          registrationState: "attached",
+          restorePolicy: "auto",
+          targetHeader: {
+            payloadSchemaVersion: 1,
+            replaySemantics: "bytes",
+            requiredCapabilities: ["target.markdown.v1"],
+            safeToLogFields: [],
+            safetyClass: "passive",
+            summary: "Gate 6 delayed content target",
+          },
+          targetKind: "markdown",
+          targetPayload: { markdown: `# target-${ordering}` },
+        });
+        assert.equal(registered.status, "registered");
+        if (registered.status !== "registered") throw new Error("expected registered target");
+
+        let releaseResponse = () => {};
+        server.contentApplyResponseGate = new Promise<void>((resolve) => {
+          releaseResponse = resolve;
+        });
+        const requestCount = server.contentSetRequests.length;
+        const responseCount = server.contentApplyResponses;
+        const restore = runtime.restoreTarget({
+          fingerprint: server.surfaceId,
+          paneId,
+          targetId: registered.targetId,
+        });
+        await waitFor(() => server.contentSetRequests.length > requestCount);
+
+        if (ordering === "response_before_prepare") {
+          releaseResponse();
+          server.contentApplyResponseGate = null;
+          const restored = await restore;
+          assert.equal(restored.evidence?.status, "applied");
+          const requirementAfter = endpointState().legacySourceRequirements[server.surfaceId];
+          assert.notEqual(
+            requirementAfter.sourceIdentitySha256,
+            requirementBefore.sourceIdentitySha256,
+          );
+          const durable = await internalRuntime.stateRepository.load();
+          assert.equal(
+            durable.locklessMigrationContinuity.endpoints[surface.endpointId]
+              .legacySourceRequirements[server.surfaceId].sourceIdentitySha256,
+            requirementAfter.sourceIdentitySha256,
+          );
+          const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+            server.surfaceId,
+            "ci_target_response_first" as never,
+          );
+          const record = endpointState().surfaces[server.surfaceId];
+          assert.deepEqual(record.source.panes[0].content.contentValue, {
+            markdown: "# target-response_before_prepare",
+          });
+          assert.equal(record.source.panes[0].content.historyEntries.length, 0);
+          assert.equal(receipt.pairRequestId, record.transaction.pairRequestId);
+          return;
+        }
+
+        const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+          server.surfaceId,
+          "ci_target_prepare_first" as never,
+        );
+        const recordBeforeResponse = structuredClone(
+          endpointState().surfaces[server.surfaceId],
+        );
+        const contentBeforeResponse = structuredClone({
+          activeContentId: pane.activeContentId,
+          contentType: pane.contentType,
+          contentValue: pane.contentValue,
+          historyEntries: pane.historyEntries,
+          historySummary: pane.historySummary,
+        });
+        releaseResponse();
+        server.contentApplyResponseGate = null;
+        const restored = await restore;
+        assert.equal(restored.evidence?.status, "applied");
+        await waitFor(() => server.contentApplyResponses > responseCount);
+        assert.deepEqual({
+          activeContentId: pane.activeContentId,
+          contentType: pane.contentType,
+          contentValue: pane.contentValue,
+          historyEntries: pane.historyEntries,
+          historySummary: pane.historySummary,
+        }, contentBeforeResponse);
+        assert.deepEqual(endpointState().surfaces[server.surfaceId], recordBeforeResponse);
+        assert.deepEqual(
+          endpointState().legacySourceRequirements[server.surfaceId],
+          requirementBefore,
+        );
+        const durable = await internalRuntime.stateRepository.load();
+        assert.deepEqual(
+          durable.locklessMigrationContinuity.endpoints[surface.endpointId]
+            .surfaces[server.surfaceId],
+          JSON.parse(JSON.stringify(recordBeforeResponse)),
+        );
+        const retry = await runtime.prepareLegacyLocklessMigrationNow(
+          server.surfaceId,
+          "ci_target_prepare_first" as never,
+        );
+        assert.equal(retry.pairRequestId, receipt.pairRequestId);
+      });
+    });
+  }
+});
+
+test("compare-prefix clear fails closed on newer retained source until a full reset permits a new cycle", async () => {
+  await withRuntimeHarness(async ({ runtime, server, stateDir }) => {
+    const paneId = (await runtime.listScreens())[0]!.panes[0]!.paneId;
+    const internalRuntime = runtime as any;
+    const surface = internalRuntime.surfaces.get(server.surfaceId);
+    const pane = surface.panes.get(paneId);
+    assert.ok(surface);
+    assert.ok(pane);
+    await runtime.read({ fingerprint: server.surfaceId, paneId });
+    const sendTap = (eventId: string, nearestContent: string) => {
+      internalRuntime.handleWireEvent(surface, {
+        eventId,
+        op: "event.tap",
+        payload: {
+          contentId: pane.activeContentId,
+          kind: "tap",
+          nearestContent,
+          paneId: pane.remotePaneId,
+          position: { x: 11, y: 12 },
+          revision: pane.currentRevision,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      });
+    };
+    sendTap("ev_prepared_prefix", "prepared-prefix");
+    await waitFor(() => pane.buffer.taps.length === 1);
+    await internalRuntime.stateWrite;
+    const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+      server.surfaceId,
+      "ci_retained_suffix" as never,
+    );
+    const endpointState = () => internalRuntime.persistentState
+      .locklessMigrationContinuity.endpoints[surface.endpointId];
+    const frozenRecord = structuredClone(endpointState().surfaces[server.surfaceId]);
+    sendTap("ev_newer_suffix", "newer-suffix");
+    await waitFor(() => pane.buffer.taps.length === 2);
+    await internalRuntime.migrationMutation;
+
+    const lookup = await runtime.lookupLegacyLocklessMigration(
+      surface.endpointId,
+      server.surfaceId,
+      "ci_retained_suffix" as never,
+    );
+    assert.equal(lookup.kind, "prepared");
+    if (lookup.kind !== "prepared") throw new Error("expected prepared lookup");
+    await lookup.record.markPairSent();
+    await lookup.record.markClientCommitted(receipt.pairRequestId);
+    await assert.rejects(lookup.record.markSourceCleared(), /migration_not_prepared/);
+    assert.deepEqual(
+      pane.buffer.taps.map((tap: any) => tap.eventId),
+      ["ev_newer_suffix"],
+    );
+    const retainedState = endpointState();
+    const retainedRecord = retainedState.surfaces[server.surfaceId];
+    assert.equal(retainedRecord.transaction.phase, "client_committed");
+    assert.deepEqual(retainedRecord.source, frozenRecord.source);
+    assert.equal(retainedRecord.transaction.pairRequestId, receipt.pairRequestId);
+    assert.equal(
+      retainedState.legacySourceRequirements[server.surfaceId].sourceIdentitySha256,
+      canonicalTestSha256(internalRuntime.captureLocklessMigrationSource(surface)),
+    );
+    const boundary = retainedState.legacyCompatibilityReadBoundaries[server.surfaceId];
+    assert.equal(boundary.complete, false);
+    assert.deepEqual(boundary.completedPaneIds, []);
+    await assert.rejects(lookup.record.complete(), /lockless_migration_source_not_cleared/);
+
+    const durable = await internalRuntime.stateRepository.load();
+    assert.deepEqual(
+      durable.locklessMigrationContinuity.endpoints[surface.endpointId]
+        .legacySourceRequirements[server.surfaceId],
+      retainedState.legacySourceRequirements[server.surfaceId],
+    );
+    assert.equal(
+      durable.locklessMigrationContinuity.endpoints[surface.endpointId]
+        .legacyCompatibilityReadBoundaries[server.surfaceId].complete,
+      false,
+    );
+    const restarted = new DefaultSurfAceRuntime({ stateDir });
+    const restartedLookup = await restarted.lookupLegacyLocklessMigration(
+      surface.endpointId,
+      server.surfaceId,
+      "ci_retained_suffix" as never,
+    );
+    assert.equal(restartedLookup.kind, "prepared");
+    const sameIdRetry = await restarted.prepareLegacyLocklessMigrationNow(
+      server.surfaceId,
+      "ci_retained_suffix" as never,
+    );
+    assert.equal(sameIdRetry.pairRequestId, receipt.pairRequestId);
+    assert.equal(sameIdRetry.phase, "client_committed");
+
+    internalRuntime.persistentState.locklessMigrationContinuity = {
+      endpoints: {},
+      schemaVersion: 1,
+    };
+    await internalRuntime.persistState();
+    const postResetRead = await runtime.read({ fingerprint: server.surfaceId, paneId });
+    assert.deepEqual(postResetRead.taps.map((tap: any) => tap.eventId), ["ev_newer_suffix"]);
+    assert.equal(postResetRead.legacyCompatibilityReadBoundary.complete, true);
+    const nextReceipt = await runtime.prepareLegacyLocklessMigrationNow(
+      server.surfaceId,
+      "ci_retained_suffix" as never,
+    );
+    assert.notEqual(nextReceipt.pairRequestId, receipt.pairRequestId);
+    const nextRecord = endpointState().surfaces[server.surfaceId];
+    assert.deepEqual(nextRecord.source.panes[0].buffer.taps, []);
+  });
+});
+
+test("full-surface snapshot hint and resume responses commit durably or no-op after preparation", async (t) => {
+  for (const trigger of ["snapshot_hint", "surface_resumed"] as const) {
+    for (const ordering of ["response_before_prepare", "prepare_before_response"] as const) {
+      await t.test(`${trigger}/${ordering}`, async () => {
+        await withRuntimeHarness(async ({ runtime, server, stateDir }) => {
+          const paneId = (await runtime.listScreens())[0]!.panes[0]!.paneId;
+          const internalRuntime = runtime as any;
+          const surface = internalRuntime.surfaces.get(server.surfaceId);
+          const pane = surface.panes.get(paneId);
+          const remotePane = server.panes.get(server.initialRemotePaneId);
+          assert.ok(surface);
+          assert.ok(pane);
+          assert.ok(remotePane);
+          await runtime.read({ fingerprint: server.surfaceId, paneId });
+          const endpointState = () => internalRuntime.persistentState
+            .locklessMigrationContinuity.endpoints[surface.endpointId];
+          const requirementBefore = structuredClone(
+            endpointState().legacySourceRequirements[server.surfaceId],
+          );
+          remotePane.contentId = `ct_${trigger}_${ordering}`;
+          remotePane.contentType = "html";
+          remotePane.revision = 17;
+          server.snapshotImage = `${trigger}-${ordering}-image`;
+          server.snapshotScrollOffset = { x: 61, y: 62 };
+          let releaseResponse = () => {};
+          server.snapshotResponseGate = new Promise<void>((resolve) => {
+            releaseResponse = resolve;
+          });
+          const requestCount = server.snapshotRequests.length;
+          const responseCount = server.snapshotResponses;
+          if (trigger === "snapshot_hint") {
+            server.sendSnapshotHint("after_render");
+          } else {
+            server.sendSurfaceResumed();
+          }
+          await waitFor(() => server.snapshotRequests.length > requestCount);
+          assert.equal(surface.snapshotSyncInFlight, true);
+
+          if (ordering === "prepare_before_response") {
+            await assert.rejects(
+              runtime.prepareLegacyLocklessMigrationNow(
+                server.surfaceId,
+                `ci_${trigger}_quiescence` as never,
+              ),
+              /migration_not_quiescent/,
+            );
+            assert.equal(endpointState().surfaces[server.surfaceId], undefined);
+          }
+
+          releaseResponse();
+          server.snapshotResponseGate = null;
+          await waitFor(() => server.snapshotResponses > responseCount);
+          await waitFor(() => surface.snapshotSyncInFlight === false);
+          await internalRuntime.migrationMutation;
+          await internalRuntime.stateWrite;
+          const requirementAfter = endpointState().legacySourceRequirements[server.surfaceId];
+          assert.notEqual(
+            requirementAfter.sourceIdentitySha256,
+            requirementBefore.sourceIdentitySha256,
+          );
+          assert.equal(
+            requirementAfter.sourceIdentitySha256,
+            canonicalTestSha256(internalRuntime.captureLocklessMigrationSource(surface)),
+          );
+          const durableBeforePrepare = await internalRuntime.stateRepository.load();
+          assert.equal(
+            durableBeforePrepare.locklessMigrationContinuity.endpoints[surface.endpointId]
+              .legacySourceRequirements[server.surfaceId].sourceIdentitySha256,
+            requirementAfter.sourceIdentitySha256,
+          );
+
+          const controllerId = `ci_${trigger}_${ordering}` as never;
+          const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+            server.surfaceId,
+            controllerId,
+          );
+          const record = endpointState().surfaces[server.surfaceId];
+          assert.equal(record.source.panes[0].content.activeContentId, remotePane.contentId);
+          assert.equal(record.source.panes[0].content.currentRevision, 17);
+          assert.deepEqual(record.source.panes[0].buffer.scrollPosition, {
+            visibleRect: { height: 768, width: 1024, x: 0, y: 0 },
+            x: 61,
+            y: 62,
+          });
+          const immutableRecord = structuredClone(record);
+          const immutablePaneSource = structuredClone(
+            internalRuntime.captureLocklessMigrationSource(surface),
+          );
+
+          remotePane.contentId = `ct_late_${trigger}_${ordering}`;
+          remotePane.revision = 18;
+          server.snapshotImage = `late-${trigger}-${ordering}-image`;
+          server.snapshotScrollOffset = { x: 71, y: 72 };
+          let releaseLateResponse = () => {};
+          server.snapshotResponseGate = new Promise<void>((resolve) => {
+            releaseLateResponse = resolve;
+          });
+          const lateRequestCount = server.snapshotRequests.length;
+          const lateResponseCount = server.snapshotResponses;
+          if (trigger === "snapshot_hint") {
+            server.sendSnapshotHint("backpressure_drop");
+          } else {
+            server.sendSurfaceResumed();
+          }
+          await waitFor(() => server.snapshotRequests.length > lateRequestCount);
+          releaseLateResponse();
+          server.snapshotResponseGate = null;
+          await waitFor(() => server.snapshotResponses > lateResponseCount);
+          await waitFor(() => surface.snapshotSyncInFlight === false);
+          await internalRuntime.migrationMutation;
+          assert.deepEqual(endpointState().surfaces[server.surfaceId], immutableRecord);
+          assert.deepEqual(
+            internalRuntime.captureLocklessMigrationSource(surface),
+            immutablePaneSource,
+          );
+          assert.equal(
+            (await runtime.prepareLegacyLocklessMigrationNow(server.surfaceId, controllerId))
+              .pairRequestId,
+            receipt.pairRequestId,
+          );
+          const restarted = new DefaultSurfAceRuntime({ stateDir });
+          const restartedLookup = await restarted.lookupLegacyLocklessMigration(
+            surface.endpointId,
+            server.surfaceId,
+            controllerId,
+          );
+          assert.equal(restartedLookup.kind, "prepared");
+          if (restartedLookup.kind !== "prepared") throw new Error("expected prepared lookup");
+          assert.equal(restartedLookup.record.pairRequestId, receipt.pairRequestId);
+        });
+      });
+    }
+  }
+});
+
+test("delayed public capture response commits before preparation or is ignored after preparation", async (t) => {
+  for (const ordering of ["response_before_prepare", "prepare_before_response"] as const) {
+    await t.test(ordering, async () => {
+      await withRuntimeHarness(async ({ runtime, server }) => {
+        const paneId = (await runtime.listScreens())[0]!.panes[0]!.paneId;
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        const pane = surface.panes.get(paneId);
+        assert.ok(surface);
+        assert.ok(pane);
+        await runtime.read({ fingerprint: server.surfaceId, paneId });
+        const endpointState = () => internalRuntime.persistentState
+          .locklessMigrationContinuity.endpoints[surface.endpointId];
+        const requirementBefore = structuredClone(
+          endpointState().legacySourceRequirements[server.surfaceId],
+        );
+        server.snapshotScrollOffset = { x: 41, y: 42 };
+        server.snapshotImage = "capture-race-image";
+        let releaseSnapshot = () => {};
+        server.snapshotResponseGate = new Promise<void>((resolve) => {
+          releaseSnapshot = resolve;
+        });
+        const requestCount = server.snapshotRequests.length;
+        const capture = runtime.capturePane({ fingerprint: server.surfaceId, paneId });
+        await waitFor(() => server.snapshotRequests.length > requestCount);
+
+        if (ordering === "response_before_prepare") {
+          releaseSnapshot();
+          server.snapshotResponseGate = null;
+          await capture;
+          const requirementAfter = endpointState().legacySourceRequirements[server.surfaceId];
+          assert.notEqual(
+            requirementAfter.sourceIdentitySha256,
+            requirementBefore.sourceIdentitySha256,
+          );
+          const durable = await internalRuntime.stateRepository.load();
+          assert.equal(
+            durable.locklessMigrationContinuity.endpoints[surface.endpointId]
+              .legacySourceRequirements[server.surfaceId].sourceIdentitySha256,
+            requirementAfter.sourceIdentitySha256,
+          );
+          const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+            server.surfaceId,
+            "ci_capture_response_first" as never,
+          );
+          const record = endpointState().surfaces[server.surfaceId];
+          assert.equal(record.source.panes[0].buffer.scrollPosition.x, 41);
+          assert.equal(record.source.panes[0].buffer.scrollPosition.y, 42);
+          assert.equal(receipt.pairRequestId, record.transaction.pairRequestId);
+          return;
+        }
+
+        const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+          server.surfaceId,
+          "ci_capture_prepare_first" as never,
+        );
+        const recordBeforeResponse = structuredClone(
+          endpointState().surfaces[server.surfaceId],
+        );
+        releaseSnapshot();
+        server.snapshotResponseGate = null;
+        const captureResult = await capture;
+        assert.equal(captureResult.capture.bytesBase64, "capture-race-image");
+        assert.equal(pane.buffer.scrollPosition, null);
+        assert.deepEqual(endpointState().surfaces[server.surfaceId], recordBeforeResponse);
+        assert.deepEqual(
+          endpointState().legacySourceRequirements[server.surfaceId],
+          requirementBefore,
+        );
+        const durable = await internalRuntime.stateRepository.load();
+        assert.deepEqual(
+          durable.locklessMigrationContinuity.endpoints[surface.endpointId]
+            .surfaces[server.surfaceId],
+          JSON.parse(JSON.stringify(recordBeforeResponse)),
+        );
+        const retry = await runtime.prepareLegacyLocklessMigrationNow(
+          server.surfaceId,
+          "ci_capture_prepare_first" as never,
+        );
+        assert.equal(retry.pairRequestId, receipt.pairRequestId);
+        const lookup = await runtime.lookupLegacyLocklessMigration(
+          surface.endpointId,
+          server.surfaceId,
+          "ci_capture_prepare_first" as never,
+        );
+        assert.equal(lookup.kind, "prepared");
+        if (lookup.kind !== "prepared") throw new Error("expected prepared lookup");
+        await lookup.record.markPairSent();
+        await lookup.record.markClientCommitted(receipt.pairRequestId);
+        await lookup.record.markSourceCleared();
+        await lookup.record.complete();
+        assert.equal(
+          endpointState().legacySourceRequirements?.[server.surfaceId],
+          undefined,
+        );
+      });
+    });
+  }
+});
+
+test("delayed annotation snapshot/finalization commits before preparation or is ignored after preparation", async (t) => {
+  for (const ordering of ["response_before_prepare", "prepare_before_response"] as const) {
+    await t.test(ordering, async () => {
+      await withRuntimeHarness(async ({ runtime, server }) => {
+        const screen = (await runtime.listScreens())[0]!;
+        const paneId = screen.panes[0]!.paneId;
+        const internalRuntime = runtime as any;
+        const surface = internalRuntime.surfaces.get(server.surfaceId);
+        const pane = surface.panes.get(paneId);
+        const remotePane = server.panes.get(server.initialRemotePaneId);
+        assert.ok(surface);
+        assert.ok(pane);
+        assert.ok(remotePane);
+        remotePane.contentId = "ct_annotation_race";
+        remotePane.contentType = "html";
+        remotePane.revision = 7;
+        server.snapshotImage = "annotation-open-image";
+        server.sendDrawingFlush(server.initialRemotePaneId, "ct_annotation_race");
+        await waitFor(() => pane.buffer.liveFrame?.image === "annotation-open-image");
+        await runtime.read({ fingerprint: server.surfaceId, paneId });
+        const endpointState = () => internalRuntime.persistentState
+          .locklessMigrationContinuity.endpoints[surface.endpointId];
+        const requirementBefore = structuredClone(
+          endpointState().legacySourceRequirements[server.surfaceId],
+        );
+        server.snapshotImage = "annotation-commit-image";
+        server.snapshotScrollOffset = { x: 51, y: 52 };
+        let releaseSnapshot = () => {};
+        server.snapshotResponseGate = new Promise<void>((resolve) => {
+          releaseSnapshot = resolve;
+        });
+        const requestCount = server.snapshotRequests.length;
+        const responseCount = server.snapshotResponses;
+        server.sendAnnotationCommitted(server.initialRemotePaneId, "ct_annotation_race");
+        await waitFor(() => server.snapshotRequests.length > requestCount);
+
+        if (ordering === "response_before_prepare") {
+          releaseSnapshot();
+          server.snapshotResponseGate = null;
+          await waitFor(() => pane.buffer.closedFrames.length === 1);
+          await internalRuntime.stateWrite;
+          const requirementAfter = endpointState().legacySourceRequirements[server.surfaceId];
+          assert.notEqual(
+            requirementAfter.sourceIdentitySha256,
+            requirementBefore.sourceIdentitySha256,
+          );
+          const durable = await internalRuntime.stateRepository.load();
+          assert.equal(
+            durable.locklessMigrationContinuity.endpoints[surface.endpointId]
+              .legacySourceRequirements[server.surfaceId].sourceIdentitySha256,
+            requirementAfter.sourceIdentitySha256,
+          );
+          await runtime.prepareLegacyLocklessMigrationNow(
+            server.surfaceId,
+            "ci_annotation_response_first" as never,
+          );
+          const record = endpointState().surfaces[server.surfaceId];
+          assert.equal(record.source.panes[0].buffer.closedFrames[0].image, "annotation-commit-image");
+          assert.equal(record.source.panes[0].buffer.liveFrame, null);
+          return;
+        }
+
+        const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+          server.surfaceId,
+          "ci_annotation_prepare_first" as never,
+        );
+        const recordBeforeResponse = structuredClone(
+          endpointState().surfaces[server.surfaceId],
+        );
+        releaseSnapshot();
+        server.snapshotResponseGate = null;
+        await waitFor(() => server.snapshotResponses > responseCount);
+        await internalRuntime.migrationMutation;
+        assert.equal(pane.buffer.closedFrames.length, 0);
+        assert.equal(pane.buffer.liveFrame?.image, "annotation-open-image");
+        assert.deepEqual(endpointState().surfaces[server.surfaceId], recordBeforeResponse);
+        assert.deepEqual(
+          endpointState().legacySourceRequirements[server.surfaceId],
+          requirementBefore,
+        );
+        const retry = await runtime.prepareLegacyLocklessMigrationNow(
+          server.surfaceId,
+          "ci_annotation_prepare_first" as never,
+        );
+        assert.equal(retry.pairRequestId, receipt.pairRequestId);
+        const lookup = await runtime.lookupLegacyLocklessMigration(
+          surface.endpointId,
+          server.surfaceId,
+          "ci_annotation_prepare_first" as never,
+        );
+        assert.equal(lookup.kind, "prepared");
+        if (lookup.kind !== "prepared") throw new Error("expected prepared lookup");
+        await lookup.record.markPairSent();
+        await lookup.record.markClientCommitted(receipt.pairRequestId);
+        await lookup.record.markSourceCleared();
+        await lookup.record.complete();
+        assert.equal(pane.buffer.liveFrame, null);
+        assert.equal(pane.buffer.closedFrames.length, 0);
+        assert.equal(
+          endpointState().legacySourceRequirements?.[server.surfaceId],
+          undefined,
+        );
+      });
+    });
+  }
 });
 
 test("pane capture fails closed when authority changes during capture", async () => {
@@ -10464,11 +11189,13 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("read and snapshot repair global pane display tokens without provider reconciliation", async () => {
+  await t.test("read and snapshot project display tokens without repair or provider reconciliation", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const before = (await runtime.listScreens())[0]!;
       const firstPane = before.panes[0]!;
       const panesListRequests = server.panesListRequests;
+      const authorityStateRequests = server.authorityStateRequests.length;
+      const snapshotRequests = server.snapshotRequests.length;
       const internalRuntime = runtime as any;
       const surface = internalRuntime.surfaces.get(server.surfaceId);
       assert.ok(surface);
@@ -10487,7 +11214,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
       assert.equal(read.paneId, stalePane.paneId);
       assert.equal(read.paneLabel, 2);
-      assert.equal(stalePane.paneLabel, 2);
+      assert.equal(stalePane.paneLabel, 9999);
       assert.equal(surface.panes.has(stalePane.paneId), true);
 
       const secondStalePane = structuredClone(sourcePane);
@@ -10496,18 +11223,326 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       secondStalePane.paneLabel = 9998;
       secondStalePane.paneLineageId = "pl_zero_revision_stale_local_snapshot";
       surface.panes.set(secondStalePane.paneId, secondStalePane);
+      const expectedSnapshotPaneLabel = internalRuntime.projectedPaneLabel(surface, secondStalePane);
       const snapshot = await runtime.snapshot({
         fingerprint: server.surfaceId,
         paneId: secondStalePane.paneId,
       });
       assert.equal(snapshot.paneId, secondStalePane.paneId);
-      const after = (await runtime.listScreens())[0]!;
-      const projectedSnapshotPane = after.panes.find((pane) => pane.paneId === secondStalePane.paneId);
-      assert.equal(snapshot.paneLabel, projectedSnapshotPane?.paneLabel);
-      assert.notEqual(snapshot.paneLabel, 9998);
-      assert.equal(secondStalePane.paneLabel, projectedSnapshotPane?.paneLabel);
+      assert.equal(snapshot.paneLabel, expectedSnapshotPaneLabel);
+      assert.notEqual(snapshot.paneLabel, secondStalePane.paneLabel);
+      assert.equal(secondStalePane.paneLabel, 9998);
       assert.equal(surface.panes.has(secondStalePane.paneId), true);
       assert.equal(server.panesListRequests, panesListRequests);
+      assert.equal(server.authorityStateRequests.length, authorityStateRequests);
+      assert.equal(server.snapshotRequests.length, snapshotRequests);
+    });
+  });
+
+  await t.test("Gate 6 local read and cached snapshot retain accepted projection while disconnected", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const screen = (await runtime.listScreens())[0]!;
+      const pane = screen.panes[0]!;
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+
+      surface.stopRequested = true;
+      await surface.client?.close(1000, "gate6_disconnected_local_projection").catch(() => {});
+      await surface.workPromise;
+      surface.workPromise = null;
+      const requestCounts = {
+        authorityState: server.authorityStateRequests.length,
+        panesList: server.panesListRequests,
+        snapshot: server.snapshotRequests.length,
+      };
+
+      const read = await runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
+      const snapshot = await runtime.snapshot({ fingerprint: server.surfaceId, paneId: pane.paneId });
+
+      assert.equal(read.paneId, pane.paneId);
+      assert.equal(snapshot.paneId, pane.paneId);
+      assert.equal(server.authorityStateRequests.length, requestCounts.authorityState);
+      assert.equal(server.panesListRequests, requestCounts.panesList);
+      assert.equal(server.snapshotRequests.length, requestCounts.snapshot);
+    });
+  });
+
+  await t.test("Gate 6 partial legacy frame reads commit only the final complete boundary", async () => {
+    await withRuntimeHarness(async ({ runtime, server, stateDir }) => {
+      const paneSummary = (await runtime.listScreens())[0]!.panes[0]!;
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(paneSummary.paneId);
+      assert.ok(pane);
+      pane.buffer.closedFrames = Array.from({ length: 6 }, (_, index) =>
+        legacyReadFrame(index, pane.viewport)
+      );
+
+      const partial = await runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
+      assert.equal(partial.frames.length, 5);
+      assert.equal(partial.pendingFrames, 1);
+      assert.equal(partial.legacyCompatibilityReadBoundary?.complete, false);
+      assert.deepEqual(partial.legacyCompatibilityReadBoundary?.completedPaneIds, []);
+      const partialState = JSON.parse(
+        await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+      );
+      assert.deepEqual(
+        partialState.locklessMigrationContinuity.endpoints[surface.endpointId]
+          .legacyCompatibilityReadBoundaries[server.surfaceId],
+        partial.legacyCompatibilityReadBoundary,
+      );
+
+      const complete = await runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
+      assert.equal(complete.frames.length, 1);
+      assert.equal(complete.pendingFrames, undefined);
+      assert.equal(complete.legacyCompatibilityReadBoundary?.complete, true);
+      assert.deepEqual(complete.legacyCompatibilityReadBoundary?.completedPaneIds, [pane.paneId]);
+      const completeState = JSON.parse(
+        await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+      );
+      assert.deepEqual(
+        completeState.locklessMigrationContinuity.endpoints[surface.endpointId]
+          .legacyCompatibilityReadBoundaries[server.surfaceId],
+        complete.legacyCompatibilityReadBoundary,
+      );
+    });
+  });
+
+  await t.test("Gate 6 source and inventory use exactly visible panes and retain post-boundary material", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = (await runtime.listScreens())[0]!.panes[0]!.paneId;
+      await runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const visiblePanes = internalRuntime.visiblePanes(surface);
+      assert.equal(visiblePanes.length, 2);
+      const hiddenPane = structuredClone(visiblePanes[0]);
+      hiddenPane.paneId = internalRuntime.allocatePaneId();
+      hiddenPane.remotePaneId = 9997;
+      hiddenPane.paneLineageId = "pl_gate6_hidden_cached";
+      hiddenPane.buffer.lastNavigation = {
+        navigatedAt: 1,
+        url: "https://hidden.invalid/",
+      };
+      surface.panes.set(hiddenPane.paneId, hiddenPane);
+
+      let finalBoundary: any = null;
+      for (const pane of visiblePanes) {
+        const result = await runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
+        finalBoundary = result.legacyCompatibilityReadBoundary;
+      }
+      const visiblePaneIds = visiblePanes.map((pane: any) => pane.paneId).sort();
+      assert.equal(finalBoundary.complete, true);
+      assert.deepEqual(finalBoundary.requiredPaneIds, visiblePaneIds);
+      assert.deepEqual(finalBoundary.completedPaneIds, visiblePaneIds);
+      assert.deepEqual(
+        internalRuntime.captureLocklessMigrationSource(surface).panes
+          .map((pane: any) => pane.paneId).sort(),
+        visiblePaneIds,
+      );
+
+      const completedBoundaryDigest = finalBoundary.compatibilityReadBoundarySha256;
+      const requirementBefore = structuredClone(
+        internalRuntime.persistentState.locklessMigrationContinuity.endpoints[surface.endpointId]
+          .legacySourceRequirements[server.surfaceId],
+      );
+      internalRuntime.handleWireEvent(surface, {
+        eventId: "ev_gate6_post_boundary_tap",
+        op: "event.tap",
+        payload: {
+          contentId: "ct_gate6_post_boundary",
+          kind: "tap",
+          nearestContent: "post-boundary",
+          paneId: visiblePanes[0].remotePaneId,
+          position: { x: 11, y: 12 },
+          revision: visiblePanes[0].currentRevision,
+        },
+        sentAt: Date.now(),
+        type: "event",
+        v: 1,
+      });
+      await waitFor(() => visiblePanes[0].buffer.taps.length === 1);
+      await internalRuntime.stateWrite;
+      const endpointState = internalRuntime.persistentState.locklessMigrationContinuity
+        .endpoints[surface.endpointId];
+      assert.equal(
+        endpointState.legacyCompatibilityReadBoundaries[server.surfaceId]
+          .compatibilityReadBoundarySha256,
+        completedBoundaryDigest,
+      );
+      assert.equal(endpointState.legacyCompatibilityReadBoundaries[server.surfaceId].complete, true);
+      assert.notEqual(
+        endpointState.legacySourceRequirements[server.surfaceId].sourceIdentitySha256,
+        requirementBefore.sourceIdentitySha256,
+      );
+
+      const receipt = await runtime.prepareLegacyLocklessMigrationNow(
+        server.surfaceId,
+        "ci_gate6_visible_source" as never,
+      );
+      assert.equal(receipt.compatibilityReadBoundarySha256, completedBoundaryDigest);
+      const prepared = internalRuntime.persistentState.locklessMigrationContinuity
+        .endpoints[surface.endpointId].surfaces[server.surfaceId];
+      assert.deepEqual(prepared.source.panes.map((pane: any) => pane.paneId).sort(), visiblePaneIds);
+      assert.equal(
+        prepared.source.panes.find((pane: any) => pane.paneId === visiblePanes[0].paneId)
+          .buffer.taps[0].nearestText,
+        "post-boundary",
+      );
+      assert.equal(
+        prepared.source.panes.some((pane: any) => pane.paneId === hiddenPane.paneId),
+        false,
+      );
+    });
+  });
+
+  await t.test("Gate 6 delayed read persistence orders concurrent material and topology after its boundary", async () => {
+    await withRuntimeHarness(async ({ runtime, server, stateDir }) => {
+      const paneSummary = (await runtime.listScreens())[0]!.panes[0]!;
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const pane = surface.panes.get(paneSummary.paneId);
+      assert.ok(pane);
+      surface.topologyRevision = 1;
+      surface.layout = { paneId: pane.paneId, type: "pane" };
+      const hiddenPane = structuredClone(pane);
+      hiddenPane.paneId = internalRuntime.allocatePaneId();
+      hiddenPane.remotePaneId = 9996;
+      hiddenPane.paneLabel = 2;
+      hiddenPane.paneLineageId = "pl_gate6_concurrent_topology";
+      surface.panes.set(hiddenPane.paneId, hiddenPane);
+
+      const repository = internalRuntime.stateRepository;
+      const originalSave = repository.save.bind(repository);
+      let releaseSave = () => {};
+      let saveEntered = false;
+      let delayNextSave = true;
+      const saveGate = new Promise<void>((resolve) => {
+        releaseSave = resolve;
+      });
+      repository.save = async (state: unknown) => {
+        if (delayNextSave) {
+          delayNextSave = false;
+          saveEntered = true;
+          await saveGate;
+        }
+        await originalSave(state);
+      };
+
+      try {
+        const readPromise = runtime.read({ fingerprint: server.surfaceId, paneId: pane.paneId });
+        await waitFor(() => saveEntered);
+        internalRuntime.handleWireEvent(surface, {
+          eventId: "ev_gate6_concurrent_tap",
+          op: "event.tap",
+          payload: {
+            contentId: "ct_gate6_concurrent",
+            kind: "tap",
+            nearestContent: "concurrent",
+            paneId: pane.remotePaneId,
+            position: { x: 21, y: 22 },
+            revision: pane.currentRevision,
+          },
+          sentAt: Date.now(),
+          type: "event",
+          v: 1,
+        });
+        internalRuntime.handleWireEvent(surface, {
+          eventId: "ev_gate6_concurrent_topology",
+          op: "event.topology_changed",
+          payload: {
+            layout: {
+              children: [
+                { paneId: pane.remotePaneId, type: "pane" },
+                { paneId: hiddenPane.remotePaneId, type: "pane" },
+              ],
+              direction: "vertical",
+              type: "split",
+            },
+            panes: [
+              { name: pane.name, paneId: pane.remotePaneId, paneLabel: 1 },
+              { name: hiddenPane.name, paneId: hiddenPane.remotePaneId, paneLabel: 2 },
+            ],
+            topologyRevision: 2,
+          },
+          sentAt: Date.now(),
+          type: "event",
+          v: 1,
+        });
+        assert.equal(internalRuntime.pendingMigrationEvents.length, 2);
+        assert.deepEqual(pane.buffer.taps, []);
+        releaseSave();
+        const read = await readPromise;
+        assert.deepEqual(read.taps, []);
+        assert.equal(read.legacyCompatibilityReadBoundary?.complete, true);
+        assert.deepEqual(read.legacyCompatibilityReadBoundary?.requiredPaneIds, [pane.paneId]);
+      } finally {
+        releaseSave();
+        repository.save = originalSave;
+      }
+
+      await waitFor(async () => {
+        const persisted = JSON.parse(
+          await fs.readFile(path.join(stateDir, "surf-ace-runtime-state.json"), "utf8"),
+        );
+        const boundary = persisted.locklessMigrationContinuity.endpoints[surface.endpointId]
+          ?.legacyCompatibilityReadBoundaries?.[server.surfaceId];
+        return boundary?.requiredPaneIds?.length === 2 && boundary.complete === false;
+      });
+      const boundary = internalRuntime.persistentState.locklessMigrationContinuity
+        .endpoints[surface.endpointId].legacyCompatibilityReadBoundaries[server.surfaceId];
+      assert.deepEqual(boundary.requiredPaneIds, [hiddenPane.paneId, pane.paneId].sort());
+      assert.deepEqual(boundary.completedPaneIds, []);
+      assert.equal(boundary.complete, false);
+      assert.equal(pane.buffer.taps[0].nearestText, "concurrent");
+    });
+  });
+
+  await t.test("Gate 6 topology-first and pane-lineage response commits precede later reads", async () => {
+    await withRuntimeHarness(async ({ runtime, server }) => {
+      const firstPaneId = (await runtime.listScreens())[0]!.panes[0]!.paneId;
+      server.topologyApplyDelayMs = 100;
+      const splitPromise = runtime.split({
+        count: 2,
+        direction: "vertical",
+        fingerprint: server.surfaceId,
+        paneId: firstPaneId,
+      });
+      await waitFor(() => server.topologyApplyRequests.length > 0);
+      const readPromise = runtime.read({ fingerprint: server.surfaceId, paneId: firstPaneId });
+      const split = await splitPromise;
+      const firstRead = await readPromise;
+      const paneIds = split.map((pane) => pane.paneId).sort();
+      assert.deepEqual(firstRead.legacyCompatibilityReadBoundary?.requiredPaneIds, paneIds);
+      assert.equal(firstRead.legacyCompatibilityReadBoundary?.complete, false);
+
+      const secondPaneId = paneIds.find((paneId) => paneId !== firstPaneId)!;
+      const completed = await runtime.read({ fingerprint: server.surfaceId, paneId: secondPaneId });
+      assert.equal(completed.legacyCompatibilityReadBoundary?.complete, true);
+      const internalRuntime = runtime as any;
+      const surface = internalRuntime.surfaces.get(server.surfaceId);
+      assert.ok(surface);
+      const firstPane = surface.panes.get(firstPaneId);
+      assert.ok(firstPane);
+      const serverPane = server.panes.get(Number(firstPane.remotePaneId));
+      assert.ok(serverPane);
+      serverPane.paneLineageId = `${serverPane.paneLineageId}_gate6_changed`;
+      await internalRuntime.syncRemotePaneList(surface);
+
+      const invalidated = internalRuntime.persistentState.locklessMigrationContinuity
+        .endpoints[surface.endpointId].legacyCompatibilityReadBoundaries[server.surfaceId];
+      assert.deepEqual(invalidated.requiredPaneIds, paneIds);
+      assert.deepEqual(invalidated.completedPaneIds, []);
+      assert.equal(invalidated.complete, false);
     });
   });
 
@@ -16013,7 +17048,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     });
   });
 
-  await t.test("pre-revision pane-list reconciliation skips in-flight topology apply", async () => {
+  await t.test("pre-revision pane-list reconciliation serializes behind in-flight topology apply", async () => {
     await withRuntimeHarness({
       configureServer: (server) => {
         const firstRemotePane = server.panes.get(server.initialRemotePaneId);
@@ -16067,8 +17102,9 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const stagedLayout = structuredClone(surface.layout);
         await internalRuntime.syncRemotePaneList(surface);
 
-        assert.deepEqual(surface.layout, stagedLayout);
         await splitPromise;
+        assert.notDeepEqual(surface.layout, stagedLayout);
+        assert.equal(internalRuntime.visiblePanes(surface).length, 3);
       },
     });
   });

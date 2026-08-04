@@ -30,6 +30,15 @@ test("Surf Ace extension does not inject static instructions through prompt-buil
   assert.equal(instructionSource.includes("prependSystemContext"), false);
 });
 
+test("capability-gated list has no hidden migration preparation write", () => {
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const listCase = source.slice(
+    source.indexOf('case "listScreens"'),
+    source.indexOf('case "prepareLegacyLocklessMigrationNow"'),
+  );
+  assert.equal(listCase.includes("prepareLegacy"), false);
+});
+
 test("Surf Ace plugin registrations share one state-root runtime and release it once", async () => {
   const stateDir = `/tmp/surf-ace-shared-runtime-${crypto.randomUUID()}`;
   let createCount = 0;

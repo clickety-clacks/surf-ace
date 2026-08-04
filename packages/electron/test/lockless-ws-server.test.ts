@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import WebSocket from "ws";
@@ -14,9 +17,63 @@ import {
   createEmptyLocklessClientState,
 } from "../src/lockless-client-authority.js";
 import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
+import {
+  loadPersistentStateFile,
+  writePersistentStateFile,
+} from "../src/persistent-state-file.js";
 import { SurfaceWsServer } from "../src/ws-server.js";
+import {
+  OpenClawLocklessController,
+} from "../../extension/src/openclaw-lockless-controller.js";
+import { capabilityGatedPreparationRuntime } from "../../extension/src/capability-gated-preparation.js";
+import type {
+  SurfAceDiscoveryEndpoint,
+  SurfAceDiscoveryService,
+} from "../../extension/src/surf-ace-discovery.js";
 
 let nextPort = 25901;
+
+class CopiedRootDiscovery implements SurfAceDiscoveryService {
+  private listener: ((endpoints: SurfAceDiscoveryEndpoint[]) => void) | null = null;
+
+  constructor(private readonly endpoint: SurfAceDiscoveryEndpoint) {}
+
+  getSnapshot(): SurfAceDiscoveryEndpoint[] {
+    return [this.endpoint];
+  }
+
+  async refreshNow(): Promise<void> {}
+
+  async start(): Promise<void> {
+    this.listener?.([this.endpoint]);
+  }
+
+  async stop(): Promise<void> {}
+
+  subscribe(listener: (endpoints: SurfAceDiscoveryEndpoint[]) => void): () => void {
+    this.listener = listener;
+    return () => {
+      this.listener = null;
+    };
+  }
+}
+
+function copiedRootEndpoint(port: number): SurfAceDiscoveryEndpoint {
+  return {
+    busy: false,
+    capabilitiesBitmask: 0,
+    endpointId: "electron-copied-root",
+    fingerprintPrefix: "sf",
+    host: "127.0.0.1",
+    instanceName: "Surf Ace",
+    lastSeenAt: Date.now(),
+    name: "Surf Ace",
+    port,
+    protocolVersion: 1,
+    viewport: { height: 800, scale: 2, width: 1200 },
+    wsPath: "/ws",
+  };
+}
 
 async function connect(url: string): Promise<WebSocket> {
   const socket = new WebSocket(url);
@@ -2171,5 +2228,257 @@ test("AC-SURF-04: concurrent lifecycle requests serialize once and stale callers
     first.close();
     second.close();
     await server.stop();
+  }
+});
+
+test("copied Electron and extension roots cold-start the production lockless server and controller", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "surf-ace-copied-composition-"));
+  const electronSourceRoot = path.join(root, "electron-source");
+  const electronCopiedRoot = path.join(root, "electron-copy");
+  const extensionSourceRoot = path.join(root, "extension-source");
+  const extensionCopiedRoot = path.join(root, "extension-copy");
+  const electronStateFile = "surf-ace-state.json";
+  let electronWrites = Promise.resolve();
+  const settleElectronWrites = async (): Promise<void> => await electronWrites;
+  const cleanLegacySource = {
+    async hydrateLegacyLocklessMigrationContinuity() {},
+    async lookupLegacyLocklessMigration() {
+      return { kind: "no_legacy_source" } as const;
+    },
+    async prepareLegacyLocklessMigrationNow() {
+      throw new Error("migration_not_legacy");
+    },
+  };
+  const createServer = (core: SurfaceCore, port: number, stateRoot: string) =>
+    new SurfaceWsServer({
+      capturePaneImage: async () => null,
+      compositorSocketPath: null,
+      core,
+      endpointName: "Surf Ace",
+      hostName: "localhost",
+      persistLocklessState: async () => {
+        const state = core.getPersistentState();
+        electronWrites = electronWrites.then(async () => {
+          await writePersistentStateFile(stateRoot, electronStateFile, state);
+        });
+        await electronWrites;
+      },
+      port,
+      viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+    });
+  try {
+    await mkdir(extensionSourceRoot, { recursive: true });
+    const sourceCore = new SurfaceCore({ clientIdentity: "electron-copied-root" });
+    const sourceSurface = sourceCore.ensurePrimarySurface("Surf Ace", {
+      height: 800,
+      scale: 2,
+      width: 1200,
+    });
+    const sourcePort = nextPort++;
+    const sourceServer = createServer(sourceCore, sourcePort, electronSourceRoot);
+    await writePersistentStateFile(electronSourceRoot, electronStateFile, sourceCore.getPersistentState());
+    await sourceServer.start();
+    const sourceController = new OpenClawLocklessController({
+      discovery: new CopiedRootDiscovery(copiedRootEndpoint(sourcePort)),
+      stateDir: extensionSourceRoot,
+    });
+    sourceController.setLegacyMigrationSource(cleanLegacySource as never);
+    await sourceController.start();
+    assert.equal((await sourceController.listScreens())[0]?.fingerprint, sourceSurface.surfaceId);
+    await sourceController.stop();
+    await sourceServer.stop();
+    await settleElectronWrites();
+    await writePersistentStateFile(electronSourceRoot, electronStateFile, sourceCore.getPersistentState());
+
+    await cp(electronSourceRoot, electronCopiedRoot, { recursive: true });
+    await cp(extensionSourceRoot, extensionCopiedRoot, { recursive: true });
+    const loaded = await loadPersistentStateFile(electronCopiedRoot, electronStateFile);
+    assert.equal(loaded.writeGuard, false);
+    assert.ok(loaded.state);
+    const copiedCore = new SurfaceCore({
+      clientIdentity: "electron-copied-root",
+      persistentState: loaded.state,
+    });
+    copiedCore.restorePersistedSurfaces("Surf Ace", {
+      height: 800,
+      scale: 2,
+      width: 1200,
+    });
+    const copiedPort = nextPort++;
+    const copiedServer = createServer(copiedCore, copiedPort, electronCopiedRoot);
+    await copiedServer.start();
+    const copiedController = new OpenClawLocklessController({
+      discovery: new CopiedRootDiscovery(copiedRootEndpoint(copiedPort)),
+      stateDir: extensionCopiedRoot,
+    });
+    copiedController.setLegacyMigrationSource(cleanLegacySource as never);
+    await copiedController.start();
+    try {
+      const copiedScreens = await copiedController.listScreens();
+      assert.equal(copiedScreens[0]?.fingerprint, sourceSurface.surfaceId);
+      assert.ok(Object.values(copiedCore.locklessAuthority.exportState().controllers)
+        .some((controller) => controller.status === "live"));
+
+      await assert.rejects(
+        copiedController.prepareLegacyMigrationNow(sourceSurface.surfaceId),
+        /migration_not_legacy/,
+        "a copied clean lockless product root must not fabricate legacy migration material",
+      );
+    } finally {
+      await copiedController.stop();
+      await copiedServer.stop();
+      await settleElectronWrites();
+    }
+  } finally {
+    await settleElectronWrites();
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("copied clean Electron, iPhone, and iPad product roots admit through unchanged production authority semantics", async (t) => {
+  const products = [
+    { clientIdentity: "surf-ace-electron", endpointName: "Surf Ace Electron", product: "Electron" },
+    { clientIdentity: "clawline-iphone", endpointName: "Clawline iPhone", product: "iPhone" },
+    { clientIdentity: "clawline-ipad", endpointName: "Clawline iPad", product: "iPad" },
+  ] as const;
+  for (const product of products) {
+    await t.test(product.product, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), `surf-ace-${product.product.toLowerCase()}-copy-`));
+      const sourceRoot = path.join(root, "source");
+      const copiedRoot = path.join(root, "copy");
+      const extensionRoot = path.join(root, "extension");
+      const stateFile = "surf-ace-state.json";
+      let writes = Promise.resolve();
+      const source = {
+        async hydrateLegacyLocklessMigrationContinuity() {},
+        async lookupLegacyLocklessMigration() {
+          return { kind: "no_legacy_source" } as const;
+        },
+        async prepareLegacyLocklessMigrationNow() {
+          throw new Error("migration_not_legacy");
+        },
+      };
+      try {
+        await mkdir(extensionRoot, { recursive: true });
+        const sourceCore = new SurfaceCore({ clientIdentity: product.clientIdentity });
+        const sourceSurface = sourceCore.ensurePrimarySurface(product.endpointName, {
+          height: 800,
+          scale: 2,
+          width: 1200,
+        });
+        await writePersistentStateFile(sourceRoot, stateFile, sourceCore.getPersistentState());
+        await cp(sourceRoot, copiedRoot, { recursive: true });
+        const loaded = await loadPersistentStateFile(copiedRoot, stateFile);
+        assert.equal(loaded.writeGuard, false);
+        assert.ok(loaded.state);
+        const core = new SurfaceCore({
+          clientIdentity: product.clientIdentity,
+          persistentState: loaded.state,
+        });
+        core.restorePersistedSurfaces(product.endpointName, {
+          height: 800,
+          scale: 2,
+          width: 1200,
+        });
+        const port = nextPort++;
+        const server = new SurfaceWsServer({
+          capturePaneImage: async () => null,
+          compositorSocketPath: null,
+          core,
+          endpointName: product.endpointName,
+          hostName: "localhost",
+          persistLocklessState: async () => {
+            const state = core.getPersistentState();
+            writes = writes.then(async () => {
+              await writePersistentStateFile(copiedRoot, stateFile, state);
+            });
+            await writes;
+          },
+          port,
+          viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+        });
+        await server.start();
+        const controller = new OpenClawLocklessController({
+          discovery: new CopiedRootDiscovery({
+            ...copiedRootEndpoint(port),
+            endpointId: product.clientIdentity,
+            instanceName: product.endpointName,
+            name: product.endpointName,
+          }),
+          stateDir: extensionRoot,
+        });
+        controller.setLegacyMigrationSource(source as never);
+        await controller.start();
+        try {
+          assert.equal((await controller.listScreens())[0]?.fingerprint, sourceSurface.surfaceId);
+          assert.equal(core.locklessAuthority.surfaceMode(sourceSurface.surfaceId), "lockless");
+          assert.deepEqual(core.locklessAuthority.exportState().migrationReceipts, {});
+          await assert.rejects(
+            controller.prepareLegacyMigrationNow(sourceSurface.surfaceId),
+            /migration_not_legacy/,
+          );
+          await controller.stop();
+
+          const identity = JSON.parse(await readFile(
+            path.join(extensionRoot, "lockless-controller-identity.json"),
+            "utf8",
+          ));
+          const receipt = {
+            compatibilityReadBoundarySha256: "a".repeat(64),
+            controllerInstanceId: identity.controllerInstanceId,
+            endpointId: product.clientIdentity,
+            fingerprint: sourceSurface.surfaceId,
+            materialSha256: "b".repeat(64),
+            pairRequestId: `rq_terminal_${product.product.toLowerCase()}`,
+            phase: "complete",
+            sourceSha256: "c".repeat(64),
+            surfaceId: sourceSurface.surfaceId,
+          } as const;
+          const terminalSource = {
+            async hydrateLegacyLocklessMigrationContinuity() {},
+            async lookupLegacyLocklessMigration() {
+              return { kind: "complete_no_migration", receipt } as const;
+            },
+            async prepareLegacyLocklessMigrationNow() {
+              return receipt;
+            },
+          };
+          const restarted = new OpenClawLocklessController({
+            discovery: new CopiedRootDiscovery({
+              ...copiedRootEndpoint(port),
+              endpointId: product.clientIdentity,
+              instanceName: product.endpointName,
+              name: product.endpointName,
+            }),
+            stateDir: extensionRoot,
+          });
+          restarted.setLegacyMigrationSource(terminalSource as never);
+          await restarted.start();
+          try {
+            assert.equal((await restarted.listScreens())[0]?.fingerprint, sourceSurface.surfaceId);
+            assert.deepEqual(core.locklessAuthority.exportState().migrationReceipts, {});
+            const officialRuntime = capabilityGatedPreparationRuntime(
+              terminalSource as never,
+              restarted,
+            );
+            assert.deepEqual(
+              await officialRuntime.prepareLegacyLocklessMigrationNow(
+                sourceSurface.surfaceId,
+              ),
+              receipt,
+            );
+          } finally {
+            await restarted.stop();
+          }
+        } finally {
+          await controller.stop();
+          await server.stop();
+          await writes;
+        }
+      } finally {
+        await writes;
+        await rm(root, { force: true, recursive: true });
+      }
+    });
   }
 });

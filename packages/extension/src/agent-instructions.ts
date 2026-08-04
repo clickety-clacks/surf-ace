@@ -1,6 +1,7 @@
 export function buildSurfAceAgentInstructions(): string {
   return [
     "Surf Ace is pane-scoped. Always call `surf_ace_list` first, resolve the intended `{ fingerprint, windowLabel, paneLabel }`, then use the returned internal `paneId` for subsequent pane-scoped calls.",
+    "For an authorized legacy-to-lockless cutover, complete `surf_ace_read` across every listed pane, then call `surf_ace_prepare_migration_now` exactly for that surface fingerprint. Listing never prepares migration.",
     "Use `surf_ace_push` for full pane replacements; `contentType:\"browser_url\"` is a live URL target, not static HTML.",
     "Use `surf_ace_launch_native_app` with `confirmed:true` when a pane must host a real native app/process through Surf Ace native hosting and overlay ownership.",
     "For terminal-shaped launches, use `surf_ace_launch_native_app` with the terminal app/process identity and argv instead of a terminal-specific Surf Ace tool.",

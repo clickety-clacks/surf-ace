@@ -126,9 +126,9 @@ export class OpenClawLocklessController {
     new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void>();
   private legacyMigrationSource: Pick<
     SurfAceRuntime,
-    | "exportLegacyLocklessMigration"
     | "hydrateLegacyLocklessMigrationContinuity"
-    | "prepareLegacyLocklessMigrationContinuity"
+    | "lookupLegacyLocklessMigration"
+    | "prepareLegacyLocklessMigrationNow"
   > | null = null;
   private reconcileWork: Promise<void> = Promise.resolve();
   private started = false;
@@ -171,9 +171,9 @@ export class OpenClawLocklessController {
   setLegacyMigrationSource(
     source: Pick<
       SurfAceRuntime,
-      | "exportLegacyLocklessMigration"
       | "hydrateLegacyLocklessMigrationContinuity"
-      | "prepareLegacyLocklessMigrationContinuity"
+      | "lookupLegacyLocklessMigration"
+      | "prepareLegacyLocklessMigrationNow"
     >,
   ): void {
     this.legacyMigrationSource = source;
@@ -212,11 +212,24 @@ export class OpenClawLocklessController {
     this.started = false;
   }
 
-  async prepareLegacyMigrationContinuity(): Promise<void> {
+  async prepareLegacyMigrationNow(fingerprint: string) {
     const source = this.legacyMigrationSource;
-    if (!source) return;
-    await source.prepareLegacyLocklessMigrationContinuity(
-      await this.identity.loadOrCreate(),
+    if (!source) throw new Error("migration_prepare_failed");
+    const controllerInstanceId = await this.identity.loadOrCreate();
+    const resolved = this.findScreen(fingerprint);
+    if (resolved) {
+      const lookup = await source.lookupLegacyLocklessMigration(
+        resolved.endpoint.endpoint.endpointId,
+        resolved.surfaceId,
+        controllerInstanceId,
+      );
+      if (lookup.kind === "no_legacy_source" || lookup.kind === "required_unprepared") {
+        throw new Error("migration_not_legacy");
+      }
+    }
+    return await source.prepareLegacyLocklessMigrationNow(
+      fingerprint,
+      controllerInstanceId,
     );
   }
 
@@ -980,12 +993,19 @@ export class OpenClawLocklessController {
           },
           prepareMigration: async (surfaceId, controllerInstanceId) => {
             const source = this.legacyMigrationSource;
-            const prepared = await source?.exportLegacyLocklessMigration(
+            const lookup = await source?.lookupLegacyLocklessMigration(
               endpoint.endpointId,
               surfaceId,
               controllerInstanceId,
-            ) ?? null;
-            return prepared && source
+            ) ?? { kind: "no_legacy_source" as const };
+            if (lookup.kind === "required_unprepared") {
+              throw new Error("migration_not_prepared");
+            }
+            if (lookup.kind !== "prepared") {
+              return null;
+            }
+            const prepared = lookup.record;
+            return source
               ? {
                   complete: prepared.complete,
                   material: prepared.material,

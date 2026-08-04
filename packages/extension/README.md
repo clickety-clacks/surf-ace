@@ -38,6 +38,10 @@ Use `tools.alsoAllow` so Surf Ace is added to the coding profile. Do not replace
 
 Verification must happen through the official tool surface: a normal OpenClaw session should declare `surf_ace_*`, and a harmless `surf_ace_list` should succeed. Logs, direct HTTP/WS calls, DNS-SD, screenshots, or remembered pane IDs are useful diagnostics but are not installation proof.
 
+For an authorized retained-state cutover, use `surf_ace_list`, consume every current pane with `surf_ace_read` until the returned compatibility boundary is complete, and then invoke `surf_ace_prepare_migration_now({ fingerprint })`. Listing, startup, discovery, and pairing never create preparation. Preserve the exact preparation receipt for restart/retry recovery.
+
+Before replacing the amended extension with a captured pre-amendment package, run `make -C packages/extension rollback-preflight STATE_FILE=/path/to/surf-ace-runtime-state.json`. A preparation record returns `rollback_requires_full_reset`; do not replace package bytes or restart the gateway. Only the approved byte-exact two-product baseline reset permits the later forward deployment to create a new migration ID.
+
 ## Topology Soak Proof Gate
 
 Topology soak reports must cite the governing procedure in `/Users/mike/shared-workspace/surf-ace/specs/fleet-soak-procedure.md` and cannot pass on pane count alone. A normal CLU session must declare the official `surf_ace_*` tools, harmless `surf_ace_list` must succeed through that tool path, and the returned recursive topology must be cross-checked against independent rendered/provider truth such as `surf_ace_capture_pane` metadata/pixels plus `surf_ace_read` for the same `fingerprint` + opaque `paneId` tuple.

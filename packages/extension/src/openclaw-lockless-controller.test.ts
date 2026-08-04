@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -19,11 +19,18 @@ import {
   advertisesLocklessCapability,
   OpenClawLocklessController,
 } from "./openclaw-lockless-controller.js";
+import { capabilityGatedPreparationRuntime } from "./capability-gated-preparation.js";
 import {
   DefaultSurfAceRuntime,
   type PaneId,
 } from "./surf-ace-runtime.js";
-import { surfAceToolNames } from "./surf-ace-tools.js";
+import { createSurfAceTools, surfAceToolNames } from "./surf-ace-tools.js";
+import { SurfaceCore } from "../../electron/src/surface-core.js";
+import { SurfaceWsServer } from "../../electron/src/ws-server.js";
+import {
+  loadPersistentStateFile,
+  writePersistentStateFile,
+} from "../../electron/src/persistent-state-file.js";
 
 class MemoryStore implements ControllerStateStore {
   value: unknown = null;
@@ -447,6 +454,111 @@ test("lockless alert presentation has no embedded host or session route", async 
   assert.equal(source.includes("agent:main:main"), false);
 });
 
+test("legacy migration lookup distinguishes clean and retained-unprepared state without capture", async () => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), "surf-ace-migration-lookup-"));
+  const runtime = new DefaultSurfAceRuntime({ stateDir });
+  await runtime.hydrateLegacyLocklessMigrationContinuity();
+  assert.deepEqual(
+    await runtime.lookupLegacyLocklessMigration("apple-clean", "sf_clean", "ci_lookup" as never),
+    { kind: "no_legacy_source" },
+  );
+  (runtime as any).persistentState.locklessMigrationContinuity.endpoints["electron-retained"] = {
+    legacySourceRequirements: {
+      sf_retained: {
+        endpointId: "electron-retained",
+        schemaVersion: 1,
+        sourceIdentitySha256: "a".repeat(64),
+        surfaceId: "sf_retained",
+      },
+    },
+    surfaces: {},
+  };
+  assert.deepEqual(
+    await runtime.lookupLegacyLocklessMigration(
+      "electron-retained",
+      "sf_retained",
+      "ci_lookup" as never,
+    ),
+    { kind: "required_unprepared" },
+  );
+  await rm(stateDir, { force: true, recursive: true });
+});
+
+test("official preparation tool replays the durable terminal receipt after lockless admission and restart", async () => {
+  const endpoint: SurfAceDiscoveryEndpoint = {
+    busy: false,
+    capabilitiesBitmask: 0,
+    endpointId: "electron-1",
+    fingerprintPrefix: "sf",
+    host: "127.0.0.1",
+    instanceName: "Surf Ace",
+    lastSeenAt: 1,
+    name: "Studio",
+    port: 17_700,
+    protocolVersion: 1,
+    viewport: { height: 768, scale: 1, width: 1024 },
+    wsPath: "/ws",
+  };
+  const stores = new Map<string, MemoryStore>();
+  const receipt = {
+    compatibilityReadBoundarySha256: "a".repeat(64),
+    controllerInstanceId: "ci_terminal",
+    endpointId: endpoint.endpointId,
+    fingerprint: "sf_1",
+    materialSha256: "b".repeat(64),
+    pairRequestId: "rq_pair_terminal",
+    phase: "complete",
+    sourceSha256: "c".repeat(64),
+    surfaceId: "sf_1",
+  } as const;
+  const source = {
+    async hydrateLegacyLocklessMigrationContinuity() {},
+    async lookupLegacyLocklessMigration() {
+      return { kind: "complete_no_migration", receipt } as const;
+    },
+    async prepareLegacyLocklessMigrationNow() {
+      return receipt;
+    },
+  };
+  const makeController = () => {
+    const wires: LocklessFakeWire[] = [];
+    const controller = new OpenClawLocklessController({
+      discovery: new StaticDiscovery(endpoint),
+      stateDir: "/unused",
+      storeFactory: (filePath) => {
+        const existing = stores.get(filePath);
+        if (existing) return existing;
+        const created = new MemoryStore();
+        stores.set(filePath, created);
+        return created;
+      },
+      wireFactory: () => {
+        const wire = new LocklessFakeWire(wires.length > 0, { live: true });
+        wires.push(wire);
+        return wire;
+      },
+    });
+    controller.setLegacyMigrationSource(source as never);
+    return controller;
+  };
+  const invokeOfficialTool = async (controller: OpenClawLocklessController) => {
+    await controller.start();
+    const runtime = capabilityGatedPreparationRuntime(source as never, controller);
+    const tool = createSurfAceTools(runtime).find((candidate) =>
+      candidate.name === "surf_ace_prepare_migration_now"
+    );
+    assert.ok(tool);
+    return await tool.execute({ fingerprint: "sf_1" }, {} as never);
+  };
+
+  const first = makeController();
+  assert.deepEqual(await invokeOfficialTool(first), receipt);
+  await first.stop();
+  const restarted = makeController();
+  assert.deepEqual(await invokeOfficialTool(restarted), receipt);
+  await restarted.stop();
+});
+
 test("legacy migration uses remote pane identity, preserves unknown tap loss, and waits for snapshot sync", async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), "surf-ace-migration-"));
   const runtime = new DefaultSurfAceRuntime({ stateDir });
@@ -479,6 +591,7 @@ test("legacy migration uses remote pane identity, preserves unknown tap loss, an
       {
         buffer,
         paneId: "local-pane-7",
+        paneLineageId: "pl_1",
         remotePaneId: 41,
       },
     ]]),
@@ -490,25 +603,55 @@ test("legacy migration uses remote pane identity, preserves unknown tap loss, an
   };
   (runtime as any).surfaces.set("sf_1", surface);
 
-  assert.equal(
-    await runtime.exportLegacyLocklessMigration(
-      "electron-1",
-      "sf_1",
-      "ci_migration" as never,
-    ),
-    null,
+  await assert.rejects(
+    runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_migration" as never),
+    /migration_not_quiescent/,
     "provider-local snapshot events are never skipped during admission",
   );
   assert.equal(buffer.taps.length, 1);
   assert.equal(buffer.overflowed, true);
 
   surface.snapshotSyncInFlight = false;
-  const prepared = await runtime.exportLegacyLocklessMigration(
-    "electron-1",
-    "sf_1",
-    "ci_migration" as never,
+  (runtime as any).writeLegacySourceRequirement(surface);
+  (runtime as any).updateLegacyReadBoundary(surface, surface.panes.get("local-pane-7"));
+  await (runtime as any).persistState();
+  await assert.rejects(
+    runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_migration" as never),
+    /migration_read_incomplete/,
   );
-  assert.ok(prepared);
+  assert.equal(
+    (runtime as any).persistentState.locklessMigrationContinuity
+      .endpoints["electron-1"].surfaces.sf_1,
+    undefined,
+  );
+  const postBoundaryTaps = structuredClone(buffer.taps);
+  buffer.taps = [];
+  (runtime as any).writeLegacySourceRequirement(surface);
+  (runtime as any).updateLegacyReadBoundary(surface, surface.panes.get("local-pane-7"));
+  buffer.taps = postBoundaryTaps;
+  (runtime as any).writeLegacySourceRequirement(surface);
+  await (runtime as any).persistState();
+  surface.panes.get("local-pane-7").paneLineageId = "pl_changed";
+  await assert.rejects(
+    runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_migration" as never),
+    /migration_read_incomplete/,
+  );
+  surface.panes.get("local-pane-7").paneLineageId = "pl_1";
+  const receipt = await runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_migration" as never);
+  const lookup = await runtime.lookupLegacyLocklessMigration("electron-1", "sf_1", "ci_migration" as never);
+  assert.equal(lookup.kind, "prepared");
+  if (lookup.kind !== "prepared") throw new Error("expected prepared lookup");
+  const prepared = lookup.record;
+  assert.equal(receipt.pairRequestId, prepared.pairRequestId);
+  assert.match(receipt.compatibilityReadBoundarySha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(
+    await runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_migration" as never),
+    receipt,
+  );
+  await assert.rejects(
+    (runtime as any).readLegacyAtMigrationBoundary({ fingerprint: "sf_1", paneId: "local-pane-7" }),
+    /migration_already_prepared/,
+  );
   const paneScope = prepared.material.scopes.find((scope) =>
     scope.scopeKind === "pane"
   );
@@ -651,12 +794,42 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   };
   (runtime as any).surfaces.set("sf_1", surface);
 
-  const prepared = await runtime.exportLegacyLocklessMigration(
-    "electron-1",
-    "sf_1",
-    "ci_gate2a" as never,
+  const postBoundaryBuffer = structuredClone(buffer);
+  buffer.closedFrames = [];
+  buffer.lastNavigation = null;
+  buffer.page = null;
+  buffer.playbackPosition = null;
+  buffer.playbackState = null;
+  buffer.scrollPosition = null;
+  buffer.selection = null;
+  buffer.taps = [];
+  (runtime as any).writeLegacySourceRequirement(surface);
+  (runtime as any).updateLegacyReadBoundary(surface, pane);
+  Object.assign(buffer, postBoundaryBuffer);
+  (runtime as any).writeLegacySourceRequirement(surface);
+  await (runtime as any).persistState();
+  await runtime.hydrateLegacyLocklessMigrationContinuity();
+  const repository = (runtime as any).stateRepository;
+  const originalSave = repository.save.bind(repository);
+  let losePreparedWriteResponse = true;
+  repository.save = async (state: unknown) => {
+    await originalSave(state);
+    if (losePreparedWriteResponse) {
+      losePreparedWriteResponse = false;
+      throw new Error("injected response loss after durable write");
+    }
+  };
+  await assert.rejects(
+    runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_gate2a" as never),
+    /migration_prepare_failed/,
   );
-  assert.ok(prepared);
+  const preparedReceipt = await runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_gate2a" as never);
+  repository.save = originalSave;
+  const initialLookup = await runtime.lookupLegacyLocklessMigration("electron-1", "sf_1", "ci_gate2a" as never);
+  assert.equal(initialLookup.kind, "prepared");
+  if (initialLookup.kind !== "prepared") throw new Error("expected prepared lookup");
+  const prepared = initialLookup.record;
+  assert.equal(preparedReceipt.pairRequestId, prepared.pairRequestId);
   const paneScope = prepared.material.scopes.find((scope) =>
     scope.scopeKind === "pane"
   );
@@ -704,12 +877,14 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
         liveSurface,
       );
     }
-    const handle = await recovered.exportLegacyLocklessMigration(
+    const recoveredLookup = await recovered.lookupLegacyLocklessMigration(
       "electron-1",
       "sf_1",
       "ci_gate2a" as never,
     );
-    assert.ok(handle);
+    assert.equal(recoveredLookup.kind, "prepared");
+    if (recoveredLookup.kind !== "prepared") throw new Error("expected prepared lookup");
+    const handle = recoveredLookup.record;
     assert.equal(handle.pairRequestId, prepared.pairRequestId);
     return { copiedDir, handle, recovered };
   };
@@ -719,6 +894,189 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
     preparedState.locklessMigrationContinuity.endpoints["electron-1"]
       .surfaces.sf_1,
   );
+  const resetSurfaceTemplate = structuredClone(surface);
+  const compositionExtension = await copyAtPhase("candidate-composition", surface);
+  await writeFile(
+    path.join(compositionExtension.copiedDir, "lockless-controller-identity.json"),
+    JSON.stringify({ controllerInstanceId: "ci_gate2a", version: 1 }, null, 2),
+  );
+  const electronSourceRoot = path.join(testRoot, "electron-source");
+  const electronCopiedRoot = path.join(testRoot, "electron-copy");
+  const electronStateFile = "surf-ace-state.json";
+  const seedCore = new SurfaceCore({ clientIdentity: "electron-gate2a" });
+  const seedSurface = seedCore.ensurePrimarySurface("Surf Ace", {
+    height: 768,
+    scale: 1,
+    width: 1024,
+  });
+  seedCore.applyProviderBootstrapTopology(seedSurface.surfaceId, {
+    initialPaneId: 41,
+    initialPaneLabel: 1,
+    windowLabel: "a",
+  });
+  const copiedElectronState = JSON.parse(
+    JSON.stringify(seedCore.getPersistentState()).replaceAll(seedSurface.surfaceId, "sf_1"),
+  );
+  await writePersistentStateFile(electronSourceRoot, electronStateFile, copiedElectronState);
+  await cp(electronSourceRoot, electronCopiedRoot, { recursive: true });
+  const loadedElectron = await loadPersistentStateFile(electronCopiedRoot, electronStateFile);
+  assert.equal(loadedElectron.writeGuard, false);
+  assert.ok(loadedElectron.state);
+  const compositionCore = new SurfaceCore({
+    clientIdentity: "electron-gate2a",
+    persistentState: loadedElectron.state,
+  });
+  compositionCore.restorePersistedSurfaces("Surf Ace", {
+    height: 768,
+    scale: 1,
+    width: 1024,
+  });
+  assert.equal(compositionCore.listSurfaces()[0]?.surfaceId, "sf_1");
+  const compositionPort = 25_877;
+  let compositionWrites = Promise.resolve();
+  const compositionServer = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core: compositionCore,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      const state = compositionCore.getPersistentState();
+      compositionWrites = compositionWrites.then(async () => {
+        await writePersistentStateFile(
+          electronCopiedRoot,
+          electronStateFile,
+          state,
+        );
+      });
+      await compositionWrites;
+    },
+    port: compositionPort,
+    viewport: () => ({ height: 768, scale: 1, width: 1024 }),
+  });
+  await compositionServer.start();
+  const compositionEndpoint: SurfAceDiscoveryEndpoint = {
+    busy: false,
+    capabilitiesBitmask: 0,
+    endpointId: "electron-1",
+    fingerprintPrefix: "sf",
+    host: "127.0.0.1",
+    instanceName: "Surf Ace",
+    lastSeenAt: 1,
+    name: "Surf Ace",
+    port: compositionPort,
+    protocolVersion: 1,
+    viewport: { height: 768, scale: 1, width: 1024 },
+    wsPath: "/ws",
+  };
+  const compositionLogs: string[] = [];
+  const compositionController = new OpenClawLocklessController({
+    discovery: new StaticDiscovery(compositionEndpoint),
+    logger: { info: (message) => compositionLogs.push(message) },
+    stateDir: compositionExtension.copiedDir,
+  });
+  compositionController.setLegacyMigrationSource(compositionExtension.recovered);
+  await compositionController.start();
+  try {
+    const officialRuntime = capabilityGatedPreparationRuntime(
+      compositionExtension.recovered,
+      compositionController,
+    );
+    const prepareTool = createSurfAceTools(officialRuntime).find((tool) =>
+      tool.name === "surf_ace_prepare_migration_now"
+    );
+    assert.ok(prepareTool);
+    const terminalReceipt = await prepareTool.execute(
+      { fingerprint: "sf_1" },
+      {} as never,
+    );
+    assert.equal(terminalReceipt.phase, "complete", compositionLogs.join("\n"));
+    assert.equal(terminalReceipt.pairRequestId, prepared.pairRequestId);
+    assert.deepEqual(
+      await prepareTool.execute({ fingerprint: "sf_1" }, {} as never),
+      terminalReceipt,
+      "the official terminal retry returns the immutable receipt",
+    );
+    assert.ok(Object.values(compositionCore.locklessAuthority.exportState().migrationReceipts)
+      .some((receipt) => receipt.requestId === prepared.pairRequestId));
+  } finally {
+    await compositionController.stop();
+    await compositionServer.stop();
+    await compositionWrites;
+  }
+  const completedCompositionState = JSON.parse(await readFile(
+    path.join(compositionExtension.copiedDir, "surf-ace-runtime-state.json"),
+    "utf8",
+  ));
+  // The rollback preflight is the production script used before package bytes
+  // or process state may change.
+  // @ts-expect-error The production preflight is intentionally a plain ESM script.
+  const { rollbackPreflight } = await import("../scripts/rollback-preflight.mjs") as {
+    rollbackPreflight(state: unknown): { allowed: boolean; error?: string };
+  };
+  const beforeRollbackRefusal = structuredClone(completedCompositionState);
+  assert.deepEqual(rollbackPreflight(completedCompositionState), {
+    allowed: false,
+    error: "rollback_requires_full_reset",
+  });
+  assert.deepEqual(completedCompositionState, beforeRollbackRefusal);
+
+  await rm(compositionExtension.copiedDir, {
+    force: true,
+    maxRetries: 5,
+    recursive: true,
+    retryDelay: 20,
+  });
+  await rm(electronCopiedRoot, {
+    force: true,
+    maxRetries: 5,
+    recursive: true,
+    retryDelay: 20,
+  });
+  await assert.rejects(readFile(
+    path.join(compositionExtension.copiedDir, "surf-ace-runtime-state.json"),
+  ), /ENOENT/);
+  await assert.rejects(readFile(path.join(electronCopiedRoot, electronStateFile)), /ENOENT/);
+
+  const resetCore = new SurfaceCore({ clientIdentity: "electron-gate2a-reset" });
+  resetCore.ensurePrimarySurface("Surf Ace", { height: 768, scale: 1, width: 1024 });
+  await writePersistentStateFile(
+    electronCopiedRoot,
+    electronStateFile,
+    resetCore.getPersistentState(),
+  );
+  assert.deepEqual(resetCore.locklessAuthority.exportState().migrationReceipts, {});
+  assert.deepEqual(resetCore.locklessAuthority.exportState().controllers, {});
+
+  const resetRuntime = new DefaultSurfAceRuntime({
+    stateDir: compositionExtension.copiedDir,
+  });
+  const resetSurface = resetSurfaceTemplate as any;
+  const resetPane = [...resetSurface.panes.values()][0] as any;
+  const resetPostBoundaryBuffer = structuredClone(resetPane.buffer);
+  resetPane.buffer.closedFrames = [];
+  resetPane.buffer.lastNavigation = null;
+  resetPane.buffer.page = null;
+  resetPane.buffer.playbackPosition = null;
+  resetPane.buffer.playbackState = null;
+  resetPane.buffer.scrollPosition = null;
+  resetPane.buffer.selection = null;
+  resetPane.buffer.taps = [];
+  (resetRuntime as any).surfaces.set("sf_1", resetSurface);
+  (resetRuntime as any).writeLegacySourceRequirement(resetSurface);
+  (resetRuntime as any).updateLegacyReadBoundary(resetSurface, resetPane);
+  Object.assign(resetPane.buffer, resetPostBoundaryBuffer);
+  (resetRuntime as any).writeLegacySourceRequirement(resetSurface);
+  await (resetRuntime as any).persistState();
+  const resetReceipt = await resetRuntime.prepareLegacyLocklessMigrationNow(
+    "sf_1",
+    "ci_gate2a_reset" as never,
+  );
+  assert.notEqual(resetReceipt.pairRequestId, prepared.pairRequestId);
+  assert.notEqual(resetReceipt.controllerInstanceId, "ci_gate2a");
+  assert.deepEqual(rollbackPreflight({
+    locklessMigrationContinuity: { endpoints: {}, schemaVersion: 1 },
+  }), { allowed: true });
   const rehydratedSurface = structuredClone(surface);
   const rehydratedPane = rehydratedSurface.panes.get("local-pane-7");
   assert.ok(rehydratedPane);
@@ -758,7 +1116,10 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   );
   await replayedPrepared.handle.markPairSent();
   await replayedPrepared.handle.markClientCommitted(prepared.pairRequestId);
-  await replayedPrepared.handle.markSourceCleared();
+  await assert.rejects(
+    replayedPrepared.handle.markSourceCleared(),
+    /migration_not_prepared/,
+  );
   assert.deepEqual(
     rehydratedPane.buffer.taps.map((tap) => tap.eventId),
     ["ev_newer_after_prepared"],
@@ -774,16 +1135,26 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   const clearedTransaction =
     clearedReplayedState.locklessMigrationContinuity.endpoints["electron-1"]
       .surfaces.sf_1.transaction;
+  const retainedRequirement =
+    clearedReplayedState.locklessMigrationContinuity.endpoints["electron-1"]
+      .legacySourceRequirements.sf_1;
+  const retainedBoundary =
+    clearedReplayedState.locklessMigrationContinuity.endpoints["electron-1"]
+      .legacyCompatibilityReadBoundaries.sf_1;
   assert.equal(clearedTransaction.pairRequestId, preparedRecord.transaction.pairRequestId);
   assert.equal(clearedTransaction.sourceSha256, preparedRecord.transaction.sourceSha256);
   assert.equal(clearedTransaction.materialSha256, preparedRecord.transaction.materialSha256);
+  assert.equal(clearedTransaction.phase, "client_committed");
+  assert.match(retainedRequirement.sourceIdentitySha256, /^[0-9a-f]{64}$/);
+  assert.equal(retainedBoundary.complete, false);
+  assert.deepEqual(retainedBoundary.completedPaneIds, []);
 
   let recovered = await copyAtPhase("prepared");
   const wrongIdentityRuntime = new DefaultSurfAceRuntime({
     stateDir: recovered.copiedDir,
   });
   await assert.rejects(
-    wrongIdentityRuntime.exportLegacyLocklessMigration(
+    wrongIdentityRuntime.lookupLegacyLocklessMigration(
       "electron-1",
       "sf_1",
       "ci_wrong" as never,
@@ -820,6 +1191,49 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   assert.equal(transaction.pairRequestId, prepared.pairRequestId);
   assert.match(transaction.sourceSha256, /^[0-9a-f]{64}$/);
   assert.match(transaction.materialSha256, /^[0-9a-f]{64}$/);
+  assert.match(transaction.compatibilityReadBoundarySha256, /^[0-9a-f]{64}$/);
+  const terminalLookup = await recovered.recovered.lookupLegacyLocklessMigration(
+    "electron-1",
+    "sf_1",
+    "ci_gate2a" as never,
+  );
+  assert.equal(terminalLookup.kind, "complete_no_migration");
+  const terminalRetry = await recovered.recovered.prepareLegacyLocklessMigrationNow(
+    "sf_1",
+    "ci_gate2a" as never,
+  );
+  assert.equal(terminalRetry.phase, "complete");
+  assert.equal(terminalRetry.pairRequestId, prepared.pairRequestId);
+  const emptyDiscovery: SurfAceDiscoveryService = {
+    getSnapshot: () => [],
+    async refreshNow() {},
+    async start() {},
+    async stop() {},
+    subscribe: () => () => {},
+  };
+  const runtimeOwner = new DefaultSurfAceRuntime({
+    discovery: emptyDiscovery,
+    stateDir: recovered.copiedDir,
+  });
+  const passiveRuntime = new DefaultSurfAceRuntime({
+    discovery: emptyDiscovery,
+    stateDir: recovered.copiedDir,
+  });
+  await runtimeOwner.start();
+  await passiveRuntime.start();
+  try {
+    const forwardedTerminalRetry = await passiveRuntime
+      .prepareLegacyLocklessMigrationNow("sf_1", "ci_gate2a" as never);
+    assert.deepEqual(forwardedTerminalRetry, terminalRetry);
+  } finally {
+    await passiveRuntime.stop();
+    await runtimeOwner.stop();
+  }
+  assert.equal(
+    completeState.locklessMigrationContinuity.endpoints["electron-1"]
+      .legacySourceRequirements?.sf_1,
+    undefined,
+  );
 
   buffer.taps.push({
     eventId: "ev_concurrent",
@@ -830,8 +1244,19 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   });
   await prepared.markPairSent();
   await prepared.markClientCommitted(prepared.pairRequestId);
-  await prepared.markSourceCleared();
+  await assert.rejects(prepared.markSourceCleared(), /migration_not_prepared/);
   assert.deepEqual(buffer.taps.map((tap) => tap.eventId), ["ev_concurrent"]);
+  const concurrentRetainedState = JSON.parse(await readFile(statePath, "utf8"));
+  assert.equal(
+    concurrentRetainedState.locklessMigrationContinuity.endpoints["electron-1"]
+      .surfaces.sf_1.transaction.phase,
+    "client_committed",
+  );
+  assert.match(
+    concurrentRetainedState.locklessMigrationContinuity.endpoints["electron-1"]
+      .legacySourceRequirements.sf_1.sourceIdentitySha256,
+    /^[0-9a-f]{64}$/,
+  );
 
   const tamperedDir = path.join(testRoot, "tampered");
   await mkdir(tamperedDir, { recursive: true });
@@ -846,7 +1271,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   );
   const tamperedRuntime = new DefaultSurfAceRuntime({ stateDir: tamperedDir });
   await assert.rejects(
-    tamperedRuntime.exportLegacyLocklessMigration(
+    tamperedRuntime.lookupLegacyLocklessMigration(
       "electron-1",
       "sf_1",
       "ci_gate2a" as never,

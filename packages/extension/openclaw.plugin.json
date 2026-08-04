@@ -12,6 +12,7 @@
   },
   "tools": [
     "surf_ace_list",
+    "surf_ace_prepare_migration_now",
     "surf_ace_authority_diagnostics",
     "surf_ace_push",
     "surf_ace_launch_native_app",
@@ -34,6 +35,7 @@
   "contracts": {
     "tools": [
       "surf_ace_list",
+      "surf_ace_prepare_migration_now",
       "surf_ace_authority_diagnostics",
       "surf_ace_push",
       "surf_ace_launch_native_app",
