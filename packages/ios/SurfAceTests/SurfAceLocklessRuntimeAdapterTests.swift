@@ -773,7 +773,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
     }
 
     func testTargetWorkCapacityRefusalIsTypedAndSideEffectFree() async throws {
-        let request: SurfAceLocklessJSON = .object(["url": .string("https://example.com")])
+        let request = Self.validTargetRequest(paneId: 1)
         let fixture = try makeFixture { state in
             let surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
             var work = SurfAceLocklessTargetWorkItem(
@@ -828,6 +828,156 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         ])])
     }
 
+    func testTargetAdmissionRevalidatesLiveSurfaceAfterFormerPreflightPause() async throws {
+        let gate = SurfAceTargetAdmissionTestGate(operationRequestId: "operation-surface-close")
+        let fixture = try makeFixture(
+            targetIntentAdmissionPreparation: { await gate.prepare($0) }
+        )
+        let adapter = fixture.adapter
+        _ = try await admit(adapter, id: "controller-a", token: "connection-a")
+        let before = await adapter.snapshot()
+        let request = Self.validTargetRequest(paneId: 1)
+        let intent = Task.detached {
+            try await adapter.commitTargetIntent(
+                connectionToken: "connection-a",
+                operationRequestId: "operation-surface-close",
+                targetRequestId: "target-request-surface-close",
+                surfaceId: "sf_1",
+                targetId: "target-surface-close",
+                targetEpoch: 1,
+                request: request
+            )
+        }
+
+        await gate.waitUntilHeld()
+        _ = try await adapter.commitLocalMutation(operation: "local.surface.close") { state, _ in
+            _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+                state: &state,
+                surfaceId: "sf_1",
+                expectedSurfaceSetRevision: state.surfaceSetRevision,
+                expectedTopologyRevision: state.liveSurfaces["sf_1"]?.topologyRevision ?? -1
+            )
+            return .object(["surfaceId": .string("sf_1")])
+        }
+        await gate.release()
+        await XCTAssertThrowsErrorAsync { _ = try await intent.value } verify: { error in
+            XCTAssertEqual(
+                error as? SurfAceLocklessRuntimeAdapterError,
+                .targetPrecommit(
+                    code: "invalid_payload",
+                    targetErrorCode: "pane_lineage_missing",
+                    message: "target.apply surface is not live"
+                )
+            )
+        }
+        try await assertUnreceiptedTargetRejection(
+            adapter,
+            before: before,
+            operationRequestId: "operation-surface-close"
+        )
+        let after = await adapter.snapshot()
+        XCTAssertNil(after.liveSurfaces["sf_1"])
+        XCTAssertTrue(after.surfaceTombstones.contains { $0.surface.surfaceId == "sf_1" })
+    }
+
+    func testTargetAdmissionRevalidatesPaneLineageAfterFormerPreflightPause() async throws {
+        let gate = SurfAceTargetAdmissionTestGate(operationRequestId: "operation-pane-close")
+        let fixture = try makeFixture(
+            configure: { state in
+                _ = try SurfAceLocklessTopologyOperations.paneSplit(
+                    state: &state,
+                    surfaceId: "sf_1",
+                    paneId: 1,
+                    count: 2,
+                    direction: "horizontal",
+                    expectedTopologyRevision: 0
+                )
+            },
+            targetIntentAdmissionPreparation: { await gate.prepare($0) }
+        )
+        let adapter = fixture.adapter
+        _ = try await admit(adapter, id: "controller-a", token: "connection-a")
+        let before = await adapter.snapshot()
+        let pane = try XCTUnwrap(before.liveSurfaces["sf_1"]?.panes["2"])
+        let request = Self.validTargetRequest(paneLineageId: pane.paneLineageId)
+        let intent = Task.detached {
+            try await adapter.commitTargetIntent(
+                connectionToken: "connection-a",
+                operationRequestId: "operation-pane-close",
+                targetRequestId: "target-request-pane-close",
+                surfaceId: "sf_1",
+                targetId: "target-pane-close",
+                targetEpoch: 1,
+                request: request
+            )
+        }
+
+        await gate.waitUntilHeld()
+        _ = try await adapter.commitLocalMutation(operation: "local.pane.close") { state, _ in
+            _ = try SurfAceLocklessTopologyOperations.paneClose(
+                state: &state,
+                surfaceId: "sf_1",
+                paneId: pane.paneId,
+                expectedTopologyRevision: state.liveSurfaces["sf_1"]?.topologyRevision ?? -1
+            )
+            return .object(["paneId": .integer(pane.paneId), "surfaceId": .string("sf_1")])
+        }
+        await gate.release()
+        await XCTAssertThrowsErrorAsync { _ = try await intent.value } verify: { error in
+            guard case .targetPrecommit(_, let targetErrorCode, _) =
+                    error as? SurfAceLocklessRuntimeAdapterError else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(targetErrorCode, "pane_lineage_missing")
+        }
+        try await assertUnreceiptedTargetRejection(
+            adapter,
+            before: before,
+            operationRequestId: "operation-pane-close"
+        )
+    }
+
+    func testTargetAdmissionRevalidatesAnnotationPolicyAfterFormerPreflightPause() async throws {
+        let gate = SurfAceTargetAdmissionTestGate(operationRequestId: "operation-policy")
+        let fixture = try makeFixture(
+            targetIntentAdmissionPreparation: { await gate.prepare($0) }
+        )
+        let adapter = fixture.adapter
+        _ = try await admit(adapter, id: "controller-a", token: "connection-a")
+        let before = await adapter.snapshot()
+        let request = Self.validTargetRequest(paneId: 1)
+        let intent = Task.detached {
+            try await adapter.commitTargetIntent(
+                connectionToken: "connection-a",
+                operationRequestId: "operation-policy",
+                targetRequestId: "target-request-policy",
+                surfaceId: "sf_1",
+                targetId: "target-policy",
+                targetEpoch: 1,
+                request: request
+            )
+        }
+
+        await gate.waitUntilHeld()
+        _ = try await adapter.commitLocalMutation(operation: "local.annotation.mode") { state, _ in
+            state.liveSurfaces["sf_1"]?.panes["1"]?.annotationMode = true
+            return .object(["paneId": .integer(1), "surfaceId": .string("sf_1")])
+        }
+        await gate.release()
+        await XCTAssertThrowsErrorAsync { _ = try await intent.value } verify: { error in
+            guard case .targetPrecommit(_, let targetErrorCode, _) =
+                    error as? SurfAceLocklessRuntimeAdapterError else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(targetErrorCode, "policy_denied")
+        }
+        try await assertUnreceiptedTargetRejection(
+            adapter,
+            before: before,
+            operationRequestId: "operation-policy"
+        )
+    }
+
     func testTargetIntentAndMaterializingAreDurableBeforeExternalWork() async throws {
         let fixture = try makeFixture()
         let adapter = fixture.adapter
@@ -845,10 +995,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             surfaceId: "sf_1",
             targetId: "target-1",
             targetEpoch: 2,
-            request: .object([
-                "paneId": .integer(1),
-                "url": .string("https://example.com"),
-            ])
+            request: Self.validTargetRequest(paneId: 1)
         )
         XCTAssertEqual(
             try fixture.store.load()?.targetApplyWorkItems["operation-1"]?.state,
@@ -872,7 +1019,8 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
     }
 
     private func makeFixture(
-        configure: (inout SurfAceLocklessAuthorityState) throws -> Void = { _ in }
+        configure: (inout SurfAceLocklessAuthorityState) throws -> Void = { _ in },
+        targetIntentAdmissionPreparation: (@Sendable (String) async -> Void)? = nil
     ) throws -> (
         adapter: SurfAceLocklessRuntimeAdapter,
         store: SurfAceLocklessGenerationStore
@@ -906,7 +1054,14 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         try configure(&state)
         try store.save(state)
         let legacy = SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
-        return (try SurfAceLocklessRuntimeAdapter(store: store, legacy: legacy), store)
+        return (
+            try SurfAceLocklessRuntimeAdapter(
+                store: store,
+                legacy: legacy,
+                targetIntentAdmissionPreparation: targetIntentAdmissionPreparation
+            ),
+            store
+        )
     }
 
     private func admit(
@@ -923,6 +1078,58 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         )
     }
 
+    private static func validTargetRequest(
+        paneId: Int64? = nil,
+        paneLineageId: String? = nil
+    ) -> SurfAceLocklessJSON {
+        var request: [String: SurfAceLocklessJSON] = [
+            "requestId": .string("target-request"),
+            "restoreReason": .string("initial"),
+            "surfaceId": .string("sf_1"),
+            "targetEpoch": .integer(1),
+            "targetHeader": .object([
+                "replaySemantics": .string("navigate"),
+                "requiredCapabilities": .array([.string("target.browser_url.v1")]),
+            ]),
+            "targetId": .string("target"),
+            "targetKind": .string("browser_url"),
+            "targetPayload": .object(["url": .string("https://example.com")]),
+        ]
+        request["paneId"] = paneId.map(SurfAceLocklessJSON.integer)
+        request["paneLineageId"] = paneLineageId.map(SurfAceLocklessJSON.string)
+        return .object(request)
+    }
+
+    private func assertUnreceiptedTargetRejection(
+        _ adapter: SurfAceLocklessRuntimeAdapter,
+        before: SurfAceLocklessAuthorityState,
+        operationRequestId: String
+    ) async throws {
+        let after = await adapter.snapshot()
+        let beforeReceipts = try XCTUnwrap(
+            before.controllers["controller-a"]?.pendingOperationReceipts
+        )
+        let afterReceipts = try XCTUnwrap(
+            after.controllers["controller-a"]?.pendingOperationReceipts
+        )
+        XCTAssertEqual(afterReceipts.count, beforeReceipts.count)
+        XCTAssertEqual(
+            afterReceipts.values.reduce(Int64(0)) { $0 + $1.bytes },
+            beforeReceipts.values.reduce(Int64(0)) { $0 + $1.bytes }
+        )
+        XCTAssertNil(afterReceipts[operationRequestId])
+        XCTAssertEqual(after.targetApplyWorkItems, before.targetApplyWorkItems)
+        XCTAssertEqual(after.targetApplyResults, before.targetApplyResults)
+        let resolutions = try await adapter.resolveReceipts(
+            connectionToken: "connection-a",
+            requestIds: [operationRequestId]
+        )
+        XCTAssertEqual(resolutions, [.object([
+            "outcome": .string("not_committed"),
+            "requestId": .string(operationRequestId),
+        ])])
+    }
+
     private func liveBundle(id: String) -> SurfAceLocklessControllerBundle {
         SurfAceLocklessControllerBundle(
             controllerInstanceId: id,
@@ -933,6 +1140,44 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             projectionCapacityBytes: 8 * 1_024 * 1_024,
             status: .live
         )
+    }
+}
+
+private actor SurfAceTargetAdmissionTestGate {
+    private let operationRequestId: String
+    private var isHeld = false
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isReleased = false
+
+    init(operationRequestId: String) {
+        self.operationRequestId = operationRequestId
+    }
+
+    func prepare(_ candidateRequestId: String) async {
+        guard candidateRequestId == operationRequestId else { return }
+        isHeld = true
+        let waiters = heldWaiters
+        heldWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilHeld() async {
+        guard !isHeld else { return }
+        await withCheckedContinuation { continuation in
+            heldWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        isReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 }
 

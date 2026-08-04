@@ -850,7 +850,10 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             request: .object([
                 "paneId": .integer(Int64(pane.paneId)),
                 "surfaceId": .string(surface.surfaceId),
-                "targetHeader": .object([:]),
+                "targetHeader": .object([
+                    "replaySemantics": .string("navigate"),
+                    "requiredCapabilities": .array([.string("target.browser_url.v1")]),
+                ]),
                 "targetKind": .string("browser_url"),
                 "targetPayload": .object(["url": .string("https://example.com")]),
             ])
@@ -866,7 +869,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertTrue(recovered.state.targetApplyWorkItems.isEmpty)
         let result = try XCTUnwrap(recovered.state.targetApplyResults["operation-target-recovery"])
         XCTAssertEqual(result.status, "failed")
-        XCTAssertEqual(result.errorCode, "capability_missing")
+        XCTAssertEqual(result.errorCode, "pane_lineage_missing")
         XCTAssertGreaterThan(result.consumableSequence, 0)
 
         let terminalRestart = SurfAceRuntime(

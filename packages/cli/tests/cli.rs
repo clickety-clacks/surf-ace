@@ -249,6 +249,7 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         "lockless-receipt-cross-connection-resolution",
         "lockless-receipt-capacity-precommit",
         "lockless-receipt-replay-not-request-replay",
+        "lockless-target-precommit-rejection-classification",
     ] {
         assert!(vector_ids.contains(&id), "canonical vectors omit {id}");
     }
@@ -306,6 +307,27 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
     for outcome in package["receiptResolutionOutcomes"].as_array().unwrap() {
         assert!(encoded.contains(outcome.as_str().unwrap()));
     }
+    let target_precommit_tokens = canonical["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|vector| vector["id"] == "lockless-target-precommit-rejection-classification")
+        .and_then(|vector| vector["tokens"].as_array())
+        .expect("canonical target precommit vector must expose classification tokens");
+    assert_eq!(
+        target_precommit_tokens,
+        json!([
+            "unsupported_operation",
+            "invalid_payload",
+            "capability_missing",
+            "pane_lineage_missing",
+            "policy_denied",
+            "unsafe_payload",
+            "not_committed"
+        ])
+        .as_array()
+        .unwrap()
+    );
 }
 
 #[test]

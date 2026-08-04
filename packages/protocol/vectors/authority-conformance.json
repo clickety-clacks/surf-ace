@@ -131,6 +131,21 @@
       "expected": "receipt_capacity, surface_state_capacity, and validation rejection invoke zero materialization callbacks; an accepted response contains operationRequestId, targetRequestId, surfaceId, targetId, and targetEpoch and proves intent only"
     },
     {
+      "id": "lockless-target-precommit-rejection-classification",
+      "requirements": ["APPLE-AC-10", "CORR-05", "CORR09-F1"],
+      "contract": "target.apply live-surface, pane-lineage, target-policy, capability, replay, and payload validation executes inside the same exclusive authority transaction as exact receipt and work admission",
+      "expected": "unsupported_operation or invalid_payload with the canonical target error is unreceipted, operation.receipt.sync resolves not_committed, receipt bytes/count and target work/results remain unchanged, and materialization is never invoked",
+      "tokens": [
+        "unsupported_operation",
+        "invalid_payload",
+        "capability_missing",
+        "pane_lineage_missing",
+        "policy_denied",
+        "unsafe_payload",
+        "not_committed"
+      ]
+    },
+    {
       "id": "lockless-target-apply-materialization-crash-state",
       "requirements": ["DEC-TA-01A", "CORR-07", "OPS-4"],
       "contract": "durable target work progresses exactly intent_committed to materializing to terminal",

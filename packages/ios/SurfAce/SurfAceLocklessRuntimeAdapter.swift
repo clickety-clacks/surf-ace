@@ -1,5 +1,7 @@
 import Foundation
 
+let surfAceTargetCapabilities = ["target.browser_url.v1"]
+
 enum SurfAceLocklessTargetAdmission {
     #if os(iOS)
     static let platformPermitsLockless = true
@@ -56,6 +58,7 @@ enum SurfAceLocklessRuntimeAdapterError: Error, Equatable, Sendable {
     case receiptUnavailable
     case surfaceStateCapacity(current: Int64, prospective: Int64, maximum: Int64)
     case stillPending
+    case targetPrecommit(code: String, targetErrorCode: String?, message: String)
 }
 
 struct SurfAceLocklessAdmissionResult: Equatable, Sendable {
@@ -114,11 +117,17 @@ actor SurfAceLocklessRuntimeAdapter {
     ) throws -> SurfAceLocklessJSON
 
     private let coordinator: SurfAceLocklessTransactionCoordinator
+    private let targetIntentAdmissionPreparation: (@Sendable (String) async -> Void)?
     private var connectionByController: [String: String] = [:]
     private var controllerByConnection: [String: String] = [:]
     private var targetWorkRecovered: Bool
 
-    init(store: SurfAceLocklessGenerationStore, legacy: SurfAceLegacyUserDefaultsSnapshot) throws {
+    init(
+        store: SurfAceLocklessGenerationStore,
+        legacy: SurfAceLegacyUserDefaultsSnapshot,
+        targetIntentAdmissionPreparation: (@Sendable (String) async -> Void)? = nil
+    ) throws {
+        self.targetIntentAdmissionPreparation = targetIntentAdmissionPreparation
         let loadedState = try store.load()
         var state: SurfAceLocklessAuthorityState
         if let loadedState {
@@ -607,21 +616,28 @@ actor SurfAceLocklessRuntimeAdapter {
     ) async throws -> SurfAceLocklessCommittedMutation {
         let controllerId = controllerByConnection[connectionToken]
         guard let controllerId else { throw SurfAceLocklessRuntimeAdapterError.notPaired }
+        await targetIntentAdmissionPreparation?(operationRequestId)
         return try await commitMutation(
             connectionToken: connectionToken,
             requestId: operationRequestId,
             operation: "target.apply"
         ) { state, sequence in
-            guard let surface = state.liveSurfaces[surfaceId]
-                    ?? state.surfaceTombstones.first(where: { $0.surface.surfaceId == surfaceId })?.surface else {
-                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            guard let surface = state.liveSurfaces[surfaceId] else {
+                throw Self.targetPrecommitFailure(
+                    targetErrorCode: "pane_lineage_missing",
+                    message: "target.apply surface is not live"
+                )
             }
+            let normalizedRequest = try Self.validateAndNormalizeTargetIntent(
+                request,
+                surface: surface
+            )
             var work = SurfAceLocklessTargetWorkItem(
                 bytes: 0,
                 controllerInstanceId: controllerId,
                 intentCommitSequence: sequence,
                 operationRequestId: operationRequestId,
-                request: request,
+                request: normalizedRequest,
                 state: .intentCommitted,
                 surfaceId: surfaceId,
                 targetEpoch: targetEpoch,
@@ -659,6 +675,98 @@ actor SurfAceLocklessRuntimeAdapter {
                 "targetRequestId": .string(targetRequestId),
             ])
         }
+    }
+
+    nonisolated private static func validateAndNormalizeTargetIntent(
+        _ request: SurfAceLocklessJSON,
+        surface: SurfAceLocklessSurfaceMaterial
+    ) throws -> SurfAceLocklessJSON {
+        guard case .object(var payload) = request else {
+            throw targetPrecommitFailure(message: "target.apply payload must be an object")
+        }
+        let pane: SurfAceLocklessPaneMaterial
+        if case .integer(let paneId) = payload["paneId"],
+           let currentPane = surface.panes[String(paneId)] {
+            pane = currentPane
+        } else if case .string(let paneLineageId) = payload["paneLineageId"],
+                  let currentPane = surface.panes.values.first(where: {
+                      $0.paneLineageId == paneLineageId
+                  }) {
+            pane = currentPane
+        } else {
+            throw targetPrecommitFailure(
+                targetErrorCode: "pane_lineage_missing",
+                message: "pane lineage is unknown"
+            )
+        }
+        payload["paneId"] = .integer(pane.paneId)
+        payload["paneLineageId"] = .string(pane.paneLineageId)
+
+        guard case .string(let targetKind) = payload["targetKind"],
+              targetKind == "browser_url" else {
+            let targetKind: String
+            if case .string(let value) = payload["targetKind"] {
+                targetKind = value
+            } else {
+                targetKind = ""
+            }
+            throw SurfAceLocklessRuntimeAdapterError.targetPrecommit(
+                code: "unsupported_operation",
+                targetErrorCode: nil,
+                message: "Unsupported target kind: \(targetKind)"
+            )
+        }
+        guard case .object(let header) = payload["targetHeader"],
+              case .array(let requiredCapabilityValues) = header["requiredCapabilities"],
+              requiredCapabilityValues.allSatisfy({
+                  if case .string = $0 { return true }
+                  return false
+              }) else {
+            throw targetPrecommitFailure(
+                targetErrorCode: "capability_missing",
+                message: "required target capability is not advertised"
+            )
+        }
+        let requiredCapabilities = requiredCapabilityValues.compactMap { value -> String? in
+            guard case .string(let capability) = value else { return nil }
+            return capability
+        }
+        guard requiredCapabilities.contains("target.browser_url.v1"),
+              requiredCapabilities.allSatisfy(surfAceTargetCapabilities.contains),
+              header["replaySemantics"] == .string("navigate") else {
+            throw targetPrecommitFailure(
+                targetErrorCode: "capability_missing",
+                message: "required target capability is not advertised"
+            )
+        }
+        guard !pane.annotationMode else {
+            throw targetPrecommitFailure(
+                targetErrorCode: "policy_denied",
+                message: "annotation mode is active"
+            )
+        }
+        guard case .object(let targetPayload) = payload["targetPayload"],
+              case .string(let urlString) = targetPayload["url"],
+              let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            throw targetPrecommitFailure(
+                targetErrorCode: "unsafe_payload",
+                message: "browser_url targetPayload.url must be http or https"
+            )
+        }
+        return .object(payload)
+    }
+
+    nonisolated private static func targetPrecommitFailure(
+        targetErrorCode: String? = nil,
+        message: String
+    ) -> SurfAceLocklessRuntimeAdapterError {
+        .targetPrecommit(
+            code: "invalid_payload",
+            targetErrorCode: targetErrorCode,
+            message: message
+        )
     }
 
     func materializeTargetWork(
@@ -1087,7 +1195,12 @@ actor SurfAceLocklessRuntimeAdapter {
                 details = nil
             }
         } else if let error = error as? SurfAceLocklessRuntimeAdapterError {
-            if case .surfaceStateCapacity = error { return nil }
+            switch error {
+            case .surfaceStateCapacity, .targetPrecommit:
+                return nil
+            default:
+                break
+            }
             code = "invalid_payload"
             details = nil
         } else if error is SurfAceLocklessAuthorityError {

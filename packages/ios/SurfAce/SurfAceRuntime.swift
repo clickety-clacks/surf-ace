@@ -8,6 +8,19 @@ struct SurfAceLocklessProtocolError: Equatable, Sendable {
     var code: String
     var details: [String: Int64]
     var message: String
+    var targetErrorCode: String?
+
+    init(
+        code: String,
+        details: [String: Int64],
+        message: String,
+        targetErrorCode: String? = nil
+    ) {
+        self.code = code
+        self.details = details
+        self.message = message
+        self.targetErrorCode = targetErrorCode
+    }
 }
 
 private func surfAceDiagnosticValue(_ value: CustomStringConvertible) -> String {
@@ -338,12 +351,6 @@ private struct SurfAceProcessedRequestResult {
     }
 }
 
-private struct SurfAceLocklessTargetPreflightFailure {
-    var code: String
-    var details: [String: Any]?
-    var message: String
-}
-
 private struct SurfAceSessionState {
     let sessionId: String
     let providerId: String
@@ -441,6 +448,13 @@ final class SurfAceRuntime {
                 ],
                 message: "Target apply work item exceeds surface recoverable base capacity"
             )
+        case .targetPrecommit(let code, let targetErrorCode, let message):
+            return SurfAceLocklessProtocolError(
+                code: code,
+                details: [:],
+                message: message,
+                targetErrorCode: targetErrorCode
+            )
         default:
             return SurfAceLocklessProtocolError(
                 code: "invalid_payload",
@@ -506,9 +520,7 @@ final class SurfAceRuntime {
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
-    let targetCapabilities = [
-        "target.browser_url.v1",
-    ]
+    let targetCapabilities = surfAceTargetCapabilities
     private let eventTypes = [
         "event.drawing_flush",
         "event.annotation_committed",
@@ -2912,37 +2924,7 @@ final class SurfAceRuntime {
                   payload["targetPayload"] != nil else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
-            let authority = await adapter.snapshot()
-            guard let surface = authority.liveSurfaces[surfaceId] else {
-                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
-            }
-            var normalizedPayload = payload
-            if let paneId = Self.int64(payload["paneId"]),
-               let pane = surface.panes[String(paneId)] {
-                normalizedPayload["paneId"] = paneId
-                normalizedPayload["paneLineageId"] = pane.paneLineageId
-            } else if let lineage = payload["paneLineageId"] as? String,
-                      let pane = surface.panes.values.first(where: { $0.paneLineageId == lineage }) {
-                normalizedPayload["paneId"] = pane.paneId
-            } else {
-                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
-            }
-            if let failure = locklessTargetApplyPreflightFailure(
-                payload: normalizedPayload,
-                surfaceId: surfaceId
-            ) {
-                return SurfAceProcessedRequestResult(
-                    responseObject: makeErrorResponse(
-                        op: "target.apply",
-                        id: id,
-                        code: failure.code,
-                        message: failure.message,
-                        details: failure.details
-                    ),
-                    postSendPairCommit: nil
-                )
-            }
-            let request = try Self.locklessJSON(fromFoundation: normalizedPayload)
+            let request = try Self.locklessJSON(fromFoundation: payload)
             let committed = try await adapter.commitTargetIntent(
                 connectionToken: connectionUUID,
                 operationRequestId: id,
@@ -2986,55 +2968,6 @@ final class SurfAceRuntime {
                 postSendPairCommit: nil
             )
         }
-    }
-
-    private func locklessTargetApplyPreflightFailure(
-        payload: [String: Any],
-        surfaceId: String
-    ) -> SurfAceLocklessTargetPreflightFailure? {
-        guard payload["targetKind"] as? String == "browser_url" else {
-            return SurfAceLocklessTargetPreflightFailure(
-                code: "unsupported_operation",
-                details: nil,
-                message: "Unsupported target kind: \(payload["targetKind"] as? String ?? "")"
-            )
-        }
-        guard let header = payload["targetHeader"] as? [String: Any],
-              let requiredCapabilities = header["requiredCapabilities"] as? [String],
-              requiredCapabilities.contains("target.browser_url.v1"),
-              targetCapabilitiesSupport(requiredCapabilities),
-              header["replaySemantics"] as? String == "navigate" else {
-            return SurfAceLocklessTargetPreflightFailure(
-                code: "invalid_payload",
-                details: ["targetErrorCode": "capability_missing"],
-                message: "required target capability is not advertised"
-            )
-        }
-        guard let paneLineageId = payload["paneLineageId"] as? String,
-              let pane = paneByLineage(surfaceId: surfaceId, paneLineageId: paneLineageId) else {
-            return SurfAceLocklessTargetPreflightFailure(
-                code: "invalid_payload",
-                details: ["targetErrorCode": "pane_lineage_missing"],
-                message: "pane lineage is unknown"
-            )
-        }
-        guard !pane.annotationMode else {
-            return SurfAceLocklessTargetPreflightFailure(
-                code: "invalid_payload",
-                details: ["targetErrorCode": "policy_denied"],
-                message: "annotation mode is active"
-            )
-        }
-        guard let targetPayload = payload["targetPayload"] as? [String: Any],
-              let url = targetPayload["url"] as? String,
-              safeBrowserURL(url) != nil else {
-            return SurfAceLocklessTargetPreflightFailure(
-                code: "invalid_payload",
-                details: ["targetErrorCode": "unsafe_payload"],
-                message: "browser_url targetPayload.url must be http or https"
-            )
-        }
-        return nil
     }
 
     private func materializeLocklessTargetWork(
@@ -6216,13 +6149,15 @@ final class SurfAceRuntime {
         error: SurfAceLocklessRuntimeAdapterError
     ) -> SurfAceProcessedRequestResult {
         let mapped = Self.locklessProtocolError(for: error)
+        var details = mapped.details.mapValues { $0 as Any }
+        details["targetErrorCode"] = mapped.targetErrorCode
         return SurfAceProcessedRequestResult(
             responseObject: makeErrorResponse(
                 op: op,
                 id: id,
                 code: mapped.code,
                 message: mapped.message,
-                details: mapped.details.isEmpty ? nil : mapped.details.mapValues { $0 as Any }
+                details: details.isEmpty ? nil : details
             ),
             postSendPairCommit: nil
         )

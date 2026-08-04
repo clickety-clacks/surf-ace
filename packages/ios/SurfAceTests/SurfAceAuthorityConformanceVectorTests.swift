@@ -58,6 +58,25 @@ final class SurfAceAuthorityConformanceVectorTests: XCTestCase {
         XCTAssertEqual(vector.tokens, Self.expectedParityTokens)
     }
 
+    func testCanonicalVectorPinsTargetPrecommitRejectionClassification() throws {
+        let vector = try XCTUnwrap(
+            loadVectorSet().vectors.first {
+                $0.id == "lockless-target-precommit-rejection-classification"
+            }
+        )
+
+        XCTAssertEqual(vector.requirements, ["APPLE-AC-10", "CORR-05", "CORR09-F1"])
+        XCTAssertEqual(vector.tokens, [
+            "unsupported_operation",
+            "invalid_payload",
+            "capability_missing",
+            "pane_lineage_missing",
+            "policy_denied",
+            "unsafe_payload",
+            "not_committed",
+        ])
+    }
+
     private func loadVectorSet() throws -> VectorSet {
         let resourceURL = try XCTUnwrap(
             Bundle(for: Self.self).url(
