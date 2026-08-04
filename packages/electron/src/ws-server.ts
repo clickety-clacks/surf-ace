@@ -1620,6 +1620,15 @@ export class SurfaceWsServer {
         "target.apply requires the target surface connection",
       );
     }
+    if (!this.core.listSurfaces().some(
+      (surface) => surface.surfaceId === request.payload.surfaceId,
+    )) {
+      throw new LocklessAuthorityError(
+        "invalid_payload",
+        "target.apply surface is not live",
+        { targetErrorCode: "pane_lineage_missing" },
+      );
+    }
     this.requireLocklessSurface(request.payload.surfaceId);
     const pane = this.resolveLocklessTargetPane(
       request.payload.surfaceId,
@@ -2771,7 +2780,8 @@ export class SurfaceWsServer {
     if (!pane?.paneLineageId) {
       throw new SurfaceCoreError(
         "invalid_payload",
-        "Target intent requires a live paneId or paneLineageId",
+        "Target intent requires a current paneId or paneLineageId",
+        { targetErrorCode: "pane_lineage_missing" },
       );
     }
     return pane;

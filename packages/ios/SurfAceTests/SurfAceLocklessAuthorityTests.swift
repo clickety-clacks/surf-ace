@@ -55,8 +55,10 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         var state = try SurfAceLocklessMigration.migrate(legacySnapshot())
         state.generation = 8
         state.controllers["controller-a"] = controllerBundle()
-        state.targetApplyWorkItems["work-1"] = targetWork()
-        state.targetApplyResults["result-1"] = targetResult()
+        let work = targetWork()
+        let result = targetResult()
+        state.targetApplyWorkItems[work.identity.storageKey] = work
+        state.targetApplyResults[result.identity.storageKey] = result
         var closedSurface = try XCTUnwrap(state.liveSurfaces["sf_1"])
         closedSurface.surfaceId = "sf_2"
         closedSurface.sceneKeys = []
@@ -67,7 +69,7 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
 
         XCTAssertEqual(restored, state)
         XCTAssertEqual(restored.controllers["controller-a"]?.pendingOperationReceipts["rq-1"]?.commitSequence, 11)
-        XCTAssertEqual(restored.targetApplyWorkItems["work-1"]?.state, .materializing)
+        XCTAssertEqual(restored.targetApplyWorkItems[work.identity.storageKey]?.state, .materializing)
         XCTAssertEqual(restored.surfaceTombstones.first?.surface.panes["7"]?.history.visible.contentId, "ct_00000001")
     }
 
@@ -278,7 +280,8 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         var state = try SurfAceLocklessMigration.migrate(legacySnapshot())
         state.generation = 5
         state.controllers["controller-a"] = controllerBundle()
-        state.targetApplyWorkItems["work-1"] = targetWork()
+        let work = targetWork()
+        state.targetApplyWorkItems[work.identity.storageKey] = work
         let before = state
 
         let first = try SurfAceLocklessMigration.rollbackPreview(state)
@@ -432,6 +435,7 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
     private func targetResult() -> SurfAceLocklessTargetResult {
         SurfAceLocklessTargetResult(
             consumableSequence: 1,
+            controllerInstanceId: "controller-a",
             errorCode: nil,
             intentCommitSequence: 11,
             materializedState: .object(["url": .string("https://example.com")]),

@@ -2934,6 +2934,9 @@ final class SurfAceRuntime {
                 targetEpoch: targetEpoch,
                 request: request
             )
+            guard let targetOperationIdentity = committed.targetOperationIdentity else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
             if let failure = locklessCommittedFailureResult(committed, adapter: adapter) { return failure }
             return try locklessCommittedResponseResult(
                 committed,
@@ -2942,7 +2945,9 @@ final class SurfAceRuntime {
                     guard let self, let adapter else { return }
                     await self.drainControllerRetentionReclamations(adapter: adapter)
                     do {
-                        let result = try await adapter.materializeTargetWork(operationRequestId: id) { work in
+                        let result = try await adapter.materializeTargetWork(
+                            identity: targetOperationIdentity
+                        ) { work in
                             await self.materializeLocklessTargetWork(work)
                         }
                         try self.projectLocklessAuthorityState(await adapter.snapshot())

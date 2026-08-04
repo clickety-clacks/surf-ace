@@ -132,17 +132,186 @@
     },
     {
       "id": "lockless-target-precommit-rejection-classification",
-      "requirements": ["APPLE-AC-10", "CORR-05", "CORR09-F1"],
+      "requirements": ["APPLE-AC-10", "CORR-05", "CORR-07", "CORR09-F1", "TOPO-8"],
       "contract": "target.apply live-surface, pane-lineage, target-policy, capability, replay, and payload validation executes inside the same exclusive authority transaction as exact receipt and work admission",
-      "expected": "unsupported_operation or invalid_payload with the canonical target error is unreceipted, operation.receipt.sync resolves not_committed, receipt bytes/count and target work/results remain unchanged, and materialization is never invoked",
-      "tokens": [
-        "unsupported_operation",
-        "invalid_payload",
-        "capability_missing",
-        "pane_lineage_missing",
-        "policy_denied",
-        "unsafe_payload",
-        "not_committed"
+      "expected": "each structured case pins the settled authority effects: accepted intent receipts resolve_success and materialize once; precommit rejection is unreceipted, resolves not_committed, changes no target work/result truth, and invokes no materializer; equal request IDs from distinct controllers remain independently correlated",
+      "cases": [
+        {
+          "id": "live-current-pane-accepted",
+          "input": {
+            "surfaceState": "live",
+            "paneLineage": "current",
+            "annotationPolicy": "allow",
+            "requiredCapability": "supported",
+            "replaySemantics": "navigate",
+            "targetPayload": "safe_https",
+            "controllerScenario": "single"
+          },
+          "expected": {
+            "topLevelCode": null,
+            "targetErrorCode": null,
+            "receiptDelta": 1,
+            "workDelta": 0,
+            "resultDelta": 1,
+            "receiptSyncOutcome": "resolved_success",
+            "notCommitted": false,
+            "materializerCalls": 1
+          }
+        },
+        {
+          "id": "tombstoned-surface-rejected",
+          "input": {
+            "surfaceState": "tombstoned",
+            "paneLineage": "current",
+            "annotationPolicy": "allow",
+            "requiredCapability": "supported",
+            "replaySemantics": "navigate",
+            "targetPayload": "safe_https",
+            "controllerScenario": "single"
+          },
+          "expected": {
+            "topLevelCode": "invalid_payload",
+            "targetErrorCode": "pane_lineage_missing",
+            "receiptDelta": 0,
+            "workDelta": 0,
+            "resultDelta": 0,
+            "receiptSyncOutcome": "not_committed",
+            "notCommitted": true,
+            "materializerCalls": 0
+          }
+        },
+        {
+          "id": "stale-pane-lineage-rejected",
+          "input": {
+            "surfaceState": "live",
+            "paneLineage": "stale",
+            "annotationPolicy": "allow",
+            "requiredCapability": "supported",
+            "replaySemantics": "navigate",
+            "targetPayload": "safe_https",
+            "controllerScenario": "single"
+          },
+          "expected": {
+            "topLevelCode": "invalid_payload",
+            "targetErrorCode": "pane_lineage_missing",
+            "receiptDelta": 0,
+            "workDelta": 0,
+            "resultDelta": 0,
+            "receiptSyncOutcome": "not_committed",
+            "notCommitted": true,
+            "materializerCalls": 0
+          }
+        },
+        {
+          "id": "annotation-policy-rejected",
+          "input": {
+            "surfaceState": "live",
+            "paneLineage": "current",
+            "annotationPolicy": "deny",
+            "requiredCapability": "supported",
+            "replaySemantics": "navigate",
+            "targetPayload": "safe_https",
+            "controllerScenario": "single"
+          },
+          "expected": {
+            "topLevelCode": "invalid_payload",
+            "targetErrorCode": "policy_denied",
+            "receiptDelta": 0,
+            "workDelta": 0,
+            "resultDelta": 0,
+            "receiptSyncOutcome": "not_committed",
+            "notCommitted": true,
+            "materializerCalls": 0
+          }
+        },
+        {
+          "id": "capability-rejected",
+          "input": {
+            "surfaceState": "live",
+            "paneLineage": "current",
+            "annotationPolicy": "allow",
+            "requiredCapability": "missing",
+            "replaySemantics": "navigate",
+            "targetPayload": "safe_https",
+            "controllerScenario": "single"
+          },
+          "expected": {
+            "topLevelCode": "invalid_payload",
+            "targetErrorCode": "capability_missing",
+            "receiptDelta": 0,
+            "workDelta": 0,
+            "resultDelta": 0,
+            "receiptSyncOutcome": "not_committed",
+            "notCommitted": true,
+            "materializerCalls": 0
+          }
+        },
+        {
+          "id": "replay-semantics-rejected",
+          "input": {
+            "surfaceState": "live",
+            "paneLineage": "current",
+            "annotationPolicy": "allow",
+            "requiredCapability": "supported",
+            "replaySemantics": "replace",
+            "targetPayload": "safe_https",
+            "controllerScenario": "single"
+          },
+          "expected": {
+            "topLevelCode": "invalid_payload",
+            "targetErrorCode": "unsafe_payload",
+            "receiptDelta": 0,
+            "workDelta": 0,
+            "resultDelta": 0,
+            "receiptSyncOutcome": "not_committed",
+            "notCommitted": true,
+            "materializerCalls": 0
+          }
+        },
+        {
+          "id": "unsafe-target-payload-rejected",
+          "input": {
+            "surfaceState": "live",
+            "paneLineage": "current",
+            "annotationPolicy": "allow",
+            "requiredCapability": "supported",
+            "replaySemantics": "navigate",
+            "targetPayload": "unsafe_file",
+            "controllerScenario": "single"
+          },
+          "expected": {
+            "topLevelCode": "invalid_payload",
+            "targetErrorCode": "unsafe_payload",
+            "receiptDelta": 0,
+            "workDelta": 0,
+            "resultDelta": 0,
+            "receiptSyncOutcome": "not_committed",
+            "notCommitted": true,
+            "materializerCalls": 0
+          }
+        },
+        {
+          "id": "two-controller-request-id-collision",
+          "input": {
+            "surfaceState": "live",
+            "paneLineage": "current",
+            "annotationPolicy": "allow",
+            "requiredCapability": "supported",
+            "replaySemantics": "navigate",
+            "targetPayload": "safe_https",
+            "controllerScenario": "two_same_request_id"
+          },
+          "expected": {
+            "topLevelCode": null,
+            "targetErrorCode": null,
+            "receiptDelta": 2,
+            "workDelta": 0,
+            "resultDelta": 2,
+            "receiptSyncOutcome": "resolved_success",
+            "notCommitted": false,
+            "materializerCalls": 2
+          }
+        }
       ]
     },
     {

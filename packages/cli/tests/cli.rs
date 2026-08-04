@@ -17,6 +17,7 @@ struct FakeWire {
     operations: Vec<String>,
     fail_after_send_on: Option<String>,
     receipt_capacity_on: Option<String>,
+    target_precommit_error: Option<(String, Option<String>)>,
     committed_rejection_on: Option<String>,
     resolutions: Vec<Value>,
     scopes: Vec<Value>,
@@ -30,6 +31,7 @@ impl FakeWire {
             operations: vec![],
             fail_after_send_on: None,
             receipt_capacity_on: None,
+            target_precommit_error: None,
             committed_rejection_on: None,
             resolutions: vec![],
             scopes: vec![],
@@ -83,6 +85,26 @@ impl DirectWire for FakeWire {
                 },
                 events: vec![],
             });
+        }
+        if op == "target.apply" {
+            if let Some((code, target_error_code)) = &self.target_precommit_error {
+                return Ok(WireResponse {
+                    response: Envelope {
+                        id: Some(id.into()),
+                        op: "target.apply.result".into(),
+                        payload: Some(json!({})),
+                        envelope_type: "response".into(),
+                        v: 1,
+                        ok: Some(false),
+                        error: Some(json!({
+                            "code": code,
+                            "details": { "targetErrorCode": target_error_code }
+                        })),
+                        sent_at: None,
+                    },
+                    events: vec![],
+                });
+            }
         }
         if self.committed_rejection_on.as_deref() == Some(op) {
             let response = Envelope {
@@ -307,27 +329,190 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
     for outcome in package["receiptResolutionOutcomes"].as_array().unwrap() {
         assert!(encoded.contains(outcome.as_str().unwrap()));
     }
-    let target_precommit_tokens = canonical["vectors"]
+    let target_cases = canonical["vectors"]
         .as_array()
         .unwrap()
         .iter()
         .find(|vector| vector["id"] == "lockless-target-precommit-rejection-classification")
-        .and_then(|vector| vector["tokens"].as_array())
-        .expect("canonical target precommit vector must expose classification tokens");
-    assert_eq!(
-        target_precommit_tokens,
-        json!([
-            "unsupported_operation",
-            "invalid_payload",
-            "capability_missing",
-            "pane_lineage_missing",
-            "policy_denied",
-            "unsafe_payload",
-            "not_committed"
-        ])
+        .and_then(|vector| vector["cases"].as_array())
+        .expect("canonical target precommit vector must expose executable cases");
+    assert_eq!(target_cases.len(), 8);
+}
+
+#[test]
+fn canonical_target_admission_cases_execute_rust_controller_semantics() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let canonical: Value = serde_json::from_slice(
+        &fs::read(manifest_dir.join("../protocol/vectors/authority-conformance.json")).unwrap(),
+    )
+    .unwrap();
+    let cases = canonical["vectors"]
         .as_array()
         .unwrap()
-    );
+        .iter()
+        .find(|vector| vector["id"] == "lockless-target-precommit-rejection-classification")
+        .and_then(|vector| vector["cases"].as_array())
+        .unwrap();
+    for case in cases {
+        if case["input"]["controllerScenario"] == "two_same_request_id" {
+            continue;
+        }
+        let temp = TempDir::new().unwrap();
+        let mut wire = FakeWire::ordinary();
+        if let Some(code) = case["expected"]["topLevelCode"].as_str() {
+            wire.target_precommit_error = Some((
+                code.into(),
+                case["expected"]["targetErrorCode"]
+                    .as_str()
+                    .map(str::to_owned),
+            ));
+        }
+        let output = execute_with_wire(
+            invocation(
+                &temp,
+                Command::TargetApply,
+                json!({
+                    "surfaceId": "sf_1",
+                    "paneId": 1,
+                    "requestId": format!("target-{}", case["id"].as_str().unwrap()),
+                    "restoreReason": "initial",
+                    "targetId": format!("target-{}", case["id"].as_str().unwrap()),
+                    "targetEpoch": 1,
+                    "targetKind": "browser_url",
+                    "targetHeader": {
+                        "replaySemantics": case["input"]["replaySemantics"],
+                        "requiredCapabilities": [if case["input"]["requiredCapability"] == "supported" {
+                            "target.browser_url.v1"
+                        } else {
+                            "target.missing.v1"
+                        }]
+                    },
+                    "targetPayload": { "url": if case["input"]["targetPayload"] == "safe_https" {
+                        "https://example.com"
+                    } else {
+                        "file:///etc/passwd"
+                    }}
+                }),
+            ),
+            &mut wire,
+        )
+        .unwrap();
+        assert!(output.ok, "{}", case["id"]);
+        assert_eq!(
+            output
+                .result
+                .get("error")
+                .and_then(|error| error.get("code")),
+            case["expected"]["topLevelCode"]
+                .as_str()
+                .map(Value::from)
+                .as_ref(),
+            "{}",
+            case["id"]
+        );
+        assert_eq!(
+            output
+                .result
+                .get("error")
+                .and_then(|error| error.get("details"))
+                .and_then(|details| details.get("targetErrorCode")),
+            case["expected"]["targetErrorCode"]
+                .as_str()
+                .map(Value::from)
+                .as_ref(),
+            "{}",
+            case["id"]
+        );
+        if case["expected"]["topLevelCode"].is_null() {
+            assert_eq!(output.result["payload"]["status"], "intent_committed");
+            assert_eq!(
+                wire.operations
+                    .iter()
+                    .filter(|op| *op == "operation.receipt.ack")
+                    .count(),
+                2,
+            );
+        } else {
+            assert!(!wire.operations.contains(&"operation.receipt.ack".into()));
+        }
+        assert_eq!(
+            wire.operations
+                .iter()
+                .filter(|op| *op == "target.apply")
+                .count(),
+            1
+        );
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+                .unwrap();
+        assert_eq!(persisted["unresolved"], json!({}), "{}", case["id"]);
+    }
+
+    let collision = cases
+        .iter()
+        .find(|case| case["input"]["controllerScenario"] == "two_same_request_id")
+        .unwrap();
+    let mut controller_ids = vec![];
+    for _ in 0..2 {
+        let temp = TempDir::new().unwrap();
+        let mut root = LockedStateRoot::open(temp.path(), 1024 * 1024).unwrap();
+        root.mutate(|state| {
+            state.unresolved.insert(
+                "rq-shared-controller-scoped".into(),
+                UnresolvedCorrelation {
+                    operation: "target.apply".into(),
+                    payload_digest: "shared".into(),
+                    phase: CorrelationPhase::Sent,
+                    terminal_response: None,
+                },
+            );
+        })
+        .unwrap();
+        let controller_id = root.state().controller_instance_id.clone();
+        drop(root);
+        let terminal = json!({
+            "id": "rq-shared-controller-scoped",
+            "ok": true,
+            "op": "target.apply.result",
+            "payload": {
+                "operationReceipt": {
+                    "commitSequence": 7,
+                    "requestId": "rq-shared-controller-scoped"
+                },
+                "operationRequestId": "rq-shared-controller-scoped",
+                "status": "intent_committed",
+                "surfaceId": "sf_1",
+                "targetEpoch": 1,
+                "targetId": "target-shared",
+                "targetRequestId": "target-shared"
+            },
+            "type": "response",
+            "v": 1
+        });
+        let mut wire = FakeWire::ordinary();
+        wire.resolutions = vec![json!({
+            "operationReceipt": {
+                "commitSequence": 7,
+                "requestId": "rq-shared-controller-scoped"
+            },
+            "outcome": collision["expected"]["receiptSyncOutcome"],
+            "requestId": "rq-shared-controller-scoped",
+            "terminalResponse": terminal
+        })];
+        let output =
+            execute_with_wire(invocation(&temp, Command::List, json!({})), &mut wire).unwrap();
+        assert_eq!(output.reconciliations.len(), 1);
+        assert_eq!(
+            output.reconciliations[0]["requestId"],
+            "rq-shared-controller-scoped"
+        );
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+                .unwrap();
+        assert_eq!(persisted["unresolved"], json!({}));
+        controller_ids.push(controller_id);
+    }
+    assert_ne!(controller_ids[0], controller_ids[1]);
 }
 
 #[test]

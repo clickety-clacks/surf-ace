@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import WebSocket from "ws";
@@ -101,6 +102,241 @@ async function pair(
     ...(surfaceId ? { surfaceId } : {}),
   });
 }
+
+type TargetAdmissionVectorCase = {
+  id: string;
+  input: {
+    annotationPolicy: "allow" | "deny";
+    controllerScenario: "single" | "two_same_request_id";
+    paneLineage: "current" | "stale";
+    replaySemantics: "navigate" | "replace";
+    requiredCapability: "supported" | "missing";
+    surfaceState: "live" | "tombstoned";
+    targetPayload: "safe_https" | "unsafe_file";
+  };
+  expected: {
+    materializerCalls: number;
+    notCommitted: boolean;
+    receiptDelta: number;
+    receiptSyncOutcome: "not_committed" | "resolved_success";
+    resultDelta: number;
+    targetErrorCode: string | null;
+    topLevelCode: string | null;
+    workDelta: number;
+  };
+};
+
+function targetAdmissionVectorCases(): TargetAdmissionVectorCase[] {
+  const vectors = JSON.parse(
+    readFileSync(
+      new URL("../../../protocol/vectors/authority-conformance.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { vectors: Array<{ cases?: TargetAdmissionVectorCase[]; id: string }> };
+  const vector = vectors.vectors.find(
+    (candidate) => candidate.id === "lockless-target-precommit-rejection-classification",
+  );
+  assert.ok(vector?.cases);
+  return vector.cases;
+}
+
+function targetAuthorityCounts(core: SurfaceCore): {
+  receipts: number;
+  results: number;
+  work: number;
+} {
+  const state = core.locklessAuthority.exportState();
+  return {
+    receipts: Object.values(state.controllers).reduce(
+      (total, controller) =>
+        total + Object.keys(controller.pendingOperationReceipts).length,
+      0,
+    ),
+    results: Object.values(state.scopes).reduce(
+      (total, scope) =>
+        total + scope.records.filter(
+          (record) => record.recordClass === "target_result",
+        ).length,
+      0,
+    ),
+    work: Object.keys(state.targetApplyWorkItems).length,
+  };
+}
+
+async function waitForTargetCounts(
+  core: SurfaceCore,
+  expected: { results: number; work: number },
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const counts = targetAuthorityCounts(core);
+    if (counts.results === expected.results && counts.work === expected.work) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  assert.deepEqual(
+    {
+      results: targetAuthorityCounts(core).results,
+      work: targetAuthorityCounts(core).work,
+    },
+    expected,
+  );
+}
+
+test("canonical target-admission cases execute Electron authority semantics", async () => {
+  for (const vectorCase of targetAdmissionVectorCases()) {
+    const core = new SurfaceCore();
+    const surface = core.ensurePrimarySurface("Surf Ace", {
+      height: 800,
+      scale: 2,
+      width: 1200,
+    });
+    const port = nextPort++;
+    const server = new SurfaceWsServer({
+      capturePaneImage: async () => null,
+      compositorSocketPath: null,
+      core,
+      endpointName: "Surf Ace",
+      hostName: "localhost",
+      port,
+      viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+    });
+    let materializerCalls = 0;
+    const targetApply = core.targetApply.bind(core);
+    core.targetApply = ((...arguments_: Parameters<SurfaceCore["targetApply"]>) => {
+      materializerCalls += 1;
+      return targetApply(...arguments_);
+    }) as SurfaceCore["targetApply"];
+    await server.start();
+    const first = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    const second = vectorCase.input.controllerScenario === "two_same_request_id"
+      ? await connect(`ws://127.0.0.1:${port}${server.wsPath}`)
+      : null;
+    try {
+      assert.equal((await pair(first, "controller-a", surface.surfaceId)).ok, true);
+      if (second) {
+        assert.equal((await pair(second, "controller-b", surface.surfaceId)).ok, true);
+      }
+      let panes = (await request(first, "panes.list", {
+        surfaceId: surface.surfaceId,
+      })).payload.panes as Array<{ paneId: number; paneLineageId: string }>;
+      if (second) {
+        const split = await request(first, "pane.split", {
+          count: 2,
+          direction: "horizontal",
+          expectedTopologyRevision: 0,
+          paneId: panes[0]!.paneId,
+          surfaceId: surface.surfaceId,
+        });
+        assert.equal(split.ok, true, `${vectorCase.id}: ${JSON.stringify(split)}`);
+        panes = (await request(first, "panes.list", {
+          surfaceId: surface.surfaceId,
+        })).payload.panes;
+      }
+      if (vectorCase.input.annotationPolicy === "deny") {
+        core.setAnnotating(surface.surfaceId, panes[0]!.paneId, true);
+      }
+      if (vectorCase.input.surfaceState === "tombstoned") {
+        const record = core.captureSurfaceTombstonePayload(surface.surfaceId);
+        const paneTombstones = core.locklessAuthority.takePaneTombstonesForSurface(
+          surface.surfaceId,
+        );
+        core.locklessAuthority.createTombstone({
+          kind: "surface",
+          payload: { paneTombstones, surface: record },
+          surfaceId: surface.surfaceId,
+        });
+        core.removeSurface(surface.surfaceId);
+      }
+      const before = targetAuthorityCounts(core);
+      const operationRequestId = second
+        ? "rq-shared-controller-scoped"
+        : `rq-${vectorCase.id}`;
+      const payloadFor = (pane: { paneId: number; paneLineageId: string }, suffix: string) => ({
+        paneLineageId: vectorCase.input.paneLineage === "current"
+          ? pane.paneLineageId
+          : "pl_stale",
+        requestId: `target-${vectorCase.id}-${suffix}`,
+        restoreReason: "initial",
+        surfaceId: surface.surfaceId,
+        targetEpoch: 1,
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: vectorCase.input.replaySemantics,
+          requiredCapabilities: [vectorCase.input.requiredCapability === "supported"
+            ? "target.browser_url.v1"
+            : "target.missing.v1"],
+          safeToLogFields: ["url"],
+          safetyClass: "network",
+          summary: vectorCase.id,
+        },
+        targetId: `target-${vectorCase.id}-${suffix}`,
+        targetKind: "browser_url",
+        targetPayload: {
+          url: vectorCase.input.targetPayload === "safe_https"
+            ? `https://example.com/${suffix}`
+            : "file:///etc/passwd",
+        },
+      });
+      const responses = await Promise.all([
+        request(first, "target.apply", payloadFor(panes[0]!, "a"), {
+          id: operationRequestId,
+        }),
+        ...(second
+          ? [request(second, "target.apply", payloadFor(panes[1]!, "b"), {
+              id: operationRequestId,
+            })]
+          : []),
+      ]);
+      for (const response of responses) {
+        assert.equal(
+          response.ok ? null : response.error.code,
+          vectorCase.expected.topLevelCode,
+          `${vectorCase.id}: ${JSON.stringify(response)}`,
+        );
+        assert.equal(
+          response.error?.details?.targetErrorCode ?? null,
+          vectorCase.expected.targetErrorCode,
+          `${vectorCase.id}: ${JSON.stringify(response)}`,
+        );
+      }
+      if (!vectorCase.expected.notCommitted) {
+        await waitForTargetCounts(core, {
+          results: before.results,
+          work: before.work + responses.length,
+        });
+        for (const [index, pane] of panes.slice(0, responses.length).entries()) {
+          server.resolveBrowserUrlNavigation(surface.surfaceId, pane.paneId, {
+            status: "applied",
+            targetId: `target-${vectorCase.id}-${index === 0 ? "a" : "b"}`,
+            url: `https://example.com/${index === 0 ? "a" : "b"}`,
+          });
+        }
+      }
+      await waitForTargetCounts(core, {
+        results: before.results + vectorCase.expected.resultDelta,
+        work: before.work + vectorCase.expected.workDelta,
+      });
+      const after = targetAuthorityCounts(core);
+      assert.equal(after.receipts - before.receipts, vectorCase.expected.receiptDelta, vectorCase.id);
+      assert.equal(after.work - before.work, vectorCase.expected.workDelta, vectorCase.id);
+      assert.equal(after.results - before.results, vectorCase.expected.resultDelta, vectorCase.id);
+      assert.equal(materializerCalls, vectorCase.expected.materializerCalls, vectorCase.id);
+      for (const socket of [first, ...(second ? [second] : [])]) {
+        const sync = await request(socket, "operation.receipt.sync", {
+          requestIds: [operationRequestId],
+        });
+        assert.equal(
+          sync.payload.resolutions[0].outcome,
+          vectorCase.expected.receiptSyncOutcome,
+          vectorCase.id,
+        );
+      }
+    } finally {
+      first.close();
+      second?.close();
+      await server.stop();
+    }
+  }
+});
 
 test("websocket integration harness admits concurrent controllers and fans out client commits", async () => {
   const core = new SurfaceCore();

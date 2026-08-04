@@ -75,6 +75,7 @@ struct SurfAceLocklessCommittedMutation: Equatable, Sendable {
     var requestId: String
     var responsePayload: SurfAceLocklessJSON
     var terminalResponse: SurfAceLocklessJSON
+    var targetOperationIdentity: SurfAceLocklessTargetOperationIdentity?
 }
 
 struct SurfAceLocklessLocalCommit: Equatable, Sendable {
@@ -379,7 +380,8 @@ actor SurfAceLocklessRuntimeAdapter {
                 outcome: outcome,
                 requestId: requestId,
                 responsePayload: responsePayload,
-                terminalResponse: terminalResponse
+                terminalResponse: terminalResponse,
+                targetOperationIdentity: nil
             )
         }
     }
@@ -482,7 +484,8 @@ actor SurfAceLocklessRuntimeAdapter {
                 outcome: "resolved_failure",
                 requestId: requestId,
                 responsePayload: .null,
-                terminalResponse: terminalResponse
+                terminalResponse: terminalResponse,
+                targetOperationIdentity: nil
             )
         }
     }
@@ -617,7 +620,11 @@ actor SurfAceLocklessRuntimeAdapter {
         let controllerId = controllerByConnection[connectionToken]
         guard let controllerId else { throw SurfAceLocklessRuntimeAdapterError.notPaired }
         await targetIntentAdmissionPreparation?(operationRequestId)
-        return try await commitMutation(
+        let identity = SurfAceLocklessTargetOperationIdentity(
+            controllerInstanceId: controllerId,
+            operationRequestId: operationRequestId
+        )
+        var committed = try await commitMutation(
             connectionToken: connectionToken,
             requestId: operationRequestId,
             operation: "target.apply"
@@ -661,7 +668,7 @@ actor SurfAceLocklessRuntimeAdapter {
                     maximum: state.limits.maxSurfaceRecoverableBaseBytes
                 )
             }
-            state.targetApplyWorkItems[operationRequestId] = work
+            state.targetApplyWorkItems[identity.storageKey] = work
             return .object([
                 "operationReceipt": .object([
                     "commitSequence": .integer(sequence),
@@ -675,6 +682,8 @@ actor SurfAceLocklessRuntimeAdapter {
                 "targetRequestId": .string(targetRequestId),
             ])
         }
+        committed.targetOperationIdentity = identity
+        return committed
     }
 
     nonisolated private static func validateAndNormalizeTargetIntent(
@@ -732,11 +741,16 @@ actor SurfAceLocklessRuntimeAdapter {
             return capability
         }
         guard requiredCapabilities.contains("target.browser_url.v1"),
-              requiredCapabilities.allSatisfy(surfAceTargetCapabilities.contains),
-              header["replaySemantics"] == .string("navigate") else {
+              requiredCapabilities.allSatisfy(surfAceTargetCapabilities.contains) else {
             throw targetPrecommitFailure(
                 targetErrorCode: "capability_missing",
                 message: "required target capability is not advertised"
+            )
+        }
+        guard header["replaySemantics"] == .string("navigate") else {
+            throw targetPrecommitFailure(
+                targetErrorCode: "unsafe_payload",
+                message: "target replay semantics must be navigate"
             )
         }
         guard !pane.annotationMode else {
@@ -770,11 +784,11 @@ actor SurfAceLocklessRuntimeAdapter {
     }
 
     func materializeTargetWork(
-        operationRequestId: String,
+        identity: SurfAceLocklessTargetOperationIdentity,
         materialize: @escaping @Sendable (SurfAceLocklessTargetWorkItem) async -> SurfAceLocklessMaterializationOutcome
     ) async throws -> SurfAceLocklessTargetResult {
         let work = try await coordinator.transact(trigger: "target_materialization_begin") { state in
-            guard var work = state.targetApplyWorkItems[operationRequestId],
+            guard var work = state.targetApplyWorkItems[identity.storageKey],
                   work.state == .intentCommitted else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
@@ -804,7 +818,7 @@ actor SurfAceLocklessRuntimeAdapter {
                     maximum: state.limits.maxSurfaceRecoverableBaseBytes
                 )
             }
-            state.targetApplyWorkItems[operationRequestId] = work
+            state.targetApplyWorkItems[identity.storageKey] = work
             return work
         }
         let outcome = await materialize(work)
@@ -825,7 +839,7 @@ actor SurfAceLocklessRuntimeAdapter {
         for work in workItems {
             if work.state == .intentCommitted {
                 results.append(try await materializeTargetWork(
-                    operationRequestId: work.operationRequestId,
+                    identity: work.identity,
                     materialize: materialize
                 ))
             } else {
@@ -848,11 +862,14 @@ actor SurfAceLocklessRuntimeAdapter {
         outcome: SurfAceLocklessMaterializationOutcome
     ) async throws -> SurfAceLocklessTargetResult {
         try await coordinator.transact(trigger: "target_materialization_finish") { state in
-            guard state.targetApplyWorkItems[work.operationRequestId]?.state == .materializing else {
+            let identity = work.identity
+            guard state.targetApplyWorkItems[identity.storageKey] == work,
+                  work.state == .materializing else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
             var result = SurfAceLocklessTargetResult(
                 consumableSequence: 0,
+                controllerInstanceId: work.controllerInstanceId,
                 errorCode: outcome.errorCode,
                 intentCommitSequence: work.intentCommitSequence,
                 materializedState: outcome.materializedState,
@@ -973,7 +990,7 @@ actor SurfAceLocklessRuntimeAdapter {
                 surface.surfaceRevision += 1
                 state.liveSurfaces[work.surfaceId] = surface
             }
-            state.targetApplyWorkItems.removeValue(forKey: work.operationRequestId)
+            state.targetApplyWorkItems.removeValue(forKey: identity.storageKey)
             var recordPayload: [String: SurfAceLocklessJSON] = [
                 "intentCommitSequence": .integer(result.intentCommitSequence),
                 "operationRequestId": .string(result.operationRequestId),
@@ -994,9 +1011,15 @@ actor SurfAceLocklessRuntimeAdapter {
                 payload: .object(recordPayload)
             )
             result.consumableSequence = occurrence.record.sequence
-            state.targetApplyResults[work.operationRequestId] = result
+            state.targetApplyResults[identity.storageKey] = result
             return result
         }
+    }
+
+    func targetResult(
+        identity: SurfAceLocklessTargetOperationIdentity
+    ) async -> SurfAceLocklessTargetResult? {
+        (await coordinator.snapshot()).targetApplyResults[identity.storageKey]
     }
 
     func fanout(afterCommitted event: SurfAceLocklessJSON) -> SurfAceLocklessFanout {

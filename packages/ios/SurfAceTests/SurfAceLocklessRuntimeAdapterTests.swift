@@ -817,7 +817,9 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         let after = await fixture.adapter.snapshot()
         XCTAssertEqual(after.generation, before.generation)
         XCTAssertEqual(after.sequences.nextCommitSequence, before.sequences.nextCommitSequence)
-        XCTAssertNil(after.targetApplyWorkItems["operation-capacity"])
+        XCTAssertNil(after.targetApplyWorkItems[
+            targetIdentity(controllerId: "controller-a", operationRequestId: "operation-capacity").storageKey
+        ])
         XCTAssertNil(after.controllers["controller-a"]?.pendingOperationReceipts["operation-capacity"])
         let targetCapacityResolutions = try await fixture.adapter.resolveReceipts(
             connectionToken: "connection-a", requestIds: ["operation-capacity"]
@@ -988,7 +990,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             projectionCapacityBytes: 8 * 1_024 * 1_024,
             protocolFeatures: [surfAceLocklessCapability]
         )
-        _ = try await adapter.commitTargetIntent(
+        let committed = try await adapter.commitTargetIntent(
             connectionToken: "connection-a",
             operationRequestId: "operation-1",
             targetRequestId: "target-request-1",
@@ -997,14 +999,15 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             targetEpoch: 2,
             request: Self.validTargetRequest(paneId: 1)
         )
+        let identity = try XCTUnwrap(committed.targetOperationIdentity)
         XCTAssertEqual(
-            try fixture.store.load()?.targetApplyWorkItems["operation-1"]?.state,
+            try fixture.store.load()?.targetApplyWorkItems[identity.storageKey]?.state,
             .intentCommitted
         )
 
-        let result = try await adapter.materializeTargetWork(operationRequestId: "operation-1") { _ in
+        let result = try await adapter.materializeTargetWork(identity: identity) { _ in
             XCTAssertEqual(
-                try? fixture.store.load()?.targetApplyWorkItems["operation-1"]?.state,
+                try? fixture.store.load()?.targetApplyWorkItems[identity.storageKey]?.state,
                 .materializing
             )
             return SurfAceLocklessMaterializationOutcome(
@@ -1014,8 +1017,98 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             )
         }
         XCTAssertEqual(result.status, "applied")
-        XCTAssertNil(try fixture.store.load()?.targetApplyWorkItems["operation-1"])
-        XCTAssertEqual(try fixture.store.load()?.targetApplyResults["operation-1"], result)
+        XCTAssertNil(try fixture.store.load()?.targetApplyWorkItems[identity.storageKey])
+        XCTAssertEqual(try fixture.store.load()?.targetApplyResults[identity.storageKey], result)
+    }
+
+    func testTargetWorkAndResultsAreScopedByControllerForSameOperationRequestId() async throws {
+        let fixture = try makeFixture()
+        let adapter = fixture.adapter
+        _ = try await admit(adapter, id: "controller-a", token: "connection-a")
+        _ = try await admit(adapter, id: "controller-b", token: "connection-b")
+        let operationRequestId = "shared-operation"
+
+        let committedA = try await adapter.commitTargetIntent(
+            connectionToken: "connection-a",
+            operationRequestId: operationRequestId,
+            targetRequestId: "target-request-a",
+            surfaceId: "sf_1",
+            targetId: "target-a",
+            targetEpoch: 1,
+            request: Self.validTargetRequest(paneId: 1, url: "https://a.example")
+        )
+        let committedB = try await adapter.commitTargetIntent(
+            connectionToken: "connection-b",
+            operationRequestId: operationRequestId,
+            targetRequestId: "target-request-b",
+            surfaceId: "sf_1",
+            targetId: "target-b",
+            targetEpoch: 2,
+            request: Self.validTargetRequest(paneId: 1, url: "https://b.example")
+        )
+        let identityA = try XCTUnwrap(committedA.targetOperationIdentity)
+        let identityB = try XCTUnwrap(committedB.targetOperationIdentity)
+        XCTAssertNotEqual(identityA.storageKey, identityB.storageKey)
+        XCTAssertNotEqual(committedA.commitSequence, committedB.commitSequence)
+
+        let committedState = try XCTUnwrap(fixture.store.load())
+        XCTAssertEqual(committedState.targetApplyWorkItems.count, 2)
+        XCTAssertEqual(
+            committedState.targetApplyWorkItems[identityA.storageKey]?.controllerInstanceId,
+            "controller-a"
+        )
+        XCTAssertEqual(
+            committedState.targetApplyWorkItems[identityB.storageKey]?.controllerInstanceId,
+            "controller-b"
+        )
+        XCTAssertEqual(
+            committedState.controllers["controller-a"]?
+                .pendingOperationReceipts[operationRequestId]?.commitSequence,
+            committedA.commitSequence
+        )
+        XCTAssertEqual(
+            committedState.controllers["controller-b"]?
+                .pendingOperationReceipts[operationRequestId]?.commitSequence,
+            committedB.commitSequence
+        )
+
+        let resultA = try await adapter.materializeTargetWork(identity: identityA) { work in
+            XCTAssertEqual(work.controllerInstanceId, "controller-a")
+            XCTAssertEqual(work.targetRequestId, "target-request-a")
+            return SurfAceLocklessMaterializationOutcome(
+                errorCode: nil,
+                materializedState: .object(["url": .string("https://a.example")]),
+                status: "applied"
+            )
+        }
+        let afterA = try XCTUnwrap(fixture.store.load())
+        XCTAssertNil(afterA.targetApplyWorkItems[identityA.storageKey])
+        XCTAssertNotNil(afterA.targetApplyWorkItems[identityB.storageKey])
+        XCTAssertEqual(afterA.targetApplyResults[identityA.storageKey], resultA)
+        XCTAssertNil(afterA.targetApplyResults[identityB.storageKey])
+
+        let resultB = try await adapter.materializeTargetWork(identity: identityB) { work in
+            XCTAssertEqual(work.controllerInstanceId, "controller-b")
+            XCTAssertEqual(work.targetRequestId, "target-request-b")
+            return SurfAceLocklessMaterializationOutcome(
+                errorCode: nil,
+                materializedState: .object(["url": .string("https://b.example")]),
+                status: "applied"
+            )
+        }
+        XCTAssertEqual(resultA.controllerInstanceId, "controller-a")
+        XCTAssertEqual(resultB.controllerInstanceId, "controller-b")
+        XCTAssertEqual(resultA.operationRequestId, operationRequestId)
+        XCTAssertEqual(resultB.operationRequestId, operationRequestId)
+        XCTAssertEqual(resultA.targetRequestId, "target-request-a")
+        XCTAssertEqual(resultB.targetRequestId, "target-request-b")
+        let storedResultA = await adapter.targetResult(identity: identityA)
+        let storedResultB = await adapter.targetResult(identity: identityB)
+        XCTAssertEqual(storedResultA, resultA)
+        XCTAssertEqual(storedResultB, resultB)
+        let terminalState = try XCTUnwrap(fixture.store.load())
+        XCTAssertTrue(terminalState.targetApplyWorkItems.isEmpty)
+        XCTAssertEqual(terminalState.targetApplyResults.count, 2)
     }
 
     private func makeFixture(
@@ -1080,7 +1173,8 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
 
     private static func validTargetRequest(
         paneId: Int64? = nil,
-        paneLineageId: String? = nil
+        paneLineageId: String? = nil,
+        url: String = "https://example.com"
     ) -> SurfAceLocklessJSON {
         var request: [String: SurfAceLocklessJSON] = [
             "requestId": .string("target-request"),
@@ -1093,11 +1187,21 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             ]),
             "targetId": .string("target"),
             "targetKind": .string("browser_url"),
-            "targetPayload": .object(["url": .string("https://example.com")]),
+            "targetPayload": .object(["url": .string(url)]),
         ]
         request["paneId"] = paneId.map(SurfAceLocklessJSON.integer)
         request["paneLineageId"] = paneLineageId.map(SurfAceLocklessJSON.string)
         return .object(request)
+    }
+
+    private func targetIdentity(
+        controllerId: String,
+        operationRequestId: String
+    ) -> SurfAceLocklessTargetOperationIdentity {
+        SurfAceLocklessTargetOperationIdentity(
+            controllerInstanceId: controllerId,
+            operationRequestId: operationRequestId
+        )
     }
 
     private func assertUnreceiptedTargetRejection(

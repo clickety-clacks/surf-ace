@@ -867,7 +867,11 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertTrue(recovered.readyForAdmission)
         XCTAssertTrue(recovered.targetWorkRecovered)
         XCTAssertTrue(recovered.state.targetApplyWorkItems.isEmpty)
-        let result = try XCTUnwrap(recovered.state.targetApplyResults["operation-target-recovery"])
+        let identity = SurfAceLocklessTargetOperationIdentity(
+            controllerInstanceId: "controller-target-recovery",
+            operationRequestId: "operation-target-recovery"
+        )
+        let result = try XCTUnwrap(recovered.state.targetApplyResults[identity.storageKey])
         XCTAssertEqual(result.status, "failed")
         XCTAssertEqual(result.errorCode, "pane_lineage_missing")
         XCTAssertGreaterThan(result.consumableSequence, 0)
@@ -877,7 +881,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         )
         await terminalRestart.restoreLocklessAuthority(reason: "test_terminal_target_restart")
         let terminal = try await terminalRestart.locklessReadinessSnapshot()
-        XCTAssertEqual(terminal.state.targetApplyResults["operation-target-recovery"], result)
+        XCTAssertEqual(terminal.state.targetApplyResults[identity.storageKey], result)
         XCTAssertTrue(terminal.state.targetApplyWorkItems.isEmpty)
     }
 

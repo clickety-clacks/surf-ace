@@ -325,6 +325,15 @@ enum SurfAceLocklessTargetWorkState: String, Codable, Equatable, Sendable {
     case materializing
 }
 
+struct SurfAceLocklessTargetOperationIdentity: Codable, Equatable, Hashable, Sendable {
+    var controllerInstanceId: String
+    var operationRequestId: String
+
+    var storageKey: String {
+        "\(controllerInstanceId.utf8.count):\(controllerInstanceId)\(operationRequestId)"
+    }
+}
+
 struct SurfAceLocklessTargetWorkItem: Codable, Equatable, Sendable {
     var bytes: Int64
     var controllerInstanceId: String
@@ -336,10 +345,18 @@ struct SurfAceLocklessTargetWorkItem: Codable, Equatable, Sendable {
     var targetEpoch: Int64
     var targetId: String
     var targetRequestId: String
+
+    var identity: SurfAceLocklessTargetOperationIdentity {
+        SurfAceLocklessTargetOperationIdentity(
+            controllerInstanceId: controllerInstanceId,
+            operationRequestId: operationRequestId
+        )
+    }
 }
 
 struct SurfAceLocklessTargetResult: Codable, Equatable, Sendable {
     var consumableSequence: Int64
+    var controllerInstanceId: String
     var errorCode: String?
     var intentCommitSequence: Int64
     var materializedState: SurfAceLocklessJSON?
@@ -350,6 +367,13 @@ struct SurfAceLocklessTargetResult: Codable, Equatable, Sendable {
     var targetEpoch: Int64
     var targetId: String
     var targetRequestId: String
+
+    var identity: SurfAceLocklessTargetOperationIdentity {
+        SurfAceLocklessTargetOperationIdentity(
+            controllerInstanceId: controllerInstanceId,
+            operationRequestId: operationRequestId
+        )
+    }
 }
 
 struct SurfAceLocklessClientSequences: Codable, Equatable, Sendable {
@@ -499,7 +523,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
 
         var targetBytesBySurface: [String: Int64] = [:]
         for (key, work) in targetApplyWorkItems {
-            guard key == work.operationRequestId else {
+            guard key == work.identity.storageKey else {
                 throw SurfAceLocklessAuthorityError.invalidState("target_work_key")
             }
             let exact = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
@@ -510,6 +534,11 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
                 targetBytesBySurface[work.surfaceId] ?? 0,
                 exact
             )
+        }
+        for (key, result) in targetApplyResults {
+            guard key == result.identity.storageKey else {
+                throw SurfAceLocklessAuthorityError.invalidState("target_result_key")
+            }
         }
         for (surfaceId, targetBytes) in targetBytesBySurface {
             guard let surface = liveSurfaces[surfaceId]

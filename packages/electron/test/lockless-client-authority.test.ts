@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -39,28 +38,6 @@ const limits: LocklessCapacityLimits = {
   maxPendingOperationReceiptsPerController: 2,
   maxPendingOperationReceiptBytesPerController: 2_048,
 };
-
-test("canonical target precommit vector pins unreceipted rejection classification", () => {
-  const vectors = JSON.parse(
-    readFileSync(
-      new URL("../../../protocol/vectors/authority-conformance.json", import.meta.url),
-      "utf8",
-    ),
-  ) as { vectors: Array<{ id: string; tokens?: string[] }> };
-  const target = vectors.vectors.find(
-    (vector) => vector.id === "lockless-target-precommit-rejection-classification",
-  );
-
-  assert.deepEqual(target?.tokens, [
-    "unsupported_operation",
-    "invalid_payload",
-    "capability_missing",
-    "pane_lineage_missing",
-    "policy_denied",
-    "unsafe_payload",
-    "not_committed",
-  ]);
-});
 
 function authority(): LocklessClientAuthority {
   return new LocklessClientAuthority(createEmptyLocklessClientState(limits));
