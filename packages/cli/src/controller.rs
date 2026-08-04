@@ -565,8 +565,11 @@ fn flush_acknowledgements(
     wire: &mut dyn DirectWire,
 ) -> Result<(), CliError> {
     for intent in root.state().acknowledgement_outbox.clone() {
-        let response =
-            request_without_correlation(wire, "consumable.ack", serde_json::to_value(&intent)?)?;
+        let response = request_without_correlation(
+            wire,
+            "consumable.ack",
+            acknowledgement_wire_payload(&intent),
+        )?;
         successful_payload(&response.response, "consumable.ack")?;
         apply_wire_events(root, &response)?;
         root.mutate(|state| {
@@ -831,7 +834,9 @@ fn apply_gap(root: &mut LockedStateRoot, payload: &Value) -> Result<(), CliError
 
 fn resume_payload(state: &crate::state::DurableState, include_unresolved: bool) -> Value {
     json!({
-        "pendingAcks": state.acknowledgement_outbox,
+        "pendingAcks": state.acknowledgement_outbox.iter()
+            .map(acknowledgement_wire_payload)
+            .collect::<Vec<_>>(),
         "unresolvedRequestIds": if include_unresolved {
             state.unresolved.iter()
                 .filter(|(_, correlation)| correlation.phase != CorrelationPhase::ReceiptAcknowledged)
@@ -851,6 +856,20 @@ fn resume_payload(state: &crate::state::DurableState, include_unresolved: bool) 
             })
         )).collect::<BTreeMap<_, _>>(),
     })
+}
+
+fn acknowledgement_wire_payload(intent: &crate::state::AcknowledgementIntent) -> Value {
+    let mut payload = json!({
+        "cursor": intent.cursor,
+        "scopeId": intent.scope_id,
+    });
+    if let Some(gap_generation) = intent.gap_generation {
+        payload
+            .as_object_mut()
+            .expect("acknowledgement payload object")
+            .insert("gapGeneration".into(), Value::from(gap_generation));
+    }
+    payload
 }
 
 fn verify_receipt_limits(payload: &Map<String, Value>) -> Result<(), CliError> {

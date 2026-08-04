@@ -15,6 +15,7 @@ use tungstenite::{accept, Message};
 struct FakeWire {
     ack_accepted: bool,
     operations: Vec<String>,
+    payloads: Vec<(String, Value)>,
     fail_after_send_on: Option<String>,
     receipt_capacity_on: Option<String>,
     target_precommit_error: Option<(String, Option<String>)>,
@@ -29,6 +30,7 @@ impl FakeWire {
         Self {
             ack_accepted: true,
             operations: vec![],
+            payloads: vec![],
             fail_after_send_on: None,
             receipt_capacity_on: None,
             target_precommit_error: None,
@@ -65,6 +67,7 @@ impl DirectWire for FakeWire {
         sent: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<WireResponse, WireFailure> {
         self.operations.push(op.into());
+        self.payloads.push((op.into(), payload.clone()));
         sent().map_err(|code| WireFailure::AfterSend { code })?;
         if self.fail_after_send_on.as_deref() == Some(op) {
             return Err(WireFailure::AfterSend {
@@ -909,6 +912,32 @@ fn discovery_and_consumable_ack_events_commit_before_sync_and_outbox_clear() {
         )],
     );
     execute_with_wire(invocation(&temp, Command::List, json!({})), &mut second).unwrap();
+    let pair_payload = second
+        .payloads
+        .iter()
+        .find(|(operation, _)| operation == "pair.request")
+        .map(|(_, payload)| payload)
+        .unwrap();
+    assert_eq!(
+        pair_payload["resume"]["pendingAcks"],
+        json!([{
+            "cursor": 2,
+            "scopeId": "surface:sf_1"
+        }])
+    );
+    let acknowledgement_payload = second
+        .payloads
+        .iter()
+        .find(|(operation, _)| operation == "consumable.ack")
+        .map(|(_, payload)| payload)
+        .unwrap();
+    assert_eq!(
+        acknowledgement_payload,
+        &json!({
+            "cursor": 2,
+            "scopeId": "surface:sf_1"
+        })
+    );
     let persisted: Value =
         serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
             .unwrap();
