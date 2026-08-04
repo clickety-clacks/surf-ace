@@ -20,6 +20,20 @@ const authorityVectorSet = JSON.parse(
     id: string;
     requirements: string[];
     tokens?: string[];
+    cases?: Array<{
+      expected: {
+        materializerCalls: number;
+        notCommitted: boolean;
+        receiptDelta: number;
+        receiptSyncOutcome: string;
+        resultDelta: number;
+        targetErrorCode: string | null;
+        topLevelCode: string | null;
+        workDelta: number;
+      };
+      id: string;
+      input: Record<string, string>;
+    }>;
   }>;
 };
 
@@ -245,6 +259,44 @@ test("authority conformance vector pins the cross-language lockless vocabulary",
     "surface_state_capacity",
     "materialization_outcome_unknown",
   ]);
+});
+
+test("target admission conformance vector pins executable semantic effects", () => {
+  const vector = authorityVectorSet.vectors.find(
+    (candidate) => candidate.id === "lockless-target-precommit-rejection-classification",
+  );
+  assert.ok(vector?.cases);
+  assert.deepEqual(vector.cases.map((entry) => entry.id), [
+    "live-current-pane-accepted",
+    "tombstoned-surface-rejected",
+    "stale-pane-lineage-rejected",
+    "annotation-policy-rejected",
+    "capability-rejected",
+    "replay-semantics-rejected",
+    "unsafe-target-payload-rejected",
+    "two-controller-request-id-collision",
+  ]);
+  for (const entry of vector.cases) {
+    assert.deepEqual(Object.keys(entry.input).sort(), [
+      "annotationPolicy",
+      "controllerScenario",
+      "paneLineage",
+      "replaySemantics",
+      "requiredCapability",
+      "surfaceState",
+      "targetPayload",
+    ]);
+    assert.deepEqual(Object.keys(entry.expected).sort(), [
+      "materializerCalls",
+      "notCommitted",
+      "receiptDelta",
+      "receiptSyncOutcome",
+      "resultDelta",
+      "targetErrorCode",
+      "topLevelCode",
+      "workDelta",
+    ]);
+  }
 });
 
 test("pane geometry schema exposes non-authoritative unresolved snapshot state", () => {
