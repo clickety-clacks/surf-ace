@@ -392,6 +392,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var liveSurfaces: [String: SurfAceLocklessSurfaceMaterial]
     var negotiatedModes: [String: SurfAceLocklessNegotiatedMode]
     var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
+    var pendingTombstoneReclamations: [SurfAceLocklessTombstoneReclamation]?
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
     var sequences: SurfAceLocklessClientSequences
@@ -411,6 +412,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             liveSurfaces: [:],
             negotiatedModes: [:],
             pendingControllerRetentionReclamations: [],
+            pendingTombstoneReclamations: [],
             sceneSurfaceIds: [:],
             scopes: [:],
             sequences: SurfAceLocklessClientSequences(
@@ -470,6 +472,19 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
                 throw SurfAceLocklessAuthorityError.invalidState(
                     "controller_retention_reclamation_delivery:\(reclamation.eventId)"
                 )
+            }
+        }
+        let pendingTombstones = pendingTombstoneReclamations ?? []
+        guard Set(pendingTombstones.map(\.eventId)).count == pendingTombstones.count else {
+            throw SurfAceLocklessAuthorityError.invalidState("tombstone_reclamation_outbox")
+        }
+        for reclamation in pendingTombstones {
+            let recipients = reclamation.recipientControllerInstanceIds
+            let delivered = reclamation.deliveredControllerInstanceIds
+            guard recipients == recipients.sorted(), Set(recipients).count == recipients.count,
+                  delivered == delivered.sorted(), Set(delivered).count == delivered.count,
+                  Set(delivered).isSubset(of: Set(recipients)) else {
+                throw SurfAceLocklessAuthorityError.invalidState("tombstone_reclamation_delivery")
             }
         }
         for (controllerId, controller) in controllers {
@@ -552,6 +567,29 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             }
         }
     }
+
+    func validated(
+        for transition: SurfAceLocklessRecoverableTransition,
+        limits replacementLimits: SurfAceLocklessCapacityLimits? = nil
+    ) throws -> Self {
+        var candidate = self
+        if let replacementLimits { candidate.limits = replacementLimits }
+        do {
+            try candidate.validate()
+            return candidate
+        } catch let error as SurfAceLocklessTopologyOperationError {
+            throw error
+        } catch {
+            throw error
+        }
+    }
+}
+
+enum SurfAceLocklessRecoverableTransition: String, Sendable {
+    case configuration
+    case legacyMigration
+    case locklessAdmission
+    case restart
 }
 
 enum SurfAceLocklessExactDurableAccounting {
@@ -973,8 +1011,7 @@ struct SurfAceLocklessGenerationStore: Sendable {
             SurfAceLocklessAuthorityState.self,
             from: Data(contentsOf: stateURL)
         )
-        try state.validate()
-        return state
+        return try state.validated(for: .restart)
     }
 
     func save(_ state: SurfAceLocklessAuthorityState) throws {

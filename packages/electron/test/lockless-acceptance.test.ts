@@ -401,7 +401,7 @@ test("AC-HIST-01..05: production SurfaceCore appends mixed-controller history, r
   assert.equal(bounded.history.at(-1)?.contentId, "chatty-20");
 });
 
-test("AC-TOPO-01 AC-TOPO-02 AC-TOPO-05 AC-TOPO-06 AC-OPS-02: competing topology requests serialize with receipts and exact replay", async () => {
+test("AC-TOPO-01 AC-TOPO-02 AC-TOPO-03 AC-TOPO-05 AC-TOPO-06 AC-OPS-02: stale topology intent is never rebased retried or transformed and exact receipts replay", async () => {
   const core = coreWithLimits(acceptanceLimits({ maxPanesPerSurface: 4 }));
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
   await withServer(core, async ({ url }) => {
@@ -603,7 +603,7 @@ test("AC-CAP-01 AC-CLOSE-01..08: P/T conservation permits exact restore over P a
   });
 });
 
-test("AC-CAP-02 AC-CLOSE-06 AC-CLOSE-07 AC-CLOSE-09: exact byte limits accept equality, reject +1 silently, and report oldest tombstone reclamation", () => {
+test("AC-CAP-02 AC-CLOSE-06 AC-CLOSE-09: exact byte limits accept equality, reject +1 silently, and report oldest tombstone reclamation", () => {
   const paneValue = { content: "pane-at-limit".repeat(8) };
   const annotations = [{ stroke: "annotation-at-limit" }];
   const limits = acceptanceLimits({
@@ -1036,7 +1036,7 @@ test("AC-LIVEBUF-01 AC-LIVEBUF-02 AC-OPS-02: overflow targets only lagging curso
   );
 });
 
-test("AC-ARCH-01 AC-SYNC-01 AC-READ-02: a disconnected production wire refuses mutation while the other controller remains actionable", async () => {
+test("AC-ARCH-01 AC-SYNC-01 AC-SYNC-02 AC-SYNC-03 AC-READ-02: one client authority refuses offline writes while the surviving controller remains actionable", async () => {
   const core = coreWithLimits();
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
   await withServer(core, async ({ url }) => {

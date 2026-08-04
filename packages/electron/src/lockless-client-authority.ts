@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
@@ -98,6 +98,14 @@ export type PersistentOperationReceipt =
       terminalResponse: unknown;
     };
 
+export type PersistentMigrationReceipt = {
+  clientIdentity: string | null;
+  controllerInstanceId: ControllerInstanceId;
+  materialSha256: string;
+  requestId: string;
+  surfaceId: string;
+};
+
 export type PersistentTargetApplyWorkItem = {
   bytes: number;
   controllerInstanceId: ControllerInstanceId;
@@ -125,6 +133,7 @@ export type PersistentLocklessClientState = {
   capability: typeof SURF_ACE_LOCKLESS_V1_CAPABILITY;
   controllers: Record<ControllerInstanceId, PersistentControllerEntry>;
   limits: LocklessCapacityLimits;
+  migrationReceipts: Record<string, PersistentMigrationReceipt>;
   modeBySurfaceId: Record<string, "legacy" | "lockless">;
   nextClosedSequence: number;
   nextCommitSequence: number;
@@ -135,6 +144,12 @@ export type PersistentLocklessClientState = {
   tombstones: PersistentTombstone[];
   version: 1;
 };
+
+export type RetainedTombstoneTransition =
+  | "admission"
+  | "configuration"
+  | "legacy_migration"
+  | "restart";
 
 export type AuthorityEvent =
   | {
@@ -232,6 +247,28 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+function canonicalProtocolJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalProtocolJson).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalProtocolJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function locklessMigrationMaterialSha256(
+  material: NonNullable<LocklessPairPayload["migrationMaterial"]>,
+): string {
+  return createHash("sha256")
+    .update(canonicalProtocolJson(material))
+    .digest("hex");
+}
+
 function nestedTombstones(
   tombstone: PersistentTombstone,
 ): PersistentTombstone[] {
@@ -293,6 +330,7 @@ export function createEmptyLocklessClientState(
     capability: SURF_ACE_LOCKLESS_V1_CAPABILITY,
     controllers: {},
     limits: clone(limits),
+    migrationReceipts: {},
     modeBySurfaceId: {},
     nextClosedSequence: 1,
     nextCommitSequence: 1,
@@ -330,6 +368,7 @@ export function migrateLocklessClientState(
     DEFAULT_LOCKLESS_LIMITS.maxPendingOperationReceiptBytesPerController;
   assertLocklessCapacityLimits(state.limits);
   state.controllers ??= {};
+  state.migrationReceipts ??= {};
   state.modeBySurfaceId ??= {};
   state.scopes ??= {};
   state.targetApplyWorkItems ??= {};
@@ -353,6 +392,42 @@ export function migrateLocklessClientState(
     controller.dormantSequence ??= state.nextDormantSequence++;
   }
   return state;
+}
+
+export function assertRetainedTombstoneAggregate(
+  state: PersistentLocklessClientState,
+  limits: LocklessCapacityLimits,
+  transition: RetainedTombstoneTransition,
+): void {
+  const exactBytes = state.tombstones.reduce((total, tombstone) => {
+    for (const candidate of [tombstone, ...nestedTombstones(tombstone)]) {
+      const { bytes, ...material } = candidate;
+      const exact = exactDurableBytes({ version: 1, ...material });
+      if (bytes !== exact) {
+        throw new LocklessAuthorityError(
+          "capability_mismatch",
+          "Persisted tombstone byte accounting is invalid",
+          {
+            exactBytes: exact,
+            persistedBytes: bytes,
+            tombstoneId: candidate.tombstoneId,
+          },
+        );
+      }
+    }
+    return total + tombstone.bytes;
+  }, 0);
+  if (exactBytes > limits.maxRetainedTombstoneBytes) {
+    throw new LocklessAuthorityError(
+      "tombstone_capacity",
+      "Retained tombstone aggregate exceeds the configured byte limit",
+      {
+        bytes: exactBytes,
+        maximumBytes: limits.maxRetainedTombstoneBytes,
+        transition,
+      },
+    );
+  }
 }
 
 export function createLocklessHistory<T>(
@@ -467,7 +542,7 @@ export class LocklessClientAuthority {
     private readonly clientIdentity: string | null = null,
   ) {
     this.state = migrateLocklessClientState(persisted);
-    this.assertPersistentInvariants();
+    this.assertPersistentInvariants("restart");
   }
 
   subscribe(listener: (event: AuthorityEvent) => void): () => void {
@@ -612,8 +687,14 @@ export class LocklessClientAuthority {
   }
 
   restorePersistentState(state: PersistentLocklessClientState): void {
+    const previous = this.state;
     this.state = clone(state);
-    this.assertPersistentInvariants();
+    try {
+      this.assertPersistentInvariants("restart");
+    } catch (error) {
+      this.state = previous;
+      throw error;
+    }
   }
 
   exportState(): PersistentLocklessClientState {
@@ -626,6 +707,21 @@ export class LocklessClientAuthority {
 
   get surfaceSetRevision(): number {
     return this.state.surfaceSetRevision;
+  }
+
+  assertRetainedTombstoneTransition(
+    transition: Exclude<
+      RetainedTombstoneTransition,
+      "configuration" | "restart"
+    >,
+  ): void {
+    assertRetainedTombstoneAggregate(this.state, this.state.limits, transition);
+  }
+
+  configureLimits(limits: LocklessCapacityLimits): void {
+    assertLocklessCapacityLimits(limits);
+    assertRetainedTombstoneAggregate(this.state, limits, "configuration");
+    this.state.limits = clone(limits);
   }
 
   setSurfaceMode(surfaceId: string, mode: "legacy" | "lockless"): void {
@@ -648,12 +744,78 @@ export class LocklessClientAuthority {
     return this.state.modeBySurfaceId[surfaceId] ?? null;
   }
 
+  resolveMigrationReceipt(input: {
+    controllerInstanceId: string;
+    material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
+    requestId: string;
+    surfaceId: string;
+  }): PersistentMigrationReceipt | null {
+    const materialSha256 = locklessMigrationMaterialSha256(input.material);
+    const existing = this.state.migrationReceipts[input.requestId];
+    if (existing) {
+      if (
+        existing.clientIdentity !== this.clientIdentity ||
+        existing.controllerInstanceId !== input.controllerInstanceId ||
+        existing.materialSha256 !== materialSha256 ||
+        existing.surfaceId !== input.surfaceId
+      ) {
+        throw new LocklessAuthorityError(
+          "invalid_payload",
+          "Migration receipt identity or material digest mismatch",
+          {
+            requestId: input.requestId,
+            expectedClientIdentity: existing.clientIdentity,
+            expectedControllerInstanceId: existing.controllerInstanceId,
+            expectedMaterialSha256: existing.materialSha256,
+            expectedSurfaceId: existing.surfaceId,
+          },
+        );
+      }
+      return clone(existing);
+    }
+    const priorForSurface = Object.values(this.state.migrationReceipts).find(
+      (receipt) => receipt.surfaceId === input.surfaceId,
+    );
+    if (priorForSurface) {
+      throw new LocklessAuthorityError(
+        "invalid_operation",
+        "Migrated surface requires replay of its durable pair request ID",
+        {
+          expectedRequestId: priorForSurface.requestId,
+          requestId: input.requestId,
+          surfaceId: input.surfaceId,
+        },
+      );
+    }
+    return null;
+  }
+
+  commitMigrationReceipt(input: {
+    controllerInstanceId: string;
+    material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
+    requestId: string;
+    surfaceId: string;
+  }): PersistentMigrationReceipt {
+    const existing = this.resolveMigrationReceipt(input);
+    if (existing) return existing;
+    const receipt: PersistentMigrationReceipt = {
+      clientIdentity: this.clientIdentity,
+      controllerInstanceId: input.controllerInstanceId,
+      materialSha256: locklessMigrationMaterialSha256(input.material),
+      requestId: input.requestId,
+      surfaceId: input.surfaceId,
+    };
+    this.state.migrationReceipts[input.requestId] = receipt;
+    return clone(receipt);
+  }
+
   admit(
     admission: LocklessControllerAdmission,
     connectionToken: string,
     requestId: string,
     connectionSlot = "lifecycle",
   ): { resumed: boolean } {
+    this.assertRetainedTombstoneTransition("admission");
     const controllerInstanceId = admission.controllerInstanceId;
     if (!validControllerInstanceId(controllerInstanceId)) {
       this.rejectAudit(
@@ -1224,6 +1386,7 @@ export class LocklessClientAuthority {
     controllerInstanceId: string,
     material: NonNullable<LocklessPairPayload["migrationMaterial"]>,
   ): void {
+    this.assertRetainedTombstoneTransition("legacy_migration");
     for (const imported of material.scopes) {
       this.ensureScope(imported.scopeId, imported.scopeKind);
       for (const source of imported.records) {
@@ -1471,8 +1634,8 @@ export class LocklessClientAuthority {
     };
     if (tombstone.bytes > this.state.limits.maxRetainedTombstoneBytes) {
       throw new LocklessAuthorityError(
-        "tombstone_capacity",
-        "Tombstone exceeds the retained tombstone byte limit",
+        "internal_error",
+        "Admitted close exceeded its pre-reserved tombstone envelope",
         {
           bytes: tombstone.bytes,
           maximumBytes: this.state.limits.maxRetainedTombstoneBytes,
@@ -1496,8 +1659,8 @@ export class LocklessClientAuthority {
       const victim = proposed.shift();
       if (!victim) {
         throw new LocklessAuthorityError(
-          "tombstone_capacity",
-          "Tombstone pool cannot admit the close",
+          "internal_error",
+          "Admitted close could not satisfy its pre-reserved tombstone envelope",
         );
       }
       reclaimed.push({
@@ -1833,8 +1996,30 @@ export class LocklessClientAuthority {
     );
   }
 
-  private assertPersistentInvariants(): void {
+  private assertPersistentInvariants(
+    transition: Extract<RetainedTombstoneTransition, "restart">,
+  ): void {
     assertLocklessCapacityLimits(this.state.limits);
+    assertRetainedTombstoneAggregate(this.state, this.state.limits, transition);
+    for (const [requestId, receipt] of Object.entries(
+      this.state.migrationReceipts,
+    )) {
+      if (
+        requestId !== receipt.requestId ||
+        !validControllerInstanceId(receipt.controllerInstanceId) ||
+        typeof receipt.surfaceId !== "string" ||
+        receipt.surfaceId.length === 0 ||
+        !/^[a-f0-9]{64}$/.test(receipt.materialSha256) ||
+        (receipt.clientIdentity !== null &&
+          typeof receipt.clientIdentity !== "string")
+      ) {
+        throw new LocklessAuthorityError(
+          "capability_mismatch",
+          "Persisted migration receipt is invalid",
+          { requestId },
+        );
+      }
+    }
     for (const controller of Object.values(this.state.controllers)) {
       controller.pendingOperationReceipts ??= {};
       const receipts = Object.values(controller.pendingOperationReceipts);

@@ -155,8 +155,7 @@ struct SurfAceLocklessMigration {
                 state.scopes[scopeId] = emptyScope(id: scopeId, kind: "pane")
             }
         }
-        try state.validate()
-        return state
+        return try state.validated(for: .legacyMigration)
     }
 
     static func rollbackPreview(_ state: SurfAceLocklessAuthorityState) throws -> SurfAceLocklessRollbackPreview {
@@ -302,7 +301,10 @@ struct SurfAceLocklessMigration {
             "strokesById": object["strokesById"] ?? .object([:]),
         ])
         var contentMaterial = object
-        for field in ["contentId", "contentType", "drawingData", "revision", "strokesById"] {
+        for field in [
+            "contentId", "contentType", "drawingData", "provenanceDisplayName",
+            "revision", "senderDisplayName", "strokesById",
+        ] {
             contentMaterial.removeValue(forKey: field)
         }
         return SurfAceLocklessHistoryEntry(
@@ -421,6 +423,8 @@ struct SurfAceLocklessMigration {
         object["contentId"] = entry.contentId.map(SurfAceLocklessJSON.string) ?? .null
         object["contentType"] = entry.contentType.map(SurfAceLocklessJSON.string) ?? .null
         object["revision"] = .integer(entry.revision)
+        object["provenanceDisplayName"] = entry.provenance.friendlyChatName.map(SurfAceLocklessJSON.string) ?? .null
+        object["senderDisplayName"] = entry.provenance.controllerProductName.map(SurfAceLocklessJSON.string) ?? .null
         if case .object(let annotations) = entry.annotations {
             object["drawingData"] = annotations["drawingData"] ?? .string("")
             object["strokesById"] = annotations["strokesById"] ?? .object([:])

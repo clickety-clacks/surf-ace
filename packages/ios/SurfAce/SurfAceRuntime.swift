@@ -1276,6 +1276,10 @@ final class SurfAceRuntime {
         originalPane.bridge?.render(entry: renderableEntry(originalPane.currentEntry), restoreViewport: nil)
         restorePaneDrawing(surfaceId: surfaceId, pane: originalPane)
         originalPane.lastNavigationURL = originalPane.currentEntry.url
+        UIAccessibility.post(
+            notification: .announcement,
+            argument: originalPane.currentCompositeProvenance().accessibilityLabel
+        )
         if eventIsEnabled(surfaceId: surfaceId, eventName: "event.history_navigated") {
             sendEvent(
                 surfaceId: surfaceId,
@@ -1305,29 +1309,17 @@ final class SurfAceRuntime {
         let directionValue = direction == .back ? "back" : "forward"
         do {
             _ = try await commitLocalMutation(adapter: adapter, operation: "local.history.\(directionValue)") { state, sequence in
-                guard var surface = state.liveSurfaces[surfaceId],
-                      var authorityPane = surface.panes[String(paneId)] else {
+                guard state.liveSurfaces[surfaceId]?.panes[String(paneId)] != nil else {
                     throw SurfAceLocklessAuthorityError.invalidState("local_history_pane")
                 }
-                switch directionValue {
-                case "back":
-                    guard let previous = authorityPane.history.back.popLast() else {
-                        return .object(["commitSequence": .integer(sequence), "noop": .bool(true)])
-                    }
-                    authorityPane.history.forward.append(authorityPane.history.visible)
-                    authorityPane.history.visible = previous
-                default:
-                    guard let next = authorityPane.history.forward.popLast() else {
-                        return .object(["commitSequence": .integer(sequence), "noop": .bool(true)])
-                    }
-                    authorityPane.history.back.append(authorityPane.history.visible)
-                    authorityPane.history.visible = next
+                guard try SurfAceLocklessContentOperations.navigate(
+                    state: &state,
+                    surfaceId: surfaceId,
+                    paneId: Int64(paneId),
+                    direction: directionValue == "back" ? .back : .forward
+                ) != nil else {
+                    return .object(["commitSequence": .integer(sequence), "noop": .bool(true)])
                 }
-                authorityPane.history.visible.lastVisibleSequence = authorityPane.history.nextVisibleSequence
-                authorityPane.history.nextVisibleSequence += 1
-                surface.panes[String(paneId)] = authorityPane
-                surface.surfaceRevision += 1
-                state.liveSurfaces[surfaceId] = surface
                 return .object([
                     "commitSequence": .integer(sequence),
                     "direction": .string(directionValue),
@@ -1341,6 +1333,10 @@ final class SurfAceRuntime {
             projectedPane.bridge?.render(entry: renderableEntry(projectedPane.currentEntry), restoreViewport: nil)
             restorePaneDrawing(surfaceId: surfaceId, pane: projectedPane)
             projectedPane.lastNavigationURL = projectedPane.currentEntry.url
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: projectedPane.currentCompositeProvenance().accessibilityLabel
+            )
             await fanoutLocklessCommittedEvent(
                 op: "event.history_navigated",
                 payload: .object([
@@ -3356,8 +3352,12 @@ final class SurfAceRuntime {
     ) async {
         guard let locklessAdapter else { return }
         await withLocklessDeliveryTurn {
-            let blockedControllerIds = await drainControllerRetentionReclamationsInCurrentTurn(
+            let tombstoneBlockedControllerIds = await drainTombstoneReclamationsInCurrentTurn(
                 adapter: locklessAdapter
+            )
+            let blockedControllerIds = await drainControllerRetentionReclamationsInCurrentTurn(
+                adapter: locklessAdapter,
+                initiallyBlockedControllerIds: tombstoneBlockedControllerIds
             )
             let fanout = await locklessAdapter.fanout(
                 afterCommitted: .object(["op": .string(op), "payload": payload])
@@ -3384,16 +3384,99 @@ final class SurfAceRuntime {
         bypassingAdmissionBarrier: String? = nil
     ) async {
         await withLocklessDeliveryTurn(bypassingAdmissionBarrier: bypassingAdmissionBarrier) {
-            _ = await drainControllerRetentionReclamationsInCurrentTurn(adapter: adapter)
+            let blocked = await drainTombstoneReclamationsInCurrentTurn(adapter: adapter)
+            _ = await drainControllerRetentionReclamationsInCurrentTurn(
+                adapter: adapter,
+                initiallyBlockedControllerIds: blocked
+            )
         }
     }
 
-    private func drainControllerRetentionReclamationsInCurrentTurn(
+    private func drainTombstoneReclamationsInCurrentTurn(
         adapter: SurfAceLocklessRuntimeAdapter
+    ) async -> Set<String> {
+        let pending = await adapter.pendingTombstoneReclamations()
+        guard !pending.isEmpty else { return [] }
+        var blockedControllerIds: Set<String> = []
+        for delivery in pending {
+            let record = delivery.record
+            let diagnosticFields: [(String, CustomStringConvertible?)] = [
+                ("event_id", record.eventId),
+                ("commit_sequence", record.commitSequence),
+                ("tombstone_id", record.tombstoneId),
+                ("surface_id", record.surfaceId),
+                ("pane_id", record.paneId),
+                ("closed_sequence", record.closedSequence),
+                ("bytes", record.bytes),
+                ("kind", record.kind.rawValue),
+                ("max_retained_tombstones", record.maxRetainedTombstones),
+                ("max_retained_tombstone_bytes", record.maxRetainedTombstoneBytes),
+                ("nested_live_pane_count", record.nestedLivePaneCount),
+                ("nested_pane_tombstone_count", record.nestedPaneTombstoneCount),
+                ("unread_frame_count", record.unreadFrameCount),
+                ("unread_bytes_discarded", record.unreadBytesDiscarded),
+                ("reason", record.reason.rawValue),
+            ]
+            do {
+                try surfAcePersistRetentionDiagnostic(
+                    "event=lockless_tombstone_reclaimed \(surfAceDiagnosticFields(diagnosticFields))"
+                )
+            } catch {
+                surfAceLifecycleLog(
+                    "event=lockless_tombstone_reclamation_diagnostic_deferred \(error.localizedDescription)"
+                )
+                return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
+            }
+            guard let payload = try? Self.locklessJSON(record),
+                  case .object(var fields) = payload else {
+                return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
+            }
+            fields.removeValue(forKey: "eventId")
+            fields.removeValue(forKey: "deliveredControllerInstanceIds")
+            fields.removeValue(forKey: "recipientControllerInstanceIds")
+            let envelope: [String: Any] = [
+                "v": 1,
+                "type": "event",
+                "op": "event.tombstone_reclaimed",
+                "eventId": record.eventId,
+                "sentAt": timestampNow(),
+                "payload": Self.foundationJSON(.object(fields)),
+            ]
+            guard let json = encodeJSON(envelope) else {
+                return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
+            }
+            var deliveredControllerIds: [String] = []
+            for controllerId in delivery.connectionTokensByControllerInstanceId.keys.sorted() {
+                guard !blockedControllerIds.contains(controllerId),
+                      let connectionToken = delivery.connectionTokensByControllerInstanceId[controllerId],
+                      let connection = locklessConnectionsByConnectionUUID[connectionToken] else { continue }
+                do {
+                    try await connection.sender.send(text: json, priority: .event)
+                    deliveredControllerIds.append(controllerId)
+                } catch {
+                    blockedControllerIds.insert(controllerId)
+                    surfAceLifecycleLog(
+                        "event=lockless_tombstone_reclamation_delivery_deferred event_id=\(record.eventId) controller_instance_id=\(controllerId)"
+                    )
+                }
+            }
+            if !deliveredControllerIds.isEmpty || record.recipientControllerInstanceIds.isEmpty {
+                try? await adapter.acknowledgeTombstoneReclamation(
+                    eventId: record.eventId,
+                    deliveredControllerInstanceIds: deliveredControllerIds
+                )
+            }
+        }
+        return blockedControllerIds
+    }
+
+    private func drainControllerRetentionReclamationsInCurrentTurn(
+        adapter: SurfAceLocklessRuntimeAdapter,
+        initiallyBlockedControllerIds: Set<String> = []
     ) async -> Set<String> {
         let pending = await adapter.pendingControllerRetentionReclamations()
         guard !pending.isEmpty else { return [] }
-        var blockedControllerIds: Set<String> = []
+        var blockedControllerIds = initiallyBlockedControllerIds
         for delivery in pending {
             let record = delivery.record
             let diagnosticFields: [(String, CustomStringConvertible?)] = [

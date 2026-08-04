@@ -15,17 +15,27 @@ enum SurfAceLocklessTopologyOperationError: Error, Equatable, Sendable {
     case invalidAuthorityState(String)
 }
 
-struct SurfAceLocklessTombstoneReclamation: Equatable, Sendable {
-    enum Kind: String, Equatable, Sendable { case pane, surface }
-    enum Reason: String, Equatable, Sendable { case countCapacity = "count_capacity", byteCapacity = "byte_capacity" }
+struct SurfAceLocklessTombstoneReclamation: Codable, Equatable, Sendable {
+    enum Kind: String, Codable, Equatable, Sendable { case pane, surface }
+    enum Reason: String, Codable, Equatable, Sendable { case countCapacity = "count_capacity", byteCapacity = "byte_capacity" }
 
     var bytes: Int64
     var closedSequence: Int64
+    var commitSequence: Int64
+    var deliveredControllerInstanceIds: [String]
+    var eventId: String
     var kind: Kind
+    var maxRetainedTombstoneBytes: Int64
+    var maxRetainedTombstones: Int64
+    var nestedLivePaneCount: Int64
+    var nestedPaneTombstoneCount: Int64
     var paneId: Int64?
     var reason: Reason
+    var recipientControllerInstanceIds: [String]
     var surfaceId: String
     var tombstoneId: String
+    var unreadBytesDiscarded: Int64
+    var unreadFrameCount: Int64
 }
 
 struct SurfAceLocklessPaneSplitResult: Equatable, Sendable {
@@ -462,6 +472,20 @@ enum SurfAceLocklessTopologyOperations {
         )
     }
 
+    static func restoredPaneTombstoneBytes(
+        closedSequence: Int64,
+        pane: SurfAceLocklessPaneMaterial,
+        scope: SurfAceLocklessConsumableScope,
+        tombstoneId: String
+    ) throws -> Int64 {
+        try paneTombstoneBytes(
+            closedSequence: closedSequence,
+            pane: pane,
+            scope: scope,
+            tombstoneId: tombstoneId
+        )
+    }
+
     static func validateRestoredRecoverableState(
         _ state: SurfAceLocklessAuthorityState
     ) throws {
@@ -506,7 +530,10 @@ enum SurfAceLocklessTopologyOperations {
             throw SurfAceLocklessAuthorityError.invalidState("retained_tombstone_entries")
         }
         guard tombstoneBytes <= state.limits.maxRetainedTombstoneBytes else {
-            throw SurfAceLocklessAuthorityError.invalidState("retained_tombstone_bytes")
+            throw Error.tombstoneCapacity(
+                bytes: tombstoneBytes,
+                maximum: state.limits.maxRetainedTombstoneBytes
+            )
         }
     }
 }
@@ -784,17 +811,54 @@ private extension SurfAceLocklessTopologyOperations {
             }
             let victim = victims.min { left, right in left.closedSequence < right.closedSequence }
             guard let victim else { throw Error.invalidAuthorityState("tombstone_pool") }
+            let commitSequence = state.sequences.nextCommitSequence
+            let recipients = state.controllers.values.filter { $0.status == .live }
+                .map(\.controllerInstanceId).sorted()
+            let reclamation: SurfAceLocklessTombstoneReclamation
             switch victim {
             case .pane(let surfaceId, let tombstone):
                 guard var surface = state.liveSurfaces[surfaceId] else { throw Error.invalidAuthorityState("pane_tombstone_surface") }
                 surface.paneTombstones.removeAll { $0.tombstoneId == tombstone.tombstoneId }
                 state.liveSurfaces[surfaceId] = surface
-                reclamations.append(.init(bytes: tombstone.bytes, closedSequence: tombstone.closedSequence, kind: .pane, paneId: tombstone.pane.paneId, reason: reason, surfaceId: surfaceId, tombstoneId: tombstone.tombstoneId))
+                let records = tombstone.scope.records + Array(tombstone.scope.liveFrames.values)
+                reclamation = .init(
+                    bytes: tombstone.bytes, closedSequence: tombstone.closedSequence,
+                    commitSequence: commitSequence, deliveredControllerInstanceIds: [],
+                    eventId: "tombstone-reclamation:\(commitSequence):\(tombstone.closedSequence):\(tombstone.tombstoneId)",
+                    kind: .pane,
+                    maxRetainedTombstoneBytes: state.limits.maxRetainedTombstoneBytes,
+                    maxRetainedTombstones: state.limits.maxRetainedTombstones,
+                    nestedLivePaneCount: 0, nestedPaneTombstoneCount: 0,
+                    paneId: tombstone.pane.paneId, reason: reason,
+                    recipientControllerInstanceIds: recipients, surfaceId: surfaceId,
+                    tombstoneId: tombstone.tombstoneId,
+                    unreadBytesDiscarded: records.reduce(0) { $0 + $1.bytes },
+                    unreadFrameCount: Int64(records.filter { $0.recordClass == .annotationFrame }.count)
+                )
             case .surface(let tombstone):
                 state.surfaceTombstones.removeAll { $0.tombstoneId == tombstone.tombstoneId }
                 state.sceneSurfaceIds = state.sceneSurfaceIds.filter { $0.value != tombstone.surface.surfaceId }
-                reclamations.append(.init(bytes: tombstone.bytes, closedSequence: tombstone.closedSequence, kind: .surface, paneId: nil, reason: reason, surfaceId: tombstone.surface.surfaceId, tombstoneId: tombstone.tombstoneId))
+                let records = tombstone.scopes.values.flatMap { $0.records + Array($0.liveFrames.values) }
+                reclamation = .init(
+                    bytes: tombstone.bytes, closedSequence: tombstone.closedSequence,
+                    commitSequence: commitSequence, deliveredControllerInstanceIds: [],
+                    eventId: "tombstone-reclamation:\(commitSequence):\(tombstone.closedSequence):\(tombstone.tombstoneId)",
+                    kind: .surface,
+                    maxRetainedTombstoneBytes: state.limits.maxRetainedTombstoneBytes,
+                    maxRetainedTombstones: state.limits.maxRetainedTombstones,
+                    nestedLivePaneCount: Int64(tombstone.surface.panes.count),
+                    nestedPaneTombstoneCount: Int64(tombstone.surface.paneTombstones.count),
+                    paneId: nil, reason: reason,
+                    recipientControllerInstanceIds: recipients,
+                    surfaceId: tombstone.surface.surfaceId, tombstoneId: tombstone.tombstoneId,
+                    unreadBytesDiscarded: records.reduce(0) { $0 + $1.bytes },
+                    unreadFrameCount: Int64(records.filter { $0.recordClass == .annotationFrame }.count)
+                )
             }
+            reclamations.append(reclamation)
+            var pending = state.pendingTombstoneReclamations ?? []
+            pending.append(reclamation)
+            state.pendingTombstoneReclamations = pending
         }
         return reclamations
     }

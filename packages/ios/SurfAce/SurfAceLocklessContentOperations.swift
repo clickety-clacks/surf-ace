@@ -42,6 +42,11 @@ struct SurfAceLocklessContentPatchPreparation: Equatable, Sendable {
     var surfaceId: String
 }
 
+enum SurfAceLocklessHistoryDirection: Sendable {
+    case back
+    case forward
+}
+
 enum SurfAceLocklessContentOperations {
     static let maximumNonVisibleHistoryEntries = 20
 
@@ -166,6 +171,36 @@ enum SurfAceLocklessContentOperations {
             surface.surfaceRevision += 1
             candidate.liveSurfaces[surfaceId] = surface
             return result(for: pane, includeHistoryEntryId: false)
+        }
+    }
+
+    static func navigate(
+        state: inout SurfAceLocklessAuthorityState,
+        surfaceId: String,
+        paneId: Int64,
+        direction: SurfAceLocklessHistoryDirection
+    ) throws -> SurfAceLocklessHistoryEntry? {
+        try atomically(&state) { candidate in
+            var surface = try liveSurface(candidate, surfaceId)
+            guard var pane = surface.panes[String(paneId)] else {
+                throw Error.paneNotFound(paneId)
+            }
+            try requireAnnotationModeInactive(pane)
+            switch direction {
+            case .back:
+                guard let entry = pane.history.back.popLast() else { return nil }
+                pane.history.forward.append(pane.history.visible)
+                pane.history.visible = entry
+            case .forward:
+                guard let entry = pane.history.forward.popLast() else { return nil }
+                pane.history.back.append(pane.history.visible)
+                pane.history.visible = entry
+            }
+            pane.history.visible.lastVisibleSequence = allocateVisibleSequence(in: &pane.history)
+            surface.panes[String(paneId)] = pane
+            surface.surfaceRevision += 1
+            candidate.liveSurfaces[surfaceId] = surface
+            return pane.history.visible
         }
     }
 

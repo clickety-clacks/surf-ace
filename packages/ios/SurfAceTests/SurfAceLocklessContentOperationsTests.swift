@@ -317,3 +317,133 @@ final class SurfAceLocklessContentOperationsTests: XCTestCase {
         ])
     }
 }
+
+extension SurfAceLocklessContentOperationsTests {
+    func testACHIST01InterleavedControllersShareOrderedBackForwardHistory() throws {
+        var state = try authority()
+        for (content, controller) in [("A1", "A"), ("B1", "B"), ("A2", "A")] {
+            _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+                content: markdown(content), contentId: content, contentType: "markdown",
+                controllerProductName: controller, friendlyChatName: content,
+                paneId: 1, surfaceId: "sf_1"
+            ))
+            XCTAssertEqual(try pane(state).history.visible.contentId, content)
+        }
+        XCTAssertEqual(try pane(state).history.back.map(\.contentId), [nil, "A1", "B1"])
+        XCTAssertEqual(try SurfAceLocklessContentOperations.navigate(
+            state: &state, surfaceId: "sf_1", paneId: 1, direction: .back
+        )?.contentId, "B1")
+        XCTAssertEqual(try SurfAceLocklessContentOperations.navigate(
+            state: &state, surfaceId: "sf_1", paneId: 1, direction: .back
+        )?.contentId, "A1")
+        XCTAssertEqual(try SurfAceLocklessContentOperations.navigate(
+            state: &state, surfaceId: "sf_1", paneId: 1, direction: .forward
+        )?.contentId, "B1")
+        XCTAssertEqual(try SurfAceLocklessContentOperations.navigate(
+            state: &state, surfaceId: "sf_1", paneId: 1, direction: .forward
+        )?.contentId, "A2")
+    }
+
+    func testACHIST02NavigationRecencyControlsSharedTwentyEntryLRU() throws {
+        var state = try authority()
+        for index in 1...20 {
+            _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+                content: markdown("entry-\(index)"), contentId: "entry-\(index)", contentType: "markdown",
+                controllerProductName: index.isMultiple(of: 2) ? "B" : "A", friendlyChatName: nil,
+                paneId: 1, surfaceId: "sf_1"
+            ))
+        }
+        for _ in 0..<10 {
+            _ = try SurfAceLocklessContentOperations.navigate(
+                state: &state, surfaceId: "sf_1", paneId: 1, direction: .back
+            )
+        }
+        let refreshed = try pane(state).history.visible.contentId
+        for _ in 0..<10 {
+            _ = try SurfAceLocklessContentOperations.navigate(
+                state: &state, surfaceId: "sf_1", paneId: 1, direction: .forward
+            )
+        }
+        _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+            content: markdown("overflow"), contentId: "overflow", contentType: "markdown",
+            controllerProductName: "A", friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
+        ))
+        let history = try pane(state).history
+        XCTAssertEqual(history.back.count + history.forward.count, 20)
+        XCTAssertTrue(history.back.contains { $0.contentId == refreshed })
+        XCTAssertEqual(history.visible.contentId, "overflow")
+    }
+
+    func testACHIST03BackThenPushClearsForwardIndependentOfController() throws {
+        func run(_ controller: String) throws -> SurfAceLocklessHistory {
+            var state = try authority()
+            for value in ["one", "two"] {
+                _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+                    content: markdown(value), contentId: value, contentType: "markdown",
+                    controllerProductName: "seed", friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
+                ))
+            }
+            _ = try SurfAceLocklessContentOperations.navigate(
+                state: &state, surfaceId: "sf_1", paneId: 1, direction: .back
+            )
+            _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+                content: markdown("replacement"), contentId: "replacement", contentType: "markdown",
+                controllerProductName: controller, friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
+            ))
+            return try pane(state).history
+        }
+        let a = try run("A")
+        let b = try run("B")
+        XCTAssertTrue(a.forward.isEmpty)
+        XCTAssertTrue(b.forward.isEmpty)
+        XCTAssertEqual(a.back.map(\.contentId), b.back.map(\.contentId))
+    }
+
+    func testACHIST04NavigationRestoresEntryStateWithoutCursorMovement() throws {
+        var state = try authority()
+        state.scopes["pane:sf%5F1:1"] = .init(
+            cursors: ["A": .init(cursor: 7, gap: nil, gapGeneration: 0)], liveFrames: [:],
+            nextSequence: 7, records: [], scopeId: "pane:sf%5F1:1", scopeKind: "pane"
+        )
+        _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+            content: markdown("one"), contentId: "one", contentType: "markdown",
+            controllerProductName: "Clawline", friendlyChatName: "CLU", paneId: 1, surfaceId: "sf_1"
+        ))
+        var surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
+        surface.panes["1"]?.history.visible.annotations = .string("annotation-one")
+        state.liveSurfaces["sf_1"] = surface
+        let captured = try pane(state).history.visible
+        _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+            content: markdown("two"), contentId: "two", contentType: "markdown",
+            controllerProductName: "OpenClaw", friendlyChatName: "Other", paneId: 1, surfaceId: "sf_1"
+        ))
+        let cursor = state.scopes["pane:sf%5F1:1"]?.cursors
+        let restored = try SurfAceLocklessContentOperations.navigate(
+            state: &state, surfaceId: "sf_1", paneId: 1, direction: .back
+        )
+        XCTAssertEqual(restored?.content, captured.content)
+        XCTAssertEqual(restored?.annotations, captured.annotations)
+        XCTAssertEqual(restored?.revision, captured.revision)
+        XCTAssertEqual(restored?.provenance, captured.provenance)
+        XCTAssertEqual(restored?.historyEntryId, captured.historyEntryId)
+        XCTAssertGreaterThan(try XCTUnwrap(restored).lastVisibleSequence, captured.lastVisibleSequence)
+        XCTAssertEqual(state.scopes["pane:sf%5F1:1"]?.cursors, cursor)
+    }
+
+    func testACHIST05ChattyControllerHasNoHistoryQuotaOrProtection() throws {
+        var state = try authority()
+        _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+            content: markdown("B-old"), contentId: "B-old", contentType: "markdown",
+            controllerProductName: "B", friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
+        ))
+        for index in 0..<21 {
+            _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+                content: markdown("A-\(index)"), contentId: "A-\(index)", contentType: "markdown",
+                controllerProductName: "A", friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
+            ))
+        }
+        let retained = try pane(state).history.back + pane(state).history.forward
+        XCTAssertFalse(retained.contains { $0.contentId == "B-old" })
+        XCTAssertEqual(retained.count, 20)
+    }
+}

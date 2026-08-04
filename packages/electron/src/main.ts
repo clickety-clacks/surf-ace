@@ -1415,8 +1415,7 @@ async function contentPayloadFromFile(
 }
 
 async function createAdditionalWindow(): Promise<void> {
-  core.createAdditionalSurface(endpointName(), displayViewport());
-  await persistState();
+  await server.openSurfaceFromLocalUser();
 }
 
 function installMenu(): void {

@@ -4,7 +4,10 @@ import test from "node:test";
 
 import WebSocket from "ws";
 
-import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
+import {
+  SURF_ACE_LOCKLESS_V1_CAPABILITY,
+  locklessPaneScopeId,
+} from "../../protocol/src/lockless.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import {
   DEFAULT_LOCKLESS_LIMITS,
@@ -338,7 +341,7 @@ test("canonical target-admission cases execute Electron authority semantics", as
   }
 });
 
-test("websocket integration harness admits concurrent controllers and fans out client commits", async () => {
+test("AC-TOPO-04: split rename resize close restore and realization share stable IDs and one topology revision seam", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -755,6 +758,19 @@ test("websocket integration harness admits concurrent controllers and fans out c
     });
     assert.equal(restoredTopologyPane.ok, true, JSON.stringify(restoredTopologyPane));
     assert.equal(restoredTopologyPane.payload.paneId, allocatedPaneId);
+    const renamed = await request(second, "pane.rename", {
+      expectedTopologyRevision: restoredTopologyPane.payload.topologyRevision,
+      name: "Stable allocated pane",
+      paneId: allocatedPaneId,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(renamed.ok, true, JSON.stringify(renamed));
+    assert.equal(renamed.payload.paneId, allocatedPaneId);
+    assert.equal(renamed.payload.name, "Stable allocated pane");
+    assert.equal(
+      renamed.payload.topologyRevision,
+      restoredTopologyPane.payload.topologyRevision + 1,
+    );
   } finally {
     first.close();
     second.close();
@@ -1427,7 +1443,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
     hostName: "localhost",
     persistLocklessState: async () => {
       persistenceCalls += 1;
-      if (persistenceCalls === 1) {
+      if (persistenceCalls === 2) {
         await new Promise<void>((resolve) => {
           releasePersistence = resolve;
         });
@@ -1456,7 +1472,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
       new Promise<string>((resolve) => setTimeout(() => resolve("withheld"), 25)),
     ]);
     assert.equal(early, "withheld");
-    assert.equal(persistenceCalls, 1);
+    assert.equal(persistenceCalls, 2);
     assert.ok(releasePersistence);
     releasePersistence();
     const terminal = await mutation;
@@ -1481,7 +1497,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
       requestId,
     });
     assert.equal(acknowledged.payload.accepted, true);
-    assert.equal(persistenceCalls, 2);
+    assert.equal(persistenceCalls, 3);
     const afterAck = await request(socket, "operation.receipt.sync", {
       requestIds: [requestId],
     });
@@ -1492,7 +1508,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
     });
     assert.equal(released.payload.accepted, true);
     assert.equal(released.payload.release, true);
-    assert.equal(persistenceCalls, 3);
+    assert.equal(persistenceCalls, 4);
     const afterRelease = await request(socket, "operation.receipt.sync", {
       requestIds: [requestId],
     });
@@ -1696,7 +1712,213 @@ test("migration admission rejects foreign and remapped bootstrap scopes", async 
   }
 });
 
-test("zero-live-surface restart retains lifecycle authority and restores a surface tombstone", async () => {
+test("E-MIG-RECEIPT :: websocket migration response waits for durable conversion and exact receipt replay", async () => {
+  const core = new SurfaceCore({ clientIdentity: "electron-client" });
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 1,
+    initialPaneLabel: 1,
+    windowLabel: "a",
+  });
+  const material = {
+    scopes: [
+      {
+        records: [{ payload: { x: 1 }, recordClass: "tap" }],
+        scopeId: locklessPaneScopeId(surface.surfaceId, 1),
+        scopeKind: "pane",
+      },
+    ],
+  };
+  let durable: ReturnType<SurfaceCore["getPersistentState"]> | null = null;
+  let releasePersistence = (): void => {};
+  const persistenceGate = new Promise<void>((resolve) => {
+    releasePersistence = resolve;
+  });
+  let persistenceCalls = 0;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      persistenceCalls += 1;
+      if (persistenceCalls === 1) {
+        durable = core.getPersistentState();
+        await persistenceGate;
+      }
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const requestId = "rq_durable_migration";
+  const payload = {
+    controllerInstanceId: "openclaw",
+    migrationMaterial: material,
+    projectionCapacityBytes: 5 * 1024 * 1024,
+    protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+    protocolVersion: 1,
+    surfaceId: surface.surfaceId,
+  };
+  try {
+    const pending = request(socket, "pair.request", payload, { id: requestId });
+    const early = await Promise.race([
+      pending.then(() => "response"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("withheld"), 25)),
+    ]);
+    assert.equal(early, "withheld");
+    assert(durable);
+    assert.equal(durable.lockless?.modeBySurfaceId[surface.surfaceId], "lockless");
+    assert.equal(
+      durable.lockless?.migrationReceipts[requestId]?.requestId,
+      requestId,
+    );
+    releasePersistence();
+    const committed = await pending;
+    assert.equal(committed.ok, true, JSON.stringify(committed));
+    assert.equal(committed.payload.migrationAccepted, true);
+    assert.equal(committed.payload.migrationReceiptId, requestId);
+  } finally {
+    releasePersistence();
+    socket.close();
+    await server.stop();
+  }
+
+  assert(durable);
+  const restarted = new SurfaceCore({
+    clientIdentity: "electron-client",
+    persistentState: durable,
+  });
+  restarted.restorePersistedSurfaces("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const replayPort = nextPort++;
+  const replayServer = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core: restarted,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port: replayPort,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await replayServer.start();
+  const replaySocket = await connect(
+    `ws://127.0.0.1:${replayPort}${replayServer.wsPath}`,
+  );
+  try {
+    const replayed = await request(
+      replaySocket,
+      "pair.request",
+      payload,
+      { id: requestId },
+    );
+    assert.equal(replayed.ok, true, JSON.stringify(replayed));
+    assert.equal(replayed.payload.migrationReceiptId, requestId);
+    assert.equal(
+      restarted.locklessAuthority.exportState().scopes[
+        locklessPaneScopeId(surface.surfaceId, 1)
+      ]?.records.length,
+      1,
+    );
+  } finally {
+    replaySocket.close();
+    await replayServer.stop();
+  }
+});
+
+test("AC-MIG-01: upgraded Electron keeps legacy and lockless negotiation mutually exclusive without capable fallback", async () => {
+  const core = new SurfaceCore();
+  const legacySurface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const locklessSurface = core.createAdditionalSurface("Surf Ace 2", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const legacy = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const capableAgainstLegacy = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const capable = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const legacyAgainstCapable = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const admittedLegacy = await request(legacy, "pair.request", {
+      connectionId: "conn_legacy",
+      initialPaneId: 1,
+      initialPaneLabel: 1,
+      protocolVersion: 1,
+      providerId: "pv_legacy",
+      providerName: "Legacy OpenClaw",
+      surfaceId: legacySurface.surfaceId,
+      takeover: false,
+      windowLabel: "a",
+    });
+    assert.equal(admittedLegacy.ok, true, JSON.stringify(admittedLegacy));
+    const noFallback = await pair(
+      capableAgainstLegacy,
+      "capable-controller",
+      legacySurface.surfaceId,
+    );
+    assert.equal(noFallback.ok, false);
+    assert.equal(noFallback.error.code, "capability_mismatch");
+    assert.equal(core.locklessAuthority.surfaceMode(legacySurface.surfaceId), null);
+
+    const admittedLockless = await pair(
+      capable,
+      "lockless-controller",
+      locklessSurface.surfaceId,
+    );
+    assert.equal(admittedLockless.ok, true, JSON.stringify(admittedLockless));
+    assert.equal(admittedLockless.payload.mode, "lockless");
+    const noLegacyMix = await request(legacyAgainstCapable, "pair.request", {
+      connectionId: "conn_forbidden_legacy",
+      initialPaneId: 1,
+      initialPaneLabel: 1,
+      protocolVersion: 1,
+      providerId: "pv_forbidden",
+      providerName: "Legacy fallback",
+      surfaceId: locklessSurface.surfaceId,
+      takeover: false,
+      windowLabel: "b",
+    });
+    assert.equal(noLegacyMix.ok, false);
+    assert.equal(noLegacyMix.error.code, "capability_mismatch");
+    assert.equal(
+      core.locklessAuthority.surfaceMode(locklessSurface.surfaceId),
+      "lockless",
+    );
+  } finally {
+    legacy.close();
+    capableAgainstLegacy.close();
+    capable.close();
+    legacyAgainstCapable.close();
+    await server.stop();
+  }
+});
+
+test("AC-SURF-02: complete surface close persists a tombstone before zero-live socket teardown and restores exact identity after restart", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -1729,10 +1951,45 @@ test("zero-live-surface restart retains lifecycle authority and restores a surfa
   assert.equal(lifecyclePair.ok, true, JSON.stringify(lifecyclePair));
   assert.equal(surfacePair.ok, true, JSON.stringify(surfacePair));
   const listed = await request(lifecycle, "surfaces.list", {});
+  const panes = await request(surfaceSession, "panes.list", {
+    surfaceId: surface.surfaceId,
+  });
+  const anchorPaneId = panes.payload.panes[0].paneId;
+  const split = await request(surfaceSession, "pane.split", {
+    count: 2,
+    direction: "horizontal",
+    expectedTopologyRevision: panes.payload.topology.topologyRevision,
+    paneId: anchorPaneId,
+    surfaceId: surface.surfaceId,
+  });
+  assert.equal(split.ok, true, JSON.stringify(split));
+  const nestedPaneId = split.payload.panes.find(
+    (pane: { paneId: number }) => pane.paneId !== anchorPaneId,
+  ).paneId;
+  const content = await request(surfaceSession, "content.set", {
+    content: { markdown: "# retained nested material" },
+    contentId: "nested-retained-content",
+    contentType: "markdown",
+    paneId: nestedPaneId,
+    surfaceId: surface.surfaceId,
+  });
+  assert.equal(content.ok, true, JSON.stringify(content));
+  core.locklessAuthority.appendConsumable({
+    payload: { value: "nested-unread" },
+    recordClass: "tap",
+    scopeId: locklessPaneScopeId(surface.surfaceId, nestedPaneId),
+    scopeKind: "pane",
+    triggerOperation: "test.surface-close",
+  });
+  const nestedClosed = await request(surfaceSession, "pane.close", {
+    expectedTopologyRevision: split.payload.topologyRevision,
+    paneId: nestedPaneId,
+    surfaceId: surface.surfaceId,
+  });
+  assert.equal(nestedClosed.ok, true, JSON.stringify(nestedClosed));
   const closed = await request(surfaceSession, "surface.window.close", {
     expectedSurfaceSetRevision: listed.payload.surfaceSetRevision,
-    expectedTopologyRevision:
-      listed.payload.surfaces[0].topology.topologyRevision,
+    expectedTopologyRevision: nestedClosed.payload.topologyRevision,
     surfaceId: surface.surfaceId,
   });
   assert.equal(closed.ok, true, JSON.stringify(closed));
@@ -1752,6 +2009,31 @@ test("zero-live-surface restart retains lifecycle authority and restores a surfa
     [],
   );
   assert.equal(restarted.listSurfaces().length, 0);
+  const retainedSurface = restarted.locklessAuthority
+    .listTombstones("surface")[0]!;
+  const retainedPayload = retainedSurface.payload as {
+    paneTombstones: Array<{
+      payload: { pane: { history: Array<{ contentId: string }> } };
+      scopes: Record<string, { records: Array<{ payload: unknown }> }>;
+      tombstoneId: string;
+    }>;
+  };
+  assert.equal(
+    retainedPayload.paneTombstones[0]?.tombstoneId,
+    nestedClosed.payload.tombstoneId,
+  );
+  assert.equal(
+    retainedPayload.paneTombstones[0]?.payload.pane.history.some(
+      (entry) => entry.contentId === "nested-retained-content",
+    ),
+    true,
+  );
+  assert.equal(
+    retainedPayload.paneTombstones[0]?.scopes[
+      locklessPaneScopeId(surface.surfaceId, nestedPaneId)
+    ]?.records.length,
+    2,
+  );
   const secondPort = nextPort++;
   const secondServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
@@ -1778,8 +2060,116 @@ test("zero-live-surface restart retains lifecycle authority and restores a surfa
     });
     assert.equal(restored.ok, true, JSON.stringify(restored));
     assert.equal(restored.payload.surfaceId, surface.surfaceId);
+    assert.equal(
+      restarted.locklessAuthority.listTombstones("pane")[0]?.tombstoneId,
+      nestedClosed.payload.tombstoneId,
+    );
   } finally {
     resumed.close();
     await secondServer.stop();
+  }
+});
+
+test("AC-SURF-01: controller and local-user surface lifecycle share the persisted client authority seam", async () => {
+  const core = new SurfaceCore();
+  core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const port = nextPort++;
+  let persistedRevision = -1;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      persistedRevision = core.locklessAuthority.surfaceSetRevision;
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const lifecycle = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(lifecycle, "lifecycle-controller")).ok, true);
+    const initial = await request(lifecycle, "surfaces.list", {});
+    const opened = await request(lifecycle, "surface.window.open", {
+      expectedSurfaceSetRevision: initial.payload.surfaceSetRevision,
+    });
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(opened.payload.surfaceSetRevision, initial.payload.surfaceSetRevision + 1);
+    assert.equal(persistedRevision, opened.payload.surfaceSetRevision);
+
+    const localOpened = await server.openSurfaceFromLocalUser();
+    assert.equal(localOpened.surfaceSetRevision, opened.payload.surfaceSetRevision + 1);
+    assert.equal(core.locklessAuthority.surfaceMode(localOpened.surfaceId), "lockless");
+    assert.equal(persistedRevision, localOpened.surfaceSetRevision);
+    const localClosed = await server.closeSurfaceFromLocalUser(localOpened.surfaceId);
+    assert.equal(localClosed.surfaceSetRevision, localOpened.surfaceSetRevision + 1);
+    assert.equal(persistedRevision, localClosed.surfaceSetRevision);
+    assert.equal(
+      core.locklessAuthority.listTombstones("surface")
+        .some((entry) => entry.tombstoneId === localClosed.tombstoneId),
+      true,
+    );
+  } finally {
+    lifecycle.close();
+    await server.stop();
+  }
+});
+
+test("AC-SURF-04: concurrent lifecycle requests serialize once and stale callers must recompute with a new request ID", async () => {
+  const core = new SurfaceCore();
+  core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const first = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(first, "lifecycle-first")).ok, true);
+    assert.equal((await pair(second, "lifecycle-second")).ok, true);
+    const initialRevision = core.locklessAuthority.surfaceSetRevision;
+    const [left, right] = await Promise.all([
+      request(first, "surface.window.open", {
+        expectedSurfaceSetRevision: initialRevision,
+      }, { id: "rq_surface_open_left" }),
+      request(second, "surface.window.open", {
+        expectedSurfaceSetRevision: initialRevision,
+      }, { id: "rq_surface_open_right" }),
+    ]);
+    const winner = [left, right].find((response) => response.ok)!;
+    const stale = [left, right].find((response) => !response.ok)!;
+    assert.equal(stale.error.code, "stale_surface_set");
+    assert.equal(core.listSurfaces().length, 2);
+    const retrySocket = stale.id === "rq_surface_open_left" ? first : second;
+    const retried = await request(retrySocket, "surface.window.open", {
+      expectedSurfaceSetRevision: winner.payload.surfaceSetRevision,
+    }, { id: "rq_surface_open_recomputed" });
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    assert.equal(
+      retried.payload.surfaceSetRevision,
+      winner.payload.surfaceSetRevision + 1,
+    );
+    assert.equal(core.listSurfaces().length, 3);
+  } finally {
+    first.close();
+    second.close();
+    await server.stop();
   }
 });

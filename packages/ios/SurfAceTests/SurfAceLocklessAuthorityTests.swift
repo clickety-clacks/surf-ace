@@ -309,6 +309,7 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
             "interactive": true,
             "payload": ["kind": "markdown", "markdown": "hello"],
             "provenanceDisplayName": "CLU",
+            "senderDisplayName": "Clawline",
             "revision": 4,
             "scrollable": true,
             "strokesById": [:],
@@ -465,4 +466,315 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         )
         return tombstone
     }
+}
+
+extension SurfAceLocklessAuthorityTests {
+    func testACCLOSE07ValidCloseAtExactBoundAndFourStandaloneTransitionsAreAtomic() throws {
+        for reversed in [false, true] {
+            var closeState = try closeAtExactTombstoneBound(reversedIdentities: reversed)
+            let beforeClose = closeState
+            let surface = try XCTUnwrap(closeState.liveSurfaces.values.first)
+            let close = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+                state: &closeState,
+                surfaceId: surface.surfaceId,
+                expectedSurfaceSetRevision: closeState.surfaceSetRevision,
+                expectedTopologyRevision: surface.topologyRevision
+            )
+            let retained = try XCTUnwrap(
+                closeState.surfaceTombstones.first(where: { $0.tombstoneId == close.tombstoneId })
+            )
+            XCTAssertEqual(retained.bytes, beforeClose.limits.maxRecoverableSurfaceBytes)
+            XCTAssertEqual(retained.bytes, beforeClose.limits.maxRetainedTombstoneBytes)
+            XCTAssertEqual(retained.surface, beforeClose.liveSurfaces[surface.surfaceId])
+
+            let equality = try retainedAggregateTransitionState(reversedIdentities: reversed)
+            let exactAggregate = equality.surfaceTombstones.reduce(Int64(0)) { $0 + $1.bytes }
+            XCTAssertEqual(exactAggregate, equality.limits.maxRetainedTombstoneBytes)
+            let equalitySource = equality
+            for transition in [
+                SurfAceLocklessRecoverableTransition.locklessAdmission,
+                .legacyMigration, .restart, .configuration,
+            ] {
+                XCTAssertEqual(try equality.validated(for: transition), equality)
+                XCTAssertEqual(equality, equalitySource)
+            }
+
+            var overLimits = equality.limits
+            overLimits.maxRetainedTombstoneBytes = exactAggregate - 1
+            XCTAssertGreaterThanOrEqual(
+                overLimits.maxRetainedTombstoneBytes,
+                overLimits.maxRecoverableSurfaceBytes
+            )
+            let priorGeneration = equality
+            for transition in [
+                SurfAceLocklessRecoverableTransition.locklessAdmission,
+                .legacyMigration, .restart, .configuration,
+            ] {
+                XCTAssertThrowsError(try equality.validated(for: transition, limits: overLimits)) { error in
+                    XCTAssertEqual(
+                        error as? SurfAceLocklessTopologyOperationError,
+                        .tombstoneCapacity(bytes: exactAggregate, maximum: exactAggregate - 1)
+                    )
+                }
+                XCTAssertEqual(equality, priorGeneration)
+            }
+        }
+
+        let normal = try retainedAggregateTransitionState(reversedIdentities: false)
+        let reversed = try retainedAggregateTransitionState(reversedIdentities: true)
+        XCTAssertEqual(normal.surfaceTombstones.map(\.bytes), reversed.surfaceTombstones.map(\.bytes))
+    }
+
+    func testACMIG02OverPPreservedStateMigratesWithoutClampAndTrueCombinedOverflowRejects() throws {
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxPanesPerSurface = 2
+        limits.maxRetainedTombstones = 3
+        let valid = try legacySnapshotWithPaneCount(3)
+        let migrated = try SurfAceLocklessMigration.migrate(valid, limits: limits)
+        XCTAssertEqual(migrated.liveSurfaces["sf_1"]?.panes.count, 3)
+        XCTAssertEqual(migrated.liveSurfaces["sf_1"]?.panes.keys.sorted(), ["7", "8", "9"])
+        let before = migrated
+        var refusal = migrated
+        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &refusal, surfaceId: "sf_1", paneId: 7, count: 2,
+            direction: "horizontal", expectedTopologyRevision: 0
+        )) { error in
+            XCTAssertEqual(
+                error as? SurfAceLocklessTopologyOperationError,
+                .paneCapacity(current: 3, requested: 4, maximum: 2)
+            )
+        }
+        XCTAssertEqual(refusal, before)
+        XCTAssertThrowsError(try SurfAceLocklessMigration.migrate(
+            legacySnapshotWithPaneCount(6), limits: limits
+        )) { error in
+            XCTAssertTrue(
+                error is SurfAceLocklessAuthorityError || error is SurfAceLocklessMigrationError,
+                "unexpected migration failure \(error)"
+            )
+        }
+    }
+
+    func testACCAP03AndACOPS01ExactOverPGenerationRestoresBeforeAdmission() async throws {
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxPanesPerSurface = 2
+        limits.maxRetainedTombstones = 3
+        var state = try SurfAceLocklessMigration.migrate(
+            legacySnapshotWithPaneCount(3), limits: limits
+        )
+        state.controllers["live"] = SurfAceLocklessControllerBundle(
+            controllerInstanceId: "live", controllerProductName: "A", disconnectedAt: nil,
+            dormantSequence: nil, pendingOperationReceipts: [:], projectionCapacityBytes: 8_388_608,
+            status: .live
+        )
+        state.controllers["dormant"] = SurfAceLocklessControllerBundle(
+            controllerInstanceId: "dormant", controllerProductName: "B", disconnectedAt: 10,
+            dormantSequence: 1, pendingOperationReceipts: [:], projectionCapacityBytes: 8_388_608,
+            status: .dormant
+        )
+        state.sequences.nextDormantSequence = 2
+        SurfAceLocklessConsumableOperations.admitController("live", in: &state)
+        SurfAceLocklessConsumableOperations.admitController("dormant", in: &state)
+        XCTAssertEqual(limits.recoverableSurfaceMinimumBytes,
+            limits.maxSurfaceRecoverableBaseBytes
+                + limits.maxSurfaceConsumableBytes
+                + limits.maxAdmittedControllerEntries * limits.maxConsumableCursorStateBytesPerScope
+                + (limits.maxPanesPerSurface + limits.maxRetainedTombstones)
+                    * (limits.maxPaneRecoverableStateBytes + limits.maxPaneConsumableBytes
+                        + limits.maxAdmittedControllerEntries * limits.maxConsumableCursorStateBytesPerScope)
+        )
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ACOPS01-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(
+            store: store, legacy: .init(identityMapping: nil, surfaceTopologies: nil)
+        )
+        let readiness = await adapter.readinessSnapshot()
+        XCTAssertTrue(readiness.fullGenerationLoaded)
+        XCTAssertTrue(readiness.readyForAdmission)
+        XCTAssertEqual(readiness.state.liveSurfaces["sf_1"]?.panes.count, 3)
+        XCTAssertEqual(readiness.state.limits, limits)
+        XCTAssertEqual(readiness.state.controllers.keys.sorted(), ["dormant", "live"])
+        XCTAssertTrue(readiness.state.controllers.values.allSatisfy { $0.status == .dormant })
+    }
+
+    func testRollbackProjectionPreservesBothCompositeProvenanceComponents() throws {
+        let state = try SurfAceLocklessMigration.migrate(legacySnapshot())
+        let preview = try SurfAceLocklessMigration.rollbackPreview(state)
+        let root = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: preview.projection.surfaceTopologies) as? [String: Any]
+        )
+        let surface = try XCTUnwrap(root["sf_1"] as? [String: Any])
+        let panes = try XCTUnwrap(surface["panes"] as? [[String: Any]])
+        let current = try XCTUnwrap(panes.first?["currentEntry"] as? [String: Any])
+        XCTAssertEqual(current["provenanceDisplayName"] as? String, "CLU")
+        XCTAssertEqual(current["senderDisplayName"] as? String, "Clawline")
+    }
+
+    private func legacySnapshotWithPaneCount(_ count: Int) throws -> SurfAceLegacyUserDefaultsSnapshot {
+        let source = legacySnapshot()
+        var root = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: XCTUnwrap(source.surfaceTopologies)) as? [String: Any]
+        )
+        var surface = try XCTUnwrap(root["sf_1"] as? [String: Any])
+        let template = try XCTUnwrap((surface["panes"] as? [[String: Any]])?.first)
+        var panes: [[String: Any]] = []
+        var leaves: [[String: Any]] = []
+        for index in 0..<count {
+            var pane = template
+            pane["paneId"] = 7 + index
+            pane["paneLabel"] = 2 + index
+            pane["paneLineageId"] = "pl_\(7 + index)"
+            panes.append(pane)
+            leaves.append(["kind": "leaf", "paneId": 7 + index, "weight": 1.0 / Double(count)])
+        }
+        surface["panes"] = panes
+        surface["paneLayout"] = count == 1
+            ? leaves[0]
+            : ["kind": "split", "direction": "horizontal", "children": leaves]
+        root["sf_1"] = surface
+        return SurfAceLegacyUserDefaultsSnapshot(
+            identityMapping: source.identityMapping,
+            surfaceTopologies: try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        )
+    }
+
+    private func retainedAggregateTransitionState(
+        reversedIdentities: Bool
+    ) throws -> SurfAceLocklessAuthorityState {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        for index in 0..<2 {
+            let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+                state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision
+            )
+            _ = try SurfAceLocklessTopologyOperations.paneSplit(
+                state: &state, surfaceId: opened.surface.surfaceId, paneId: 1, count: 3,
+                direction: "horizontal", expectedTopologyRevision: 0
+            )
+            try applyEqualWidthIdentity(
+                to: &state, surfaceId: opened.surface.surfaceId,
+                reversed: reversedIdentities != (index == 0)
+            )
+            _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+                state: &state, surfaceId: opened.surface.surfaceId,
+                expectedSurfaceSetRevision: state.surfaceSetRevision,
+                expectedTopologyRevision: 1
+            )
+        }
+        var limits = try exactSmallLimits(for: state)
+        let aggregate = state.surfaceTombstones.reduce(Int64(0)) { $0 + $1.bytes }
+        limits.maxRetainedTombstoneBytes = aggregate
+        limits.maxRecoverableSurfaceBytes = max(
+            limits.recoverableSurfaceMinimumBytes,
+            state.surfaceTombstones.map(\.bytes).max() ?? 1
+        )
+        XCTAssertLessThanOrEqual(limits.maxRecoverableSurfaceBytes, aggregate)
+        state.limits = limits
+        return try state.validated(for: .configuration)
+    }
+
+    private func closeAtExactTombstoneBound(
+        reversedIdentities: Bool
+    ) throws -> SurfAceLocklessAuthorityState {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        )
+        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &state, surfaceId: opened.surface.surfaceId, paneId: 1, count: 3,
+            direction: "horizontal", expectedTopologyRevision: 0
+        )
+        _ = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: opened.surface.surfaceId,
+            paneId: split.newPaneIds[0], expectedTopologyRevision: 1
+        )
+        _ = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: opened.surface.surfaceId,
+            paneId: split.newPaneIds[1], expectedTopologyRevision: 2
+        )
+        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &state, surfaceId: opened.surface.surfaceId, paneId: 1, count: 3,
+            direction: "vertical", expectedTopologyRevision: 3
+        )
+        try applyEqualWidthIdentity(
+            to: &state, surfaceId: opened.surface.surfaceId, reversed: reversedIdentities
+        )
+        let surface = try XCTUnwrap(state.liveSurfaces[opened.surface.surfaceId])
+        let sequence = state.sequences.nextClosedSequence
+        let tombstoneId = String(format: "st_%016llx", sequence)
+        let scopes = Dictionary(uniqueKeysWithValues: state.scopes.filter {
+            $0.key.hasPrefix("surface:") || $0.key.hasPrefix("pane:")
+        })
+        let exact = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+            closedSequence: sequence, scopes: scopes, surface: surface, tombstoneId: tombstoneId
+        )
+        var limits = try exactSmallLimits(for: state)
+        limits.maxRetainedTombstoneBytes = exact
+        limits.maxRecoverableSurfaceBytes = exact
+        XCTAssertLessThanOrEqual(limits.recoverableSurfaceMinimumBytes, exact)
+        state.limits = limits
+        return try state.validated(for: .configuration)
+    }
+
+    private func exactSmallLimits(
+        for state: SurfAceLocklessAuthorityState
+    ) throws -> SurfAceLocklessCapacityLimits {
+        let surfaces = Array(state.liveSurfaces.values) + state.surfaceTombstones.map(\.surface)
+        let panes = surfaces.flatMap { Array($0.panes.values) + $0.paneTombstones.map(\.pane) }
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxPanesPerSurface = 3
+        limits.maxRetainedTombstones = 2
+        limits.maxPaneRecoverableStateBytes = try panes.map {
+            try SurfAceLocklessContentOperations.exactPaneRecoverableBytes($0)
+        }.max() ?? 1
+        limits.maxPaneAnnotationRestoreBytes = try panes.map {
+            try SurfAceLocklessContentOperations.exactAnnotationRestoreBytes($0)
+        }.max() ?? 1
+        limits.maxSurfaceRecoverableBaseBytes = try surfaces.map {
+            try SurfAceLocklessTopologyOperations.surfaceBaseBytes($0)
+        }.max() ?? 1
+        limits.maxPaneConsumableRecords = 1
+        limits.maxPaneConsumableBytes = 1
+        limits.maxSurfaceConsumableRecords = 1
+        limits.maxSurfaceConsumableBytes = 1
+        limits.maxConsumableRecordBytes = 1
+        limits.maxConsumableCursorStateBytesPerScope = 1
+        limits.maxAdmittedControllerEntries = 1
+        limits.maxDormantControllerEntries = 1
+        limits.maxRecoverableSurfaceBytes = limits.recoverableSurfaceMinimumBytes
+        limits.maxRetainedTombstoneBytes = limits.maxRecoverableSurfaceBytes
+        return limits
+    }
+
+    private func applyEqualWidthIdentity(
+        to state: inout SurfAceLocklessAuthorityState,
+        surfaceId: String,
+        reversed: Bool
+    ) throws {
+        var surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        let chat = reversed ? "Controller-B" : "Controller-A"
+        let product = reversed ? "Product-B" : "Product-A"
+        for key in surface.panes.keys {
+            surface.panes[key]?.history.visible.provenance = .init(
+                friendlyChatName: chat, controllerProductName: product
+            )
+        }
+        for index in surface.paneTombstones.indices {
+            surface.paneTombstones[index].pane.history.visible.provenance = .init(
+                friendlyChatName: chat, controllerProductName: product
+            )
+            let tombstone = surface.paneTombstones[index]
+            surface.paneTombstones[index].bytes = try SurfAceLocklessTopologyOperations
+                .restoredPaneTombstoneBytes(
+                    closedSequence: tombstone.closedSequence,
+                    pane: surface.paneTombstones[index].pane,
+                    scope: tombstone.scope,
+                    tombstoneId: tombstone.tombstoneId
+                )
+        }
+        state.liveSurfaces[surfaceId] = surface
+    }
+
 }

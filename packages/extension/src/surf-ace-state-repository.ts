@@ -25,6 +25,8 @@ export class SurfAceStateRepository<TState> {
 
   async save(state: TState): Promise<void> {
     await fs.mkdir(this.stateDir, { recursive: true });
-    await fs.writeFile(this.statePath, JSON.stringify(state, null, 2));
+    const temporaryPath = `${this.statePath}.${process.pid}.tmp`;
+    await fs.writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`);
+    await fs.rename(temporaryPath, this.statePath);
   }
 }

@@ -70,10 +70,13 @@ export type LocklessControllerSessionOptions = {
   onConsumableAvailable?: (scopeId: LocklessScopeId) => void;
   onConsumableAcknowledged?: (scopeId: LocklessScopeId) => void;
   preflightComplete?: boolean;
-  prepareMigration?: () => Promise<{
-    accept(): Promise<void>;
+  prepareMigration?: (controllerInstanceId: ControllerInstanceId) => Promise<{
+    complete(): Promise<void>;
     material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
-    reject(): Promise<void>;
+    markClientCommitted(migrationReceiptId: string): Promise<void>;
+    markPairSent(): Promise<void>;
+    markSourceCleared(): Promise<void>;
+    pairRequestId: string;
   } | null>;
   surfaceId?: string;
   wire: ControllerWire;
@@ -165,6 +168,11 @@ export class LocklessControllerSession {
       this.repairScopes.add(scopeId);
     }
     this.controllerInstanceId = await this.options.identity.loadOrCreate();
+    // Surface migration continuity is hydrated and durably prepared before the
+    // first transport for that surface is opened.
+    const migration = await this.options.prepareMigration?.(
+      this.controllerInstanceId,
+    ) ?? null;
     await this.options.wire.connect();
     this.unsubscribeClose = this.options.wire.onClose?.(() => {
       void this.handleTransportLoss();
@@ -197,11 +205,11 @@ export class LocklessControllerSession {
         }
       });
     });
-    const migration = await this.options.prepareMigration?.() ?? null;
-    const pairRequestId = `rq_pair_${randomUUID()}`;
+    const pairRequestId = migration?.pairRequestId ?? `rq_pair_${randomUUID()}`;
     let payload: Record<string, unknown>;
     let scopes: unknown[];
     try {
+      await migration?.markPairSent();
       const response = await this.options.wire.request(LOCKLESS_WIRE_OPS.pair, {
         controllerInstanceId: this.controllerInstanceId,
         controllerProductName: this.options.controllerProductName,
@@ -240,9 +248,12 @@ export class LocklessControllerSession {
         throw new Error("invalid_lockless_pair_receipt_resolutions");
       }
       scopes = payload.scopes;
-      await migration?.accept();
+      if (migration) {
+        await migration.markClientCommitted(String(payload.migrationReceiptId));
+        await migration.markSourceCleared();
+        await migration.complete();
+      }
     } catch (error) {
-      await migration?.reject().catch(() => {});
       throw error;
     }
     for (const scope of scopes) {

@@ -631,13 +631,17 @@ test("legacy migration clears only after an accepted receipt for the exact pair 
   let accepted = 0;
   let rejected = 0;
   let observedPairId = "";
+  const phaseOrder: string[] = [];
   const acceptedWire: ControllerWire = {
     async close() {},
-    async connect() {},
+    async connect() {
+      phaseOrder.push("connect");
+    },
     onEvent() {
       return () => {};
     },
     async request(op, payload, id) {
+      phaseOrder.push("pair.request");
       assert.equal(op, "pair.request");
       observedPairId = id ?? "";
       assert.deepEqual(
@@ -676,15 +680,26 @@ test("legacy migration clears only after an accepted receipt for the exact pair 
       new MemoryStore(),
       () => "ci_migration" as ControllerInstanceId,
     ),
-    prepareMigration: async () => ({
-      accept: async () => {
-        accepted += 1;
-      },
-      material,
-      reject: async () => {
-        rejected += 1;
-      },
-    }),
+    prepareMigration: async () => {
+      phaseOrder.push("prepared");
+      return {
+        complete: async () => {
+          phaseOrder.push("complete");
+          accepted += 1;
+        },
+        material,
+        markClientCommitted: async () => {
+          phaseOrder.push("client_committed");
+        },
+        markPairSent: async () => {
+          phaseOrder.push("pair_sent");
+        },
+        markSourceCleared: async () => {
+          phaseOrder.push("source_cleared");
+        },
+        pairRequestId: "rq_pair_stable",
+      };
+    },
     preflightComplete: true,
     projection: new BoundedControllerProjection(new MemoryStore(), 4096),
     wire: acceptedWire,
@@ -695,9 +710,18 @@ test("legacy migration clears only after an accepted receipt for the exact pair 
     outcome: "receipt_unavailable",
     requestId: "rq_reclaimed",
   }]);
-  assert.match(observedPairId, /^rq_pair_/);
+  assert.equal(observedPairId, "rq_pair_stable");
   assert.equal(accepted, 1);
   assert.equal(rejected, 0);
+  assert.deepEqual(phaseOrder, [
+    "prepared",
+    "connect",
+    "pair_sent",
+    "pair.request",
+    "client_committed",
+    "source_cleared",
+    "complete",
+  ]);
   await acceptedSession.stop();
 
   const refusedWire: ControllerWire = {
@@ -737,13 +761,14 @@ test("legacy migration clears only after an accepted receipt for the exact pair 
         () => "ci_migration" as ControllerInstanceId,
       ),
       prepareMigration: async () => ({
-        accept: async () => {
+        complete: async () => {
           accepted += 1;
         },
         material,
-        reject: async () => {
-          rejected += 1;
-        },
+        markClientCommitted: async () => {},
+        markPairSent: async () => {},
+        markSourceCleared: async () => {},
+        pairRequestId: "rq_pair_stable",
       }),
       preflightComplete: true,
       projection: new BoundedControllerProjection(new MemoryStore(), 4096),
@@ -752,5 +777,5 @@ test("legacy migration clears only after an accepted receipt for the exact pair 
     /lockless_migration_not_accepted/,
   );
   assert.equal(accepted, 1);
-  assert.equal(rejected, 1);
+  assert.equal(rejected, 0);
 });

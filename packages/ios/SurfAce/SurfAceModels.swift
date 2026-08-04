@@ -583,6 +583,7 @@ struct SurfAcePaneEntry: Codable {
     var provenanceAgentId: String?
     var provenanceStreamLabel: String?
     var provenancePushedAt: String?
+    var provenanceControllerProductName: String?
     var scrollable: Bool
     var interactive: Bool
     var url: String?
@@ -604,6 +605,7 @@ struct SurfAcePaneEntry: Codable {
         provenanceAgentId: String? = nil,
         provenanceStreamLabel: String? = nil,
         provenancePushedAt: String? = nil,
+        provenanceControllerProductName: String? = nil,
         scrollable: Bool,
         interactive: Bool,
         url: String?,
@@ -624,6 +626,7 @@ struct SurfAcePaneEntry: Codable {
         self.provenanceAgentId = provenanceAgentId
         self.provenanceStreamLabel = provenanceStreamLabel
         self.provenancePushedAt = provenancePushedAt
+        self.provenanceControllerProductName = provenanceControllerProductName
         self.scrollable = scrollable
         self.interactive = interactive
         self.url = url
@@ -647,6 +650,7 @@ struct SurfAcePaneEntry: Codable {
             provenanceAgentId: nil,
             provenanceStreamLabel: nil,
             provenancePushedAt: nil,
+            provenanceControllerProductName: nil,
             scrollable: true,
             interactive: true,
             url: nil,
@@ -671,6 +675,7 @@ struct SurfAcePaneEntry: Codable {
             provenanceAgentId: frame.provenanceAgentId,
             provenanceStreamLabel: frame.provenanceStreamLabel,
             provenancePushedAt: frame.provenancePushedAt,
+            provenanceControllerProductName: frame.senderDisplayName,
             scrollable: frame.scrollable,
             interactive: frame.interactive,
             url: nil,
@@ -706,6 +711,7 @@ struct SurfAcePaneEntry: Codable {
             provenanceAgentId: nil,
             provenanceStreamLabel: nil,
             provenancePushedAt: nil,
+            provenanceControllerProductName: nil,
             scrollable: true,
             interactive: true,
             url: url,
@@ -1301,8 +1307,72 @@ final class SurfAcePaneModel {
         return nil
     }
 
+    func currentCompositeProvenance(locale: Locale = .current) -> SurfAceCompositeProvenance {
+        let chat = currentProvenanceDisplayName()
+        let provider = currentEntry.provenanceControllerProductName
+        return SurfAceCompositeProvenance(
+            friendlyChatName: chat,
+            controllerProductName: provider,
+            locale: locale
+        )
+    }
+
     func currentChromeDisplayName() -> String? {
         currentProvenanceDisplayName()
+    }
+}
+
+enum SurfAceProvenanceWidthClass: Equatable {
+    case composite
+    case collapsed
+    case hidden
+}
+
+struct SurfAceCompositeProvenance: Equatable {
+    let friendlyChatName: String
+    let controllerProductName: String
+
+    init(friendlyChatName: String?, controllerProductName: String?, locale: Locale = .current) {
+        self.friendlyChatName = Self.component(
+            friendlyChatName,
+            fallback: Self.localizedFallback(chat: true, locale: locale)
+        )
+        self.controllerProductName = Self.component(
+            controllerProductName,
+            fallback: Self.localizedFallback(chat: false, locale: locale)
+        )
+    }
+
+    var visualLabel: String {
+        "\u{2068}\(friendlyChatName)\u{2069} — \u{2068}\(controllerProductName)\u{2069}"
+    }
+
+    var plainLabel: String { "\(friendlyChatName) — \(controllerProductName)" }
+
+    var accessibilityLabel: String {
+        "Pushed by \(friendlyChatName), using \(controllerProductName)"
+    }
+
+    func widthClass(
+        availableWidth: CGFloat,
+        compositeMinimumWidth: CGFloat,
+        collapsedMinimumWidth: CGFloat
+    ) -> SurfAceProvenanceWidthClass {
+        if availableWidth >= compositeMinimumWidth { return .composite }
+        if availableWidth >= collapsedMinimumWidth { return .collapsed }
+        return .hidden
+    }
+
+    private static func component(_ value: String?, fallback: String) -> String {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    private static func localizedFallback(chat: Bool, locale: Locale) -> String {
+        switch locale.language.languageCode?.identifier {
+        case "es": return chat ? "Chat desconocido" : "Proveedor desconocido"
+        default: return chat ? "Unknown chat" : "Unknown provider"
+        }
     }
 }
 

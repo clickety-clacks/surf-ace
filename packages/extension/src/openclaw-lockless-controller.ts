@@ -126,9 +126,9 @@ export class OpenClawLocklessController {
     new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void>();
   private legacyMigrationSource: Pick<
     SurfAceRuntime,
-    | "acceptLegacyLocklessMigration"
-    | "discardLegacyLocklessMigration"
     | "exportLegacyLocklessMigration"
+    | "hydrateLegacyLocklessMigrationContinuity"
+    | "prepareLegacyLocklessMigrationContinuity"
   > | null = null;
   private reconcileWork: Promise<void> = Promise.resolve();
   private started = false;
@@ -171,9 +171,9 @@ export class OpenClawLocklessController {
   setLegacyMigrationSource(
     source: Pick<
       SurfAceRuntime,
-      | "acceptLegacyLocklessMigration"
-      | "discardLegacyLocklessMigration"
       | "exportLegacyLocklessMigration"
+      | "hydrateLegacyLocklessMigrationContinuity"
+      | "prepareLegacyLocklessMigrationContinuity"
     >,
   ): void {
     this.legacyMigrationSource = source;
@@ -183,6 +183,8 @@ export class OpenClawLocklessController {
     if (this.started) {
       return;
     }
+    await this.legacyMigrationSource
+      ?.hydrateLegacyLocklessMigrationContinuity();
     this.started = true;
     this.unsubscribeDiscovery = this.discovery.subscribe((endpoints) => {
       this.reconcileWork = this.reconcileWork.then(async () => {
@@ -208,6 +210,14 @@ export class OpenClawLocklessController {
     this.endpoints.clear();
     await this.discovery.stop();
     this.started = false;
+  }
+
+  async prepareLegacyMigrationContinuity(): Promise<void> {
+    const source = this.legacyMigrationSource;
+    if (!source) return;
+    await source.prepareLegacyLocklessMigrationContinuity(
+      await this.identity.loadOrCreate(),
+    );
   }
 
   hasFingerprint(fingerprint: string): boolean {
@@ -968,21 +978,21 @@ export class OpenClawLocklessController {
               this.alertScopeKey(endpoint.endpointId, scopeId),
             );
           },
-          prepareMigration: async (surfaceId) => {
+          prepareMigration: async (surfaceId, controllerInstanceId) => {
             const source = this.legacyMigrationSource;
             const prepared = await source?.exportLegacyLocklessMigration(
               endpoint.endpointId,
               surfaceId,
+              controllerInstanceId,
             ) ?? null;
             return prepared && source
               ? {
-                  accept: async () => {
-                    await source.acceptLegacyLocklessMigration(prepared.token);
-                  },
+                  complete: prepared.complete,
                   material: prepared.material,
-                  reject: async () => {
-                    await source.discardLegacyLocklessMigration(prepared.token);
-                  },
+                  markClientCommitted: prepared.markClientCommitted,
+                  markPairSent: prepared.markPairSent,
+                  markSourceCleared: prepared.markSourceCleared,
+                  pairRequestId: prepared.pairRequestId,
                 }
               : null;
           },

@@ -487,13 +487,32 @@ export class SurfaceCore {
     surfaceId: string,
     migrationMaterial?: LocklessPairPayload["migrationMaterial"],
     controllerInstanceId?: string,
+    pairRequestId?: string,
   ): void {
+    this.locklessAuthority.assertRetainedTombstoneTransition(
+      migrationMaterial ? "legacy_migration" : "admission",
+    );
     if (this.locklessAuthority.surfaceMode(surfaceId) === "lockless") {
       if (migrationMaterial) {
-        throw new LocklessAuthorityError(
-          "invalid_operation",
-          "Legacy migration material is accepted only during first lockless admission",
-        );
+        if (!controllerInstanceId || !pairRequestId) {
+          throw new LocklessAuthorityError(
+            "invalid_payload",
+            "Migration receipt resolution requires stable controller and request identities",
+          );
+        }
+        const receipt = this.locklessAuthority.resolveMigrationReceipt({
+          controllerInstanceId,
+          material: migrationMaterial,
+          requestId: pairRequestId,
+          surfaceId,
+        });
+        if (!receipt) {
+          throw new LocklessAuthorityError(
+            "invalid_operation",
+            "Already-lockless surface has no durable receipt for migration replay",
+            { requestId: pairRequestId, surfaceId },
+          );
+        }
       }
       return;
     }
@@ -577,10 +596,10 @@ export class SurfaceCore {
         );
       }
       if (migrationMaterial) {
-        if (!controllerInstanceId) {
+        if (!controllerInstanceId || !pairRequestId) {
           throw new LocklessAuthorityError(
             "invalid_controller_instance",
-            "Legacy migration requires the stable controller instance",
+            "Legacy migration requires stable controller and request identities",
           );
         }
         const admittedScopeIds = new Set([
@@ -606,6 +625,12 @@ export class SurfaceCore {
           controllerInstanceId,
           migrationMaterial,
         );
+        this.locklessAuthority.commitMigrationReceipt({
+          controllerInstanceId,
+          material: migrationMaterial,
+          requestId: pairRequestId,
+          surfaceId,
+        });
       }
       this.locklessAuthority.convertSurfaceToLocklessMode(surfaceId);
       this.emit({ surfaceId, type: "surface-changed" });
@@ -696,12 +721,6 @@ export class SurfaceCore {
   ): SurfaceState {
     const surface = this.createAdditionalSurface(name, viewport);
     try {
-      const identity = this.locklessAuthority.allocatePaneIdentity([], []);
-      this.applyProviderBootstrapTopology(surface.surfaceId, {
-        initialPaneId: identity.paneId,
-        initialPaneLabel: identity.paneLabel,
-        windowLabel: surface.windowLabel,
-      });
       this.admitSurfaceToLockless(surface.surfaceId);
       return surface;
     } catch (error) {

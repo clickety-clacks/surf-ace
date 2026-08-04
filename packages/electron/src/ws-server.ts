@@ -877,6 +877,42 @@ export class SurfaceWsServer {
     return result;
   }
 
+  async openSurfaceFromLocalUser(): Promise<{
+    surfaceId: string;
+    surfaceSetRevision: number;
+  }> {
+    const result = await this.core.locklessAuthority.transactionAsync(
+      async () => {
+        const committed = await this.runLifecycleTransaction(() => {
+          this.core.locklessAuthority.assertPaneCreationCapacity(0, 1);
+          const surface = this.core.createLocklessSurface(
+            "Surf Ace",
+            this.viewportProvider(),
+          );
+          this.core.locklessAuthority.ensureScope(
+            `surface:${encodeURIComponent(surface.surfaceId)}`,
+            "surface",
+          );
+          for (const paneId of this.core.activePaneIds(surface.surfaceId)) {
+            this.core.locklessAuthority.ensureScope(
+              locklessPaneScopeId(surface.surfaceId, paneId),
+              "pane",
+            );
+          }
+          return {
+            surfaceId: surface.surfaceId,
+            surfaceSetRevision:
+              this.core.locklessAuthority.advanceSurfaceSetRevision(),
+          };
+        });
+        await this.persistLocklessState();
+        return committed;
+      },
+    );
+    this.core.markLocklessAuthorityChanged(result.surfaceId);
+    return result;
+  }
+
   disconnectSurface(surfaceId: string, reason = "provider_shutdown"): void {
     const transport = this.transport(surfaceId);
     if (transport.active) {
@@ -1470,6 +1506,8 @@ export class SurfaceWsServer {
           );
         });
       }
+    } else if (request.op === "pair.request") {
+      response = (await dispatch()).response;
     } else {
       response = await this.core.locklessAuthority.transactionAsync(async () => {
         const result = await dispatch();
@@ -1860,39 +1898,44 @@ export class SurfaceWsServer {
         this.core.locklessAuthority.hasController(
           request.payload.controllerInstanceId,
         );
-      const admission = this.core.transaction(() =>
-        this.core.locklessAuthority.transaction(() => {
-        const admitted = this.core.locklessAuthority.admit(
-          request.payload,
-          connectionToken,
-          request.id,
-          connectionSlot,
-        );
-        for (const ack of request.payload.resume?.pendingAcks ?? []) {
-          this.core.locklessAuthority.acknowledge(
-            request.payload.controllerInstanceId,
-            ack,
-          );
-        }
-        if (surfaceId) {
-          this.core.admitSurfaceToLockless(
-            surfaceId,
-            request.payload.migrationMaterial,
-            request.payload.controllerInstanceId,
-          );
-          this.core.locklessAuthority.ensureScope(
-            `surface:${encodeURIComponent(surfaceId)}`,
-            "surface",
-          );
-          for (const paneId of this.core.activePaneIds(surfaceId)) {
-            this.core.locklessAuthority.ensureScope(
-              locklessPaneScopeId(surfaceId, paneId),
-              "pane",
+      const admission = await this.core.transactionAsync(async () =>
+        await this.core.locklessAuthority.transactionPersisted(
+          () => {
+            const admitted = this.core.locklessAuthority.admit(
+              request.payload,
+              connectionToken,
+              request.id,
+              connectionSlot,
             );
-          }
-        }
-          return admitted;
-        }),
+            for (const ack of request.payload.resume?.pendingAcks ?? []) {
+              this.core.locklessAuthority.acknowledge(
+                request.payload.controllerInstanceId,
+                ack,
+              );
+            }
+            if (surfaceId) {
+              this.core.admitSurfaceToLockless(
+                surfaceId,
+                request.payload.migrationMaterial,
+                request.payload.controllerInstanceId,
+                request.id,
+              );
+              this.core.locklessAuthority.ensureScope(
+                `surface:${encodeURIComponent(surfaceId)}`,
+                "surface",
+              );
+              for (const paneId of this.core.activePaneIds(surfaceId)) {
+                this.core.locklessAuthority.ensureScope(
+                  locklessPaneScopeId(surfaceId, paneId),
+                  "pane",
+                );
+              }
+            }
+            this.core.markLocklessAuthorityChanged(surfaceId ?? undefined);
+            return admitted;
+          },
+          this.persistLocklessState,
+        ),
       );
       const session: LocklessTransportSession = {
         connectionSlot,
@@ -1909,7 +1952,6 @@ export class SurfaceWsServer {
         if (socketMeta) socketMeta.pairedSurfaceId = surfaceId;
         this.core.setConnectionBar(surfaceId, "connected");
       }
-      this.core.markLocklessAuthorityChanged(surfaceId ?? undefined);
       const admittedScopeIds = surfaceId
         ? [
             `surface:${encodeURIComponent(surfaceId)}`,
@@ -3184,6 +3226,12 @@ export class SurfaceWsServer {
   private async acceptPairRequest(socket: WebSocket, request: PairRequest, meta: SocketMeta | undefined): Promise<Response> {
     const surfaceId = request.payload.surfaceId;
     this.core.getSurface(surfaceId);
+    if (this.core.locklessAuthority.surfaceMode(surfaceId) === "lockless") {
+      throw new SurfaceCoreError(
+        "capability_mismatch",
+        "Surface is active in explicitly negotiated lockless mode",
+      );
+    }
     const transport = this.transport(surfaceId);
     const existing = transport.active;
     const lock = transport.lock;

@@ -24,6 +24,112 @@ private func annotationDrawingData(strokeCount: Int) -> Data {
     return PKDrawing(strokes: strokes).dataRepresentation()
 }
 
+@MainActor
+extension SurfAceRenderAndAnnotationDiagnosticsTests {
+    func testACPROV01ExactFriendlyChatAndProductComposite() {
+        let provenance = SurfAceCompositeProvenance(
+            friendlyChatName: "CLU",
+            controllerProductName: "Clawline",
+            locale: Locale(identifier: "en")
+        )
+        XCTAssertEqual(provenance.plainLabel, "CLU — Clawline")
+        XCTAssertEqual(provenance.visualLabel, "\u{2068}CLU\u{2069} — \u{2068}Clawline\u{2069}")
+    }
+
+    func testACPROV02CompositeIsCapturedByVisibleEntryAcrossNavigation() {
+        let pane = SurfAcePaneModel(paneId: 1)
+        var first = SurfAcePaneEntry.empty(revision: 1)
+        first.provenanceDisplayName = "Alpha"
+        first.provenanceControllerProductName = "OpenClaw"
+        var second = SurfAcePaneEntry.empty(revision: 2)
+        second.provenanceDisplayName = "Beta"
+        second.provenanceControllerProductName = "Clawline"
+        pane.currentEntry = second
+        pane.backStack = [first]
+
+        let previous = pane.backStack.removeLast()
+        pane.forwardStack.append(pane.currentEntry)
+        pane.currentEntry = previous
+        XCTAssertEqual(pane.currentCompositeProvenance().plainLabel, "Alpha — OpenClaw")
+
+        let next = pane.forwardStack.removeLast()
+        pane.backStack.append(pane.currentEntry)
+        pane.currentEntry = next
+        XCTAssertEqual(pane.currentCompositeProvenance().plainLabel, "Beta — Clawline")
+    }
+
+    func testACPROV03LocalizedFallbacksTrimButDoNotTranslateSuppliedLabels() {
+        let english = SurfAceCompositeProvenance(
+            friendlyChatName: " \t ", controllerProductName: nil,
+            locale: Locale(identifier: "en")
+        )
+        XCTAssertEqual(english.plainLabel, "Unknown chat — Unknown provider")
+        let spanish = SurfAceCompositeProvenance(
+            friendlyChatName: "  CLU عربي  ", controllerProductName: "  Clawline  ",
+            locale: Locale(identifier: "es")
+        )
+        XCTAssertEqual(spanish.plainLabel, "CLU عربي — Clawline")
+        let spanishFallback = SurfAceCompositeProvenance(
+            friendlyChatName: nil, controllerProductName: "", locale: Locale(identifier: "es")
+        )
+        XCTAssertEqual(spanishFallback.plainLabel, "Chat desconocido — Proveedor desconocido")
+    }
+
+    func testACPROV04WidthClassesAndBidirectionalIsolationAreDeterministic() {
+        let provenance = SurfAceCompositeProvenance(
+            friendlyChatName: "English العربية", controllerProductName: "מוצר Product"
+        )
+        for scale in [CGFloat(1), 1.35, 2.0, 3.0] {
+            let collapsed = 12 * scale
+            let composite = 48 * scale
+            XCTAssertEqual(provenance.widthClass(
+                availableWidth: composite, compositeMinimumWidth: composite,
+                collapsedMinimumWidth: collapsed
+            ), .composite)
+            XCTAssertEqual(provenance.widthClass(
+                availableWidth: composite.nextDown, compositeMinimumWidth: composite,
+                collapsedMinimumWidth: collapsed
+            ), .collapsed)
+            XCTAssertEqual(provenance.widthClass(
+                availableWidth: collapsed.nextDown, compositeMinimumWidth: composite,
+                collapsedMinimumWidth: collapsed
+            ), .hidden)
+        }
+        XCTAssertTrue(provenance.visualLabel.hasPrefix("\u{2068}"))
+        XCTAssertEqual(provenance.visualLabel.filter { $0 == "\u{2068}" }.count, 2)
+        XCTAssertEqual(provenance.visualLabel.filter { $0 == "\u{2069}" }.count, 2)
+    }
+
+    func testACPROV05CompositeChangesDoNotChangeAuthorityIdentityOrCursorKeys() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.controllers["controller-a"] = .init(
+            controllerInstanceId: "controller-a", controllerProductName: "Same",
+            disconnectedAt: nil, dormantSequence: nil, pendingOperationReceipts: [:],
+            projectionCapacityBytes: 8_388_608, status: .live
+        )
+        state.controllers["controller-b"] = .init(
+            controllerInstanceId: "controller-b", controllerProductName: "Same",
+            disconnectedAt: nil, dormantSequence: nil, pendingOperationReceipts: [:],
+            projectionCapacityBytes: 8_388_608, status: .live
+        )
+        let keys = state.controllers.keys.sorted()
+        state.controllers["controller-a"]?.controllerProductName = "Changed"
+        XCTAssertEqual(state.controllers.keys.sorted(), keys)
+        XCTAssertEqual(Set(state.controllers.values.map(\.controllerInstanceId)), Set(keys))
+    }
+
+    func testACPROV06FullAccessibleAnnouncementNeverCollapses() {
+        let provenance = SurfAceCompositeProvenance(
+            friendlyChatName: "CLU", controllerProductName: "Clawline"
+        )
+        XCTAssertEqual(provenance.accessibilityLabel, "Pushed by CLU, using Clawline")
+        XCTAssertEqual(provenance.widthClass(
+            availableWidth: 0, compositeMinimumWidth: 40, collapsedMinimumWidth: 10
+        ), .hidden)
+        XCTAssertEqual(provenance.accessibilityLabel, "Pushed by CLU, using Clawline")
+    }
+}
+
 private func annotationStrokesById(_ strokeIds: [String]) -> [String: SurfAceStroke] {
     Dictionary(uniqueKeysWithValues: strokeIds.enumerated().map { index, strokeId in
         (

@@ -129,10 +129,12 @@ function capabilityGatedRuntime(
             await locklessController.stop();
           };
         case "listScreens":
-          return async () => [
-            ...(await locklessController.listScreens()),
-            ...(await target.listScreens()),
-          ];
+          return async () => {
+            const lockless = await locklessController.listScreens();
+            const legacy = await target.listScreens();
+            await locklessController.prepareLegacyMigrationContinuity();
+            return [...lockless, ...legacy];
+          };
         case "push":
           return async (
             input: Parameters<SurfAceRuntime["push"]>[0],

@@ -101,6 +101,11 @@ struct SurfAceLocklessControllerRetentionDelivery: Equatable, Sendable {
     var record: SurfAceLocklessControllerRetentionReclamation
 }
 
+struct SurfAceLocklessTombstoneReclamationDelivery: Equatable, Sendable {
+    var connectionTokensByControllerInstanceId: [String: String]
+    var record: SurfAceLocklessTombstoneReclamation
+}
+
 struct SurfAceLocklessMaterializationOutcome: Equatable, Sendable {
     var errorCode: String?
     var materializedState: SurfAceLocklessJSON?
@@ -177,6 +182,7 @@ actor SurfAceLocklessRuntimeAdapter {
         }
 
         let admission = try await coordinator.transact(trigger: "controller_admission") { state in
+            state = try state.validated(for: .locklessAdmission)
             let pendingReclamationCount = state.pendingControllerRetentionReclamations?.count ?? 0
             let requiredProjectionBytes = max(
                 state.limits.maxPaneConsumableBytes,
@@ -1043,6 +1049,42 @@ actor SurfAceLocklessRuntimeAdapter {
                 connectionTokensByControllerInstanceId: connections,
                 record: record
             )
+        }
+    }
+
+    func pendingTombstoneReclamations() async -> [SurfAceLocklessTombstoneReclamationDelivery] {
+        let state = await coordinator.snapshot()
+        return (state.pendingTombstoneReclamations ?? []).sorted {
+            ($0.commitSequence, $0.closedSequence, $0.tombstoneId)
+                < ($1.commitSequence, $1.closedSequence, $1.tombstoneId)
+        }.map { record in
+            let delivered = Set(record.deliveredControllerInstanceIds)
+            let recipients = Set(record.recipientControllerInstanceIds).subtracting(delivered)
+            return SurfAceLocklessTombstoneReclamationDelivery(
+                connectionTokensByControllerInstanceId: Dictionary(uniqueKeysWithValues: recipients.compactMap {
+                    controllerId in connectionByController[controllerId].map { (controllerId, $0) }
+                }),
+                record: record
+            )
+        }
+    }
+
+    func acknowledgeTombstoneReclamation(
+        eventId: String,
+        deliveredControllerInstanceIds: [String]
+    ) async throws {
+        try await coordinator.transact(trigger: "tombstone_reclamation_delivery_ack") { state in
+            var pending = state.pendingTombstoneReclamations ?? []
+            guard let index = pending.firstIndex(where: { $0.eventId == eventId }) else { return }
+            var delivered = Set(pending[index].deliveredControllerInstanceIds)
+            delivered.formUnion(deliveredControllerInstanceIds)
+            let recipients = Set(pending[index].recipientControllerInstanceIds)
+            if recipients.isSubset(of: delivered) {
+                pending.remove(at: index)
+            } else {
+                pending[index].deliveredControllerInstanceIds = delivered.sorted()
+            }
+            state.pendingTombstoneReclamations = pending
         }
     }
 

@@ -5,11 +5,13 @@ import {
   LocklessAuthorityError,
   LocklessClientAuthority,
   appendLocklessHistory,
+  assertRetainedTombstoneAggregate,
   createEmptyLocklessClientState,
   createLocklessHistory,
   exactDurableBytes,
   navigateLocklessHistory,
   type PersistentLocklessClientState,
+  type RetainedTombstoneTransition,
 } from "../src/lockless-client-authority.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
@@ -103,6 +105,57 @@ test("controller instance is deconflicted and retained across restart as dormant
       "resume-a",
     ).resumed,
     true,
+  );
+});
+
+test("AC-ID-03 AC-PROV-05: duplicate and changed human labels do not grant authority or recover another controller bundle", () => {
+  const target = authority();
+  const admission = (controllerInstanceId: string, controllerProductName: string) => ({
+    controllerInstanceId,
+    controllerProductName,
+    projectionCapacityBytes: 856,
+    protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY] as [
+      typeof SURF_ACE_LOCKLESS_V1_CAPABILITY,
+    ],
+  });
+  target.admit(admission("controller-a", "Same Label"), "socket-a", "admit-a");
+  target.admit(admission("controller-b", "Same Label"), "socket-b", "admit-b");
+  const record = target.appendConsumable({
+    payload: { value: "identity-neutral" },
+    recordClass: "tap",
+    scopeId: "surface:surface-a",
+    scopeKind: "surface",
+    triggerOperation: "test.label-neutrality",
+  })!;
+  target.acknowledge("controller-a", {
+    cursor: record.sequence + 1,
+    scopeId: "surface:surface-a",
+  });
+  assert.equal(
+    target.scopeSnapshot("controller-a", "surface:surface-a").cursor.cursor,
+    record.sequence + 1,
+  );
+  assert.equal(
+    target.scopeSnapshot("controller-b", "surface:surface-a").cursor.cursor,
+    record.sequence,
+  );
+  target.disconnect("controller-a", "socket-a");
+  assert.equal(
+    target.admit(
+      admission("controller-a", "Changed Composite"),
+      "socket-a-resumed",
+      "resume-a",
+    ).resumed,
+    true,
+  );
+  assert.equal(target.controllerProductName("controller-a"), "Changed Composite");
+  assert.equal(
+    target.scopeSnapshot("controller-a", "surface:surface-a").cursor.cursor,
+    record.sequence + 1,
+  );
+  assert.equal(
+    target.scopeSnapshot("controller-b", "surface:surface-a").cursor.cursor,
+    record.sequence,
   );
 });
 
@@ -589,7 +642,182 @@ test("latest-wins records coalesce and tombstones reclaim oldest sequence", () =
   );
 });
 
-test("surface tombstone reclamation audits nested pane and unread disposition", () => {
+function retainedAggregateFixture(identityOrder: "forward" | "reverse"): {
+  aggregateBytes: number;
+  state: PersistentLocklessClientState;
+} {
+  const roomyLimits = {
+    ...limits,
+    maxRetainedTombstoneBytes: 100_000,
+  };
+  const target = new LocklessClientAuthority(
+    createEmptyLocklessClientState(roomyLimits),
+  );
+  const identities = identityOrder === "forward"
+    ? ["controller-a", "controller-b"]
+    : ["controller-b", "controller-a"];
+  for (const [index, controllerInstanceId] of identities.entries()) {
+    target.createTombstone({
+      kind: "pane",
+      payload: {
+        pane: {
+          blob: String(index).repeat(12_000),
+          paneId: index + 1,
+          provenance: { controllerInstanceId },
+        },
+      },
+      surfaceId: "surface-a",
+    });
+  }
+  const state = target.exportState();
+  return {
+    aggregateBytes: state.tombstones.reduce(
+      (total, tombstone) => total + tombstone.bytes,
+      0,
+    ),
+    state,
+  };
+}
+
+test("AC-CLOSE-07: a valid admitted close at the retained byte bound succeeds without tombstone_capacity under identity reversal", () => {
+  const results = ["forward", "reverse"].map((identityOrder) => {
+    const probe = authority();
+    const probeTombstone = probe.createTombstone({
+      kind: "pane",
+      payload: {
+        pane: {
+          blob: "",
+          closerControllerInstanceId: "controller-a",
+          paneId: 1,
+          provenance: { controllerInstanceId: "controller-b" },
+        },
+      },
+      surfaceId: "surface-a",
+    });
+    const maximumBytes = Math.max(
+      limits.maxRecoverableSurfaceBytes,
+      probeTombstone.bytes + 1,
+    );
+    const target = new LocklessClientAuthority(
+      createEmptyLocklessClientState({
+        ...limits,
+        maxRetainedTombstoneBytes: maximumBytes,
+      }),
+    );
+    admit(target, "controller-a");
+    admit(target, "controller-b");
+    const [closerControllerInstanceId, creatorControllerInstanceId] =
+      identityOrder === "forward"
+        ? ["controller-a", "controller-b"]
+        : ["controller-b", "controller-a"];
+    const committed = target.createTombstone({
+      kind: "pane",
+      payload: {
+        pane: {
+          blob: "x".repeat(maximumBytes - probeTombstone.bytes),
+          closerControllerInstanceId,
+          paneId: 1,
+          provenance: { controllerInstanceId: creatorControllerInstanceId },
+        },
+      },
+      surfaceId: "surface-a",
+    });
+    assert.equal(committed.bytes, maximumBytes);
+    assert.equal(target.listTombstones()[0]?.bytes, maximumBytes);
+    return committed.bytes;
+  });
+  assert.deepEqual(results, [results[0], results[0]]);
+});
+
+test("AC-CLOSE-07: admission migration restart and configuration reject aggregate bound+1 atomically and accept equality under identity reversal", () => {
+  const observed: number[] = [];
+  for (const identityOrder of ["forward", "reverse"] as const) {
+    const fixture = retainedAggregateFixture(identityOrder);
+    assert.ok(
+      fixture.aggregateBytes - 1 >= fixture.state.limits.maxRecoverableSurfaceBytes,
+    );
+    const equalityLimits = {
+      ...fixture.state.limits,
+      maxRetainedTombstoneBytes: fixture.aggregateBytes,
+    };
+    const exceededLimits = {
+      ...equalityLimits,
+      maxRetainedTombstoneBytes: fixture.aggregateBytes - 1,
+    };
+    const source = structuredClone(fixture.state);
+    const transitions: RetainedTombstoneTransition[] = [
+      "admission",
+      "legacy_migration",
+      "restart",
+      "configuration",
+    ];
+    for (const transition of transitions) {
+      assert.throws(
+        () =>
+          assertRetainedTombstoneAggregate(
+            fixture.state,
+            exceededLimits,
+            transition,
+          ),
+        (error) =>
+          error instanceof LocklessAuthorityError &&
+          error.code === "tombstone_capacity" &&
+          error.details?.bytes === fixture.aggregateBytes &&
+          error.details?.maximumBytes === fixture.aggregateBytes - 1 &&
+          error.details?.transition === transition,
+      );
+      assert.deepEqual(fixture.state, source);
+      assert.doesNotThrow(() =>
+        assertRetainedTombstoneAggregate(
+          fixture.state,
+          equalityLimits,
+          transition,
+        )
+      );
+    }
+
+    const restartSource = structuredClone(fixture.state);
+    restartSource.limits = exceededLimits;
+    assert.throws(
+      () => new LocklessClientAuthority(restartSource),
+      (error) =>
+        error instanceof LocklessAuthorityError &&
+        error.code === "tombstone_capacity" &&
+        error.details?.transition === "restart",
+    );
+    assert.deepEqual(restartSource.tombstones, fixture.state.tombstones);
+    const restarted = new LocklessClientAuthority({
+      ...structuredClone(fixture.state),
+      limits: equalityLimits,
+    });
+    assert.equal(restarted.listTombstones().length, 2);
+
+    const configured = new LocklessClientAuthority(fixture.state);
+    const priorGeneration = configured.exportState();
+    assert.throws(
+      () => configured.configureLimits(exceededLimits),
+      (error) =>
+        error instanceof LocklessAuthorityError &&
+        error.code === "tombstone_capacity" &&
+        error.details?.transition === "configuration",
+    );
+    assert.deepEqual(configured.exportState(), priorGeneration);
+    assert.doesNotThrow(() => configured.configureLimits(equalityLimits));
+    assert.equal(
+      configured.limits.maxRetainedTombstoneBytes,
+      fixture.aggregateBytes,
+    );
+
+    admit(restarted, "controller-a");
+    assert.doesNotThrow(() =>
+      restarted.importLegacyMigrationMaterial("controller-a", { scopes: [] })
+    );
+    observed.push(fixture.aggregateBytes);
+  }
+  assert.deepEqual(observed, [observed[0], observed[0]]);
+});
+
+test("AC-SURF-05: bounded global surface tombstone reclamation follows closed sequence and audits nested unread disposition", () => {
   const target = authority();
   const events: Array<Record<string, unknown>> = [];
   target.subscribe((event) =>
@@ -709,7 +937,7 @@ test("pane tombstones contain and restore authoritative cursor scope state", () 
   );
 });
 
-test("dormant reclamation charges and reports live-frame-only unread state", () => {
+test("AC-RET-02: dormant count byte and total reclamation chooses the oldest sequence and reports exact unread disposition", () => {
   const target = authority();
   const events: Array<Record<string, unknown>> = [];
   target.subscribe((event) => events.push(event as unknown as Record<string, unknown>));
@@ -770,13 +998,135 @@ test("dormant reclamation charges and reports live-frame-only unread state", () 
       ?.scopes["pane:surface-a:1"]?.liveFrames,
     {},
   );
+
+  const byteLimits = {
+    ...limits,
+    maxAdmittedControllerEntries: 3,
+    maxDormantControllerBytes: 256,
+    maxDormantControllerEntries: 2,
+  };
+  byteLimits.maxRecoverableSurfaceBytes =
+    locklessRecoverableSurfaceMinimumBytes(byteLimits);
+  byteLimits.maxRetainedTombstoneBytes = Math.max(
+    byteLimits.maxRetainedTombstoneBytes,
+    byteLimits.maxRecoverableSurfaceBytes,
+  );
+  const byteBounded = new LocklessClientAuthority(
+    createEmptyLocklessClientState(byteLimits),
+  );
+  const byteEvents: Array<Record<string, unknown>> = [];
+  byteBounded.subscribe((event) =>
+    byteEvents.push(event as unknown as Record<string, unknown>)
+  );
+  admit(byteBounded, "controller-byte-bound", "socket-byte-bound");
+  byteBounded.appendConsumable({
+    payload: { value: "x".repeat(120) },
+    recordClass: "tap",
+    scopeId: "surface:byte-bound",
+    scopeKind: "surface",
+    triggerOperation: "test.byte-bound",
+  });
+  byteBounded.disconnect("controller-byte-bound", "socket-byte-bound");
+  assert.equal(byteBounded.hasController("controller-byte-bound"), false);
+  assert.equal(
+    byteEvents.some(
+      (event) =>
+        event.type === "event.controller_retention_reclaimed" &&
+        event.reason === "dormant_capacity" &&
+        event.maxDormantControllerBytes === 256,
+    ),
+    true,
+  );
 });
 
-test("persistent export restores authoritative limits and scopes without retaining diagnostics", () => {
+test("AC-RET-01: dormant resume preserves its exact cursor while reclaimed readmission starts at the current tail", () => {
+  const target = authority();
+  admit(target, "z-oldest", "socket-oldest");
+  const first = target.appendConsumable({
+    payload: { value: 1 },
+    recordClass: "tap",
+    scopeId: "surface:surface-a",
+    scopeKind: "surface",
+    triggerOperation: "test.retention",
+  })!;
+  target.acknowledge("z-oldest", {
+    cursor: first.sequence + 1,
+    scopeId: "surface:surface-a",
+  });
+  target.disconnect("z-oldest", "socket-oldest");
+  admit(target, "a-newer", "socket-newer");
+  target.disconnect("a-newer", "socket-newer");
+  assert.equal(target.hasController("z-oldest"), false);
+  const second = target.appendConsumable({
+    payload: { value: 2 },
+    recordClass: "tap",
+    scopeId: "surface:surface-a",
+    scopeKind: "surface",
+    triggerOperation: "test.retention",
+  })!;
+  const fresh = target.admit(
+    {
+      controllerInstanceId: "z-oldest",
+      controllerProductName: "same human label as a-newer",
+      projectionCapacityBytes: 856,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+    },
+    "socket-fresh",
+    "fresh-oldest",
+  );
+  assert.equal(fresh.resumed, false);
+  assert.equal(
+    target.scopeSnapshot("z-oldest", "surface:surface-a").cursor.cursor,
+    second.sequence + 1,
+  );
+  assert.equal(
+    target.scopeSnapshot("z-oldest", "surface:surface-a").cursor.gap,
+    null,
+  );
+});
+
+test("AC-RET-04: all-live registry refuses admission and a later admission reclaims only the oldest eligible dormant bundle", () => {
+  const target = authority();
+  admit(target, "controller-z", "socket-z");
+  admit(target, "controller-a", "socket-a");
+  assert.throws(
+    () => admit(target, "controller-third", "socket-third"),
+    (error) =>
+      error instanceof LocklessAuthorityError &&
+      error.code === "controller_capacity",
+  );
+  assert.deepEqual(
+    target.liveControllerIds().sort(),
+    ["controller-a", "controller-z"],
+  );
+  target.disconnect("controller-z", "socket-z");
+  admit(target, "controller-third", "socket-third");
+  assert.equal(target.hasController("controller-z"), false);
+  assert.equal(target.hasController("controller-a"), true);
+  assert.equal(target.hasController("controller-third"), true);
+});
+
+test("AC-OPS-01: restart restores limits modes controller bundles consumable scopes sequences and tombstones before admission", () => {
   const target = authority();
   admit(target, "controller-a");
+  admit(target, "controller-b");
   target.setSurfaceMode("surface-a", "lockless");
-  target.ensureScope("surface:surface-a", "surface");
+  const record = target.appendConsumable({
+    payload: { value: "restart" },
+    recordClass: "tap",
+    scopeId: "surface:surface-a",
+    scopeKind: "surface",
+    triggerOperation: "test.restart",
+  })!;
+  target.acknowledge("controller-a", {
+    cursor: record.sequence + 1,
+    scopeId: "surface:surface-a",
+  });
+  const tombstone = target.createTombstone({
+    kind: "pane",
+    payload: { pane: { paneId: 7 }, topologyRevision: 9 },
+    surfaceId: "surface-a",
+  });
   const persisted: PersistentLocklessClientState = target.exportState();
   const restored = new LocklessClientAuthority(persisted);
   assert.equal(restored.surfaceMode("surface-a"), "lockless");
@@ -785,6 +1135,20 @@ test("persistent export restores authoritative limits and scopes without retaini
     restored.scopeSnapshot("controller-a", "surface:surface-a").version,
     1,
   );
+  assert.equal(
+    restored.scopeSnapshot("controller-a", "surface:surface-a").cursor.cursor,
+    record.sequence + 1,
+  );
+  assert.equal(
+    restored.scopeSnapshot("controller-b", "surface:surface-a").records.length,
+    1,
+  );
+  assert.equal(
+    restored.listTombstones("pane")[0]?.tombstoneId,
+    tombstone.tombstoneId,
+  );
+  assert.equal(restored.exportState().nextClosedSequence, persisted.nextClosedSequence);
+  assert.equal(restored.exportState().nextCommitSequence, persisted.nextCommitSequence);
   assert.equal("audit" in restored.exportState(), false);
 });
 

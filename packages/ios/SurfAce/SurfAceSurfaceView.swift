@@ -1114,7 +1114,7 @@ private struct SurfAcePaneControls: View {
                 SurfAceBrowserControlsPill(runtime: runtime, surface: surface, pane: pane)
             }
 
-            if hasNavigationContext && (ownerName != nil || pane.canGoBack || pane.canGoForward) {
+            if hasNavigationContext {
                 HStack(spacing: 4) {
                     if pane.canGoBack {
                         Button {
@@ -1127,6 +1127,8 @@ private struct SurfAcePaneControls: View {
                             Image(systemName: "chevron.backward")
                         }
                         .buttonStyle(SurfAceGlassButtonStyle())
+                        .accessibilityLabel("Back")
+                        .accessibilityHint("Shows \(provenance.accessibilityLabel)")
                     }
 
                     if pane.canGoForward {
@@ -1140,17 +1142,12 @@ private struct SurfAcePaneControls: View {
                             Image(systemName: "chevron.forward")
                         }
                         .buttonStyle(SurfAceGlassButtonStyle())
+                        .accessibilityLabel("Forward")
+                        .accessibilityHint("Shows \(provenance.accessibilityLabel)")
                     }
 
-                    if let ownerName {
-                        Text(ownerName)
-                            .font(.custom(SurfAceChromeFont.regularName, size: 16))
-                            .foregroundStyle(surfAceToolbarForegroundColor(for: colorScheme).opacity(0.86))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .padding(.leading, 4)
-                            .padding(.trailing, 10)
-                    }
+                    SurfAceCompositeProvenanceView(provenance: provenance)
+                        .frame(minWidth: 0, idealWidth: 180, maxWidth: 280)
                 }
                 .surfAceControlPillChrome()
             }
@@ -1225,12 +1222,64 @@ private struct SurfAcePaneControls: View {
         }
     }
 
-    private var ownerName: String? {
-        pane.currentProvenanceDisplayName()
+    private var provenance: SurfAceCompositeProvenance {
+        pane.currentCompositeProvenance()
     }
 
     private var hasNavigationContext: Bool {
         pane.currentEntry.contentId != nil || pane.currentEntry.payload != nil || pane.canGoBack || pane.canGoForward
+    }
+}
+
+private struct SurfAceCompositeProvenanceView: View {
+    let provenance: SurfAceCompositeProvenance
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        GeometryReader { proxy in
+            let font = scaledFont
+            let compositeFloor = measuredWidth("… — …", font: font)
+            let collapsedFloor = measuredWidth("…", font: font)
+            switch provenance.widthClass(
+                availableWidth: proxy.size.width,
+                compositeMinimumWidth: compositeFloor,
+                collapsedMinimumWidth: collapsedFloor
+            ) {
+            case .composite:
+                HStack(spacing: 4) {
+                    Text("\u{2068}\(provenance.friendlyChatName)\u{2069}")
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    Text("—").fixedSize()
+                    Text("\u{2068}\(provenance.controllerProductName)\u{2069}")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .lineLimit(1)
+                .truncationMode(.tail)
+            case .collapsed:
+                Text("…").frame(maxWidth: .infinity)
+            case .hidden:
+                Color.clear
+            }
+        }
+        .frame(height: scaledFont.lineHeight)
+        .font(.custom(SurfAceChromeFont.regularName, size: scaledFont.pointSize))
+        .foregroundStyle(surfAceToolbarForegroundColor(for: colorScheme).opacity(0.86))
+        .padding(.leading, 4)
+        .padding(.trailing, 10)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(provenance.accessibilityLabel)
+        .accessibilityAddTraits(.isStaticText)
+        .allowsHitTesting(false)
+    }
+
+    private var scaledFont: UIFont {
+        let base = UIFont(name: SurfAceChromeFont.regularName, size: 16)
+            ?? UIFont.systemFont(ofSize: 16)
+        return UIFontMetrics(forTextStyle: .body).scaledFont(for: base)
+    }
+
+    private func measuredWidth(_ value: String, font: UIFont) -> CGFloat {
+        ceil((value as NSString).size(withAttributes: [.font: font]).width)
     }
 }
 

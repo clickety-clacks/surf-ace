@@ -314,3 +314,91 @@ final class SurfAceLocklessConsumableOperationsTests: XCTestCase {
         return Int64(try encoder.encode(value).count)
     }
 }
+
+extension SurfAceLocklessConsumableOperationsTests {
+    func testACLIVEBUF01ConnectedNeverReaderGetsTargetedStickyGapWhileProducerContinues() throws {
+        var state = try authority(controllerIds: ["slow-a", "producer-b"])
+        state.limits.maxPaneConsumableRecords = 2
+        var droppedSequences: [Int64] = []
+        for index in 1...5 {
+            let occurrence = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+                in: &state, scopeId: "pane:surface-a:1", scopeKind: "pane",
+                recordId: "tap-\(index)", recordClass: .tap, payload: .integer(Int64(index))
+            )
+            if !occurrence.affectedGaps.isEmpty {
+                droppedSequences.append(Int64(index - 2))
+            }
+            _ = try SurfAceLocklessConsumableOperations.acknowledge(
+                in: &state, controllerInstanceId: "producer-b", scopeId: "pane:surface-a:1",
+                cursor: occurrence.record.sequence + 1, gapGeneration: nil
+            )
+        }
+        let slow = try snapshot(state, "slow-a")
+        let producer = try snapshot(state, "producer-b")
+        XCTAssertEqual(droppedSequences, [1, 2, 3])
+        XCTAssertEqual(slow.cursor.gap?.firstLostSequence, 1)
+        XCTAssertEqual(slow.cursor.gap?.lastLostSequence, 3)
+        XCTAssertEqual(slow.cursor.gap?.droppedRecordCount, 3)
+        XCTAssertNil(producer.cursor.gap)
+        XCTAssertLessThanOrEqual(slow.records.count, 2)
+        XCTAssertEqual(slow.records.map(\.sequence), [4, 5])
+    }
+
+    func testACLIVEBUF02DeclaredCoalescingTargetResultsOversizeReplayAndAckStayDistinct() throws {
+        var state = try authority(controllerIds: ["a"])
+        _ = try append(&state, id: "scroll-old", recordClass: .scroll)
+        _ = try append(&state, id: "tap", recordClass: .tap)
+        _ = try append(&state, id: "scroll-latest", recordClass: .scroll)
+        _ = try SurfAceLocklessConsumableOperations.updateLiveFrame(
+            in: &state, scopeId: "pane:surface-a:1", frameId: "live", payload: .string("one")
+        )
+        _ = try SurfAceLocklessConsumableOperations.updateLiveFrame(
+            in: &state, scopeId: "pane:surface-a:1", frameId: "live", payload: .string("two")
+        )
+        _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+            in: &state, scopeId: "surface:surface-a", scopeKind: "surface",
+            recordId: "target-result", recordClass: .targetResult,
+            payload: .object(["status": .string("applied")])
+        )
+        let surfaceSnapshot = try SurfAceLocklessConsumableOperations.snapshot(
+            in: state, controllerInstanceId: "a", scopeId: "surface:surface-a"
+        )
+        XCTAssertEqual(surfaceSnapshot.records.map(\.recordClass), [.targetResult])
+        XCTAssertEqual(try snapshot(state, "a").records.map(\.recordId), ["tap", "scroll-latest", "live"])
+
+        state.limits.maxConsumableRecordBytes = 1
+        let oversize = try append(&state, id: "oversize", recordClass: .content)
+        XCTAssertFalse(oversize.retained)
+        let delta = try SurfAceLocklessConsumableOperations.delta(
+            in: state, controllerInstanceId: "a", scopeId: "pane:surface-a:1"
+        )
+        let loss = try snapshot(state, "a").cursor
+        XCTAssertEqual(loss.gap?.cause, "record_oversize")
+        XCTAssertEqual(loss.gap?.recordClasses, [.content])
+        _ = try SurfAceLocklessConsumableOperations.acknowledge(
+            in: &state, controllerInstanceId: "a", scopeId: "pane:surface-a:1",
+            cursor: delta.lastRetainedSequence + 1, gapGeneration: loss.gapGeneration
+        )
+        XCTAssertNil(try snapshot(state, "a").cursor.gap)
+    }
+
+    func testACREAD02WithinWindowCatchesUpAndCrossingWindowUsesStructuredLoss() throws {
+        var state = try authority(controllerIds: ["slow", "producer"])
+        state.limits.maxPaneConsumableRecords = 3
+        _ = try append(&state, id: "one", recordClass: .content)
+        _ = try append(&state, id: "two", recordClass: .content)
+        XCTAssertEqual(try snapshot(state, "slow").records.map(\.recordId), ["one", "two"])
+        XCTAssertNil(try snapshot(state, "slow").cursor.gap)
+        _ = try SurfAceLocklessConsumableOperations.acknowledge(
+            in: &state, controllerInstanceId: "producer", scopeId: "pane:surface-a:1",
+            cursor: 3, gapGeneration: nil
+        )
+        _ = try append(&state, id: "three", recordClass: .content)
+        _ = try append(&state, id: "four", recordClass: .content)
+        let crossed = try snapshot(state, "slow")
+        XCTAssertEqual(crossed.records.map(\.recordId), ["two", "three", "four"])
+        XCTAssertEqual(crossed.cursor.gap?.cause, "scope_capacity")
+        XCTAssertEqual(crossed.cursor.gap?.firstLostSequence, 1)
+        XCTAssertNil(try snapshot(state, "producer").cursor.gap)
+    }
+}

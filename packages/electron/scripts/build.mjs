@@ -59,6 +59,7 @@ await build({
     path.join(rootDir, "test", "identity.test.ts"),
     path.join(rootDir, "test", "lockless-acceptance.test.ts"),
     path.join(rootDir, "test", "lockless-client-authority.test.ts"),
+    path.join(rootDir, "test", "migration-receipt.test.ts"),
     path.join(rootDir, "test", "legacy-rollback-migration.test.ts"),
     path.join(rootDir, "test", "lockless-ws-server.test.ts"),
     path.join(rootDir, "test", "native-pane-bridge.test.ts"),
