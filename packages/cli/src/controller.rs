@@ -116,10 +116,15 @@ fn execute_locked(
         return Err(CliError::Protocol("surface_pair_mismatch".into()));
     }
     verify_receipt_limits(pair_payload)?;
-    apply_synchronization(root, pair_payload, &pair.events)?;
-    finalize_acknowledged_receipts(root, wire)?;
-
-    flush_acknowledgements(root, wire)?;
+    if let Err(error) = (|| {
+        apply_synchronization(root, pair_payload, &pair.events)?;
+        finalize_acknowledged_receipts(root, wire)?;
+        flush_acknowledgements(root, wire)
+    })() {
+        let _ = mark_all_unsynchronized(root);
+        let _ = wire.close();
+        return Err(error);
+    }
     let resolutions = pair_payload
         .get("receiptResolutions")
         .and_then(Value::as_array)

@@ -2261,17 +2261,6 @@ export class SurfaceWsServer {
       return locklessSuccess(request, result);
     }
     if (request.op === "consumable.ack") {
-      if (
-        !this.locklessSessionMatchesScope(
-          session,
-          request.payload.scopeId,
-        )
-      ) {
-        throw new SurfaceCoreError(
-          "not_paired",
-          "Acknowledgement requires the scope's surface connection",
-        );
-      }
       this.core.locklessAuthority.acknowledge(
         session.controllerInstanceId,
         request.payload,

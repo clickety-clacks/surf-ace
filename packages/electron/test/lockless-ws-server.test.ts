@@ -1719,6 +1719,105 @@ test("one stable controller may hold lifecycle and surface sessions but not dupl
   }
 });
 
+test("consumable acknowledgements use durable controller scope ownership across admitted connection slots", async () => {
+  const core = new SurfaceCore();
+  const firstSurface = core.ensurePrimarySurface("First", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const secondSurface = core.createAdditionalSurface("Second", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const firstPaneScope = locklessPaneScopeId(
+    firstSurface.surfaceId,
+    1,
+  );
+  const secondSurfaceScope =
+    `surface:${encodeURIComponent(secondSurface.surfaceId)}`;
+  core.locklessAuthority.ensureScope(firstPaneScope, "pane");
+  core.locklessAuthority.ensureScope(secondSurfaceScope, "surface");
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const lifecycle = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const firstSurfaceSession = await connect(
+    `ws://127.0.0.1:${port}${server.wsPath}`,
+  );
+  try {
+    assert.equal((await pair(lifecycle, "durable-controller")).ok, true);
+    assert.equal(
+      (await pair(
+        firstSurfaceSession,
+        "durable-controller",
+        firstSurface.surfaceId,
+      )).ok,
+      true,
+    );
+    core.locklessAuthority.appendConsumable({
+      payload: { value: "pane" },
+      recordClass: "tap",
+      scopeId: firstPaneScope,
+      scopeKind: "pane",
+      triggerOperation: "test.lifecycle-ack",
+    });
+    core.locklessAuthority.appendConsumable({
+      payload: { value: "other-surface" },
+      recordClass: "target_result",
+      scopeId: secondSurfaceScope,
+      scopeKind: "surface",
+      triggerOperation: "test.cross-surface-ack",
+    });
+
+    const lifecycleAck = await request(lifecycle, "consumable.ack", {
+      cursor: 2,
+      scopeId: firstPaneScope,
+    });
+    assert.equal(lifecycleAck.ok, true, JSON.stringify(lifecycleAck));
+    assert.equal(lifecycleAck.payload.acceptedCursor, 2);
+
+    const crossSurfaceAck = await request(
+      firstSurfaceSession,
+      "consumable.ack",
+      {
+        cursor: 2,
+        scopeId: secondSurfaceScope,
+      },
+    );
+    assert.equal(crossSurfaceAck.ok, true, JSON.stringify(crossSurfaceAck));
+    assert.equal(crossSurfaceAck.payload.acceptedCursor, 2);
+
+    const lifecycleSync = await request(lifecycle, "consumable.sync", {
+      scopeIds: [firstPaneScope],
+    });
+    assert.equal(lifecycleSync.ok, false);
+    assert.equal(lifecycleSync.error.code, "not_paired");
+
+    const foreignSurfaceList = await request(
+      firstSurfaceSession,
+      "panes.list",
+      { surfaceId: secondSurface.surfaceId },
+    );
+    assert.equal(foreignSurfaceList.ok, false);
+    assert.equal(foreignSurfaceList.error.code, "not_paired");
+  } finally {
+    lifecycle.close();
+    firstSurfaceSession.close();
+    await server.stop();
+  }
+});
+
 test("migration admission rejects foreign and remapped bootstrap scopes", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {

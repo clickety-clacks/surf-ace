@@ -14,6 +14,7 @@ use tungstenite::{accept, Message};
 
 struct FakeWire {
     ack_accepted: bool,
+    close_count: usize,
     operations: Vec<String>,
     payloads: Vec<(String, Value)>,
     fail_after_send_on: Option<String>,
@@ -29,6 +30,7 @@ impl FakeWire {
     fn ordinary() -> Self {
         Self {
             ack_accepted: true,
+            close_count: 0,
             operations: vec![],
             payloads: vec![],
             fail_after_send_on: None,
@@ -208,6 +210,7 @@ impl DirectWire for FakeWire {
     }
 
     fn close(&mut self) -> Result<(), WireFailure> {
+        self.close_count += 1;
         Ok(())
     }
 }
@@ -1095,6 +1098,53 @@ fn consumable_ack_projection_failure_keeps_outbox_and_unsynchronized_state() {
         1
     );
     assert_eq!(persisted["scopes"]["surface:sf_1"]["synchronized"], false);
+    assert_eq!(second.close_count, 1);
+}
+
+#[test]
+fn consumable_ack_rejection_closes_and_keeps_outbox_unsynchronized() {
+    let temp = TempDir::new().unwrap();
+    let mut first = FakeWire::ordinary();
+    first.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 1,
+        "records": [{
+            "bytes": 32,
+            "payload": { "value": "initial" },
+            "recordClass": "tap",
+            "recordId": "record-1",
+            "sequence": 1
+        }],
+        "scopeId": "surface:sf_1",
+        "version": 1
+    })];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut first).unwrap();
+    let mut local = invocation(&temp, Command::Read, json!({ "scopeId": "surface:sf_1" }));
+    local.endpoint = None;
+    local.product_label = None;
+    execute(local).unwrap();
+
+    let mut rejected = FakeWire::ordinary();
+    rejected.scopes = first.scopes;
+    rejected.receipt_capacity_on = Some("consumable.ack".into());
+    let error =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut rejected).unwrap_err();
+    assert!(matches!(
+        error,
+        CliError::Rejected { ref operation, ref code }
+            if operation == "consumable.ack" && code == "receipt_capacity"
+    ));
+    assert_eq!(rejected.close_count, 1);
+    assert!(!rejected.operations.contains(&"surfaces.list".into()));
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        persisted["acknowledgementOutbox"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(persisted["scopes"]["surface:sf_1"]["synchronized"], false);
 }
 
 #[test]
@@ -1447,6 +1497,152 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
 }
 
 #[test]
+fn production_lifecycle_connection_flushes_multi_surface_read_acknowledgements() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let scopes = vec![
+            json!({
+                "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+                "firstRetainedSequence": 1,
+                "lastRetainedSequence": 1,
+                "records": [{
+                    "bytes": 32,
+                    "payload": { "surfaceId": "sf_1" },
+                    "recordClass": "tap",
+                    "recordId": "record-sf-1",
+                    "sequence": 1
+                }],
+                "scopeId": "surface:sf_1",
+                "version": 1
+            }),
+            json!({
+                "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+                "firstRetainedSequence": 1,
+                "lastRetainedSequence": 1,
+                "records": [{
+                    "bytes": 32,
+                    "payload": { "surfaceId": "sf_2" },
+                    "recordClass": "tap",
+                    "recordId": "record-sf-2",
+                    "sequence": 1
+                }],
+                "scopeId": "surface:sf_2",
+                "version": 1
+            }),
+        ];
+
+        let (sync_stream, _) = listener.accept().unwrap();
+        let mut sync = accept(sync_stream).unwrap();
+        let pair = read_request(&mut sync);
+        assert_eq!(pair["op"], "pair.request");
+        assert!(pair["payload"].get("surfaceId").is_none());
+        let mut initial_pair = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        initial_pair["scopes"] = json!(scopes);
+        initial_pair["synchronizationCutoff"] = json!("cutoff-initial");
+        send_response(
+            &mut sync,
+            pair["id"].as_str().unwrap(),
+            "pair.response",
+            initial_pair,
+        );
+        let list = read_request(&mut sync);
+        assert_eq!(list["op"], "surfaces.list");
+        send_response(
+            &mut sync,
+            list["id"].as_str().unwrap(),
+            "surfaces.list.result",
+            json!({
+                "surfaces": [
+                    { "surfaceId": "sf_1" },
+                    { "surfaceId": "sf_2" }
+                ]
+            }),
+        );
+        expect_orderly_close(&mut sync);
+
+        let (ack_stream, _) = listener.accept().unwrap();
+        let mut ack = accept(ack_stream).unwrap();
+        let pair = read_request(&mut ack);
+        assert_eq!(pair["op"], "pair.request");
+        assert!(pair["payload"].get("surfaceId").is_none());
+        assert_eq!(
+            pair["payload"]["resume"]["pendingAcks"],
+            json!([
+                { "cursor": 2, "scopeId": "surface:sf_1" },
+                { "cursor": 2, "scopeId": "surface:sf_2" }
+            ])
+        );
+        let mut resumed_pair = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        resumed_pair["resumed"] = json!(true);
+        resumed_pair["scopes"] = json!(scopes);
+        resumed_pair["synchronizationCutoff"] = json!("cutoff-resumed");
+        send_response(
+            &mut ack,
+            pair["id"].as_str().unwrap(),
+            "pair.response",
+            resumed_pair,
+        );
+        for scope_id in ["surface:sf_1", "surface:sf_2"] {
+            let acknowledgement = read_request(&mut ack);
+            assert_eq!(acknowledgement["op"], "consumable.ack");
+            assert_eq!(acknowledgement["payload"]["scopeId"], scope_id);
+            assert_eq!(acknowledgement["payload"]["cursor"], 2);
+            send_response(
+                &mut ack,
+                acknowledgement["id"].as_str().unwrap(),
+                "consumable.ack.result",
+                json!({ "accepted": true }),
+            );
+        }
+        let list = read_request(&mut ack);
+        assert_eq!(list["op"], "surfaces.list");
+        send_response(
+            &mut ack,
+            list["id"].as_str().unwrap(),
+            "surfaces.list.result",
+            json!({
+                "surfaces": [
+                    { "surfaceId": "sf_1" },
+                    { "surfaceId": "sf_2" }
+                ]
+            }),
+        );
+        expect_orderly_close(&mut ack);
+    });
+
+    let temp = TempDir::new().unwrap();
+    let mut synchronize = invocation(&temp, Command::List, json!({}));
+    synchronize.endpoint = Some(endpoint.clone());
+    execute(synchronize).unwrap();
+    for scope_id in ["surface:sf_1", "surface:sf_2"] {
+        let mut read = invocation(&temp, Command::Read, json!({ "scopeId": scope_id }));
+        read.endpoint = None;
+        read.product_label = None;
+        let output = execute(read).unwrap();
+        assert_eq!(output.result["cacheStatus"], "current");
+        assert_eq!(output.result["acknowledgement"]["cursor"], 2);
+    }
+    let mut list = invocation(&temp, Command::List, json!({}));
+    list.endpoint = Some(endpoint);
+    execute(list).unwrap();
+    server.join().unwrap();
+
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["acknowledgementOutbox"], json!([]));
+    for scope_id in ["surface:sf_1", "surface:sf_2"] {
+        assert_eq!(persisted["scopes"][scope_id]["clientCursor"], 2);
+        assert_eq!(persisted["scopes"][scope_id]["synchronized"], true);
+        assert_eq!(
+            persisted["scopes"][scope_id]["synchronizationCutoff"],
+            "cutoff-resumed"
+        );
+    }
+}
+
+#[test]
 fn state_root_os_lock_serializes_whole_cross_process_lifetime() {
     let temp = TempDir::new().unwrap();
     let first = LockedStateRoot::open(temp.path(), 1024 * 1024).unwrap();
@@ -1521,6 +1717,16 @@ fn read_request(socket: &mut tungstenite::WebSocket<std::net::TcpStream>) -> Val
                 return envelope;
             }
             Message::Close(_) => panic!("connection closed before request"),
+            _ => {}
+        }
+    }
+}
+
+fn expect_orderly_close(socket: &mut tungstenite::WebSocket<std::net::TcpStream>) {
+    loop {
+        match socket.read().unwrap() {
+            Message::Close(_) => return,
+            Message::Ping(payload) => socket.send(Message::Pong(payload)).unwrap(),
             _ => {}
         }
     }
