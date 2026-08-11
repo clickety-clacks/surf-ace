@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { cp, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -13,6 +14,45 @@ const manifestUrl = new URL("../../packages/cli/Cargo.toml", import.meta.url);
 const manifestPath = fileURLToPath(manifestUrl);
 const proofScriptPath = fileURLToPath(new URL("./proof/tightbeam-skill-consumer.exs", import.meta.url));
 const tightbeamSourceRoot = process.env.TIGHTBEAM_SOURCE_ROOT;
+
+async function startLocalController(socketPath) {
+  const source = `
+    import net from "node:net";
+    const server = net.createServer((socket) => {
+      let encoded = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => encoded += chunk);
+      socket.on("end", () => {
+        const request = JSON.parse(encoded);
+        socket.end(JSON.stringify({
+          id: request.id,
+          ok: true,
+          result: {
+            command: request.command,
+            controllerInstanceId: "ci_consumer_proof",
+            ok: true,
+            reconciliations: [],
+            result: {
+              acknowledgement: null,
+              cacheStatus: "unsynchronized",
+              consumableLoss: null,
+              records: [],
+              scopeId: request.input.scopeId,
+              synchronizationCutoff: null
+            }
+          },
+          v: 1
+        }) + "\\n");
+      });
+    });
+    server.listen(process.argv[1], () => process.stdout.write("ready\\n"));
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source, socketPath], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  await once(child.stdout, "data");
+  return child;
+}
 
 test("Tight Beam consumes the unchanged general surf-ace executable", async () => {
   const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -45,7 +85,7 @@ test("Tight Beam consumes the unchanged general surf-ace executable", async () =
   }
 });
 
-test("standalone executes the installed general binary", async (context) => {
+test("direct caller executes the installed local-controller client", async (context) => {
   const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
   const proofRoot = await mkdtemp(join(tmpdir(), "surf-ace-identical-binary-"));
   context.after(async () => rm(proofRoot, { recursive: true, force: true }));
@@ -61,12 +101,15 @@ test("standalone executes the installed general binary", async (context) => {
     .update(await readFile(executablePath))
     .digest("hex");
   assert.equal(basename(executablePath), fixture.attachment.executable);
+  const socketPath = join(proofRoot, "controller.sock");
+  const controller = await startLocalController(socketPath);
+  context.after(() => controller.kill("SIGTERM"));
 
   const invocation = spawnSync(
     executablePath,
     [
-      "--state-root",
-      join(proofRoot, "state", "direct-standalone"),
+      "--socket",
+      socketPath,
       "read",
       "--input-json",
       JSON.stringify({ scopeId: "surface:proof" }),
@@ -94,13 +137,16 @@ test("ordinary Tight Beam archetypes materialize the skill and invoke identical 
   );
   assert.equal(installed.status, 0, installed.stderr);
   const executablePath = await realpath(join(installRoot, "bin", "surf-ace"));
+  const socketPath = join(proofRoot, "controller.sock");
+  const controller = await startLocalController(socketPath);
+  context.after(() => controller.kill("SIGTERM"));
   const mixBuildPath = join(proofRoot, "tightbeam-build");
   const compiledPriv = join(mixBuildPath, "lib", "tightbeam", "priv");
   await mkdir(dirname(compiledPriv), { recursive: true });
   await cp(join(tightbeamSourceRoot, "priv"), compiledPriv, { recursive: true });
   const exercised = spawnSync(
     "mix",
-    ["run", "--no-start", proofScriptPath, "--", join(proofRoot, "tightbeam-home"), fileURLToPath(skillUrl), executablePath],
+    ["run", "--no-start", proofScriptPath, "--", join(proofRoot, "tightbeam-home"), fileURLToPath(skillUrl), executablePath, socketPath],
     {
       cwd: tightbeamSourceRoot,
       encoding: "utf8",

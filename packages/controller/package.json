@@ -5,8 +5,12 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "surf-ace-controller": "dist/main.js"
+  },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json",
+    "package:linux": "node scripts/build-linux-package.mjs",
     "test": "node --import tsx --test src/*.test.ts"
   },
   "exports": {

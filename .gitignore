@@ -1,6 +1,7 @@
 node_modules/
 dist/
 target/
+build/
 .DS_Store
 *.log
 scratch/

@@ -1,4 +1,4 @@
-[base_dir, skill_source, executable] = Enum.reject(System.argv(), &(&1 == "--"))
+[base_dir, skill_source, executable, socket_path] = Enum.reject(System.argv(), &(&1 == "--"))
 identity_dir = Path.join(base_dir, "identity")
 
 Tightbeam.Identity.init!(base_dir)
@@ -53,8 +53,8 @@ invoke = fn id, kind, cwd, materialized_skill ->
     System.cmd(
       executable,
       [
-        "--state-root",
-        Path.join([base_dir, "state", id]),
+        "--socket",
+        socket_path,
         "read",
         "--input-json",
         ~s({"scopeId":"surface:proof"})

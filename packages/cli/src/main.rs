@@ -28,22 +28,12 @@ fn main() {
 
 fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
     let mut args = env::args().skip(1).peekable();
-    let mut state_root: Option<PathBuf> = None;
-    let mut endpoint = None;
-    let mut product_label = None;
-    let mut projection_capacity_bytes = 16 * 1024 * 1024;
+    let mut socket_path: Option<PathBuf> = None;
     let mut input_json = None;
     let mut command = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
-            "--state-root" => state_root = Some(PathBuf::from(value(&mut args, "state-root")?)),
-            "--endpoint" => endpoint = Some(value(&mut args, "endpoint")?),
-            "--product-label" => product_label = Some(value(&mut args, "product-label")?),
-            "--projection-capacity-bytes" => {
-                projection_capacity_bytes = value(&mut args, "projection-capacity-bytes")?
-                    .parse::<u64>()
-                    .map_err(|_| input_error("projection-capacity-bytes"))?;
-            }
+            "--socket" => socket_path = Some(PathBuf::from(value(&mut args, "socket")?)),
             "--input-json" => input_json = Some(value(&mut args, "input-json")?),
             value if command.is_none() => {
                 command = Command::parse(value);
@@ -55,7 +45,9 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
         }
     }
     let command = command.ok_or_else(|| input_error("command"))?;
-    let state_root = state_root.ok_or_else(|| input_error("state-root"))?;
+    let socket_path = socket_path
+        .or_else(|| env::var_os("SURF_ACE_CONTROLLER_SOCKET").map(PathBuf::from))
+        .ok_or_else(|| input_error("socket"))?;
     let encoded = if let Some(input) = input_json {
         input
     } else {
@@ -76,11 +68,8 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
         .ok_or_else(|| input_error("input-json-object"))?;
     Ok(Invocation {
         command,
-        endpoint,
         input,
-        product_label,
-        projection_capacity_bytes,
-        state_root,
+        socket_path,
     })
 }
 

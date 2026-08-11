@@ -1,0 +1,30 @@
+{
+  "capture": {
+    "endpoint": "ws://shrdlu:19001/ws",
+    "paired": false,
+    "readOnly": true,
+    "recordedAt": "2026-08-11T15:30:35-07:00"
+  },
+  "response": {
+    "id": "rq_fixture_surfaces",
+    "ok": true,
+    "op": "surfaces.list",
+    "payload": {
+      "surfaces": [
+        {
+          "name": "shrdlu Surf Ace",
+          "paired": true,
+          "surfaceId": "sf_0019da33b612",
+          "viewport": {
+            "height": 3840,
+            "scale": 1,
+            "width": 2160
+          }
+        }
+      ]
+    },
+    "sentAt": 1786462235204,
+    "type": "response",
+    "v": 1
+  }
+}

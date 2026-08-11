@@ -1,6 +1,6 @@
 # T1770 Rejected-Architecture Proof Ledger — 2026-07-30
 
-> Historical diagnostic evidence only. Flynn rejected the dedicated Tight Beam archetype and MCP adapter that this run exercised. Current Revision 11 requires one general standalone native `surf-ace` CLI plus a separate Tight Beam reusable-skill consumer of the identical executable, with no Tight-Beam-specific binary, MCP, or dedicated archetype. Nothing in this ledger proves the corrected product route, and the former quota/no-tool result is not a current product blocker. Corrected official proof remains prohibited until AC-CLI-09/CORR-09 approves the combined source and native macOS/Linux evidence.
+> Historical diagnostic evidence only. Flynn rejected the dedicated Tight Beam archetype and MCP adapter that this run exercised. The current correction requires one OpenClaw-independent resident controller plus one native `surf-ace` local CLI and a separate Tight Beam reusable-skill consumer of the identical executable, with no Tight-Beam-specific binary, MCP, or dedicated archetype. Nothing in this ledger proves the corrected product route, and the former quota/no-tool result is not a current product blocker. Corrected official proof remains prohibited until AC-CLI-09 approves the resident-controller source, Linux package, and local CLI evidence.
 
 ## Result
 

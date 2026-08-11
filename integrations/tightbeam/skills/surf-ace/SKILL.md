@@ -9,14 +9,12 @@ Use the installed `surf-ace` executable through ordinary command execution. This
 capability; it does not select or alter an archetype and it declares no MCP
 server or tools.
 
-Supply all runtime facts explicitly:
+Supply the local controller socket explicitly:
 
-- `--state-root` identifies one durable controller state root shared by
-  sequential invocations.
-- `--endpoint` is required for networked commands and must be the Surf Ace
-  controller WebSocket selected by the current environment.
-- `--product-label` is required for networked commands and is human-readable
-  provenance, not identity or authority.
+- `--socket` or `SURF_ACE_CONTROLLER_SOCKET` identifies the resident
+  controller's local Unix socket.
+- The resident controller owns discovery, controller identity, durable
+  projection state, WebSocket connections, and reconnects.
 - `friendlyChatName` belongs in each `push` input when the caller has a friendly
   chat label. Never synthesize or hard-code it.
 - `--input-json` contains one command input object. Treat stdout as the sole
@@ -36,8 +34,7 @@ or use `contentType: "text"`. The accepted pairs are:
 For example:
 
 ```sh
-surf-ace --state-root "$STATE_ROOT" --endpoint "$SURF_ACE_ENDPOINT" \
-  --product-label Clawline push --input-json \
+surf-ace --socket "$SURF_ACE_CONTROLLER_SOCKET" push --input-json \
   '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"# Visible result"},"friendlyChatName":"CLU"}'
 ```
 
@@ -45,18 +42,17 @@ Commands are exactly: `list`, `push`, `read`, `topology-intent`,
 `topology-realize`, `clear`, `annotations-remove`, `capture-pane`,
 `surface-intent`, `target-register`, and `target-apply`.
 
-`read` is special: omit `--endpoint` and `--product-label`. It is a locked local
-projection transaction and performs no network access. If it reports
-`cacheStatus: "unsynchronized"`, use a later explicit networked command to
-repair; do not replace it with a direct fetch.
+`read` is a local controller projection transaction and performs no surface
+network access. If it reports `cacheStatus: "unsynchronized"`, wait for the
+resident controller to repair the projection; do not replace it with a direct
+fetch.
 
 For mutations, success requires the exact correlated `operationReceipt` in the
 result. `outcome_unknown` means the request may have reached the client; do not
-retry it. A later networked invocation resolves the durable request correlation.
+retry it. The resident controller resolves the durable request correlation.
 `still_pending` forbids another mutation. `receipt_unavailable` with
 `controller_reclaimed` is permanent and must not be inferred as success or
-retried.
+retried. The resident controller resolves durable request correlations.
 
-Never start a resident process for this capability. Do not add MCP, a dedicated
-archetype, a sidecar/daemon, launchd/login-item/autostart, or another persistence
-service.
+Do not start another resident controller for this capability. Do not add MCP, a
+dedicated archetype, a second sidecar/daemon, or another persistence service.

@@ -1,0 +1,18 @@
+[Unit]
+Description=Surf Ace resident controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/surf-ace/controller
+EnvironmentFile=%h/.config/surf-ace/runtime.env
+Environment=SURF_ACE_PRODUCT_LABEL=Surf Ace Linux Controller
+ExecStart=/opt/surf-ace/surf-ace-runtime
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=surf-ace
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=default.target

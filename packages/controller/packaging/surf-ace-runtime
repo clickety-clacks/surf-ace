@@ -1,0 +1,24 @@
+#!/bin/bash
+set -euo pipefail
+
+: "${SURF_ACE_CLIENT_COMMAND:?SURF_ACE_CLIENT_COMMAND is required}"
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"
+
+export SURF_ACE_STATE_DIR="${SURF_ACE_STATE_DIR:-$HOME/.config/@surf-ace/electron/controller}"
+export SURF_ACE_SOCKET_PATH="${SURF_ACE_SOCKET_PATH:-$XDG_RUNTIME_DIR/surf-ace/controller.sock}"
+
+bash -lc "$SURF_ACE_CLIENT_COMMAND" &
+client_pid=$!
+node /opt/surf-ace/controller/dist/main.js &
+controller_pid=$!
+
+stop() {
+  kill "$client_pid" "$controller_pid" 2>/dev/null || true
+  wait "$client_pid" "$controller_pid" 2>/dev/null || true
+}
+
+trap stop EXIT INT TERM
+wait -n "$client_pid" "$controller_pid"
+exit_status=$?
+stop
+exit "$exit_status"

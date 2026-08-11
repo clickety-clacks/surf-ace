@@ -1,7 +1,5 @@
 pub mod command;
-pub mod controller;
-pub mod state;
-pub mod wire;
+pub mod local_client;
 
 pub use command::{Command, Invocation};
-pub use controller::{execute, CliError, CliOutput};
+pub use local_client::{execute, CliError};
