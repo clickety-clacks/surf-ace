@@ -26,8 +26,9 @@ Shrdlu, Racter, EEZO, Aleph, or a Simulator.
    the exact current tmux pane launch command without changing it.
 4. Stop the existing `surf-ace-compositor` tmux runtime. Do not remove its
    state files.
-5. Replace `/opt/surf-ace/controller` and `/usr/local/bin/surf-ace` from the
-   reviewed archive. Do not retain a second version elsewhere on Shrdlu.
+5. Replace `/opt/surf-ace/controller`, `/opt/surf-ace/surf-ace-runtime`, and
+   `/usr/local/bin/surf-ace` from the reviewed archive. Do not retain a second
+   version elsewhere on Shrdlu.
 6. Write the exact recorded tmux pane launch command as
    `SURF_ACE_CLIENT_COMMAND` in `~/.config/surf-ace/runtime.env`. Do not invent
    or normalize the command.
@@ -52,14 +53,17 @@ existing files directly under `/home/clu/.config/@surf-ace/electron`.
 ## Rollback
 
 1. Stop and disable the reviewed controller unit.
-2. Restore the previously recorded runtime bytes at their original path.
-3. Restart the prior `surf-ace-compositor` command with its original working
+2. Remove the reviewed controller bytes, CLI, user unit, and supervisor at
+   `/opt/surf-ace/surf-ace-runtime`. Restore any previously recorded bytes at
+   those paths.
+3. Restore the previously recorded runtime bytes at their original path.
+4. Restart the prior `surf-ace-compositor` command with its original working
    directory and environment.
-4. Verify the recorded executable, listener, and primary and backup state-file
+5. Verify the recorded executable, listener, and primary and backup state-file
    hashes.
-5. Keep the failed controller package out of service. Do not start it in
+6. Keep the failed controller package out of service. Do not start it in
    parallel with the restored runtime.
-6. Preserve the controller subdirectory for investigation unless the owner
+7. Preserve the controller subdirectory for investigation unless the owner
    explicitly authorizes its removal. The client state files remain unchanged.
 
 Rollback is complete only when process, listener, executable hash, state-file
