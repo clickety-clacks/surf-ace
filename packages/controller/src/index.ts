@@ -1,3 +1,4 @@
+export * from "./discovery.js";
 export * from "./identity.js";
 export * from "./multi-surface-controller.js";
 export * from "./projection.js";

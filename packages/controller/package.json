@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@surf-ace/protocol": "workspace:*",
+    "bonjour-service": "^1.3.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
