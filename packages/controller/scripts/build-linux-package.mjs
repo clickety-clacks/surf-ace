@@ -48,7 +48,7 @@ const sourceStatus = (await exec("git", [
 if (sourceStatus) {
   throw new Error(`linux_package_requires_clean_source:\n${sourceStatus}`);
 }
-await fs.mkdir(output, { recursive: false });
+await fs.mkdir(output, { recursive: true });
 await fs.mkdir(stage);
 await run("pnpm", ["--filter", "@surf-ace/protocol", "build"]);
 await run("pnpm", ["--filter", "@surf-ace/controller", "build"]);
