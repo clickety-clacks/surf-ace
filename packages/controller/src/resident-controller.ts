@@ -275,7 +275,7 @@ export class ResidentController {
     for (const endpoint of endpoints) {
       const stableKey = endpointStableKey(endpoint);
       discoveredKeys.add(stableKey);
-      const previous = this.topology.endpoints[stableKey];
+      const previous = await this.migrateInstanceFallback(endpoint, stableKey);
       this.topology.endpoints[stableKey] = {
         discovered: true,
         endpointId: endpoint.endpointId,
@@ -299,6 +299,38 @@ export class ResidentController {
       }
     }
     await this.topologyStore.save(this.topology);
+  }
+
+  private async migrateInstanceFallback(
+    endpoint: SurfAceDiscoveryEndpoint,
+    stableKey: string,
+  ): Promise<ResidentFleetEndpoint | undefined> {
+    const current = this.topology.endpoints[stableKey];
+    if (!endpoint.fingerprintPrefix.trim()) {
+      return current;
+    }
+    const fallbackKey = createHash("sha256")
+      .update(endpoint.instanceName.trim())
+      .digest("hex")
+      .slice(0, 24);
+    if (fallbackKey === stableKey) {
+      return current;
+    }
+    const fallback = this.topology.endpoints[fallbackKey];
+    if (
+      !fallback ||
+      fallback.instanceName !== endpoint.instanceName ||
+      fallback.fingerprintPrefix.trim()
+    ) {
+      return current;
+    }
+    const active = this.active.get(fallbackKey);
+    if (active) {
+      await active.controller.stop();
+      this.active.delete(fallbackKey);
+    }
+    delete this.topology.endpoints[fallbackKey];
+    return current ?? fallback;
   }
 
   private async connectEndpoint(

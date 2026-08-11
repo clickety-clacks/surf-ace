@@ -34,9 +34,11 @@ Shrdlu, Racter, EEZO, Aleph, or a Simulator.
 7. Install the reviewed user unit as
    `~/.config/systemd/user/surf-ace-controller.service`.
 8. Start exactly that one user unit. Its reviewed supervisor starts the exact
-   prior client command and the resident controller as one service. Verify one
-   unit, one client process, one controller process, one local socket at
-   `%t/surf-ace/controller.sock`, and the existing client listener.
+   prior client command and the resident controller as one service. The unit
+   restarts the full supervisor when either child exits, including a clean
+   child exit. Verify that restart behavior, one unit, one client process, one
+   controller process, one local socket at `%t/surf-ace/controller.sock`, and
+   the existing client listener.
 9. Run the installed CLI locally. Verify that `list` reports topology that the
    controller obtained through `surfaces.list` followed by `panes.list`.
 10. Continue the coordinator's serialized Shrdlu, Racter, macOS, and iPad gates

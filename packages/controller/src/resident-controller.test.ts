@@ -121,12 +121,15 @@ class FakeEndpointController implements ResidentEndpointController {
   }
 }
 
-function endpoint(host = "shrdlu.local"): SurfAceDiscoveryEndpoint {
+function endpoint(
+  host = "shrdlu.local",
+  fingerprintPrefix = "c0ffee",
+): SurfAceDiscoveryEndpoint {
   return {
     busy: false,
     capabilitiesBitmask: 1,
-    endpointId: `${host}:19001/ws#c0ffee`,
-    fingerprintPrefix: "c0ffee",
+    endpointId: `${host}:19001/ws#${fingerprintPrefix}`,
+    fingerprintPrefix,
     host,
     instanceName: "shrdlu Surf Ace",
     lastSeenAt: 100,
@@ -200,6 +203,43 @@ test("resident controller persists surfaces.list then panes.list across discover
     "surfaces.list",
     "panes.list:sf_0019da33b612",
   ]);
+  await controller.stop();
+});
+
+test("resident controller migrates the instance fallback when a fingerprint appears", async () => {
+  const discovery = new FakeDiscovery([endpoint("shrdlu.local", "")]);
+  const topologyStore = new MemoryStore();
+  const sessions: FakeEndpointController[] = [];
+  const listedSurfaces = await capturedSurfacesList();
+  const controller = new ResidentController({
+    controllerProductName: "Surf Ace Linux Controller",
+    createEndpointController: () => {
+      const session = new FakeEndpointController(listedSurfaces);
+      sessions.push(session);
+      return session;
+    },
+    discovery,
+    identity: new ControllerIdentity(
+      new MemoryStore(),
+      () => "ci_resident" as ControllerInstanceId,
+    ),
+    now: () => 200,
+    stateDir: "/unused",
+    topologyStore,
+  });
+
+  await controller.start();
+  discovery.emit([endpoint()]);
+  const listed = (await controller.call("list", {})).result as {
+    endpoints: Array<{ fingerprintPrefix: string; surfaces: unknown[] }>;
+  };
+
+  assert.equal(listed.endpoints.length, 1);
+  assert.equal(listed.endpoints[0]?.fingerprintPrefix, "c0ffee");
+  assert.equal(listed.endpoints[0]?.surfaces.length, 1);
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions[0]?.stopped, true);
+  assert.equal(sessions[1]?.stopped, false);
   await controller.stop();
 });
 

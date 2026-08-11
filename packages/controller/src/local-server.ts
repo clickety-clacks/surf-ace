@@ -55,10 +55,27 @@ export class ResidentControllerLocalServer {
         void this.respond(socket, encoded);
       });
     });
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(this.socketPath, () => resolve());
-    });
+    try {
+      await listen(server, this.socketPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") {
+        throw error;
+      }
+      const candidate = await fs.lstat(this.socketPath);
+      if (!candidate.isSocket() || await acceptsConnections(this.socketPath)) {
+        throw error;
+      }
+      const current = await fs.lstat(this.socketPath);
+      if (
+        !current.isSocket() ||
+        current.dev !== candidate.dev ||
+        current.ino !== candidate.ino
+      ) {
+        throw error;
+      }
+      await fs.unlink(this.socketPath);
+      await listen(server, this.socketPath);
+    }
     await fs.chmod(this.socketPath, 0o600);
     this.server = server;
   }
@@ -93,4 +110,32 @@ export class ResidentControllerLocalServer {
       })}\n`);
     }
   }
+}
+
+function acceptsConnections(socketPath: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ECONNREFUSED") {
+        resolve(false);
+        return;
+      }
+      reject(error);
+    });
+  });
+}
+
+function listen(server: net.Server, socketPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(socketPath, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
 }
