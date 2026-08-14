@@ -21,17 +21,17 @@ test("runtime identity binding request carries explicit Electron contract identi
     },
     pid: 4101,
     ppid: 4100,
-    uiLabel: "shrdlu Surf Ace",
-    windowTitle: "shrdlu Surf Ace · a",
+    uiLabel: "tablet-a Surf Ace",
+    windowTitle: "tablet-a Surf Ace · a",
   }), {
     evidence: {
       expectedBundleId: SURF_ACE_ELECTRON_BUNDLE_ID,
       expectedPackageName: SURF_ACE_ELECTRON_PACKAGE_NAME,
       expectedRuntimeId: SURF_ACE_ELECTRON_RUNTIME_ID,
       launchToken: "ltok_123",
-      observedUiLabel: "shrdlu Surf Ace",
+      observedUiLabel: "tablet-a Surf Ace",
       observedWaylandAppId: "surf-ace-electron",
-      observedWindowTitle: "shrdlu Surf Ace · a",
+      observedWindowTitle: "tablet-a Surf Ace · a",
       process: {
         pid: 4101,
         ppid: 4100,
@@ -71,8 +71,8 @@ test("runtime identity binding request accepts compositor-provided launch token 
     },
     pid: 5101,
     ppid: 5100,
-    uiLabel: "racter Surf Ace",
-    windowTitle: "racter Surf Ace",
+    uiLabel: "portrait-display Surf Ace",
+    windowTitle: "portrait-display Surf Ace",
   });
 
   assert.equal(request.evidence.launchToken, "ctok_456");
@@ -139,8 +139,8 @@ test("pending compositor binding is not ready until token and lineage authority 
     env: {},
     pid: 4101,
     ppid: 4100,
-    uiLabel: "shrdlu Surf Ace",
-    windowTitle: "shrdlu Surf Ace",
+    uiLabel: "tablet-a Surf Ace",
+    windowTitle: "tablet-a Surf Ace",
   });
 
   const diagnostics = pendingRuntimeAppBindingDiagnostics(request, 123);
@@ -159,8 +159,8 @@ test("compositor bind response without lineage proof remains degraded in readine
     },
     pid: 4101,
     ppid: 4100,
-    uiLabel: "shrdlu Surf Ace",
-    windowTitle: "shrdlu Surf Ace",
+    uiLabel: "tablet-a Surf Ace",
+    windowTitle: "tablet-a Surf Ace",
   });
 
   const diagnostics = runtimeAppBindingDiagnosticsFromCompositorResponse(request, { ok: true }, 456);
@@ -178,8 +178,8 @@ test("explicit trusted compositor bind diagnostics become ready", () => {
     env: { SURF_ACE_LAUNCH_TOKEN: "ltok_123" },
     pid: 4101,
     ppid: 4100,
-    uiLabel: "shrdlu Surf Ace",
-    windowTitle: "shrdlu Surf Ace",
+    uiLabel: "tablet-a Surf Ace",
+    windowTitle: "tablet-a Surf Ace",
   });
 
   const diagnostics = runtimeAppBindingDiagnosticsFromCompositorResponse(request, {
@@ -190,9 +190,9 @@ test("explicit trusted compositor bind diagnostics become ready", () => {
     expectedPackageName: SURF_ACE_ELECTRON_PACKAGE_NAME,
     expectedRuntimeId: SURF_ACE_ELECTRON_RUNTIME_ID,
     launchTokenStatus: "matched",
-    observedUiLabel: "shrdlu Surf Ace",
+    observedUiLabel: "tablet-a Surf Ace",
     observedWaylandAppId: "surf-ace-electron",
-    observedWindowTitle: "shrdlu Surf Ace",
+    observedWindowTitle: "tablet-a Surf Ace",
     ok: true,
     processLineageStatus: "matched",
     ready: true,
@@ -213,8 +213,8 @@ test("unsupported compositor bind request falls back to launch-token readiness",
     env: { SURF_ACE_COMPOSITOR_LAUNCH_TOKEN: "ctok_456" },
     pid: 4101,
     ppid: 4100,
-    uiLabel: "racter Surf Ace",
-    windowTitle: "racter Surf Ace",
+    uiLabel: "portrait-display Surf Ace",
+    windowTitle: "portrait-display Surf Ace",
   });
 
   const diagnostics = runtimeAppBindingDiagnosticsFromCompositorResponse(request, {
@@ -233,8 +233,8 @@ test("failed compositor bind response is degraded and visible to readiness", () 
     env: { SURF_ACE_LAUNCH_TOKEN: "ltok_123" },
     pid: 4101,
     ppid: 4100,
-    uiLabel: "shrdlu Surf Ace",
-    windowTitle: "shrdlu Surf Ace",
+    uiLabel: "tablet-a Surf Ace",
+    windowTitle: "tablet-a Surf Ace",
   });
 
   const diagnostics = runtimeAppBindingDiagnosticsFromCompositorResponse(request, {
@@ -253,8 +253,8 @@ test("compositor bind transport error is degraded and visible to readiness", () 
     env: { SURF_ACE_LAUNCH_TOKEN: "ltok_123" },
     pid: 4101,
     ppid: 4100,
-    uiLabel: "shrdlu Surf Ace",
-    windowTitle: "shrdlu Surf Ace",
+    uiLabel: "tablet-a Surf Ace",
+    windowTitle: "tablet-a Surf Ace",
   });
 
   const diagnostics = runtimeAppBindingDiagnosticsFromCompositorError(request, new Error("socket closed"), 654);

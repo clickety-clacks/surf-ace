@@ -7,19 +7,19 @@ This package owns:
 - Bonjour/mDNS discovery for `_surf-ace._tcp`
 - Persistent WebSocket connection jobs per paired surface
 - Local pane content/readback buffers for `surf_ace_read`
-- CLU tool registration for Surf Ace surface operations
+- OpenClaw tool registration for Surf Ace surface operations
 
-## Provider Placement
+## Provider Configuration
 
-Surf Ace OpenClaw extension/provider installs and provider identity/state belong on TARS only. Do not install or run this package under `~/.openclaw/extensions/surf-ace/` on eezo or other non-TARS hosts; eezo may run the Surf Ace Electron client for display/testing.
+Surf Ace provider startup requires `SURF_ACE_PROVIDER_ALLOWED_HOSTS`. Set it to the approved comma-separated host names. Startup fails before provider state resolution when the value is absent, malformed, or excludes the current host.
 
-Deploy provider changes with `make -C packages/extension deploy-tars`. The deploy target accepts only the canonical `tars.tail4105e8.ts.net` destination and has no non-TARS override. It preserves the provider identity/runtime files, `lockless-controller-identity.json`, and the complete `lockless-endpoints/` state tree while deleting stale package artifacts. The runtime entrypoint separately enforces provider placement before resolving OpenClaw state or starting the provider.
+Deploy provider changes by setting `SURF_ACE_EXTENSION_DEPLOY_HOST` to a valid destination host name and running `make -C packages/extension deploy-provider`. The target rejects missing values, schemes, users, ports, paths, and malformed host names before packaging. It preserves the provider identity/runtime files, `lockless-controller-identity.json`, and the complete `lockless-endpoints/` state tree while deleting stale package artifacts.
 
 ## OpenClaw Tool Admission
 
 The extension registers the `surf_ace_*` tools, but OpenClaw will not expose them from the normal coding tool profile unless the Surf Ace plugin is explicitly admitted in `~/.openclaw/openclaw.json`.
 
-Required TARS config:
+Required OpenClaw config:
 
     {
       "tools": {
@@ -44,7 +44,7 @@ Before replacing the amended extension with a captured pre-amendment package, ru
 
 ## Topology Soak Proof Gate
 
-Topology soak reports must cite the governing procedure in `/Users/mike/shared-workspace/surf-ace/specs/fleet-soak-procedure.md` and cannot pass on pane count alone. A normal CLU session must declare the official `surf_ace_*` tools, harmless `surf_ace_list` must succeed through that tool path, and the returned recursive topology must be cross-checked against independent rendered/provider truth such as `surf_ace_capture_pane` metadata/pixels plus `surf_ace_read` for the same `fingerprint` + opaque `paneId` tuple.
+Topology soak reports must cite the governing procedure in `<spec-root>/surf-ace/specs/fleet-soak-procedure.md` and cannot pass on pane count alone. A normal OpenClaw session must declare the official `surf_ace_*` tools, harmless `surf_ace_list` must succeed through that tool path, and the returned recursive topology must be cross-checked against independent rendered/provider truth such as `surf_ace_capture_pane` metadata/pixels plus `surf_ace_read` for the same `fingerprint` + opaque `paneId` tuple.
 
 Direct runtime calls, logs, DNS-SD, screenshots, local state files, and debug JSON are diagnostic-only. They may explain a mismatch, but they do not replace the official tool-surface admission gate or the rendered/provider topology cross-check.
 

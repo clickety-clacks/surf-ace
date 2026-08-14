@@ -7,32 +7,32 @@ import { fileURLToPath } from "node:url";
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 async function demoSource(): Promise<string> {
-  return fs.readFile(path.join(packageDir, "scripts", "racter-native-pane-demo.mjs"), "utf8");
+  return fs.readFile(path.join(packageDir, "scripts", "disabled-native-pane-demo.mjs"), "utf8");
 }
 
 async function nativePointerSource(): Promise<string> {
   return fs.readFile(path.join(packageDir, "scripts", "surf-ace-native-pointer-tester.mjs"), "utf8");
 }
 
-test("Racter native pane demo cannot register production-trusted Surf Ace surfaces", async () => {
+test("disabled native pane demo cannot register production-trusted Surf Ace surfaces", async () => {
   const source = await demoSource();
 
-  assert.match(source, /racter-native-pane-demo is disabled/);
+  assert.match(source, /native-pane-demo is disabled/);
   assert.match(source, /must not pair with production-trusted Surf Ace surfaces/);
   assert.match(source, /Direct compositor\/native-pane hosting is lower-layer diagnostic evidence only/);
   assert.doesNotMatch(source, /new WebSocket|connectWebSocket|pair\.request|topology\.apply|target\.apply|content\.apply/);
 });
 
-test("Racter native pane demo cannot smuggle caller-controlled visible IDs", async () => {
+test("disabled native pane demo cannot smuggle caller-controlled visible IDs", async () => {
   const source = await demoSource();
 
   assert.doesNotMatch(source, /windowLabel|initialPaneId|initialPaneLabel|paneLabel|paneId/);
-  assert.doesNotMatch(source, /RACTER Graphical Native/);
+  assert.doesNotMatch(source, /Graphical Native/);
   assert.doesNotMatch(source, /DOCS/);
-  assert.doesNotMatch(source, /RACTER Overlay Verify/);
+  assert.doesNotMatch(source, /Overlay Verify/);
 });
 
-test("Racter native pane demo no longer contains executable pointer proof behavior", async () => {
+test("disabled native pane demo contains no executable pointer proof behavior", async () => {
   const source = await demoSource();
 
   assert.doesNotMatch(source, /function pointerProofHtml/);

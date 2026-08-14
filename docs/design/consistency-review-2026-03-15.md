@@ -1,6 +1,6 @@
 # DESIGN.md Consistency Review
 
-Reviewed file: `/Users/mike/src/surf-ace-openclaw-extension/DESIGN.md`
+Reviewed file: `../../DESIGN.md`
 
 1. Lines 238-245 and 268-277 define `### 4.6 iOS / iPadOS Background Behavior` twice, and the two sections disagree. Lines 242-245 say the WebSocket drops immediately on background and state is kept in memory only; lines 272-275 instead specify a 30-second background-task grace period that keeps the socket alive and accepts pushes. That directly conflicts with the settled “WS drops in background” behavior and leaves duplicate section numbering.
 
@@ -8,7 +8,7 @@ Reviewed file: `/Users/mike/src/surf-ace-openclaw-extension/DESIGN.md`
 
 3. Lines 56, 69, 161, 387-394, 1615, 2017-2055, and 2870 still define pane focus as part of Phase 1 topology (`focus/select` lifecycle, `pane.focus`, and keyboard shortcuts that focus panes) even though the spec’s current invariant at lines 124-125 says there is no focused-pane concept.
 
-4. Lines 367, 376, 1438-1448, 1925-1942, 2267, and 2589-2590 still expose `focused` / `focusedPaneId` in pair responses, panes lists, hardening text, and the CLU tool return shape. That contradicts lines 124-125 (“there is no concept of a focused pane”). Line 2589 is also self-contradictory because it lists `focusedPaneId` while saying it should be omitted.
+4. Lines 367, 376, 1438-1448, 1925-1942, 2267, and 2589-2590 still expose `focused` / `focusedPaneId` in pair responses, panes lists, hardening text, and the OpenClaw tool return shape. That contradicts lines 124-125 (“there is no concept of a focused pane”). Line 2589 is also self-contradictory because it lists `focusedPaneId` while saying it should be omitted.
 
 5. Lines 678-689 keep removed focus/history-entry schema refs (`PaneFocusedEvent`, `HistoryList*`, `HistoryClose*`, `HistoryEntry*`), line 716 keeps `HistoryEntryId`, and line 1403 still mentions history-entry lifecycle events. None of those `$defs` exist later in Section 10, so these are dead cross-references/orphaned schema artifacts.
 
@@ -26,7 +26,7 @@ Reviewed file: `/Users/mike/src/surf-ace-openclaw-extension/DESIGN.md`
 
 12. Lines 405 and 2834 conflict directly on UI ownership. Line 405 says topology is fully extension-controlled with no user-initiated rename or split UI; line 2834 says users can assign custom pane names.
 
-13. Lines 429-430 say CLU does not list, target, or reason about individual history entries, but lines 681-689, 2326-2331, and 3330 still refer to history-entry requests/events/skills and “pane/history entry lifecycle events.” Those references are residual inconsistencies after history entries became internal-only.
+13. Lines 429-430 say OpenClaw does not list, target, or reason about individual history entries, but lines 681-689, 2326-2331, and 3330 still refer to history-entry requests/events/skills and “pane/history entry lifecycle events.” Those references are residual inconsistencies after history entries became internal-only.
 
 14. Lines 442-445 and 2901 still place Back/Forward and restore-failure UI in a “pane header,” but lines 2876-2883 say there is no fixed pane header bar and controls live in a bottom-center floating cluster. The UI chrome model is internally inconsistent.
 

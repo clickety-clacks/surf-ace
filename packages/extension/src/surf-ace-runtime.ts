@@ -3461,7 +3461,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       options.stateDir ?? path.dirname(resolveDefaultProviderIdentityPath()),
       PROVIDER_IDENTITY_FILE_NAME,
     );
-    this.providerName = options.providerName ?? "CLU / Surf Ace";
+    this.providerName = options.providerName ?? "OpenClaw / Surf Ace";
     this.stateDir = options.stateDir ?? resolveDefaultSurfAceStateDir(options.openClawStateDir);
     this.stateRepository = new SurfAceStateRepository<RuntimeStateFile>(this.stateDir, STATE_FILE_NAME);
     this.warnLegacyStateRoot = !options.stateDir && !options.legacyStateDir;

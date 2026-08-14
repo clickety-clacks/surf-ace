@@ -2,15 +2,15 @@
 #
 # Targets:
 #   package      Build self-contained deploy package at dist/openclaw-package/
-#   deploy-tars  Package then rsync to TARS ~/.openclaw/extensions/surf-ace/
+#   deploy-provider  Package then rsync to the configured provider host
 #   clean        Remove dist/openclaw-package/
 #
 # Deploy layout includes source files for inspection plus compiled runtime
 # entries for installed OpenClaw package loading.
 
 PKG_DIR := dist/openclaw-package
-TARS_EXTENSION_DEPLOY_HOST := tars.tail4105e8.ts.net
-SURF_ACE_EXTENSION_DEPLOY_HOST ?= $(TARS_EXTENSION_DEPLOY_HOST)
+SURF_ACE_EXTENSION_DEPLOY_HOST ?=
+export SURF_ACE_EXTENSION_DEPLOY_HOST
 SURF_ACE_CONTINUITY_FILES := \
 	surf-ace-provider-identity.json \
 	surf-ace-runtime-state.json \
@@ -26,7 +26,7 @@ SURF_ACE_CONTINUITY_HIDE_FILTERS := \
 	$(foreach directory,$(SURF_ACE_CONTINUITY_DIRECTORIES),--filter='H /$(directory)/***')
 SURF_ACE_CONTINUITY_FILTERS := $(SURF_ACE_CONTINUITY_PROTECT_FILTERS) $(SURF_ACE_CONTINUITY_HIDE_FILTERS)
 
-.PHONY: package verify-package verify-deploy-state-preservation rollback-preflight deploy-tars guard-tars-extension-deploy clean
+.PHONY: package verify-package verify-deploy-state-preservation rollback-preflight deploy-provider guard-extension-deploy-config clean
 
 package:
 	pnpm --dir ../protocol build
@@ -89,14 +89,12 @@ rollback-preflight:
 	@test -n "$(STATE_FILE)" || { printf '%s\n' "STATE_FILE is required" >&2; exit 1; }
 	node scripts/rollback-preflight.mjs --state-file "$(STATE_FILE)"
 
-guard-tars-extension-deploy:
-	@test "$(SURF_ACE_EXTENSION_DEPLOY_HOST)" = "$(TARS_EXTENSION_DEPLOY_HOST)" || { \
-		printf '%s\n' "Refusing Surf Ace provider deploy: destination must resolve exactly to $(TARS_EXTENSION_DEPLOY_HOST), got $(SURF_ACE_EXTENSION_DEPLOY_HOST)." >&2; \
-		exit 1; \
-	}
+guard-extension-deploy-config:
+	node scripts/validate-deploy-host.mjs
 
-deploy-tars: guard-tars-extension-deploy verify-deploy-state-preservation package
-	rsync -av --delete $(SURF_ACE_CONTINUITY_FILTERS) $(PKG_DIR)/ $(SURF_ACE_EXTENSION_DEPLOY_HOST):~/.openclaw/extensions/surf-ace/
+deploy-provider: guard-extension-deploy-config verify-deploy-state-preservation package
+	@deploy_host=$$(node scripts/validate-deploy-host.mjs); \
+	rsync -av --delete $(SURF_ACE_CONTINUITY_FILTERS) $(PKG_DIR)/ "$$deploy_host:~/.openclaw/extensions/surf-ace/"
 
 clean:
 	rm -rf $(PKG_DIR)

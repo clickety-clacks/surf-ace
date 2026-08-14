@@ -28,12 +28,12 @@ private func annotationDrawingData(strokeCount: Int) -> Data {
 extension SurfAceRenderAndAnnotationDiagnosticsTests {
     func testACPROV01ExactFriendlyChatAndProductComposite() {
         let provenance = SurfAceCompositeProvenance(
-            friendlyChatName: "CLU",
+            friendlyChatName: "OpenClaw",
             controllerProductName: "Clawline",
             locale: Locale(identifier: "en")
         )
-        XCTAssertEqual(provenance.plainLabel, "CLU — Clawline")
-        XCTAssertEqual(provenance.visualLabel, "\u{2068}CLU\u{2069} — \u{2068}Clawline\u{2069}")
+        XCTAssertEqual(provenance.plainLabel, "OpenClaw — Clawline")
+        XCTAssertEqual(provenance.visualLabel, "\u{2068}OpenClaw\u{2069} — \u{2068}Clawline\u{2069}")
     }
 
     func testACPROV02CompositeIsCapturedByVisibleEntryAcrossNavigation() {
@@ -65,10 +65,10 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         )
         XCTAssertEqual(english.plainLabel, "Unknown chat — Unknown provider")
         let spanish = SurfAceCompositeProvenance(
-            friendlyChatName: "  CLU عربي  ", controllerProductName: "  Clawline  ",
+            friendlyChatName: "  OpenClaw عربي  ", controllerProductName: "  Clawline  ",
             locale: Locale(identifier: "es")
         )
-        XCTAssertEqual(spanish.plainLabel, "CLU عربي — Clawline")
+        XCTAssertEqual(spanish.plainLabel, "OpenClaw عربي — Clawline")
         let spanishFallback = SurfAceCompositeProvenance(
             friendlyChatName: nil, controllerProductName: "", locale: Locale(identifier: "es")
         )
@@ -120,13 +120,13 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
 
     func testACPROV06FullAccessibleAnnouncementNeverCollapses() {
         let provenance = SurfAceCompositeProvenance(
-            friendlyChatName: "CLU", controllerProductName: "Clawline"
+            friendlyChatName: "OpenClaw", controllerProductName: "Clawline"
         )
-        XCTAssertEqual(provenance.accessibilityLabel, "Pushed by CLU, using Clawline")
+        XCTAssertEqual(provenance.accessibilityLabel, "Pushed by OpenClaw, using Clawline")
         XCTAssertEqual(provenance.widthClass(
             availableWidth: 0, compositeMinimumWidth: 40, collapsedMinimumWidth: 10
         ), .hidden)
-        XCTAssertEqual(provenance.accessibilityLabel, "Pushed by CLU, using Clawline")
+        XCTAssertEqual(provenance.accessibilityLabel, "Pushed by OpenClaw, using Clawline")
     }
 }
 

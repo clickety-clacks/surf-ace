@@ -44,7 +44,7 @@ const plugin = {
           discovery: locklessController.legacyDiscovery(),
           logger,
           openClawStateDir,
-          providerName: "CLU / Surf Ace",
+          providerName: "OpenClaw / Surf Ace",
         });
         locklessController.setLegacyMigrationSource(legacyRuntime);
         return capabilityGatedRuntime(

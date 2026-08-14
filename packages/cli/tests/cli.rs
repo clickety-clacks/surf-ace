@@ -617,7 +617,7 @@ fn canonical_network_cases() -> Vec<(Command, Value, &'static str)> {
         (Command::List, json!({}), "surfaces.list"),
         (
             Command::Push,
-            json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "markdown", "content": { "markdown": "hi" }, "friendlyChatName": "CLU" }),
+            json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "markdown", "content": { "markdown": "hi" }, "friendlyChatName": "OpenClaw" }),
             "content.set",
         ),
         (
@@ -1439,7 +1439,7 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         );
         let push = read_request(&mut surface);
         assert_eq!(push["op"], "content.set");
-        assert_eq!(push["payload"]["friendlyChatName"], "CLU");
+        assert_eq!(push["payload"]["friendlyChatName"], "OpenClaw");
         let push_id = push["id"].as_str().unwrap();
         send_response(
             &mut surface,
@@ -1484,7 +1484,7 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
             "contentId": "c_1",
             "contentType": "markdown",
             "content": { "markdown": "hello" },
-            "friendlyChatName": "CLU"
+            "friendlyChatName": "OpenClaw"
         }),
     );
     call.endpoint = Some(endpoint);

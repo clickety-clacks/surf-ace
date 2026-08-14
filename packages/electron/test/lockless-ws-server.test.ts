@@ -446,7 +446,7 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
       content: { markdown: "# shared" },
       contentId: "content-shared",
       contentType: "markdown",
-      friendlyChatName: "CLU",
+      friendlyChatName: "OpenClaw",
       paneId,
       surfaceId: surface.surfaceId,
     });

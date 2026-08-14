@@ -352,7 +352,7 @@ test("native pane bridge validates deg90 full-height pane handle alignment", () 
       captures: ["pointer_hover", "pointer_button", "pointer_axis"],
       kind: "pane_handle",
       paneId: "1",
-      paneInstanceId: "1:target_racter_btop",
+      paneInstanceId: "1:target_portrait_btop",
       rect: { height: 48, width: 148, x: 466, y: 3743 },
       regionId: "surf-ace-pane-1-pane-handle-0",
       zIndex: 10,
@@ -361,7 +361,7 @@ test("native pane bridge validates deg90 full-height pane handle alignment", () 
       captures: ["pointer_hover", "pointer_button", "pointer_axis"],
       kind: "pane_handle",
       paneId: "2",
-      paneInstanceId: "2:target_racter_top",
+      paneInstanceId: "2:target_portrait_top",
       rect: { height: 48, width: 148, x: 1546, y: 3743 },
       regionId: "surf-ace-pane-2-pane-handle-0",
       zIndex: 10,
@@ -388,12 +388,12 @@ test("native pane bridge preserves renderer-measured chrome rects and resolves l
     {
       geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 0, y: 0 },
       id: "1",
-      paneInstanceId: "1:target_racter_btop",
+      paneInstanceId: "1:target_portrait_btop",
     },
     {
       geometry: { coordinateSpace: "compositor_logical", height: 3840, width: 1080, x: 1080, y: 0 },
       id: "2",
-      paneInstanceId: "2:target_racter_top",
+      paneInstanceId: "2:target_portrait_top",
     },
   ] as const;
   const badRendererRegions = [
@@ -438,19 +438,19 @@ test("native pane bridge preserves renderer-measured chrome rects and resolves l
   assert.deepEqual(resolvedOverlayRegionsForCompositor([...badRendererRegions], panes), [
     {
       ...badRendererRegions[0],
-      paneInstanceId: "1:target_racter_btop",
+      paneInstanceId: "1:target_portrait_btop",
     },
     {
       ...badRendererRegions[1],
-      paneInstanceId: "1:target_racter_btop",
+      paneInstanceId: "1:target_portrait_btop",
     },
     {
       ...badRendererRegions[2],
-      paneInstanceId: "1:target_racter_btop",
+      paneInstanceId: "1:target_portrait_btop",
     },
     {
       ...badRendererRegions[3],
-      paneInstanceId: "1:target_racter_btop",
+      paneInstanceId: "1:target_portrait_btop",
     },
   ]);
 });
@@ -666,16 +666,16 @@ test("native pane bridge identifies transient overlay native-pane liveness failu
 
 test("native pane bridge extracts live overlay pane-instance authority from compositor failures", () => {
   const response = {
-    error: "invalid overlay region: pane PaneId(\"1\") pane instance 'stale' does not match live pane instance '1:target_racter_btop'",
+    error: "invalid overlay region: pane PaneId(\"1\") pane instance 'stale' does not match live pane instance '1:target_portrait_btop'",
     ok: false,
   };
   assert.equal(
     overlayLivePaneInstanceIdFromCompositorResponse(response),
-    "1:target_racter_btop",
+    "1:target_portrait_btop",
   );
   assert.deepEqual(
     overlayLivePaneAuthorityFromCompositorResponse(response),
-    { paneId: "1", paneInstanceId: "1:target_racter_btop" },
+    { paneId: "1", paneInstanceId: "1:target_portrait_btop" },
   );
   assert.equal(overlayLivePaneInstanceIdFromCompositorResponse({ ok: true }), null);
 });
