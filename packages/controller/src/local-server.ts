@@ -41,8 +41,9 @@ export class ResidentControllerLocalServer {
       return;
     }
     await fs.mkdir(path.dirname(this.socketPath), { recursive: true });
-    const server = net.createServer((socket) => {
+    const server = net.createServer({ allowHalfOpen: true }, (socket) => {
       let buffer = "";
+      let requestAccepted = false;
       socket.setEncoding("utf8");
       socket.on("data", (chunk) => {
         buffer += chunk;
@@ -52,7 +53,13 @@ export class ResidentControllerLocalServer {
         }
         const encoded = buffer.slice(0, newline);
         buffer = "";
+        requestAccepted = true;
         void this.respond(socket, encoded);
+      });
+      socket.on("end", () => {
+        if (!requestAccepted) {
+          socket.end();
+        }
       });
     });
     try {

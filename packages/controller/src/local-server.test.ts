@@ -54,3 +54,50 @@ test("local server refuses to replace a socket that accepts connections", async 
   await first.stop();
   await fs.rmdir(directory);
 });
+
+test("local server responds after the client half-closes while a request is pending", async () => {
+  const directory = await sessionTemporaryDirectory();
+  const socketPath = path.join(directory, "controller.sock");
+  let markCalled!: () => void;
+  let release!: () => void;
+  const called = new Promise<void>((resolve) => markCalled = resolve);
+  const pending = new Promise<void>((resolve) => release = resolve);
+  const server = new ResidentControllerLocalServer({
+    async call() {
+      markCalled();
+      await pending;
+      return { ok: true };
+    },
+  }, socketPath);
+  await server.start();
+
+  const response = new Promise<Record<string, unknown>>((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let encoded = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      socket.end(`${JSON.stringify({
+        command: "list",
+        id: "local_half_close",
+        input: {},
+        v: 1,
+      })}\n`);
+    });
+    socket.on("data", (chunk) => encoded += chunk);
+    socket.on("end", () => resolve(JSON.parse(encoded)));
+    socket.on("error", reject);
+  });
+
+  await called;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  release();
+  assert.deepEqual(await response, {
+    id: "local_half_close",
+    ok: true,
+    result: { ok: true },
+    v: 1,
+  });
+
+  await server.stop();
+  await fs.rmdir(directory);
+});
