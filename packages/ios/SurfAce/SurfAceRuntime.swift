@@ -554,9 +554,7 @@ final class SurfAceRuntime {
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
-        let hostName = ProcessInfo.processInfo.hostName
-        let shortHostName = hostName.split(separator: ".").first.map(String.init) ?? hostName
-        self.screenName = "\(fallbackName) - \(deviceName) (\(shortHostName))"
+        self.screenName = "\(fallbackName) - \(deviceName)"
         self.fingerprint = "00000000"
         let vendorID = UIDevice.current.identifierForVendor?
             .uuidString

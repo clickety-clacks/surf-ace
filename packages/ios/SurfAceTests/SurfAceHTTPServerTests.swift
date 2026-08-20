@@ -91,6 +91,31 @@ final class SurfAceHTTPServerTests: XCTestCase {
         await secondServer.stop()
     }
 
+    @MainActor
+    func testRuntimeInitializationUsesDeviceNameWithoutBlockingHostResolution() throws {
+        let runtimeSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SurfAce/SurfAceRuntime.swift")
+        let source = try String(contentsOf: runtimeSourceURL, encoding: .utf8)
+        let initializationStart = try XCTUnwrap(
+            source.range(of: "    init(\n        userDefaults: UserDefaults = .standard")?.lowerBound
+        )
+        let initializationEnd = try XCTUnwrap(
+            source.range(of: "\n    func start() async", range: initializationStart..<source.endIndex)?.lowerBound
+        )
+        let initializationSource = source[initializationStart..<initializationEnd]
+
+        XCTAssertFalse(initializationSource.contains("ProcessInfo.processInfo.hostName"))
+        XCTAssertFalse(initializationSource.contains("NSHost"))
+
+        let suiteName = "SurfAceHostnameWatchdogTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let runtime = SurfAceRuntime(userDefaults: defaults)
+        XCTAssertEqual(runtime.screenName, "Surf Ace - \(UIDevice.current.name)")
+    }
+
     func testInfoPlistDeclaresLocalNetworkPrivacyUsage() throws {
         let info = try loadAppInfoPlist()
         let usageDescription = try XCTUnwrap(info["NSLocalNetworkUsageDescription"] as? String)
