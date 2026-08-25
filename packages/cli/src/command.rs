@@ -708,6 +708,7 @@ pub struct Invocation {
     pub command: Command,
     pub endpoint: Option<String>,
     pub input: Map<String, Value>,
+    pub migration_material: Option<Value>,
     pub product_label: Option<String>,
     pub projection_capacity_bytes: u64,
     pub state_root: PathBuf,

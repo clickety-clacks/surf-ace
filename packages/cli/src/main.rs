@@ -69,15 +69,17 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
             input
         }
     };
-    let input = serde_json::from_str::<Value>(&encoded)
+    let mut input = serde_json::from_str::<Value>(&encoded)
         .map_err(|_| input_error("input-json"))?
         .as_object()
         .cloned()
         .ok_or_else(|| input_error("input-json-object"))?;
+    let migration_material = input.remove("migrationMaterial");
     Ok(Invocation {
         command,
         endpoint,
         input,
+        migration_material,
         product_label,
         projection_capacity_bytes,
         state_root,
