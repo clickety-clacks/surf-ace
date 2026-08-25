@@ -30,17 +30,15 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
         .validate(&invocation.input)
         .map_err(CliError::Input)?;
     if invocation.command.is_local() {
-        validate_migration_material(&invocation, None)?;
         return execute_local(invocation);
     }
-    let surface_id = operation_surface_id(&invocation)?;
-    validate_migration_material(&invocation, surface_id.as_deref())?;
     let endpoint = invocation
         .endpoint
         .clone()
         .ok_or_else(|| CliError::Input("missing_endpoint".into()))?;
     let mut root =
         LockedStateRoot::open(&invocation.state_root, invocation.projection_capacity_bytes)?;
+    let surface_id = operation_surface_id(&invocation)?;
     if let Some(surface_id) = surface_id.as_deref() {
         let mut lifecycle = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
         discover_surface(&invocation, &mut root, &mut lifecycle, surface_id)?;
@@ -64,11 +62,9 @@ pub fn execute_with_wire(
         .validate(&invocation.input)
         .map_err(CliError::Input)?;
     if invocation.command.is_local() {
-        validate_migration_material(&invocation, None)?;
         return Err(CliError::Input("read_must_use_local_path".into()));
     }
     let surface_id = operation_surface_id(&invocation)?;
-    validate_migration_material(&invocation, surface_id.as_deref())?;
     let mut root =
         LockedStateRoot::open(&invocation.state_root, invocation.projection_capacity_bytes)?;
     execute_locked(invocation, &mut root, wire, surface_id.as_deref())
@@ -95,11 +91,10 @@ fn execute_locked(
         "resume": resume_payload(root.state(), true),
     });
     if let Some(surface_id) = surface_id {
-        let pair_payload = pair_payload.as_object_mut().expect("pair payload object");
-        pair_payload.insert("surfaceId".into(), Value::String(surface_id.into()));
-        if let Some(migration_material) = invocation.migration_material.clone() {
-            pair_payload.insert("migrationMaterial".into(), migration_material);
-        }
+        pair_payload
+            .as_object_mut()
+            .expect("pair payload object")
+            .insert("surfaceId".into(), Value::String(surface_id.into()));
     }
     let pair = request_without_correlation(wire, "pair.request", pair_payload)?;
     let pair_payload = successful_payload(&pair.response, "pair.request")?;
@@ -273,19 +268,6 @@ fn operation_surface_id(invocation: &Invocation) -> Result<Option<String>, CliEr
         .filter(|value| !value.is_empty())
         .map(|value| Some(value.to_owned()))
         .ok_or_else(|| CliError::Input("invalid_input:surfaceId".into()))
-}
-
-fn validate_migration_material(
-    invocation: &Invocation,
-    surface_id: Option<&str>,
-) -> Result<(), CliError> {
-    let Some(material) = invocation.migration_material.as_ref() else {
-        return Ok(());
-    };
-    if surface_id.is_none() || material.as_object().is_none_or(|object| object.is_empty()) {
-        return Err(CliError::Input("migrationMaterial".into()));
-    }
-    Ok(())
 }
 
 fn discover_surface(

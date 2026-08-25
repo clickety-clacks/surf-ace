@@ -29,11 +29,6 @@ The complete command set is `list`, `push`, `read`, `topology-intent`,
 one JSON object via `--input-json` or standard input and writes exactly one JSON
 result to standard output. `read` is strictly local and rejects `--endpoint`.
 
-Surface-scoped commands may include `migrationMaterial` in the input object.
-The CLI removes it from the requested operation and forwards it only in the
-surface-scoped `pair.request`. When it is absent, the pair request omits it.
-An empty or non-object value is rejected before state or transport access.
-
 `target-apply` returns after Surf Ace has durably committed the target intent,
 before browser/native materialization. Its `operationReceipt` proves that intent
 commit only. Materialization success or failure arrives later as a correlated

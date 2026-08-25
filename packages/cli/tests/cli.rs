@@ -18,7 +18,6 @@ struct FakeWire {
     operations: Vec<String>,
     payloads: Vec<(String, Value)>,
     fail_after_send_on: Option<String>,
-    pair_rejection_code: Option<String>,
     receipt_capacity_on: Option<String>,
     target_precommit_error: Option<(String, Option<String>)>,
     committed_rejection_on: Option<String>,
@@ -35,7 +34,6 @@ impl FakeWire {
             operations: vec![],
             payloads: vec![],
             fail_after_send_on: None,
-            pair_rejection_code: None,
             receipt_capacity_on: None,
             target_precommit_error: None,
             committed_rejection_on: None,
@@ -77,23 +75,6 @@ impl DirectWire for FakeWire {
             return Err(WireFailure::AfterSend {
                 code: "test_disconnect".into(),
             });
-        }
-        if op == "pair.request" {
-            if let Some(code) = &self.pair_rejection_code {
-                return Ok(WireResponse {
-                    response: Envelope {
-                        id: Some(id.into()),
-                        op: "pair.response".into(),
-                        payload: Some(json!({})),
-                        envelope_type: "response".into(),
-                        v: 1,
-                        ok: Some(false),
-                        error: Some(json!({ "code": code })),
-                        sent_at: None,
-                    },
-                    events: vec![],
-                });
-            }
         }
         if self.receipt_capacity_on.as_deref() == Some(op) {
             return Ok(WireResponse {
@@ -239,7 +220,6 @@ fn invocation(temp: &TempDir, command: Command, input: Value) -> Invocation {
         command,
         endpoint: Some("ws://unused.test".into()),
         input: input.as_object().cloned().unwrap_or_else(Map::new),
-        migration_material: None,
         product_label: Some("Clawline".into()),
         projection_capacity_bytes: 1024 * 1024,
         state_root: temp.path().into(),
@@ -1515,131 +1495,6 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         11
     );
     server.join().unwrap();
-}
-
-#[test]
-fn native_cli_forwards_only_explicit_surface_migration_material() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
-    let expected_material = json!({ "scopes": [], "gaps": [] });
-    let server_material = expected_material.clone();
-    let server = thread::spawn(move || {
-        let (lifecycle_stream, _) = listener.accept().unwrap();
-        let mut lifecycle = accept(lifecycle_stream).unwrap();
-        let pair = read_request(&mut lifecycle);
-        assert!(pair["payload"].get("migrationMaterial").is_none());
-        send_response(
-            &mut lifecycle,
-            pair["id"].as_str().unwrap(),
-            "pair.response",
-            pair_payload(pair["payload"]["controllerInstanceId"].clone()),
-        );
-        let list = read_request(&mut lifecycle);
-        assert_eq!(list["op"], "surfaces.list");
-        send_response(
-            &mut lifecycle,
-            list["id"].as_str().unwrap(),
-            "surfaces.list.result",
-            json!({ "surfaces": [{ "surfaceId": "sf_1" }] }),
-        );
-
-        let (surface_stream, _) = listener.accept().unwrap();
-        let mut surface = accept(surface_stream).unwrap();
-        let pair = read_request(&mut surface);
-        assert_eq!(pair["payload"]["surfaceId"], "sf_1");
-        assert_eq!(pair["payload"]["migrationMaterial"], server_material);
-        let mut surface_pair = pair_payload(pair["payload"]["controllerInstanceId"].clone());
-        surface_pair["surfaceId"] = json!("sf_1");
-        send_response(
-            &mut surface,
-            pair["id"].as_str().unwrap(),
-            "pair.response",
-            surface_pair,
-        );
-        let snapshot = read_request(&mut surface);
-        assert_eq!(snapshot["op"], "snapshot.get");
-        assert!(snapshot["payload"].get("migrationMaterial").is_none());
-        send_response(
-            &mut surface,
-            snapshot["id"].as_str().unwrap(),
-            "snapshot.result",
-            json!({ "snapshotId": "sn_1" }),
-        );
-    });
-
-    let temp = TempDir::new().unwrap();
-    let mut call = invocation(
-        &temp,
-        Command::CapturePane,
-        json!({ "paneId": 1, "surfaceId": "sf_1" }),
-    );
-    call.endpoint = Some(endpoint);
-    call.migration_material = Some(expected_material);
-    let output = execute(call).unwrap();
-    assert_eq!(output.result["payload"]["snapshotId"], "sn_1");
-    server.join().unwrap();
-}
-
-#[test]
-fn pair_rejection_preserves_controller_operation_and_code() {
-    let temp = TempDir::new().unwrap();
-    let mut wire = FakeWire::ordinary();
-    wire.pair_rejection_code = Some("invalid_operation".into());
-    let error = execute_with_wire(
-        invocation(
-            &temp,
-            Command::Push,
-            json!({
-                "surfaceId": "sf_1",
-                "paneId": 1,
-                "contentId": "c_1",
-                "contentType": "markdown",
-                "content": { "markdown": "hello" }
-            }),
-        ),
-        &mut wire,
-    )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        CliError::Rejected { ref operation, ref code }
-            if operation == "pair.request" && code == "invalid_operation"
-    ));
-    assert_eq!(wire.operations, vec!["pair.request"]);
-}
-
-#[test]
-fn native_cli_rejects_empty_and_malformed_migration_material_before_transport_or_state() {
-    for material in [json!({}), json!(null), json!("malformed"), json!([])] {
-        let temp = TempDir::new().unwrap();
-        let input = json!({
-            "migrationMaterial": material,
-            "paneId": 1,
-            "surfaceId": "sf_1"
-        });
-        let output = ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
-            .args([
-                "--state-root",
-                temp.path().to_str().unwrap(),
-                "--endpoint",
-                "ws://127.0.0.1:9",
-                "--product-label",
-                "Clawline",
-                "capture-pane",
-                "--input-json",
-                &serde_json::to_string(&input).unwrap(),
-            ])
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(result["error"]["code"], "invalid_input");
-        assert!(result["error"]["details"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("migrationMaterial"));
-        assert!(!temp.path().join("controller-state.json").exists());
-    }
 }
 
 #[test]
