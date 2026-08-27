@@ -2233,6 +2233,7 @@ test("surface mode conversion binds one exact surface, checks observed mode, rec
     assert.equal(converted.payload.surfaceId, legacySurface.surfaceId);
     assert.equal(converted.payload.operationReceipt.requestId, converted.id);
     assert.equal(core.surfaceAdmissionMode(legacySurface.surfaceId), "lockless");
+    assert.equal(core.getProviderOwnership(legacySurface.surfaceId), null);
     assert.equal(core.surfaceAdmissionMode(currentSurface.surfaceId), "lockless");
     assert.equal(core.surfaceAdmissionMode(unknownSurface.surfaceId), "unknown");
 
@@ -2360,10 +2361,129 @@ test("surface mode conversion releases an exact legacy reservation when pair res
     assert.equal(conversion.payload.previousMode, "legacy");
     assert.equal(conversion.payload.currentMode, "lockless");
     assert.equal(core.surfaceAdmissionMode(surface.surfaceId), "lockless");
+    assert.equal(core.getProviderOwnership(surface.surfaceId), null);
   } finally {
     WebSocket.prototype.send = originalSend;
     legacy.close();
     lifecycle.close();
+    await server.stop();
+  }
+});
+
+test("a same-id legacy pair retry redispatches after rejected response delivery", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Retry Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  core.setProviderOwnership(surface.surfaceId, {
+    ownershipEpoch: 2,
+    providerId: "retry-provider",
+    sessionId: "retry-prior-session",
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const legacy = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const originalSend = WebSocket.prototype.send;
+  const pairRequest = JSON.stringify({
+    id: "rq_retried_pair_delivery",
+    op: "pair.request",
+    payload: {
+      connectionId: "retried-pair-connection",
+      initialPaneId: 1,
+      initialPaneLabel: 1,
+      protocolVersion: 1,
+      providerId: "retry-provider",
+      providerName: "Retry Provider",
+      surfaceId: surface.surfaceId,
+      takeover: false,
+      windowLabel: "g",
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+  try {
+    let reportFailureInjected = (): void => {};
+    const failureInjected = new Promise<void>((resolve) => {
+      reportFailureInjected = resolve;
+    });
+    WebSocket.prototype.send = function rejectFirstPairResponse(
+      data: Parameters<WebSocket["send"]>[0],
+      optionsOrCallback?: Parameters<WebSocket["send"]>[1],
+      callback?: Parameters<WebSocket["send"]>[2],
+    ): WebSocket {
+      let message: Record<string, unknown> | null = null;
+      try {
+        message = JSON.parse(String(data)) as Record<string, unknown>;
+      } catch {}
+      if (
+        message?.type === "response" &&
+        message.op === "pair.request" &&
+        message.ok === true
+      ) {
+        const completion = typeof optionsOrCallback === "function"
+          ? optionsOrCallback
+          : callback;
+        queueMicrotask(() => {
+          completion?.(new Error("synthetic non-close delivery failure"));
+          reportFailureInjected();
+        });
+        return this;
+      }
+      return originalSend.call(
+        this,
+        data,
+        optionsOrCallback as never,
+        callback as never,
+      );
+    };
+    legacy.send(pairRequest);
+    await failureInjected;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    WebSocket.prototype.send = originalSend;
+
+    const retryResponse = new Promise<Record<string, any>>((resolve, reject) => {
+      const cleanup = (): void => {
+        legacy.off("message", onMessage);
+        legacy.off("error", onError);
+      };
+      const onError = (error: Error): void => {
+        cleanup();
+        reject(error);
+      };
+      const onMessage = (raw: WebSocket.RawData): void => {
+        const message = JSON.parse(String(raw)) as Record<string, any>;
+        if (message.id !== "rq_retried_pair_delivery") return;
+        cleanup();
+        resolve(message);
+      };
+      legacy.on("message", onMessage);
+      legacy.on("error", onError);
+    });
+    legacy.send(pairRequest);
+    const retried = await retryResponse;
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+
+    const panes = await request(legacy, "panes.list", {});
+    assert.equal(panes.ok, true, JSON.stringify(panes));
+    assert.equal(
+      core.getProviderOwnership(surface.surfaceId)?.sessionId,
+      retried.payload.sessionId,
+    );
+  } finally {
+    WebSocket.prototype.send = originalSend;
+    legacy.close();
     await server.stop();
   }
 });

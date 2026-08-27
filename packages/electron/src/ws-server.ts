@@ -1177,7 +1177,7 @@ export class SurfaceWsServer {
     try {
       responseDelivered = await this.reply(socket, response);
     } catch (error) {
-      this.abandonPairResponse(response);
+      this.abandonPairResponse(response, cache);
       throw error;
     }
     if (
@@ -1188,7 +1188,7 @@ export class SurfaceWsServer {
       if (responseDelivered) {
         this.commitPairResponse(response);
       } else {
-        this.abandonPairResponse(response);
+        this.abandonPairResponse(response, cache);
       }
     }
     if (request.op === "pair.request") {
@@ -5963,10 +5963,16 @@ export class SurfaceWsServer {
     }
   }
 
-  private abandonPairResponse(response: Response): void {
+  private abandonPairResponse(
+    response: Response,
+    cache: Map<string, SocketCacheEntry>,
+  ): void {
     const plan = this.pendingPairCommits.get(response);
     if (!plan) {
       return;
+    }
+    if (cache.get(response.id)?.response === response) {
+      cache.delete(response.id);
     }
     this.pendingPairCommits.delete(response);
     this.releaseLegacyPair(plan.surfaceId);

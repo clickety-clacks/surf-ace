@@ -660,7 +660,8 @@ export class SurfaceCore {
   }
 
   convertObservedSurfaceToLocklessMode(surfaceId: string): void {
-    this.getSurface(surfaceId);
+    const surface = this.getSurface(surfaceId);
+    surface.providerOwnership = null;
     this.locklessAuthority.convertSurfaceToLocklessMode(surfaceId);
     this.emit({ surfaceId, type: "surface-changed" });
   }
