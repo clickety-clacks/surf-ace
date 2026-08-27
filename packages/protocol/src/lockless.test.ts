@@ -49,7 +49,7 @@ test("production validator accepts every serialized Rust CLI network variant", (
       "utf8",
     ),
   ) as { requests: unknown[] };
-  assert.equal(vector.requests.length, 15);
+  assert.equal(vector.requests.length, 16);
   for (const envelope of vector.requests) {
     assert.deepEqual(validateLocklessEnvelope(envelope), { ok: true });
   }
@@ -303,6 +303,10 @@ test("lockless validator accepts every converted and new request shape", () => {
       expectedSurfaceSetRevision: 2,
       tombstoneId: "st-a",
     }),
+    request("surface.mode.convert", {
+      currentMode: "legacy",
+      surfaceId: "surface-a",
+    }),
     request("topology.apply", {
       allowDestroyPaneIds: [],
       desired: { type: "pane" },
@@ -349,6 +353,28 @@ test("lockless validator accepts every converted and new request shape", () => {
       validateLocklessEnvelope(envelope),
       { ok: true },
       envelope.op,
+    );
+  }
+});
+
+test("surface mode conversion requires an exact surface and observed mode", () => {
+  for (const currentMode of ["legacy", "lockless", "unknown"]) {
+    assert.deepEqual(
+      validateLocklessEnvelope(request("surface.mode.convert", {
+        currentMode,
+        surfaceId: "surface-a",
+      })),
+      { ok: true },
+    );
+  }
+  for (const payload of [
+    { currentMode: "legacy" },
+    { currentMode: "future", surfaceId: "surface-a" },
+    { currentMode: "legacy", surfaceId: "" },
+  ]) {
+    assert.equal(
+      validateLocklessEnvelope(request("surface.mode.convert", payload)).ok,
+      false,
     );
   }
 });

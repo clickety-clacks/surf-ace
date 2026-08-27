@@ -2074,6 +2074,135 @@ test("AC-MIG-01: upgraded Electron keeps legacy and lockless negotiation mutuall
   }
 });
 
+test("surface mode conversion binds one exact surface, checks observed mode, receipts success, and is idempotent", async () => {
+  const core = new SurfaceCore();
+  const legacySurface = core.ensurePrimarySurface("Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const currentSurface = core.createAdditionalSurface("Current", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const unknownSurface = core.createAdditionalSurface("Unknown", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const activeLegacySurface = core.createAdditionalSurface("Active Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  core.setProviderOwnership(legacySurface.surfaceId, {
+    ownershipEpoch: 1,
+    providerId: "legacy-provider",
+    sessionId: "legacy-session",
+  });
+  core.locklessAuthority.convertSurfaceToLocklessMode(currentSurface.surfaceId);
+  assert.equal(core.surfaceAdmissionMode(legacySurface.surfaceId), "legacy");
+  assert.equal(core.surfaceAdmissionMode(currentSurface.surfaceId), "lockless");
+  assert.equal(core.surfaceAdmissionMode(unknownSurface.surfaceId), "unknown");
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const activeLegacy = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const activeAdmission = await request(activeLegacy, "pair.request", {
+    connectionId: "active-legacy-connection",
+    initialPaneId: 1,
+    initialPaneLabel: 1,
+    protocolVersion: 1,
+    providerId: "active-legacy-provider",
+    providerName: "Active Legacy",
+    surfaceId: activeLegacySurface.surfaceId,
+    takeover: false,
+    windowLabel: "d",
+  });
+  assert.equal(activeAdmission.ok, true, JSON.stringify(activeAdmission));
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const admitted = await pair(socket, "mode-operator");
+    assert.equal(admitted.ok, true, JSON.stringify(admitted));
+
+    const activeRefusal = await request(socket, "surface.mode.convert", {
+      currentMode: "legacy",
+      surfaceId: activeLegacySurface.surfaceId,
+    });
+    assert.equal(activeRefusal.ok, false);
+    assert.equal(activeRefusal.error.code, "invalid_operation");
+    assert.equal(activeRefusal.error.details.currentMode, "legacy");
+    assert.equal(activeRefusal.error.details.requiredMode, "lockless");
+    assert.match(activeRefusal.error.message, /disconnect it and rerun/);
+    assert.equal(core.surfaceAdmissionMode(activeLegacySurface.surfaceId), "legacy");
+
+    const mismatch = await request(socket, "surface.mode.convert", {
+      currentMode: "lockless",
+      surfaceId: legacySurface.surfaceId,
+    });
+    assert.equal(mismatch.ok, false);
+    assert.equal(mismatch.error.code, "capability_mismatch");
+    assert.equal(mismatch.error.details.currentMode, "legacy");
+    assert.equal(mismatch.error.details.requiredMode, "lockless");
+    assert.equal(
+      mismatch.error.details.remedyCommand,
+      `surface-mode-convert --input-json '${JSON.stringify({
+        currentMode: "legacy",
+        surfaceId: legacySurface.surfaceId,
+      })}'`,
+    );
+    assert.equal(core.surfaceAdmissionMode(legacySurface.surfaceId), "legacy");
+
+    const converted = await request(socket, "surface.mode.convert", {
+      currentMode: "legacy",
+      surfaceId: legacySurface.surfaceId,
+    });
+    assert.equal(converted.ok, true, JSON.stringify(converted));
+    assert.equal(converted.payload.changed, true);
+    assert.equal(converted.payload.previousMode, "legacy");
+    assert.equal(converted.payload.currentMode, "lockless");
+    assert.equal(converted.payload.surfaceId, legacySurface.surfaceId);
+    assert.equal(converted.payload.operationReceipt.requestId, converted.id);
+    assert.equal(core.surfaceAdmissionMode(legacySurface.surfaceId), "lockless");
+    assert.equal(core.surfaceAdmissionMode(currentSurface.surfaceId), "lockless");
+    assert.equal(core.surfaceAdmissionMode(unknownSurface.surfaceId), "unknown");
+
+    const idempotent = await request(socket, "surface.mode.convert", {
+      currentMode: "lockless",
+      surfaceId: currentSurface.surfaceId,
+    });
+    assert.equal(idempotent.ok, true, JSON.stringify(idempotent));
+    assert.equal(idempotent.payload.changed, false);
+    assert.equal(idempotent.payload.previousMode, "lockless");
+    assert.equal(idempotent.payload.currentMode, "lockless");
+    assert.equal(idempotent.payload.operationReceipt.requestId, idempotent.id);
+
+    const explicitUnknown = await request(socket, "surface.mode.convert", {
+      currentMode: "unknown",
+      surfaceId: unknownSurface.surfaceId,
+    });
+    assert.equal(explicitUnknown.ok, false);
+    assert.equal(explicitUnknown.error.code, "invalid_operation");
+    assert.equal(explicitUnknown.error.details.currentMode, "unknown");
+    assert.equal(explicitUnknown.error.details.requiredMode, "legacy");
+    assert.equal(core.surfaceAdmissionMode(unknownSurface.surfaceId), "unknown");
+  } finally {
+    activeLegacy.close();
+    socket.close();
+    await server.stop();
+  }
+});
+
 test("AC-SURF-02: complete surface close persists a tombstone before zero-live socket teardown and restores exact identity after restart", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {

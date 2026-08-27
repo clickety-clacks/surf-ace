@@ -1882,10 +1882,7 @@ export class SurfaceWsServer {
           transport.active ||
           transport.lock
         ) {
-          throw new LocklessAuthorityError(
-            "capability_mismatch",
-            "Surface is active in explicitly negotiated legacy mode",
-          );
+          throw this.surfaceModeMismatch(surfaceId, "legacy");
         }
       }
       const connectionToken = metaConnectionToken(
@@ -2075,6 +2072,61 @@ export class SurfaceWsServer {
           topology: this.core.topologyState(surface.surfaceId),
           viewport: this.core.viewport(surface.surfaceId),
         })),
+      });
+    }
+    if (request.op === "surface.mode.convert") {
+      if (session.surfaceId !== null) {
+        throw new SurfaceCoreError(
+          "invalid_operation",
+          "surface.mode.convert requires the lifecycle connection",
+        );
+      }
+      const surfaceId = request.payload.surfaceId;
+      const currentMode = this.core.surfaceAdmissionMode(surfaceId);
+      if (request.payload.currentMode !== currentMode) {
+        throw this.surfaceModeMismatch(surfaceId, currentMode);
+      }
+      if (currentMode === "lockless") {
+        return locklessSuccess(request, {
+          changed: false,
+          currentMode,
+          previousMode: currentMode,
+          surfaceId,
+        });
+      }
+      if (currentMode === "unknown") {
+        const remedyCommand = this.surfaceModeRemedy(surfaceId, "legacy");
+        throw new LocklessAuthorityError(
+          "invalid_operation",
+          `Surface ${surfaceId} is in unknown mode; required conversion source mode is legacy. Restore an explicit legacy admission stamp, then run the exact command: ${remedyCommand}`,
+          {
+            currentMode,
+            remedyCommand,
+            requiredMode: "legacy",
+            surfaceId,
+          },
+        );
+      }
+      const transport = this.transport(surfaceId);
+      if (transport.active || transport.lock) {
+        throw new LocklessAuthorityError(
+          "invalid_operation",
+          `Surface ${surfaceId} still has an active legacy transport; disconnect it and rerun ${this.surfaceModeRemedy(surfaceId, currentMode)}`,
+          {
+            currentMode,
+            remedyCommand: this.surfaceModeRemedy(surfaceId, currentMode),
+            requiredMode: "lockless",
+            surfaceId,
+          },
+        );
+      }
+      this.core.convertObservedSurfaceToLocklessMode(surfaceId);
+      this.core.markLocklessAuthorityChanged(surfaceId);
+      return locklessSuccess(request, {
+        changed: true,
+        currentMode: "lockless",
+        previousMode: currentMode,
+        surfaceId,
       });
     }
     if (request.op === "panes.list") {
@@ -5499,12 +5551,33 @@ export class SurfaceWsServer {
       transport.active ||
       transport.lock
     ) {
-      throw new LocklessAuthorityError(
-        "capability_mismatch",
-        "Surface is active in explicitly negotiated legacy mode",
-      );
+      throw this.surfaceModeMismatch(surfaceId, "legacy");
     }
     this.core.admitSurfaceToLockless(surfaceId);
+  }
+
+  private surfaceModeRemedy(
+    surfaceId: string,
+    currentMode: "legacy" | "lockless" | "unknown",
+  ): string {
+    return `surface-mode-convert --input-json '${JSON.stringify({ currentMode, surfaceId })}'`;
+  }
+
+  private surfaceModeMismatch(
+    surfaceId: string,
+    currentMode: "legacy" | "lockless" | "unknown",
+  ): LocklessAuthorityError {
+    const remedyCommand = this.surfaceModeRemedy(surfaceId, currentMode);
+    return new LocklessAuthorityError(
+      "capability_mismatch",
+      `Surface ${surfaceId} is in ${currentMode} mode; required mode is lockless. Run the CLI with the same global options and exact command: ${remedyCommand}`,
+      {
+        currentMode,
+        remedyCommand,
+        requiredMode: "lockless",
+        surfaceId,
+      },
+    );
   }
 
   private async broadcastLockless(event: LocklessEvent): Promise<void> {

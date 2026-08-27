@@ -459,6 +459,13 @@ export type LocklessRequest =
       "surface.window.restore",
       LocklessSurfaceRestoreIntent
     >
+  | LocklessWireRequest<
+      "surface.mode.convert",
+      {
+        currentMode: "legacy" | "lockless" | "unknown";
+        surfaceId: string;
+      }
+    >
   | LocklessWireRequest<"topology.apply", LocklessTopologyRealizeIntent>
   | LocklessWireRequest<"target.apply", LocklessTargetApplyIntent>
   | LocklessWireRequest<"target.register", LocklessTargetRegisterIntent>
@@ -708,6 +715,9 @@ const LOCKLESS_REQUEST_FIELDS: Record<
   "surface.window.restore": {
     optional: ["placement"],
     required: ["expectedSurfaceSetRevision", "tombstoneId"],
+  },
+  "surface.mode.convert": {
+    required: ["currentMode", "surfaceId"],
   },
   "topology.apply": {
     required: [
@@ -1500,6 +1510,11 @@ function validateLocklessRequestPayload(
           plainRecord(payload.placement))
         ? null
         : "invalid_surface_restore";
+    case "surface.mode.convert":
+      return nonemptyString(payload.surfaceId) &&
+        ["legacy", "lockless", "unknown"].includes(String(payload.currentMode))
+        ? null
+        : "invalid_surface_mode_conversion";
     case "topology.apply":
       return nonemptyString(payload.surfaceId) &&
         revision(payload.expectedTopologyRevision) &&

@@ -652,6 +652,19 @@ export class SurfaceCore {
     return ownership ? structuredClone(ownership) : null;
   }
 
+  surfaceAdmissionMode(surfaceId: string): "legacy" | "lockless" | "unknown" {
+    const surface = this.getSurface(surfaceId);
+    const explicit = this.locklessAuthority.surfaceMode(surfaceId);
+    if (explicit) return explicit;
+    return surface.providerOwnership ? "legacy" : "unknown";
+  }
+
+  convertObservedSurfaceToLocklessMode(surfaceId: string): void {
+    this.getSurface(surfaceId);
+    this.locklessAuthority.convertSurfaceToLocklessMode(surfaceId);
+    this.emit({ surfaceId, type: "surface-changed" });
+  }
+
   setProviderOwnership(surfaceId: string, ownership: PersistentProviderOwnership): void {
     const surface = this.getSurface(surfaceId);
     surface.providerOwnership = {
