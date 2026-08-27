@@ -89,6 +89,12 @@ type SocketCacheEntry = {
   response: Response;
 };
 
+type PendingPairRequest = {
+  payloadHash: string;
+  resolve: (response: Response | null) => void;
+  settled: Promise<Response | null>;
+};
+
 type ActiveSession = {
   connectionId: string;
   drawingFlushConfig: DrawingFlushConfig;
@@ -159,6 +165,7 @@ type BrowserUrlNavigationEvidence = {
 
 type SocketMeta = {
   cache: Map<string, SocketCacheEntry>;
+  pendingPairRequests: Map<string, PendingPairRequest>;
   pairedSurfaceId: string | null;
   remoteAddress: string;
   socketId: string;
@@ -374,7 +381,13 @@ export class SurfaceWsServer {
     this.wss.on("connection", (socket, request) => {
       const remoteAddress = request.socket.remoteAddress ?? "<unknown>";
       const socketId = `sock_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-      this.socketMeta.set(socket, { cache: new Map(), pairedSurfaceId: null, remoteAddress, socketId });
+      this.socketMeta.set(socket, {
+        cache: new Map(),
+        pendingPairRequests: new Map(),
+        pairedSurfaceId: null,
+        remoteAddress,
+        socketId,
+      });
       persistentServerDiagnostic(
         "info",
         "socket_open",
@@ -1082,6 +1095,31 @@ export class SurfaceWsServer {
       op: request.op,
       payload: request.payload,
     });
+    const pendingPairRequest = request.op === "pair.request"
+      ? meta.pendingPairRequests.get(request.id)
+      : undefined;
+    if (pendingPairRequest) {
+      if (pendingPairRequest.payloadHash !== payloadHash) {
+        persistentServerDiagnostic(
+          "warn",
+          "request_reject",
+          {
+            op: request.op,
+            reason: "request_id_reuse_mismatch",
+            request_id: request.id,
+          },
+        );
+        await this.reply(socket, errorResponse(request.op, request.id, "invalid_request_id_reuse", "Request id was reused with different payload"));
+        return;
+      }
+      const settledResponse = await pendingPairRequest.settled;
+      if (settledResponse) {
+        await this.reply(socket, settledResponse);
+        return;
+      }
+      await this.handleMessage(socket, raw);
+      return;
+    }
     const cached = cache.get(request.id);
     if (cached) {
       if (cached.payloadHash !== payloadHash) {
@@ -1100,6 +1138,30 @@ export class SurfaceWsServer {
       await this.reply(socket, cached.response);
       return;
     }
+
+    let ownedPendingPairRequest: PendingPairRequest | null = null;
+    if (request.op === "pair.request") {
+      let resolvePendingPairRequest = (_response: Response | null): void => {};
+      const settled = new Promise<Response | null>((resolve) => {
+        resolvePendingPairRequest = resolve;
+      });
+      ownedPendingPairRequest = {
+        payloadHash,
+        resolve: resolvePendingPairRequest,
+        settled,
+      };
+      meta.pendingPairRequests.set(request.id, ownedPendingPairRequest);
+    }
+    const settlePendingPairRequest = (settledResponse: Response | null): void => {
+      if (!ownedPendingPairRequest) {
+        return;
+      }
+      if (meta.pendingPairRequests.get(request.id) === ownedPendingPairRequest) {
+        meta.pendingPairRequests.delete(request.id);
+      }
+      ownedPendingPairRequest.resolve(settledResponse);
+      ownedPendingPairRequest = null;
+    };
 
     let response: Response;
     try {
@@ -1176,21 +1238,25 @@ export class SurfaceWsServer {
     let responseDelivered: boolean;
     try {
       responseDelivered = await this.reply(socket, response);
+      if (
+        response.type === "response" &&
+        response.ok &&
+        response.op === "pair.request"
+      ) {
+        if (responseDelivered) {
+          this.commitPairResponse(response, cache);
+        } else {
+          this.abandonPairResponse(response, cache);
+        }
+      }
     } catch (error) {
       this.abandonPairResponse(response, cache);
+      settlePendingPairRequest(
+        response.ok && response.op === "pair.request" ? null : response,
+      );
       throw error;
     }
-    if (
-      response.type === "response" &&
-      response.ok &&
-      response.op === "pair.request"
-    ) {
-      if (responseDelivered) {
-        this.commitPairResponse(response);
-      } else {
-        this.abandonPairResponse(response, cache);
-      }
-    }
+    settlePendingPairRequest(responseDelivered ? response : null);
     if (request.op === "pair.request") {
       persistentServerDiagnostic(
         response.ok && responseDelivered ? "info" : "warn",
@@ -5930,7 +5996,10 @@ export class SurfaceWsServer {
     this.closeSession(surfaceId, active, reason);
   }
 
-  private commitPairResponse(response: Response): void {
+  private commitPairResponse(
+    response: Response,
+    cache: Map<string, SocketCacheEntry>,
+  ): void {
     const plan = this.pendingPairCommits.get(response);
     if (!plan) {
       return;
@@ -5954,6 +6023,11 @@ export class SurfaceWsServer {
     const meta = this.socketMeta.get(plan.session.socket);
     if (meta) {
       meta.pairedSurfaceId = plan.surfaceId;
+    }
+    const cacheEntry = cache.get(response.id);
+    if (cacheEntry?.response === response) {
+      plan.session.requestCache.set(response.id, cacheEntry);
+      trimCache(plan.session.requestCache);
     }
     this.core.setConnectionBar(plan.surfaceId, "connecting");
     this.core.setProviderName(plan.surfaceId, plan.providerName);

@@ -2481,6 +2481,172 @@ test("a same-id legacy pair retry redispatches after rejected response delivery"
       core.getProviderOwnership(surface.surfaceId)?.sessionId,
       retried.payload.sessionId,
     );
+
+    const committedReplay = new Promise<Record<string, any>>((resolve, reject) => {
+      const cleanup = (): void => {
+        legacy.off("message", onMessage);
+        legacy.off("error", onError);
+      };
+      const onError = (error: Error): void => {
+        cleanup();
+        reject(error);
+      };
+      const onMessage = (raw: WebSocket.RawData): void => {
+        const message = JSON.parse(String(raw)) as Record<string, any>;
+        if (message.id !== "rq_retried_pair_delivery") return;
+        cleanup();
+        resolve(message);
+      };
+      legacy.on("message", onMessage);
+      legacy.on("error", onError);
+    });
+    legacy.send(pairRequest);
+    const replayed = await committedReplay;
+    assert.equal(replayed.ok, true, JSON.stringify(replayed));
+    assert.equal(replayed.payload.sessionId, retried.payload.sessionId);
+  } finally {
+    WebSocket.prototype.send = originalSend;
+    legacy.close();
+    await server.stop();
+  }
+});
+
+test("an in-flight same-id legacy pair duplicate waits for delivery settlement before retrying", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Concurrent Retry Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  core.setProviderOwnership(surface.surfaceId, {
+    ownershipEpoch: 2,
+    providerId: "concurrent-provider",
+    sessionId: "concurrent-prior-session",
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const interceptableServer = server as unknown as {
+    handleMessage(socket: WebSocket, raw: string): Promise<void>;
+  };
+  const originalHandleMessage = interceptableServer.handleMessage.bind(server);
+  let pairRequestCount = 0;
+  let reportDuplicateEntered = (): void => {};
+  const duplicateEntered = new Promise<void>((resolve) => {
+    reportDuplicateEntered = resolve;
+  });
+  interceptableServer.handleMessage = async (socket, raw): Promise<void> => {
+    const message = JSON.parse(raw) as Record<string, unknown>;
+    if (message.id === "rq_inflight_duplicate_pair") {
+      pairRequestCount += 1;
+      if (pairRequestCount === 2) {
+        reportDuplicateEntered();
+      }
+    }
+    await originalHandleMessage(socket, raw);
+  };
+  const legacy = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const originalSend = WebSocket.prototype.send;
+  const pairRequest = JSON.stringify({
+    id: "rq_inflight_duplicate_pair",
+    op: "pair.request",
+    payload: {
+      connectionId: "concurrent-connection",
+      initialPaneId: 1,
+      initialPaneLabel: 1,
+      protocolVersion: 1,
+      providerId: "concurrent-provider",
+      providerName: "Concurrent Provider",
+      surfaceId: surface.surfaceId,
+      takeover: false,
+      windowLabel: "h",
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+  try {
+    let failFirstResponse = (_error: Error): void => {};
+    let reportFirstBlocked = (): void => {};
+    const firstBlocked = new Promise<void>((resolve) => {
+      reportFirstBlocked = resolve;
+    });
+    let successfulPairSendCount = 0;
+    WebSocket.prototype.send = function holdFirstPairResponse(
+      data: Parameters<WebSocket["send"]>[0],
+      optionsOrCallback?: Parameters<WebSocket["send"]>[1],
+      callback?: Parameters<WebSocket["send"]>[2],
+    ): WebSocket {
+      let message: Record<string, unknown> | null = null;
+      try {
+        message = JSON.parse(String(data)) as Record<string, unknown>;
+      } catch {}
+      if (
+        message?.type === "response" &&
+        message.op === "pair.request" &&
+        message.ok === true
+      ) {
+        successfulPairSendCount += 1;
+        if (successfulPairSendCount === 1) {
+          const completion = typeof optionsOrCallback === "function"
+            ? optionsOrCallback
+            : callback;
+          failFirstResponse = (error: Error): void => completion?.(error);
+          reportFirstBlocked();
+          return this;
+        }
+      }
+      return originalSend.call(
+        this,
+        data,
+        optionsOrCallback as never,
+        callback as never,
+      );
+    };
+
+    legacy.send(pairRequest);
+    await firstBlocked;
+    const duplicateResponse = new Promise<Record<string, any>>((resolve, reject) => {
+      const cleanup = (): void => {
+        legacy.off("message", onMessage);
+        legacy.off("error", onError);
+      };
+      const onError = (error: Error): void => {
+        cleanup();
+        reject(error);
+      };
+      const onMessage = (raw: WebSocket.RawData): void => {
+        const message = JSON.parse(String(raw)) as Record<string, any>;
+        if (message.id !== "rq_inflight_duplicate_pair") return;
+        cleanup();
+        resolve(message);
+      };
+      legacy.on("message", onMessage);
+      legacy.on("error", onError);
+    });
+    legacy.send(pairRequest);
+    await duplicateEntered;
+    assert.equal(successfulPairSendCount, 1);
+
+    failFirstResponse(new Error("synthetic delayed first-delivery failure"));
+    const retried = await duplicateResponse;
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    assert.equal(successfulPairSendCount, 2);
+
+    const panes = await request(legacy, "panes.list", {});
+    assert.equal(panes.ok, true, JSON.stringify(panes));
+    assert.equal(
+      core.getProviderOwnership(surface.surfaceId)?.sessionId,
+      retried.payload.sessionId,
+    );
   } finally {
     WebSocket.prototype.send = originalSend;
     legacy.close();
