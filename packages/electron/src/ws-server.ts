@@ -296,6 +296,7 @@ export class SurfaceWsServer {
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly pendingPairCommits = new WeakMap<Response, PairPostResponseCommit>();
+  private readonly pendingLegacyPairs = new Map<string, number>();
   private readonly transports = new Map<string, SurfaceTransportState>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
@@ -1182,6 +1183,7 @@ export class SurfaceWsServer {
         this.commitPairResponse(response);
       } else {
         this.pendingPairCommits.delete(response);
+        this.releaseLegacyPair(response.payload.surfaceId);
       }
     }
     if (request.op === "pair.request") {
@@ -2108,10 +2110,10 @@ export class SurfaceWsServer {
         );
       }
       const transport = this.transport(surfaceId);
-      if (transport.active || transport.lock) {
+      if (this.pendingLegacyPairs.has(surfaceId) || transport.active || transport.lock) {
         throw new LocklessAuthorityError(
           "invalid_operation",
-          `Surface ${surfaceId} still has an active legacy transport; disconnect it and rerun ${this.surfaceModeRemedy(surfaceId, currentMode)}`,
+          `Surface ${surfaceId} still has an in-flight or active legacy transport; wait for it to finish if in flight, or disconnect it and rerun ${this.surfaceModeRemedy(surfaceId, currentMode)}`,
           {
             currentMode,
             remedyCommand: this.surfaceModeRemedy(surfaceId, currentMode),
@@ -3261,18 +3263,27 @@ export class SurfaceWsServer {
       );
     }
 
-    return await this.runProviderWindowLabelMutation(() => this.acceptPairRequest(socket, request, meta));
+    return await this.runProviderWindowLabelMutation(async () => {
+      const surfaceId = request.payload.surfaceId;
+      this.core.getSurface(surfaceId);
+      if (this.core.locklessAuthority.surfaceMode(surfaceId) === "lockless") {
+        throw new SurfaceCoreError(
+          "capability_mismatch",
+          "Surface is active in explicitly negotiated lockless mode",
+        );
+      }
+      this.reserveLegacyPair(surfaceId);
+      try {
+        return await this.acceptPairRequest(socket, request, meta);
+      } catch (error) {
+        this.releaseLegacyPair(surfaceId);
+        throw error;
+      }
+    });
   }
 
   private async acceptPairRequest(socket: WebSocket, request: PairRequest, meta: SocketMeta | undefined): Promise<Response> {
     const surfaceId = request.payload.surfaceId;
-    this.core.getSurface(surfaceId);
-    if (this.core.locklessAuthority.surfaceMode(surfaceId) === "lockless") {
-      throw new SurfaceCoreError(
-        "capability_mismatch",
-        "Surface is active in explicitly negotiated lockless mode",
-      );
-    }
     const transport = this.transport(surfaceId);
     const existing = transport.active;
     const lock = transport.lock;
@@ -3721,6 +3732,22 @@ export class SurfaceWsServer {
       if (this.mutationQueues.get(surfaceId) === queued) {
         this.mutationQueues.delete(surfaceId);
       }
+    }
+  }
+
+  private reserveLegacyPair(surfaceId: string): void {
+    this.pendingLegacyPairs.set(
+      surfaceId,
+      (this.pendingLegacyPairs.get(surfaceId) ?? 0) + 1,
+    );
+  }
+
+  private releaseLegacyPair(surfaceId: string): void {
+    const remaining = (this.pendingLegacyPairs.get(surfaceId) ?? 0) - 1;
+    if (remaining > 0) {
+      this.pendingLegacyPairs.set(surfaceId, remaining);
+    } else {
+      this.pendingLegacyPairs.delete(surfaceId);
     }
   }
 
@@ -5918,6 +5945,7 @@ export class SurfaceWsServer {
       providerId: plan.session.providerId,
       sessionId: plan.session.sessionId,
     });
+    this.releaseLegacyPair(plan.surfaceId);
     const meta = this.socketMeta.get(plan.session.socket);
     if (meta) {
       meta.pairedSurfaceId = plan.surfaceId;

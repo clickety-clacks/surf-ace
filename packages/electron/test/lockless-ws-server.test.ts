@@ -2096,22 +2096,48 @@ test("surface mode conversion binds one exact surface, checks observed mode, rec
     scale: 2,
     width: 1200,
   });
+  const racingLegacySurface = core.createAdditionalSurface("Racing Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
   core.setProviderOwnership(legacySurface.surfaceId, {
     ownershipEpoch: 1,
     providerId: "legacy-provider",
     sessionId: "legacy-session",
   });
   core.locklessAuthority.convertSurfaceToLocklessMode(currentSurface.surfaceId);
+  core.setProviderOwnership(racingLegacySurface.surfaceId, {
+    ownershipEpoch: 1,
+    providerId: "racing-provider",
+    sessionId: "racing-prior-session",
+  });
   assert.equal(core.surfaceAdmissionMode(legacySurface.surfaceId), "legacy");
   assert.equal(core.surfaceAdmissionMode(currentSurface.surfaceId), "lockless");
   assert.equal(core.surfaceAdmissionMode(unknownSurface.surfaceId), "unknown");
 
+  let blockLegacyCapabilities = false;
+  let reportCapabilityBlocked = (): void => {};
+  const capabilityBlocked = new Promise<void>((resolve) => {
+    reportCapabilityBlocked = resolve;
+  });
+  let releaseCapabilities = (): void => {};
+  const capabilitiesReleased = new Promise<void>((resolve) => {
+    releaseCapabilities = resolve;
+  });
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
+    getRuntimeAppBinding: async () => {
+      if (blockLegacyCapabilities) {
+        reportCapabilityBlocked();
+        await capabilitiesReleased;
+      }
+      return null;
+    },
     hostName: "localhost",
     port,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
@@ -2130,10 +2156,43 @@ test("surface mode conversion binds one exact surface, checks observed mode, rec
     windowLabel: "d",
   });
   assert.equal(activeAdmission.ok, true, JSON.stringify(activeAdmission));
+  const racingLegacy = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
   const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
   try {
     const admitted = await pair(socket, "mode-operator");
     assert.equal(admitted.ok, true, JSON.stringify(admitted));
+
+    blockLegacyCapabilities = true;
+    const racingAdmissionPromise = request(racingLegacy, "pair.request", {
+      connectionId: "racing-legacy-connection",
+      initialPaneId: 1,
+      initialPaneLabel: 1,
+      protocolVersion: 1,
+      providerId: "racing-provider",
+      providerName: "Racing Legacy",
+      surfaceId: racingLegacySurface.surfaceId,
+      takeover: false,
+      windowLabel: "e",
+    });
+    await capabilityBlocked;
+    const racingConversion = await request(socket, "surface.mode.convert", {
+      currentMode: "legacy",
+      surfaceId: racingLegacySurface.surfaceId,
+    });
+    assert.equal(racingConversion.ok, false);
+    assert.equal(racingConversion.error.code, "invalid_operation");
+    assert.equal(racingConversion.error.details.currentMode, "legacy");
+    assert.equal(racingConversion.error.details.requiredMode, "lockless");
+    assert.match(racingConversion.error.message, /in-flight or active legacy transport/);
+    assert.equal(core.surfaceAdmissionMode(racingLegacySurface.surfaceId), "legacy");
+    releaseCapabilities();
+    const racingAdmission = await racingAdmissionPromise;
+    assert.equal(racingAdmission.ok, true, JSON.stringify(racingAdmission));
+    assert.equal(core.surfaceAdmissionMode(racingLegacySurface.surfaceId), "legacy");
+    assert.equal(
+      core.getProviderOwnership(racingLegacySurface.surfaceId)?.providerId,
+      "racing-provider",
+    );
 
     const activeRefusal = await request(socket, "surface.mode.convert", {
       currentMode: "legacy",
@@ -2198,6 +2257,7 @@ test("surface mode conversion binds one exact surface, checks observed mode, rec
     assert.equal(core.surfaceAdmissionMode(unknownSurface.surfaceId), "unknown");
   } finally {
     activeLegacy.close();
+    racingLegacy.close();
     socket.close();
     await server.stop();
   }
