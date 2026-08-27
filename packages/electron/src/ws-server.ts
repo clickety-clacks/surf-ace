@@ -1173,7 +1173,13 @@ export class SurfaceWsServer {
 
     cache.set(request.id, { payloadHash, response });
     trimCache(cache);
-    const responseDelivered = await this.reply(socket, response);
+    let responseDelivered: boolean;
+    try {
+      responseDelivered = await this.reply(socket, response);
+    } catch (error) {
+      this.abandonPairResponse(response);
+      throw error;
+    }
     if (
       response.type === "response" &&
       response.ok &&
@@ -1182,8 +1188,7 @@ export class SurfaceWsServer {
       if (responseDelivered) {
         this.commitPairResponse(response);
       } else {
-        this.pendingPairCommits.delete(response);
-        this.releaseLegacyPair(response.payload.surfaceId);
+        this.abandonPairResponse(response);
       }
     }
     if (request.op === "pair.request") {
@@ -5956,6 +5961,15 @@ export class SurfaceWsServer {
     if (plan.supersededSession && plan.supersededSession.socket !== plan.session.socket) {
       this.closeSession(plan.surfaceId, plan.supersededSession, "superseded");
     }
+  }
+
+  private abandonPairResponse(response: Response): void {
+    const plan = this.pendingPairCommits.get(response);
+    if (!plan) {
+      return;
+    }
+    this.pendingPairCommits.delete(response);
+    this.releaseLegacyPair(plan.surfaceId);
   }
 
   private closeSession(surfaceId: string, active: ActiveSession, reason: string): void {

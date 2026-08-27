@@ -2263,6 +2263,111 @@ test("surface mode conversion binds one exact surface, checks observed mode, rec
   }
 });
 
+test("surface mode conversion releases an exact legacy reservation when pair response delivery rejects", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Failed Delivery Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  core.setProviderOwnership(surface.surfaceId, {
+    ownershipEpoch: 4,
+    providerId: "failed-delivery-provider",
+    sessionId: "failed-delivery-session",
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const lifecycle = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const legacy = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const originalSend = WebSocket.prototype.send;
+  try {
+    const admitted = await pair(lifecycle, "failed-delivery-mode-operator");
+    assert.equal(admitted.ok, true, JSON.stringify(admitted));
+
+    let reportFailureInjected = (): void => {};
+    const failureInjected = new Promise<void>((resolve) => {
+      reportFailureInjected = resolve;
+    });
+    WebSocket.prototype.send = function rejectLegacyPairResponse(
+      data: Parameters<WebSocket["send"]>[0],
+      optionsOrCallback?: Parameters<WebSocket["send"]>[1],
+      callback?: Parameters<WebSocket["send"]>[2],
+    ): WebSocket {
+      let message: Record<string, unknown> | null = null;
+      try {
+        message = JSON.parse(String(data)) as Record<string, unknown>;
+      } catch {}
+      if (
+        message?.type === "response" &&
+        message.op === "pair.request" &&
+        message.ok === true
+      ) {
+        const completion = typeof optionsOrCallback === "function"
+          ? optionsOrCallback
+          : callback;
+        queueMicrotask(() => {
+          completion?.(new Error("synthetic non-close delivery failure"));
+          reportFailureInjected();
+        });
+        return this;
+      }
+      return originalSend.call(
+        this,
+        data,
+        optionsOrCallback as never,
+        callback as never,
+      );
+    };
+
+    legacy.send(JSON.stringify({
+      id: "rq_failed_pair_delivery",
+      op: "pair.request",
+      payload: {
+        connectionId: "failed-delivery-connection",
+        initialPaneId: 1,
+        initialPaneLabel: 1,
+        protocolVersion: 1,
+        providerId: "failed-delivery-provider",
+        providerName: "Failed Delivery Provider",
+        surfaceId: surface.surfaceId,
+        takeover: false,
+        windowLabel: "f",
+      },
+      sentAt: Date.now(),
+      type: "request",
+      v: 1,
+    }));
+    await failureInjected;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    WebSocket.prototype.send = originalSend;
+
+    assert.equal(core.getProviderOwnership(surface.surfaceId)?.sessionId, "failed-delivery-session");
+    const conversion = await request(lifecycle, "surface.mode.convert", {
+      currentMode: "legacy",
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(conversion.ok, true, JSON.stringify(conversion));
+    assert.equal(conversion.payload.changed, true);
+    assert.equal(conversion.payload.previousMode, "legacy");
+    assert.equal(conversion.payload.currentMode, "lockless");
+    assert.equal(core.surfaceAdmissionMode(surface.surfaceId), "lockless");
+  } finally {
+    WebSocket.prototype.send = originalSend;
+    legacy.close();
+    lifecycle.close();
+    await server.stop();
+  }
+});
+
 test("AC-SURF-02: complete surface close persists a tombstone before zero-live socket teardown and restores exact identity after restart", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
