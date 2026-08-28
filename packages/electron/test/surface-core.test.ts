@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { Revision } from "../../protocol/src/index.js";
 import {
+  LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH,
   LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES,
   LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
   LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
@@ -48,6 +49,29 @@ function admissionLedgerBytes(
   attempts: LocklessSurfaceAdmissionAttempt[],
 ): number {
   return Buffer.byteLength(JSON.stringify(attempts), "utf8");
+}
+
+function reservedAdmissionLedgerBytes(
+  attempts: LocklessSurfaceAdmissionAttempt[],
+): number {
+  return admissionLedgerBytes(
+    attempts.map((attempt) =>
+      attempt.outcome === "pending"
+        ? {
+            ...attempt,
+            outcome: "failed",
+            reason: "x".repeat(
+              LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2,
+            ),
+            reasonCode: "x".repeat(
+              LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH,
+            ),
+            stage: "controller_admission",
+            updatedAt: Number.MAX_SAFE_INTEGER,
+          }
+        : attempt
+    ),
+  );
 }
 
 function failedAdmissionAttempt(
@@ -186,6 +210,100 @@ test("surface admission ledger accepts exact byte bound and refuses one more rec
   assert.equal(
     admissionLedgerBytes(core.listSurfaceAdmissionAttempts()),
     LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+  );
+});
+
+test("surface admission reservation at exact byte bound survives terminalization and restart", () => {
+  const now = Number.MAX_SAFE_INTEGER;
+  const pendingAttempt = (attemptSequence: number) => ({
+    attemptSequence,
+    controllerInstanceId: "controller_terminal_equality",
+    outcome: "pending" as const,
+    reason: null,
+    reasonCode: null,
+    requestId: "rq_terminal_equality",
+    stage: "requested" as const,
+    startedAt: now,
+    surfaceId: "sf_test",
+    updatedAt: now,
+  });
+  let attempts: LocklessSurfaceAdmissionAttempt[] | null = null;
+  for (
+    let count = 1;
+    count < LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS;
+    count++
+  ) {
+    const minimum = Array.from(
+      { length: count },
+      (_, index) => failedAdmissionAttempt(index + 1, "x"),
+    );
+    const maximum = minimum.map((attempt) => ({
+      ...attempt,
+      reason: "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2),
+    }));
+    const pending = pendingAttempt(count + 1);
+    if (
+      reservedAdmissionLedgerBytes([...minimum, pending]) <=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES &&
+      reservedAdmissionLedgerBytes([...maximum, pending]) >=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES
+    ) {
+      attempts = minimum;
+      break;
+    }
+  }
+  assert(attempts);
+  const pending = pendingAttempt(attempts.length + 1);
+  let remaining =
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES -
+    reservedAdmissionLedgerBytes([...attempts, pending]);
+  for (const attempt of attempts) {
+    const added = Math.min(
+      remaining,
+      LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 3,
+    );
+    attempt.reason = "x".repeat(1 + added);
+    remaining -= added;
+  }
+  assert.equal(remaining, 0);
+
+  const core = new SurfaceCore({
+    now: () => now,
+    persistentState: {
+      admissionAttempts: attempts,
+      nextAdmissionAttemptSequence: attempts.length + 1,
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const begun = core.beginSurfaceAdmissionAttempt({
+    controllerInstanceId: pending.controllerInstanceId,
+    requestId: pending.requestId,
+    surfaceId: pending.surfaceId,
+  });
+  assert.equal(
+    reservedAdmissionLedgerBytes(core.listSurfaceAdmissionAttempts()),
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+  );
+  core.advanceSurfaceAdmissionAttempt(
+    begun.attemptSequence,
+    "controller_admission",
+  );
+  core.failSurfaceAdmissionAttempt(
+    begun.attemptSequence,
+    "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH),
+    "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2),
+  );
+  const persisted = core.getPersistentState();
+  assert.equal(
+    admissionLedgerBytes(persisted.admissionAttempts ?? []),
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+  );
+
+  const restarted = new SurfaceCore({ persistentState: persisted });
+  assert.equal(
+    restarted.listSurfaceAdmissionAttempts().length,
+    attempts.length + 1,
   );
 });
 

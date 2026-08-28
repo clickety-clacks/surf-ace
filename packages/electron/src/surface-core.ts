@@ -409,6 +409,8 @@ const SUPPORTED_TARGET_CAPABILITIES = [
 ] as const;
 
 const ADMISSION_REASON_TRUNCATION_SUFFIX = "…[truncated]";
+const ADMISSION_ATTEMPT_MAX_RESERVED_STAGE: SurfaceAdmissionAttemptStage =
+  "controller_admission";
 
 function admissionAttemptLedgerBytes(
   attempts: PersistentSurfaceAdmissionAttempt[],
@@ -457,16 +459,17 @@ function admissionAttemptLedgerReservedBytes(
     attempts.map((attempt) =>
       attempt.outcome === "pending"
         ? {
-            ...attempt,
-            outcome: "failed",
-            reason: "x".repeat(
-              LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2,
-            ),
-            reasonCode: "x".repeat(
-              LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH,
-            ),
-            updatedAt: Number.MAX_SAFE_INTEGER,
-          }
+          ...attempt,
+          outcome: "failed",
+          reason: "x".repeat(
+            LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2,
+          ),
+          reasonCode: "x".repeat(
+            LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH,
+          ),
+          stage: ADMISSION_ATTEMPT_MAX_RESERVED_STAGE,
+          updatedAt: Number.MAX_SAFE_INTEGER,
+        }
         : attempt
     ),
   );

@@ -945,8 +945,12 @@ function nonemptyString(value: unknown): boolean {
   return typeof value === "string" && value.length > 0;
 }
 
-function jsonStringBytes(value: string): number {
+function jsonEncodedBytes(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+function jsonStringBytes(value: string): number {
+  return jsonEncodedBytes(value);
 }
 
 function optionalBoolean(
@@ -1680,6 +1684,15 @@ export function validLocklessSurfaceAdmissionAttempt(value: unknown): boolean {
   );
 }
 
+function validLocklessSurfaceAdmissionAttempts(
+  value: unknown,
+): value is LocklessSurfaceAdmissionAttempt[] {
+  return Array.isArray(value) &&
+    value.length <= LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS &&
+    value.every(validLocklessSurfaceAdmissionAttempt) &&
+    jsonEncodedBytes(value) <= LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES;
+}
+
 export function validateLocklessEnvelope(
   envelope: unknown,
 ):
@@ -1911,10 +1924,9 @@ export function validateLocklessEnvelope(
       }
       if (
         envelope.payload.admissionAttempts !== undefined &&
-        (!Array.isArray(envelope.payload.admissionAttempts) ||
-          !envelope.payload.admissionAttempts.every(
-            validLocklessSurfaceAdmissionAttempt,
-          ))
+        !validLocklessSurfaceAdmissionAttempts(
+          envelope.payload.admissionAttempts,
+        )
       ) {
         return { ok: false, reason: "invalid_admission_attempts" };
       }

@@ -4,8 +4,11 @@ import test from "node:test";
 
 import {
   LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES,
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
   type LocklessCapacityLimits,
+  type LocklessSurfaceAdmissionAttempt,
   validateLocklessEnvelope,
 } from "./lockless.js";
 import { protocolSchemaDefs } from "./schemas.js";
@@ -476,7 +479,7 @@ test("lockless pair and discovery require exact capability and finite limits", (
   );
 });
 
-test("lockless pair admission enforces identifier and retained reason bounds", () => {
+test("lockless pair admission and lifecycle ledger enforce bounded identifiers, records, and bytes", () => {
   const pairPayload = {
     controllerInstanceId: "c".repeat(64),
     projectionCapacityBytes: 1,
@@ -505,7 +508,7 @@ test("lockless pair admission enforces identifier and retained reason bounds", (
     assert.equal(validateLocklessEnvelope(envelope).ok, false);
   }
 
-  const admissionAttempt = {
+  const admissionAttempt: LocklessSurfaceAdmissionAttempt = {
     attemptSequence: 1,
     controllerInstanceId: "controller-a",
     outcome: "failed",
@@ -545,6 +548,99 @@ test("lockless pair admission enforces identifier and retained reason bounds", (
         }],
       },
     }).ok,
+    false,
+  );
+
+  const lifecycleWithAttempts = (admissionAttempts: unknown[]) => ({
+    ...discovery,
+    payload: { ...discovery.payload, admissionAttempts },
+  });
+  const countEquality = Array.from(
+    { length: LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS },
+    (_, index) => ({
+      ...admissionAttempt,
+      attemptSequence: index + 1,
+      outcome: "succeeded",
+      reason: null,
+      reasonCode: null,
+    }),
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(lifecycleWithAttempts(countEquality)),
+    { ok: true },
+  );
+  assert.equal(
+    validateLocklessEnvelope(
+      lifecycleWithAttempts([
+        ...countEquality,
+        { ...countEquality[0], attemptSequence: countEquality.length + 1 },
+      ]),
+    ).ok,
+    false,
+  );
+
+  const ledgerBytes = (attempts: unknown[]) =>
+    new TextEncoder().encode(JSON.stringify(attempts)).byteLength;
+  let byteEquality: LocklessSurfaceAdmissionAttempt[] | null = null;
+  for (
+    let count = 1;
+    count < LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS;
+    count++
+  ) {
+    const minimum = Array.from({ length: count }, (_, index) => ({
+      ...admissionAttempt,
+      attemptSequence: index + 1,
+      reason: "x",
+    }));
+    const maximum = minimum.map((attempt) => ({
+      ...attempt,
+      reason: "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2),
+    }));
+    if (
+      ledgerBytes(minimum) <=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES &&
+      ledgerBytes(maximum) >=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES
+    ) {
+      byteEquality = minimum;
+      break;
+    }
+  }
+  assert(byteEquality);
+  let byteRemainder =
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES -
+    ledgerBytes(byteEquality);
+  for (const attempt of byteEquality) {
+    const added = Math.min(
+      byteRemainder,
+      LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 3,
+    );
+    attempt.reason = "x".repeat(1 + added);
+    byteRemainder -= added;
+  }
+  assert.equal(byteRemainder, 0);
+  assert.equal(
+    ledgerBytes(byteEquality),
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(lifecycleWithAttempts(byteEquality)),
+    { ok: true },
+  );
+  const bytePlusOne = structuredClone(byteEquality);
+  const expandable = bytePlusOne.find(
+    (attempt) =>
+      typeof attempt.reason === "string" &&
+      attempt.reason.length < LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2,
+  );
+  assert(expandable && typeof expandable.reason === "string");
+  expandable.reason += "x";
+  assert.equal(
+    ledgerBytes(bytePlusOne),
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES + 1,
+  );
+  assert.equal(
+    validateLocklessEnvelope(lifecycleWithAttempts(bytePlusOne)).ok,
     false,
   );
 });
