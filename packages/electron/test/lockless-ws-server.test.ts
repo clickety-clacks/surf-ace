@@ -1500,7 +1500,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
     hostName: "localhost",
     persistLocklessState: async () => {
       persistenceCalls += 1;
-      if (persistenceCalls === 2) {
+      if (persistenceCalls === 3) {
         await new Promise<void>((resolve) => {
           releasePersistence = resolve;
         });
@@ -1529,7 +1529,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
       new Promise<string>((resolve) => setTimeout(() => resolve("withheld"), 25)),
     ]);
     assert.equal(early, "withheld");
-    assert.equal(persistenceCalls, 2);
+    assert.equal(persistenceCalls, 3);
     assert.ok(releasePersistence);
     releasePersistence();
     const terminal = await mutation;
@@ -1554,7 +1554,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
       requestId,
     });
     assert.equal(acknowledged.payload.accepted, true);
-    assert.equal(persistenceCalls, 3);
+    assert.equal(persistenceCalls, 4);
     const afterAck = await request(socket, "operation.receipt.sync", {
       requestIds: [requestId],
     });
@@ -1565,7 +1565,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
     });
     assert.equal(released.payload.accepted, true);
     assert.equal(released.payload.release, true);
-    assert.equal(persistenceCalls, 4);
+    assert.equal(persistenceCalls, 5);
     const afterRelease = await request(socket, "operation.receipt.sync", {
       requestIds: [requestId],
     });
@@ -1677,6 +1677,7 @@ test("one stable controller may hold lifecycle and surface sessions but not dupl
       true,
       JSON.stringify(surfacePair),
     );
+    assert.equal(surfacePair.payload.admissionAttempt.outcome, "succeeded");
     const duplicate = await pair(
       duplicateSurface,
       "tight-beam",
@@ -1684,8 +1685,25 @@ test("one stable controller may hold lifecycle and surface sessions but not dupl
     );
     assert.equal(duplicate.ok, false);
     assert.equal(duplicate.error.code, "duplicate_controller_instance");
+    assert.deepEqual(
+      core.listSurfaceAdmissionAttempts().map((attempt) => ({
+        outcome: attempt.outcome,
+        reasonCode: attempt.reasonCode,
+        stage: attempt.stage,
+      })),
+      [
+        { outcome: "succeeded", reasonCode: null, stage: "mode_commit" },
+        {
+          outcome: "failed",
+          reasonCode: "duplicate_controller_instance",
+          stage: "controller_admission",
+        },
+      ],
+    );
 
     const listed = await request(lifecycle, "surfaces.list", {});
+    const surfaceScopedList = await request(surfaceSession, "surfaces.list", {});
+    assert.equal(surfaceScopedList.payload.admissionAttempts, undefined);
     const removal = nextEvent(lifecycle, "event.surface_removed");
     const closed = await request(surfaceSession, "surface.window.close", {
       expectedSurfaceSetRevision: listed.payload.surfaceSetRevision,
@@ -1862,6 +1880,25 @@ test("migration admission rejects foreign and remapped bootstrap scopes", async 
       assert.equal(response.error.code, "invalid_payload");
     }
     assert.deepEqual(core.activePaneIds(surface.surfaceId), [0]);
+    assert.deepEqual(
+      core.listSurfaceAdmissionAttempts().map((attempt) => ({
+        outcome: attempt.outcome,
+        reasonCode: attempt.reasonCode,
+        stage: attempt.stage,
+      })),
+      [
+        {
+          outcome: "failed",
+          reasonCode: "invalid_payload",
+          stage: "legacy_migration",
+        },
+        {
+          outcome: "failed",
+          reasonCode: "invalid_payload",
+          stage: "legacy_migration",
+        },
+      ],
+    );
   } finally {
     socket.close();
     await server.stop();
@@ -1890,6 +1927,7 @@ test("E-MIG-RECEIPT :: websocket migration response waits for durable conversion
     ],
   };
   let durable: ReturnType<SurfaceCore["getPersistentState"]> | null = null;
+  let crashDurable: ReturnType<SurfaceCore["getPersistentState"]> | null = null;
   let releasePersistence = (): void => {};
   const persistenceGate = new Promise<void>((resolve) => {
     releasePersistence = resolve;
@@ -1904,8 +1942,9 @@ test("E-MIG-RECEIPT :: websocket migration response waits for durable conversion
     hostName: "localhost",
     persistLocklessState: async () => {
       persistenceCalls += 1;
-      if (persistenceCalls === 1) {
-        durable = core.getPersistentState();
+      durable = core.getPersistentState();
+      if (persistenceCalls === 2) {
+        crashDurable = structuredClone(durable);
         await persistenceGate;
       }
     },
@@ -1936,6 +1975,9 @@ test("E-MIG-RECEIPT :: websocket migration response waits for durable conversion
       durable.lockless?.migrationReceipts[requestId]?.requestId,
       requestId,
     );
+    assert.equal(durable.admissionAttempts?.length, 1);
+    assert.equal(durable.admissionAttempts?.[0]?.outcome, "succeeded");
+    assert.equal(durable.admissionAttempts?.[0]?.stage, "mode_commit");
     releasePersistence();
     const committed = await pending;
     assert.equal(committed.ok, true, JSON.stringify(committed));
@@ -1947,10 +1989,10 @@ test("E-MIG-RECEIPT :: websocket migration response waits for durable conversion
     await server.stop();
   }
 
-  assert(durable);
+  assert(crashDurable);
   const restarted = new SurfaceCore({
     clientIdentity: "electron-client",
-    persistentState: durable,
+    persistentState: crashDurable,
   });
   restarted.restorePersistedSurfaces("Surf Ace", {
     height: 800,
@@ -1980,6 +2022,11 @@ test("E-MIG-RECEIPT :: websocket migration response waits for durable conversion
     );
     assert.equal(replayed.ok, true, JSON.stringify(replayed));
     assert.equal(replayed.payload.migrationReceiptId, requestId);
+    assert.equal(replayed.payload.admissionAttempt.attemptSequence, 2);
+    assert.deepEqual(
+      restarted.listSurfaceAdmissionAttempts().map((attempt) => attempt.outcome),
+      ["succeeded", "succeeded"],
+    );
     assert.equal(
       restarted.locklessAuthority.exportState().scopes[
         locklessPaneScopeId(surface.surfaceId, 1)
@@ -1989,6 +2036,282 @@ test("E-MIG-RECEIPT :: websocket migration response waits for durable conversion
   } finally {
     replaySocket.close();
     await replayServer.stop();
+  }
+});
+
+test("failed admission survives rollback and restart, then exact conversion permits a recorded retry", async () => {
+  let clock = 10_000;
+  const core = new SurfaceCore({ now: () => clock++ });
+  const surface = core.ensurePrimarySurface("Poisoned Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  core.setProviderOwnership(surface.surfaceId, {
+    ownershipEpoch: 3,
+    providerId: "legacy-provider",
+    sessionId: "legacy-session",
+  });
+  let durable = core.getPersistentState();
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      durable = core.getPersistentState();
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const failedSocket = await connect(
+    `ws://127.0.0.1:${port}${server.wsPath}`,
+  );
+  try {
+    const failed = await pair(
+      failedSocket,
+      "missing-migration-controller",
+      surface.surfaceId,
+    );
+    assert.equal(failed.ok, false, JSON.stringify(failed));
+    assert.equal(failed.error.code, "admission_failed");
+    assert.match(failed.error.message, /was not admitted to lockless mode/);
+    assert.match(failed.error.message, /Retry pair\.request with migrationMaterial/);
+    assert.equal(failed.error.details.currentMode, "legacy");
+    assert.equal(failed.error.details.requiredMode, "lockless");
+    assert.equal(
+      failed.error.details.remedyCommand,
+      `surface-mode-convert --input-json '${JSON.stringify({
+        currentMode: "legacy",
+        surfaceId: surface.surfaceId,
+      })}'`,
+    );
+    assert.equal(
+      failed.error.details.admissionAttemptSequence,
+      1,
+    );
+  } finally {
+    failedSocket.close();
+    await server.stop();
+  }
+
+  assert.equal(durable.lockless?.modeBySurfaceId[surface.surfaceId], undefined);
+  assert.equal(
+    durable.surfaces?.[0]?.providerOwnership?.sessionId,
+    "legacy-session",
+  );
+  const failedAttempt = durable.admissionAttempts?.[0];
+  assert(failedAttempt);
+  assert.equal(failedAttempt.attemptSequence, 1);
+  assert.equal(
+    failedAttempt.controllerInstanceId,
+    "missing-migration-controller",
+  );
+  assert.equal(failedAttempt.outcome, "failed");
+  assert.equal(failedAttempt.reasonCode, "admission_failed");
+  assert.match(failedAttempt.reason ?? "", /Retry pair\.request with migrationMaterial/);
+  assert.equal(failedAttempt.stage, "surface_preflight");
+  assert.equal(failedAttempt.startedAt, 10_001);
+  assert(failedAttempt.updatedAt > failedAttempt.startedAt);
+  assert.equal(failedAttempt.surfaceId, surface.surfaceId);
+
+  const restarted = new SurfaceCore({
+    now: () => clock++,
+    persistentState: durable,
+  });
+  restarted.restorePersistedSurfaces("Poisoned Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  let recoveredDurable = restarted.getPersistentState();
+  const recoveredPort = nextPort++;
+  const recoveredServer = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core: restarted,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      recoveredDurable = restarted.getPersistentState();
+    },
+    port: recoveredPort,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await recoveredServer.start();
+  const lifecycle = await connect(
+    `ws://127.0.0.1:${recoveredPort}${recoveredServer.wsPath}`,
+  );
+  const retriedSurface = await connect(
+    `ws://127.0.0.1:${recoveredPort}${recoveredServer.wsPath}`,
+  );
+  try {
+    const lifecycleAdmission = await pair(lifecycle, "recovery-controller");
+    assert.equal(lifecycleAdmission.ok, true, JSON.stringify(lifecycleAdmission));
+    const beforeRecovery = await request(lifecycle, "surfaces.list", {});
+    assert.equal(beforeRecovery.ok, true, JSON.stringify(beforeRecovery));
+    assert.equal(beforeRecovery.payload.admissionAttempts.length, 1);
+    assert.equal(beforeRecovery.payload.admissionAttempts[0].outcome, "failed");
+
+    const converted = await request(lifecycle, "surface.mode.convert", {
+      currentMode: "legacy",
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(converted.ok, true, JSON.stringify(converted));
+    assert.equal(converted.payload.changed, true);
+    assert.equal(converted.payload.operationReceipt.requestId, converted.id);
+
+    const retried = await pair(
+      retriedSurface,
+      "recovery-controller",
+      surface.surfaceId,
+    );
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    assert.equal(retried.payload.admissionAttempt.attemptSequence, 2);
+    assert.equal(retried.payload.admissionAttempt.outcome, "succeeded");
+    assert.equal(retried.payload.admissionAttempt.stage, "mode_commit");
+
+    const afterRecovery = await request(lifecycle, "surfaces.list", {});
+    assert.deepEqual(
+      afterRecovery.payload.admissionAttempts.map(
+        (attempt: Record<string, unknown>) => attempt.outcome,
+      ),
+      ["failed", "succeeded"],
+    );
+  } finally {
+    retriedSurface.close();
+    lifecycle.close();
+    await recoveredServer.stop();
+  }
+
+  const finalRestart = new SurfaceCore({ persistentState: recoveredDurable });
+  finalRestart.restorePersistedSurfaces("Poisoned Legacy", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  assert.equal(finalRestart.surfaceAdmissionMode(surface.surfaceId), "lockless");
+  assert.deepEqual(
+    finalRestart.listSurfaceAdmissionAttempts().map((attempt) => attempt.outcome),
+    ["failed", "succeeded"],
+  );
+});
+
+test("three surfaces recover independently and complete the offline push-capture path", async () => {
+  const core = new SurfaceCore();
+  const surfaces = [
+    core.ensurePrimarySurface("Already Lockless", {
+      height: 800,
+      scale: 2,
+      width: 1200,
+    }),
+    core.createAdditionalSurface("Failed Legacy One", {
+      height: 800,
+      scale: 2,
+      width: 1200,
+    }),
+    core.createAdditionalSurface("Failed Legacy Two", {
+      height: 800,
+      scale: 2,
+      width: 1200,
+    }),
+  ];
+  for (const [index, surface] of surfaces.slice(1).entries()) {
+    core.setProviderOwnership(surface.surfaceId, {
+      ownershipEpoch: index + 1,
+      providerId: `legacy-provider-${index + 1}`,
+      sessionId: `legacy-session-${index + 1}`,
+    });
+  }
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async (surfaceId, paneId) =>
+      Buffer.from(`${surfaceId}:${paneId}`).toString("base64"),
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const lifecycle = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const surfaceSockets = await Promise.all(
+    surfaces.map(() => connect(`ws://127.0.0.1:${port}${server.wsPath}`)),
+  );
+  try {
+    assert.equal((await pair(lifecycle, "three-surface-controller")).ok, true);
+
+    const firstAdmission = await pair(
+      surfaceSockets[0]!,
+      "three-surface-controller",
+      surfaces[0]!.surfaceId,
+    );
+    assert.equal(firstAdmission.ok, true, JSON.stringify(firstAdmission));
+
+    for (const index of [1, 2]) {
+      const failed = await pair(
+        surfaceSockets[index]!,
+        "three-surface-controller",
+        surfaces[index]!.surfaceId,
+      );
+      assert.equal(failed.ok, false, JSON.stringify(failed));
+      assert.equal(failed.error.code, "admission_failed");
+      const converted = await request(lifecycle, "surface.mode.convert", {
+        currentMode: "legacy",
+        surfaceId: surfaces[index]!.surfaceId,
+      });
+      assert.equal(converted.ok, true, JSON.stringify(converted));
+      assert.equal(converted.payload.operationReceipt.requestId, converted.id);
+      const retried = await pair(
+        surfaceSockets[index]!,
+        "three-surface-controller",
+        surfaces[index]!.surfaceId,
+      );
+      assert.equal(retried.ok, true, JSON.stringify(retried));
+    }
+
+    for (const [index, surface] of surfaces.entries()) {
+      const panes = await request(surfaceSockets[index]!, "panes.list", {
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(panes.ok, true, JSON.stringify(panes));
+      const paneId = panes.payload.panes[0].paneId;
+      assert(Number(paneId) > 0);
+      const contentId = `three-surface-${index + 1}`;
+      const pushed = await request(surfaceSockets[index]!, "content.set", {
+        content: { markdown: `# ${contentId}` },
+        contentId,
+        contentType: "markdown",
+        paneId,
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(pushed.ok, true, JSON.stringify(pushed));
+      const captured = await request(surfaceSockets[index]!, "snapshot.get", {
+        includeImage: true,
+        paneId,
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(captured.ok, true, JSON.stringify(captured));
+      assert.equal(captured.payload.contentId, contentId);
+      assert.equal(
+        captured.payload.image,
+        Buffer.from(`${surface.surfaceId}:${paneId}`).toString("base64"),
+      );
+      assert.equal(captured.payload.revision, pushed.payload.revision);
+    }
+
+    assert.deepEqual(
+      core.listSurfaceAdmissionAttempts().map((attempt) => attempt.outcome),
+      ["succeeded", "failed", "succeeded", "failed", "succeeded"],
+    );
+  } finally {
+    for (const socket of surfaceSockets) socket.close();
+    lifecycle.close();
+    await server.stop();
   }
 });
 

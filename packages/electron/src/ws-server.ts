@@ -75,10 +75,17 @@ import {
   errorDiagnosticFields,
   recordClientDiagnostic,
 } from "./client-flight-recorder.js";
-import { isValidWindowLabel, SurfaceCore, SurfaceCoreError, type CoreEvent } from "./surface-core.js";
+import {
+  isValidWindowLabel,
+  SurfaceCore,
+  SurfaceCoreError,
+  surfaceModeConversionCommand,
+  type CoreEvent,
+} from "./surface-core.js";
 import {
   LocklessAuthorityError,
   type AuthorityEvent,
+  type LocklessClientAuthority,
   type PersistentTargetApplyWorkItem,
   type PersistentTombstone,
 } from "./lockless-client-authority.js";
@@ -1581,6 +1588,20 @@ export class SurfaceWsServer {
       }
     } else if (request.op === "pair.request") {
       response = (await dispatch()).response;
+    } else if (request.op === "surfaces.list") {
+      response = await this.core.locklessAuthority.transactionAsync(() =>
+        this.core.transactionAsync(async () => {
+          const attemptCount =
+            this.core.listSurfaceAdmissionAttempts().length;
+          const result = await dispatch();
+          if (
+            this.core.listSurfaceAdmissionAttempts().length > attemptCount
+          ) {
+            await this.persistLocklessState();
+          }
+          return result.response;
+        }),
+      );
     } else {
       response = await this.core.locklessAuthority.transactionAsync(async () => {
         const result = await dispatch();
@@ -1948,15 +1969,15 @@ export class SurfaceWsServer {
           "Legacy migration material requires a surface-scoped pair",
         );
       }
-      if (surfaceId) {
-        this.core.getSurface(surfaceId);
-        const transport = this.transport(surfaceId);
-        if (
-          transport.active ||
-          transport.lock
-        ) {
-          throw this.surfaceModeMismatch(surfaceId, "legacy");
-        }
+      const admissionAttempt = surfaceId
+        ? this.core.beginSurfaceAdmissionAttempt({
+            controllerInstanceId: request.payload.controllerInstanceId,
+            requestId: request.id,
+            surfaceId,
+          })
+        : null;
+      if (admissionAttempt) {
+        await this.persistLocklessState();
       }
       const connectionToken = metaConnectionToken(
         this.socketMeta.get(socket),
@@ -1968,45 +1989,103 @@ export class SurfaceWsServer {
         this.core.locklessAuthority.hasController(
           request.payload.controllerInstanceId,
         );
-      const admission = await this.core.transactionAsync(async () =>
-        await this.core.locklessAuthority.transactionPersisted(
-          () => {
-            const admitted = this.core.locklessAuthority.admit(
-              request.payload,
-              connectionToken,
-              request.id,
-              connectionSlot,
-            );
-            for (const ack of request.payload.resume?.pendingAcks ?? []) {
-              this.core.locklessAuthority.acknowledge(
-                request.payload.controllerInstanceId,
-                ack,
-              );
-            }
-            if (surfaceId) {
-              this.core.admitSurfaceToLockless(
-                surfaceId,
-                request.payload.migrationMaterial,
-                request.payload.controllerInstanceId,
+      let admission: ReturnType<
+        LocklessClientAuthority["admit"]
+      >;
+      try {
+        if (surfaceId && admissionAttempt) {
+          this.core.advanceSurfaceAdmissionAttempt(
+            admissionAttempt.attemptSequence,
+            "surface_lookup",
+          );
+          this.core.getSurface(surfaceId);
+          const transport = this.transport(surfaceId);
+          if (transport.active || transport.lock) {
+            throw this.surfaceModeMismatch(surfaceId, "legacy");
+          }
+          this.core.advanceSurfaceAdmissionAttempt(
+            admissionAttempt.attemptSequence,
+            "controller_admission",
+          );
+        }
+        admission = await this.core.transactionAsync(async () =>
+          await this.core.locklessAuthority.transactionPersisted(
+            () => {
+              const admitted = this.core.locklessAuthority.admit(
+                request.payload,
+                connectionToken,
                 request.id,
+                connectionSlot,
               );
-              this.core.locklessAuthority.ensureScope(
-                `surface:${encodeURIComponent(surfaceId)}`,
-                "surface",
-              );
-              for (const paneId of this.core.activePaneIds(surfaceId)) {
-                this.core.locklessAuthority.ensureScope(
-                  locklessPaneScopeId(surfaceId, paneId),
-                  "pane",
+              for (const ack of request.payload.resume?.pendingAcks ?? []) {
+                this.core.locklessAuthority.acknowledge(
+                  request.payload.controllerInstanceId,
+                  ack,
                 );
               }
-            }
-            this.core.markLocklessAuthorityChanged(surfaceId ?? undefined);
-            return admitted;
-          },
-          this.persistLocklessState,
-        ),
-      );
+              if (surfaceId) {
+                this.core.admitSurfaceToLockless(
+                  surfaceId,
+                  request.payload.migrationMaterial,
+                  request.payload.controllerInstanceId,
+                  request.id,
+                  admissionAttempt?.attemptSequence,
+                );
+                this.core.locklessAuthority.ensureScope(
+                  `surface:${encodeURIComponent(surfaceId)}`,
+                  "surface",
+                );
+                for (const paneId of this.core.activePaneIds(surfaceId)) {
+                  this.core.locklessAuthority.ensureScope(
+                    locklessPaneScopeId(surfaceId, paneId),
+                    "pane",
+                  );
+                }
+              }
+              this.core.markLocklessAuthorityChanged(surfaceId ?? undefined);
+              if (admissionAttempt) {
+                this.core.succeedSurfaceAdmissionAttempt(
+                  admissionAttempt.attemptSequence,
+                );
+              }
+              return admitted;
+            },
+            this.persistLocklessState,
+          ),
+        );
+      } catch (error) {
+        if (admissionAttempt) {
+          if (error instanceof PersistentStateOutcomeUnknownError) {
+            throw error;
+          }
+          if (
+            this.core.surfaceAdmissionAttempt(
+              admissionAttempt.attemptSequence,
+            ).outcome === "succeeded"
+          ) {
+            this.core.rollbackUnpersistedSurfaceAdmissionSuccess(
+              admissionAttempt.attemptSequence,
+            );
+          }
+          const reasonCode = error instanceof LocklessAuthorityError ||
+              error instanceof SurfaceCoreError
+            ? error.code
+            : "internal_error";
+          const reason = error instanceof Error
+            ? error.message
+            : "Unknown surface admission failure";
+          this.core.failSurfaceAdmissionAttempt(
+            admissionAttempt.attemptSequence,
+            reasonCode,
+            reason,
+          );
+          await this.persistLocklessState();
+        }
+        throw error;
+      }
+      const completedAdmissionAttempt = admissionAttempt
+        ? this.core.surfaceAdmissionAttempt(admissionAttempt.attemptSequence)
+        : null;
       const session: LocklessTransportSession = {
         connectionSlot,
         connectionToken,
@@ -2048,6 +2127,9 @@ export class SurfaceWsServer {
         ok: true,
         op: request.op,
         payload: {
+          ...(completedAdmissionAttempt
+            ? { admissionAttempt: completedAdmissionAttempt }
+            : {}),
           capabilities: await this.locklessCapabilities(),
           controllerInstanceId: request.payload.controllerInstanceId,
           limits: this.core.locklessAuthority.limits,
@@ -2123,17 +2205,25 @@ export class SurfaceWsServer {
     if (request.op === "surfaces.list") {
       for (const surface of this.core.listSurfaces()) {
         if (
+          this.core.surfaceAdmissionMode(surface.surfaceId) === "unknown" &&
           this.core
             .activePaneIds(surface.surfaceId)
             .some((paneId) => paneId < 1)
         ) {
-          this.requireLocklessSurface(surface.surfaceId);
+          this.admitSurfaceForDiscovery(
+            session.controllerInstanceId,
+            request.id,
+            surface.surfaceId,
+          );
         }
       }
       return locklessSuccess(request, {
         admissionAvailable:
           this.core.locklessAuthority.liveControllerIds().length <
           this.core.locklessAuthority.limits.maxAdmittedControllerEntries,
+        ...(session.surfaceId === null
+          ? { admissionAttempts: this.core.listSurfaceAdmissionAttempts() }
+          : {}),
         limits: this.core.locklessAuthority.limits,
         surfaceSetRevision:
           this.core.locklessAuthority.surfaceSetRevision,
@@ -5654,11 +5744,53 @@ export class SurfaceWsServer {
     this.core.admitSurfaceToLockless(surfaceId);
   }
 
+  private admitSurfaceForDiscovery(
+    controllerInstanceId: string,
+    requestId: string,
+    surfaceId: string,
+  ): void {
+    const attempt = this.core.beginSurfaceAdmissionAttempt({
+      controllerInstanceId,
+      requestId: `${requestId}:${surfaceId}`,
+      surfaceId,
+    });
+    try {
+      this.core.advanceSurfaceAdmissionAttempt(
+        attempt.attemptSequence,
+        "surface_lookup",
+      );
+      this.core.getSurface(surfaceId);
+      this.core.admitSurfaceToLockless(
+        surfaceId,
+        undefined,
+        undefined,
+        undefined,
+        attempt.attemptSequence,
+      );
+      this.core.markLocklessAuthorityChanged(surfaceId);
+      this.core.succeedSurfaceAdmissionAttempt(attempt.attemptSequence);
+    } catch (error) {
+      const reasonCode = error instanceof LocklessAuthorityError ||
+          error instanceof SurfaceCoreError
+        ? error.code
+        : "internal_error";
+      const reason = error instanceof Error
+        ? error.message
+        : "Unknown surface admission failure";
+      this.core.failSurfaceAdmissionAttempt(
+        attempt.attemptSequence,
+        reasonCode,
+        reason,
+      );
+      throw error;
+    }
+  }
+
   private surfaceModeRemedy(
     surfaceId: string,
     currentMode: "legacy" | "lockless" | "unknown",
   ): string {
-    return `surface-mode-convert --input-json '${JSON.stringify({ currentMode, surfaceId })}'`;
+    return surfaceModeConversionCommand(surfaceId, currentMode);
   }
 
   private surfaceModeMismatch(

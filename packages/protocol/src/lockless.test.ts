@@ -380,11 +380,24 @@ test("surface mode conversion requires an exact surface and observed mode", () =
 });
 
 test("lockless pair and discovery require exact capability and finite limits", () => {
+  const admissionAttempt = {
+    attemptSequence: 1,
+    controllerInstanceId: "controller-a",
+    outcome: "succeeded",
+    reason: null,
+    reasonCode: null,
+    requestId: "rq-pair",
+    stage: "mode_commit",
+    startedAt: 1,
+    surfaceId: "surface-a",
+    updatedAt: 2,
+  };
   const discovery = {
     id: "rq-list",
     ok: true,
     op: "surfaces.list",
     payload: {
+      admissionAttempts: [admissionAttempt],
       capabilities: {
         limits,
         protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
@@ -415,6 +428,7 @@ test("lockless pair and discovery require exact capability and finite limits", (
     ok: true,
     op: "pair.request",
     payload: {
+      admissionAttempt,
       capabilities: {
         protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
       },
@@ -434,6 +448,16 @@ test("lockless pair and discovery require exact capability and finite limits", (
     v: 1,
   };
   assert.deepEqual(validateLocklessEnvelope(pair), { ok: true });
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      ...pair,
+      payload: {
+        ...pair.payload,
+        admissionAttempt: { ...admissionAttempt, outcome: "lost" },
+      },
+    }),
+    { ok: false, reason: "invalid_admission_attempt" },
+  );
   assert.equal(
     validateLocklessEnvelope({
       ...pair,
@@ -448,6 +472,31 @@ test("lockless pair and discovery require exact capability and finite limits", (
       },
     }).ok,
     false,
+  );
+});
+
+test("admission failure is a public lockless error with a remedy shape", () => {
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      error: {
+        code: "admission_failed",
+        details: {
+          currentMode: "legacy",
+          remedyCommand:
+            "surface-mode-convert --input-json '{\"currentMode\":\"legacy\",\"surfaceId\":\"surface-a\"}'",
+          requiredMode: "lockless",
+          surfaceId: "surface-a",
+        },
+        message: "Surface surface-a was not admitted to lockless mode",
+      },
+      id: "rq-pair",
+      ok: false,
+      op: "pair.request",
+      sentAt: 1,
+      type: "response",
+      v: 1,
+    }),
+    { ok: true },
   );
 });
 

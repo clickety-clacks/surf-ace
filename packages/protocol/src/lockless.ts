@@ -534,7 +534,27 @@ export type LocklessResponse = {
   v: 1;
 };
 
+export type LocklessSurfaceAdmissionAttempt = {
+  attemptSequence: number;
+  controllerInstanceId: string;
+  outcome: "failed" | "pending" | "succeeded";
+  reason: string | null;
+  reasonCode: string | null;
+  requestId: string;
+  stage:
+    | "requested"
+    | "surface_lookup"
+    | "controller_admission"
+    | "surface_preflight"
+    | "legacy_migration"
+    | "mode_commit";
+  startedAt: number;
+  surfaceId: string;
+  updatedAt: number;
+};
+
 export type LocklessErrorCode =
+  | "admission_failed"
   | "capability_mismatch"
   | "controller_capacity"
   | "duplicate_controller_instance"
@@ -778,6 +798,7 @@ const LOCKLESS_EVENT_OPS = new Set<LocklessEvent["op"]>([
 ]);
 
 const LOCKLESS_ERROR_CODES = new Set<LocklessErrorCode>([
+  "admission_failed",
   "capability_mismatch",
   "controller_capacity",
   "duplicate_controller_instance",
@@ -1576,6 +1597,45 @@ function validateLocklessRequestPayload(
   }
 }
 
+function validSurfaceAdmissionAttempt(value: unknown): boolean {
+  if (
+    !plainRecord(value) ||
+    !hasExactKeys(value, [
+      "attemptSequence",
+      "controllerInstanceId",
+      "outcome",
+      "reason",
+      "reasonCode",
+      "requestId",
+      "stage",
+      "startedAt",
+      "surfaceId",
+      "updatedAt",
+    ])
+  ) {
+    return false;
+  }
+  return (
+    positiveInteger(value.attemptSequence) &&
+    nonemptyString(value.controllerInstanceId) &&
+    ["failed", "pending", "succeeded"].includes(String(value.outcome)) &&
+    (value.reason === null || nonemptyString(value.reason)) &&
+    (value.reasonCode === null || nonemptyString(value.reasonCode)) &&
+    nonemptyString(value.requestId) &&
+    [
+      "requested",
+      "surface_lookup",
+      "controller_admission",
+      "surface_preflight",
+      "legacy_migration",
+      "mode_commit",
+    ].includes(String(value.stage)) &&
+    revision(value.startedAt) &&
+    nonemptyString(value.surfaceId) &&
+    revision(value.updatedAt)
+  );
+}
+
 export function validateLocklessEnvelope(
   envelope: unknown,
 ):
@@ -1719,7 +1779,7 @@ export function validateLocklessEnvelope(
             "surfaceId",
             "surfaceSetRevision",
           ],
-          ["migrationAccepted", "migrationReceiptId"],
+          ["admissionAttempt", "migrationAccepted", "migrationReceiptId"],
         ) ||
         !nonemptyString(envelope.payload.controllerInstanceId) ||
         typeof envelope.payload.resumed !== "boolean" ||
@@ -1735,6 +1795,12 @@ export function validateLocklessEnvelope(
         !plainRecord(envelope.payload.limits)
       ) {
         return { ok: false, reason: "lockless_limits_missing" };
+      }
+      if (
+        envelope.payload.admissionAttempt !== undefined &&
+        !validSurfaceAdmissionAttempt(envelope.payload.admissionAttempt)
+      ) {
+        return { ok: false, reason: "invalid_admission_attempt" };
       }
       const hasMigrationAccepted =
         "migrationAccepted" in envelope.payload;
@@ -1798,6 +1864,15 @@ export function validateLocklessEnvelope(
           ok: false,
           reason: error instanceof Error ? error.message : "invalid_limits",
         };
+      }
+      if (
+        envelope.payload.admissionAttempts !== undefined &&
+        (!Array.isArray(envelope.payload.admissionAttempts) ||
+          !envelope.payload.admissionAttempts.every(
+            validSurfaceAdmissionAttempt,
+          ))
+      ) {
+        return { ok: false, reason: "invalid_admission_attempts" };
       }
     }
     if (

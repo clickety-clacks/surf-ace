@@ -405,11 +405,13 @@ Severe violation threshold:
 
 Rules:
 1. Provider MAY call `surfaces.list` immediately after WS connect.
-2. In lockless mode the response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, and admission availability without ownership fields. `paired` is legacy capability state only.
+2. After lifecycle admission, the lockless response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, admission availability, and the durable admission-attempt ledger without ownership fields. `paired` is legacy capability state only. Pre-pair and surface-scoped discovery omit the ledger.
 3. `surfaces.list` is discovery-only and grants no pane/topology/lifecycle right.
 4. Any controller meeting lockless identity/capacity admission may send `pair.request`; a duplicate live ID or full all-live controller registry receives its distinct stable refusal.
 5. Full pane topology discovery follows admission via `panes.list`, and valid restored live pane counts above `maxPanesPerSurface` are reported without clamping.
 6. Legacy clients retain the historical `paired`/claim/owner-resume/takeover behavior only in legacy mode.
+
+Each admission-attempt ledger record contains the exact `surfaceId`, `controllerInstanceId`, triggering request ID, monotonic attempt sequence, start/update times, last reached stage, outcome, and failure code/message. The client persists the pending record before admission work begins. A failed attempt survives transaction rollback and restart. A successful attempt is committed atomically with the admitted authority and surface state. `surfaces.list` exposes the complete ledger so an endpoint-lifecycle controller can diagnose and recover a surface that has never completed admission.
 
 ### 6.0.1 Surface Admission Mode Conversion
 
@@ -421,7 +423,7 @@ Rules:
 1. The client reads the exact surface's persisted admission mode at execution. A supplied `currentMode` that differs from the observed mode returns `capability_mismatch`, names the observed current mode and required `lockless` mode, supplies the exact `surface-mode-convert` remedy for that surface, and commits nothing.
 2. An observed `unknown` mode returns `invalid_operation`, names `unknown` as current and `legacy` as the required conversion source mode, supplies the exact command to run after an explicit legacy admission stamp is restored, and commits nothing. The client never infers or repairs a missing mode stamp.
 3. An observed `legacy` mode with an active or in-flight legacy transport returns `invalid_operation`, names the current and required modes and the exact command remedy, and commits nothing. The operator must wait for in-flight admission to finish or disconnect an active legacy transport before retrying.
-4. For an inactive observed `legacy` surface, the client atomically clears legacy provider ownership and stamps the same exact surface `lockless`. Success returns `surfaceId`, `previousMode: "legacy"`, `currentMode: "lockless"`, `changed: true`, and the exact correlated `operationReceipt`.
+4. For an inactive observed `legacy` surface, the client atomically clears legacy provider ownership, prepares the existing surface for lockless authority, and stamps the same exact surface `lockless`. Success returns `surfaceId`, `previousMode: "legacy"`, `currentMode: "lockless"`, `changed: true`, and the exact correlated `operationReceipt`.
 5. For an already `lockless` surface, the operation is idempotent: it leaves the surface unchanged and returns `surfaceId`, both modes as `lockless`, `changed: false`, and the exact correlated `operationReceipt`.
 
 The success receipt contains `requestId` equal to the request envelope ID and the client-allocated positive `commitSequence`. The ordinary mutation receipt, persistence, replay, and uncertain-outcome rules in §4.9 apply.
@@ -432,7 +434,7 @@ Flow:
 1. Provider opens WS.
 2. Provider may call `surfaces.list` to discover available surfaces.
 3. Provider sends `pair.request`.
-4. Surface replies `pair.response` (success or error). In lockless mode success means new controller admission or same-ID retained-state resume; it never means ownership acquisition or transfer.
+4. Surface replies `pair.response` (success or error). In lockless mode success means new controller admission or same-ID retained-state resume; it never means ownership acquisition or transfer. A surface-scoped success includes the committed admission-attempt record.
 5. If success, connection enters active mode and event streaming starts immediately.
 
 `pair.request` fields include:
@@ -458,6 +460,8 @@ Flow:
 6. Current pane state summary (`panes[]` with per-pane `paneId`, `paneLabel`, `currentContentId`, `currentRevision`, and `contentType`) plus current topology/surface revisions, bounded consumable snapshot/cursor/gap state, and retained lifecycle state required by negotiated lockless capability.
 
 A successful `pair.response` MUST include at least one topology pane. Providers MUST treat `state.panes.length < 1` as a protocol failure and MUST NOT mark that surface connected or targetable from that response. Fresh Surf Ace surfaces expose at least one targetable topology pane.
+
+For a surface with legacy provider state but no persisted lockless admission, `pair.request` without migration material returns `admission_failed`, not `capability_mismatch`. The error names the current and required modes, exact surface, and exact `surface-mode-convert` command. The caller may retry with valid migration material to preserve legacy state, or an admitted lifecycle controller may run the explicit conversion command to discard legacy provider ownership. Conversion is safe only under the current/unknown/active refusals in §6.0.1. After conversion, the same surface accepts a new recorded pair attempt. Repeating conversion on an already-lockless surface is idempotent.
 
 ### 6.1.1 Controller Admission, Recoverable Lifecycle, and Shared History Operations (Phase 1)
 
