@@ -25,9 +25,13 @@ uses `""` or an object with optional `color` and `grid` fields.
 
 The complete command set is `list`, `push`, `read`, `topology-intent`,
 `topology-realize`, `clear`, `annotations-remove`, `capture-pane`,
-`surface-intent`, `target-register`, and `target-apply`. Each command accepts
+`surface-mode-convert`, `surface-intent`, `target-register`, and `target-apply`. Each command accepts
 one JSON object via `--input-json` or standard input and writes exactly one JSON
 result to standard output. `read` is strictly local and rejects `--endpoint`.
+
+`surface-mode-convert` requires the exact surface identity and its currently
+observed mode. It uses a lifecycle connection, returns an operation receipt,
+and leaves an already-lockless surface unchanged.
 
 `target-apply` returns after Surf Ace has durably committed the target intent,
 before browser/native materialization. Its `operationReceipt` proves that intent

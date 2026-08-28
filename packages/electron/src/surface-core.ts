@@ -53,12 +53,22 @@ import {
   type PersistentLocklessClientState,
 } from "./lockless-client-authority.js";
 import {
+  LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH,
+  LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES,
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
   locklessPaneScopeId,
   locklessSurfaceScopeId,
+  validLocklessAdmissionReasonCode,
+  validLocklessControllerInstanceId,
+  validLocklessRequestId,
+  validLocklessSurfaceAdmissionAttempt,
+  validLocklessSurfaceId,
   type LocklessContentCommit,
   type LocklessContentPush,
   type LocklessEntryProvenance,
   type LocklessPairPayload,
+  type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
 
@@ -177,6 +187,10 @@ export type PersistentProviderOwnership = {
   sessionId: string;
 };
 
+export type PersistentSurfaceAdmissionAttempt = LocklessSurfaceAdmissionAttempt;
+export type SurfaceAdmissionAttemptStage =
+  PersistentSurfaceAdmissionAttempt["stage"];
+
 type BrowserUrlTargetValidation =
   | {
       pane: PaneState;
@@ -195,7 +209,9 @@ const DIRECT_NATIVE_PANE_EXECUTABLE_ENV = new Map<string, Record<string, string>
 export type PaneNavigationDirection = "down" | "left" | "right" | "up";
 
 export type PersistentSurfaceState = {
+  admissionAttempts?: PersistentSurfaceAdmissionAttempt[];
   lockless?: PersistentLocklessClientState;
+  nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
   surfaces?: PersistentSurfaceRecord[];
   version: 1;
@@ -352,6 +368,13 @@ function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
   return paneLabel > 0 ? String(paneLabel) : "";
 }
 
+export function surfaceModeConversionCommand(
+  surfaceId: string,
+  currentMode: "legacy" | "lockless" | "unknown",
+): string {
+  return `surface-mode-convert --input-json '${JSON.stringify({ currentMode, surfaceId })}'`;
+}
+
 function alphabeticLabel(ordinal: number): string {
   let remaining = Math.max(1, Math.trunc(ordinal));
   let result = "";
@@ -385,13 +408,105 @@ const SUPPORTED_TARGET_CAPABILITIES = [
   "target.browser_url.v1",
 ] as const;
 
+const ADMISSION_REASON_TRUNCATION_SUFFIX = "…[truncated]";
+const ADMISSION_ATTEMPT_MAX_RESERVED_STAGE: SurfaceAdmissionAttemptStage =
+  "controller_admission";
+
+function admissionAttemptLedgerBytes(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+): number {
+  return Buffer.byteLength(JSON.stringify(attempts), "utf8");
+}
+
+function boundedAdmissionReason(reason: string): string {
+  if (
+    Buffer.byteLength(JSON.stringify(reason), "utf8") <=
+      LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES
+  ) {
+    return reason;
+  }
+  const codePoints = [...reason];
+  let low = 0;
+  let high = codePoints.length;
+  while (low < high) {
+    const midpoint = Math.ceil((low + high) / 2);
+    const candidate =
+      codePoints.slice(0, midpoint).join("") +
+      ADMISSION_REASON_TRUNCATION_SUFFIX;
+    if (
+      Buffer.byteLength(JSON.stringify(candidate), "utf8") <=
+        LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES
+    ) {
+      low = midpoint;
+    } else {
+      high = midpoint - 1;
+    }
+  }
+  return codePoints.slice(0, low).join("") +
+    ADMISSION_REASON_TRUNCATION_SUFFIX;
+}
+
+function boundedAdmissionReasonCode(reasonCode: string): string {
+  return validLocklessAdmissionReasonCode(reasonCode)
+    ? reasonCode
+    : "internal_error";
+}
+
+function admissionAttemptLedgerReservedBytes(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+): number {
+  return admissionAttemptLedgerBytes(
+    attempts.map((attempt) =>
+      attempt.outcome === "pending"
+        ? {
+          ...attempt,
+          outcome: "failed",
+          reason: "x".repeat(
+            LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2,
+          ),
+          reasonCode: "x".repeat(
+            LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH,
+          ),
+          stage: ADMISSION_ATTEMPT_MAX_RESERVED_STAGE,
+          updatedAt: Number.MAX_SAFE_INTEGER,
+        }
+        : attempt
+    ),
+  );
+}
+
+function assertAdmissionAttemptLedgerWithinCapacity(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+): void {
+  const reservedBytes = admissionAttemptLedgerReservedBytes(attempts);
+  if (
+    attempts.length > LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS ||
+    reservedBytes > LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES
+  ) {
+    throw new LocklessAuthorityError(
+      "surface_state_capacity",
+      "Surface admission attempt ledger is at bounded retention capacity",
+      {
+        attemptedBytes: reservedBytes,
+        attemptedCount: attempts.length,
+        maxBytes: LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+        maxCount: LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+      },
+    );
+  }
+}
+
 export class SurfaceCore {
   readonly locklessAuthority: LocklessClientAuthority;
+  // Admission evidence is a write-ahead ledger. Transaction rollback restores
+  // surface and authority state, but must never erase or rewind these records.
+  private readonly admissionAttempts: PersistentSurfaceAdmissionAttempt[];
   private readonly surfaces = new Map<string, SurfaceState>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
   private readonly logger: { warn?: (message: string) => void };
   private readonly now: () => number;
+  private nextAdmissionAttemptSequence: number;
   private persistentState: PersistentSurfaceState;
 
   constructor(options?: {
@@ -406,6 +521,26 @@ export class SurfaceCore {
       primarySurfaceId: null,
       version: 1,
     };
+    this.admissionAttempts = structuredClone(
+      this.persistentState.admissionAttempts ?? [],
+    );
+    if (
+      !this.admissionAttempts.every(validLocklessSurfaceAdmissionAttempt)
+    ) {
+      throw new LocklessAuthorityError(
+        "surface_state_capacity",
+        "Persisted surface admission attempt ledger violates bounded field shapes",
+      );
+    }
+    assertAdmissionAttemptLedgerWithinCapacity(this.admissionAttempts);
+    const nextFromRecords = this.admissionAttempts.reduce(
+      (next, attempt) => Math.max(next, attempt.attemptSequence + 1),
+      1,
+    );
+    this.nextAdmissionAttemptSequence = Math.max(
+      nextFromRecords,
+      this.persistentState.nextAdmissionAttemptSequence ?? 1,
+    );
     this.locklessAuthority = new LocklessClientAuthority(
       this.persistentState.lockless,
       this.now,
@@ -467,9 +602,139 @@ export class SurfaceCore {
   getPersistentState(): PersistentSurfaceState {
     return {
       ...structuredClone(this.persistentState),
+      admissionAttempts: structuredClone(this.admissionAttempts),
       lockless: this.locklessAuthority.exportState(),
+      nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,
       surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
     };
+  }
+
+  beginSurfaceAdmissionAttempt(input: {
+    controllerInstanceId: string;
+    requestId: string;
+    surfaceId: string;
+  }): PersistentSurfaceAdmissionAttempt {
+    if (
+      !validLocklessControllerInstanceId(input.controllerInstanceId) ||
+      !validLocklessRequestId(input.requestId) ||
+      !validLocklessSurfaceId(input.surfaceId)
+    ) {
+      throw new LocklessAuthorityError(
+        "invalid_payload",
+        "Surface admission attempt identifiers violate bounded protocol shapes",
+      );
+    }
+    const now = this.now();
+    const attempt: PersistentSurfaceAdmissionAttempt = {
+      attemptSequence: this.nextAdmissionAttemptSequence,
+      controllerInstanceId: input.controllerInstanceId,
+      outcome: "pending",
+      reason: null,
+      reasonCode: null,
+      requestId: input.requestId,
+      stage: "requested",
+      startedAt: now,
+      surfaceId: input.surfaceId,
+      updatedAt: now,
+    };
+    assertAdmissionAttemptLedgerWithinCapacity([
+      ...this.admissionAttempts,
+      attempt,
+    ]);
+    this.nextAdmissionAttemptSequence++;
+    this.admissionAttempts.push(attempt);
+    return structuredClone(attempt);
+  }
+
+  advanceSurfaceAdmissionAttempt(
+    attemptSequence: number,
+    stage: SurfaceAdmissionAttemptStage,
+  ): PersistentSurfaceAdmissionAttempt {
+    const attempt = this.requirePendingSurfaceAdmissionAttempt(attemptSequence);
+    attempt.stage = stage;
+    attempt.updatedAt = this.now();
+    return structuredClone(attempt);
+  }
+
+  failSurfaceAdmissionAttempt(
+    attemptSequence: number,
+    reasonCode: string,
+    reason: string,
+  ): PersistentSurfaceAdmissionAttempt {
+    const attempt = this.requirePendingSurfaceAdmissionAttempt(attemptSequence);
+    attempt.outcome = "failed";
+    attempt.reason = boundedAdmissionReason(reason);
+    attempt.reasonCode = boundedAdmissionReasonCode(reasonCode);
+    attempt.updatedAt = this.now();
+    return structuredClone(attempt);
+  }
+
+  succeedSurfaceAdmissionAttempt(
+    attemptSequence: number,
+  ): PersistentSurfaceAdmissionAttempt {
+    const attempt = this.requirePendingSurfaceAdmissionAttempt(attemptSequence);
+    attempt.outcome = "succeeded";
+    attempt.reason = null;
+    attempt.reasonCode = null;
+    attempt.updatedAt = this.now();
+    return structuredClone(attempt);
+  }
+
+  rollbackUnpersistedSurfaceAdmissionSuccess(
+    attemptSequence: number,
+  ): void {
+    const attempt = this.admissionAttempts.find(
+      (candidate) => candidate.attemptSequence === attemptSequence,
+    );
+    if (!attempt || attempt.outcome !== "succeeded") {
+      throw new LocklessAuthorityError(
+        "internal_error",
+        `Surface admission attempt ${attemptSequence} has no unpersisted success to roll back`,
+      );
+    }
+    attempt.outcome = "pending";
+    attempt.reason = null;
+    attempt.reasonCode = null;
+  }
+
+  surfaceAdmissionAttempt(
+    attemptSequence: number,
+  ): PersistentSurfaceAdmissionAttempt {
+    const attempt = this.admissionAttempts.find(
+      (candidate) => candidate.attemptSequence === attemptSequence,
+    );
+    if (!attempt) {
+      throw new LocklessAuthorityError(
+        "internal_error",
+        `Unknown surface admission attempt: ${attemptSequence}`,
+      );
+    }
+    return structuredClone(attempt);
+  }
+
+  listSurfaceAdmissionAttempts(): PersistentSurfaceAdmissionAttempt[] {
+    return structuredClone(this.admissionAttempts);
+  }
+
+  private requirePendingSurfaceAdmissionAttempt(
+    attemptSequence: number,
+  ): PersistentSurfaceAdmissionAttempt {
+    const attempt = this.admissionAttempts.find(
+      (candidate) => candidate.attemptSequence === attemptSequence,
+    );
+    if (!attempt) {
+      throw new LocklessAuthorityError(
+        "internal_error",
+        `Unknown surface admission attempt: ${attemptSequence}`,
+      );
+    }
+    if (attempt.outcome !== "pending") {
+      throw new LocklessAuthorityError(
+        "internal_error",
+        `Surface admission attempt ${attemptSequence} is already ${attempt.outcome}`,
+      );
+    }
+    return attempt;
   }
 
   markLocklessAuthorityChanged(surfaceId?: string): void {
@@ -488,6 +753,7 @@ export class SurfaceCore {
     migrationMaterial?: LocklessPairPayload["migrationMaterial"],
     controllerInstanceId?: string,
     pairRequestId?: string,
+    admissionAttemptSequence?: number,
   ): void {
     this.locklessAuthority.assertRetainedTombstoneTransition(
       migrationMaterial ? "legacy_migration" : "admission",
@@ -514,6 +780,12 @@ export class SurfaceCore {
           );
         }
       }
+      if (admissionAttemptSequence !== undefined) {
+        this.advanceSurfaceAdmissionAttempt(
+          admissionAttemptSequence,
+          "mode_commit",
+        );
+      }
       return;
     }
     const surface = this.getSurface(surfaceId);
@@ -522,6 +794,28 @@ export class SurfaceCore {
     const usedLabels = new Set<number>();
     let nextLabel = 1;
     try {
+      if (admissionAttemptSequence !== undefined) {
+        this.advanceSurfaceAdmissionAttempt(
+          admissionAttemptSequence,
+          "surface_preflight",
+        );
+      }
+      if (hadLegacyOwnership && !migrationMaterial) {
+        const remedyCommand = surfaceModeConversionCommand(surfaceId, "legacy");
+        throw new LocklessAuthorityError(
+          "admission_failed",
+          `Surface ${surfaceId} was not admitted to lockless mode because its legacy provider state requires migration material. Retry pair.request with migrationMaterial, or explicitly discard legacy provider ownership with the exact command: ${remedyCommand}`,
+          {
+            ...(admissionAttemptSequence !== undefined
+              ? { admissionAttemptSequence }
+              : {}),
+            currentMode: "legacy",
+            remedyCommand,
+            requiredMode: "lockless",
+            surfaceId,
+          },
+        );
+      }
       surface.providerOwnership = null;
       const bootstrapPane = surface.panes.get(BOOTSTRAP_PANE_ID);
       if (
@@ -589,13 +883,13 @@ export class SurfaceCore {
           "Legacy surface exceeds lockless live-plus-tombstone envelope",
         );
       }
-      if (hadLegacyOwnership && !migrationMaterial) {
-        throw new LocklessAuthorityError(
-          "capability_mismatch",
-          "Legacy provider-local unread state requires explicit migration material",
-        );
-      }
       if (migrationMaterial) {
+        if (admissionAttemptSequence !== undefined) {
+          this.advanceSurfaceAdmissionAttempt(
+            admissionAttemptSequence,
+            "legacy_migration",
+          );
+        }
         if (!controllerInstanceId || !pairRequestId) {
           throw new LocklessAuthorityError(
             "invalid_controller_instance",
@@ -633,6 +927,12 @@ export class SurfaceCore {
         });
       }
       this.locklessAuthority.convertSurfaceToLocklessMode(surfaceId);
+      if (admissionAttemptSequence !== undefined) {
+        this.advanceSurfaceAdmissionAttempt(
+          admissionAttemptSequence,
+          "mode_commit",
+        );
+      }
       this.emit({ surfaceId, type: "surface-changed" });
     } catch (error) {
       const restored = deserializeSurface(rollback, this.now());
@@ -650,6 +950,28 @@ export class SurfaceCore {
   getProviderOwnership(surfaceId: string): PersistentProviderOwnership | null {
     const ownership = this.getSurface(surfaceId).providerOwnership;
     return ownership ? structuredClone(ownership) : null;
+  }
+
+  surfaceAdmissionMode(surfaceId: string): "legacy" | "lockless" | "unknown" {
+    const surface = this.getSurface(surfaceId);
+    const explicit = this.locklessAuthority.surfaceMode(surfaceId);
+    if (explicit) return explicit;
+    return surface.providerOwnership ? "legacy" : "unknown";
+  }
+
+  convertObservedSurfaceToLocklessMode(surfaceId: string): void {
+    const surface = this.getSurface(surfaceId);
+    const rollback = serializeSurface(surface);
+    try {
+      surface.providerOwnership = null;
+      this.admitSurfaceToLockless(surfaceId);
+    } catch (error) {
+      const restored = deserializeSurface(rollback, this.now());
+      if (restored) {
+        this.surfaces.set(surfaceId, restored);
+      }
+      throw error;
+    }
   }
 
   setProviderOwnership(surfaceId: string, ownership: PersistentProviderOwnership): void {

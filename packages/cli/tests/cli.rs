@@ -260,7 +260,7 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         .iter()
         .map(|command| command.name())
         .collect::<Vec<_>>();
-    assert_eq!(expected.len(), 11);
+    assert_eq!(expected.len(), 12);
     assert_eq!(package["commands"], json!(expected));
     assert_eq!(
         package["receiptResolutionOutcomes"],
@@ -532,7 +532,7 @@ fn canonical_target_admission_cases_execute_rust_controller_semantics() {
 }
 
 #[test]
-fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
+fn all_twelve_commands_map_to_the_public_wire_and_return_json() {
     for (command, input, expected_operation) in canonical_network_cases() {
         let temp = TempDir::new().unwrap();
         let mut wire = FakeWire::ordinary();
@@ -547,6 +547,35 @@ fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
     local.product_label = None;
     let output = execute(local).unwrap();
     assert_eq!(output.result["cacheStatus"], "unsynchronized");
+}
+
+#[test]
+fn surface_mode_conversion_uses_lifecycle_pairing_and_exact_input() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::SurfaceModeConvert,
+            json!({ "currentMode": "legacy", "surfaceId": "sf_legacy" }),
+        ),
+        &mut wire,
+    )
+    .unwrap();
+
+    assert_eq!(output.command, "surface-mode-convert");
+    assert_eq!(wire.operations[0], "pair.request");
+    assert_eq!(wire.payloads[0].1.get("surfaceId"), None);
+    assert!(wire.operations.contains(&"surface.mode.convert".into()));
+    let conversion = wire
+        .payloads
+        .iter()
+        .find(|(op, _)| op == "surface.mode.convert")
+        .unwrap();
+    assert_eq!(
+        conversion.1,
+        json!({ "currentMode": "legacy", "surfaceId": "sf_legacy" }),
+    );
 }
 
 #[test]
@@ -694,6 +723,11 @@ fn canonical_network_cases() -> Vec<(Command, Value, &'static str)> {
             Command::TargetApply,
             json!({ "surfaceId": "sf_1", "paneId": 1, "requestId": "target_request_1", "restoreReason": "initial", "targetId": "tg_1", "targetEpoch": 1, "targetKind": "native_app", "targetHeader": {}, "targetPayload": {} }),
             "target.apply",
+        ),
+        (
+            Command::SurfaceModeConvert,
+            json!({ "surfaceId": "sf_1", "currentMode": "legacy" }),
+            "surface.mode.convert",
         ),
     ]
 }
