@@ -1,6 +1,40 @@
 export const SURF_ACE_LOCKLESS_V1_CAPABILITY =
   "surf-ace.lockless-multi-controller.v1" as const;
 
+export const LOCKLESS_MAX_REQUEST_ID_LENGTH = 64;
+export const LOCKLESS_MAX_CONTROLLER_INSTANCE_ID_LENGTH = 64;
+export const LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS = 256;
+export const LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES = 128 * 1024;
+export const LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH = 64;
+export const LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES = 512;
+
+const LOCKLESS_REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
+const LOCKLESS_CONTROLLER_INSTANCE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
+const LOCKLESS_SURFACE_ID_PATTERN = /^sf_[A-Za-z0-9._:-]{3,64}$/;
+const LOCKLESS_ADMISSION_REASON_CODE_PATTERN = /^[a-z_]{1,64}$/;
+
+export function validLocklessRequestId(value: unknown): value is string {
+  return typeof value === "string" && LOCKLESS_REQUEST_ID_PATTERN.test(value);
+}
+
+export function validLocklessControllerInstanceId(
+  value: unknown,
+): value is string {
+  return typeof value === "string" &&
+    LOCKLESS_CONTROLLER_INSTANCE_ID_PATTERN.test(value);
+}
+
+export function validLocklessSurfaceId(value: unknown): value is string {
+  return typeof value === "string" && LOCKLESS_SURFACE_ID_PATTERN.test(value);
+}
+
+export function validLocklessAdmissionReasonCode(
+  value: unknown,
+): value is string {
+  return typeof value === "string" &&
+    LOCKLESS_ADMISSION_REASON_CODE_PATTERN.test(value);
+}
+
 export type ControllerInstanceId = string;
 export type LocklessScopeId = string;
 export type TombstoneId = string;
@@ -911,6 +945,10 @@ function nonemptyString(value: unknown): boolean {
   return typeof value === "string" && value.length > 0;
 }
 
+function jsonStringBytes(value: string): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
 function optionalBoolean(
   payload: Record<string, unknown>,
   key: string,
@@ -1401,7 +1439,9 @@ function validateLocklessRequestPayload(
     new Set(value).size === value.length;
   switch (op) {
     case "pair.request":
-      return nonemptyString(payload.controllerInstanceId) &&
+      return validLocklessControllerInstanceId(payload.controllerInstanceId) &&
+        (payload.surfaceId === undefined ||
+          validLocklessSurfaceId(payload.surfaceId)) &&
         positiveInteger(payload.projectionCapacityBytes) &&
         payload.protocolVersion === 1 &&
         Array.isArray(payload.protocolFeatures) &&
@@ -1597,7 +1637,7 @@ function validateLocklessRequestPayload(
   }
 }
 
-function validSurfaceAdmissionAttempt(value: unknown): boolean {
+export function validLocklessSurfaceAdmissionAttempt(value: unknown): boolean {
   if (
     !plainRecord(value) ||
     !hasExactKeys(value, [
@@ -1617,11 +1657,15 @@ function validSurfaceAdmissionAttempt(value: unknown): boolean {
   }
   return (
     positiveInteger(value.attemptSequence) &&
-    nonemptyString(value.controllerInstanceId) &&
+    validLocklessControllerInstanceId(value.controllerInstanceId) &&
     ["failed", "pending", "succeeded"].includes(String(value.outcome)) &&
-    (value.reason === null || nonemptyString(value.reason)) &&
-    (value.reasonCode === null || nonemptyString(value.reasonCode)) &&
-    nonemptyString(value.requestId) &&
+    (value.reason === null ||
+      (typeof value.reason === "string" && value.reason.length > 0 &&
+        jsonStringBytes(value.reason) <=
+          LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES)) &&
+    (value.reasonCode === null ||
+      validLocklessAdmissionReasonCode(value.reasonCode)) &&
+    validLocklessRequestId(value.requestId) &&
     [
       "requested",
       "surface_lookup",
@@ -1631,7 +1675,7 @@ function validSurfaceAdmissionAttempt(value: unknown): boolean {
       "mode_commit",
     ].includes(String(value.stage)) &&
     revision(value.startedAt) &&
-    nonemptyString(value.surfaceId) &&
+    validLocklessSurfaceId(value.surfaceId) &&
     revision(value.updatedAt)
   );
 }
@@ -1661,7 +1705,7 @@ export function validateLocklessEnvelope(
         "type",
         "v",
       ]) ||
-      typeof envelope.id !== "string" ||
+      !validLocklessRequestId(envelope.id) ||
       !plainRecord(envelope.payload)
     ) {
       return { ok: false, reason: "invalid_request" };
@@ -1798,7 +1842,7 @@ export function validateLocklessEnvelope(
       }
       if (
         envelope.payload.admissionAttempt !== undefined &&
-        !validSurfaceAdmissionAttempt(envelope.payload.admissionAttempt)
+        !validLocklessSurfaceAdmissionAttempt(envelope.payload.admissionAttempt)
       ) {
         return { ok: false, reason: "invalid_admission_attempt" };
       }
@@ -1869,7 +1913,7 @@ export function validateLocklessEnvelope(
         envelope.payload.admissionAttempts !== undefined &&
         (!Array.isArray(envelope.payload.admissionAttempts) ||
           !envelope.payload.admissionAttempts.every(
-            validSurfaceAdmissionAttempt,
+            validLocklessSurfaceAdmissionAttempt,
           ))
       ) {
         return { ok: false, reason: "invalid_admission_attempts" };

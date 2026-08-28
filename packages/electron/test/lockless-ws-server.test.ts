@@ -8,6 +8,7 @@ import test from "node:test";
 import WebSocket from "ws";
 
 import {
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
   locklessPaneScopeId,
 } from "../../protocol/src/lockless.js";
@@ -2197,6 +2198,105 @@ test("failed admission survives rollback and restart, then exact conversion perm
   assert.deepEqual(
     finalRestart.listSurfaceAdmissionAttempts().map((attempt) => attempt.outcome),
     ["failed", "succeeded"],
+  );
+});
+
+test("unknown-surface admission is bounded, durable, and lifecycle-only", async () => {
+  let durable: ReturnType<SurfaceCore["getPersistentState"]> | null = null;
+  const core = new SurfaceCore();
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      durable = core.getPersistentState();
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const unknown = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const lifecycle = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const oversizedController = await request(
+      unknown,
+      "pair.request",
+      {
+        controllerInstanceId: "c".repeat(65),
+        projectionCapacityBytes: 1,
+        protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+        protocolVersion: 1,
+        surfaceId: "sf_unknown",
+      },
+      { id: "rq_oversized_controller" },
+    );
+    assert.equal(oversizedController.ok, false);
+    assert.equal(core.listSurfaceAdmissionAttempts().length, 0);
+
+    const missing = await request(
+      unknown,
+      "pair.request",
+      {
+        controllerInstanceId: "unknown_surface_controller",
+        projectionCapacityBytes: 1,
+        protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+        protocolVersion: 1,
+        surfaceId: "sf_unknown",
+      },
+      { id: "rq_unknown_surface" },
+    );
+    assert.equal(missing.ok, false, JSON.stringify(missing));
+    assert.equal(missing.error.code, "invalid_payload");
+    assert(durable);
+    assert.equal(durable.admissionAttempts?.length, 1);
+    assert.equal(durable.admissionAttempts?.[0]?.surfaceId, "sf_unknown");
+    assert.equal(durable.admissionAttempts?.[0]?.outcome, "failed");
+
+    const lifecyclePair = await pair(lifecycle, "lifecycle_controller");
+    assert.equal(lifecyclePair.ok, true, JSON.stringify(lifecyclePair));
+    const discovered = await request(lifecycle, "surfaces.list", {});
+    assert.equal(discovered.ok, true, JSON.stringify(discovered));
+    assert.equal(discovered.payload.admissionAttempts.length, 1);
+    assert(
+      Buffer.byteLength(
+        JSON.stringify(discovered.payload.admissionAttempts),
+        "utf8",
+      ) <= LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+    );
+
+    const surfaceScoped = await connect(
+      `ws://127.0.0.1:${port}${server.wsPath}`,
+    );
+    try {
+      const scopedPair = await pair(
+        surfaceScoped,
+        "surface_scoped_controller",
+        "sf_unknown",
+      );
+      assert.equal(scopedPair.ok, false);
+      assert.equal(
+        (scopedPair.payload as Record<string, unknown> | undefined)
+          ?.admissionAttempts,
+        undefined,
+      );
+    } finally {
+      surfaceScoped.close();
+    }
+  } finally {
+    lifecycle.close();
+    unknown.close();
+    await server.stop();
+  }
+
+  assert(durable);
+  const restarted = new SurfaceCore({ persistentState: durable });
+  assert.equal(restarted.listSurfaceAdmissionAttempts().length, 2);
+  assert.deepEqual(
+    restarted.listSurfaceAdmissionAttempts().map((attempt) => attempt.outcome),
+    ["failed", "failed"],
   );
 });
 

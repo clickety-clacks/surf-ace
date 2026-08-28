@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 
 import {
+  LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES,
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
   type LocklessCapacityLimits,
   validateLocklessEnvelope,
@@ -389,7 +390,7 @@ test("lockless pair and discovery require exact capability and finite limits", (
     requestId: "rq-pair",
     stage: "mode_commit",
     startedAt: 1,
-    surfaceId: "surface-a",
+    surfaceId: "sf_surface-a",
     updatedAt: 2,
   };
   const discovery = {
@@ -469,6 +470,79 @@ test("lockless pair and discovery require exact capability and finite limits", (
             "authority.state.v1",
           ],
         },
+      },
+    }).ok,
+    false,
+  );
+});
+
+test("lockless pair admission enforces identifier and retained reason bounds", () => {
+  const pairPayload = {
+    controllerInstanceId: "c".repeat(64),
+    projectionCapacityBytes: 1,
+    protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+    protocolVersion: 1,
+    surfaceId: `sf_${"s".repeat(64)}`,
+  };
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      ...request("pair.request", pairPayload),
+      id: "r".repeat(64),
+    }),
+    { ok: true },
+  );
+  for (const envelope of [
+    { ...request("pair.request", pairPayload), id: "r".repeat(65) },
+    request("pair.request", {
+      ...pairPayload,
+      controllerInstanceId: "c".repeat(65),
+    }),
+    request("pair.request", {
+      ...pairPayload,
+      surfaceId: `sf_${"s".repeat(65)}`,
+    }),
+  ]) {
+    assert.equal(validateLocklessEnvelope(envelope).ok, false);
+  }
+
+  const admissionAttempt = {
+    attemptSequence: 1,
+    controllerInstanceId: "controller-a",
+    outcome: "failed",
+    reason: "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2),
+    reasonCode: "invalid_payload",
+    requestId: "rq-pair",
+    stage: "surface_lookup",
+    startedAt: 1,
+    surfaceId: "sf_surface-a",
+    updatedAt: 2,
+  };
+  const discovery = {
+    id: "rq-list",
+    ok: true,
+    op: "surfaces.list",
+    payload: {
+      admissionAttempts: [admissionAttempt],
+      capabilities: {
+        limits,
+        protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      },
+      surfaces: [],
+    },
+    sentAt: 1,
+    type: "response",
+    v: 1,
+  };
+  assert.deepEqual(validateLocklessEnvelope(discovery), { ok: true });
+  assert.equal(
+    validateLocklessEnvelope({
+      ...discovery,
+      payload: {
+        ...discovery.payload,
+        admissionAttempts: [{
+          ...admissionAttempt,
+          reason: "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 1),
+        }],
       },
     }).ok,
     false,
@@ -715,7 +789,7 @@ test("migration material rejects ambiguous or injected nested authority", () => 
       projectionCapacityBytes: 10,
       protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
       protocolVersion: 1,
-      surfaceId: "surface-a",
+      surfaceId: "sf_surface-a",
     });
 
   assert.deepEqual(validateLocklessEnvelope(pair(material)), { ok: true });

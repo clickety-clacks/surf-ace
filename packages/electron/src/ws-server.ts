@@ -5751,7 +5751,7 @@ export class SurfaceWsServer {
   ): void {
     const attempt = this.core.beginSurfaceAdmissionAttempt({
       controllerInstanceId,
-      requestId: `${requestId}:${surfaceId}`,
+      requestId,
       surfaceId,
     });
     try {

@@ -405,13 +405,17 @@ Severe violation threshold:
 
 Rules:
 1. Provider MAY call `surfaces.list` immediately after WS connect.
-2. After lifecycle admission, the lockless response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, admission availability, and the durable admission-attempt ledger without ownership fields. `paired` is legacy capability state only. Pre-pair and surface-scoped discovery omit the ledger.
+2. After lifecycle admission, the lockless response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, admission availability, and the bounded durable admission-attempt ledger without ownership fields. `paired` is legacy capability state only. Pre-pair and surface-scoped discovery omit the ledger.
 3. `surfaces.list` is discovery-only and grants no pane/topology/lifecycle right.
 4. Any controller meeting lockless identity/capacity admission may send `pair.request`; a duplicate live ID or full all-live controller registry receives its distinct stable refusal.
 5. Full pane topology discovery follows admission via `panes.list`, and valid restored live pane counts above `maxPanesPerSurface` are reported without clamping.
 6. Legacy clients retain the historical `paired`/claim/owner-resume/takeover behavior only in legacy mode.
 
-Each admission-attempt ledger record contains the exact `surfaceId`, `controllerInstanceId`, triggering request ID, monotonic attempt sequence, start/update times, last reached stage, outcome, and failure code/message. The client persists the pending record before admission work begins. A failed attempt survives transaction rollback and restart. A successful attempt is committed atomically with the admitted authority and surface state. `surfaces.list` exposes the complete ledger so an endpoint-lifecycle controller can diagnose and recover a surface that has never completed admission.
+Each admission-attempt ledger record contains the exact `surfaceId`, `controllerInstanceId`, triggering request ID, monotonic attempt sequence, start/update times, last reached stage, outcome, and failure code/message. Request and controller IDs use `[A-Za-z0-9._:-]{1,64}`; surface IDs use `sf_` followed by 3–64 characters from the same set. Failure codes use `[a-z_]{1,64}`. Failure messages retain at most 512 UTF-8 bytes in their JSON string encoding and carry `…[truncated]` when the exact message exceeds that bound.
+
+The ledger retains at most 256 records and at most 128 KiB of JSON-encoded records. Pending records reserve the maximum failure-code and failure-message space, so terminalization cannot cross the byte bound. The client refuses a new surface admission with `surface_state_capacity` before it allocates a sequence, appends, performs surface lookup, or changes authority when either limit would be exceeded. It never evicts an admission record or rewinds the monotonic sequence. Existing persisted state outside these bounds is invalid state and causes a loud startup refusal instead of inference or repair.
+
+Within those limits, the client persists the pending record before admission work begins. A failed attempt survives transaction rollback and restart. A successful attempt is committed atomically with the admitted authority and surface state. Lifecycle `surfaces.list` exposes the complete retained ledger; pre-pair and surface-scoped discovery omit it.
 
 ### 6.0.1 Surface Admission Mode Conversion
 

@@ -53,8 +53,17 @@ import {
   type PersistentLocklessClientState,
 } from "./lockless-client-authority.js";
 import {
+  LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH,
+  LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES,
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
   locklessPaneScopeId,
   locklessSurfaceScopeId,
+  validLocklessAdmissionReasonCode,
+  validLocklessControllerInstanceId,
+  validLocklessRequestId,
+  validLocklessSurfaceAdmissionAttempt,
+  validLocklessSurfaceId,
   type LocklessContentCommit,
   type LocklessContentPush,
   type LocklessEntryProvenance,
@@ -399,6 +408,91 @@ const SUPPORTED_TARGET_CAPABILITIES = [
   "target.browser_url.v1",
 ] as const;
 
+const ADMISSION_REASON_TRUNCATION_SUFFIX = "…[truncated]";
+
+function admissionAttemptLedgerBytes(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+): number {
+  return Buffer.byteLength(JSON.stringify(attempts), "utf8");
+}
+
+function boundedAdmissionReason(reason: string): string {
+  if (
+    Buffer.byteLength(JSON.stringify(reason), "utf8") <=
+      LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES
+  ) {
+    return reason;
+  }
+  const codePoints = [...reason];
+  let low = 0;
+  let high = codePoints.length;
+  while (low < high) {
+    const midpoint = Math.ceil((low + high) / 2);
+    const candidate =
+      codePoints.slice(0, midpoint).join("") +
+      ADMISSION_REASON_TRUNCATION_SUFFIX;
+    if (
+      Buffer.byteLength(JSON.stringify(candidate), "utf8") <=
+        LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES
+    ) {
+      low = midpoint;
+    } else {
+      high = midpoint - 1;
+    }
+  }
+  return codePoints.slice(0, low).join("") +
+    ADMISSION_REASON_TRUNCATION_SUFFIX;
+}
+
+function boundedAdmissionReasonCode(reasonCode: string): string {
+  return validLocklessAdmissionReasonCode(reasonCode)
+    ? reasonCode
+    : "internal_error";
+}
+
+function admissionAttemptLedgerReservedBytes(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+): number {
+  return admissionAttemptLedgerBytes(
+    attempts.map((attempt) =>
+      attempt.outcome === "pending"
+        ? {
+            ...attempt,
+            outcome: "failed",
+            reason: "x".repeat(
+              LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2,
+            ),
+            reasonCode: "x".repeat(
+              LOCKLESS_MAX_ADMISSION_REASON_CODE_LENGTH,
+            ),
+            updatedAt: Number.MAX_SAFE_INTEGER,
+          }
+        : attempt
+    ),
+  );
+}
+
+function assertAdmissionAttemptLedgerWithinCapacity(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+): void {
+  const reservedBytes = admissionAttemptLedgerReservedBytes(attempts);
+  if (
+    attempts.length > LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS ||
+    reservedBytes > LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES
+  ) {
+    throw new LocklessAuthorityError(
+      "surface_state_capacity",
+      "Surface admission attempt ledger is at bounded retention capacity",
+      {
+        attemptedBytes: reservedBytes,
+        attemptedCount: attempts.length,
+        maxBytes: LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+        maxCount: LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+      },
+    );
+  }
+}
+
 export class SurfaceCore {
   readonly locklessAuthority: LocklessClientAuthority;
   // Admission evidence is a write-ahead ledger. Transaction rollback restores
@@ -427,6 +521,15 @@ export class SurfaceCore {
     this.admissionAttempts = structuredClone(
       this.persistentState.admissionAttempts ?? [],
     );
+    if (
+      !this.admissionAttempts.every(validLocklessSurfaceAdmissionAttempt)
+    ) {
+      throw new LocklessAuthorityError(
+        "surface_state_capacity",
+        "Persisted surface admission attempt ledger violates bounded field shapes",
+      );
+    }
+    assertAdmissionAttemptLedgerWithinCapacity(this.admissionAttempts);
     const nextFromRecords = this.admissionAttempts.reduce(
       (next, attempt) => Math.max(next, attempt.attemptSequence + 1),
       1,
@@ -508,9 +611,19 @@ export class SurfaceCore {
     requestId: string;
     surfaceId: string;
   }): PersistentSurfaceAdmissionAttempt {
+    if (
+      !validLocklessControllerInstanceId(input.controllerInstanceId) ||
+      !validLocklessRequestId(input.requestId) ||
+      !validLocklessSurfaceId(input.surfaceId)
+    ) {
+      throw new LocklessAuthorityError(
+        "invalid_payload",
+        "Surface admission attempt identifiers violate bounded protocol shapes",
+      );
+    }
     const now = this.now();
     const attempt: PersistentSurfaceAdmissionAttempt = {
-      attemptSequence: this.nextAdmissionAttemptSequence++,
+      attemptSequence: this.nextAdmissionAttemptSequence,
       controllerInstanceId: input.controllerInstanceId,
       outcome: "pending",
       reason: null,
@@ -521,6 +634,11 @@ export class SurfaceCore {
       surfaceId: input.surfaceId,
       updatedAt: now,
     };
+    assertAdmissionAttemptLedgerWithinCapacity([
+      ...this.admissionAttempts,
+      attempt,
+    ]);
+    this.nextAdmissionAttemptSequence++;
     this.admissionAttempts.push(attempt);
     return structuredClone(attempt);
   }
@@ -542,8 +660,8 @@ export class SurfaceCore {
   ): PersistentSurfaceAdmissionAttempt {
     const attempt = this.requirePendingSurfaceAdmissionAttempt(attemptSequence);
     attempt.outcome = "failed";
-    attempt.reason = reason;
-    attempt.reasonCode = reasonCode;
+    attempt.reason = boundedAdmissionReason(reason);
+    attempt.reasonCode = boundedAdmissionReasonCode(reasonCode);
     attempt.updatedAt = this.now();
     return structuredClone(attempt);
   }

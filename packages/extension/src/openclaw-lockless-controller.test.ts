@@ -807,12 +807,12 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
     snapshotBufferOverflowGeneration: 3,
     snapshotBufferOverflowed: true,
     snapshotSyncInFlight: false,
-    surfaceId: "sf_1",
+    surfaceId: "sf_001",
     topologyRevision: 4,
     viewport: { height: 100, scale: 1, width: 100 },
     windowLabel: "Studio",
   };
-  (runtime as any).surfaces.set("sf_1", surface);
+  (runtime as any).surfaces.set("sf_001", surface);
 
   const postBoundaryBuffer = structuredClone(buffer);
   buffer.closedFrames = [];
@@ -840,12 +840,12 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
     }
   };
   await assert.rejects(
-    runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_gate2a" as never),
+    runtime.prepareLegacyLocklessMigrationNow("sf_001", "ci_gate2a" as never),
     /migration_prepare_failed/,
   );
-  const preparedReceipt = await runtime.prepareLegacyLocklessMigrationNow("sf_1", "ci_gate2a" as never);
+  const preparedReceipt = await runtime.prepareLegacyLocklessMigrationNow("sf_001", "ci_gate2a" as never);
   repository.save = originalSave;
-  const initialLookup = await runtime.lookupLegacyLocklessMigration("electron-1", "sf_1", "ci_gate2a" as never);
+  const initialLookup = await runtime.lookupLegacyLocklessMigration("electron-1", "sf_001", "ci_gate2a" as never);
   assert.equal(initialLookup.kind, "prepared");
   if (initialLookup.kind !== "prepared") throw new Error("expected prepared lookup");
   const prepared = initialLookup.record;
@@ -899,7 +899,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
     }
     const recoveredLookup = await recovered.lookupLegacyLocklessMigration(
       "electron-1",
-      "sf_1",
+      "sf_001",
       "ci_gate2a" as never,
     );
     assert.equal(recoveredLookup.kind, "prepared");
@@ -912,7 +912,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   const preparedState = JSON.parse(await readFile(statePath, "utf8"));
   const preparedRecord = structuredClone(
     preparedState.locklessMigrationContinuity.endpoints["electron-1"]
-      .surfaces.sf_1,
+      .surfaces.sf_001,
   );
   const resetSurfaceTemplate = structuredClone(surface);
   const compositionExtension = await copyAtPhase("candidate-composition", surface);
@@ -935,7 +935,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
     windowLabel: "a",
   });
   const copiedElectronState = JSON.parse(
-    JSON.stringify(seedCore.getPersistentState()).replaceAll(seedSurface.surfaceId, "sf_1"),
+    JSON.stringify(seedCore.getPersistentState()).replaceAll(seedSurface.surfaceId, "sf_001"),
   );
   await writePersistentStateFile(electronSourceRoot, electronStateFile, copiedElectronState);
   await cp(electronSourceRoot, electronCopiedRoot, { recursive: true });
@@ -951,7 +951,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
     scale: 1,
     width: 1024,
   });
-  assert.equal(compositionCore.listSurfaces()[0]?.surfaceId, "sf_1");
+  assert.equal(compositionCore.listSurfaces()[0]?.surfaceId, "sf_001");
   const compositionPort = 25_877;
   let compositionWrites = Promise.resolve();
   const compositionServer = new SurfaceWsServer({
@@ -1007,13 +1007,13 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
     );
     assert.ok(prepareTool);
     const terminalReceipt = await prepareTool.execute(
-      { fingerprint: "sf_1" },
+      { fingerprint: "sf_001" },
       {} as never,
     );
     assert.equal(terminalReceipt.phase, "complete", compositionLogs.join("\n"));
     assert.equal(terminalReceipt.pairRequestId, prepared.pairRequestId);
     assert.deepEqual(
-      await prepareTool.execute({ fingerprint: "sf_1" }, {} as never),
+      await prepareTool.execute({ fingerprint: "sf_001" }, {} as never),
       terminalReceipt,
       "the official terminal retry returns the immutable receipt",
     );
@@ -1082,14 +1082,14 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   resetPane.buffer.scrollPosition = null;
   resetPane.buffer.selection = null;
   resetPane.buffer.taps = [];
-  (resetRuntime as any).surfaces.set("sf_1", resetSurface);
+  (resetRuntime as any).surfaces.set("sf_001", resetSurface);
   (resetRuntime as any).writeLegacySourceRequirement(resetSurface);
   (resetRuntime as any).updateLegacyReadBoundary(resetSurface, resetPane);
   Object.assign(resetPane.buffer, resetPostBoundaryBuffer);
   (resetRuntime as any).writeLegacySourceRequirement(resetSurface);
   await (resetRuntime as any).persistState();
   const resetReceipt = await resetRuntime.prepareLegacyLocklessMigrationNow(
-    "sf_1",
+    "sf_001",
     "ci_gate2a_reset" as never,
   );
   assert.notEqual(resetReceipt.pairRequestId, prepared.pairRequestId);
@@ -1121,7 +1121,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   ));
   const replayedPreparedRecord =
     replayedPreparedState.locklessMigrationContinuity.endpoints["electron-1"]
-      .surfaces.sf_1;
+      .surfaces.sf_001;
   assert.deepEqual(
     replayedPreparedRecord.transaction,
     preparedRecord.transaction,
@@ -1154,13 +1154,13 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   ));
   const clearedTransaction =
     clearedReplayedState.locklessMigrationContinuity.endpoints["electron-1"]
-      .surfaces.sf_1.transaction;
+      .surfaces.sf_001.transaction;
   const retainedRequirement =
     clearedReplayedState.locklessMigrationContinuity.endpoints["electron-1"]
-      .legacySourceRequirements.sf_1;
+      .legacySourceRequirements.sf_001;
   const retainedBoundary =
     clearedReplayedState.locklessMigrationContinuity.endpoints["electron-1"]
-      .legacyCompatibilityReadBoundaries.sf_1;
+      .legacyCompatibilityReadBoundaries.sf_001;
   assert.equal(clearedTransaction.pairRequestId, preparedRecord.transaction.pairRequestId);
   assert.equal(clearedTransaction.sourceSha256, preparedRecord.transaction.sourceSha256);
   assert.equal(clearedTransaction.materialSha256, preparedRecord.transaction.materialSha256);
@@ -1176,7 +1176,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   await assert.rejects(
     wrongIdentityRuntime.lookupLegacyLocklessMigration(
       "electron-1",
-      "sf_1",
+      "sf_001",
       "ci_wrong" as never,
     ),
     /lockless_migration_continuity_mismatch/,
@@ -1206,7 +1206,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   ));
   const transaction = completeState.locklessMigrationContinuity.endpoints[
     "electron-1"
-  ].surfaces.sf_1.transaction;
+  ].surfaces.sf_001.transaction;
   assert.equal(transaction.phase, "complete");
   assert.equal(transaction.pairRequestId, prepared.pairRequestId);
   assert.match(transaction.sourceSha256, /^[0-9a-f]{64}$/);
@@ -1214,12 +1214,12 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   assert.match(transaction.compatibilityReadBoundarySha256, /^[0-9a-f]{64}$/);
   const terminalLookup = await recovered.recovered.lookupLegacyLocklessMigration(
     "electron-1",
-    "sf_1",
+    "sf_001",
     "ci_gate2a" as never,
   );
   assert.equal(terminalLookup.kind, "complete_no_migration");
   const terminalRetry = await recovered.recovered.prepareLegacyLocklessMigrationNow(
-    "sf_1",
+    "sf_001",
     "ci_gate2a" as never,
   );
   assert.equal(terminalRetry.phase, "complete");
@@ -1243,7 +1243,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   await passiveRuntime.start();
   try {
     const forwardedTerminalRetry = await passiveRuntime
-      .prepareLegacyLocklessMigrationNow("sf_1", "ci_gate2a" as never);
+      .prepareLegacyLocklessMigrationNow("sf_001", "ci_gate2a" as never);
     assert.deepEqual(forwardedTerminalRetry, terminalRetry);
   } finally {
     await passiveRuntime.stop();
@@ -1251,7 +1251,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   }
   assert.equal(
     completeState.locklessMigrationContinuity.endpoints["electron-1"]
-      .legacySourceRequirements?.sf_1,
+      .legacySourceRequirements?.sf_001,
     undefined,
   );
 
@@ -1269,19 +1269,19 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   const concurrentRetainedState = JSON.parse(await readFile(statePath, "utf8"));
   assert.equal(
     concurrentRetainedState.locklessMigrationContinuity.endpoints["electron-1"]
-      .surfaces.sf_1.transaction.phase,
+      .surfaces.sf_001.transaction.phase,
     "client_committed",
   );
   assert.match(
     concurrentRetainedState.locklessMigrationContinuity.endpoints["electron-1"]
-      .legacySourceRequirements.sf_1.sourceIdentitySha256,
+      .legacySourceRequirements.sf_001.sourceIdentitySha256,
     /^[0-9a-f]{64}$/,
   );
 
   const tamperedDir = path.join(testRoot, "tampered");
   await mkdir(tamperedDir, { recursive: true });
   const tampered = JSON.parse(await readFile(statePath, "utf8"));
-  tampered.locklessMigrationContinuity.endpoints["electron-1"].surfaces.sf_1
+  tampered.locklessMigrationContinuity.endpoints["electron-1"].surfaces.sf_001
     .material.scopes[0].records.push({ payload: {}, recordClass: "topology" });
   await import("node:fs/promises").then(({ writeFile }) =>
     writeFile(
@@ -1293,7 +1293,7 @@ test("Gate 2A copied runtime continuity replays prepared state unchanged across 
   await assert.rejects(
     tamperedRuntime.lookupLegacyLocklessMigration(
       "electron-1",
-      "sf_1",
+      "sf_001",
       "ci_gate2a" as never,
     ),
     /lockless_migration_continuity_mismatch/,
