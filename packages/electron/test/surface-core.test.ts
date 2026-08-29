@@ -2153,7 +2153,7 @@ test("surface core rejects caller-controlled human strings as window labels", ()
     () => core.applyProviderBootstrapTopology(surface.surfaceId, {
       initialPaneId: 7,
       initialPaneLabel: 7,
-      windowLabel: "RACTER GRAPHICAL NATIVE",
+      windowLabel: "portrait-display GRAPHICAL NATIVE",
     }),
     /windowLabel must be a lowercase alphabetic provider identity label/,
   );

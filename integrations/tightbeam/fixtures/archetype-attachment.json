@@ -11,13 +11,13 @@
       "sourceSha256": "cd809aa2cb71d2f7a79a5aade7d987fe4acb027340de3c80b57341e39b130b15",
       "before": {
         "name": "coder",
-        "where": ["eezo", "racter"],
+        "where": ["workstation-a", "portrait-display"],
         "skills": ["worktree-session", "committing-and-pushing"],
         "guidance": { "text": "\n#include \"wisdom-core.md\"\n\n#include \"engineering-tenets.md\"\n\n#include \"preferred-models.md\"\n\n#include \"coder.md\"\n" }
       },
       "after": {
         "name": "coder",
-        "where": ["eezo", "racter"],
+        "where": ["workstation-a", "portrait-display"],
         "skills": ["worktree-session", "committing-and-pushing", "surf-ace"],
         "guidance": { "text": "\n#include \"wisdom-core.md\"\n\n#include \"engineering-tenets.md\"\n\n#include \"preferred-models.md\"\n\n#include \"coder.md\"\n" }
       }
@@ -28,13 +28,13 @@
       "sourceSha256": "c93bc573904f3c65d40f75f89293f277957dff3a494f2bdf817c5799d0d99fa0",
       "before": {
         "name": "reviewer",
-        "where": ["eezo", "racter"],
+        "where": ["workstation-a", "portrait-display"],
         "skills": ["reviewing-code", "reviewing-specs", "spec-conformance", "review-for-completeness", "review-for-yagni", "tightbeam-law-minting", "tightbeam-guidance-authoring"],
         "guidance": { "text": "\n#include \"wisdom-core.md\"\n\n#include \"wisdom-meta.md\"\n\n#include \"engineering-tenets.md\"\n\n#include \"preferred-models.md\"\n\n#include \"reviewer.md\"\n" }
       },
       "after": {
         "name": "reviewer",
-        "where": ["eezo", "racter"],
+        "where": ["workstation-a", "portrait-display"],
         "skills": ["reviewing-code", "reviewing-specs", "spec-conformance", "review-for-completeness", "review-for-yagni", "tightbeam-law-minting", "tightbeam-guidance-authoring", "surf-ace"],
         "guidance": { "text": "\n#include \"wisdom-core.md\"\n\n#include \"wisdom-meta.md\"\n\n#include \"engineering-tenets.md\"\n\n#include \"preferred-models.md\"\n\n#include \"reviewer.md\"\n" }
       }

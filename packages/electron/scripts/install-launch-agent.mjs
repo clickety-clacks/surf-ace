@@ -5,7 +5,7 @@ import process from "node:process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { assertAutostartInstallAllowed } from "./tars-autostart-guard.mjs";
+import { assertAutostartInstallAllowed } from "./autostart-host-guard.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageDir = path.resolve(__dirname, "..");

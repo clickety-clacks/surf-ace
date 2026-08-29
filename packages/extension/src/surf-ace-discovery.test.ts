@@ -29,11 +29,11 @@ test("discoveryDiagnostic formats concise structured fields", () => {
   assert.equal(
     __test.discoveryDiagnostic("reconcile", {
       adopted_count: 1,
-      endpoint_id: "eezo.local:19001/ws",
+      endpoint_id: "workstation-a.local:19001/ws",
       note: "name changed",
       skipped: undefined,
     }),
-    '[surf-ace:discovery] event=reconcile adopted_count=1 endpoint_id=eezo.local:19001/ws note="name changed"',
+    '[surf-ace:discovery] event=reconcile adopted_count=1 endpoint_id=workstation-a.local:19001/ws note="name changed"',
   );
 });
 
@@ -41,19 +41,19 @@ test("parseDnsSdBrowseOutput decodes instance names", () => {
   const output = `Browsing for _surf-ace._tcp.local.
 DATE: ---Sat 21 Mar 2026---
  9:31:11.907  Add        3   1 local.               _surf-ace._tcp.      Surf Ace - iPad Pro 13-inch (M5)
- 9:31:12.046  Add        2  15 local.               _surf-ace._tcp.      eezo Surf Ace (eezo)
+ 9:31:12.046  Add        2  15 local.               _surf-ace._tcp.      workstation-a Surf Ace (workstation-a)
 `;
 
   assert.deepEqual(__test.parseDnsSdBrowseOutput(output), [
     "Surf Ace - iPad Pro 13-inch (M5)",
-    "eezo Surf Ace (eezo)",
+    "workstation-a Surf Ace (workstation-a)",
   ]);
 });
 
 test("parseDnsSdLookupOutput resolves host, port, and txt payload", () => {
   const output = `Lookup Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032(M5)._surf-ace._tcp.local.
 DATE: ---Sat 21 Mar 2026---
- 9:36:04.926  Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032(M5)._surf-ace._tcp.local. can be reached at eezo.local.:55386 (interface 15) Flags: 1
+ 9:36:04.926  Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032(M5)._surf-ace._tcp.local. can be reached at workstation-a.local.:55386 (interface 15) Flags: 1
  s=2.0 h=1024 tls=0 cap=31 w=768 pk=e305802b name=Surf\\ Ace\\ -\\ iPad\\ Pro\\ 13-inch\\ \\(M5\\) busy=1 ws=/ws v=1
 `;
 
@@ -66,9 +66,9 @@ DATE: ---Sat 21 Mar 2026---
   assert.deepEqual(endpoint, {
     busy: true,
     capabilitiesBitmask: 31,
-    endpointId: "eezo.local:55386/ws#e305802b",
+    endpointId: "workstation-a.local:55386/ws#e305802b",
     fingerprintPrefix: "e305802b",
-    host: "eezo.local",
+    host: "workstation-a.local",
     instanceName: "Surf Ace - iPad Pro 13-inch (M5)",
     lastSeenAt: 1234,
     name: "Surf Ace - iPad Pro 13-inch (M5)",
@@ -85,45 +85,45 @@ DATE: ---Sat 21 Mar 2026---
 
 test("parseDnsSdLookupOutput gives same host and port distinct service identities", () => {
   const electron = __test.parseDnsSdLookupOutput(
-    "eezo Surf Ace (eezo)",
-    `Lookup eezo\\032Surf\\032Ace\\032\\(eezo\\)._surf-ace._tcp.local.
+    "workstation-a Surf Ace (workstation-a)",
+    `Lookup workstation-a\\032Surf\\032Ace\\032\\(workstation-a\\)._surf-ace._tcp.local.
 DATE: ---Mon 27 Apr 2026---
- 21:52:00.000  eezo\\032Surf\\032Ace\\032\\(eezo\\)._surf-ace._tcp.local. can be reached at eezo.local.:19001 (interface 15) Flags: 1
- s=1 h=1410 tls=0 cap=31 w=5120 pk=b0ddd36d name=eezo\\ Surf\\ Ace busy=1 ws=/ws v=1
+ 21:52:00.000  workstation-a\\032Surf\\032Ace\\032\\(workstation-a\\)._surf-ace._tcp.local. can be reached at workstation-a.local.:19001 (interface 15) Flags: 1
+ s=1 h=1410 tls=0 cap=31 w=5120 pk=b0ddd36d name=workstation-a\\ Surf\\ Ace busy=1 ws=/ws v=1
 `,
     () => 1234,
   );
   const simulator = __test.parseDnsSdLookupOutput(
-    "Surf Ace - iPad Pro 13-inch (M5) (eezo)",
-    `Lookup Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032\\(M5\\)\\032\\(eezo\\)._surf-ace._tcp.local.
+    "Surf Ace - iPad Pro 13-inch (M5) (workstation-a)",
+    `Lookup Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032\\(M5\\)\\032\\(workstation-a\\)._surf-ace._tcp.local.
 DATE: ---Mon 27 Apr 2026---
- 21:52:00.000  Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032\\(M5\\)\\032\\(eezo\\)._surf-ace._tcp.local. can be reached at eezo.local.:19001 (interface 15) Flags: 1
- s=2 h=1024 tls=0 cap=31 w=768 pk=2bb97f09 name=Surf\\ Ace\\ -\\ iPad\\ Pro\\ 13-inch\\ \\(M5\\)\\ \\(eezo\\) busy=0 ws=/ws v=1
+ 21:52:00.000  Surf\\032Ace\\032-\\032iPad\\032Pro\\03213-inch\\032\\(M5\\)\\032\\(workstation-a\\)._surf-ace._tcp.local. can be reached at workstation-a.local.:19001 (interface 15) Flags: 1
+ s=2 h=1024 tls=0 cap=31 w=768 pk=2bb97f09 name=Surf\\ Ace\\ -\\ iPad\\ Pro\\ 13-inch\\ \\(M5\\)\\ \\(workstation-a\\) busy=0 ws=/ws v=1
 `,
     () => 1234,
   );
 
   assert.ok(electron);
   assert.ok(simulator);
-  assert.equal(electron.host, "eezo.local");
-  assert.equal(simulator.host, "eezo.local");
+  assert.equal(electron.host, "workstation-a.local");
+  assert.equal(simulator.host, "workstation-a.local");
   assert.equal(electron.port, simulator.port);
   assert.notEqual(electron.endpointId, simulator.endpointId);
-  assert.equal(electron.endpointId, "eezo.local:19001/ws#b0ddd36d");
-  assert.equal(simulator.endpointId, "eezo.local:19001/ws#2bb97f09");
+  assert.equal(electron.endpointId, "workstation-a.local:19001/ws#b0ddd36d");
+  assert.equal(simulator.endpointId, "workstation-a.local:19001/ws#2bb97f09");
 });
 
 test("serviceToEndpoint prefers stable service hostname over stale numeric addresses", () => {
   const endpoint = __test.serviceToEndpoint(
     {
       addresses: ["192.168.50.183"],
-      host: "eezo.local.",
-      name: "eezo Surf Ace (eezo)",
+      host: "workstation-a.local.",
+      name: "workstation-a Surf Ace (workstation-a)",
       port: 19001,
       txt: {
         cap: "31",
         h: "1410",
-        name: "eezo Surf Ace",
+        name: "workstation-a Surf Ace",
         pk: "b0ddd36d",
         s: "1",
         v: "1",
@@ -134,8 +134,8 @@ test("serviceToEndpoint prefers stable service hostname over stale numeric addre
     () => 1234,
   );
 
-  assert.equal(endpoint?.host, "eezo.local");
-  assert.equal(endpoint?.endpointId, "eezo.local:19001/ws#b0ddd36d");
+  assert.equal(endpoint?.host, "workstation-a.local");
+  assert.equal(endpoint?.endpointId, "workstation-a.local:19001/ws#b0ddd36d");
 });
 
 test("refreshNow clears stale endpoints when a full refresh returns no advertisements", async () => {

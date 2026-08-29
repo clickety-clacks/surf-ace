@@ -1,11 +1,11 @@
 # Surf Ace Identity / Authority Invariant Report
 
 Date: 2026-05-14
-Worktree: `/Users/mike/src/worktrees/surf-ace-identity-hardening`
+Worktree: `<historical-worktree>/surf-ace-identity-hardening`
 
 ## Product Invariant Summary
 
-Flynn's invariant set maps to one rule: stable product identity belongs to the TARS Surf Ace extension/provider install, and runtime/presentation details must not decide durable ownership. A same-install disagreement can be yellow while the client and provider reconcile, but it must not remain terminal yellow. A real ownership block requires evidence that a pane/window belongs to another Surf Ace extension installation.
+Flynn's invariant set maps to one rule: stable product identity belongs to the provider-a Surf Ace extension/provider install, and runtime/presentation details must not decide durable ownership. A same-install disagreement can be yellow while the client and provider reconcile, but it must not remain terminal yellow. A real ownership block requires evidence that a pane/window belongs to another Surf Ace extension installation.
 
 ## Current Distributed Identity Algorithm
 
@@ -16,13 +16,13 @@ Flynn's invariant set maps to one rule: stable product identity belongs to the T
 - Runtime state load reads persisted provider state, then reconciles it with the durable provider identity in `loadState` (`packages/extension/src/surf-ace-runtime.ts:7190`). Existing durable ids win; otherwise the provider seeds from prior local state or creates a new random provider id (`packages/extension/src/surf-ace-runtime.ts:7238`).
 - Durable provider id persistence uses exclusive create and re-reads on `EEXIST`, which prevents concurrent startup from rotating identity (`packages/extension/src/surf-ace-runtime.ts:7284`).
 - Pairing sends stable `providerId` plus per-attempt `connectionId`; `connectionId` is generated inside `requestPair` and is not the lock identity (`packages/extension/src/surf-ace-runtime.ts:9675`).
-- `DESIGN.md:354` already says `providerId` is stable product state stored in a trusted TARS path and reused across restart, branch overlay, package move, or redeploy.
+- `DESIGN.md:354` already says `providerId` is stable product state stored in a trusted provider-a path and reused across restart, branch overlay, package move, or redeploy.
 
 Result against invariant 1: the provider/install side is aligned. PID/run identity is diagnostic/runtime state only and is not used as stable provider identity.
 
 ### Endpoint Identity
 
-- The protocol defines endpoint as app/device host:port over mDNS (`DESIGN.md:106`) and the public-key fingerprint TXT key as endpoint identity only, not a CLU screen selector (`DESIGN.md:194`).
+- The protocol defines endpoint as app/device host:port over mDNS (`DESIGN.md:106`) and the public-key fingerprint TXT key as endpoint identity only, not an OpenClaw screen selector (`DESIGN.md:194`).
 - Extension managed surfaces store `endpointId`, endpoint metadata, and fingerprint as discovery provenance in `createManagedSurface` (`packages/extension/src/surf-ace-runtime.ts:1428`).
 - Endpoint probe keys prefer fingerprint, falling back to the WebSocket URL (`packages/extension/src/surf-ace-runtime.ts:2594`).
 - Discovery removal is treated as endpoint liveness/probe state; owned or paired surfaces are preserved even if discovery no longer lists the endpoint (`packages/extension/src/surf-ace-runtime.ts:4276`).

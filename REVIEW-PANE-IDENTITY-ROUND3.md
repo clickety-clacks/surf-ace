@@ -1,9 +1,9 @@
 # Pane Identity Adversarial Review Round 3
 
 Scope reviewed:
-- [DESIGN.md](/Users/mike/src/surf-ace/DESIGN.md) sections governing pane identity, pane labels, pane names, pair/list/split/lifecycle payloads, and CLU tool contract
-- [scratch/pane-id-pane-label-migration-20260328.md](/Users/mike/src/surf-ace/scratch/pane-id-pane-label-migration-20260328.md)
-- [ADJUDICATION-PANE-IDENTITY-ROUND2.md](/Users/mike/src/surf-ace/ADJUDICATION-PANE-IDENTITY-ROUND2.md)
+- [DESIGN.md](./DESIGN.md) sections governing pane identity, pane labels, pane names, pair/list/split/lifecycle payloads, and OpenClaw tool contract
+- [scratch/pane-id-pane-label-migration-20260328.md](./scratch/pane-id-pane-label-migration-20260328.md)
+- [ADJUDICATION-PANE-IDENTITY-ROUND2.md](./ADJUDICATION-PANE-IDENTITY-ROUND2.md)
 
 Out of scope:
 - implementation behavior
@@ -33,8 +33,8 @@ The pane-identity spec review loop is **clean** for the scoped areas. The follow
    - `paneName` remains optional metadata and does not replace `paneLabel`.
 
 4. Tool-contract semantics are internally coherent:
-   - CLU resolves panes through `surf_ace_list` using `windowLabel` / `paneLabel`.
-   - CLU targets panes by `paneId`.
+   - OpenClaw resolves panes through `surf_ace_list` using `windowLabel` / `paneLabel`.
+   - OpenClaw targets panes by `paneId`.
    - `surf_ace_split` now matches the normative operation text by stating that the provider assigns both `paneId` and `paneLabel` for new panes.
 
 5. Migration-note alignment is preserved:

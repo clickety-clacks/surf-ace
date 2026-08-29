@@ -788,19 +788,19 @@ test("ws server diagnostics format concise structured fields", () => {
 
 test("ws server browser_url diagnostics expose scheme host and port", () => {
   assert.deepEqual(
-    __test.browserUrlDiagnosticFields("http://tars.tail4105e8.ts.net:18800/www/smoke-alarm/index.html"),
+    __test.browserUrlDiagnosticFields("http://provider-a.example.test:18800/www/smoke-alarm/index.html"),
     {
-      url: "http://tars.tail4105e8.ts.net:18800/www/smoke-alarm/index.html",
-      url_host: "tars.tail4105e8.ts.net",
+      url: "http://provider-a.example.test:18800/www/smoke-alarm/index.html",
+      url_host: "provider-a.example.test",
       url_port: "18800",
       url_scheme: "http",
     },
   );
   assert.deepEqual(
-    __test.browserUrlDiagnosticFields("https://tars.tail4105e8.ts.net:19443/www/smoke-alarm/index.html"),
+    __test.browserUrlDiagnosticFields("https://provider-a.example.test:19443/www/smoke-alarm/index.html"),
     {
-      url: "https://tars.tail4105e8.ts.net:19443/www/smoke-alarm/index.html",
-      url_host: "tars.tail4105e8.ts.net",
+      url: "https://provider-a.example.test:19443/www/smoke-alarm/index.html",
+      url_host: "provider-a.example.test",
       url_port: "19443",
       url_scheme: "https",
     },
@@ -811,7 +811,7 @@ test("ws server rejects human strings as provider-supplied visible window IDs", 
   await withServer(async ({ surfaceId, url }) => {
     const socket = await connect(url);
     try {
-      for (const label of ["DOCS", "RACTER GRAPHICAL NATIVE"]) {
+      for (const label of ["DOCS", "portrait-display GRAPHICAL NATIVE"]) {
         const invalid = pairRequest(surfaceId, "pv_alpha");
         invalid.payload.windowLabel = label as never;
 
@@ -1811,10 +1811,10 @@ test("ws server clears the ownership lock on ownership.relinquish", async () => 
 test("ws server exposes providerName while connected and clears it on relinquish", async () => {
   await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
-    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", { providerName: "CLU / Surf Ace" }));
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", { providerName: "OpenClaw / Surf Ace" }));
     assert.equal(paired.ok, true);
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connecting");
-    assert.equal(core.getRendererWindowState(surfaceId).providerName, "CLU / Surf Ace");
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, "OpenClaw / Surf Ace");
 
     const heartbeat = await request(owner, heartbeatRequest());
     assert.equal(heartbeat.ok, true);
@@ -1882,13 +1882,13 @@ test("production connection sources project the complete mutually exclusive chro
 test("ws server clears green connection bar when accepted provider socket closes", async () => {
   await withServer(async ({ core, surfaceId, url }) => {
     const owner = await connect(url);
-    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", { providerName: "CLU / Surf Ace" }));
+    const paired = await request(owner, pairRequest(surfaceId, "pv_alpha", { providerName: "OpenClaw / Surf Ace" }));
     assert.equal(paired.ok, true);
 
     const authority = await request(owner, authorityStateRequest(paired as Extract<Response, { op: "pair.request"; ok: true }>));
     assert.equal(authority.ok, true);
     assert.equal(core.getRendererWindowState(surfaceId).connectionBar, "connected");
-    assert.equal(core.getRendererWindowState(surfaceId).providerName, "CLU / Surf Ace");
+    assert.equal(core.getRendererWindowState(surfaceId).providerName, "OpenClaw / Surf Ace");
 
     await closeSocket(owner, 1001, "network_lost");
     await waitForRendererConnectionBar(core, surfaceId, "disconnected");

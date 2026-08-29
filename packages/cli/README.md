@@ -14,7 +14,7 @@ surf-ace \
   --state-root /path/to/controller-state \
   --endpoint ws://surf-ace.example:3210 \
   --product-label Clawline \
-  push --input-json '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"Hello"},"friendlyChatName":"CLU"}'
+  push --input-json '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"Hello"},"friendlyChatName":"OpenClaw"}'
 ```
 
 `push` validates the protocol's discriminated content value: `html` uses

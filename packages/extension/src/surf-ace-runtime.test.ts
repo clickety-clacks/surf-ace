@@ -4135,7 +4135,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
     }
   });
 
-  await t.test("listScreens exposes only the CLU surface fields and local pane identities", async () => {
+  await t.test("listScreens exposes only the OpenClaw surface fields and local pane identities", async () => {
     await withRuntimeHarness(async ({ runtime, server }) => {
       const screens = await runtime.listScreens();
       assert.equal(screens.length, 1);
@@ -5002,7 +5002,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
   await t.test("provider process inventory recognizes in-process owner and stale plugin siblings", () => {
     const inProcessHealth = providerProcessHealthFromProcessList(
       [
-        "48791 /opt/homebrew/opt/node@24/bin/node /Users/mike/openclaw/dist/index.js gateway --port 18789",
+        "48791 /opt/homebrew/opt/node@24/bin/node /opt/openclaw/dist/index.js gateway --port 18789",
         "49466 node -e const text='openclaw-plugins'",
       ].join("\n"),
       48791,
@@ -5021,7 +5021,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
     const staleSiblingHealth = providerProcessHealthFromProcessList(
       [
-        "48791 /opt/homebrew/opt/node@24/bin/node /Users/mike/openclaw/dist/index.js gateway --port 18789",
+        "48791 /opt/homebrew/opt/node@24/bin/node /opt/openclaw/dist/index.js gateway --port 18789",
         "27021 OSLogRateLimit=64 OPENCLAW_GATEWAY_PORT=18789 openclaw-plugins",
       ].join("\n"),
       48791,
@@ -5043,8 +5043,8 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
     const duplicateGatewayHealth = providerProcessHealthFromProcessList(
       [
-        "48791 /opt/homebrew/opt/node@24/bin/node /Users/mike/openclaw/dist/index.js gateway --port 18789",
-        "48802 /opt/homebrew/opt/node@24/bin/node /Users/mike/openclaw/dist/index.js gateway --port 18789",
+        "48791 /opt/homebrew/opt/node@24/bin/node /opt/openclaw/dist/index.js gateway --port 18789",
+        "48802 /opt/homebrew/opt/node@24/bin/node /opt/openclaw/dist/index.js gateway --port 18789",
       ].join("\n"),
       48791,
     );
@@ -8537,7 +8537,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(screens[0]?.authority.actionable, true);
 
         await runtime.push({
-          content: "https://tars.tail4105e8.ts.net:19443/tracker.html?id=T338",
+          content: "https://provider-a.example.test:19443/tracker.html?id=T338",
           contentType: "browser_url",
           fingerprint: server.surfaceId,
           paneId: firstPaneId,
@@ -8547,7 +8547,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         assert.equal(server.targetApplyRequests.length, 1);
         assert.equal(server.targetApplyRequests[0]?.targetKind, "browser_url");
         assert.deepEqual(server.targetApplyRequests[0]?.targetPayload, {
-          url: "https://tars.tail4105e8.ts.net:19443/tracker.html?id=T338",
+          url: "https://provider-a.example.test:19443/tracker.html?id=T338",
         });
       },
     });
@@ -10172,7 +10172,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const registered = await runtime.registerTarget({
           expectedPreviousTargetEpoch: null,
           fingerprint: server.surfaceId,
-          idempotencyKey: "terminal:top:racter-deg90-logical",
+          idempotencyKey: "terminal:top:portrait-display-deg90-logical",
           ...targetRegistrationOwnership(runtime, server.surfaceId, firstPaneId),
           paneId: firstPaneId,
           registrationState: "attached",
@@ -10711,7 +10711,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
       });
     });
 
-    await t.test("provider realizes topology across multiple surfaces in one CLU operation", async () => {
+    await t.test("provider realizes topology across multiple surfaces in one OpenClaw operation", async () => {
       await withRuntimeHarness({
         configureServer: (server) => {
           server.addSurface({
@@ -17154,16 +17154,16 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
 
   await t.test("pair.request includes configured providerName", async () => {
     await withRuntimeHarness({
-      providerName: "CLU / Surf Ace",
+      providerName: "OpenClaw / Surf Ace",
       run: async ({ server }) => {
-        assert.equal(server.pairAttemptDetails[0]?.providerName, "CLU / Surf Ace");
+        assert.equal(server.pairAttemptDetails[0]?.providerName, "OpenClaw / Surf Ace");
       },
     });
   });
 
   await t.test("providerNameForSurface never falls back to pane session keys", async () => {
     await withRuntimeHarness({
-      providerName: "CLU / Surf Ace",
+      providerName: "OpenClaw / Surf Ace",
       run: async ({ runtime, server }) => {
         const internalRuntime = runtime as any;
         const surface = internalRuntime.surfaces.get(server.surfaceId);
@@ -17171,7 +17171,7 @@ test("surf ace runtime enforces spec-aligned provider behavior", async (t) => {
         const firstPaneId = await livePaneId(runtime, server.surfaceId, 1);
         surface.panes.get(firstPaneId).pendingOwnerSessionKey = "agent:main:clawline:flynn:main";
         surface.panes.get(firstPaneId).ownerSessionKey = "agent:main:clawline:flynn:main";
-        assert.equal(internalRuntime.providerNameForSurface(surface), "CLU / Surf Ace");
+        assert.equal(internalRuntime.providerNameForSurface(surface), "OpenClaw / Surf Ace");
       },
     });
   });

@@ -308,7 +308,7 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
             "drawingData": "",
             "interactive": true,
             "payload": ["kind": "markdown", "markdown": "hello"],
-            "provenanceDisplayName": "CLU",
+            "provenanceDisplayName": "OpenClaw",
             "senderDisplayName": "Clawline",
             "revision": 4,
             "scrollable": true,
@@ -609,7 +609,7 @@ extension SurfAceLocklessAuthorityTests {
         let surface = try XCTUnwrap(root["sf_1"] as? [String: Any])
         let panes = try XCTUnwrap(surface["panes"] as? [[String: Any]])
         let current = try XCTUnwrap(panes.first?["currentEntry"] as? [String: Any])
-        XCTAssertEqual(current["provenanceDisplayName"] as? String, "CLU")
+        XCTAssertEqual(current["provenanceDisplayName"] as? String, "OpenClaw")
         XCTAssertEqual(current["senderDisplayName"] as? String, "Clawline")
     }
 

@@ -407,7 +407,7 @@ extension SurfAceLocklessContentOperationsTests {
         )
         _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
             content: markdown("one"), contentId: "one", contentType: "markdown",
-            controllerProductName: "Clawline", friendlyChatName: "CLU", paneId: 1, surfaceId: "sf_1"
+            controllerProductName: "Clawline", friendlyChatName: "OpenClaw", paneId: 1, surfaceId: "sf_1"
         ))
         var surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
         surface.panes["1"]?.history.visible.annotations = .string("annotation-one")
