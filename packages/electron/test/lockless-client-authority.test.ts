@@ -513,65 +513,6 @@ test("scope snapshots use first-unread cursors and include current live frames",
   );
 });
 
-test("legacy migration imports gaps transactionally and rolls back oversize material", () => {
-  const target = authority();
-  admit(target, "controller-a");
-  target.transaction(() =>
-    target.importLegacyMigrationMaterial("controller-a", {
-      gaps: [
-        {
-          gap: {
-            cause: "legacy_overflow",
-            droppedBytes: 12,
-            droppedEventCount: 1,
-            droppedFrameCount: 0,
-            droppedRecordCount: 1,
-            firstLostSequence: 1,
-            lastLostSequence: 1,
-            lossExtent: "exact",
-            recordClasses: ["tap"],
-          },
-          scopeId: "pane:surface-a:1",
-        },
-      ],
-      scopes: [
-        {
-          records: [
-            { payload: { value: "retained" }, recordClass: "tap" },
-          ],
-          scopeId: "pane:surface-a:1",
-          scopeKind: "pane",
-        },
-      ],
-    }),
-  );
-  assert.equal(
-    target.scopeSnapshot("controller-a", "pane:surface-a:1").cursor.gap
-      ?.cause,
-    "legacy_overflow",
-  );
-  const before = target.exportState();
-  assert.throws(() =>
-    target.transaction(() =>
-      target.importLegacyMigrationMaterial("controller-a", {
-        scopes: [
-          {
-            records: [
-              {
-                payload: { value: "x".repeat(1_000) },
-                recordClass: "tap",
-              },
-            ],
-            scopeId: "pane:surface-a:2",
-            scopeKind: "pane",
-          },
-        ],
-      }),
-    ),
-  );
-  assert.deepEqual(target.exportState(), before);
-});
-
 test("latest-wins records coalesce and tombstones reclaim oldest sequence", () => {
   const target = authority();
   const events: Array<Record<string, unknown>> = [];
@@ -747,7 +688,6 @@ test("AC-CLOSE-07: admission migration restart and configuration reject aggregat
     const source = structuredClone(fixture.state);
     const transitions: RetainedTombstoneTransition[] = [
       "admission",
-      "legacy_migration",
       "restart",
       "configuration",
     ];
@@ -809,9 +749,6 @@ test("AC-CLOSE-07: admission migration restart and configuration reject aggregat
     );
 
     admit(restarted, "controller-a");
-    assert.doesNotThrow(() =>
-      restarted.importLegacyMigrationMaterial("controller-a", { scopes: [] })
-    );
     observed.push(fixture.aggregateBytes);
   }
   assert.deepEqual(observed, [observed[0], observed[0]]);
@@ -1110,7 +1047,6 @@ test("AC-OPS-01: restart restores limits modes controller bundles consumable sco
   const target = authority();
   admit(target, "controller-a");
   admit(target, "controller-b");
-  target.setSurfaceMode("surface-a", "lockless");
   const record = target.appendConsumable({
     payload: { value: "restart" },
     recordClass: "tap",
@@ -1129,7 +1065,6 @@ test("AC-OPS-01: restart restores limits modes controller bundles consumable sco
   });
   const persisted: PersistentLocklessClientState = target.exportState();
   const restored = new LocklessClientAuthority(persisted);
-  assert.equal(restored.surfaceMode("surface-a"), "lockless");
   assert.deepEqual(restored.limits, limits);
   assert.equal(
     restored.scopeSnapshot("controller-a", "surface:surface-a").version,
@@ -1167,7 +1102,13 @@ test("authority FIFO isolates persisted work, ordinary mutations, failure rollba
   const first = target.transactionPersisted(
     () => {
       order.push("first-mutation");
-      target.setSurfaceMode("surface-a", "lockless");
+      target.appendConsumable({
+        payload: { value: "first" },
+        recordClass: "tap",
+        scopeId: "surface:surface-a",
+        scopeKind: "surface",
+        triggerOperation: "test.first",
+      });
     },
     async () => {
       order.push("first-persist-start");
@@ -1190,7 +1131,13 @@ test("authority FIFO isolates persisted work, ordinary mutations, failure rollba
   const second = target.transactionPersisted(
     () => {
       order.push("second-mutation");
-      target.setSurfaceMode("surface-b", "lockless");
+      target.appendConsumable({
+        payload: { value: "second" },
+        recordClass: "tap",
+        scopeId: "surface:surface-c",
+        scopeKind: "surface",
+        triggerOperation: "test.second",
+      });
     },
     async () => {
       order.push("second-persist");
@@ -1211,7 +1158,15 @@ test("authority FIFO isolates persisted work, ordinary mutations, failure rollba
 
   await assert.rejects(
     target.transactionPersisted(
-      () => target.setSurfaceMode("surface-failed", "lockless"),
+      () => {
+        target.appendConsumable({
+          payload: { value: "failed" },
+          recordClass: "tap",
+          scopeId: "surface:surface-failed",
+          scopeKind: "surface",
+          triggerOperation: "test.failed",
+        });
+      },
       async () => {
         throw new Error("persist failed");
       },
@@ -1219,13 +1174,22 @@ test("authority FIFO isolates persisted work, ordinary mutations, failure rollba
     /persist failed/,
   );
   await target.transactionPersisted(
-    () => target.setSurfaceMode("surface-after-failure", "lockless"),
+    () => {
+      target.appendConsumable({
+        payload: { value: "after-failure" },
+        recordClass: "tap",
+        scopeId: "surface:surface-after-failure",
+        scopeKind: "surface",
+        triggerOperation: "test.after",
+      });
+    },
     async () => {},
   );
-  assert.equal(target.surfaceMode("surface-failed"), null);
-  assert.equal(target.surfaceMode("surface-after-failure"), "lockless");
-  const restored = new LocklessClientAuthority(target.exportState());
-  assert.equal(restored.surfaceMode("surface-a"), "lockless");
-  assert.equal(restored.surfaceMode("surface-b"), "lockless");
+  const exported = target.exportState();
+  assert.equal("surface:surface-failed" in exported.scopes, false);
+  assert.equal("surface:surface-after-failure" in exported.scopes, true);
+  const restored = new LocklessClientAuthority(exported);
+  assert.equal(restored.scopeSnapshot("controller-a", "surface:surface-a").records.length, 1);
+  assert.equal(restored.scopeSnapshot("controller-a", "surface:surface-c").records.length, 1);
   assert.equal(restored.scopeSnapshot("controller-a", "surface:surface-b").records.length, 1);
 });

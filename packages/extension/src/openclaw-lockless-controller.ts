@@ -21,7 +21,6 @@ import {
   type SurfAceDiscoveryService,
   type SurfAceLogger,
 } from "./surf-ace-discovery.js";
-import { SurfAceToolError } from "./surf-ace-runtime.js";
 import type {
   PaneId,
   SurfAceAnnotateRemoveInput,
@@ -41,7 +40,6 @@ import type {
   SurfAceReattemptConnectionsResult,
   SurfAceScreenSummary,
   SurfAceSessionContext,
-  SurfAceRuntime,
   SurfAceSnapshotResult,
   SurfAceTargetRegisterInput,
   SurfAceTargetRegisterResult,
@@ -125,12 +123,6 @@ export class OpenClawLocklessController {
   private readonly identity: ControllerIdentity;
   private readonly legacyListeners =
     new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void>();
-  private legacyMigrationSource: Pick<
-    SurfAceRuntime,
-    | "hydrateLegacyLocklessMigrationContinuity"
-    | "lookupLegacyLocklessMigration"
-    | "prepareLegacyLocklessMigrationNow"
-  > | null = null;
   private reconcileWork: Promise<void> = Promise.resolve();
   private started = false;
   private unsubscribeDiscovery: (() => void) | null = null;
@@ -169,23 +161,10 @@ export class OpenClawLocklessController {
     };
   }
 
-  setLegacyMigrationSource(
-    source: Pick<
-      SurfAceRuntime,
-      | "hydrateLegacyLocklessMigrationContinuity"
-      | "lookupLegacyLocklessMigration"
-      | "prepareLegacyLocklessMigrationNow"
-    >,
-  ): void {
-    this.legacyMigrationSource = source;
-  }
-
   async start(): Promise<void> {
     if (this.started) {
       return;
     }
-    await this.legacyMigrationSource
-      ?.hydrateLegacyLocklessMigrationContinuity();
     this.started = true;
     this.unsubscribeDiscovery = this.discovery.subscribe((endpoints) => {
       this.reconcileWork = this.reconcileWork.then(async () => {
@@ -211,27 +190,6 @@ export class OpenClawLocklessController {
     this.endpoints.clear();
     await this.discovery.stop();
     this.started = false;
-  }
-
-  async prepareLegacyMigrationNow(fingerprint: string) {
-    const source = this.legacyMigrationSource;
-    if (!source) throw new Error("migration_prepare_failed");
-    const controllerInstanceId = await this.identity.loadOrCreate();
-    try {
-      return await source.prepareLegacyLocklessMigrationNow(
-        fingerprint,
-        controllerInstanceId,
-      );
-    } catch (error) {
-      if (
-        error instanceof SurfAceToolError &&
-        error.code === "screen_not_found" &&
-        this.findScreen(fingerprint)
-      ) {
-        throw new SurfAceToolError("migration_not_legacy", "migration_not_legacy");
-      }
-      throw error;
-    }
   }
 
   hasFingerprint(fingerprint: string): boolean {
@@ -991,31 +949,6 @@ export class OpenClawLocklessController {
             this.alertedScopes.delete(
               this.alertScopeKey(endpoint.endpointId, scopeId),
             );
-          },
-          prepareMigration: async (surfaceId, controllerInstanceId) => {
-            const source = this.legacyMigrationSource;
-            const lookup = await source?.lookupLegacyLocklessMigration(
-              endpoint.endpointId,
-              surfaceId,
-              controllerInstanceId,
-            ) ?? { kind: "no_legacy_source" as const };
-            if (lookup.kind === "required_unprepared") {
-              throw new Error("migration_not_prepared");
-            }
-            if (lookup.kind !== "prepared") {
-              return null;
-            }
-            const prepared = lookup.record;
-            return source
-              ? {
-                  complete: prepared.complete,
-                  material: prepared.material,
-                  markClientCommitted: prepared.markClientCommitted,
-                  markPairSent: prepared.markPairSent,
-                  markSourceCleared: prepared.markSourceCleared,
-                  pairRequestId: prepared.pairRequestId,
-                }
-              : null;
           },
         });
         await controller.start();

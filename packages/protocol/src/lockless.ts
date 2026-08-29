@@ -247,29 +247,12 @@ export type LocklessReceiptResolution =
     };
 
 export type LocklessPairPayload = LocklessControllerAdmission & {
-  migrationMaterial?: {
-    gaps?: Array<{
-      gap: Omit<ConsumableGap, "cause" | "generation"> & {
-        cause: "legacy_overflow";
-      };
-      scopeId: LocklessScopeId;
-    }>;
-    scopes: Array<{
-      liveFrames?: Array<{ frameId: string; payload: unknown }>;
-      records: Array<{
-        payload: unknown;
-        recordClass: ConsumableRecordClass;
-      }>;
-      scopeId: LocklessScopeId;
-      scopeKind: "pane" | "surface";
-    }>;
-  };
   protocolVersion: 1;
   resume?: LocklessResumeState;
   surfaceId?: string;
 };
 
-type LocklessPairResultBase = {
+export type LocklessPairResult = {
   capabilities: Record<string, unknown>;
   controllerInstanceId: ControllerInstanceId;
   limits: LocklessCapacityLimits;
@@ -282,18 +265,6 @@ type LocklessPairResultBase = {
   surfaceSetRevision: number;
   receiptResolutions: LocklessReceiptResolution[];
 };
-
-export type LocklessPairResult = LocklessPairResultBase &
-  (
-    | {
-        migrationAccepted: true;
-        migrationReceiptId: string;
-      }
-    | {
-        migrationAccepted?: never;
-        migrationReceiptId?: never;
-      }
-  );
 
 export type LocklessConsumableDelta = {
   firstRetainedSequence: number;
@@ -493,13 +464,6 @@ export type LocklessRequest =
       "surface.window.restore",
       LocklessSurfaceRestoreIntent
     >
-  | LocklessWireRequest<
-      "surface.mode.convert",
-      {
-        currentMode: "legacy" | "lockless" | "unknown";
-        surfaceId: string;
-      }
-    >
   | LocklessWireRequest<"topology.apply", LocklessTopologyRealizeIntent>
   | LocklessWireRequest<"target.apply", LocklessTargetApplyIntent>
   | LocklessWireRequest<"target.register", LocklessTargetRegisterIntent>
@@ -580,7 +544,6 @@ export type LocklessSurfaceAdmissionAttempt = {
     | "surface_lookup"
     | "controller_admission"
     | "surface_preflight"
-    | "legacy_migration"
     | "mode_commit";
   startedAt: number;
   surfaceId: string;
@@ -675,7 +638,6 @@ const LOCKLESS_REQUEST_FIELDS: Record<
   "pair.request": {
     optional: [
       "controllerProductName",
-      "migrationMaterial",
       "resume",
       "surfaceId",
     ],
@@ -769,9 +731,6 @@ const LOCKLESS_REQUEST_FIELDS: Record<
   "surface.window.restore": {
     optional: ["placement"],
     required: ["expectedSurfaceSetRevision", "tombstoneId"],
-  },
-  "surface.mode.convert": {
-    required: ["currentMode", "surfaceId"],
   },
   "topology.apply": {
     required: [
@@ -1148,7 +1107,6 @@ function validTargetApplyAccepted(
 
 function validConsumableGap(
   value: unknown,
-  includeGeneration = false,
 ): value is ConsumableGap {
   if (
     !plainRecord(value) ||
@@ -1164,7 +1122,7 @@ function validConsumableGap(
         "lastLostSequence",
         "lossExtent",
         "recordClasses",
-        ...(includeGeneration ? ["generation"] : []),
+        "generation",
       ],
     )
   ) {
@@ -1173,10 +1131,9 @@ function validConsumableGap(
   const unknownExtent = value.lossExtent === "unknown";
   return (
     (value.cause === "legacy_overflow" ||
-      (includeGeneration &&
-        (value.cause === "scope_capacity" ||
-          value.cause === "record_oversize"))) &&
-    (!includeGeneration || positiveInteger(value.generation)) &&
+      value.cause === "scope_capacity" ||
+      value.cause === "record_oversize") &&
+    positiveInteger(value.generation) &&
     (value.lossExtent === "exact" || unknownExtent) &&
     (unknownExtent
       ? value.droppedBytes === null &&
@@ -1251,7 +1208,7 @@ function validScopeSnapshot(value: unknown): value is ConsumableScopeSnapshot {
   }
   return (
     value.cursor.gap === null ||
-    validConsumableGap(value.cursor.gap, true)
+    validConsumableGap(value.cursor.gap)
   );
 }
 
@@ -1309,7 +1266,7 @@ function validateLocklessEventPayload(
         ]) &&
         positiveInteger(payload.firstRetainedSequence) &&
         revision(payload.lastRetainedSequence) &&
-        validConsumableGap(payload.gap, true) &&
+        validConsumableGap(payload.gap) &&
         nonemptyString(payload.scopeId)
       );
     case "event.controller_retention_reclaimed":
@@ -1324,83 +1281,6 @@ function validateLocklessEventPayload(
       );
     }
   }
-}
-
-function validMigrationMaterial(value: unknown): boolean {
-  if (
-    !plainRecord(value) ||
-    !hasExactKeys(value, ["scopes"], ["gaps"]) ||
-    !Array.isArray(value.scopes)
-  ) {
-    return false;
-  }
-  const scopeIds = new Set<string>();
-  if (
-    !value.scopes.every((candidate) => {
-      if (
-        !plainRecord(candidate) ||
-        !hasExactKeys(
-          candidate,
-          ["records", "scopeId", "scopeKind"],
-          ["liveFrames"],
-        ) ||
-        !nonemptyString(candidate.scopeId)
-      ) {
-        return false;
-      }
-      const scopeId = String(candidate.scopeId);
-      if (scopeIds.has(scopeId)) return false;
-      scopeIds.add(scopeId);
-      const frameIds = new Set<string>();
-      return (
-        (candidate.scopeKind === "pane" ||
-          candidate.scopeKind === "surface") &&
-        String(candidate.scopeId).startsWith(
-          `${candidate.scopeKind}:`,
-        ) &&
-        Array.isArray(candidate.records) &&
-        candidate.records.every(
-          (record) =>
-            plainRecord(record) &&
-            hasExactKeys(record, ["payload", "recordClass"]) &&
-            CONSUMABLE_RECORD_CLASSES.has(
-              record.recordClass as ConsumableRecordClass,
-            ),
-        ) &&
-        (candidate.liveFrames === undefined ||
-          (Array.isArray(candidate.liveFrames) &&
-            candidate.liveFrames.every(
-              (frame) =>
-                plainRecord(frame) &&
-                hasExactKeys(frame, ["frameId", "payload"]) &&
-                nonemptyString(frame.frameId) &&
-                !frameIds.has(String(frame.frameId)) &&
-                Boolean(frameIds.add(String(frame.frameId))),
-            )))
-      );
-    })
-  ) {
-    return false;
-  }
-  if (value.gaps === undefined) return true;
-  if (!Array.isArray(value.gaps)) return false;
-  const gapScopeIds = new Set<string>();
-  return value.gaps.every((candidate) => {
-    if (
-      !plainRecord(candidate) ||
-      !hasExactKeys(candidate, ["gap", "scopeId"]) ||
-      !nonemptyString(candidate.scopeId)
-    ) {
-      return false;
-    }
-    const scopeId = String(candidate.scopeId);
-    return (
-      scopeIds.has(scopeId) &&
-      !gapScopeIds.has(scopeId) &&
-      Boolean(gapScopeIds.add(scopeId)) &&
-      validConsumableGap(candidate.gap)
-    );
-  });
 }
 
 function validReceiptResolution(value: unknown): boolean {
@@ -1451,9 +1331,7 @@ function validateLocklessRequestPayload(
         Array.isArray(payload.protocolFeatures) &&
         payload.protocolFeatures.length >= 1 &&
         payload.protocolFeatures[0] === SURF_ACE_LOCKLESS_V1_CAPABILITY &&
-        payload.protocolFeatures.every(nonemptyString) &&
-        (payload.migrationMaterial === undefined ||
-          validMigrationMaterial(payload.migrationMaterial))
+        payload.protocolFeatures.every(nonemptyString)
         ? null
         : "invalid_lockless_admission";
     case "surfaces.list":
@@ -1575,11 +1453,6 @@ function validateLocklessRequestPayload(
           plainRecord(payload.placement))
         ? null
         : "invalid_surface_restore";
-    case "surface.mode.convert":
-      return nonemptyString(payload.surfaceId) &&
-        ["legacy", "lockless", "unknown"].includes(String(payload.currentMode))
-        ? null
-        : "invalid_surface_mode_conversion";
     case "topology.apply":
       return nonemptyString(payload.surfaceId) &&
         revision(payload.expectedTopologyRevision) &&
@@ -1675,7 +1548,6 @@ export function validLocklessSurfaceAdmissionAttempt(value: unknown): boolean {
       "surface_lookup",
       "controller_admission",
       "surface_preflight",
-      "legacy_migration",
       "mode_commit",
     ].includes(String(value.stage)) &&
     revision(value.startedAt) &&
@@ -1836,7 +1708,7 @@ export function validateLocklessEnvelope(
             "surfaceId",
             "surfaceSetRevision",
           ],
-          ["admissionAttempt", "migrationAccepted", "migrationReceiptId"],
+          ["admissionAttempt"],
         ) ||
         !nonemptyString(envelope.payload.controllerInstanceId) ||
         typeof envelope.payload.resumed !== "boolean" ||
@@ -1858,18 +1730,6 @@ export function validateLocklessEnvelope(
         !validLocklessSurfaceAdmissionAttempt(envelope.payload.admissionAttempt)
       ) {
         return { ok: false, reason: "invalid_admission_attempt" };
-      }
-      const hasMigrationAccepted =
-        "migrationAccepted" in envelope.payload;
-      const hasMigrationReceipt =
-        "migrationReceiptId" in envelope.payload;
-      if (
-        hasMigrationAccepted !== hasMigrationReceipt ||
-        (hasMigrationAccepted &&
-          (envelope.payload.migrationAccepted !== true ||
-            envelope.payload.migrationReceiptId !== envelope.id))
-      ) {
-        return { ok: false, reason: "invalid_migration_receipt" };
       }
       try {
         assertLocklessCapacityLimits(

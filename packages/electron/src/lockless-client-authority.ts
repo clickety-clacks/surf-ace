@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
@@ -14,7 +14,6 @@ import {
   type LocklessControllerAdmission,
   type LocklessEntryProvenance,
   type LocklessErrorCode,
-  type LocklessPairPayload,
   type LocklessOperationReceipt,
   type LocklessReceiptResolution,
   type LocklessTargetApplyIntent,
@@ -98,14 +97,6 @@ export type PersistentOperationReceipt =
       terminalResponse: unknown;
     };
 
-export type PersistentMigrationReceipt = {
-  clientIdentity: string | null;
-  controllerInstanceId: ControllerInstanceId;
-  materialSha256: string;
-  requestId: string;
-  surfaceId: string;
-};
-
 export type PersistentTargetApplyWorkItem = {
   bytes: number;
   controllerInstanceId: ControllerInstanceId;
@@ -133,8 +124,6 @@ export type PersistentLocklessClientState = {
   capability: typeof SURF_ACE_LOCKLESS_V1_CAPABILITY;
   controllers: Record<ControllerInstanceId, PersistentControllerEntry>;
   limits: LocklessCapacityLimits;
-  migrationReceipts: Record<string, PersistentMigrationReceipt>;
-  modeBySurfaceId: Record<string, "legacy" | "lockless">;
   nextClosedSequence: number;
   nextCommitSequence: number;
   nextDormantSequence: number;
@@ -148,7 +137,6 @@ export type PersistentLocklessClientState = {
 export type RetainedTombstoneTransition =
   | "admission"
   | "configuration"
-  | "legacy_migration"
   | "restart";
 
 export type AuthorityEvent =
@@ -247,28 +235,6 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-function canonicalProtocolJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalProtocolJson).join(",")}]`;
-  }
-  if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalProtocolJson(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-export function locklessMigrationMaterialSha256(
-  material: NonNullable<LocklessPairPayload["migrationMaterial"]>,
-): string {
-  return createHash("sha256")
-    .update(canonicalProtocolJson(material))
-    .digest("hex");
-}
-
 function nestedTombstones(
   tombstone: PersistentTombstone,
 ): PersistentTombstone[] {
@@ -330,8 +296,6 @@ export function createEmptyLocklessClientState(
     capability: SURF_ACE_LOCKLESS_V1_CAPABILITY,
     controllers: {},
     limits: clone(limits),
-    migrationReceipts: {},
-    modeBySurfaceId: {},
     nextClosedSequence: 1,
     nextCommitSequence: 1,
     nextDormantSequence: 1,
@@ -368,8 +332,6 @@ export function migrateLocklessClientState(
     DEFAULT_LOCKLESS_LIMITS.maxPendingOperationReceiptBytesPerController;
   assertLocklessCapacityLimits(state.limits);
   state.controllers ??= {};
-  state.migrationReceipts ??= {};
-  state.modeBySurfaceId ??= {};
   state.scopes ??= {};
   state.targetApplyWorkItems ??= {};
   state.tombstones ??= [];
@@ -722,91 +684,6 @@ export class LocklessClientAuthority {
     assertLocklessCapacityLimits(limits);
     assertRetainedTombstoneAggregate(this.state, limits, "configuration");
     this.state.limits = clone(limits);
-  }
-
-  setSurfaceMode(surfaceId: string, mode: "legacy" | "lockless"): void {
-    const current = this.state.modeBySurfaceId[surfaceId];
-    if (current && current !== mode) {
-      throw new LocklessAuthorityError(
-        "capability_mismatch",
-        `Surface ${surfaceId} is already admitted in ${current} mode`,
-        { currentMode: current, requestedMode: mode },
-      );
-    }
-    this.state.modeBySurfaceId[surfaceId] = mode;
-  }
-
-  convertSurfaceToLocklessMode(surfaceId: string): void {
-    this.state.modeBySurfaceId[surfaceId] = "lockless";
-  }
-
-  surfaceMode(surfaceId: string): "legacy" | "lockless" | null {
-    return this.state.modeBySurfaceId[surfaceId] ?? null;
-  }
-
-  resolveMigrationReceipt(input: {
-    controllerInstanceId: string;
-    material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
-    requestId: string;
-    surfaceId: string;
-  }): PersistentMigrationReceipt | null {
-    const materialSha256 = locklessMigrationMaterialSha256(input.material);
-    const existing = this.state.migrationReceipts[input.requestId];
-    if (existing) {
-      if (
-        existing.clientIdentity !== this.clientIdentity ||
-        existing.controllerInstanceId !== input.controllerInstanceId ||
-        existing.materialSha256 !== materialSha256 ||
-        existing.surfaceId !== input.surfaceId
-      ) {
-        throw new LocklessAuthorityError(
-          "invalid_payload",
-          "Migration receipt identity or material digest mismatch",
-          {
-            requestId: input.requestId,
-            expectedClientIdentity: existing.clientIdentity,
-            expectedControllerInstanceId: existing.controllerInstanceId,
-            expectedMaterialSha256: existing.materialSha256,
-            expectedSurfaceId: existing.surfaceId,
-          },
-        );
-      }
-      return clone(existing);
-    }
-    const priorForSurface = Object.values(this.state.migrationReceipts).find(
-      (receipt) => receipt.surfaceId === input.surfaceId,
-    );
-    if (priorForSurface) {
-      throw new LocklessAuthorityError(
-        "invalid_operation",
-        "Migrated surface requires replay of its durable pair request ID",
-        {
-          expectedRequestId: priorForSurface.requestId,
-          requestId: input.requestId,
-          surfaceId: input.surfaceId,
-        },
-      );
-    }
-    return null;
-  }
-
-  commitMigrationReceipt(input: {
-    controllerInstanceId: string;
-    material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
-    requestId: string;
-    surfaceId: string;
-  }): PersistentMigrationReceipt {
-    const existing = this.resolveMigrationReceipt(input);
-    if (existing) return existing;
-    const receipt: PersistentMigrationReceipt = {
-      clientIdentity: this.clientIdentity,
-      controllerInstanceId: input.controllerInstanceId,
-      materialSha256: locklessMigrationMaterialSha256(input.material),
-      requestId: input.requestId,
-      surfaceId: input.surfaceId,
-    };
-    this.state.migrationReceipts[input.requestId] = receipt;
-    return clone(receipt);
   }
 
   admit(
@@ -1382,87 +1259,6 @@ export class LocklessClientAuthority {
     };
   }
 
-  importLegacyMigrationMaterial(
-    controllerInstanceId: string,
-    material: NonNullable<LocklessPairPayload["migrationMaterial"]>,
-  ): void {
-    this.assertRetainedTombstoneTransition("legacy_migration");
-    for (const imported of material.scopes) {
-      this.ensureScope(imported.scopeId, imported.scopeKind);
-      for (const source of imported.records) {
-        const record = this.appendConsumable({
-          payload: source.payload,
-          recordClass: source.recordClass,
-          scopeId: imported.scopeId,
-          scopeKind: imported.scopeKind,
-          triggerOperation: "legacy_migration",
-        });
-        if (!record) {
-          throw new LocklessAuthorityError(
-            "capability_mismatch",
-            "Legacy consumable record exceeds advertised lockless capacity",
-            { scopeId: imported.scopeId },
-          );
-        }
-      }
-      for (const frame of imported.liveFrames ?? []) {
-        if (imported.scopeKind !== "pane") {
-          throw new LocklessAuthorityError(
-            "invalid_payload",
-            "Legacy live annotation frames require a pane scope",
-            { scopeId: imported.scopeId },
-          );
-        }
-        const record = this.updateLiveFrame({
-          frameId: frame.frameId,
-          payload: frame.payload,
-          scopeId: imported.scopeId,
-          triggerOperation: "legacy_migration",
-        });
-        if (!record) {
-          throw new LocklessAuthorityError(
-            "capability_mismatch",
-            "Legacy live frame exceeds advertised lockless capacity",
-            { scopeId: imported.scopeId },
-          );
-        }
-      }
-      const projection = this.state.scopes[imported.scopeId]!.cursors[
-        controllerInstanceId
-      ];
-      if (projection?.gap) {
-        throw new LocklessAuthorityError(
-          "capability_mismatch",
-          "Legacy consumable window exceeds advertised lockless capacity",
-          { gap: projection.gap, scopeId: imported.scopeId },
-        );
-      }
-    }
-    for (const imported of material.gaps ?? []) {
-      const scope = this.state.scopes[imported.scopeId];
-      const projection = scope?.cursors[controllerInstanceId];
-      if (!scope || !projection) {
-        throw new LocklessAuthorityError(
-          "invalid_payload",
-          "Legacy overflow references an unknown migrated scope",
-          { scopeId: imported.scopeId },
-        );
-      }
-      const generation = projection.gapGeneration + 1;
-      projection.gapGeneration = generation;
-      projection.gap = {
-        ...clone(imported.gap),
-        cause: "legacy_overflow",
-        generation,
-      };
-      projection.cursor = Math.max(
-        projection.cursor,
-        this.scopeProjectionRecords(scope)[0]?.sequence ??
-          scope.nextSequence,
-      );
-    }
-  }
-
   updateLiveFrame(input: {
     frameId: string;
     payload: unknown;
@@ -2001,25 +1797,6 @@ export class LocklessClientAuthority {
   ): void {
     assertLocklessCapacityLimits(this.state.limits);
     assertRetainedTombstoneAggregate(this.state, this.state.limits, transition);
-    for (const [requestId, receipt] of Object.entries(
-      this.state.migrationReceipts,
-    )) {
-      if (
-        requestId !== receipt.requestId ||
-        !validControllerInstanceId(receipt.controllerInstanceId) ||
-        typeof receipt.surfaceId !== "string" ||
-        receipt.surfaceId.length === 0 ||
-        !/^[a-f0-9]{64}$/.test(receipt.materialSha256) ||
-        (receipt.clientIdentity !== null &&
-          typeof receipt.clientIdentity !== "string")
-      ) {
-        throw new LocklessAuthorityError(
-          "capability_mismatch",
-          "Persisted migration receipt is invalid",
-          { requestId },
-        );
-      }
-    }
     for (const controller of Object.values(this.state.controllers)) {
       controller.pendingOperationReceipts ??= {};
       const receipts = Object.values(controller.pendingOperationReceipts);

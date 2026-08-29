@@ -4,7 +4,6 @@ import type {
   LocklessPaneCloseIntent,
   LocklessPaneRestoreIntent,
   LocklessPaneSplitIntent,
-  LocklessPairPayload,
   LocklessScopeId,
   LocklessSurfaceCloseIntent,
   LocklessSurfaceOpenIntent,
@@ -34,17 +33,6 @@ export type MultiSurfaceControllerOptions = {
     surfaceId: string,
     scopeId: LocklessScopeId,
   ) => void;
-  prepareMigration?: (
-    surfaceId: string,
-    controllerInstanceId: ControllerInstanceId,
-  ) => Promise<{
-    complete(): Promise<void>;
-    material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
-    markClientCommitted(migrationReceiptId: string): Promise<void>;
-    markPairSent(): Promise<void>;
-    markSourceCleared(): Promise<void>;
-    pairRequestId: string;
-  } | null>;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -233,13 +221,6 @@ export class MultiSurfaceController {
           }
         : undefined,
       projection: this.options.createProjection(scopeKey),
-      prepareMigration: surfaceId
-        ? async (controllerInstanceId) =>
-          await this.options.prepareMigration?.(
-            surfaceId,
-            controllerInstanceId,
-          ) ?? null
-        : undefined,
       surfaceId,
       wire: this.options.createWire(),
     });

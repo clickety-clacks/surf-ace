@@ -10,7 +10,6 @@ import type {
   LocklessPaneCloseIntent,
   LocklessPaneRestoreIntent,
   LocklessPaneSplitIntent,
-  LocklessPairPayload,
   LocklessPairResult,
   LocklessScopeId,
   LocklessSurfaceCloseIntent,
@@ -70,14 +69,6 @@ export type LocklessControllerSessionOptions = {
   onConsumableAvailable?: (scopeId: LocklessScopeId) => void;
   onConsumableAcknowledged?: (scopeId: LocklessScopeId) => void;
   preflightComplete?: boolean;
-  prepareMigration?: (controllerInstanceId: ControllerInstanceId) => Promise<{
-    complete(): Promise<void>;
-    material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
-    markClientCommitted(migrationReceiptId: string): Promise<void>;
-    markPairSent(): Promise<void>;
-    markSourceCleared(): Promise<void>;
-    pairRequestId: string;
-  } | null>;
   surfaceId?: string;
   wire: ControllerWire;
 };
@@ -168,11 +159,6 @@ export class LocklessControllerSession {
       this.repairScopes.add(scopeId);
     }
     this.controllerInstanceId = await this.options.identity.loadOrCreate();
-    // Surface migration continuity is hydrated and durably prepared before the
-    // first transport for that surface is opened.
-    const migration = await this.options.prepareMigration?.(
-      this.controllerInstanceId,
-    ) ?? null;
     await this.options.wire.connect();
     this.unsubscribeClose = this.options.wire.onClose?.(() => {
       void this.handleTransportLoss();
@@ -205,11 +191,10 @@ export class LocklessControllerSession {
         }
       });
     });
-    const pairRequestId = migration?.pairRequestId ?? `rq_pair_${randomUUID()}`;
+    const pairRequestId = `rq_pair_${randomUUID()}`;
     let payload: Record<string, unknown>;
     let scopes: unknown[];
     try {
-      await migration?.markPairSent();
       const response = await this.options.wire.request(LOCKLESS_WIRE_OPS.pair, {
         controllerInstanceId: this.controllerInstanceId,
         controllerProductName: this.options.controllerProductName,
@@ -221,7 +206,6 @@ export class LocklessControllerSession {
           ),
         ],
         protocolVersion: 1,
-        migrationMaterial: migration?.material,
         resume: this.options.projection.resumeState(),
         surfaceId: this.options.surfaceId,
       }, pairRequestId);
@@ -232,15 +216,6 @@ export class LocklessControllerSession {
       if (payload.controllerInstanceId !== this.controllerInstanceId) {
         throw new Error("lockless_controller_identity_mismatch");
       }
-      if (
-        migration &&
-        (
-          payload.migrationAccepted !== true ||
-          payload.migrationReceiptId !== pairRequestId
-        )
-      ) {
-        throw new Error("lockless_migration_not_accepted");
-      }
       if (!Array.isArray(payload.scopes)) {
         throw new Error("invalid_lockless_pair_scopes");
       }
@@ -248,11 +223,6 @@ export class LocklessControllerSession {
         throw new Error("invalid_lockless_pair_receipt_resolutions");
       }
       scopes = payload.scopes;
-      if (migration) {
-        await migration.markClientCommitted(String(payload.migrationReceiptId));
-        await migration.markSourceCleared();
-        await migration.complete();
-      }
     } catch (error) {
       throw error;
     }
@@ -276,7 +246,7 @@ export class LocklessControllerSession {
     this.heartbeatInterval = setInterval(() => {
       void this.sendHeartbeat();
     }, this.options.heartbeatIntervalMs ?? 15_000);
-    const resultBase = {
+    return {
       capabilities: record(payload.capabilities),
       controllerInstanceId: this.controllerInstanceId,
       limits: record(payload.limits) as LocklessPairResult["limits"],
@@ -292,13 +262,6 @@ export class LocklessControllerSession {
         : null,
       surfaceSetRevision: Number(payload.surfaceSetRevision),
     };
-    return migration
-      ? {
-          ...resultBase,
-          migrationAccepted: true,
-          migrationReceiptId: pairRequestId,
-        }
-      : resultBase;
   }
 
   async stop(): Promise<void> {

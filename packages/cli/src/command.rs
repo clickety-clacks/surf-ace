@@ -29,14 +29,13 @@ pub enum Command {
     Clear,
     AnnotationsRemove,
     CapturePane,
-    SurfaceModeConvert,
     SurfaceIntent,
     TargetRegister,
     TargetApply,
 }
 
 impl Command {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::List,
         Self::Push,
         Self::Read,
@@ -45,7 +44,6 @@ impl Command {
         Self::Clear,
         Self::AnnotationsRemove,
         Self::CapturePane,
-        Self::SurfaceModeConvert,
         Self::SurfaceIntent,
         Self::TargetRegister,
         Self::TargetApply,
@@ -67,7 +65,6 @@ impl Command {
             Self::Clear => "clear",
             Self::AnnotationsRemove => "annotations-remove",
             Self::CapturePane => "capture-pane",
-            Self::SurfaceModeConvert => "surface-mode-convert",
             Self::SurfaceIntent => "surface-intent",
             Self::TargetRegister => "target-register",
             Self::TargetApply => "target-apply",
@@ -99,7 +96,6 @@ impl Command {
             Self::Clear => Ok("content.clear"),
             Self::AnnotationsRemove => Ok("annotations.remove"),
             Self::CapturePane => Ok("snapshot.get"),
-            Self::SurfaceModeConvert => Ok("surface.mode.convert"),
             Self::SurfaceIntent => match string(input, "action")? {
                 "open" => Ok("surface.window.open"),
                 "close" => Ok("surface.window.close"),
@@ -251,14 +247,6 @@ impl Command {
                 positive_integer(input, "paneId")?;
                 for key in ["includeDrawings", "includeImage", "includeVisibleText"] {
                     optional_boolean(input, key)?;
-                }
-            }
-            Self::SurfaceModeConvert => {
-                exact_fields(input, &["currentMode", "surfaceId"], &[])?;
-                required_string(input, "surfaceId")?;
-                match string(input, "currentMode")? {
-                    "legacy" | "lockless" | "unknown" => {}
-                    _ => return Err("invalid_input:currentMode".into()),
                 }
             }
             Self::SurfaceIntent => {

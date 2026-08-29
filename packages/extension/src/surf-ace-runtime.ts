@@ -84,7 +84,6 @@ import type {
   RestorePolicy,
   PageEvent,
   TopologyApplyRequest,
-  LocklessPairPayload,
 } from "../../protocol/src/index.js";
 import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
@@ -275,45 +274,6 @@ export type SurfAceScreenSummary = {
   };
 };
 
-export type SurfAceLegacyLocklessMigration = {
-  complete(): Promise<void>;
-  material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
-  markClientCommitted(migrationReceiptId: string): Promise<void>;
-  markPairSent(): Promise<void>;
-  markSourceCleared(): Promise<void>;
-  pairRequestId: string;
-};
-
-export type LegacyCompatibilityReadBoundary = {
-  compatibilityReadBoundarySha256: string;
-  complete: boolean;
-  completedPaneIds: string[];
-  endpointId: string;
-  paneInventorySha256: string;
-  panePostReadSha256: Record<string, string>;
-  requiredPaneIds: string[];
-  schemaVersion: 1;
-  surfaceId: string;
-};
-
-export type LegacyMigrationPreparationReceipt = {
-  compatibilityReadBoundarySha256: string;
-  controllerInstanceId: import("@surf-ace/protocol").ControllerInstanceId;
-  endpointId: string;
-  fingerprint: string;
-  materialSha256: string;
-  pairRequestId: string;
-  phase: LocklessMigrationPhase;
-  sourceSha256: string;
-  surfaceId: string;
-};
-
-export type LegacyMigrationLookup =
-  | { kind: "prepared"; record: SurfAceLegacyLocklessMigration }
-  | { kind: "complete_no_migration"; receipt: LegacyMigrationPreparationReceipt }
-  | { kind: "required_unprepared" }
-  | { kind: "no_legacy_source" };
-
 type EndpointProvenance = {
   endpointHost: string;
   endpointId: string;
@@ -390,7 +350,6 @@ export type SurfAceReadResult = {
     navigatedAt: number;
     url: string;
   } | null;
-  legacyCompatibilityReadBoundary?: LegacyCompatibilityReadBoundary;
   liveDirtyStrokeIds: string[];
   liveFrame: SurfAceFrame | null;
   liveSeq: number | null;
@@ -902,16 +861,6 @@ export interface SurfAceRuntime {
   annotateRemove(input: SurfAceAnnotateRemoveInput): Promise<SurfAceAnnotateRemoveResult>;
   capturePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAcePaneCaptureResult>;
   clear(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClearResult>;
-  hydrateLegacyLocklessMigrationContinuity(): Promise<void>;
-  prepareLegacyLocklessMigrationNow(
-    fingerprint: string,
-    controllerInstanceId?: import("@surf-ace/protocol").ControllerInstanceId,
-  ): Promise<LegacyMigrationPreparationReceipt>;
-  lookupLegacyLocklessMigration(
-    endpointId: string,
-    surfaceId: string,
-    controllerInstanceId: import("@surf-ace/protocol").ControllerInstanceId,
-  ): Promise<LegacyMigrationLookup>;
   closePane(input: { fingerprint: string; paneId: PaneId }): Promise<SurfAceClosePaneResult>;
   listScreens(): Promise<SurfAceScreenSummary[]>;
   launchNativeApp(input: SurfAceLaunchNativeAppInput, context?: SurfAceSessionContext): Promise<SurfAcePushResult>;
@@ -1095,7 +1044,6 @@ type EndpointProbe = {
 };
 
 type RuntimeStateFile = {
-  locklessMigrationContinuity?: LocklessMigrationContinuity;
   nextRemotePaneId: number;
   nextPaneLabel: number;
   nextWindowLabelIndex: number;
@@ -1130,78 +1078,6 @@ type RuntimeStateFile = {
   tombstonedEndpointIds?: string[];
   version: 1;
   windowLabels: Record<string, string>;
-};
-
-export type LocklessMigrationPhase =
-  | "prepared"
-  | "pair_sent"
-  | "client_committed"
-  | "source_cleared"
-  | "complete";
-
-type LocklessMigrationSource = {
-  panes: Array<{
-    buffer: MutablePaneBuffer;
-    content: {
-      activeContentId: ContentId | null;
-      contentType: ContentType | null;
-      contentValue: unknown;
-      currentRevision: Revision;
-      display: ContentDisplay | null;
-      historyEntries: ManagedHistoryEntry[];
-      historySummary: SurfAceHistorySummary;
-      ownerSessionKey: string | null;
-    };
-    name: string | null;
-    paneId: string;
-    paneLabel: number;
-    paneLineageId: string;
-    remotePaneId: number;
-    viewport: SurfaceViewport;
-  }>;
-  surface: {
-    endpointId: string;
-    layout: ManagedLayoutNode | null;
-    snapshotBufferOverflowGeneration: number;
-    snapshotBufferOverflowed: boolean;
-    surfaceId: string;
-    topologyRevision: number;
-    viewport: SurfaceViewport;
-    windowLabel: string;
-  };
-};
-
-type LocklessMigrationTransaction = {
-  clientMigrationReceiptId?: string;
-  compatibilityReadBoundarySha256: string;
-  controllerInstanceId: import("@surf-ace/protocol").ControllerInstanceId;
-  endpointId: string;
-  materialSha256: string;
-  pairRequestId: string;
-  phase: LocklessMigrationPhase;
-  schemaVersion: 1;
-  sourceSha256: string;
-  surfaceId: string;
-};
-
-type LocklessMigrationRecord = {
-  material: NonNullable<LocklessPairPayload["migrationMaterial"]>;
-  source: LocklessMigrationSource | null;
-  transaction: LocklessMigrationTransaction;
-};
-
-type LocklessMigrationContinuity = {
-  endpoints: Record<string, {
-    legacyCompatibilityReadBoundaries?: Record<string, LegacyCompatibilityReadBoundary>;
-    legacySourceRequirements?: Record<string, {
-      endpointId: string;
-      schemaVersion: 1;
-      sourceIdentitySha256: string;
-      surfaceId: string;
-    }>;
-    surfaces: Record<string, LocklessMigrationRecord>;
-  }>;
-  schemaVersion: 1;
 };
 
 type ProviderIdentityFile = {
@@ -1480,13 +1356,6 @@ export class SurfAceToolError extends Error {
       | "render_failed"
       | "busy"
       | "invalid_operation"
-      | "lockless_migration_continuity_mismatch"
-      | "migration_already_prepared"
-      | "migration_not_legacy"
-      | "migration_not_prepared"
-      | "migration_not_quiescent"
-      | "migration_prepare_failed"
-      | "migration_read_incomplete"
       | "rate_limited"
       | "stale_revision"
       | "unsupported_operation_for_content_type",
@@ -1547,11 +1416,6 @@ type OwnerControlCommand =
   | {
       input: SurfAceAnnotateRemoveInput;
       op: "annotateRemove";
-    }
-  | {
-      controllerInstanceId: import("@surf-ace/protocol").ControllerInstanceId;
-      input: { fingerprint: string };
-      op: "prepareLegacyLocklessMigrationNow";
     };
 
 type RuntimeLeaseFile = {
@@ -1690,79 +1554,6 @@ function createPaneBuffer(): MutablePaneBuffer {
     scrollPosition: null,
     selection: null,
     taps: [],
-  };
-}
-
-function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function canonicalProtocolJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalProtocolJson).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, child]) => child !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) =>
-        `${JSON.stringify(key)}:${canonicalProtocolJson(child)}`
-      ).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function canonicalSha256(value: unknown): string {
-  return createHash("sha256").update(canonicalProtocolJson(value)).digest("hex");
-}
-
-function commonFramePrefixLength(
-  current: SurfAceFrame[],
-  migrated: SurfAceFrame[],
-): number {
-  let count = 0;
-  while (
-    count < current.length &&
-    count < migrated.length &&
-    sameJson(current[count], migrated[count])
-  ) {
-    count += 1;
-  }
-  return count;
-}
-
-function commonTapPrefixLength(
-  current: SurfAceReadResult["taps"],
-  migrated: SurfAceReadResult["taps"],
-): number {
-  let count = 0;
-  while (
-    count < current.length &&
-    count < migrated.length &&
-    sameJson(current[count], migrated[count])
-  ) {
-    count += 1;
-  }
-  return count;
-}
-
-function legacyAnnotationFramePayload(
-  frame: SurfAceFrame,
-): Record<string, unknown> {
-  return {
-    contentId: frame.contentId,
-    firstStrokeAt: frame.openedAt,
-    flushId: frame.frameId,
-    image: frame.image,
-    lastStrokeAt: frame.updatedAt,
-    legacyFrame: structuredClone(frame),
-    strokes: frame.strokes.map((stroke) => ({
-      points: stroke.points.map((point) => ({
-        ...point,
-        timestamp: stroke.startedAt,
-      })),
-      strokeId: stroke.strokeId,
-    })),
   };
 }
 
@@ -3411,7 +3202,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private lastDiscoveryUpdateLogAt = 0;
   private lastDiscoveryUpdateLogKey = "";
   private persistentState: RuntimeStateFile = {
-    locklessMigrationContinuity: { endpoints: {}, schemaVersion: 1 },
     nextRemotePaneId: 1,
     nextPaneLabel: 1,
     nextWindowLabelIndex: 0,
@@ -3480,7 +3270,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       this.logger.info?.("[surf-ace:runtime] start() — loading state");
       await ensureDirectory(this.stateDir);
       await this.warnIfLegacyStateRootExists();
-      await this.hydrateLegacyLocklessMigrationContinuity();
+      this.stateHydration ??= this.loadState();
+      await this.stateHydration;
       this.logger.info?.(
         runtimeDiagnostic("startup_state_dir", {
           provider_id: this.persistentState.providerId,
@@ -3551,11 +3342,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
   }
 
-  async hydrateLegacyLocklessMigrationContinuity(): Promise<void> {
-    this.stateHydration ??= this.loadState();
-    await this.stateHydration;
-  }
-
   async stop(): Promise<void> {
     this.started = false;
     if (!this.ownsRuntimeLease) {
@@ -3621,742 +3407,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     return () => {
       this.listeners.delete(listener);
     };
-  }
-
-  async lookupLegacyLocklessMigration(
-    endpointId: string,
-    surfaceId: string,
-    controllerInstanceId: import("@surf-ace/protocol").ControllerInstanceId,
-  ): Promise<LegacyMigrationLookup> {
-    await this.hydrateLegacyLocklessMigrationContinuity();
-    const endpoint = this.persistentState.locklessMigrationContinuity
-      ?.endpoints[endpointId];
-    const record = endpoint?.surfaces[surfaceId];
-    if (record) {
-      this.assertMigrationRecord(record, {
-        controllerInstanceId,
-        endpointId,
-        surfaceId,
-      });
-      if (record.transaction.phase === "complete") {
-        return {
-          kind: "complete_no_migration",
-          receipt: this.migrationReceipt(surfaceId, record),
-        };
-      }
-      return { kind: "prepared", record: this.migrationHandle(record) };
-    }
-
-    return endpoint?.legacySourceRequirements?.[surfaceId]
-      ? { kind: "required_unprepared" }
-      : { kind: "no_legacy_source" };
-  }
-
-  async prepareLegacyLocklessMigrationNow(
-    fingerprint: string,
-    controllerInstanceId?: import("@surf-ace/protocol").ControllerInstanceId,
-  ): Promise<LegacyMigrationPreparationReceipt> {
-    await this.hydrateLegacyLocklessMigrationContinuity();
-    if (!controllerInstanceId) {
-      throw new SurfAceToolError("internal_error", "Surf Ace migration controller identity is unavailable.");
-    }
-    if (this.started && !this.ownsRuntimeLease) {
-      return await this.forwardToRuntimeOwner<LegacyMigrationPreparationReceipt>({
-        controllerInstanceId,
-        input: { fingerprint },
-        op: "prepareLegacyLocklessMigrationNow",
-      });
-    }
-    return await this.serializeMigrationMutation(async () => {
-      await this.stateWrite.catch(() => {});
-      const durableBefore = await this.stateRepository.load() as RuntimeStateFile | null;
-      if (durableBefore?.version === 1 && durableBefore.locklessMigrationContinuity?.schemaVersion === 1) {
-        this.persistentState.locklessMigrationContinuity = structuredClone(
-          durableBefore.locklessMigrationContinuity,
-        );
-      }
-      const continuity = this.persistentState.locklessMigrationContinuity ??=
-        { endpoints: {}, schemaVersion: 1 };
-      for (const [endpointId, endpoint] of Object.entries(continuity.endpoints)) {
-        const record = endpoint.surfaces[fingerprint];
-        if (!record) continue;
-        this.assertMigrationRecord(record, {
-          controllerInstanceId,
-          endpointId,
-          surfaceId: fingerprint,
-        });
-        return this.migrationReceipt(fingerprint, record);
-      }
-
-    const surface = this.allManagedSurfaces().find((candidate) =>
-      String(candidate.surfaceId) === fingerprint
-    );
-    if (!surface) {
-      throw new SurfAceToolError("screen_not_found", "Surf Ace screen not found.");
-    }
-    if (surface.snapshotSyncInFlight || surface.snapshotBufferedEvents.length > 0) {
-      throw new SurfAceToolError("migration_not_quiescent", "migration_not_quiescent");
-    }
-    const endpointId = surface.endpointId;
-    const surfaceId = String(surface.surfaceId);
-    const endpoint = continuity.endpoints[endpointId] ??= { surfaces: {} };
-    const source = this.captureLocklessMigrationSource(surface);
-    const requirement = endpoint.legacySourceRequirements?.[surfaceId];
-    const boundary = endpoint.legacyCompatibilityReadBoundaries?.[surfaceId];
-    const inventory = this.legacyPaneInventory(surface);
-    if (!requirement || !boundary || !boundary.complete ||
-      boundary.paneInventorySha256 !== inventory.paneInventorySha256 ||
-      !sameJson(boundary.requiredPaneIds, boundary.completedPaneIds)) {
-      throw new SurfAceToolError("migration_read_incomplete", "migration_read_incomplete");
-    }
-    if (requirement.sourceIdentitySha256 !== canonicalSha256(source)) {
-      throw new SurfAceToolError("lockless_migration_continuity_mismatch", "lockless_migration_continuity_mismatch");
-    }
-    const buffers = source.panes;
-    const scopes: NonNullable<
-      LocklessPairPayload["migrationMaterial"]
-    >["scopes"] = [{
-      records: [],
-      scopeId: `surface:${encodeURIComponent(surfaceId)}`,
-      scopeKind: "surface",
-    }];
-    const gaps: NonNullable<
-      LocklessPairPayload["migrationMaterial"]
-    >["gaps"] = [];
-    if (surface.snapshotBufferOverflowed) {
-      gaps.push({
-        gap: {
-          cause: "legacy_overflow",
-          droppedBytes: null,
-          droppedEventCount: null,
-          droppedFrameCount: null,
-          droppedRecordCount: null,
-          firstLostSequence: null,
-          lastLostSequence: null,
-          lossExtent: "unknown",
-          recordClasses: ["topology"],
-        },
-        scopeId: `surface:${encodeURIComponent(surfaceId)}`,
-      });
-    }
-    scopes[0]?.records.push({
-      payload: {
-        cursorMaterial: {
-          knownGapTruth: gaps,
-          scopeIds: [
-            `surface:${encodeURIComponent(surfaceId)}`,
-            ...buffers.map((pane) =>
-              `pane:${encodeURIComponent(surfaceId)}:${encodeURIComponent(String(pane.remotePaneId))}`
-            ),
-          ],
-        },
-        layout: structuredClone(surface.layout),
-        paneRestoreMaterial: buffers.map((pane) => ({
-          buffer: structuredClone(pane.buffer),
-          name: pane.name,
-          paneId: pane.remotePaneId,
-          paneLabel: pane.paneLabel,
-          paneLineageId: pane.paneLineageId,
-          viewport: structuredClone(pane.viewport),
-        })),
-        surfaceId,
-        topologyRevision: surface.topologyRevision,
-        viewport: structuredClone(surface.viewport),
-      },
-      recordClass: "topology",
-    });
-    for (const paneSource of buffers) {
-      const snapshot = paneSource.buffer;
-      const scopeId =
-        `pane:${encodeURIComponent(surfaceId)}:${encodeURIComponent(String(paneSource.remotePaneId))}`;
-      const records: NonNullable<
-        LocklessPairPayload["migrationMaterial"]
-      >["scopes"][number]["records"] = [];
-      for (const frame of snapshot.closedFrames) {
-        records.push({
-          payload: legacyAnnotationFramePayload(frame),
-          recordClass: "annotation_frame",
-        });
-      }
-      for (const tap of snapshot.taps) {
-        records.push({
-          payload: {
-            kind: tap.kind,
-            legacyEventId: tap.eventId,
-            nearestContent: tap.nearestText,
-            position: { x: tap.x, y: tap.y },
-            timestamp: tap.timestamp,
-          },
-          recordClass: "tap",
-        });
-      }
-      if (snapshot.scrollPosition) {
-        records.push({
-          payload: {
-            viewport: {
-              visibleRect: structuredClone(
-                snapshot.scrollPosition.visibleRect,
-              ),
-            },
-          },
-          recordClass: "scroll",
-        });
-      }
-      if (snapshot.selection) {
-        records.push({
-          payload: { selection: structuredClone(snapshot.selection) },
-          recordClass: "selection",
-        });
-      }
-      if (snapshot.page) {
-        records.push({
-          payload: {
-            page: snapshot.page.pageNumber,
-            pageText: snapshot.page.pageLabel,
-            totalPages: snapshot.page.pageCount,
-          },
-          recordClass: "page",
-        });
-      }
-      if (
-        snapshot.playbackPosition !== null ||
-        snapshot.playbackState !== null
-      ) {
-        records.push({
-          payload: {
-            playbackPosition: snapshot.playbackPosition,
-            playbackState: snapshot.playbackState,
-          },
-          recordClass: "playback",
-        });
-      }
-      if (snapshot.lastNavigation) {
-        records.push({
-          payload: structuredClone(snapshot.lastNavigation),
-          recordClass: "navigation",
-        });
-      }
-      if (paneSource.content.activeContentId || paneSource.content.historyEntries.length > 0) {
-        records.push({
-          payload: {
-            activeContentId: paneSource.content.activeContentId,
-            contentType: paneSource.content.contentType,
-            contentValue: structuredClone(paneSource.content.contentValue),
-            currentRevision: paneSource.content.currentRevision,
-            display: structuredClone(paneSource.content.display),
-            ownerSessionKey: paneSource.content.ownerSessionKey,
-            paneId: paneSource.remotePaneId,
-            paneLabel: paneSource.paneLabel,
-            paneLineageId: paneSource.paneLineageId,
-            provenance: structuredClone(
-              paneSource.content.historySummary.visibleProvenance ?? null,
-            ),
-          },
-          recordClass: "content",
-        });
-        for (const historyEntry of paneSource.content.historyEntries) {
-          const {
-            historyOwnerToken: _historyOwnerToken,
-            revision,
-            ...historyMaterial
-          } = historyEntry;
-          records.push({
-            payload: {
-              ...structuredClone(historyMaterial),
-              contentRevision: revision,
-            },
-            recordClass: "history",
-          });
-        }
-      }
-      scopes.push({
-        liveFrames: snapshot.liveFrame
-          ? [{
-              frameId: snapshot.liveFrame.frameId,
-              payload: {
-                ...legacyAnnotationFramePayload(snapshot.liveFrame),
-                liveDirtyStrokeIds: structuredClone(
-                  snapshot.liveDirtyStrokeIds,
-                ),
-                liveSequence: snapshot.liveSeq,
-              },
-            }]
-          : undefined,
-        records,
-        scopeId,
-        scopeKind: "pane",
-      });
-      if (snapshot.overflowed) {
-        gaps.push({
-          gap: {
-            cause: "legacy_overflow",
-            droppedBytes: null,
-            droppedEventCount: null,
-            droppedFrameCount: null,
-            droppedRecordCount: null,
-            firstLostSequence: null,
-            lastLostSequence: null,
-            lossExtent: "unknown",
-            recordClasses: ["tap"],
-          },
-          scopeId,
-        });
-      }
-    }
-    const material = {
-      gaps: gaps.length > 0 ? gaps : undefined,
-      scopes,
-    };
-    const record: LocklessMigrationRecord = {
-      material,
-      source,
-      transaction: {
-        compatibilityReadBoundarySha256: boundary.compatibilityReadBoundarySha256,
-        controllerInstanceId,
-        endpointId,
-        materialSha256: canonicalSha256(material),
-        pairRequestId: `rq_pair_${randomUUID()}`,
-        phase: "prepared",
-        schemaVersion: 1,
-        sourceSha256: canonicalSha256(source),
-        surfaceId,
-      },
-    };
-    endpoint.surfaces[surfaceId] = record;
-    try {
-      await this.persistState();
-      const committed = await this.stateRepository.load() as RuntimeStateFile | null;
-      const durable = committed?.locklessMigrationContinuity?.endpoints[endpointId]
-        ?.surfaces[surfaceId];
-      if (!durable) throw new Error("migration_prepare_failed");
-      this.assertMigrationRecord(durable, { controllerInstanceId, endpointId, surfaceId });
-    } catch (error) {
-      if (String(error).includes("lockless_migration_continuity_mismatch")) throw error;
-      throw new SurfAceToolError("migration_prepare_failed", "migration_prepare_failed");
-    }
-    return this.migrationReceipt(fingerprint, record);
-    });
-  }
-
-  private captureLocklessMigrationSource(
-    surface: ManagedSurface,
-  ): LocklessMigrationSource {
-    return {
-      panes: this.visiblePanes(surface).map((pane) => ({
-        buffer: structuredClone(pane.buffer),
-        content: {
-          activeContentId: pane.activeContentId,
-          contentType: pane.contentType,
-          contentValue: structuredClone(pane.contentValue),
-          currentRevision: pane.currentRevision,
-          display: structuredClone(pane.display),
-          historyEntries: structuredClone(pane.historyEntries ?? []),
-          historySummary: structuredClone(pane.historySummary ?? {
-            backCount: 0,
-            forwardCount: 0,
-            visibleContentId: null,
-          }),
-          ownerSessionKey: pane.ownerSessionKey,
-        },
-        name: pane.name,
-        paneId: pane.paneId,
-        paneLabel: pane.paneLabel,
-        paneLineageId: pane.paneLineageId,
-        remotePaneId: Number(pane.remotePaneId),
-        viewport: structuredClone(pane.viewport),
-      })),
-      surface: {
-        endpointId: surface.endpointId,
-        layout: structuredClone(surface.layout),
-        snapshotBufferOverflowGeneration:
-          surface.snapshotBufferOverflowGeneration,
-        snapshotBufferOverflowed: surface.snapshotBufferOverflowed,
-        surfaceId: String(surface.surfaceId),
-        topologyRevision: surface.topologyRevision,
-        viewport: structuredClone(surface.viewport),
-        windowLabel: surface.windowLabel,
-      },
-    };
-  }
-
-  private legacyPaneInventory(surface: ManagedSurface): {
-    paneInventorySha256: string;
-    requiredPaneIds: string[];
-  } {
-    const entries = this.visiblePanes(surface)
-      .map((pane) => ({ paneId: String(pane.paneId), paneLineageId: pane.paneLineageId }))
-      .sort((left, right) => left.paneId.localeCompare(right.paneId));
-    return {
-      paneInventorySha256: canonicalSha256(entries),
-      requiredPaneIds: entries.map((entry) => entry.paneId),
-    };
-  }
-
-  private migrationReceipt(
-    fingerprint: string,
-    record: LocklessMigrationRecord,
-  ): LegacyMigrationPreparationReceipt {
-    const transaction = record.transaction;
-    return {
-      compatibilityReadBoundarySha256: transaction.compatibilityReadBoundarySha256,
-      controllerInstanceId: transaction.controllerInstanceId,
-      endpointId: transaction.endpointId,
-      fingerprint,
-      materialSha256: transaction.materialSha256,
-      pairRequestId: transaction.pairRequestId,
-      phase: transaction.phase,
-      sourceSha256: transaction.sourceSha256,
-      surfaceId: transaction.surfaceId,
-    };
-  }
-
-  private writeLegacySourceRequirement(surface: ManagedSurface): void {
-    const continuity = this.persistentState.locklessMigrationContinuity ??=
-      { endpoints: {}, schemaVersion: 1 };
-    const endpoint = continuity.endpoints[surface.endpointId] ??= { surfaces: {} };
-    endpoint.legacySourceRequirements ??= {};
-    const source = this.captureLocklessMigrationSource(surface);
-    endpoint.legacySourceRequirements[String(surface.surfaceId)] = {
-      endpointId: surface.endpointId,
-      schemaVersion: 1,
-      sourceIdentitySha256: canonicalSha256(source),
-      surfaceId: String(surface.surfaceId),
-    };
-  }
-
-  private refreshLegacyPersistenceMetadata(surface: ManagedSurface): void {
-    const continuity = this.persistentState.locklessMigrationContinuity ??=
-      { endpoints: {}, schemaVersion: 1 };
-    const endpoint = continuity.endpoints[surface.endpointId] ??= { surfaces: {} };
-    const surfaceId = String(surface.surfaceId);
-    const migrationPhase = endpoint.surfaces[surfaceId]?.transaction.phase;
-    if (!migrationPhase || migrationPhase === "source_cleared") {
-      this.writeLegacySourceRequirement(surface);
-    }
-    const boundary = endpoint.legacyCompatibilityReadBoundaries?.[surfaceId];
-    if (!boundary) return;
-    if (migrationPhase === "source_cleared") {
-      this.resetLegacyReadBoundary(surface);
-      return;
-    }
-    const inventory = this.legacyPaneInventory(surface);
-    if (boundary.paneInventorySha256 === inventory.paneInventorySha256) return;
-    this.resetLegacyReadBoundary(surface, inventory);
-  }
-
-  private resetLegacyReadBoundary(
-    surface: ManagedSurface,
-    inventory = this.legacyPaneInventory(surface),
-  ): LegacyCompatibilityReadBoundary {
-    const continuity = this.persistentState.locklessMigrationContinuity ??=
-      { endpoints: {}, schemaVersion: 1 };
-    const endpoint = continuity.endpoints[surface.endpointId] ??= { surfaces: {} };
-    endpoint.legacyCompatibilityReadBoundaries ??= {};
-    const surfaceId = String(surface.surfaceId);
-    const boundary: LegacyCompatibilityReadBoundary = {
-      compatibilityReadBoundarySha256: canonicalSha256({
-        complete: false,
-        completedPaneIds: [],
-        endpointId: surface.endpointId,
-        paneInventorySha256: inventory.paneInventorySha256,
-        panePostReadSha256: {},
-        requiredPaneIds: inventory.requiredPaneIds,
-        schemaVersion: 1,
-        surfaceId,
-      }),
-      complete: false,
-      completedPaneIds: [],
-      endpointId: surface.endpointId,
-      paneInventorySha256: inventory.paneInventorySha256,
-      panePostReadSha256: {},
-      requiredPaneIds: inventory.requiredPaneIds,
-      schemaVersion: 1,
-      surfaceId,
-    };
-    endpoint.legacyCompatibilityReadBoundaries[surfaceId] = boundary;
-    return structuredClone(boundary);
-  }
-
-  private hasLegacyMigrationRecord(surface: ManagedSurface): boolean {
-    return Boolean(
-      this.persistentState.locklessMigrationContinuity
-        ?.endpoints[surface.endpointId]?.surfaces[String(surface.surfaceId)],
-    );
-  }
-
-  private updateLegacyReadBoundary(
-    surface: ManagedSurface,
-    pane: ManagedPane,
-    inventory = this.legacyPaneInventory(surface),
-  ): LegacyCompatibilityReadBoundary {
-    const continuity = this.persistentState.locklessMigrationContinuity ??=
-      { endpoints: {}, schemaVersion: 1 };
-    const endpoint = continuity.endpoints[surface.endpointId] ??= { surfaces: {} };
-    endpoint.legacyCompatibilityReadBoundaries ??= {};
-    const surfaceId = String(surface.surfaceId);
-    let boundary = endpoint.legacyCompatibilityReadBoundaries[surfaceId];
-    if (!boundary || boundary.paneInventorySha256 !== inventory.paneInventorySha256) {
-      boundary = {
-        compatibilityReadBoundarySha256: "",
-        complete: false,
-        completedPaneIds: [],
-        endpointId: surface.endpointId,
-        paneInventorySha256: inventory.paneInventorySha256,
-        panePostReadSha256: {},
-        requiredPaneIds: inventory.requiredPaneIds,
-        schemaVersion: 1,
-        surfaceId,
-      };
-    }
-    const paneId = String(pane.paneId);
-    if (this.hasCompatibilityReadablePendingMaterial(pane) === false) {
-      boundary.panePostReadSha256[paneId] = canonicalSha256(
-        this.captureLocklessMigrationSource(surface).panes.find((candidate) =>
-          String(candidate.paneId) === paneId
-        ) ?? null,
-      );
-      boundary.completedPaneIds = [...new Set([...boundary.completedPaneIds, paneId])].sort();
-    }
-    boundary.complete = sameJson(boundary.requiredPaneIds, boundary.completedPaneIds);
-    const { compatibilityReadBoundarySha256: _ignored, ...digestFields } = boundary;
-    boundary.compatibilityReadBoundarySha256 = canonicalSha256(digestFields);
-    endpoint.legacyCompatibilityReadBoundaries[surfaceId] = boundary;
-    return structuredClone(boundary);
-  }
-
-  private hasCompatibilityReadablePendingMaterial(pane: ManagedPane): boolean {
-    return pane.buffer.closedFrames.length > 0 || pane.buffer.taps.length > 0 ||
-      pane.buffer.lastNavigation !== null || pane.buffer.page !== null ||
-      pane.buffer.scrollPosition !== null || pane.buffer.selection !== null ||
-      pane.buffer.playbackPosition !== null || pane.buffer.playbackState !== null;
-  }
-
-  private migrationHandle(
-    record: LocklessMigrationRecord,
-  ): SurfAceLegacyLocklessMigration {
-    const persistPhase = async (phase: LocklessMigrationPhase) => {
-      const phases: LocklessMigrationPhase[] = [
-        "prepared",
-        "pair_sent",
-        "client_committed",
-        "source_cleared",
-        "complete",
-      ];
-      if (phases.indexOf(record.transaction.phase) >= phases.indexOf(phase)) {
-        return;
-      }
-      record.transaction.phase = phase;
-      await this.persistState();
-    };
-    return {
-      complete: async () => {
-        await this.serializeMigrationMutation(async () => {
-          if (record.transaction.phase === "complete") return;
-          if (record.transaction.phase !== "source_cleared") {
-            throw new Error("lockless_migration_source_not_cleared");
-          }
-          const endpoint = this.persistentState.locklessMigrationContinuity
-            ?.endpoints[record.transaction.endpointId];
-          if (endpoint?.legacySourceRequirements?.[record.transaction.surfaceId]) {
-            throw new Error("migration_not_prepared");
-          }
-          record.transaction.phase = "complete";
-          if (endpoint?.legacyCompatibilityReadBoundaries) {
-            delete endpoint.legacyCompatibilityReadBoundaries[record.transaction.surfaceId];
-          }
-          await this.persistState();
-        });
-      },
-      material: structuredClone(record.material),
-      markClientCommitted: async (migrationReceiptId) => {
-        if (migrationReceiptId !== record.transaction.pairRequestId) {
-          throw new Error("lockless_migration_receipt_mismatch");
-        }
-        record.transaction.clientMigrationReceiptId = migrationReceiptId;
-        await persistPhase("client_committed");
-      },
-      markPairSent: async () => {
-        await persistPhase("pair_sent");
-      },
-      markSourceCleared: async () => {
-        await this.serializeMigrationMutation(async () => {
-          if (record.transaction.phase === "source_cleared" ||
-            record.transaction.phase === "complete") {
-            return;
-          }
-          if (record.transaction.phase !== "client_committed") {
-            throw new Error("lockless_migration_client_not_committed");
-          }
-          const { retainedNewerSource, surface } = this.clearLocklessMigrationSource(record);
-          if (retainedNewerSource && surface) {
-            this.writeLegacySourceRequirement(surface);
-            this.resetLegacyReadBoundary(surface);
-            await this.persistState();
-            throw new Error("migration_not_prepared");
-          }
-          record.source = null;
-          const endpoint = this.persistentState.locklessMigrationContinuity
-            ?.endpoints[record.transaction.endpointId];
-          if (endpoint?.legacySourceRequirements) {
-            delete endpoint.legacySourceRequirements[record.transaction.surfaceId];
-          }
-          record.transaction.phase = "source_cleared";
-          await this.persistState();
-        });
-      },
-      pairRequestId: record.transaction.pairRequestId,
-    };
-  }
-
-  private assertMigrationRecord(
-    record: LocklessMigrationRecord,
-    identity: {
-      controllerInstanceId: import("@surf-ace/protocol").ControllerInstanceId;
-      endpointId: string;
-      surfaceId: string;
-    },
-  ): void {
-    const transaction = record.transaction;
-    const phases: LocklessMigrationPhase[] = [
-      "prepared",
-      "pair_sent",
-      "client_committed",
-      "source_cleared",
-      "complete",
-    ];
-    const phaseIndex = phases.indexOf(transaction.phase);
-    if (transaction.schemaVersion !== 1 || phaseIndex < 0 ||
-      !transaction.pairRequestId ||
-      !/^[0-9a-f]{64}$/.test(transaction.compatibilityReadBoundarySha256) ||
-      transaction.controllerInstanceId !== identity.controllerInstanceId ||
-      transaction.endpointId !== identity.endpointId ||
-      transaction.surfaceId !== identity.surfaceId ||
-      transaction.materialSha256 !== canonicalSha256(record.material) ||
-      (record.source !== null &&
-        transaction.sourceSha256 !== canonicalSha256(record.source)) ||
-      (phaseIndex >= phases.indexOf("client_committed") &&
-        transaction.clientMigrationReceiptId !== transaction.pairRequestId) ||
-      (phaseIndex < phases.indexOf("source_cleared") &&
-        record.source === null) ||
-      (phaseIndex >= phases.indexOf("source_cleared") &&
-        record.source !== null)) {
-      throw new Error("lockless_migration_continuity_mismatch");
-    }
-  }
-
-  private assertLegacyMigrationMetadata(continuity: LocklessMigrationContinuity): void {
-    for (const [endpointId, endpoint] of Object.entries(continuity.endpoints)) {
-      for (const [surfaceId, requirement] of Object.entries(
-        endpoint.legacySourceRequirements ?? {},
-      )) {
-        if (requirement.schemaVersion !== 1 || requirement.endpointId !== endpointId ||
-          requirement.surfaceId !== surfaceId ||
-          !/^[0-9a-f]{64}$/.test(requirement.sourceIdentitySha256)) {
-          throw new SurfAceToolError(
-            "lockless_migration_continuity_mismatch",
-            "lockless_migration_continuity_mismatch",
-          );
-        }
-      }
-      for (const [surfaceId, boundary] of Object.entries(
-        endpoint.legacyCompatibilityReadBoundaries ?? {},
-      )) {
-        const sortedRequired = [...new Set(boundary.requiredPaneIds)].sort();
-        const sortedCompleted = [...new Set(boundary.completedPaneIds)].sort();
-        const { compatibilityReadBoundarySha256, ...digestFields } = boundary;
-        const validCompleted = sortedCompleted.every((paneId) => sortedRequired.includes(paneId));
-        if (boundary.schemaVersion !== 1 || boundary.endpointId !== endpointId ||
-          boundary.surfaceId !== surfaceId ||
-          !/^[0-9a-f]{64}$/.test(boundary.paneInventorySha256) ||
-          !sameJson(boundary.requiredPaneIds, sortedRequired) ||
-          !sameJson(boundary.completedPaneIds, sortedCompleted) || !validCompleted ||
-          boundary.complete !== sameJson(sortedRequired, sortedCompleted) ||
-          !sameJson(Object.keys(boundary.panePostReadSha256).sort(), sortedCompleted) ||
-          Object.keys(boundary.panePostReadSha256).sort().some((paneId, index, keys) =>
-            !sortedCompleted.includes(paneId) || keys[index] !== paneId ||
-            !/^[0-9a-f]{64}$/.test(boundary.panePostReadSha256[paneId] ?? "")
-          ) ||
-          compatibilityReadBoundarySha256 !== canonicalSha256(digestFields)) {
-          throw new SurfAceToolError(
-            "lockless_migration_continuity_mismatch",
-            "lockless_migration_continuity_mismatch",
-          );
-        }
-      }
-    }
-  }
-
-  private clearLocklessMigrationSource(record: LocklessMigrationRecord): {
-    retainedNewerSource: boolean;
-    surface: ManagedSurface | null;
-  } {
-    const source = record.source;
-    if (!source) return { retainedNewerSource: false, surface: null };
-    if (canonicalSha256(source) !== record.transaction.sourceSha256) {
-      throw new Error("lockless_migration_source_digest_mismatch");
-    }
-    const surface = this.allManagedSurfaces().find((candidate) =>
-      candidate.endpointId === record.transaction.endpointId &&
-      String(candidate.surfaceId) === record.transaction.surfaceId
-    );
-    if (!surface) return { retainedNewerSource: false, surface: null };
-    const retainedNewerSource = !sameJson(
-      this.captureLocklessMigrationSource(surface),
-      source,
-    );
-    if (source.surface.snapshotBufferOverflowed &&
-      surface.snapshotBufferOverflowed &&
-      surface.snapshotBufferOverflowGeneration ===
-        source.surface.snapshotBufferOverflowGeneration) {
-      surface.snapshotBufferOverflowed = false;
-    }
-    for (const paneSource of source.panes) {
-      const pane = [...surface.panes.values()].find((candidate) =>
-        Number(candidate.remotePaneId) === paneSource.remotePaneId
-      );
-      if (!pane) continue;
-      const snapshot = paneSource.buffer;
-      const bufferUnchanged = sameJson(pane.buffer, snapshot);
-      pane.buffer.closedFrames.splice(
-        0,
-        commonFramePrefixLength(pane.buffer.closedFrames, snapshot.closedFrames),
-      );
-      pane.buffer.taps.splice(
-        0,
-        commonTapPrefixLength(pane.buffer.taps, snapshot.taps),
-      );
-      if (
-        sameJson(pane.buffer.liveFrame, snapshot.liveFrame) &&
-        sameJson(
-          pane.buffer.liveDirtyStrokeIds,
-          snapshot.liveDirtyStrokeIds,
-        )
-      ) {
-        pane.buffer.liveFrame = null;
-        pane.buffer.liveDirtyStrokeIds = [];
-      }
-      if (sameJson(pane.buffer.lastNavigation, snapshot.lastNavigation)) {
-        pane.buffer.lastNavigation = null;
-      }
-      if (sameJson(pane.buffer.page, snapshot.page)) pane.buffer.page = null;
-      if (
-        sameJson(pane.buffer.scrollPosition, snapshot.scrollPosition)
-      ) pane.buffer.scrollPosition = null;
-      if (sameJson(pane.buffer.selection, snapshot.selection)) {
-        pane.buffer.selection = null;
-      }
-      if (
-        pane.buffer.playbackPosition === snapshot.playbackPosition &&
-        pane.buffer.playbackState === snapshot.playbackState
-      ) {
-        pane.buffer.playbackPosition = null;
-        pane.buffer.playbackState = null;
-      }
-      if (bufferUnchanged) {
-        pane.buffer.overflowed = false;
-      }
-    }
-    return { retainedNewerSource, surface };
   }
 
   async listScreens(): Promise<SurfAceScreenSummary[]> {
@@ -4433,7 +3483,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         throw new SurfAceToolError("unsupported_content_type", `Unsupported content type: ${String(input.contentType)}`);
       }
       const committed = await this.contentSet(surface, input, context, true);
-      this.refreshLegacyPersistenceMetadata(surface);
       await this.persistState();
       return committed;
     }, { bufferWireEvents: false });
@@ -4499,7 +3548,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     await this.reconcilePaneTopologyAuthority(surface, "content clear");
     return await this.serializeMigrationMutation(async () => {
       const result = await this.contentClear(surface, input, true);
-      this.refreshLegacyPersistenceMetadata(surface);
       await this.persistState();
       return result;
     }, { bufferWireEvents: false });
@@ -4813,17 +3861,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
   private async readLegacyAtMigrationBoundary(
     input: { fingerprint: string; paneId: PaneId },
   ): Promise<SurfAceReadResult> {
-    const knownSurface = this.allManagedSurfaces().find((candidate) =>
-      String(candidate.surfaceId) === input.fingerprint
-    );
-    const existing = knownSurface && this.persistentState.locklessMigrationContinuity
-      ?.endpoints[knownSurface.endpointId]?.surfaces[String(knownSurface.surfaceId)];
-    if (existing && existing.transaction.phase !== "complete") {
-      throw new SurfAceToolError("migration_already_prepared", "migration_already_prepared");
-    }
     const surface = this.requireKnownSurface(input.fingerprint);
     const pane = this.requireLocallyReadablePane(input.fingerprint, input.paneId);
-    const readInventory = this.legacyPaneInventory(surface);
     const paneLabel = this.projectedPaneLabel(surface, pane);
     const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
     const returnedFrames: SurfAceFrame[] = [];
@@ -4889,8 +3928,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     pane.buffer.playbackPosition = null;
     pane.buffer.playbackState = null;
 
-    this.writeLegacySourceRequirement(surface);
-    result.legacyCompatibilityReadBoundary = this.updateLegacyReadBoundary(surface, pane, readInventory);
     await this.persistState();
 
     return result;
@@ -4944,10 +3981,8 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
 
     return await this.serializeMigrationMutation(async () => {
     this.assertAuthorityProofUnchanged(surface, pane, paneAuthorityProof, "capture");
-    const prepared = this.hasLegacyMigrationRecord(surface);
-    if (snapshotResponse && !prepared) {
+    if (snapshotResponse) {
       this.applySnapshot(surface, pane, snapshotResponse);
-      this.refreshLegacyPersistenceMetadata(surface);
       await this.persistState();
     }
     const payload = snapshotResponse?.payload ?? null;
@@ -5206,7 +4241,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       remainingStrokeCount: payload.remainingStrokeCount,
       removedStrokeIds: [...payload.removedStrokeIds],
     };
-    this.refreshLegacyPersistenceMetadata(surface);
     await this.persistState();
     return result;
     }, { bufferWireEvents: false });
@@ -5653,7 +4687,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         targetPayload: { url: input.content },
       });
       pane.diagnosticContent = null;
-      this.refreshLegacyPersistenceMetadata(surface);
       await this.persistState();
       return { pane, target };
     }, { bufferWireEvents: false });
@@ -5661,7 +4694,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     const evidence = await this.materializeTargetRecord(surface, pane, target, "initial_apply");
     return await this.serializeMigrationMutation(async () => {
       this.repairLivePaneLabelInvariant("browser_url target push", surface);
-      this.refreshLegacyPersistenceMetadata(surface);
       await this.persistState();
       const paneLabel = this.projectedPaneLabel(surface, pane);
       const displayId = visiblePaneAddress(surface.windowLabel, paneLabel);
@@ -6786,8 +5818,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         break;
     }
     if (this.surfaces.get(surface.surfaceId) === surface) {
-      this.refreshLegacyPersistenceMetadata(surface);
-      this.runBackgroundTask(`persist legacy source metadata ${surface.surfaceId}`, async () => {
+      this.runBackgroundTask(`persist surface state ${surface.surfaceId}`, async () => {
         await this.persistState();
       });
     }
@@ -6914,7 +5945,7 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     }
     try {
       await this.serializeMigrationMutation(async () => {
-        if (surface.stopRequested || this.hasLegacyMigrationRecord(surface)) {
+        if (surface.stopRequested) {
           return;
         }
         this.assertAuthorityProofUnchanged(
@@ -6952,7 +5983,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         if (finalizeAfterSnapshot) {
           this.finalizeLiveFrame(surface, pane);
         }
-        this.refreshLegacyPersistenceMetadata(surface);
         await this.persistState();
         this.queuePersistScreenSnapshot(
           `${reason} ${surface.surfaceId}/${pane.paneId}/${frameId}`,
@@ -8769,7 +7799,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       if (lineageChanged) {
         await this.persistSurfaceTargetState(surface, "topology lineage repair");
       }
-      this.refreshLegacyPersistenceMetadata(surface);
       await this.persistState();
       surface.topologyApplyInFlight = false;
       await this.publishAuthorityState(surface);
@@ -9310,9 +8339,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         status: "applied",
       };
       return await this.serializeMigrationMutation(async () => {
-        if (this.hasLegacyMigrationRecord(surface)) {
-          return evidence;
-        }
         this.assertAuthorityProofUnchanged(
           surface,
           pane,
@@ -9338,7 +8364,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         recordTargetApplyEvidence(evidence);
         pane.lastRestoreBlockedReason = null;
         pane.diagnosticContent = null;
-        this.refreshLegacyPersistenceMetadata(surface);
         await this.persistSurfaceTargetState(surface, "target materialized");
         return evidence;
       }, { bufferWireEvents: false });
@@ -9486,9 +8511,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       return evidence;
     }
     return await this.serializeMigrationMutation(async () => {
-      if (this.hasLegacyMigrationRecord(surface)) {
-        return evidence;
-      }
       this.assertAuthorityProofUnchanged(
         surface,
         pane,
@@ -9502,7 +8524,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
       pane.lastRestoreBlockedReason = null;
       this.clearVisiblePaneContent(pane, asRevision(Math.max(Number(pane.currentRevision), target.targetEpoch)));
-      this.refreshLegacyPersistenceMetadata(surface);
       await this.persistSurfaceTargetState(surface, "target apply response");
       return evidence;
     }, { bufferWireEvents: false });
@@ -9970,10 +8991,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (parsed?.version === 1) {
       loadedStateProviderId = parsed.providerId;
       this.persistentState = {
-        locklessMigrationContinuity:
-          parsed.locklessMigrationContinuity?.schemaVersion === 1
-            ? parsed.locklessMigrationContinuity
-            : { endpoints: {}, schemaVersion: 1 },
         nextRemotePaneId: parsed.nextRemotePaneId ?? (parsed as { nextPaneId?: number }).nextPaneId ?? 1,
         nextPaneLabel: parsed.nextPaneLabel ?? 1,
         nextWindowLabelIndex: parsed.nextWindowLabelIndex,
@@ -9988,10 +9005,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         version: 1,
         windowLabels: parsed.windowLabels ?? {},
       };
-      this.assertLegacyMigrationMetadata(this.persistentState.locklessMigrationContinuity!);
-      if (!parsed.locklessMigrationContinuity) {
-        shouldPersistState = true;
-      }
       this.tombstonedEndpointIds.clear();
       for (const endpointId of this.persistentState.tombstonedEndpointIds ?? []) {
         if (typeof endpointId === "string" && endpointId.length > 0) {
@@ -12422,11 +11435,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
         return await this.launchTerminal(command.input, command.context);
       case "push":
         return await this.push(command.input, command.context);
-      case "prepareLegacyLocklessMigrationNow":
-        return await this.prepareLegacyLocklessMigrationNow(
-          command.input.fingerprint,
-          command.controllerInstanceId,
-        );
       case "read":
         return await this.read(command.input);
       case "realizeTopology":
@@ -14708,10 +13716,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
     if (isErrorResponse(response)) {
       return null;
     }
-    if (this.hasLegacyMigrationRecord(surface)) {
-      return this.visiblePanes(surface).map((pane) => pane.paneId);
-    }
-
     const rawPaneStates = (response as PanesListResponse).payload.panes;
     const providerOwnedRemotePaneIds =
       surface.topologyRevision > 0 ? this.layoutRemotePaneIds(surface) : null;
@@ -14814,7 +13818,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       );
     }
     if (!options.deferLegacyMetadataCommit) {
-      this.refreshLegacyPersistenceMetadata(surface);
       await this.persistState();
     }
     return providerPaneIds;
@@ -15035,9 +14038,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
       }
 
       const committed = await this.serializeMigrationMutation(async () => {
-        if (this.hasLegacyMigrationRecord(surface)) {
-          return false;
-        }
         this.assertAuthorityProofUnchanged(
           surface,
           pane,
@@ -15051,7 +14051,6 @@ export class DefaultSurfAceRuntime implements SurfAceRuntime {
           );
         }
         this.applySnapshot(surface, pane, response as SnapshotResponse);
-        this.refreshLegacyPersistenceMetadata(surface);
         await this.persistState();
         return true;
       }, { bufferWireEvents: false });
