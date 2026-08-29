@@ -2,7 +2,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { OPENCLAW, OPENCLAW_BUILD_COMMANDS, OPENCLAW_TEST_COMMANDS, TOOLCHAINS, TOOLING_TAG } from "./release-config.mjs";
+import { OPENCLAW, OPENCLAW_BUILD_COMMANDS, OPENCLAW_TEST_COMMANDS, TOOLCHAINS } from "./release-config.mjs";
 import {
   assertExactPublicFiles,
   assertDisjointTrees,
@@ -59,16 +59,18 @@ export async function buildOpenclawRelease(options) {
   const sourceArgument = options.sourceDir;
   const sourceDir = path.resolve(options.sourceDir);
   const outputDir = requiredReleaseOutput("openclaw", options.outputDir);
+  const toolingTag = options.toolingTag ?? process.env.TOOLING_TAG;
   if (options.sourceTag !== OPENCLAW.sourceTag || options.sourceCommit !== OPENCLAW.candidateCommit || options.version !== OPENCLAW.version) {
     throw new Error("openclaw_release_identity_mismatch");
   }
+  if (!toolingTag) throw new Error("openclaw_tooling_tag_required");
   assertDisjointTrees(sourceDir, outputDir);
   assertDisjointTrees(toolingRoot, outputDir);
   assertDisjointTrees(sourceDir, toolingRoot);
   await assertSourceIdentity(sourceDir, options.sourceTag, options.sourceCommit);
   await assertTrackedInputsUnchanged(sourceDir);
   const toolingCommit = await capture("git", ["-C", toolingRoot, "rev-parse", "HEAD"]);
-  const toolingPeel = await capture("git", ["-C", toolingRoot, "rev-parse", `refs/tags/${TOOLING_TAG}^{commit}`]);
+  const toolingPeel = await capture("git", ["-C", toolingRoot, "rev-parse", `refs/tags/${toolingTag}^{commit}`]);
   if (toolingPeel !== toolingCommit) throw new Error(`tooling_tag_mismatch:${toolingPeel}:${toolingCommit}`);
 
   await removeIfExists(outputDir);
@@ -122,7 +124,7 @@ export async function buildOpenclawRelease(options) {
     source: { commit: options.sourceCommit, tag: options.sourceTag },
     tests: OPENCLAW_TEST_COMMANDS.map((command) => ({ command, result: "passed" })),
     toolchains: TOOLCHAINS,
-    tooling: { commit: toolingCommit, tag: TOOLING_TAG },
+    tooling: { commit: toolingCommit, tag: toolingTag },
   });
   await removeIfExists(dependencyClosure);
   await removeIfExists(packageRoot);

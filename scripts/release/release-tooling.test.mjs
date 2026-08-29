@@ -26,6 +26,7 @@ import { verifySri } from "./verify-sri.mjs";
 import { verifyOpenclawPackage } from "./verify-openclaw-package.mjs";
 import { buildOpenclawRelease } from "./build-openclaw-release.mjs";
 import { buildTightbeamRelease } from "./build-tightbeam-release.mjs";
+import { OPENCLAW } from "./release-config.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 
 async function temporary(t) {
@@ -255,7 +256,8 @@ test("source identity binds HEAD and the immutable source tag to one commit", as
 });
 
 test("channel builders reject any source identity outside the reviewed constants before I/O", async () => {
-  await assert.rejects(buildOpenclawRelease({ sourceDir: ".", outputDir: "build/release/openclaw", sourceTag: "wrong", sourceCommit: "wrong", version: "0" }), /openclaw_release_identity_mismatch/);
+  await assert.rejects(buildOpenclawRelease({ sourceDir: ".", outputDir: "build/release/openclaw", sourceTag: "wrong", sourceCommit: "wrong", toolingTag: "wrong", version: "0" }), /openclaw_release_identity_mismatch/);
+  await assert.rejects(buildOpenclawRelease({ sourceDir: ".", outputDir: "build/release/openclaw", sourceTag: OPENCLAW.sourceTag, sourceCommit: OPENCLAW.candidateCommit, version: OPENCLAW.version }), /openclaw_tooling_tag_required/);
   await assert.rejects(buildTightbeamRelease({ sourceDir: ".", outputDir: "build/release/tightbeam", sourceTag: "wrong", sourceCommit: "wrong", version: "0", target: "wrong" }), /tightbeam_release_identity_mismatch/);
 });
 
@@ -264,19 +266,17 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   assert.equal(await sha256(path.join(repository, "docs/release/openclaw-tightbeam-release-split.md")), "fc5dd8fdbcf458284cb119a385877bbac757a131c8145eecea1290571e68419c");
   assert.ok((await lockedPackages(path.join(repository, "pnpm-lock.yaml"))).size > 100);
   assert.ok((await cargoLockedPackages(path.join(repository, "packages/cli/Cargo.lock"))).length > 10);
-  for (const workflow of ["release-openclaw.yml", "release-tightbeam.yml"]) {
+  for (const workflow of ["release-openclaw.yml", "release-openclaw-gate5.yml", "release-tightbeam.yml"]) {
     const text = await fs.readFile(path.join(repository, ".github/workflows", workflow), "utf8");
     for (const match of text.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) {
       assert.match(match[1], /@[0-9a-f]{40}$/);
     }
-    assert.match(text, /git -C source diff --exit-code HEAD -- \./);
-    assert.match(text, /git -C source diff --cached --exit-code HEAD -- \./);
+    if (workflow !== "release-openclaw-gate5.yml") {
+      assert.match(text, /git -C source diff --exit-code HEAD -- \./);
+      assert.match(text, /git -C source diff --cached --exit-code HEAD -- \./);
+    }
   }
   const tightbeamWorkflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
-  const openclawWorkflow = await fs.readFile(path.join(repository, ".github/workflows/release-openclaw.yml"), "utf8");
-  assert.doesNotMatch(openclawWorkflow, /workflow_dispatch/);
-  assert.match(openclawWorkflow, /release\/run-openclaw-v0\.1\.0/);
-  assert.match(openclawWorkflow, /test "\$\{GITHUB_REF\}" = "\$\{TRIGGER_REF\}"/);
   assert.doesNotMatch(tightbeamWorkflow, /workflow_dispatch/);
   assert.match(tightbeamWorkflow, /release\/run-tightbeam-v0\.2\.0/);
   assert.match(tightbeamWorkflow, /test "\$\{GITHUB_REF\}" = "\$\{TRIGGER_REF\}"/);
@@ -284,4 +284,34 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   assert.match(tightbeamWorkflow, /--output macos-smoke-receipt\.json/);
   assert.match(tightbeamWorkflow, /subject-path: release\/\.receipts\/linux-smoke-receipt\.json/);
   assert.match(tightbeamWorkflow, /subject-path: release\/\.receipts\/macos-smoke-receipt\.json/);
+});
+
+test("OpenClaw Gate 4 dispatch cannot reach smoke or publication", async () => {
+  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-openclaw.yml"), "utf8");
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.doesNotMatch(workflow, /^\s+push:/m);
+  assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
+  assert.match(workflow, /test "\$\{GITHUB_REF_TYPE\}" = tag/);
+  assert.match(workflow, /^  compare:/m);
+  assert.doesNotMatch(workflow, /^  smoke:/m);
+  assert.doesNotMatch(workflow, /^  attest-and-publish:/m);
+  assert.doesNotMatch(workflow, /^\s+contents: write$/m);
+  assert.doesNotMatch(workflow, /^\s+id-token:/m);
+  assert.doesNotMatch(workflow, /^\s+attestations:/m);
+});
+
+test("OpenClaw Gate 5 requires a separate exact successful Gate 4 run", async () => {
+  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-openclaw-gate5.yml"), "utf8");
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.doesNotMatch(workflow, /^\s+push:/m);
+  assert.match(workflow, /gate4_run_id:/);
+  assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
+  assert.match(workflow, /test "\$\{gate4_conclusion\}" = success/);
+  assert.match(workflow, /test "\$\{gate4_head_sha\}" = "\$\{GITHUB_SHA\}"/);
+  assert.match(workflow, /test "\$\{gate4_path\}" = \.github\/workflows\/release-openclaw\.yml/);
+  assert.match(workflow, /run-id: \$\{\{ inputs\.gate4_run_id \}\}/);
+  assert.match(workflow, /^  smoke:/m);
+  assert.match(workflow, /^  attest-and-publish:/m);
 });

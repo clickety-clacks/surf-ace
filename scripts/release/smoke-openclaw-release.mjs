@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { OPENCLAW, TOOLING_TAG } from "./release-config.mjs";
+import { OPENCLAW } from "./release-config.mjs";
 import { capture, parseArgs, removeIfExists, run, verifyManifestFiles, writeCanonicalJson } from "./release-lib.mjs";
 import { electronHandshake, start, stop, waitForCommand } from "./smoke-lib.mjs";
 import { verifySri } from "./verify-sri.mjs";
@@ -80,11 +80,12 @@ async function gatewayScenario(root, states) {
 }
 
 export async function smokeOpenclaw(options) {
+  const toolingTag = options.toolingTag ?? process.env.TOOLING_TAG;
   if (options.baselineCommit !== OPENCLAW.baselineCommit || options.candidateCommit !== OPENCLAW.candidateCommit || options.openclawVersion !== OPENCLAW.hostVersion) {
     throw new Error("openclaw_smoke_identity_mismatch");
   }
   const manifest = await verifyManifestFiles(options.manifest, { electron: options.electron, extension: options.extension });
-  if (manifest.source?.commit !== options.candidateCommit || manifest.source?.tag !== OPENCLAW.sourceTag || manifest.tooling?.tag !== TOOLING_TAG) {
+  if (!toolingTag || manifest.source?.commit !== options.candidateCommit || manifest.source?.tag !== OPENCLAW.sourceTag || manifest.tooling?.tag !== toolingTag) {
     throw new Error("openclaw_smoke_manifest_identity_mismatch");
   }
   const baselineExtension = process.env.SURF_ACE_OPENCLAW_BASELINE_EXTENSION;

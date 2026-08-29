@@ -1,14 +1,10 @@
-name: Release final OpenClaw-compatible Surf Ace
+name: OpenClaw Gate 4 - test and compare
 
 on:
-  push:
-    branches:
-      - release/run-openclaw-v0.1.0
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: surf-ace-openclaw-v0.1.0
@@ -19,8 +15,7 @@ env:
   PNPM_VERSION: 10.15.1
   PRODUCT_COMMIT: 58ac8c435679e6611903d31abaecec11bb9d7f75
   PRODUCT_TAG: surf-ace-openclaw-v0.1.0
-  TOOLING_TAG: surf-ace-release-tooling-v0.1.0
-  TRIGGER_REF: refs/heads/release/run-openclaw-v0.1.0
+  TOOLING_TAG: ${{ github.ref_name }}
 
 jobs:
   guard:
@@ -43,8 +38,9 @@ jobs:
             test "${object_type}" = commit
             printf '%s\n' "${object_sha}"
           }
-          test "${GITHUB_EVENT_NAME}" = push
-          test "${GITHUB_REF}" = "${TRIGGER_REF}"
+          test "${GITHUB_EVENT_NAME}" = workflow_dispatch
+          test "${GITHUB_REF_TYPE}" = tag
+          test "${GITHUB_REF}" = "refs/tags/${TOOLING_TAG}"
           tooling_remote="$(peel_tag "${TOOLING_TAG}")"
           product_remote="$(peel_tag "${PRODUCT_TAG}")"
           test "${tooling_remote}" = "${GITHUB_SHA}"
@@ -160,100 +156,3 @@ jobs:
             --build-a build-a \
             --build-b build-b \
             --files surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip,surf-ace-openclaw-extension-v0.1.0.tgz,surf-ace-openclaw-v0.1.0-manifest.json
-
-  smoke:
-    needs: compare
-    runs-on: macos-15
-    steps:
-      - name: Check out immutable tooling
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          path: tooling
-          persist-credentials: false
-          ref: ${{ env.TOOLING_TAG }}
-      - name: Check out test-only baseline
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          path: baseline
-          persist-credentials: false
-          ref: d889f2f4bfb554bc3bfde0eb9927372552d40e51
-      - name: Download compared candidate
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: openclaw-build-a
-          path: build/release/openclaw
-      - name: Pin Node and pnpm
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Build frozen test-only baseline
-        run: |
-          set -euo pipefail
-          sudo xcode-select --switch /Applications/Xcode_16.4.app
-          test "$(xcodebuild -version | head -1)" = "Xcode 16.4"
-          corepack enable
-          corepack prepare "pnpm@${PNPM_VERSION}" --activate
-          pnpm --dir baseline fetch --frozen-lockfile
-          pnpm --dir baseline install --offline --frozen-lockfile
-          node tooling/scripts/release/build-smoke-baseline.mjs \
-            --component openclaw \
-            --source-dir baseline \
-            --output-dir baseline-build \
-            --source-commit d889f2f4bfb554bc3bfde0eb9927372552d40e51
-      - name: Smoke clean install, upgrade, and rollback
-        env:
-          SURF_ACE_OPENCLAW_BASELINE_ELECTRON: ${{ github.workspace }}/baseline-build/baseline-electron.zip
-          SURF_ACE_OPENCLAW_BASELINE_EXTENSION: ${{ github.workspace }}/baseline-build/baseline-extension.tgz
-        run: |
-          set -euo pipefail
-          node tooling/scripts/release/smoke-openclaw-release.mjs \
-            --baseline-commit d889f2f4bfb554bc3bfde0eb9927372552d40e51 \
-            --candidate-commit 58ac8c435679e6611903d31abaecec11bb9d7f75 \
-            --openclaw-version 2026.7.1-2 \
-            --manifest build/release/openclaw/surf-ace-openclaw-v0.1.0-manifest.json \
-            --extension build/release/openclaw/surf-ace-openclaw-extension-v0.1.0.tgz \
-            --electron build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip
-          node tooling/scripts/release/write-smoke-receipt.mjs \
-            --channel openclaw \
-            --manifest build/release/openclaw/surf-ace-openclaw-v0.1.0-manifest.json \
-            --files build/release/openclaw/surf-ace-openclaw-extension-v0.1.0.tgz,build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip \
-            --output build/release/openclaw/.receipts/smoke-receipt.json
-      - name: Retain smoke-approved bytes and receipt
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: openclaw-smoke-approved
-          path: build/release/openclaw
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 30
-
-  attest-and-publish:
-    needs: smoke
-    environment: openclaw-release
-    runs-on: macos-15
-    steps:
-      - name: Download unchanged smoke-approved files
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: openclaw-smoke-approved
-          path: release
-      - name: Attest immutable smoke receipt
-        id: attest
-        uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd
-        with:
-          subject-path: release/.receipts/smoke-receipt.json
-      - name: Publish only attested smoke-approved files
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
-        run: |
-          set -euo pipefail
-          test -n "${ATTESTATION_URL}"
-          gh release create "${PRODUCT_TAG}" \
-            release/surf-ace-openclaw-extension-v0.1.0.tgz \
-            release/surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip \
-            release/surf-ace-openclaw-v0.1.0-manifest.json \
-            --repo "${GITHUB_REPOSITORY}" \
-            --verify-tag \
-            --title "Surf Ace OpenClaw v0.1.0" \
-            --notes "Smoke attestation: ${ATTESTATION_URL}"
