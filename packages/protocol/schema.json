@@ -1537,7 +1537,7 @@
               "properties": {
                 "paneId": {
                   "$ref": "#/$defs/PaneId",
-                  "description": "Target pane. Required — CLU must always specify which pane to target."
+                  "description": "Target pane. Required — OpenClaw must always specify which pane to target."
                 },
                 "contentId": {
                   "$ref": "#/$defs/ContentId"
@@ -1716,7 +1716,7 @@
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "contentId": {
               "$ref": "#/$defs/ContentId"
@@ -1773,7 +1773,7 @@
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "contentId": {
               "$ref": "#/$defs/ContentId"
@@ -1848,7 +1848,7 @@
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "revision": {
               "$ref": "#/$defs/Revision"
@@ -1895,7 +1895,7 @@
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "contentId": {
               "$ref": "#/$defs/ContentId"
@@ -1948,7 +1948,7 @@
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "includeImage": {
               "type": "boolean",
@@ -4342,7 +4342,7 @@
             "closedFramesDiscarded": {
               "type": "integer",
               "minimum": 0,
-              "description": "Count of unread closed annotation frames dropped from the provider buffer for this pane. CLU can use this to know what was lost."
+              "description": "Count of unread closed annotation frames dropped from the provider buffer for this pane. OpenClaw can use this to know what was lost."
             }
           }
         }

@@ -272,7 +272,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
           },
           fingerprint: fingerprintParam,
           name: {
-            description: "Case-insensitive substring match against the Surf Ace surface name, e.g. `eezo` or `Cyberbrain`.",
+            description: "Case-insensitive substring match against the Surf Ace surface name, e.g. `workstation-a` or `Cyberbrain`.",
             type: "string",
           },
           paneAddress: {

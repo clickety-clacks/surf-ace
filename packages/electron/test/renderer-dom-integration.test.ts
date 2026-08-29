@@ -238,16 +238,16 @@ test("renderer DOM integrates authoritative connection states and live scale con
   provenanceWidth = 200;
   stateListener!(provenanceState(2, {
     controllerProductName: "\u3000Clawline\u0085",
-    friendlyChatName: "\u0085CLU\u3000",
+    friendlyChatName: "\u0085OpenClaw\u3000",
   }));
   await Promise.resolve();
   let provenanceLabel = document.querySelector(
     ".navigation-pill__provenance",
   ) as HTMLElement;
-  assert.equal(provenanceLabel.textContent, "CLU — Clawline");
+  assert.equal(provenanceLabel.textContent, "OpenClaw — Clawline");
   assert.equal(
     provenanceLabel.getAttribute("aria-label"),
-    "Pushed by \u2068CLU\u2069, using \u2068Clawline\u2069",
+    "Pushed by \u2068OpenClaw\u2069, using \u2068Clawline\u2069",
   );
   assert.equal(provenanceLabel.getAttribute("role"), "group");
   assert.equal(provenanceLabel.hasAttribute("tabindex"), false);
@@ -275,7 +275,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   );
   assert.equal(
     suppliedComponents[0]!.style.getPropertyValue("inline-size"),
-    "24px",
+    "64px",
   );
   assert.equal(
     suppliedComponents[1]!.style.getPropertyValue("inline-size"),
@@ -284,7 +284,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
 
   let provenanceRevision = 3;
   const fallbackCases = [
-    [{ controllerProductName: null, friendlyChatName: "CLU" }, "CLU — Unknown provider", "CLU — Proveedor desconocido"],
+    [{ controllerProductName: null, friendlyChatName: "OpenClaw" }, "OpenClaw — Unknown provider", "OpenClaw — Proveedor desconocido"],
     [{ controllerProductName: "Clawline", friendlyChatName: null }, "Unknown chat — Clawline", "Chat desconocido — Clawline"],
     [null, "Unknown chat — Unknown provider", "Chat desconocido — Proveedor desconocido"],
     [{ controllerProductName: "", friendlyChatName: "" }, "Unknown chat — Unknown provider", "Chat desconocido — Proveedor desconocido"],
@@ -349,7 +349,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     },
     {
       controllerProductName: "Clawline مزود طويل",
-      friendlyChatName: "CLU محادثة طويلة",
+      friendlyChatName: "OpenClaw محادثة طويلة",
     },
   ];
   const widthModes = [

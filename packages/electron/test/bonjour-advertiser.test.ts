@@ -106,11 +106,11 @@ class FakeChildProcess extends EventEmitter {
 
 test("bonjour advertiser republishes with a suffixed name after a name conflict", async () => {
   const bonjour = new FakeBonjour([
-    [{ name: "TARS Surf Ace", port: 18791, txt: { pk: "other" } }],
+    [{ name: "provider-a Surf Ace", port: 18791, txt: { pk: "other" } }],
   ]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
-    name: "TARS Surf Ace",
+    name: "provider-a Surf Ace",
     port: 18791,
     txtProvider: () => ({ pk: "sf_test" }),
   });
@@ -123,7 +123,7 @@ test("bonjour advertiser republishes with a suffixed name after a name conflict"
     verifyPublishedService(): Promise<void>;
   }).verifyPublishedService();
 
-  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace", "TARS Surf Ace (2)"]);
+  assert.deepEqual(bonjour.publishNames, ["provider-a Surf Ace", "provider-a Surf Ace (2)"]);
   assert.equal(bonjour.findCalls, 1);
   await advertiser.stop();
 });
@@ -131,13 +131,13 @@ test("bonjour advertiser republishes with a suffixed name after a name conflict"
 test("bonjour advertiser republishes when our prompt publish creates a duplicate name", async () => {
   const bonjour = new FakeBonjour([
     [
-      { name: "shrdlu Surf Ace", port: 19001, txt: { pk: "sf_test" } },
-      { event: "txt-update", name: "shrdlu Surf Ace", port: 19001, txt: { pk: "other" } },
+      { name: "tablet-a Surf Ace", port: 19001, txt: { pk: "sf_test" } },
+      { event: "txt-update", name: "tablet-a Surf Ace", port: 19001, txt: { pk: "other" } },
     ],
   ]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
-    name: "shrdlu Surf Ace",
+    name: "tablet-a Surf Ace",
     port: 19001,
     txtProvider: () => ({ pk: "sf_test" }),
   });
@@ -150,18 +150,18 @@ test("bonjour advertiser republishes when our prompt publish creates a duplicate
     verifyPublishedService(): Promise<void>;
   }).verifyPublishedService();
 
-  assert.deepEqual(bonjour.publishNames, ["shrdlu Surf Ace", "shrdlu Surf Ace (2)"]);
+  assert.deepEqual(bonjour.publishNames, ["tablet-a Surf Ace", "tablet-a Surf Ace (2)"]);
   await advertiser.stop();
 });
 
 test("bonjour advertiser diagnostics format concise structured fields", () => {
   assert.equal(
     __test.bonjourDiagnostic("publish_attempt", {
-      name: "TARS Surf Ace",
+      name: "provider-a Surf Ace",
       port: 19001,
       txt_keys: "busy,name,pk",
     }),
-    '[surf-ace:bonjour] event=publish_attempt name="TARS Surf Ace" port=19001 txt_keys="busy,name,pk"',
+    '[surf-ace:bonjour] event=publish_attempt name="provider-a Surf Ace" port=19001 txt_keys="busy,name,pk"',
   );
 });
 
@@ -206,12 +206,12 @@ test("bonjour advertiser uses the default binding on non-macOS hosts", () => {
 
 test("bonjour advertiser keeps incrementing the suffix across repeated conflicts", async () => {
   const bonjour = new FakeBonjour([
-    [{ name: "TARS Surf Ace", port: 18791, txt: { pk: "other" } }],
-    [{ name: "TARS Surf Ace (2)", port: 18791, txt: { pk: "other" } }],
+    [{ name: "provider-a Surf Ace", port: 18791, txt: { pk: "other" } }],
+    [{ name: "provider-a Surf Ace (2)", port: 18791, txt: { pk: "other" } }],
   ]);
   const advertiser = new BonjourAdvertiser({
     bonjour,
-    name: "TARS Surf Ace",
+    name: "provider-a Surf Ace",
     port: 18791,
     txtProvider: () => ({ pk: "sf_test" }),
   });
@@ -228,9 +228,9 @@ test("bonjour advertiser keeps incrementing the suffix across repeated conflicts
   }).verifyPublishedService();
 
   assert.deepEqual(bonjour.publishNames, [
-    "TARS Surf Ace",
-    "TARS Surf Ace (2)",
-    "TARS Surf Ace (3)",
+    "provider-a Surf Ace",
+    "provider-a Surf Ace (2)",
+    "provider-a Surf Ace (3)",
   ]);
   assert.equal(bonjour.unpublishCalls, 2);
   await advertiser.stop();
@@ -241,7 +241,7 @@ test("bonjour advertiser only republishes TXT when the advertised payload change
   let busy = "0";
   const advertiser = new BonjourAdvertiser({
     bonjour,
-    name: "TARS Surf Ace",
+    name: "provider-a Surf Ace",
     port: 18791,
     txtProvider: () => ({ busy, pk: "sf_test" }),
   });
@@ -255,7 +255,7 @@ test("bonjour advertiser only republishes TXT when the advertised payload change
   await new Promise((resolve) => {
     setTimeout(resolve, 50);
   });
-  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace"]);
+  assert.deepEqual(bonjour.publishNames, ["provider-a Surf Ace"]);
   assert.equal(bonjour.unpublishCalls, 0);
 
   busy = "1";
@@ -264,7 +264,7 @@ test("bonjour advertiser only republishes TXT when the advertised payload change
     setTimeout(resolve, 800);
   });
 
-  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace", "TARS Surf Ace"]);
+  assert.deepEqual(bonjour.publishNames, ["provider-a Surf Ace", "provider-a Surf Ace"]);
   assert.equal(bonjour.unpublishCalls, 1);
   await advertiser.stop();
 });
@@ -274,7 +274,7 @@ test("bonjour advertiser publishes promptly without name preflight", async () =>
   bonjour.findError = new Error("preflight failed");
   const advertiser = new BonjourAdvertiser({
     bonjour,
-    name: "TARS Surf Ace",
+    name: "provider-a Surf Ace",
     port: 18791,
     txtProvider: () => ({ pk: "sf_test" }),
   });
@@ -284,7 +284,7 @@ test("bonjour advertiser publishes promptly without name preflight", async () =>
     setTimeout(resolve, 50);
   });
 
-  assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace"]);
+  assert.deepEqual(bonjour.publishNames, ["provider-a Surf Ace"]);
   assert.equal(bonjour.findCalls, 0);
   await advertiser.stop();
 });
@@ -293,7 +293,7 @@ test("bonjour advertiser disables native library preflight probe", async () => {
   const bonjour = new FakeBonjour();
   const advertiser = new BonjourAdvertiser({
     bonjour,
-    name: "shrdlu Surf Ace",
+    name: "tablet-a Surf Ace",
     port: 19001,
     txtProvider: () => ({ pk: "sf_test" }),
   });
@@ -322,7 +322,7 @@ test("bonjour advertiser disables mDNS when publish throws EADDRNOTAVAIL", async
   try {
     const advertiser = new BonjourAdvertiser({
       bonjour,
-      name: "TARS Surf Ace",
+      name: "provider-a Surf Ace",
       port: 18791,
       txtProvider: () => ({ pk: "sf_test" }),
     });
@@ -355,7 +355,7 @@ test("bonjour advertiser disables mDNS when discovery throws ENETUNREACH", async
   try {
     const advertiser = new BonjourAdvertiser({
       bonjour,
-      name: "TARS Surf Ace",
+      name: "provider-a Surf Ace",
       port: 18791,
       txtProvider: () => ({ pk: "sf_test" }),
     });
@@ -368,7 +368,7 @@ test("bonjour advertiser disables mDNS when discovery throws ENETUNREACH", async
       verifyPublishedService(): Promise<void>;
     }).verifyPublishedService();
 
-    assert.deepEqual(bonjour.publishNames, ["TARS Surf Ace"]);
+    assert.deepEqual(bonjour.publishNames, ["provider-a Surf Ace"]);
     assert.equal(bonjour.destroyed, true);
     assert.match(warnings.join("\n"), /\[surf-ace:bonjour\] event=binding_disabled .*interface=default .*reason=multicast_unavailable/);
     await advertiser.stop();
@@ -385,7 +385,7 @@ test("bonjour advertiser handles missing dns-sd isolated publisher without crash
   const advertiser = new BonjourAdvertiser({
     bonjour: new FakeBonjour(),
     isolatedPublisherSpawn: fakeSpawn,
-    name: "TARS Surf Ace",
+    name: "provider-a Surf Ace",
     port: 18791,
     txtProvider: () => ({ pk: "sf_test" }),
   });
@@ -396,7 +396,7 @@ test("bonjour advertiser handles missing dns-sd isolated publisher without crash
   try {
     await (advertiser as unknown as {
       publishWithIsolatedPublisher(name: string): Promise<void>;
-    }).publishWithIsolatedPublisher("TARS Surf Ace");
+    }).publishWithIsolatedPublisher("provider-a Surf Ace");
     child.emit("error", Object.assign(new Error("spawn dns-sd ENOENT"), { code: "ENOENT" }));
     await advertiser.stop();
   } finally {
@@ -412,14 +412,14 @@ test("bonjour advertiser keeps isolated publisher alive when self-discovery is b
   const advertiser = new BonjourAdvertiser({
     bonjour: new FakeBonjour([[]]),
     isolatedPublisherSpawn: fakeSpawn,
-    name: "eezo Surf Ace (eezo)",
+    name: "workstation-a Surf Ace (workstation-a)",
     port: 19001,
     txtProvider: () => ({ pk: "b0ddd36d" }),
   });
 
   await (advertiser as unknown as {
     publishWithIsolatedPublisher(name: string): Promise<void>;
-  }).publishWithIsolatedPublisher("eezo Surf Ace (eezo)");
+  }).publishWithIsolatedPublisher("workstation-a Surf Ace (workstation-a)");
   await (advertiser as unknown as {
     verifyPublishedService(): Promise<void>;
   }).verifyPublishedService();
@@ -437,14 +437,14 @@ test("bonjour advertiser reaps only stale orphaned isolated publishers with the 
       killedPids.push(pid);
     },
     isolatedPublisherProcessList: async () => [
-      "101 1 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
-      "102 1 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=ffffffff ws=/ws",
-      "103 1 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19002 busy=1 pk=b0ddd36d ws=/ws",
-      "104 999 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+      "101 1 dns-sd -R workstation-a Surf Ace (workstation-a) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+      "102 1 dns-sd -R workstation-a Surf Ace (workstation-a) _surf-ace._tcp local. 19001 busy=1 pk=ffffffff ws=/ws",
+      "103 1 dns-sd -R workstation-a Surf Ace (workstation-a) _surf-ace._tcp local. 19002 busy=1 pk=b0ddd36d ws=/ws",
+      "104 999 dns-sd -R workstation-a Surf Ace (workstation-a) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
       "105 1 dns-sd -R Other Surf Ace _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
-      "106 1 dns-sd -R eezo Surf Ace (eezo) _other._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+      "106 1 dns-sd -R workstation-a Surf Ace (workstation-a) _other._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
     ].join("\n"),
-    name: "eezo Surf Ace (eezo)",
+    name: "workstation-a Surf Ace (workstation-a)",
     platform: "darwin",
     port: 19001,
     txtProvider: () => ({ pk: "b0ddd36d" }),
@@ -452,7 +452,7 @@ test("bonjour advertiser reaps only stale orphaned isolated publishers with the 
 
   await (advertiser as unknown as {
     cleanupOrphanedIsolatedPublishers(name: string): Promise<void>;
-  }).cleanupOrphanedIsolatedPublishers("eezo Surf Ace (eezo)");
+  }).cleanupOrphanedIsolatedPublishers("workstation-a Surf Ace (workstation-a)");
 
   assert.deepEqual(killedPids, [101]);
 });
@@ -465,8 +465,8 @@ test("bonjour advertiser does not reap the current isolated publisher child", as
       killedPids.push(pid);
     },
     isolatedPublisherProcessList: async () =>
-      "201 98793 dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
-    name: "eezo Surf Ace (eezo)",
+      "201 98793 dns-sd -R workstation-a Surf Ace (workstation-a) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+    name: "workstation-a Surf Ace (workstation-a)",
     platform: "darwin",
     port: 19001,
     txtProvider: () => ({ pk: "b0ddd36d" }),
@@ -475,7 +475,7 @@ test("bonjour advertiser does not reap the current isolated publisher child", as
   (advertiser as unknown as { isolatedPublisher: { pid: number } }).isolatedPublisher = { pid: 201 };
   await (advertiser as unknown as {
     cleanupOrphanedIsolatedPublishers(name: string): Promise<void>;
-  }).cleanupOrphanedIsolatedPublishers("eezo Surf Ace (eezo)");
+  }).cleanupOrphanedIsolatedPublishers("workstation-a Surf Ace (workstation-a)");
 
   assert.deepEqual(killedPids, []);
 });
@@ -483,15 +483,15 @@ test("bonjour advertiser does not reap the current isolated publisher child", as
 test("bonjour advertiser isolated publisher matcher requires same service name port and fingerprint", () => {
   assert.equal(
     __test.isolatedPublisherCommandMatches(
-      "dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
-      { name: "eezo Surf Ace (eezo)", port: 19001, publicKeyFingerprint: "b0ddd36d" },
+      "dns-sd -R workstation-a Surf Ace (workstation-a) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36d ws=/ws",
+      { name: "workstation-a Surf Ace (workstation-a)", port: 19001, publicKeyFingerprint: "b0ddd36d" },
     ),
     true,
   );
   assert.equal(
     __test.isolatedPublisherCommandMatches(
-      "dns-sd -R eezo Surf Ace (eezo) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36e ws=/ws",
-      { name: "eezo Surf Ace (eezo)", port: 19001, publicKeyFingerprint: "b0ddd36d" },
+      "dns-sd -R workstation-a Surf Ace (workstation-a) _surf-ace._tcp local. 19001 busy=1 pk=b0ddd36e ws=/ws",
+      { name: "workstation-a Surf Ace (workstation-a)", port: 19001, publicKeyFingerprint: "b0ddd36d" },
     ),
     false,
   );

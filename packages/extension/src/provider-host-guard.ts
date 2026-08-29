@@ -1,14 +1,12 @@
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 
-export const NON_TARS_PROVIDER_OVERRIDE_ENV = "SURF_ACE_ALLOW_NON_TARS_PROVIDER";
-
-const TARS_PROVIDER_HOSTS = new Set(["tars", "tars-2", "tars.tail4105e8.ts.net"]);
+export const PROVIDER_ALLOWED_HOSTS_ENV = "SURF_ACE_PROVIDER_ALLOWED_HOSTS";
 
 export type ProviderHostGuardResult = {
   allowed: boolean;
   hostNames: string[];
-  reason: "non_tars_host" | "override" | "tars_host";
+  reason: "configuration_missing_or_invalid" | "configured_host" | "host_not_allowed";
   message?: string;
 };
 
@@ -30,6 +28,23 @@ function uniqueProviderHostNames(hostNames: string[]): string[] {
         .filter((hostName) => hostName.length > 0),
     ),
   );
+}
+
+function configuredProviderHostNames(
+  env: Record<string, string | undefined>,
+): { error: string | null; hostNames: string[] } {
+  const configured = env[PROVIDER_ALLOWED_HOSTS_ENV];
+  if (typeof configured !== "string" || configured.trim().length === 0) {
+    return { error: `${PROVIDER_ALLOWED_HOSTS_ENV} is required`, hostNames: [] };
+  }
+  const rawHostNames = configured.split(",").map((hostName) => hostName.trim());
+  if (rawHostNames.some((hostName) => !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(hostName) || hostName.includes(".."))) {
+    return { error: `${PROVIDER_ALLOWED_HOSTS_ENV} must be a comma-separated list of host names`, hostNames: [] };
+  }
+  const hostNames = uniqueProviderHostNames(rawHostNames);
+  return hostNames.length > 0
+    ? { error: null, hostNames }
+    : { error: `${PROVIDER_ALLOWED_HOSTS_ENV} must contain at least one host name`, hostNames: [] };
 }
 
 function readScutilLocalHostName(): string {
@@ -55,34 +70,32 @@ export function evaluateProviderHostGuard(
   env: Record<string, string | undefined> = process.env,
 ): ProviderHostGuardResult {
   const normalizedHostNames = uniqueProviderHostNames(hostNames);
-  if (env[NON_TARS_PROVIDER_OVERRIDE_ENV] === "1") {
-    return { allowed: true, hostNames: normalizedHostNames, reason: "override" };
+  const allowed = configuredProviderHostNames(env);
+  if (allowed.error) {
+    return {
+      allowed: false,
+      hostNames: normalizedHostNames,
+      message: `Surf Ace OpenClaw extension/provider startup requires explicit host configuration: ${allowed.error}.`,
+      reason: "configuration_missing_or_invalid",
+    };
   }
-  if (normalizedHostNames.some((hostName) => TARS_PROVIDER_HOSTS.has(hostName))) {
-    return { allowed: true, hostNames: normalizedHostNames, reason: "tars_host" };
+  if (normalizedHostNames.some((hostName) => allowed.hostNames.includes(hostName))) {
+    return { allowed: true, hostNames: normalizedHostNames, reason: "configured_host" };
   }
   const detectedHostNames = normalizedHostNames.length > 0 ? normalizedHostNames.join(", ") : "unknown";
   return {
     allowed: false,
     hostNames: normalizedHostNames,
     message:
-      `Surf Ace OpenClaw extension/provider state is TARS-only; detected host(s): ${detectedHostNames}. ` +
-      `Run the Electron client elsewhere if needed, but install/run this provider only on TARS. ` +
-      `Set ${NON_TARS_PROVIDER_OVERRIDE_ENV}=1 only for an explicit approved override.`,
-    reason: "non_tars_host",
+      `Surf Ace OpenClaw extension/provider startup is not allowed on detected host(s): ${detectedHostNames}. ` +
+      `Configure ${PROVIDER_ALLOWED_HOSTS_ENV} with the approved comma-separated host names.`,
+    reason: "host_not_allowed",
   };
 }
 
 export function assertProviderHostAllowed(logger: ProviderHostGuardLogger = console): void {
   const result = evaluateProviderHostGuard(resolveLocalProviderHostNames());
   if (result.allowed) {
-    if (result.reason === "override") {
-      logger.warn?.(
-        `[surf-ace] ${NON_TARS_PROVIDER_OVERRIDE_ENV}=1 is allowing provider startup on non-TARS host(s): ${
-          result.hostNames.join(", ") || "unknown"
-        }`,
-      );
-    }
     return;
   }
   logger.error?.(result.message);

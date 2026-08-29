@@ -8,7 +8,7 @@ T1770 is not ready for a product-readiness claim.
 
 - The official OpenClaw controller path passed a fresh correlated production-client push, visible Markdown render, local read, provenance, and accessibility capture after review fixes.
 - The official Tightbeam agent path is blocked before its first Surf Ace tool call by the available Claude model's weekly quota. The available Codex agent session loaded the Surf Ace identity and skill but did not expose the MCP tools.
-- The exact `CLU — Clawline` provenance example is not proven. The official OpenClaw session supplied no friendly chat label, so the production client correctly rendered the specified fallback `Unknown chat — Clawline`.
+- The exact `OpenClaw — Clawline` provenance example is not proven. The official OpenClaw session supplied no friendly chat label, so the production client correctly rendered the specified fallback `Unknown chat — Clawline`.
 
 Fixtures, mocks, direct WebSocket calls, compositor-only calls, and uncorrelated logs remain diagnostic and are not used for the product claims below.
 
@@ -80,7 +80,7 @@ The production DOM contained:
 
 Chromium accessibility exposed matching static text, and the screenshot visibly confirms it. The final client log contains no `window_console_message`, `Uncaught`, or error match.
 
-The actual session again supplied no friendly chat label, so the deterministic production fallback is `Unknown chat — Clawline`; exact `CLU — Clawline` remains unproven. Its components retain `dir=auto` and isolated bidirectional rendering, and the noninteractive AX group exposes the full semantic name.
+The actual session again supplied no friendly chat label, so the deterministic production fallback is `Unknown chat — Clawline`; exact `OpenClaw — Clawline` remains unproven. Its components retain `dir=auto` and isolated bidirectional rendering, and the noninteractive AX group exposes the full semantic name.
 
 | Final artifact | SHA-256 |
 |---|---|

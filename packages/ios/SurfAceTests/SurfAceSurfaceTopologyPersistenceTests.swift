@@ -71,7 +71,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(surfAceValidatedProviderWindowLabel(from: "aa"), "aa")
 
         XCTAssertNil(surfAceValidatedProviderWindowLabel(from: "DOCS"))
-        XCTAssertNil(surfAceValidatedProviderWindowLabel(from: "RACTER GRAPHICAL NATIVE"))
+        XCTAssertNil(surfAceValidatedProviderWindowLabel(from: "portrait-display GRAPHICAL NATIVE"))
         XCTAssertNil(surfAceValidatedProviderWindowLabel(from: " a"))
         XCTAssertNil(surfAceValidatedProviderWindowLabel(from: "a1"))
         XCTAssertNil(surfAceValidatedProviderWindowLabel(from: ""))

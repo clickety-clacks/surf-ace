@@ -15,4 +15,4 @@ Surf Ace sends raw user annotation geometry. The provider does not classify or c
 
 - Use `surf_ace_annotations_remove` only for live overlay strokes that should disappear from the current pane.
 - Closed frames returned by `surf_ace_read` are immutable records. Do not expect removal to rewrite backlog frames.
-- If CLU interprets a scratch-out or consumed gesture, remove only the specific `strokeIds` that should leave the live overlay.
+- If OpenClaw interprets a scratch-out or consumed gesture, remove only the specific `strokeIds` that should leave the live overlay.

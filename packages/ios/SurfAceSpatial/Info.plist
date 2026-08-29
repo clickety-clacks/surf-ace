@@ -37,7 +37,7 @@
 		<string>_surf-ace._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Surf Ace announces itself on your local network so CLU can discover and render content.</string>
+	<string>Surf Ace announces itself on your local network so OpenClaw can discover and render content.</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>Rajdhani-Regular.ttf</string>
