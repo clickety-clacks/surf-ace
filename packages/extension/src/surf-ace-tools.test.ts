@@ -249,7 +249,7 @@ function createStubRuntime(): SurfAceRuntime {
   };
 }
 
-test("CLU tool surface matches DESIGN.md exactly", () => {
+test("OpenClaw tool surface matches DESIGN.md exactly", () => {
   const tools = createSurfAceTools(createStubRuntime());
 
   assert.deepEqual(surfAceToolNames, [
@@ -569,8 +569,8 @@ test("surf_ace_list supports bounded official fleet selection by surface and pan
       {
         ...(await createStubRuntime().listScreens())[0],
         _debug: largeDebug,
-        fingerprint: "sf_eezo",
-        name: "eezo",
+        fingerprint: "sf_workstation_a",
+        name: "workstation-a",
         panes: [
           {
             activeContent: null,
@@ -602,11 +602,11 @@ test("surf_ace_list supports bounded official fleet selection by surface and pan
   const listTool = createSurfAceTools(runtime).find((tool) => tool.name === "surf_ace_list");
   assert.ok(listTool);
 
-  const eezo = await listTool.execute({ actionableOnly: true, name: "eezo" });
-  assert.deepEqual(eezo.map((screen) => screen.fingerprint), ["sf_eezo"]);
-  assert.equal(eezo[0]?.panes.some((pane) => pane.displayId === "b4" && pane.paneId === 4), true);
-  assert.equal(eezo[0]?.panes.some((pane) => pane.displayId === "b9" && pane.paneId === 9), true);
-  assert.equal(JSON.stringify(eezo).includes("providerAuthorityProjection"), false);
+  const workstationA = await listTool.execute({ actionableOnly: true, name: "workstation-a" });
+  assert.deepEqual(workstationA.map((screen) => screen.fingerprint), ["sf_workstation_a"]);
+  assert.equal(workstationA[0]?.panes.some((pane) => pane.displayId === "b4" && pane.paneId === 4), true);
+  assert.equal(workstationA[0]?.panes.some((pane) => pane.displayId === "b9" && pane.paneId === 9), true);
+  assert.equal(JSON.stringify(workstationA).includes("providerAuthorityProjection"), false);
 
   const cyberbrain = await listTool.execute({ actionableOnly: true, name: "Cyberbrain" });
   assert.deepEqual(cyberbrain.map((screen) => screen.fingerprint), ["sf_cyberbrain"]);
@@ -614,12 +614,12 @@ test("surf_ace_list supports bounded official fleet selection by surface and pan
   assert.equal(cyberbrain[0]?.name, "Surf Ace - Apple Vision Pro");
 
   const paneB9 = await listTool.execute({ paneAddress: "b9" });
-  assert.deepEqual(paneB9.map((screen) => screen.fingerprint), ["sf_eezo"]);
+  assert.deepEqual(paneB9.map((screen) => screen.fingerprint), ["sf_workstation_a"]);
   assert.deepEqual(paneB9[0]?.panes.map((pane) => pane.displayId), ["b9"]);
   assert.ok(JSON.stringify(paneB9).length < 16_000);
 
   const paneIdB4 = await listTool.execute({ paneId: "4" });
-  assert.deepEqual(paneIdB4.map((screen) => screen.fingerprint), ["sf_eezo"]);
+  assert.deepEqual(paneIdB4.map((screen) => screen.fingerprint), ["sf_workstation_a"]);
   assert.deepEqual(paneIdB4[0]?.panes.map((pane) => pane.displayId), ["b4"]);
 });
 

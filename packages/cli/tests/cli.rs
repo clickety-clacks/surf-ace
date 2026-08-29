@@ -18,6 +18,7 @@ struct FakeWire {
     operations: Vec<String>,
     payloads: Vec<(String, Value)>,
     fail_after_send_on: Option<String>,
+    pair_rejection: Option<Envelope>,
     receipt_capacity_on: Option<String>,
     target_precommit_error: Option<(String, Option<String>)>,
     committed_rejection_on: Option<String>,
@@ -34,6 +35,7 @@ impl FakeWire {
             operations: vec![],
             payloads: vec![],
             fail_after_send_on: None,
+            pair_rejection: None,
             receipt_capacity_on: None,
             target_precommit_error: None,
             committed_rejection_on: None,
@@ -75,6 +77,14 @@ impl DirectWire for FakeWire {
             return Err(WireFailure::AfterSend {
                 code: "test_disconnect".into(),
             });
+        }
+        if op == "pair.request" {
+            if let Some(response) = self.pair_rejection.clone() {
+                return Ok(WireResponse {
+                    response,
+                    events: vec![],
+                });
+            }
         }
         if self.receipt_capacity_on.as_deref() == Some(op) {
             return Ok(WireResponse {
@@ -250,7 +260,7 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         .iter()
         .map(|command| command.name())
         .collect::<Vec<_>>();
-    assert_eq!(expected.len(), 11);
+    assert_eq!(expected.len(), 12);
     assert_eq!(package["commands"], json!(expected));
     assert_eq!(
         package["receiptResolutionOutcomes"],
@@ -522,7 +532,7 @@ fn canonical_target_admission_cases_execute_rust_controller_semantics() {
 }
 
 #[test]
-fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
+fn all_twelve_commands_map_to_the_public_wire_and_return_json() {
     for (command, input, expected_operation) in canonical_network_cases() {
         let temp = TempDir::new().unwrap();
         let mut wire = FakeWire::ordinary();
@@ -537,6 +547,35 @@ fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
     local.product_label = None;
     let output = execute(local).unwrap();
     assert_eq!(output.result["cacheStatus"], "unsynchronized");
+}
+
+#[test]
+fn surface_mode_conversion_uses_lifecycle_pairing_and_exact_input() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::SurfaceModeConvert,
+            json!({ "currentMode": "legacy", "surfaceId": "sf_legacy" }),
+        ),
+        &mut wire,
+    )
+    .unwrap();
+
+    assert_eq!(output.command, "surface-mode-convert");
+    assert_eq!(wire.operations[0], "pair.request");
+    assert_eq!(wire.payloads[0].1.get("surfaceId"), None);
+    assert!(wire.operations.contains(&"surface.mode.convert".into()));
+    let conversion = wire
+        .payloads
+        .iter()
+        .find(|(op, _)| op == "surface.mode.convert")
+        .unwrap();
+    assert_eq!(
+        conversion.1,
+        json!({ "currentMode": "legacy", "surfaceId": "sf_legacy" }),
+    );
 }
 
 #[test]
@@ -617,7 +656,7 @@ fn canonical_network_cases() -> Vec<(Command, Value, &'static str)> {
         (Command::List, json!({}), "surfaces.list"),
         (
             Command::Push,
-            json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "markdown", "content": { "markdown": "hi" }, "friendlyChatName": "CLU" }),
+            json!({ "surfaceId": "sf_1", "paneId": 1, "contentId": "c_1", "contentType": "markdown", "content": { "markdown": "hi" }, "friendlyChatName": "OpenClaw" }),
             "content.set",
         ),
         (
@@ -684,6 +723,11 @@ fn canonical_network_cases() -> Vec<(Command, Value, &'static str)> {
             Command::TargetApply,
             json!({ "surfaceId": "sf_1", "paneId": 1, "requestId": "target_request_1", "restoreReason": "initial", "targetId": "tg_1", "targetEpoch": 1, "targetKind": "native_app", "targetHeader": {}, "targetPayload": {} }),
             "target.apply",
+        ),
+        (
+            Command::SurfaceModeConvert,
+            json!({ "surfaceId": "sf_1", "currentMode": "legacy" }),
+            "surface.mode.convert",
         ),
     ]
 }
@@ -1429,6 +1473,7 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         let mut surface = accept(surface_stream).unwrap();
         let pair = read_request(&mut surface);
         assert_eq!(pair["payload"]["surfaceId"], "sf_1");
+        assert!(pair["payload"].get("migrationMaterial").is_none());
         let mut surface_pair = pair_payload(pair["payload"]["controllerInstanceId"].clone());
         surface_pair["surfaceId"] = json!("sf_1");
         send_response(
@@ -1439,7 +1484,7 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         );
         let push = read_request(&mut surface);
         assert_eq!(push["op"], "content.set");
-        assert_eq!(push["payload"]["friendlyChatName"], "CLU");
+        assert_eq!(push["payload"]["friendlyChatName"], "OpenClaw");
         let push_id = push["id"].as_str().unwrap();
         send_response(
             &mut surface,
@@ -1484,7 +1529,7 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
             "contentId": "c_1",
             "contentType": "markdown",
             "content": { "markdown": "hello" },
-            "friendlyChatName": "CLU"
+            "friendlyChatName": "OpenClaw"
         }),
     );
     call.endpoint = Some(endpoint);
@@ -1494,6 +1539,72 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         11
     );
     server.join().unwrap();
+}
+
+#[test]
+fn captured_pair_rejection_preserves_controller_operation_and_code() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    wire.pair_rejection = Some(
+        serde_json::from_str(include_str!("fixtures/pair-request-invalid-operation.json")).unwrap(),
+    );
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Push,
+            json!({
+                "surfaceId": "sf_1",
+                "paneId": 1,
+                "contentId": "c_1",
+                "contentType": "markdown",
+                "content": { "markdown": "hello" }
+            }),
+        ),
+        &mut wire,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CliError::Rejected { ref operation, ref code }
+            if operation == "pair.request" && code == "invalid_operation"
+    ));
+    assert_eq!(wire.operations, vec!["pair.request"]);
+}
+
+#[test]
+fn native_cli_rejects_malformed_migration_material_before_transport_or_state() {
+    let temp = TempDir::new().unwrap();
+    let input = json!({
+        "migrationMaterial": { "unexpected": true },
+        "surfaceId": "sf_1",
+        "paneId": 1,
+        "contentId": "c_1",
+        "contentType": "markdown",
+        "content": { "markdown": "hello" }
+    });
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args([
+            "--state-root",
+            temp.path().to_str().unwrap(),
+            "--endpoint",
+            "ws://127.0.0.1:9",
+            "--product-label",
+            "Clawline",
+            "push",
+            "--input-json",
+            &serde_json::to_string(&input).unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "invalid_input");
+    assert!(result["error"]["details"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("migrationMaterial"));
+    assert!(!temp.path().join("controller-state.json").exists());
+    assert!(!temp.path().join("invocation.lock").exists());
 }
 
 #[test]

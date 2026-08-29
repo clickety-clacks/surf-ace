@@ -1,31 +1,31 @@
 # Surf Ace Wire Protocol (WebSocket)
 
 Status: Design draft
-Depends on: `/Users/mike/shared-workspace/clawline/specs/clawline-invariants.md`
+Depends on: `<spec-root>/clawline/specs/clawline-invariants.md`
 
 ## 1. Purpose and Goals
 
-Surf Ace is a standalone display and annotation system that turns any screen running the Surf Ace app into a CLU-managed surface. It is a purpose-built binary application — not embedded in another app — available on iOS/iPadOS and as an Electron app on macOS, Windows, and Linux.
+Surf Ace is a standalone display and annotation system that turns any screen running the Surf Ace app into an OpenClaw-managed surface. It is a purpose-built binary application — not embedded in another app — available on iOS/iPadOS and as an Electron app on macOS, Windows, and Linux.
 
 ### Actors
 
-- **CLU** — the AI orchestrator. CLU discovers surfaces, pushes content to them, reads user annotations and events, and interprets surface activity.
-- **Surfaces** — screens running the Surf Ace app. A surface is a render target that CLU can address by stable identity. Multiple surfaces can be active simultaneously; CLU manages them independently.
-- **Users** — annotators and viewers. On iPad, users draw on content with a stylus (Apple Pencil) or finger. On Electron, users annotate with mouse or trackpad. User interactions are captured and reported to CLU for interpretation.
+- **OpenClaw** — the AI orchestrator. OpenClaw discovers surfaces, pushes content to them, reads user annotations and events, and interprets surface activity.
+- **Surfaces** — screens running the Surf Ace app. A surface is a render target that OpenClaw can address by stable identity. Multiple surfaces can be active simultaneously; OpenClaw manages them independently.
+- **Users** — annotators and viewers. On iPad, users draw on content with a stylus (Apple Pencil) or finger. On Electron, users annotate with mouse or trackpad. User interactions are captured and reported to OpenClaw for interpretation.
 
 ### Core Goals
 
-1. **CLU-managed surface.** Any screen running the Surf Ace app becomes a surface CLU can push content to and read events from.
-2. **Content display.** CLU pushes content to surfaces in the following types: `html`, `image`, `pdf`, `terminal`, `markdown`. `video` and `canvas` remain optional wire-level content types for forward compatibility, but CLU drawing workflows do not depend on them because draw-capable HTML/SVG content already works through normal content updates. The surface renders content and keeps it displayed until CLU explicitly changes it.
-3. **User annotation.** Users draw and annotate on displayed content using a stylus (iPad) or input device (Electron). Annotation strokes are captured and reported to CLU.
-4. **CLU interpretation.** CLU reads user annotations and interprets them — identifying point-outs, markup gestures, written content, and spatial relationships to the displayed material.
+1. **OpenClaw-managed surface.** Any screen running the Surf Ace app becomes a surface OpenClaw can push content to and read events from.
+2. **Content display.** OpenClaw pushes content to surfaces in the following types: `html`, `image`, `pdf`, `terminal`, `markdown`. `video` and `canvas` remain optional wire-level content types for forward compatibility, but OpenClaw drawing workflows do not depend on them because draw-capable HTML/SVG content already works through normal content updates. The surface renders content and keeps it displayed until OpenClaw explicitly changes it.
+3. **User annotation.** Users draw and annotate on displayed content using a stylus (iPad) or input device (Electron). Annotation strokes are captured and reported to OpenClaw.
+4. **OpenClaw interpretation.** OpenClaw reads user annotations and interprets them — identifying point-outs, markup gestures, written content, and spatial relationships to the displayed material.
 5. **Zero-config discovery.** Surfaces advertise themselves via Bonjour/mDNS (`_surf-ace._tcp`). No manual setup, pairing codes, or configuration is required.
-6. **Multi-surface and multi-pane.** CLU can manage multiple surfaces simultaneously. Each surface has a stable identity and independent state. Within a surface, windows can be split into multiple panes, each with independent content and annotation context. CLU can target content and read annotations at the pane level.
+6. **Multi-surface and multi-pane.** OpenClaw can manage multiple surfaces simultaneously. Each surface has a stable identity and independent state. Within a surface, windows can be split into multiple panes, each with independent content and annotation context. OpenClaw can target content and read annotations at the pane level.
 7. **Standalone app.** Surf Ace is its own binary on each platform. It is not a plugin, extension, or embedded view inside another application.
 
 ### Architecture Overview
 
-All provider↔surface communication uses the public WebSocket protocol. The provider (CLU's runtime component managing surface connections) is the WS client; the surface app runs the WS server. There is no REST API. OpenClaw maintains a persistent connection, handles reconnect, and buffers surface state for CLU tool reads. The general standalone `surf-ace` CLI connects directly for each explicit networked invocation and durably reconciles its local projection under the caller-supplied state root before disconnecting, regardless of whether the caller is a program, script, user, or agent such as Tight Beam.
+All provider↔surface communication uses the public WebSocket protocol. The provider (OpenClaw's runtime component managing surface connections) is the WS client; the surface app runs the WS server. There is no REST API. OpenClaw maintains a persistent connection, handles reconnect, and buffers surface state for OpenClaw tool reads. The general standalone `surf-ace` CLI connects directly for each explicit networked invocation and durably reconciles its local projection under the caller-supplied state root before disconnecting, regardless of whether the caller is a program, script, user, or agent such as Tight Beam.
 
 Key design decisions:
 1. Provider initiates the connection (provider is WS client).
@@ -44,7 +44,7 @@ Key design decisions:
 
 ### 2.2 Non-Goals
 1. UI design details for surface rendering.
-2. CLU prompt orchestration details.
+2. OpenClaw prompt orchestration details.
 3. Cloud relay transport.
 
 ### 2.3 Delivery Phasing
@@ -55,7 +55,7 @@ Implementation order is explicitly phased:
 1. Multi-window support (already in protocol).
 2. Multi-pane support inside a window (internal `paneId`, visible `paneLabel`, pane split/resize/close lifecycle).
 3. Stable read/write targeting by `{surfaceId, paneId}`.
-4. **Client-owned pane history routing** — when multiple controllers or CLU sessions target the same pane, each accepted `content.set` creates a distinct entry and becomes visible immediately. The previously visible entry remains in the shared retained Back/Forward pool.
+4. **Client-owned pane history routing** — when multiple controllers or OpenClaw sessions target the same pane, each accepted `content.set` creates a distinct entry and becomes visible immediately. The previously visible entry remains in the shared retained Back/Forward pool.
 
 **Phase 2 — Annotation semantics:**
 1. Annotation mode UX lock.
@@ -68,13 +68,13 @@ Constraint: annotation semantics in §§13–14 are normative architecture and m
 1. A single window can be split into multiple panes, each with stable internal `paneId` and stable visible `paneLabel`.
 2. Pane lifecycle exists: create/split, resize, rename, close.
 3. All screen-scoped tool operations can target `{surfaceId, paneId}` after resolving human references through `surf_ace_list`.
-4. **`paneId` is required** on all pane-scoped tool calls. CLU MUST always specify which pane it is targeting once it has resolved the intended pane from `windowLabel` / `paneLabel`. There is no default-pane fallback.
+4. **`paneId` is required** on all pane-scoped tool calls. OpenClaw MUST always specify which pane it is targeting once it has resolved the intended pane from `windowLabel` / `paneLabel`. There is no default-pane fallback.
 5. `surfaces.list` enumerates active window surfaces for an endpoint; after pair/resume, `panes.list` and `surf_ace_list` expose pane topology and active content per pane.
 6. Content operations are isolated per pane (push/clear in pane A does not mutate pane B).
 7. Lockless-capable surfaces use concurrent controller admission and client-local authority. Ownership lock semantics remain only for explicitly negotiated legacy surfaces.
 8. At least one iOS and one Electron implementation pass topology tests for pane isolation and routing.
 9. History model is active: every accepted `content.set` creates a distinct entry and makes it visible. The prior visible entry enters one shared per-pane pool of at most 20 non-visible Back/Forward entries, evicted by client `lastVisibleSequence` LRU. Surface provides Back/Forward navigation.
-10. Annotation reads are pane-scoped at the CLU boundary; any finer-grained history bookkeeping needed for Back/Forward restore is implementation-internal to the surface/provider.
+10. Annotation reads are pane-scoped at the OpenClaw boundary; any finer-grained history bookkeeping needed for Back/Forward restore is implementation-internal to the surface/provider.
 
 Only after these are true do annotation-priority implementation tasks move to Phase 2.
 
@@ -89,7 +89,7 @@ Rules:
 4. This boundary is enforced to prevent cross-project leakage and to keep extraction to a true standalone plugin clean if that becomes necessary.
 5. Both extensions benefit from monorepo-level access to core internals (`src/`) while this boundary is maintained.
 
-Ownership: `extensions/surf-ace/` owns the Surf Ace provider runtime — mDNS discovery, WS connection management, local state buffers, and all `surf_ace_*` CLU tools. The corresponding surface-side core module (if needed) lives in `src/surf-ace/`. Neither Clawline nor any other extension imports from these paths.
+Ownership: `extensions/surf-ace/` owns the Surf Ace provider runtime — mDNS discovery, WS connection management, local state buffers, and all `surf_ace_*` OpenClaw tools. The corresponding surface-side core module (if needed) lives in `src/surf-ace/`. Neither Clawline nor any other extension imports from these paths.
 
 ## 2a. Concepts
 
@@ -101,13 +101,13 @@ Before the protocol details, these terms are used consistently throughout this s
 
 **Pane** — a rendering scope nested inside a surface window. Each pane has a stable internal identity (`paneId`) and a separate stable visible identity (`paneLabel`).
 
-**Pane label** — the client-assigned user-visible identifier for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from `paneId` and is a secondary key for the live Surf Ace topology. Pane labels are scoped to one surface/window; `windowLabel + paneLabel` is the user-visible coordinate. The CLU/user-facing pane token is the pane's `displayId` / `paneAddress`, which is derived from the window label plus pane label.
+**Pane label** — the client-assigned user-visible identifier for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from `paneId` and is a secondary key for the live Surf Ace topology. Pane labels are scoped to one surface/window; `windowLabel + paneLabel` is the user-visible coordinate. The OpenClaw/user-facing pane token is the pane's `displayId` / `paneAddress`, which is derived from the window label plus pane label.
 
 **Endpoint** — the app/device WS host:port advertised via mDNS. One endpoint may host multiple surfaces (windows).
 
 **Provider/controller capability** — a product component that uses the public Surf Ace WebSocket protocol. OpenClaw supplies a connection-holding extension. Surf Ace supplies the general standalone native `surf-ace` Rust CLI, directly callable by any local program, script, user, or agent; each explicit networked invocation connects directly while stable controller identity, bounded projection, cursors, acknowledgement intents, resume metadata, and unresolved receipt correlations live atomically under its caller-supplied state root. Tight Beam is one separate reusable-skill consumer of those identical executable bytes. Neither form is Surf Ace state, topology, cursor, or retention authority. Standalone use requires no MCP process, dedicated archetype, sidecar, daemon, login item, autostart entry, or persistent service.
 
-**Content** — the item currently displayed in a rendering scope. Content has a type (`html`, `image`, `pdf`, `terminal`, `markdown`, `video`, `canvas`) and a stable payload identity (`contentId`). A window always has one or more panes. Each pane displays one content item independently (scoped internally by `paneId`, displayed to humans via `paneLabel`). CLU pushes content to a target scope and can clear it. Content is distinct from annotations. `video` and `canvas` remain optional protocol content types for forward compatibility; draw-capable CLU workflows can already use normal HTML/SVG content without depending on a dedicated `canvas` wire feature.
+**Content** — the item currently displayed in a rendering scope. Content has a type (`html`, `image`, `pdf`, `terminal`, `markdown`, `video`, `canvas`) and a stable payload identity (`contentId`). A window always has one or more panes. Each pane displays one content item independently (scoped internally by `paneId`, displayed to humans via `paneLabel`). OpenClaw pushes content to a target scope and can clear it. Content is distinct from annotations. `video` and `canvas` remain optional protocol content types for forward compatibility; draw-capable OpenClaw workflows can already use normal HTML/SVG content without depending on a dedicated `canvas` wire feature.
 
 **Annotations** — drawing strokes the user has made on top of the current content using the stylus or finger. Annotations are layered over content and persist until an explicit controller operation removes them. Persistent visible and retained-history annotation/restore material is part of CAP-1/CAP-3 pane recoverable-state accounting. Annotations are not content and are not cleared when content changes unless the spec says so.
 
@@ -115,7 +115,7 @@ Before the protocol details, these terms are used consistently throughout this s
 
 **Local buffer** — a bounded controller-side read projection populated from client-authoritative consumable scopes. OpenClaw maintains it asynchronously over its background connection; the standalone `surf-ace` CLI reconciles it during explicit networked invocations for every caller, including Tight Beam. Ordinary reads consume only this projection and never trigger a network call. The projection is not cursor, pending, overflow, or unread authority.
 
-**Connection job** — OpenClaw's per-surface background process that maintains the WS connection, runs the pair handshake, handles reconnect, and syncs local state. The standalone CLI has no corresponding resident process: `surf-ace` performs pair/resume, reconciliation, requested network work, and orderly disconnect inside each explicit networked invocation while holding its cross-process state lock. This is identical for every caller, including Tight Beam. Both forms are fully opaque to CLU.
+**Connection job** — OpenClaw's per-surface background process that maintains the WS connection, runs the pair handshake, handles reconnect, and syncs local state. The standalone CLI has no corresponding resident process: `surf-ace` performs pair/resume, reconciliation, requested network work, and orderly disconnect inside each explicit networked invocation while holding its cross-process state lock. This is identical for every caller, including Tight Beam. Both forms are fully opaque to OpenClaw.
 
 **Pane history** — the client-managed Back/Forward model for a pane. The visible entry is separate from one shared per-pane pool of at most 20 retained non-visible entries across Back and Forward. Every accepted push creates a distinct client-identified entry and becomes visible. The client assigns `lastVisibleSequence` whenever an entry becomes visible and evicts the non-visible entry with the smallest sequence when the pool exceeds 20. Navigating Back then receiving a new push removes the Forward branch before LRU enforcement. Entries retain their own content revision, provenance, and annotation/restore state.
 
@@ -126,17 +126,17 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 1. **WebSocket-only transport.** All provider↔surface communication runs over the public WebSocket protocol. The provider is the WS client; the surface app runs the WS server. There is no REST API. OpenClaw holds its socket persistently; the general standalone `surf-ace` CLI connects directly only for each explicit networked invocation, regardless of caller.
 2. **Lockless client-local authority.** A client advertising the T1770 lockless capability admits multiple controllers concurrently. No provider, controller, product, chat, or identity owns a client, surface, window, pane, history entry, unread record, tombstone, mutation, or restore right. Every surface mutation traverses one client-owned ordered seam and all admission, ordering, validation, capacity, retention, close, restore, and reclamation rules are identity-independent. Clients without the lockless capability retain the explicitly scoped legacy ownership behavior in this document and MUST NOT admit multiple T1770 controllers.
 3. **Content persistence through connection changes.** Connection state MUST NOT affect displayed content or mutate client truth. Content changes only through an accepted explicit content operation.
-4. **Reads are local-only projections.** Ordinary CLU reads use the controller's bounded local projection and never synchronously contact a surface. The client remains authoritative for bounded consumable scopes, per-controller cursor floors, pending truth, and structured gaps; a local read durably queues an idempotent acknowledgement. OpenClaw's connection job delivers it in the background; `surf-ace` delivers it during the next explicit networked CLI invocation for any standalone caller.
-5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a stable internal `paneId` and a stable visible `paneLabel`. CLU resolves human references through `surf_ace_list` using `windowLabel` / `paneLabel`, then targets the pane explicitly by `paneId`. Keyboard focus is a local input affordance only; it does not create default-pane routing or default-pane resolution.
+4. **Reads are local-only projections.** Ordinary OpenClaw reads use the controller's bounded local projection and never synchronously contact a surface. The client remains authoritative for bounded consumable scopes, per-controller cursor floors, pending truth, and structured gaps; a local read durably queues an idempotent acknowledgement. OpenClaw's connection job delivers it in the background; `surf-ace` delivers it during the next explicit networked CLI invocation for any standalone caller.
+5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a stable internal `paneId` and a stable visible `paneLabel`. OpenClaw resolves human references through `surf_ace_list` using `windowLabel` / `paneLabel`, then targets the pane explicitly by `paneId`. Keyboard focus is a local input affordance only; it does not create default-pane routing or default-pane resolution.
 6. **One visible entry with shared history.** Each pane shows one entry at a time. Every accepted push creates a distinct client-identified entry, becomes visible, and moves the previously visible entry into the shared retained pool. Back and Forward use one cross-controller 20-entry non-visible LRU pool; controller identity never creates replacement-in-place, quota, pinning, priority, or eviction preference.
-7. **Connection-context identity.** In lockless mode, the adapter supplies its asserted stable controller instance ID at admission and the client binds operations to that admitted socket context. CLU does not pass controller/session identity on individual operation payloads, and friendly provenance is never authentication. Legacy `sessionId` injection remains legacy-capability behavior.
+7. **Connection-context identity.** In lockless mode, the adapter supplies its asserted stable controller instance ID at admission and the client binds operations to that admitted socket context. OpenClaw does not pass controller/session identity on individual operation payloads, and friendly provenance is never authentication. Legacy `sessionId` injection remains legacy-capability behavior.
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
 9. **Annotation mode locks the viewport.** When annotation mode is active, scroll is disabled and link following is disabled. The drawing layer captures all touch and stylus input until annotation mode exits.
 10. **Client-allocated content revisions.** For lockless-capable surfaces, accepted append-style content operations traverse the client mutation seam; the client allocates the next content revision and a new history-entry ID atomically. Controllers do not submit authoritative content revisions or history-owner tokens. Legacy clients retain the caller-supplied monotonic revision gate only within legacy capability mode.
-11. **Annotation reads are pane-scoped at the CLU boundary.** `surf_ace_read` and related CLU-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but CLU does not pass or track history identifiers.
+11. **Annotation reads are pane-scoped at the OpenClaw boundary.** `surf_ace_read` and related OpenClaw-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but OpenClaw does not pass or track history identifiers.
 12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. Lockless committed content/history/topology/lifecycle events fan out to every admitted controller for the affected surface; cursor-specific availability/overflow signals target only the affected controller without conferring authority.
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
-14. **Portable extension packaging.** Surf Ace MUST remain buildable as a standalone OpenClaw extension bundle without requiring Clawline as a dependency or core patches. Current product topology restricts actual Surf Ace provider install/run state to TARS only unless an explicit approved override is used; non-TARS hosts such as eezo may run Surf Ace surface clients manually/temporarily, but must not create Surf Ace provider state or persistent Surf Ace launchd/auto-start jobs.
+14. **Portable extension packaging.** Surf Ace MUST remain buildable as a standalone OpenClaw extension bundle without requiring Clawline as a dependency or core patches. Provider startup, provider deployment, and persistent Surf Ace launchd/auto-start installation require explicit validated host configuration. Each operation fails before mutation when its configuration is absent, malformed, or excludes the current destination.
 
 ## 3. Transport and Discovery
 
@@ -146,7 +146,7 @@ Surfaces continue advertising `_surf-ace._tcp` over Bonjour/mDNS.
 
 #### 3.1.1 Multi-Window, Multi-Pane, and History Topology (iPad + Electron)
 
-A single app instance may host multiple surface windows simultaneously. Each window is an independent Surf Ace surface. Within each window, one or more panes provide independent content and annotation contexts. Within each pane, one or more history entries allow multiple CLU sessions to coexist without overwriting each other.
+A single app instance may host multiple surface windows simultaneously. Each window is an independent Surf Ace surface. Within each window, one or more panes provide independent content and annotation contexts. Within each pane, one or more history entries allow multiple OpenClaw sessions to coexist without overwriting each other.
 
 **Topology hierarchy:** Surface (`surfaceId`) → Window (`windowLabel`) → Pane (`paneId` internal, `paneLabel` visible) → Content (history-stacked)
 
@@ -165,18 +165,18 @@ Pane rules (Phase 1 committed work, see §2.3):
 1. Each window may contain one or more panes, each with a stable internal numeric `paneId` and a stable visible numeric `paneLabel`.
 2. `paneId` is the internal routing key. `paneLabel` is the user-visible addressing token shown on the surface.
 3. Each pane has independent content, capture frame queue, taps, selection, scroll, and annotation state.
-4. All screen-scoped CLU tools target `{ surfaceId, paneId }`. `paneId` is **required**. CLU first resolves the intended pane from `windowLabel` / `paneLabel` via `surf_ace_list`, then keeps using internal `paneId`.
+4. All screen-scoped OpenClaw tools target `{ surfaceId, paneId }`. `paneId` is **required**. OpenClaw first resolves the intended pane from `windowLabel` / `paneLabel` via `surf_ace_list`, then keeps using internal `paneId`.
 5. Pane lifecycle (create/split/resize/rename/close) is managed in-band; pane changes do not affect window-level session or mDNS state.
 
 Naming system:
 1. **Window labels** (a, b, c … z, aa, ab …) are allocated, validated, persisted, and projected by the **client-local authority**.
 2. `windowLabel` is a visible coordinate for users and diagnostics, not durable target authority. The client may preserve it across ordinary reconnect and recoverable close/restore when still valid and unassigned. Otherwise restore allocates a new unique live label without changing surface identity or preserved state.
 3. **Pane IDs** are allocated by the **client-local authority**. They are stable internal routing identifiers. Controllers target existing stable IDs or submit pane-creating intent; they do not preallocate new pane IDs.
-4. **Pane labels** are allocated, validated, persisted, and uniquely projected by the **client-local authority**. The CLU/user-facing pane token is the `displayId` / `paneAddress`, derived from `windowLabel + paneLabel`; `paneLabel` alone is not durable target authority and is not globally unique. The client enforces unique live `windowLabel + paneLabel` coordinates and repairs invalid persisted state before lockless admission without matching or partitioning by controller identity.
+4. **Pane labels** are allocated, validated, persisted, and uniquely projected by the **client-local authority**. The OpenClaw/user-facing pane token is the `displayId` / `paneAddress`, derived from `windowLabel + paneLabel`; `paneLabel` alone is not durable target authority and is not globally unique. The client enforces unique live `windowLabel + paneLabel` coordinates and repairs invalid persisted state before lockless admission without matching or partitioning by controller identity.
 5. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. Pane names are optional metadata and MUST NOT replace `paneLabel` as the visible identity or addressing token.
 6. The client is the sole authority on topology and visible labeling. Controllers submit intent against stable IDs and expected revisions; the client validates, allocates, commits, and emits lifecycle events.
 7. When a pane is split, the controller specifies the target, count, and layout intent. After the stale-revision and pane-creation capacity checks, the client allocates each new `paneId` and `paneLabel`, commits atomically, and emits `event.pane_created`.
-8. **Initial surface state:** A newly opened surface starts with one client-allocated window identity and one client-allocated pane identity/label, subject to pane-creation admission. CLU MUST call `surf_ace_list` before any pane-scoped operation and MUST accept a valid post-restore live pane count above `maxPanesPerSurface`.
+8. **Initial surface state:** A newly opened surface starts with one client-allocated window identity and one client-allocated pane identity/label, subject to pane-creation admission. OpenClaw MUST call `surf_ace_list` before any pane-scoped operation and MUST accept a valid post-restore live pane count above `maxPanesPerSurface`.
 9. Labels are displayed on the surface — window identity immediately precedes the pane label as a bottom-right floating overlay within each pane. The window identity is uppercase text inside a rounded-rectangle outline, followed by the plain pane number, e.g. an outlined `A` box next to `12`. See §15.1 for visibility rules.
 
 
@@ -191,7 +191,7 @@ TXT keys used by WS protocol:
 | `s` | int | `2` | Scale factor |
 | `cap` | int | `31` | Content type bitmask |
 | `busy` | `0|1` | `0` | Legacy-capability ownership status only. Lockless-capable clients advertise `0`; controller admission is reported through lockless capability/state instead. |
-| `pk` | hex8 | `a1b2c3d4` | Device public key fingerprint prefix (endpoint identity only; not used as screen selector in CLU tools) |
+| `pk` | hex8 | `a1b2c3d4` | Device public key fingerprint prefix (endpoint identity only; not used as screen selector in OpenClaw tools) |
 | `ws` | path | `/ws` | WS upgrade path |
 | `tls` | `0|1` | `0` | Reserved for future WSS profile; ignored by v1 |
 
@@ -344,14 +344,14 @@ For lockless-capable surfaces, the June provider-segregation recon D1/D3/R2..R7 
 ### 4.9 General Standalone Surf Ace CLI and Reusable Consumers
 
 1. Surf Ace exposes one general standalone native Rust `surf-ace` CLI, directly callable by any local program, script, user, or agent. Tight Beam is one separate reusable-skill consumer of the identical installed executable through ordinary command execution; it does not own or redefine the executable, crate, package, commands, controller identity, runtime, configuration, state model, authority, or access gate. The delivered tree contains no Surf Ace MCP declaration/server/tool, MCP-only adapter, dedicated Surf Ace archetype, Tight-Beam-specific binary, or parallel fallback route. Attaching the Tight Beam skill changes neither the archetype identity nor unrelated archetype material.
-2. The supported surface is exactly `list`, `push`, `read`, `topology-intent`, `topology-realize`, `clear`, `annotations-remove`, `capture-pane`, `surface-intent`, `target-register`, and `target-apply`. Inputs, acknowledgements, errors, and results are deterministic JSON. Endpoint, state root, controller product label, and per-operation friendly chat label are external inputs; no machine, role, address, surface, topology, or provenance label is compiled in.
+2. The supported surface is exactly `list`, `push`, `read`, `topology-intent`, `topology-realize`, `clear`, `annotations-remove`, `capture-pane`, `surface-mode-convert`, `surface-intent`, `target-register`, and `target-apply`. Inputs, acknowledgements, errors, and results are deterministic JSON. Endpoint, state root, controller product label, and per-operation friendly chat label are external inputs; no machine, role, address, surface, topology, or provenance label is compiled in.
 3. One state root atomically retains the stable controller instance ID, bounded projection, sticky gaps, projected cursors, acknowledgement outbox, resume metadata, and unresolved request/receipt correlations. An OS lock covers each complete networked invocation. `read` instead performs one locked local transaction, opens no connection, advances only projected consumption, and atomically queues idempotent acknowledgement intent.
 4. Every explicit networked invocation connects directly to the public client WebSocket, pairs or resumes with the durable ID, reconciles client-ordered snapshots/deltas/gaps, flushes acknowledgements, resolves every uncertain request, performs the requested work if permitted, persists resulting state, and disconnects. No sidecar, daemon, resident MCP process, launchd/login item, autostart entry, or persistent service participates.
 5. A mutation remains connected until its exact correlated `operationReceipt` is durably stored and returned. Interruption after send and before durable receipt returns deterministic `outcome_unknown`, never success or an automatic retry. A later networked invocation must resolve all such IDs before another mutation. `target.apply` is the one asynchronous materialization seam: after pure validation and capacity checks, the client atomically persists the exact `intent_committed` response, receipt, and surface-charged work item before handing the response to the transport; browser/native materialization begins only after that send attempt. The receipt proves committed intent, never materialization success.
 6. The client advertises finite positive pending-receipt count and exact serialized-byte limits per controller. It reserves capacity before mutation commit and atomically stores the exact terminal response and receipt under `(controllerInstanceId, requestId)`; overflow returns `receipt_capacity` and commits nothing. Individual receipts are never evicted.
 7. Pair/resume is a barrier after the prior connection's mutation-seam work. `operation.receipt.sync` yields exactly `resolved_success`, `resolved_failure`, `not_committed`, `still_pending`, or `receipt_unavailable` with `controller_reclaimed` cause. Stored success/failure is replayed exactly without request re-execution; `not_committed` alone permits a later new request ID; `still_pending` keeps the invocation read/sync-only; unavailability is legal only after deterministic whole-controller-bundle reclamation. For `target.apply`, stored success replays the exact committed-intent response and does not infer materialization. The CLI persists replay before `operation.receipt.ack`; the client retains an accepted receipt until the CLI durably records that acceptance, and an idempotent release then deletes it. A crash on either side of the accepted-ack/local-marker boundary therefore replays the same terminal instead of converting it to `not_committed`. This cross-connection resolution is separate from connection-scoped request replay.
 8. Durable target work progresses exactly `intent_committed → materializing → terminal`. Restart from `intent_committed` first persists `materializing`, then invokes the materializer once. Restart from `materializing` never invokes it again and terminalizes with `failed`/`materialization_outcome_unknown`. Terminalization emits exactly one separately correlated `event.target_apply_result` and append-only `target_result` occurrence in the percent-encoded surface scope, using normal surface snapshot, delta, gap, deduplication, and `consumable.ack` semantics without changing the intent receipt.
-9. The same locked Rust source, canonical schemas/vectors, all eleven commands, every acknowledgement/receipt/order/resume/failure path, receipt capacity/reclamation behavior, and deterministic fixtures must pass natively on macOS and Linux without caller-specific carve-outs. Direct non-Tight-Beam invocation proves the standalone product boundary. Separately, the Tight Beam skill must invoke that exact installed executable path/digest from two ordinary current archetypes and a future-archetype fixture without identity changes.
+9. The same locked Rust source, canonical schemas/vectors, all twelve commands, every acknowledgement/receipt/order/resume/failure path, receipt capacity/reclamation behavior, and deterministic fixtures must pass natively on macOS and Linux without caller-specific carve-outs. Direct non-Tight-Beam invocation proves the standalone product boundary. Separately, the Tight Beam skill must invoke that exact installed executable path/digest from two ordinary current archetypes and a future-archetype fixture without identity changes.
 
 ## 5. Message Model
 
@@ -405,11 +405,32 @@ Severe violation threshold:
 
 Rules:
 1. Provider MAY call `surfaces.list` immediately after WS connect.
-2. In lockless mode the response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, and admission availability without ownership fields. `paired` is legacy capability state only.
+2. After lifecycle admission, the lockless response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, admission availability, and the bounded durable admission-attempt ledger without ownership fields. `paired` is legacy capability state only. Pre-pair and surface-scoped discovery omit the ledger.
 3. `surfaces.list` is discovery-only and grants no pane/topology/lifecycle right.
 4. Any controller meeting lockless identity/capacity admission may send `pair.request`; a duplicate live ID or full all-live controller registry receives its distinct stable refusal.
 5. Full pane topology discovery follows admission via `panes.list`, and valid restored live pane counts above `maxPanesPerSurface` are reported without clamping.
 6. Legacy clients retain the historical `paired`/claim/owner-resume/takeover behavior only in legacy mode.
+
+Each admission-attempt ledger record contains the exact `surfaceId`, `controllerInstanceId`, triggering request ID, monotonic attempt sequence, start/update times, last reached stage, outcome, and failure code/message. Request and controller IDs use `[A-Za-z0-9._:-]{1,64}`; surface IDs use `sf_` followed by 3–64 characters from the same set. Failure codes use `[a-z_]{1,64}`. Failure messages retain at most 512 UTF-8 bytes in their JSON string encoding and carry `…[truncated]` when the exact message exceeds that bound.
+
+The ledger retains at most 256 records and at most 128 KiB of JSON-encoded records. Pending records reserve the longest stage, maximum failure-code and failure-message space, and maximum update timestamp, so every later stage transition and terminalization remains within the byte bound. The client refuses a new surface admission with `surface_state_capacity` before it allocates a sequence, appends, performs surface lookup, or changes authority when either limit would be exceeded. It never evicts an admission record or rewinds the monotonic sequence. Existing persisted state outside these bounds is invalid state and causes a loud startup refusal instead of inference or repair.
+
+Within those limits, the client persists the pending record before admission work begins. A failed attempt survives transaction rollback and restart. A successful attempt is committed atomically with the admitted authority and surface state. Lifecycle `surfaces.list` exposes the complete retained ledger; pre-pair and surface-scoped discovery omit it.
+
+### 6.0.1 Surface Admission Mode Conversion
+
+`surface.mode.convert` is an explicit endpoint-lifecycle mutation. It runs only on an admitted lifecycle connection with no target surface bound to the connection. The standalone CLI exposes this operation as `surface-mode-convert`; no connection, pair, resume, or ordinary operation converts a surface implicitly.
+
+**Request fields:** exact non-empty `surfaceId`; `currentMode` equal to the caller's observed `legacy`, `lockless`, or `unknown` admission mode.
+
+**Behavior:**
+1. The client reads the exact surface's persisted admission mode at execution. A supplied `currentMode` that differs from the observed mode returns `capability_mismatch`, names the observed current mode and required `lockless` mode, supplies the exact `surface-mode-convert` remedy for that surface, and commits nothing.
+2. An observed `unknown` mode returns `invalid_operation`, names `unknown` as current and `legacy` as the required conversion source mode, supplies the exact command to run after an explicit legacy admission stamp is restored, and commits nothing. The client never infers or repairs a missing mode stamp.
+3. An observed `legacy` mode with an active or in-flight legacy transport returns `invalid_operation`, names the current and required modes and the exact command remedy, and commits nothing. The operator must wait for in-flight admission to finish or disconnect an active legacy transport before retrying.
+4. For an inactive observed `legacy` surface, the client atomically clears legacy provider ownership, prepares the existing surface for lockless authority, and stamps the same exact surface `lockless`. Success returns `surfaceId`, `previousMode: "legacy"`, `currentMode: "lockless"`, `changed: true`, and the exact correlated `operationReceipt`.
+5. For an already `lockless` surface, the operation is idempotent: it leaves the surface unchanged and returns `surfaceId`, both modes as `lockless`, `changed: false`, and the exact correlated `operationReceipt`.
+
+The success receipt contains `requestId` equal to the request envelope ID and the client-allocated positive `commitSequence`. The ordinary mutation receipt, persistence, replay, and uncertain-outcome rules in §4.9 apply.
 
 ### 6.1 Pair Handshake
 
@@ -417,7 +438,7 @@ Flow:
 1. Provider opens WS.
 2. Provider may call `surfaces.list` to discover available surfaces.
 3. Provider sends `pair.request`.
-4. Surface replies `pair.response` (success or error). In lockless mode success means new controller admission or same-ID retained-state resume; it never means ownership acquisition or transfer.
+4. Surface replies `pair.response` (success or error). In lockless mode success means new controller admission or same-ID retained-state resume; it never means ownership acquisition or transfer. A surface-scoped success includes the committed admission-attempt record.
 5. If success, connection enters active mode and event streaming starts immediately.
 
 `pair.request` fields include:
@@ -443,6 +464,8 @@ Flow:
 6. Current pane state summary (`panes[]` with per-pane `paneId`, `paneLabel`, `currentContentId`, `currentRevision`, and `contentType`) plus current topology/surface revisions, bounded consumable snapshot/cursor/gap state, and retained lifecycle state required by negotiated lockless capability.
 
 A successful `pair.response` MUST include at least one topology pane. Providers MUST treat `state.panes.length < 1` as a protocol failure and MUST NOT mark that surface connected or targetable from that response. Fresh Surf Ace surfaces expose at least one targetable topology pane.
+
+For a surface with legacy provider state but no persisted lockless admission, `pair.request` without migration material returns `admission_failed`, not `capability_mismatch`. The error names the current and required modes, exact surface, and exact `surface-mode-convert` command. The caller may retry with valid migration material to preserve legacy state, or an admitted lifecycle controller may run the explicit conversion command to discard legacy provider ownership. Conversion is safe only under the current/unknown/active refusals in §6.0.1. After conversion, the same surface accepts a new recorded pair attempt. Repeating conversion on an already-lockless surface is idempotent.
 
 ### 6.1.1 Controller Admission, Recoverable Lifecycle, and Shared History Operations (Phase 1)
 
@@ -488,7 +511,7 @@ Returns current pane layout for the paired surface.
 
 **Response fields per pane:** `paneId`, `paneLabel`, `name` (extension-assigned or null), `activeContentId` (or null), `contentType` (or null), `viewport`.
 
-The CLU-facing `surf_ace_list` response exposes the client-owned `topologyRevision` and recursive `topology` tree. Agents plan intent operations against those fields rather than inferring structure from the flat pane list. A live count above `maxPanesPerSurface` after restore is valid state.
+The OpenClaw-facing `surf_ace_list` response exposes the client-owned `topologyRevision` and recursive `topology` tree. Agents plan intent operations against those fields rather than inferring structure from the flat pane list. A live count above `maxPanesPerSurface` after restore is valid state.
 
 #### `pane.split`
 Splits an existing pane into N panes.
@@ -506,7 +529,7 @@ Assigns or clears a name for a pane. This is an **extension-to-surface** operati
 
 **Response fields:** `paneId`, `name` (new name or null).
 
-**Behavior:** Pane names are display metadata only. They do not replace `paneLabel`. CLU resolves human pane references through `paneLabel` in `surf_ace_list`, then targets the pane by internal `paneId`.
+**Behavior:** Pane names are display metadata only. They do not replace `paneLabel`. OpenClaw resolves human pane references through `paneLabel` in `surf_ace_list`, then targets the pane by internal `paneId`.
 
 **Surface default affordance:** The surface displays pane names as assigned by the extension. Topology is fully extension-controlled — no user-initiated rename or split UI is provided.
 
@@ -532,7 +555,7 @@ These events are always-on (not profile-gated), analogous to `event.surface_appe
 
 #### Surface-owned history behavior
 
-History is fully modeled and owned by the surface. CLU does not list, target, or reason about individual history entries.
+History is fully modeled and owned by the surface. OpenClaw does not list, target, or reason about individual history entries.
 
 These rules are normative for the lockless shared history model:
 1. `content.set` always targets one pane. The newly targeted content becomes front/visible immediately in that pane.
@@ -543,7 +566,7 @@ These rules are normative for the lockless shared history model:
 6. Lockless admission/state-growing operations enforce annotation/restore byte bounds before commit, so a retained history entry restores byte-identical content/overlay state; history navigation never truncates to fit.
 7. The visible entry is separate from one Back/Forward pool capped at 20 non-visible states. Visibility assigns `lastVisibleSequence`; overflow evicts the non-visible state with the smallest sequence after Forward-branch truncation.
 8. `content.append` / `content.patch` remain valid only against the currently visible content in that pane, enforced by `contentId` + `revision`.
-9. `content.clear` clears the currently visible content for the targeted pane. Any history bookkeeping needed to preserve older pane states is internal to the surface/provider and not part of the CLU call surface.
+9. `content.clear` clears the currently visible content for the targeted pane. Any history bookkeeping needed to preserve older pane states is internal to the surface/provider and not part of the OpenClaw call surface.
 
 - Each pane's bottom controls are split into two side-by-side floating pills: a left navigation pill for history controls and visible entry provenance, and a right annotation pill for annotation controls.
 - The navigation pill appears only when pushed content/history exists for that pane. Back/Forward controls appear in that navigation pill.
@@ -560,8 +583,8 @@ These rules are normative for the lockless shared history model:
 - Navigation events do not fire (no URLs, no links).
 - `content.clear` clears the background spec and ALL annotations (same global rule as all content types).
 - Scroll and page registers do not apply.
-- CLU-originated drawing is v2-only. No v1 wire op exists for provider/model-authored strokes.
-- The surface renders a blank (or gridded) background. In v1, users annotate on the canvas and CLU observes those annotations via `surf_ace_read` / `snapshot.get` only.
+- OpenClaw-originated drawing is v2-only. No v1 wire op exists for provider/model-authored strokes.
+- The surface renders a blank (or gridded) background. In v1, users annotate on the canvas and OpenClaw observes those annotations via `surf_ace_read` / `snapshot.get` only.
 
 #### `video` (v1 reserved, v2 required)
 - `content.set` payload is a URL string pointing to the video source.
@@ -586,7 +609,7 @@ Once paired, surface emits events without any subscribe/unsubscribe API.
 ### 7.1 Minimum Deep Event Set (Default)
 
 Default event profile is `minimum_deep`.
-`minimum_deep` is the smallest set that keeps CLU useful with low noise.
+`minimum_deep` is the smallest set that keeps OpenClaw useful with low noise.
 
 Active events in `minimum_deep`:
 1. `event.drawing_flush` - raw strokes accumulated locally and flushed as one batch by flush gate timing.
@@ -594,7 +617,7 @@ Active events in `minimum_deep`:
 3. `event.selection` - semantically complete selection event. In v1 interoperability profile, only `kind:"text"` is guaranteed; `point`/`region` are reserved for v2 unless explicitly negotiated.
 4. `event.page` - full PDF page transition state.
 5. `event.navigation` - surface navigated away from pushed content (user followed a link or triggered in-page navigation). Carries the new URL and signals that any open capture frame or buffered annotation state should be considered stale relative to the original content. **Applies to `html` content type only.** Surfaces MUST NOT emit `event.navigation` for any other content type (`pdf`, `image`, `markdown`, `terminal`, `canvas`, `video`). If the provider receives a `NavigationEvent` while a non-HTML content type is active, it MUST discard it silently.
-6. `event.snapshot_hint` - provider-internal control-plane event (reconnect/backpressure sync). NOT exposed in the CLU register model.
+6. `event.snapshot_hint` - provider-internal control-plane event (reconnect/backpressure sync). NOT exposed in the OpenClaw register model.
 
 Drawing semantics in default mode:
 1. Surface does no stroke classification, shape recognition, or gesture interpretation.
@@ -621,13 +644,13 @@ Behavioral result:
 1. A user who pauses naturally between strokes does not trigger a flush until they have been fully idle for 8s.
 2. A slow drawer (long gaps between strokes) does not spam flushes — the timer resets on each new stroke.
 3. Continuous drawing without pause is force-flushed at most every 30s.
-4. There is intentionally no short/fast tier. Sending partial annotation batches mid-session would inundate CLU and produce redundant passes. One flush per drawing session is the goal.
+4. There is intentionally no short/fast tier. Sending partial annotation batches mid-session would inundate OpenClaw and produce redundant passes. One flush per drawing session is the goal.
 
 Provider interpretation model:
-1. CLU decides at interpretation time whether strokes are persistent (leave rendered) or consumed (call `annotations.remove`).
+1. OpenClaw decides at interpretation time whether strokes are persistent (leave rendered) or consumed (call `annotations.remove`).
 2. No user mode switch is required.
 3. Surface is passive: it renders and flushes strokes, and removes only the explicit IDs requested by provider.
-4. Canonical consumed example: scratch-out gesture is interpreted by CLU, then CLU calls `annotations.remove` for scratch stroke IDs and separately edits/deletes the scratched content.
+4. Canonical consumed example: scratch-out gesture is interpreted by OpenClaw, then OpenClaw calls `annotations.remove` for scratch stroke IDs and separately edits/deletes the scratched content.
 5. Stroke visual attributes (color/width/opacity) are intentionally omitted from v1 wire schema; v1 interpretation uses stroke geometry and timing.
 
 ### 7.2 Optional Event Expansions (Still No Watch Mode)
@@ -645,7 +668,7 @@ The stream is still always-on; expansions are negotiated at pair time, not throu
 | `event.selection` | Deep semantic | Yes | Represents explicit user focus with interpretable payload. |
 | `event.page` | Deep semantic | Yes | Complete navigation state transition for paged content. |
 | `event.navigation` | Deep semantic | Yes | Surface navigated away from pushed content. Carries new URL; signals any open capture frame or buffered annotation state is stale. |
-| `event.snapshot_hint` | Provider-internal control plane | Yes (internal only) | Used for reconnect/backpressure state sync. Not exposed in CLU register model. Appears in `pair.response.eventConfig.activeEvents` (it is profile-controlled, part of `minimum_deep`), but the provider does not surface it to CLU tooling. |
+| `event.snapshot_hint` | Provider-internal control plane | Yes (internal only) | Used for reconnect/backpressure state sync. Not exposed in OpenClaw register model. Appears in `pair.response.eventConfig.activeEvents` (it is profile-controlled, part of `minimum_deep`), but the provider does not surface it to OpenClaw tooling. |
 | `event.surface_appeared` | Lifecycle — **not profile-gated** | Always | Emitted on any active socket when a new window appears. Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents` (which lists only profile-controlled events). |
 | `event.surface_removed` | Lifecycle — **not profile-gated** | Always | Emitted when a window closes. Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
 | `event.surface_resumed` | Lifecycle — **not profile-gated** | Always | Emitted when a surface successfully reconnects after background/resume. Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
@@ -1258,7 +1281,7 @@ The schema below defines every v1 application message type over WS.
               "properties": {
                 "paneId": {
                   "$ref": "#/$defs/PaneId",
-                  "description": "Target pane. Required — CLU must always specify which pane to target."
+                  "description": "Target pane. Required — OpenClaw must always specify which pane to target."
                 },
                 "contentId": { "$ref": "#/$defs/ContentId" },
                 "historyOwnerToken": { "type": "string", "minLength": 1, "description": "Legacy capability replacement token only; prohibited in lockless mode." },
@@ -1345,7 +1368,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
@@ -1374,7 +1397,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "revision": { "$ref": "#/$defs/Revision" },
@@ -1418,7 +1441,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "revision": { "$ref": "#/$defs/Revision" }
           }
@@ -1442,7 +1465,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "contentId": { "$ref": "#/$defs/ContentId" },
             "strokeIds": {
@@ -1472,7 +1495,7 @@ The schema below defines every v1 application message type over WS.
           "properties": {
             "paneId": {
               "$ref": "#/$defs/PaneId",
-              "description": "Target pane. Required — CLU must always specify which pane to target."
+              "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "includeImage": { "type": "boolean", "default": false },
             "includeVisibleText": { "type": "boolean", "default": true },
@@ -2544,7 +2567,7 @@ Resolution: surface shows a visible in-flight send indicator for every drawing f
 Resolution: every stroke carries stable `strokeId`; `annotations.remove` accepts explicit `strokeIds` and returns `removedStrokeIds` + `notFoundStrokeIds`, leaving unspecified strokes untouched.
 
 13. Surface overreach on drawing semantics.
-Resolution: surface remains passive and non-interpreting; only CLU decides persistent vs consumed drawings and invokes `annotations.remove` when needed.
+Resolution: surface remains passive and non-interpreting; only OpenClaw decides persistent vs consumed drawings and invokes `annotations.remove` when needed.
 
 14. Orphaned strokes across content transitions.
 Resolution: `content.set` and `content.clear` both hard-clear the drawing overlay; no cross-content carryover is allowed.
@@ -2591,16 +2614,16 @@ Protocol is ready for implementation when these checks pass in integration tests
 
 Implementation status: ready for implementation.
 
-## 13. Provider → CLU Event Routing
+## 13. Provider → OpenClaw Event Routing
 
-This section specifies how surface events reach CLU. It is intentionally separate from the WS protocol (Sections 3–10), which covers only the provider↔surface channel. The provider↔CLU channel is a different seam with different requirements.
+This section specifies how surface events reach OpenClaw. It is intentionally separate from the WS protocol (Sections 3–10), which covers only the provider↔surface channel. The provider↔OpenClaw channel is a different seam with different requirements.
 
 ### 13.1 Design Principles
 
 1. **Augmentative, not invasive.** Normal Clawline message dispatch must have zero knowledge of Surf Ace. No Surf Ace logic runs in the inbound message critical path.
-2. **Tool-driven.** CLU interacts with surfaces exclusively via explicit tool calls. The provider never injects context into a CLU turn automatically.
-3. **Alerts are expensive.** Each alert fires a CLU agent turn. The provider MUST minimize alerts while still ensuring CLU can observe surface activity in a timely way.
-4. **No live network I/O in dispatch path.** The provider MUST NOT issue live `snapshot.get` calls (or any network calls to surfaces) as part of processing an inbound CLU message.
+2. **Tool-driven.** OpenClaw interacts with surfaces exclusively via explicit tool calls. The provider never injects context into an OpenClaw turn automatically.
+3. **Alerts are expensive.** Each alert fires an OpenClaw agent turn. The provider MUST minimize alerts while still ensuring OpenClaw can observe surface activity in a timely way.
+4. **No live network I/O in dispatch path.** The provider MUST NOT issue live `snapshot.get` calls (or any network calls to surfaces) as part of processing an inbound OpenClaw message.
 
 ### 13.2 Client-Authoritative Consumable Scopes and Controller Read Projection
 
@@ -2610,9 +2633,9 @@ In lockless mode, the client maintains the authoritative bounded pane/surface co
 - **Channel A — Live dirty channel (mutable):** near-real-time stroke deltas for the currently active context frame while the user is annotating.
 - **Channel B — Closed frame projection (immutable):** finalized append records retained authoritatively by the client within advertised scope bounds and projected locally until the controller reads/acknowledges them.
 
-CLU reads from this local projection only; no ordinary `surf_ace_read` call triggers a live network call to a surface. Local consumption durably queues an idempotent acknowledgement; only client acceptance advances authoritative cursor/pending/gap truth.
+OpenClaw reads from this local projection only; no ordinary `surf_ace_read` call triggers a live network call to a surface. Local consumption durably queues an idempotent acknowledgement; only client acceptance advances authoritative cursor/pending/gap truth.
 
-**Scope:** At the CLU boundary, reads are pane-scoped: `surf_ace_read(fingerprint, paneId)` targets the corresponding projected client pane scope. The client also owns one surface-level non-pane consumable scope. Per-history annotation/restore state remains CAP-bounded client state and opaque to the tool API.
+**Scope:** At the OpenClaw boundary, reads are pane-scoped: `surf_ace_read(fingerprint, paneId)` targets the corresponding projected client pane scope. The client also owns one surface-level non-pane consumable scope. Per-history annotation/restore state remains CAP-bounded client state and opaque to the tool API.
 
 ---
 
@@ -2621,7 +2644,7 @@ CLU reads from this local projection only; no ordinary `surf_ace_read` call trig
 Annotation data is keyed by **context**, not by annotation session.
 
 A context key is:
-- CLU-pushed content: active `contentId`
+- OpenClaw-pushed content: active `contentId`
 - HTML user navigation context: normalized URL (fragment stripped, query preserved)
 - Non-URL types: `contentId` (or equivalent stable content identity)
 
@@ -2642,7 +2665,7 @@ Current content readback is separate from annotation frames. A content push upda
 
 Note: This section governs **frame finalization** only. Transport flush/send cadence for `event.drawing_flush` remains governed by Section 7.1 flush-gate timing (`idleWindowMs` / `maxIntervalMs`).
 
-This preserves context-coherent payloads while still allowing CLU to react during active annotation.
+This preserves context-coherent payloads while still allowing OpenClaw to react during active annotation.
 
 **Frame structure (shared by live and closed channels):**
 
@@ -2681,7 +2704,7 @@ The live channel exposes the currently open context frame with incremental dirty
 - `liveDirtyStrokeIds[]` — stroke IDs appended since last `surf_ace_read`
 - `liveSeq` — monotonically increasing sequence for live updates on that frame
 
-**Live read semantics:** CLU can repeatedly call `surf_ace_read` during annotation and receive the newest deltas for near-real-time reaction.
+**Live read semantics:** OpenClaw can repeatedly call `surf_ace_read` during annotation and receive the newest deltas for near-real-time reaction.
 
 ---
 
@@ -2704,9 +2727,9 @@ The same stroke may appear in both channels:
 - first via live dirty updates (Channel A)
 - later inside its finalized closed frame (Channel B)
 
-This is intentional. Closed frames are guaranteed context-preserved records and MUST remain deliverable even if CLU already saw live deltas.
+This is intentional. Closed frames are guaranteed context-preserved records and MUST remain deliverable even if OpenClaw already saw live deltas.
 
-**Dedup guidance:** CLU should dedupe by `strokeId` per `frameId` (or per `contextKey` where appropriate). Provider MUST keep stable `strokeId` across live and closed representations.
+**Dedup guidance:** OpenClaw should dedupe by `strokeId` per `frameId` (or per `contextKey` where appropriate). Provider MUST keep stable `strokeId` across live and closed representations.
 
 ---
 
@@ -2726,7 +2749,7 @@ The following declared record classes handle non-annotation surface events. Appe
 | `taps` | Append | array | Ordered list of point-out tap events since last read. UI-navigation taps (link follows, button activations) are NOT included here — they produce `event.navigation` instead. |
 | `playbackPosition` | Latest-wins | number? | **Video only.** Current playback position in seconds. `null` for all other content types. Populated by a v2 wire event. In v1, always `null`. |
 | `playbackState` | Latest-wins | string? | **Video only.** One of `"playing"`, `"paused"`, `"ended"`. `null` for all other content types. In v1, always `null`. |
-| `lastNavigation` | Latest-wins | object? | **HTML only.** Most recent navigation away from CLU-pushed content in the currently addressed pane. `{ url: string, navigatedAt: EpochMs }` or `null`. Populated by `event.navigation`. `navigatedAt` maps from wire `NavigationEvent.sentAt`. Cleared on `surf_ace_read`. |
+| `lastNavigation` | Latest-wins | object? | **HTML only.** Most recent navigation away from OpenClaw-pushed content in the currently addressed pane. `{ url: string, navigatedAt: EpochMs }` or `null`. Populated by `event.navigation`. `navigatedAt` maps from wire `NavigationEvent.sentAt`. Cleared on `surf_ace_read`. |
 
 #### Overflow
 
@@ -2751,9 +2774,9 @@ This gives one alert per unread activity burst while still allowing live reads d
 
 **Non-annotation events:** register-only updates do not independently trigger alerts in v1.
 
-### 13.4 CLU Reads the Buffer
+### 13.4 OpenClaw Reads the Buffer
 
-CLU uses one read tool:
+OpenClaw uses one read tool:
 
 **`surf_ace_read(fingerprint, paneId)`** — reads the current local content snapshot, live annotation state, closed frames (bounded), plus registers, for one pane. `paneId` is required.
 
@@ -2767,7 +2790,7 @@ Read order and behavior:
 7. Return without opening a connection, waiting for a client round trip, or invoking snapshot/network I/O.
 8. OpenClaw's background sender transmits acknowledgements; the standalone CLI transmits them during the next explicit networked invocation for every caller. Reconnect reconciles the durable outbox, client cursor/gap generations, and missing projection ranges idempotently.
 
-CLU should use `contentSnapshot` for current pane content readback, prioritize interpreting `liveFrame` first when present, then process closed frames for guaranteed context-preserved completion.
+OpenClaw should use `contentSnapshot` for current pane content readback, prioritize interpreting `liveFrame` first when present, then process closed frames for guaranteed context-preserved completion.
 
 **Model processing order policy (dirty vs backlog):**
 1. **Live preempts backlog.** If `liveFrame` + `liveDirtyStrokeIds` is present, model should process that first for real-time responsiveness.
@@ -2785,17 +2808,17 @@ This preserves both goals: real-time reaction during active annotation and guara
 The alert sent to the watcher session MUST be lightweight:
 - It names the screen and indicates pending update state (live dirty and/or closed frame queue depth).
 - It does NOT include frame payloads or stroke data in the alert body.
-- CLU retrieves payloads via the `surf_ace_read` tool call.
+- OpenClaw retrieves payloads via the `surf_ace_read` tool call.
 
 ### 13.6 What the Provider MUST NOT Do
 
 - **No live snapshot calls during inbound message handling.** Context injection that requires network round-trips to surfaces is forbidden in the Clawline admission/dispatch path.
-- **No automatic context enrichment.** Provider must not attempt to append surface state to CLU messages pre-run. If CLU wants current state, it calls `surf_ace_read`, which reads from local cache only.
-- **No multiple alerts per unread activity burst.** Once `alertFired = true`, the provider suppresses further alerts until CLU reads (which re-arms the gate) OR the 10-minute alert timeout expires.
+- **No automatic context enrichment.** Provider must not attempt to append surface state to OpenClaw messages pre-run. If OpenClaw wants current state, it calls `surf_ace_read`, which reads from local cache only.
+- **No multiple alerts per unread activity burst.** Once `alertFired = true`, the provider suppresses further alerts until OpenClaw reads (which re-arms the gate) OR the 10-minute alert timeout expires.
 
 ### 13.7 Relationship to Inbound Context Enrichment
 
-If surface context (e.g. cached screen description) is ever added to CLU's context, it must use a fail-open enricher interface:
+If surface context (e.g. cached screen description) is ever added to OpenClaw's context, it must use a fail-open enricher interface:
 - Reads from a local cache only — never issues live network calls.
 - Has a bounded synchronous timeout (< 5ms cache read).
 - Returns empty/stale context on any failure — never blocks or throws.
@@ -2803,36 +2826,36 @@ If surface context (e.g. cached screen description) is ever added to CLU's conte
 
 This enricher, if implemented, must be incapable of affecting message delivery correctness.
 
-## 14. OpenClaw Connection Job and Shared CLU Tool Surface
+## 14. OpenClaw Connection Job and Shared OpenClaw Tool Surface
 
 ### 14.1 OpenClaw Connection Job Model
 
-OpenClaw maintains persistent WS connections to all discovered screens automatically. CLU never initiates, manages, or tears down those OpenClaw connections. The general standalone `surf-ace` CLI has no connection job, daemon, sidecar, or MCP gate: for every caller, including Tight Beam, each short-lived invocation performs pair/resume, reconciliation, one explicit networked command, and orderly disconnect directly against the public client WebSocket.
+OpenClaw maintains persistent WS connections to all discovered screens automatically. OpenClaw never initiates, manages, or tears down those OpenClaw connections. The general standalone `surf-ace` CLI has no connection job, daemon, sidecar, or MCP gate: for every caller, including Tight Beam, each short-lived invocation performs pair/resume, reconciliation, one explicit networked command, and orderly disconnect directly against the public client WebSocket.
 
 Rules:
 1. When a screen is discovered via mDNS, OpenClaw immediately begins connecting and runs the WS pair handshake.
 2. OpenClaw owns an ongoing connection job for each discovered screen. The job runs continuously: if the socket drops, OpenClaw reconnects per the backoff policy in Section 4.4.
 3. If a screen disappears from mDNS, OpenClaw stops the connection job for it.
 4. If a screen reappears, OpenClaw resumes immediately.
-5. The WS pair handshake (Section 6.1) is an internal protocol detail executed by the connection job. It is not exposed as a CLU action.
-6. CLU never calls a "connect" or "pair" tool. By the time CLU acts on a screen, the provider is already connected — or actively attempting to be.
+5. The WS pair handshake (Section 6.1) is an internal protocol detail executed by the connection job. It is not exposed as an OpenClaw action.
+6. OpenClaw never calls a "connect" or "pair" tool. By the time OpenClaw acts on a screen, the provider is already connected — or actively attempting to be.
 
-Connection states visible to CLU (via `surf_ace_list`):
+Connection states visible to OpenClaw (via `surf_ace_list`):
 - `connected` — WS socket established and pair handshake complete; ready for operations.
 - `connecting` — provider is actively attempting to connect or reconnect.
 - `unreachable` — screen was discovered but repeated connection attempts have failed (backoff limit reached or mDNS record stale).
 
 ### 14.2 Read/Write Model
 
-CLU's tool surface has a strict read/write split:
+OpenClaw's tool surface has a strict read/write split:
 
-**Writes** either go to the surface over the WS connection (pushing content, clearing content, removing annotations) or, for the explicit legacy-to-lockless cutover preparation action, durably freeze a local migration boundary without network I/O. These are explicit CLU intent.
+**Writes** either go to the surface over the WS connection (pushing content, clearing content, removing annotations) or, for the explicit legacy-to-lockless cutover preparation action, durably freeze a local migration boundary without network I/O. These are explicit OpenClaw intent.
 
 **Reads** are always local projection transactions. The client owns authoritative bounded consumable scopes, cursor floors, pending truth, and structured gaps. Pair/resume snapshots plus ordered deltas received during OpenClaw's connection job or the standalone CLI's explicit networked invocations keep the controller projection current. An ordinary read returns cached data/loss/status, durably advances the projected cursor and queues an idempotent acknowledgement intent, and never triggers synchronous network I/O. Only client acceptance of the acknowledgement advances authoritative state.
 
-### 14.3 CLU Tool Surface
+### 14.3 OpenClaw Tool Surface
 
-CLU interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector. `paneId` is **required** on all pane-scoped calls — CLU resolves human references through `surf_ace_list` (`windowLabel` / `paneLabel`), then specifies the target pane explicitly by internal `paneId`. All pane-aware tool responses echo both the effective internal `paneId` and the visible `paneLabel`.
+OpenClaw interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector. `paneId` is **required** on all pane-scoped calls — OpenClaw resolves human references through `surf_ace_list` (`windowLabel` / `paneLabel`), then specifies the target pane explicitly by internal `paneId`. All pane-aware tool responses echo both the effective internal `paneId` and the visible `paneLabel`.
 
 ---
 
@@ -2854,7 +2877,7 @@ panes             array     Full current pane topology: [{ paneId, name, activeC
                           Each pane record also includes `paneLabel`, the visible human-facing pane identifier.
                           activeContent: { contentId, contentType, revision } or null if idle
                           historySummary: { visibleContentId, backCount, forwardCount }
-pendingEvents     int       Count of buffered events not yet read by CLU
+pendingEvents     int       Count of buffered events not yet read by OpenClaw
 ```
 
 **Errors:** none (always returns current known local state, possibly empty array)
@@ -3162,7 +3185,7 @@ pane node:  { "type": "pane", "paneId"?: paneId, "name"?: string | null, "weight
 
 #### `surf_ace_realize_topologies`
 
-Realize desired pane topology changes and top-level Surf Ace Spatial surface-window lifecycle mutations across one or more Surf Ace surfaces/windows in one CLU-facing operation. Write.
+Realize desired pane topology changes and top-level Surf Ace Spatial surface-window lifecycle mutations across one or more Surf Ace surfaces/windows in one OpenClaw-facing operation. Write.
 
 **Params:**
 ```
@@ -3224,7 +3247,7 @@ paneLabel      integer  Closed pane's visible label at the moment it was closed.
 
 #### `surf_ace_read`
 
-Read current cached content, dual-channel annotation state, registers, and structured loss from the bounded local projection for a pane. Read-only and local—no synchronous network call to the surface. `surf_ace_read` is pane-scoped at the CLU boundary; the client decides which pane-history entry is visible and remains authoritative for records/cursors/gaps.
+Read current cached content, dual-channel annotation state, registers, and structured loss from the bounded local projection for a pane. Read-only and local—no synchronous network call to the surface. `surf_ace_read` is pane-scoped at the OpenClaw boundary; the client decides which pane-history entry is visible and remains authoritative for records/cursors/gaps.
 
 Response includes:
 1. **Current content snapshot** (when locally cached),
@@ -3293,12 +3316,12 @@ pendingFrames     int?     Remaining closed frames still queued beyond this batc
 taps              array    Ordered point-out tap events since last read.
                            Each: { eventId, timestamp, x, y, kind, nearestText?, elementRole? }
                            kind: "tap" | "long_press" (from wire TapEvent.kind).
-                           CLU-layer mapping: wire `nearestContent` → `nearestText`; `elementRole` =
+                           OpenClaw-layer mapping: wire `nearestContent` → `nearestText`; `elementRole` =
                            provider-computed ARIA role of tapped element; `timestamp` from wire sentAt.
 scrollPosition    object?  Latest settled scroll state: { x, y, visibleRect }. null if no scroll event since last read.
 selection         object?  Latest selection: { selectedText, bounds, anchorStart?, anchorEnd? }. null if none.
-                           CLU-layer mapping: wire `text` → `selectedText`; wire `boundingRect` → `bounds`;
-                           `kind` is implicit as text in this CLU-layer shape. v1 providers preserve wire
+                           OpenClaw-layer mapping: wire `text` → `selectedText`; wire `boundingRect` → `bounds`;
+                           `kind` is implicit as text in this OpenClaw-layer shape. v1 providers preserve wire
                            `kind:"text"` selections and discard `kind:"point"`/`kind:"region"` unless explicitly
                            feature-negotiated (see §7.1 and §13.2). `anchorStart`/`anchorEnd` are provider-computed
                            DOM offsets when available (commonly HTML); otherwise null.
@@ -3327,10 +3350,10 @@ legacyCompatibilityReadBoundary object? {
 ```
 
 **Read priority + dedupe contract:**
-- CLU should use `contentSnapshot` for current content readback after pushes.
-- CLU should interpret `liveFrame` first when present (newest/live).
-- CLU should process `frames[]` oldest-first for guaranteed context-preserved delivery.
-- If new live dirty data appears while processing backlog, CLU should pause backlog and return to live.
+- OpenClaw should use `contentSnapshot` for current content readback after pushes.
+- OpenClaw should interpret `liveFrame` first when present (newest/live).
+- OpenClaw should process `frames[]` oldest-first for guaranteed context-preserved delivery.
+- If new live dirty data appears while processing backlog, OpenClaw should pause backlog and return to live.
 - Closed frames should still be processed even when some strokes were already seen live (frame image/context is authoritative).
 - A stroke may appear in both channels; dedupe by `strokeId` per `frameId`/`contextKey`.
 
@@ -3398,7 +3421,7 @@ This tool is deprecated and removed in the capture frame model. Frame images are
 
 Remove specific annotation strokes from a screen's drawing overlay by stroke ID. Write.
 
-**Note (dual-channel frame model):** In the dual-channel model, rendered strokes persist until the provider explicitly removes them or content changes under the normal content rules. The underlying context frame may remain open and continue on later same-context re-entry (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay. For most CLU workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at CLU interpretation time (dedupe/ignore/act), not by mutating closed frames.
+**Note (dual-channel frame model):** In the dual-channel model, rendered strokes persist until the provider explicitly removes them or content changes under the normal content rules. The underlying context frame may remain open and continue on later same-context re-entry (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay. For most OpenClaw workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at OpenClaw interpretation time (dedupe/ignore/act), not by mutating closed frames.
 
 **Params:**
 ```
@@ -3423,7 +3446,7 @@ remainingStrokeCount   int
 
 ### 14.4 Alert Routing
 
-When unread annotation activity first appears (live dirty update and/or closed frame queue growth), the provider fires one Clawline alert if none has fired for the current unread burst. Alerts route to `agent:main:main` by default. This is opaque to CLU — there is no tool to configure routing.
+When unread annotation activity first appears (live dirty update and/or closed frame queue growth), the provider fires one Clawline alert if none has fired for the current unread burst. Alerts route to `agent:main:main` by default. This is opaque to OpenClaw — there is no tool to configure routing.
 
 ### 14.5 Tool Error Codes
 
@@ -3479,7 +3502,7 @@ Each window is assigned a short alphabetic identifier using an auto-incrementing
 - Colored according to the window's connection state, with both outline and letters at 35% opacity.
 - Rendered in the overlay layer — it does not scroll with content.
 
-The window label is the primary visible addressing handle within the current `surf_ace_list` result. It MUST be visible when the surface is at rest so that a user can tell CLU "move content to window b" without ambiguity, but CLU/provider targeting authority still comes from the run-admitted `surfaceId`/`paneId` tuple rather than from the label alone.
+The window label is the primary visible addressing handle within the current `surf_ace_list` result. It MUST be visible when the surface is at rest so that a user can tell OpenClaw "move content to window b" without ambiguity, but OpenClaw/provider targeting authority still comes from the run-admitted `surfaceId`/`paneId` tuple rather than from the label alone.
 
 Each pane is assigned by the client-local authority a stable visible numeric `paneLabel` distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier and live-topology secondary key within the authoritative live projection; it is not durable target authority. Controllers adopt the client-assigned label. Optional pane names do not replace it. The pane label MUST be:
 - Displayed as plain overlay text with no pill, background, or border.
@@ -3551,7 +3574,7 @@ Required defaults:
 - The right annotation pill contains annotation controls only: 👆 and, while annotation mode is active, Done. It MUST NOT contain the pane label or window label.
 - 👆 (drawing input) button is always present in the annotation pill.
 - On iOS and iPadOS, the navigation and annotation pills MUST use native Liquid Glass-style capsule material/chrome for their background and border. Electron keeps its platform-specific pill styling.
-- Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. Keyboard focus may add the visible focus affordance from §15.1, but it does not create a default target for CLU routing and does not replace explicit `paneId` targeting.
+- Multiple panes in a window share a background; pane boundaries are indicated by a center divider only. Keyboard focus may add the visible focus affordance from §15.1, but it does not create a default target for OpenClaw routing and does not replace explicit `paneId` targeting.
 
 #### Icon assets
 
@@ -3641,7 +3664,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
 - **Pane Label Authority** — "Pane labels are client-assigned visible numeric identifiers distinct from internal `paneId`." Source: §3.1.1
 - **Prominent Surface Labels** — "Window label and pane label render together as an always-visible bottom-right identity overlay in each pane." Source: §3.1.1 / §15.1
-- **Displayed Content Persistence** — "The surface renders content and keeps it displayed until CLU explicitly changes it." Source: §1
+- **Displayed Content Persistence** — "The surface renders content and keeps it displayed until OpenClaw explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
 - **History Navigation Controls** — "Previously visible content in that pane remains navigable through the surface's Back/Forward controls." Source: §6.1.1
 - **Floating History Controls** — "Back/Forward controls appear in the left navigation pill when history exists." Source: §6.1.1 / §15.3
@@ -3664,7 +3687,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Annotation Mode Visual State** — "When annotation mode is active, the pane MUST render a 2px accent border as the sole visual indicator." Source: §15.1
 - **Two-Pill Control Rule** — "Navigation controls and current visible entry provenance live in the left navigation pill; annotation controls live in the right annotation pill." Source: §15.3
 - **Keyboard Focus Affordance** — "Keyboard-focused panes MUST render a visible mid-gray focus outline or equivalent affordance, legible on both white and dark-ish content backgrounds. iOS/iPadOS suppresses this outline for single-pane surfaces." Source: §15.1
-- **Explicit Pane Routing** — "Keyboard focus does not create a default target for CLU routing and does not replace explicit `paneId` targeting." Source: §15.3
+- **Explicit Pane Routing** — "Keyboard focus does not create a default target for OpenClaw routing and does not replace explicit `paneId` targeting." Source: §15.3
 - **Accessibility Touch Targets** — "All chrome controls MUST provide a minimum 44x44 touch target." Source: §15.2
 - **Accessibility Contrast** — "All chrome labels and controls MUST meet WCAG AA contrast." Source: §15.2
 - **Electron Shortcut Defaults** — "`A` enters annotation mode, `D` exits annotation mode via Done, `Cmd-[` navigates Back, `Cmd-]` navigates Forward, `Cmd-H/J/K/L` and arrow keys scroll the keyboard-focused pane by a 64px line increment, `PageUp`/`PageDown` scroll by an 85%-viewport page increment, `Cmd-Option-Shift-H/J/K/L` moves keyboard focus by pane geometry, and non-macOS Command-backtick cycles Surf Ace windows." Source: §15.2
@@ -3694,19 +3717,19 @@ This section is the authoritative list of unresolved design decisions. Items her
 
 ### OT-1: Model-Side Markup (Provider-Originated Strokes)
 
-**Problem:** v1 has no dedicated protocol for model-originated strokes in the native annotation overlay. CLU can still present draw-capable experiences by pushing normal renderable content such as HTML with `<canvas>` or SVG, but there is no native-overlay stroke op, no capture exclusion mechanism for provider-originated overlay marks, and no visual distinction protocol for those overlay marks.
+**Problem:** v1 has no dedicated protocol for model-originated strokes in the native annotation overlay. OpenClaw can still present draw-capable experiences by pushing normal renderable content such as HTML with `<canvas>` or SVG, but there is no native-overlay stroke op, no capture exclusion mechanism for provider-originated overlay marks, and no visual distinction protocol for those overlay marks.
 
 **Status:** Open. Not Phase 1 or Phase 2 scope. See Appendix A.12 for background.
 
 ### OT-2: Semantic Gesture Classification — CLOSED
 
-**Decision:** No on-device semantic classification. The surface sends raw stroke geometry in the buffer. CLU receives and interprets the geometry directly, using whatever approach it sees fit. No `semanticHints` field, no wire extension, no on-device model integration. Closed; will not be revisited.
+**Decision:** No on-device semantic classification. The surface sends raw stroke geometry in the buffer. OpenClaw receives and interprets the geometry directly, using whatever approach it sees fit. No `semanticHints` field, no wire extension, no on-device model integration. Closed; will not be revisited.
 
 ---
 
 ## 16. Common Pane Geometry Architecture
 
-Status: normative architecture amendment, 2026-04-27. Source spec: `/Users/mike/shared-workspace/surf-ace/specs/common-geometry-architecture.md`.
+Status: normative architecture amendment, 2026-04-27. Source spec: `<spec-root>/surf-ace/specs/common-geometry-architecture.md`.
 
 Surf Ace has one resolved geometry truth per pane. Each pane produces a canonical resolved geometry snapshot; content viewport, controls, overlays, hit regions, target materialization, capture masks, debug visuals, and protocol-reported pane viewport MUST derive from that snapshot.
 
@@ -3734,9 +3757,9 @@ If a consumer needs a new rectangle, the geometry authority adds a named project
 
 Electron surfaces have explicit geometry seams between renderer UI, Electron main, native/compositor hosting, overlay reporting, hit routing, and protocol reporting. Electron MUST treat the resolved pane snapshot as the only placement authority. Renderer DOM overlay measurements may provide semantic control presence, intrinsic size, and relative offsets, but they MUST NOT define the pane placement basis once native pane geometry exists. Compositor payloads consume `panes[].geometry` and `regions[].rect` as resolved rectangles; compositor MUST NOT infer pane layout from Surf Ace topology intent.
 
-Compositor status `panes` are native hosted/materialized pane records, not Surf Ace topology panes. Surf Ace topology panes are reported by `pair.response`, `panes.list`, and CLU-facing `surf_ace_list`. A compositor status with `panes=[]` or `overlay_regions=0` means no native materialized panes or overlay regions are currently installed; it does not imply that Surf Ace topology is empty.
+Compositor status `panes` are native hosted/materialized pane records, not Surf Ace topology panes. Surf Ace topology panes are reported by `pair.response`, `panes.list`, and OpenClaw-facing `surf_ace_list`. A compositor status with `panes=[]` or `overlay_regions=0` means no native materialized panes or overlay regions are currently installed; it does not imply that Surf Ace topology is empty.
 
-Racter tall-logical-surface remains a required fixture: Surf Ace receives a logical surface of `2160x3840` and must treat it exactly like any other `2160x3840` monitor/window. Native panes, Surf Ace controls, overlay regions, and hit regions must align in that logical coordinate space. Surf Ace must not reason from display rotation or physical scanout shape.
+portrait-display tall-logical-surface remains a required fixture: Surf Ace receives a logical surface of `2160x3840` and must treat it exactly like any other `2160x3840` monitor/window. Native panes, Surf Ace controls, overlay regions, and hit regions must align in that logical coordinate space. Surf Ace must not reason from display rotation or physical scanout shape.
 
 ### 16.4 Native Host Special Cases
 
@@ -3753,7 +3776,7 @@ Allowed internal native-host special cases are:
 
 Any additional native special case must defend the same three properties: why native behavior is necessary, why the behavior stays behind the Surf Ace/compositor seam, and why pane-targeted API parity with web/content targets is preserved.
 
-Verification for native-hosted targets must preserve that boundary. A passing implementation test may assert that Surf Ace projected a valid internal `native_pane.host` request, but a product/status gate must also exercise the official controller target flow and its CLU-facing result. A direct compositor-hosted window, even when visible and correctly sized, is not Surf Ace materialization proof unless it is the consequence of a live client-accepted `target.apply` for the same admitted/actionable pane.
+Verification for native-hosted targets must preserve that boundary. A passing implementation test may assert that Surf Ace projected a valid internal `native_pane.host` request, but a product/status gate must also exercise the official controller target flow and its OpenClaw-facing result. A direct compositor-hosted window, even when visible and correctly sized, is not Surf Ace materialization proof unless it is the consequence of a live client-accepted `target.apply` for the same admitted/actionable pane.
 
 ### 16.5 iOS requirement
 
@@ -3828,23 +3851,23 @@ In v2, the wire `DrawingFlushEvent` payload may optionally be extended with `scr
 
 ### A.2 Multi-Scroll Annotation Image Capture
 
-**Question:** If a user annotates the top of a long webpage, scrolls down, and annotates the bottom — how does the provider produce a meaningful image for CLU?
+**Question:** If a user annotates the top of a long webpage, scrolls down, and annotates the bottom — how does the provider produce a meaningful image for OpenClaw?
 
 **Decision:** Multi-scroll behavior is handled by the dual-channel context model. Because annotation mode locks the viewport (see §15.6 "While IN annotation mode"), scrolling cannot occur while actively drawing. If a user annotates at scroll position A, exits annotation mode, scrolls, and re-enters annotation in the **same context**, strokes append to the same context frame (not a new context frame). If annotation resumes only after a true context switch (e.g., different URL/content context and annotation starts there), the previous context frame is finalized and the new context gets its own frame.
 
-CLU may therefore receive either one evolving context frame (same context, multiple annotation sessions) or multiple finalized frames (annotation across distinct contexts). `scrollOffset` at frame open remains the reference anchor for mapping to document-space.
+OpenClaw may therefore receive either one evolving context frame (same context, multiple annotation sessions) or multiple finalized frames (annotation across distinct contexts). `scrollOffset` at frame open remains the reference anchor for mapping to document-space.
 
 ---
 
 ### A.3 Semantic Gesture Interpretation (Brackets Problem)
 
-**Question:** When a user draws `[` at one position and `]` far below it, their intent is "everything between these brackets." Raw stroke geometry alone cannot convey this — the provider would only see two curved strokes with a large gap. How does the system convey the user's region intent to CLU?
+**Question:** When a user draws `[` at one position and `]` far below it, their intent is "everything between these brackets." Raw stroke geometry alone cannot convey this — the provider would only see two curved strokes with a large gap. How does the system convey the user's region intent to OpenClaw?
 
 **Related:** Same problem applies to any multi-stroke semantic gesture where the intent spans content between the strokes rather than the strokes themselves.
 
 **Status:** Partially addressed by the capture frame model — full resolution requires on-device gesture classification (A.4).
 
-**With dual-channel context frames:** Bracket strokes and other multi-stroke semantic gestures can be accumulated into one finalized context frame (even across multiple same-context annotation sessions). CLU receives the frame stroke set plus viewport screenshot, reducing partial-geometry ambiguity.
+**With dual-channel context frames:** Bracket strokes and other multi-stroke semantic gestures can be accumulated into one finalized context frame (even across multiple same-context annotation sessions). OpenClaw receives the frame stroke set plus viewport screenshot, reducing partial-geometry ambiguity.
 
 However, geometry-based inference of the "between" region still requires understanding that the strokes form brackets and that the intent is spatial span between them. This is the unresolved part. On-device classification (A.4) applied per finalized frame remains the most promising path: the surface classifies gesture intent for the frame stroke set before (or at) finalization and includes a `semanticHints` field. Design deferred to v2.
 
@@ -3855,7 +3878,7 @@ However, geometry-based inference of the "between" region still requires underst
 **Question:** iOS devices with Apple Intelligence have an on-device foundation model available. Should the surface use it to classify stroke gestures (lasso, bracket, circle-for-emphasis, underline, cross-out, drawn box, etc.) before reporting to the provider?
 
 **Why it matters:**
-- CLU receives classified intent rather than raw geometry — dramatically reduces ambiguity
+- OpenClaw receives classified intent rather than raw geometry — dramatically reduces ambiguity
 - On-device inference is fast and private
 - Resolves A.3 (bracket problem) and the point-out classification ambiguity
 - Raises question of confidence threshold: what does the surface report when classification is uncertain?
@@ -3873,16 +3896,16 @@ However, geometry-based inference of the "between" region still requires underst
 
 ### A.5 Point-Out vs. Passive Annotation
 
-**Question:** Is "point-out" (user explicitly directing CLU's attention) a distinct surface behavior, or is it inferred by CLU from existing event types?
+**Question:** Is "point-out" (user explicitly directing OpenClaw's attention) a distinct surface behavior, or is it inferred by OpenClaw from existing event types?
 
 **Context:** Two modes of surface use were identified:
 1. *Point-out* — user highlights, boxes, or selects something, meaning "look at this specifically"
-2. *Passive* — user scribbles, writes, thinks on-screen; CLU observes without explicit direction
+2. *Passive* — user scribbles, writes, thinks on-screen; OpenClaw observes without explicit direction
 
 **Open sub-questions:**
-- Does the surface classify which mode is active, or does CLU infer it?
+- Does the surface classify which mode is active, or does OpenClaw infer it?
 - Are point-out gestures a distinct register, or do they arrive as ordinary stroke/selection events?
-- For text selections (OS-level), the selected text is cleanly available — CLU may not need an image at all. For drawn boxes or lasso regions, an image crop is needed. Should these be unified under one "attention region" concept?
+- For text selections (OS-level), the selected text is cleanly available — OpenClaw may not need an image at all. For drawn boxes or lasso regions, an image crop is needed. Should these be unified under one "attention region" concept?
 
 **Status:** Unresolved. Depends on A.4.
 
@@ -3890,11 +3913,11 @@ However, geometry-based inference of the "between" region still requires underst
 
 ### A.6 Image Request Scope and Cropping
 
-**Question:** When CLU requests an image of a region, how is the region specified, and what exactly is composited?
+**Question:** When OpenClaw requests an image of a region, how is the region specified, and what exactly is composited?
 
 **Partially resolved:**
 - Images always include the annotation overlay rendered on top of content (never content-only or strokes-only)
-- CLU specifies a region of interest rather than always requesting full-screen
+- OpenClaw specifies a region of interest rather than always requesting full-screen
 - Provider crops from locally cached render + live annotation layer
 
 **Still open:**
@@ -3903,7 +3926,7 @@ However, geometry-based inference of the "between" region still requires underst
 - Does the provider maintain a rendered image cache proactively, or only on demand?
 - For "full screen" requests, is the image the current viewport or the full scrollable content?
 
-**Status:** Partially resolved. Coordinate space is settled (viewport coordinates per A.1). In the capture frame model, each frame includes a viewport screenshot — CLU receives the image directly in `surf_ace_read` without needing a separate buffer crop. The region-of-interest question is moot for closed frames (each frame image is already the viewport at capture time). For live/open frame inspection, `snapshot.get` with `includeImage=true` remains available over the WS protocol.
+**Status:** Partially resolved. Coordinate space is settled (viewport coordinates per A.1). In the capture frame model, each frame includes a viewport screenshot — OpenClaw receives the image directly in `surf_ace_read` without needing a separate buffer crop. The region-of-interest question is moot for closed frames (each frame image is already the viewport at capture time). For live/open frame inspection, `snapshot.get` with `includeImage=true` remains available over the WS protocol.
 
 ---
 
@@ -3911,7 +3934,7 @@ However, geometry-based inference of the "between" region still requires underst
 
 **Question:** Does the surface have explicit interaction modes (e.g. "navigation mode" vs. "markup mode"), or is it always one unified thing?
 
-**Design direction:** No explicit modes. The surface always behaves like a real browser. Full link following is supported — if CLU pushes a website, the user should be able to use it as a website including hyperlinks. Pencil always draws annotations. Finger always does finger things: scroll, select text, tap elements, follow links. Point-out is not a mode — it is the natural byproduct of ordinary finger interactions (text selection, element tap) that happen to produce structured register entries.
+**Design direction:** No explicit modes. The surface always behaves like a real browser. Full link following is supported — if OpenClaw pushes a website, the user should be able to use it as a website including hyperlinks. Pencil always draws annotations. Finger always does finger things: scroll, select text, tap elements, follow links. Point-out is not a mode — it is the natural byproduct of ordinary finger interactions (text selection, element tap) that happen to produce structured register entries.
 
 **Implications:**
 - Link navigation must be detected and reported as a content state change (URL change → navigation event → snapshot_hint)
@@ -3920,16 +3943,16 @@ However, geometry-based inference of the "between" region still requires underst
 - The model observes URL changes via the content state register and can react or ignore
 
 **Open sub-questions:**
-- Should the surface suppress link navigation when CLU-pushed content is active, with an opt-in flag to allow it? Or always allow it?
+- Should the surface suppress link navigation when OpenClaw-pushed content is active, with an opt-in flag to allow it? Or always allow it?
 - How should annotation buffering handle URL fragments (#section) vs. full URL changes?
-- What happens to annotations when CLU calls `surf_ace_push` with new content — are they cleared or preserved?
+- What happens to annotations when OpenClaw calls `surf_ace_push` with new content — are they cleared or preserved?
 
 **Decision:** On pencil-supported devices, pencil contact automatically enters annotation mode; fingers do normal operations (scroll, select, tap, follow links) by default. A single 👆 drawing-input button is always visible and, when tapped, adds finger drawing capability to annotation mode. On non-pencil platforms (Electron), that same 👆 button is the entry point for annotation mode and enables drawing input. This is the only surface-level mode distinction and it is UI-only; the wire protocol and register model do not change based on mode.
 
 **UI defaults alignment:** Drawing controls live in the annotation pill. The Done control appears in that pill while annotation mode is active. Blocked navigation or blocked content replacement during annotation mode produces a small toast directing the user to finish annotation first.
 
 **Data model:** The provider MUST store surface state in a context dictionary keyed by `contextKey`, where `contextKey` is:
-- For CLU-pushed content: the `contentId` (e.g. `ct_a1b2c3d4`)
+- For OpenClaw-pushed content: the `contentId` (e.g. `ct_a1b2c3d4`)
 - For user-navigated URLs (within an HTML push): the full URL string, normalized (fragment stripped, query preserved)
 - For non-URL content (images, PDFs): the content hash or `contentId`
 
@@ -3982,7 +4005,7 @@ Rationale: Annotation settlement is a surface-owned state transition ("Done"/ann
 
 **Video** (`video`) — fundamentally temporal rather than spatial. Annotations carry an optional `videoTimestamp` field anchoring strokes to playback position. Two additional registers: `playbackPosition` and `playbackState`. The multi-scroll / bounding-box problems from A.2/A.3 have a temporal analog here — strokes made at different playback times may span content that is no longer visible. Full semantics deferred to v2. See the `video` characteristics in §6.1.1.
 
-**Blank canvas** (`canvas`) — an optional/legacy content type where annotations are the primary artifact and there is no underlying document. The surface renders a blank or gridded background. `content.clear` removes all annotations (same global rule as all content types). In v1, CLU observes user strokes via the existing register model (read-only for the native annotation layer). CLU does not need this content type in order to present draw-capable experiences, because normal HTML/SVG content can already render its own `<canvas>` or similar drawing UI. Dedicated native-overlay annotation writes remain undefined in v1 and would require a future protocol extension. Useful for whiteboard-style collaboration. See the `canvas` characteristics in §6.1.1.
+**Blank canvas** (`canvas`) — an optional/legacy content type where annotations are the primary artifact and there is no underlying document. The surface renders a blank or gridded background. `content.clear` removes all annotations (same global rule as all content types). In v1, OpenClaw observes user strokes via the existing register model (read-only for the native annotation layer). OpenClaw does not need this content type in order to present draw-capable experiences, because normal HTML/SVG content can already render its own `<canvas>` or similar drawing UI. Dedicated native-overlay annotation writes remain undefined in v1 and would require a future protocol extension. Useful for whiteboard-style collaboration. See the `canvas` characteristics in §6.1.1.
 
 **Default empty/degraded presentation:** Unsupported content should use a centered empty-state message. Blank-canvas presentations may use a blank or gridded background.
 
@@ -4006,7 +4029,7 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
    - `paneId` required on all pane-scoped calls
    - explicit pane target for `push/read/clear/annotations_remove`.
 
-**Why this is safe:** This adds pane orchestration via explicit `paneId` targeting. CLU always specifies which pane it is addressing. No ambiguity from fallback resolution.
+**Why this is safe:** This adds pane orchestration via explicit `paneId` targeting. OpenClaw always specifies which pane it is addressing. No ambiguity from fallback resolution.
 
 ---
 
@@ -4014,7 +4037,7 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
 
 **Goal (v2+ enhancements):** Extend one-window multi-pane behavior with richer pane layout orchestration and lifecycle semantics beyond the Phase 1 committed baseline.
 
-**Compatibility principle:** Model mutable state as `contextScope = { surfaceId, paneId }`. `paneId` is always required. CLU must read surface state to know valid `paneId` values before targeting a pane.
+**Compatibility principle:** Model mutable state as `contextScope = { surfaceId, paneId }`. `paneId` is always required. OpenClaw must read surface state to know valid `paneId` values before targeting a pane.
 
 **Expected v2+ shape:**
 1. Advanced pane lifecycle/layout operations (nested split templates, persistent layout presets, pane groups).
@@ -4027,7 +4050,7 @@ Multi-pane support — splitting a single Surf Ace window into multiple panes, e
 
 ### A.12 Model-Side Markup and Point-Outs (Open Topic)
 
-**Problem:** The current spec defines the native annotation overlay as user-generated (stylus/finger strokes). CLU can already present draw-capable experiences by pushing normal renderable content such as HTML with `<canvas>` or SVG, but v1 has no dedicated provider-originated stroke/markup protocol for drawing into the native annotation layer itself.
+**Problem:** The current spec defines the native annotation overlay as user-generated (stylus/finger strokes). OpenClaw can already present draw-capable experiences by pushing normal renderable content such as HTML with `<canvas>` or SVG, but v1 has no dedicated provider-originated stroke/markup protocol for drawing into the native annotation layer itself.
 
 **Proposed behavior:**
 1. A future protocol extension could let the model send its own point-outs and markup strokes into the native annotation overlay via a dedicated tool (e.g. `surf_ace_annotate`).
@@ -4046,11 +4069,11 @@ Dedicated native-overlay model markups may eventually become full interactive UI
 - Capture exclusion: how does the frame capture mechanism know to exclude model-originated strokes?
 - Interactive markup v2: what protocol extensions are needed for widget → model callbacks?
 
-**Status:** Open. This is only about dedicated native-overlay annotation primitives; it does not block CLU from presenting draw-capable HTML/SVG/canvas content in v1. Not part of Phase 1 or Phase 2 scope as currently defined.
+**Status:** Open. This is only about dedicated native-overlay annotation primitives; it does not block OpenClaw from presenting draw-capable HTML/SVG/canvas content in v1. Not part of Phase 1 or Phase 2 scope as currently defined.
 
-### A.13 Multi-Session CLU History Routing — Rationale Context
+### A.13 Multi-Session OpenClaw History Routing — Rationale Context
 
-**Background:** Each admitted controller has its own WS connection in lockless mode, and multiple CLU sessions may also route through one controller. The client-owned shared history model (§3.1.1, §6.1.1) preserves every accepted push as a distinct entry while guaranteeing exactly one visible entry per pane.
+**Background:** Each admitted controller has its own WS connection in lockless mode, and multiple OpenClaw sessions may also route through one controller. The client-owned shared history model (§3.1.1, §6.1.1) preserves every accepted push as a distinct entry while guaranteeing exactly one visible entry per pane.
 
 **Resolved policy summary:**
 1. The newest `content.set` in a pane becomes visible immediately.

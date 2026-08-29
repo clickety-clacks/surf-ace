@@ -178,50 +178,37 @@ test("Surf Ace plugin tool context resolves Clawline names from nested source pr
   assert.match(sqliteCalls[0]?.[1] ?? "", /agent:main:clawline:flynn:s_3d3b104a/);
 });
 
-test("Surf Ace provider host guard allows TARS aliases", () => {
-  assert.deepEqual(evaluateProviderHostGuard(["tars"], {}), {
+test("Surf Ace provider host guard allows an explicitly configured host", () => {
+  assert.deepEqual(evaluateProviderHostGuard(["provider-a"], {
+    SURF_ACE_PROVIDER_ALLOWED_HOSTS: "provider-a, provider-b.example.test",
+  }), {
     allowed: true,
-    hostNames: ["tars"],
-    reason: "tars_host",
-  });
-  assert.deepEqual(evaluateProviderHostGuard(["TARS.tail4105e8.ts.net."], {}), {
-    allowed: true,
-    hostNames: ["tars.tail4105e8.ts.net"],
-    reason: "tars_host",
-  });
-  assert.deepEqual(evaluateProviderHostGuard(["tars.local"], {}), {
-    allowed: true,
-    hostNames: ["tars"],
-    reason: "tars_host",
-  });
-  assert.deepEqual(evaluateProviderHostGuard(["TARS-2.local"], {}), {
-    allowed: true,
-    hostNames: ["tars-2"],
-    reason: "tars_host",
+    hostNames: ["provider-a"],
+    reason: "configured_host",
   });
 });
 
-test("Surf Ace provider host guard rejects non-TARS hosts without override", () => {
-  const result = evaluateProviderHostGuard(["eezo.local"], {});
+test("Surf Ace provider host guard fails closed without configuration", () => {
+  const result = evaluateProviderHostGuard(["provider-a.local"], {});
 
   assert.equal(result.allowed, false);
-  assert.equal(result.reason, "non_tars_host");
-  assert.deepEqual(result.hostNames, ["eezo"]);
-  assert.match(result.message ?? "", /TARS-only/);
-  assert.match(result.message ?? "", /SURF_ACE_ALLOW_NON_TARS_PROVIDER=1/);
+  assert.equal(result.reason, "configuration_missing_or_invalid");
+  assert.deepEqual(result.hostNames, ["provider-a"]);
+  assert.match(result.message ?? "", /SURF_ACE_PROVIDER_ALLOWED_HOSTS is required/);
 });
 
-test("Surf Ace provider host guard allows explicit non-TARS override", () => {
-  assert.deepEqual(
-    evaluateProviderHostGuard(["eezo.local"], {
-      SURF_ACE_ALLOW_NON_TARS_PROVIDER: "1",
-    }),
-    {
-      allowed: true,
-      hostNames: ["eezo"],
-      reason: "override",
-    },
-  );
+test("Surf Ace provider host guard rejects invalid configuration and unlisted hosts", () => {
+  const invalid = evaluateProviderHostGuard(["provider-a"], {
+    SURF_ACE_PROVIDER_ALLOWED_HOSTS: "ssh://provider-a",
+  });
+  assert.equal(invalid.allowed, false);
+  assert.equal(invalid.reason, "configuration_missing_or_invalid");
+
+  const unlisted = evaluateProviderHostGuard(["provider-b"], {
+    SURF_ACE_PROVIDER_ALLOWED_HOSTS: "provider-a",
+  });
+  assert.equal(unlisted.allowed, false);
+  assert.equal(unlisted.reason, "host_not_allowed");
 });
 
 test("Surf Ace wire client rejects inbound target.register as unsupported product surface", async () => {

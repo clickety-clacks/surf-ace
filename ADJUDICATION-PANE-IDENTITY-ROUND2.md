@@ -1,15 +1,15 @@
 # Pane Identity Round 2 Adjudication
 
 Scope adjudicated:
-- [REVIEW-PANE-IDENTITY-ROUND2.md](/Users/mike/src/surf-ace/REVIEW-PANE-IDENTITY-ROUND2.md)
-- [DESIGN.md](/Users/mike/src/surf-ace/DESIGN.md)
-- [scratch/pane-id-pane-label-migration-20260328.md](/Users/mike/src/surf-ace/scratch/pane-id-pane-label-migration-20260328.md)
+- [REVIEW-PANE-IDENTITY-ROUND2.md](./REVIEW-PANE-IDENTITY-ROUND2.md)
+- [DESIGN.md](./DESIGN.md)
+- [scratch/pane-id-pane-label-migration-20260328.md](./scratch/pane-id-pane-label-migration-20260328.md)
 
 ## Decision Summary
 
 All three round-2 blockers were accepted as valid spec blockers.
 
-The fixes were applied in [DESIGN.md](/Users/mike/src/surf-ace/DESIGN.md). The migration note did not require amendment for this round because it was already aligned with the intended pane-label payload contract and split semantics.
+The fixes were applied in [DESIGN.md](./DESIGN.md). The migration note did not require amendment for this round because it was already aligned with the intended pane-label payload contract and split semantics.
 
 ## Blocker Adjudication
 
@@ -40,7 +40,7 @@ Fix applied:
 - Added `paneLabel` to `PaneSplitResponse.panes[]`.
 - Added `paneLabel` to `PaneCreatedEvent.payload.required` and properties.
 
-### 3. CLU split-tool contract omitted provider-assigned pane labels
+### 3. OpenClaw split-tool contract omitted provider-assigned pane labels
 
 Status: `accepted and fixed`
 
@@ -56,7 +56,7 @@ Fix applied:
 Status: `no patch required`
 
 Reason:
-- [scratch/pane-id-pane-label-migration-20260328.md](/Users/mike/src/surf-ace/scratch/pane-id-pane-label-migration-20260328.md) already matched the intended outcome for these three blockers:
+- [scratch/pane-id-pane-label-migration-20260328.md](./scratch/pane-id-pane-label-migration-20260328.md) already matched the intended outcome for these three blockers:
   - coupled Phase 2 rollout
   - `initialPaneLabel` in pair bootstrap
   - `paneLabel` in pair/list/split/lifecycle payloads

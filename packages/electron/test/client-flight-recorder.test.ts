@@ -14,11 +14,11 @@ test("client flight recorder formats SSH-readable diagnostic lines and commands"
 
   assert.equal(
     clientDiagnosticLine("app", "selected_provider_endpoint", {
-      endpoint_name: "TARS Surf Ace",
+      endpoint_name: "provider-a Surf Ace",
       port: 19001,
       surface_id: "sf_1234",
     }),
-    "[surf-ace:app] event=selected_provider_endpoint endpoint_name=\"TARS Surf Ace\" port=19001 surface_id=sf_1234",
+    "[surf-ace:app] event=selected_provider_endpoint endpoint_name=\"provider-a Surf Ace\" port=19001 surface_id=sf_1234",
   );
 
   assert.equal(clientFlightRecorderTailCommand("/tmp/surf ace/client.log"), "tail -n 200 '/tmp/surf ace/client.log'");

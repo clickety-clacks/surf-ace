@@ -3,8 +3,12 @@ import fs from "node:fs";
 import test from "node:test";
 
 import {
+  LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES,
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
   type LocklessCapacityLimits,
+  type LocklessSurfaceAdmissionAttempt,
   validateLocklessEnvelope,
 } from "./lockless.js";
 import { protocolSchemaDefs } from "./schemas.js";
@@ -49,7 +53,7 @@ test("production validator accepts every serialized Rust CLI network variant", (
       "utf8",
     ),
   ) as { requests: unknown[] };
-  assert.equal(vector.requests.length, 15);
+  assert.equal(vector.requests.length, 16);
   for (const envelope of vector.requests) {
     assert.deepEqual(validateLocklessEnvelope(envelope), { ok: true });
   }
@@ -303,6 +307,10 @@ test("lockless validator accepts every converted and new request shape", () => {
       expectedSurfaceSetRevision: 2,
       tombstoneId: "st-a",
     }),
+    request("surface.mode.convert", {
+      currentMode: "legacy",
+      surfaceId: "surface-a",
+    }),
     request("topology.apply", {
       allowDestroyPaneIds: [],
       desired: { type: "pane" },
@@ -353,12 +361,47 @@ test("lockless validator accepts every converted and new request shape", () => {
   }
 });
 
+test("surface mode conversion requires an exact surface and observed mode", () => {
+  for (const currentMode of ["legacy", "lockless", "unknown"]) {
+    assert.deepEqual(
+      validateLocklessEnvelope(request("surface.mode.convert", {
+        currentMode,
+        surfaceId: "surface-a",
+      })),
+      { ok: true },
+    );
+  }
+  for (const payload of [
+    { currentMode: "legacy" },
+    { currentMode: "future", surfaceId: "surface-a" },
+    { currentMode: "legacy", surfaceId: "" },
+  ]) {
+    assert.equal(
+      validateLocklessEnvelope(request("surface.mode.convert", payload)).ok,
+      false,
+    );
+  }
+});
+
 test("lockless pair and discovery require exact capability and finite limits", () => {
+  const admissionAttempt = {
+    attemptSequence: 1,
+    controllerInstanceId: "controller-a",
+    outcome: "succeeded",
+    reason: null,
+    reasonCode: null,
+    requestId: "rq-pair",
+    stage: "mode_commit",
+    startedAt: 1,
+    surfaceId: "sf_surface-a",
+    updatedAt: 2,
+  };
   const discovery = {
     id: "rq-list",
     ok: true,
     op: "surfaces.list",
     payload: {
+      admissionAttempts: [admissionAttempt],
       capabilities: {
         limits,
         protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
@@ -389,6 +432,7 @@ test("lockless pair and discovery require exact capability and finite limits", (
     ok: true,
     op: "pair.request",
     payload: {
+      admissionAttempt,
       capabilities: {
         protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
       },
@@ -408,6 +452,16 @@ test("lockless pair and discovery require exact capability and finite limits", (
     v: 1,
   };
   assert.deepEqual(validateLocklessEnvelope(pair), { ok: true });
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      ...pair,
+      payload: {
+        ...pair.payload,
+        admissionAttempt: { ...admissionAttempt, outcome: "lost" },
+      },
+    }),
+    { ok: false, reason: "invalid_admission_attempt" },
+  );
   assert.equal(
     validateLocklessEnvelope({
       ...pair,
@@ -422,6 +476,197 @@ test("lockless pair and discovery require exact capability and finite limits", (
       },
     }).ok,
     false,
+  );
+});
+
+test("lockless pair admission and lifecycle ledger enforce bounded identifiers, records, and bytes", () => {
+  const pairPayload = {
+    controllerInstanceId: "c".repeat(64),
+    projectionCapacityBytes: 1,
+    protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+    protocolVersion: 1,
+    surfaceId: `sf_${"s".repeat(64)}`,
+  };
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      ...request("pair.request", pairPayload),
+      id: "r".repeat(64),
+    }),
+    { ok: true },
+  );
+  for (const envelope of [
+    { ...request("pair.request", pairPayload), id: "r".repeat(65) },
+    request("pair.request", {
+      ...pairPayload,
+      controllerInstanceId: "c".repeat(65),
+    }),
+    request("pair.request", {
+      ...pairPayload,
+      surfaceId: `sf_${"s".repeat(65)}`,
+    }),
+  ]) {
+    assert.equal(validateLocklessEnvelope(envelope).ok, false);
+  }
+
+  const admissionAttempt: LocklessSurfaceAdmissionAttempt = {
+    attemptSequence: 1,
+    controllerInstanceId: "controller-a",
+    outcome: "failed",
+    reason: "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2),
+    reasonCode: "invalid_payload",
+    requestId: "rq-pair",
+    stage: "surface_lookup",
+    startedAt: 1,
+    surfaceId: "sf_surface-a",
+    updatedAt: 2,
+  };
+  const discovery = {
+    id: "rq-list",
+    ok: true,
+    op: "surfaces.list",
+    payload: {
+      admissionAttempts: [admissionAttempt],
+      capabilities: {
+        limits,
+        protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      },
+      surfaces: [],
+    },
+    sentAt: 1,
+    type: "response",
+    v: 1,
+  };
+  assert.deepEqual(validateLocklessEnvelope(discovery), { ok: true });
+  assert.equal(
+    validateLocklessEnvelope({
+      ...discovery,
+      payload: {
+        ...discovery.payload,
+        admissionAttempts: [{
+          ...admissionAttempt,
+          reason: "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 1),
+        }],
+      },
+    }).ok,
+    false,
+  );
+
+  const lifecycleWithAttempts = (admissionAttempts: unknown[]) => ({
+    ...discovery,
+    payload: { ...discovery.payload, admissionAttempts },
+  });
+  const countEquality = Array.from(
+    { length: LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS },
+    (_, index) => ({
+      ...admissionAttempt,
+      attemptSequence: index + 1,
+      outcome: "succeeded",
+      reason: null,
+      reasonCode: null,
+    }),
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(lifecycleWithAttempts(countEquality)),
+    { ok: true },
+  );
+  assert.equal(
+    validateLocklessEnvelope(
+      lifecycleWithAttempts([
+        ...countEquality,
+        { ...countEquality[0], attemptSequence: countEquality.length + 1 },
+      ]),
+    ).ok,
+    false,
+  );
+
+  const ledgerBytes = (attempts: unknown[]) =>
+    new TextEncoder().encode(JSON.stringify(attempts)).byteLength;
+  let byteEquality: LocklessSurfaceAdmissionAttempt[] | null = null;
+  for (
+    let count = 1;
+    count < LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS;
+    count++
+  ) {
+    const minimum = Array.from({ length: count }, (_, index) => ({
+      ...admissionAttempt,
+      attemptSequence: index + 1,
+      reason: "x",
+    }));
+    const maximum = minimum.map((attempt) => ({
+      ...attempt,
+      reason: "x".repeat(LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2),
+    }));
+    if (
+      ledgerBytes(minimum) <=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES &&
+      ledgerBytes(maximum) >=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES
+    ) {
+      byteEquality = minimum;
+      break;
+    }
+  }
+  assert(byteEquality);
+  let byteRemainder =
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES -
+    ledgerBytes(byteEquality);
+  for (const attempt of byteEquality) {
+    const added = Math.min(
+      byteRemainder,
+      LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 3,
+    );
+    attempt.reason = "x".repeat(1 + added);
+    byteRemainder -= added;
+  }
+  assert.equal(byteRemainder, 0);
+  assert.equal(
+    ledgerBytes(byteEquality),
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(lifecycleWithAttempts(byteEquality)),
+    { ok: true },
+  );
+  const bytePlusOne = structuredClone(byteEquality);
+  const expandable = bytePlusOne.find(
+    (attempt) =>
+      typeof attempt.reason === "string" &&
+      attempt.reason.length < LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES - 2,
+  );
+  assert(expandable && typeof expandable.reason === "string");
+  expandable.reason += "x";
+  assert.equal(
+    ledgerBytes(bytePlusOne),
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES + 1,
+  );
+  assert.equal(
+    validateLocklessEnvelope(lifecycleWithAttempts(bytePlusOne)).ok,
+    false,
+  );
+});
+
+test("admission failure is a public lockless error with a remedy shape", () => {
+  assert.deepEqual(
+    validateLocklessEnvelope({
+      error: {
+        code: "admission_failed",
+        details: {
+          currentMode: "legacy",
+          remedyCommand:
+            "surface-mode-convert --input-json '{\"currentMode\":\"legacy\",\"surfaceId\":\"surface-a\"}'",
+          requiredMode: "lockless",
+          surfaceId: "surface-a",
+        },
+        message: "Surface surface-a was not admitted to lockless mode",
+      },
+      id: "rq-pair",
+      ok: false,
+      op: "pair.request",
+      sentAt: 1,
+      type: "response",
+      v: 1,
+    }),
+    { ok: true },
   );
 });
 
@@ -640,7 +885,7 @@ test("migration material rejects ambiguous or injected nested authority", () => 
       projectionCapacityBytes: 10,
       protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
       protocolVersion: 1,
-      surfaceId: "surface-a",
+      surfaceId: "sf_surface-a",
     });
 
   assert.deepEqual(validateLocklessEnvelope(pair(material)), { ok: true });

@@ -1,7 +1,7 @@
 {
   "requests": [
     {"id":"rq-0","op":"surfaces.list","payload":{},"sentAt":1785619273922,"type":"request","v":1},
-    {"id":"rq-1","op":"content.set","payload":{"surfaceId":"sf_1","paneId":1,"contentId":"c_1","contentType":"markdown","content":{"markdown":"hi"},"friendlyChatName":"CLU"},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-1","op":"content.set","payload":{"surfaceId":"sf_1","paneId":1,"contentId":"c_1","contentType":"markdown","content":{"markdown":"hi"},"friendlyChatName":"OpenClaw"},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-2","op":"pane.split","payload":{"surfaceId":"sf_1","paneId":1,"count":2,"direction":"horizontal","expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-3","op":"pane.close","payload":{"surfaceId":"sf_1","paneId":1,"expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-4","op":"pane.restore","payload":{"surfaceId":"sf_1","anchorPaneId":1,"tombstoneId":"pt_1","direction":"vertical","expectedTopologyRevision":1},"sentAt":1785619273922,"type":"request","v":1},
@@ -14,6 +14,7 @@
     {"id":"rq-11","op":"surface.window.close","payload":{"expectedSurfaceSetRevision":1,"expectedTopologyRevision":1,"surfaceId":"sf_1"},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-12","op":"surface.window.restore","payload":{"expectedSurfaceSetRevision":1,"tombstoneId":"st_1","placement":{}},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-13","op":"target.register","payload":{"surfaceId":"sf_1","paneId":1,"idempotencyKey":"idem_1","expectedPreviousTargetEpoch":null,"launchedAt":"2026-07-30T00:00:00Z","registrationState":"attached","targetKind":"native_app","targetHeader":{},"targetPayload":{}},"sentAt":1785619273922,"type":"request","v":1},
-    {"id":"rq-14","op":"target.apply","payload":{"surfaceId":"sf_1","paneId":1,"requestId":"target_request_1","restoreReason":"initial","targetId":"tg_1","targetEpoch":1,"targetKind":"native_app","targetHeader":{},"targetPayload":{}},"sentAt":1785619273922,"type":"request","v":1}
+    {"id":"rq-14","op":"target.apply","payload":{"surfaceId":"sf_1","paneId":1,"requestId":"target_request_1","restoreReason":"initial","targetId":"tg_1","targetEpoch":1,"targetKind":"native_app","targetHeader":{},"targetPayload":{}},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-15","op":"surface.mode.convert","payload":{"surfaceId":"sf_1","currentMode":"legacy"},"sentAt":1785619273922,"type":"request","v":1}
   ]
 }

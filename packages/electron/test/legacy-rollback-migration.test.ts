@@ -168,9 +168,9 @@ function representativeState(): PersistentSurfaceState {
 
 test("preview preserves legacy material without an owner and reports every lockless-only item", () => {
   const state = representativeState();
-  const preview = previewLegacyRollback(state, "racter-pre-rollout-snapshot");
+  const preview = previewLegacyRollback(state, "portrait-display-pre-rollout-snapshot");
 
-  assert.equal(preview.legacySnapshotIdentity, "racter-pre-rollout-snapshot");
+  assert.equal(preview.legacySnapshotIdentity, "portrait-display-pre-rollout-snapshot");
   assert.equal(preview.legacyState.lockless, undefined);
   assert.equal(preview.legacyState.surfaces?.[0]?.providerOwnership, null);
   assert.deepEqual(preview.legacyState.surfaces?.[0]?.panes, state.surfaces?.[0]?.panes);
@@ -208,7 +208,7 @@ test("offline preview/apply installs legacy state and captured generation restor
   const capturedPath = path.join(stateDir, "rollout-captured-generation.json");
   await fs.copyFile(path.join(stateDir, FILE_NAME), capturedPath);
 
-  const preview = await previewCommittedLegacyRollback(stateDir, FILE_NAME, "snapshot-from-racter");
+  const preview = await previewCommittedLegacyRollback(stateDir, FILE_NAME, "snapshot-from-portrait-display");
   await applyLegacyRollbackPreview(stateDir, FILE_NAME, preview);
   const applied = await loadPersistentStateFile(stateDir, FILE_NAME);
   assert.deepEqual(applied.state, preview.legacyState);

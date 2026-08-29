@@ -38,7 +38,7 @@ For example:
 ```sh
 surf-ace --state-root "$STATE_ROOT" --endpoint "$SURF_ACE_ENDPOINT" \
   --product-label Clawline push --input-json \
-  '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"# Visible result"},"friendlyChatName":"CLU"}'
+  '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"# Visible result"},"friendlyChatName":"OpenClaw"}'
 ```
 
 Commands are exactly: `list`, `push`, `read`, `topology-intent`,

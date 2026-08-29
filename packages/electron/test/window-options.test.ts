@@ -11,7 +11,7 @@ async function mainSource(): Promise<string> {
 test("surface window is frameless and visible when hosted by the compositor", () => {
   const options = surfaceWindowOptions({
     compositorSocketPath: "/tmp/surf-ace-compositor.sock",
-    endpointName: "racter Surf Ace",
+    endpointName: "portrait-display Surf Ace",
     viewport: { height: 3840, scale: 1, width: 2160 },
     windowLabel: "a",
   });
@@ -24,13 +24,13 @@ test("surface window is frameless and visible when hosted by the compositor", ()
   assert.equal(options.useContentSize, true);
   assert.equal(options.height, 3840);
   assert.equal(options.width, 2160);
-  assert.equal(options.title, "racter Surf Ace · a");
+  assert.equal(options.title, "portrait-display Surf Ace · a");
 });
 
 test("surface window keeps the platform frame outside compositor hosting", () => {
   const options = surfaceWindowOptions({
     compositorSocketPath: null,
-    endpointName: "eezo Surf Ace",
+    endpointName: "workstation-a Surf Ace",
     viewport: { height: 812, scale: 2, width: 375 },
   });
 
@@ -41,7 +41,7 @@ test("surface window keeps the platform frame outside compositor hosting", () =>
   assert.equal(options.transparent, false);
   assert.equal(options.height, 812);
   assert.equal(options.width, 960);
-  assert.equal(options.title, "eezo Surf Ace");
+  assert.equal(options.title, "workstation-a Surf Ace");
 });
 
 test("surface window load query flags compositor hosting before first paint", () => {
@@ -77,7 +77,7 @@ test("renderer enters compositor transparent mode before stylesheet paint", asyn
 test("compositor-hosted windows materialize with alpha bootstrap in one option path", async () => {
   const options = surfaceWindowOptions({
     compositorSocketPath: "/tmp/surf-ace-compositor.sock",
-    endpointName: "racter Surf Ace",
+    endpointName: "portrait-display Surf Ace",
     viewport: { height: 3840, scale: 1, width: 2160 },
   });
   const query = surfaceWindowLoadQuery({
