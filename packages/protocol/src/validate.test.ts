@@ -42,14 +42,12 @@ test("validateEnvelopeType accepts current request envelopes", () => {
     id: "req_1",
     op: "pair.request",
     payload: {
-      connectionId: "cn_1",
-      initialPaneId: 1,
-      initialPaneLabel: 1,
+      controllerInstanceId: "controller-1",
+      controllerProductName: "test-harness",
+      projectionCapacityBytes: 4096,
       protocolVersion: 1,
-      providerId: "prov_1",
-      providerName: "test-harness",
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
       surfaceId: "sf_1",
-      windowLabel: "a",
     },
     sentAt: Date.now(),
     type: "request",
@@ -57,47 +55,6 @@ test("validateEnvelopeType accepts current request envelopes", () => {
   });
 
   assert.deepEqual(result, { ok: true });
-});
-
-test("validateEnvelopeType accepts provider authority state envelopes", () => {
-  const request = validateEnvelopeType("authority.state", {
-    id: "req_authority_1",
-    op: "authority.state",
-    payload: {
-      actionable: true,
-      reason: null,
-      ownershipEpoch: 1,
-      providerId: "prov_1",
-      sessionId: "sa_1",
-      surfaceId: "sf_1",
-      windowLabel: "a",
-      panes: [
-        {
-          paneId: 41,
-          paneLabel: 1,
-          paneLineageId: "pl_1",
-        },
-      ],
-    },
-    sentAt: Date.now(),
-    type: "request",
-    v: 1,
-  });
-  assert.deepEqual(request, { ok: true });
-
-  const response = validateEnvelopeType("authority.state", {
-    id: "req_authority_1",
-    ok: true,
-    op: "authority.state",
-    payload: {
-      accepted: true,
-      reason: null,
-    },
-    sentAt: Date.now(),
-    type: "response",
-    v: 1,
-  });
-  assert.deepEqual(response, { ok: true });
 });
 
 test("validateEnvelopeType accepts weighted topology change events", () => {
@@ -126,27 +83,6 @@ test("validateEnvelopeType accepts weighted topology change events", () => {
   });
 
   assert.deepEqual(result, { ok: true });
-});
-
-test("validateEnvelopeType rejects pair requests without providerName", () => {
-  const result = validateEnvelopeType("pair.request", {
-    id: "req_missing_provider_name",
-    op: "pair.request",
-    payload: {
-      connectionId: "cn_1",
-      initialPaneId: 1,
-      initialPaneLabel: 1,
-      protocolVersion: 1,
-      providerId: "prov_1",
-      surfaceId: "sf_1",
-      windowLabel: "a",
-    },
-    sentAt: Date.now(),
-    type: "request",
-    v: 1,
-  });
-
-  assert.equal(result.ok, false);
 });
 
 test("validateEnvelopeType accepts file reload source metadata on content.set", () => {
@@ -246,7 +182,7 @@ test("authority conformance vector pins the cross-language lockless vocabulary",
     "not_committed",
     "still_pending",
     "receipt_unavailable",
-    "legacy_overflow",
+    "source_overflow",
     "scope_capacity",
     "record_oversize",
     "cursor",
@@ -474,193 +410,6 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
   });
   assert.deepEqual(panesListResponse, { ok: true });
 
-  const relinquishRequest = validateEnvelopeType("ownership.relinquish", {
-    id: "req_3",
-    op: "ownership.relinquish",
-    sentAt: Date.now(),
-    type: "request",
-    v: 1,
-  });
-  assert.deepEqual(relinquishRequest, { ok: true });
-
-  const pairResponse = validateEnvelopeType("pair.request", {
-    id: "req_4",
-    ok: true,
-    op: "pair.request",
-    payload: {
-	      capabilities: {
-	        contentTypes: ["html"],
-	        eventTypes: ["event.drawing_flush"],
-	        protocolFeatures: ["authority.state.v1"],
-	      },
-      eventConfig: {
-        activeEvents: ["event.drawing_flush"],
-        drawingFlushConfig: {
-          idleWindowMs: 8000,
-          maxIntervalMs: 30000,
-        },
-        profile: "minimum_deep",
-      },
-      limits: {
-        maxDrawingFlushBytes: 1024,
-        maxFrameBytes: 1024,
-        maxMessageBytes: 1024,
-        maxStrokePointsPerFlush: 1024,
-        maxVisibleTextBytes: 1024,
-        resumeGraceMs: 20_000,
-      },
-      ownershipEpoch: 1,
-      resumed: false,
-      sessionId: "sa_pair_session",
-      state: {
-        layout: { paneId: 1, type: "pane" },
-        panes: [
-          {
-            contentType: null,
-            currentContentId: null,
-            currentRevision: 0,
-            currentTarget: {
-              currentState: "current",
-              paneLineageId: "pl_1",
-              restorePolicy: "auto",
-              targetEpoch: 1,
-              targetHeader: {
-                payloadSchemaVersion: 1,
-                replaySemantics: "navigate",
-                requiredCapabilities: ["browser_url"],
-                safeToLogFields: ["url"],
-                safetyClass: "network",
-                summary: "target.browser_url.v1",
-              },
-              targetId: "tg_1",
-              targetKind: "browser_url",
-              targetPayload: { url: "https://example.test/live" },
-            },
-            paneId: 1,
-            paneLineageId: "pl_1",
-            paneLabel: 1,
-          },
-        ],
-        topologyRevision: 0,
-      },
-      surfaceId: "sf_1",
-      surfaceName: "Surface A",
-      viewport: { height: 768, scale: 2, width: 1024 },
-    },
-    sentAt: Date.now(),
-    type: "response",
-    v: 1,
-	  });
-	  assert.deepEqual(pairResponse, { ok: true });
-
-	  const legacyPairResponseWithoutProtocolFeatures = validateEnvelopeType("pair.request", {
-	    id: "req_legacy_pair",
-	    ok: true,
-	    op: "pair.request",
-	    payload: {
-	      capabilities: {
-	        contentTypes: ["html"],
-	        eventTypes: ["event.drawing_flush"],
-	      },
-	      eventConfig: {
-	        activeEvents: ["event.drawing_flush"],
-	        drawingFlushConfig: {
-	          idleWindowMs: 8000,
-	          maxIntervalMs: 30000,
-	        },
-	        profile: "minimum_deep",
-	      },
-	      limits: {
-	        maxDrawingFlushBytes: 1024,
-	        maxFrameBytes: 1024,
-	        maxMessageBytes: 1024,
-	        maxStrokePointsPerFlush: 1024,
-	        maxVisibleTextBytes: 1024,
-	        resumeGraceMs: 20_000,
-	      },
-	      ownershipEpoch: 1,
-		      resumed: false,
-		      sessionId: "sa_pair_legacy_session",
-		      state: {
-		        layout: { paneId: 1, type: "pane" },
-		        panes: [
-		          {
-		            contentType: null,
-		            currentContentId: null,
-	            currentRevision: 0,
-	            paneId: 1,
-	            paneLineageId: "pl_legacy",
-		            paneLabel: 1,
-		          },
-		        ],
-		        topologyRevision: 0,
-		      },
-	      surfaceId: "sf_legacy",
-	      surfaceName: "Legacy Surface",
-	      viewport: { height: 768, scale: 2, width: 1024 },
-	    },
-	    sentAt: Date.now(),
-	    type: "response",
-	    v: 1,
-	  });
-	  assert.deepEqual(legacyPairResponseWithoutProtocolFeatures, { ok: true });
-
-	  const emptyPairPanes = validateEnvelopeType("pair.request", {
-    id: "req_empty_pair_panes",
-    ok: true,
-    op: "pair.request",
-    payload: {
-      capabilities: {
-        contentTypes: ["html"],
-        eventTypes: ["event.drawing_flush"],
-      },
-      eventConfig: {
-        activeEvents: ["event.drawing_flush"],
-        drawingFlushConfig: {
-          idleWindowMs: 8000,
-          maxIntervalMs: 30000,
-        },
-        profile: "minimum_deep",
-      },
-      limits: {
-        maxDrawingFlushBytes: 1024,
-        maxFrameBytes: 1024,
-        maxMessageBytes: 1024,
-        maxStrokePointsPerFlush: 1024,
-        maxVisibleTextBytes: 1024,
-        resumeGraceMs: 20_000,
-      },
-      ownershipEpoch: 1,
-      resumed: false,
-      sessionId: "sa_pair_session",
-      state: {
-        layout: { paneId: 1, type: "pane" },
-        panes: [],
-        topologyRevision: 0,
-      },
-      surfaceId: "sf_1",
-      surfaceName: "Surface A",
-      viewport: { height: 768, scale: 2, width: 1024 },
-    },
-    sentAt: Date.now(),
-    type: "response",
-    v: 1,
-  });
-  assert.equal(emptyPairPanes.ok, false);
-
-  const relinquishResponse = validateEnvelopeType("ownership.relinquish", {
-    id: "req_5",
-    ok: true,
-    op: "ownership.relinquish",
-    payload: {
-      relinquished: true,
-    },
-    sentAt: Date.now(),
-    type: "response",
-    v: 1,
-  });
-  assert.deepEqual(relinquishResponse, { ok: true });
-
   const errorResponse = validateEnvelopeType("pair.request", {
     error: {
       code: "internal_error",
@@ -759,8 +508,6 @@ test("validateEnvelopeType accepts target.apply.result native app proof state", 
       appliedAt: new Date().toISOString(),
       materializedState: {
         authority: {
-          ownershipEpoch: 1,
-          ownershipSessionId: "sa_1",
           paneLineageId: "pl_1",
           surfaceId: "sf_1",
           targetEpoch: 1,
@@ -832,7 +579,7 @@ test("validateEnvelopeType rejects compositor fields in target.apply result mate
   assert.deepEqual(result, { ok: false, reason: "unknown_property:preflightStatusSummary" });
 });
 
-test("validateEnvelopeType rejects legacy target.apply native materialization payloads", () => {
+test("validateEnvelopeType rejects unknown target.apply native materialization payloads", () => {
   const result = validateEnvelopeType("target.apply", {
     id: "req_target_apply",
     op: "target.apply",
@@ -855,8 +602,6 @@ test("validateEnvelopeType rejects legacy target.apply native materialization pa
           revision: 1,
         }],
       },
-      ownershipEpoch: 1,
-      ownershipSessionId: "sa_1",
       paneLineageId: "pl_1",
       requestId: "tr_1",
       restoreReason: "initial_apply",
@@ -887,8 +632,6 @@ test("validateEnvelopeType rejects compositor fields in target.apply targetPaylo
     id: "req_target_apply",
     op: "target.apply",
     payload: {
-      ownershipEpoch: 1,
-      ownershipSessionId: "sa_1",
       paneLineageId: "pl_1",
       requestId: "tr_1",
       restoreReason: "initial_apply",
@@ -940,9 +683,9 @@ test("validateEnvelopeType accepts target.register.rejected responses", () => {
     ok: true,
     op: "target.register.rejected",
     payload: {
-      errorCode: "ownership_epoch_mismatch",
+      errorCode: "pane_lineage_missing",
       idempotencyKey: "idem_1",
-      message: "target.register ownershipEpoch does not match active ownership",
+      message: "target.register pane lineage is not present",
       status: "rejected",
     },
     sentAt: Date.now(),

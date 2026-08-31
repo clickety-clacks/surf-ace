@@ -6,12 +6,5 @@ Do not install or run this scaffold as an OpenClaw provider. The canonical provi
 
 ## Current state
 
-- Legacy provider implementation moved to `legacy/provider-extension/`
-- Fresh runtime scaffold started in `src/`
-- Protocol contracts imported from `packages/protocol/`
-
-## Next implementation steps
-
-1. WS connection manager (provider as client)
-2. Pair/reconnect lifecycle
-3. Tool wiring (`surf_ace_pair`, `surf_ace_push`, `surf_ace_snapshot`, etc.)
+The supported provider package is `packages/extension`. It uses the current
+lockless controller protocol and imports its contracts from `packages/protocol`.

@@ -670,7 +670,7 @@ test("AC-CLOSE-07: a valid admitted close at the retained byte bound succeeds wi
   assert.deepEqual(results, [results[0], results[0]]);
 });
 
-test("AC-CLOSE-07: admission migration restart and configuration reject aggregate bound+1 atomically and accept equality under identity reversal", () => {
+test("AC-CLOSE-07: admission restart and configuration reject aggregate bound+1 atomically and accept equality under identity reversal", () => {
   const observed: number[] = [];
   for (const identityOrder of ["forward", "reverse"] as const) {
     const fixture = retainedAggregateFixture(identityOrder);

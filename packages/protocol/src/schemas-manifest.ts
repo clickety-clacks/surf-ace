@@ -2,8 +2,6 @@ import {
   annotationCommittedEventSchema,
   annotationsRemoveRequestSchema,
   annotationsRemoveResponseSchema,
-  authorityStateRequestSchema,
-  authorityStateResponseSchema,
   contentAppendRequestSchema,
   contentClearRequestSchema,
   contentPatchRequestSchema,
@@ -18,10 +16,6 @@ import {
   locklessResponseSchema,
   locklessTargetApplyResultEventSchema,
   pageEventSchema,
-  pairRequestSchema,
-  pairResponseSchema,
-  relinquishRequestSchema,
-  relinquishResponseSchema,
   surfaceWindowCloseRequestSchema,
   surfaceWindowCloseResponseSchema,
   surfaceWindowOpenRequestSchema,
@@ -82,14 +76,9 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
     errorResponse: errorResponseSchema,
   },
   "pair.request": {
-    request: pairRequestSchema,
-    response: pairResponseSchema,
-    errorResponse: errorResponseSchema,
-  },
-  "ownership.relinquish": {
-    request: relinquishRequestSchema,
-    response: relinquishResponseSchema,
-    errorResponse: errorResponseSchema,
+    request: locklessRequestSchema,
+    response: locklessResponseSchema,
+    errorResponse: locklessResponseSchema,
   },
   "surface.window.open": {
     request: surfaceWindowOpenRequestSchema,
@@ -140,11 +129,6 @@ export const SURF_ACE_PROTOCOL_SCHEMAS = {
   "snapshot.get": {
     request: snapshotGetRequestSchema,
     response: snapshotResponseSchema,
-    errorResponse: errorResponseSchema,
-  },
-  "authority.state": {
-    request: authorityStateRequestSchema,
-    response: authorityStateResponseSchema,
     errorResponse: errorResponseSchema,
   },
   "heartbeat.ping": {

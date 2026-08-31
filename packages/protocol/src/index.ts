@@ -9,9 +9,6 @@ type Brand<T, TName extends string> = T & {
 };
 
 export type RequestId = Brand<string, "RequestId">;
-export type ProviderId = Brand<string, "ProviderId">;
-export type ConnectionId = Brand<string, "ConnectionId">;
-export type SessionId = Brand<string, "SessionId">;
 export type SurfaceId = Brand<string, "SurfaceId">;
 export type ContentId = Brand<string, "ContentId">;
 export type StrokeId = Brand<string, "StrokeId">;
@@ -62,8 +59,6 @@ export type BrowserUrlMaterializedState = {
 
 export type NativeHostMaterializedState = {
   authority?: {
-    ownershipEpoch: number;
-    ownershipSessionId: string;
     paneLineageId: string;
     surfaceId: SurfaceId;
     targetEpoch: number;
@@ -169,8 +164,6 @@ export type TargetErrorCode =
   | "policy_denied"
   | "approval_required"
   | "unsafe_payload"
-  | "ownership_epoch_mismatch"
-  | "ownership_session_mismatch"
   | "pane_lineage_missing"
   | "pane_lineage_ambiguous"
   | "target_epoch_stale"
@@ -194,7 +187,7 @@ export type TargetApplyReason =
 //
 // KNOWN BUG (iOS client): The connection status indicator (green bar) on
 // device surfaces should only show "connected" (green) AFTER a successful
-// pair handshake (pair.request → PairResponse with ok:true). It must show
+// pair handshake (pair.request → a successful lockless response). It must show
 // "disconnected" (red/grey) any time the socket is closed OR a pair is
 // pending/in-flight. The current iOS client turns green on raw socket open,
 // which is incorrect — it stays green during crash loops because the
@@ -353,10 +346,6 @@ export type ContentReloadSource = {
   path: string;
 };
 
-export type PairResume = {
-  sessionId: SessionId;
-};
-
 export type TopologyRevision = Brand<number, "TopologyRevision">;
 
 export type DrawingFlushConfig = {
@@ -390,26 +379,6 @@ export type EventBase<TOp extends string> = {
 };
 
 export type SurfacesListRequest = RequestBase<"surfaces.list">;
-
-export type PairRequest = RequestBase<"pair.request"> & {
-  payload: {
-    providerId: ProviderId;
-    connectionId: ConnectionId;
-    surfaceId: SurfaceId;
-    windowLabel: string;
-    initialPaneId: PaneId;
-    initialPaneLabel: number;
-    providerName: string;
-    protocolVersion: 1;
-    restoreAttemptId?: string;
-    takeover?: boolean;
-    eventProfile?: EventProfile;
-    drawingFlushConfig?: DrawingFlushConfig;
-    resume?: PairResume;
-  };
-};
-
-export type RelinquishRequest = RequestBase<"ownership.relinquish">;
 
 export type ContentSetPayload = (
   {
@@ -567,27 +536,6 @@ export type NativePaneWindowGroupDiagnostic = {
   members: NativePaneWindowGroupMember[];
 };
 
-export type AuthorityPaneIdentity = {
-  paneId: PaneId;
-  paneLabel: number;
-  paneLineageId: string;
-};
-
-export type AuthorityStatePayload = {
-  actionable: boolean;
-  reason: string | null;
-  ownershipEpoch: number;
-  providerId: ProviderId;
-  sessionId: SessionId;
-  surfaceId: SurfaceId;
-  windowLabel: string;
-  panes: AuthorityPaneIdentity[];
-};
-
-export type AuthorityStateRequest = RequestBase<"authority.state"> & {
-  payload: AuthorityStatePayload;
-};
-
 export type TopologyLayoutNode =
   | {
       type: "pane";
@@ -648,8 +596,6 @@ export type TargetApplyRequest = RequestBase<"target.apply"> & {
     requestId: string;
     targetId: string;
     surfaceId: SurfaceId;
-    ownershipSessionId: string;
-    ownershipEpoch: number;
     paneLineageId: string;
     targetEpoch: number;
     targetKind: TargetKind;
@@ -665,8 +611,6 @@ export type TargetRegisterRequest = RequestBase<"target.register"> & {
     idempotencyKey: string;
     surfaceId: SurfaceId;
     surfaceInstanceId: string | null;
-    ownershipSessionId: string;
-    ownershipEpoch: number;
     paneLineageId: string;
     expectedPreviousTargetEpoch: number | null;
     targetKind: TargetKind;
@@ -713,71 +657,11 @@ export type SurfacesListResponse = ResponseBase<"surfaces.list"> & {
   };
 };
 
-export type PairResponse = ResponseBase<"pair.request"> & {
-  payload: {
-    sessionId: SessionId;
-    ownershipEpoch: number;
-    resumed: boolean;
-    surfaceId: SurfaceId;
-    surfaceName: string;
-    viewport: SurfaceViewport;
-    capabilities: {
-      contentTypes: ContentType[];
-      eventTypes: Event["op"][];
-      protocolFeatures?: string[];
-      runtimeAppBinding?: RuntimeAppBindingDiagnostics;
-      targetCapabilities?: string[];
-    };
-    eventConfig: {
-      profile: EventProfile;
-      activeEvents: Array<
-        | "event.drawing_flush"
-        | "event.history_navigated"
-        | "event.tap"
-        | "event.scroll"
-        | "event.selection"
-        | "event.page"
-        | "event.navigation"
-        | "event.snapshot_hint"
-      >;
-      drawingFlushConfig: DrawingFlushConfig;
-    };
-    limits: {
-      maxMessageBytes: number;
-      maxFrameBytes: number;
-      maxVisibleTextBytes: number;
-      maxStrokePointsPerFlush: number;
-      maxDrawingFlushBytes: number;
-      resumeGraceMs: number;
-    };
-    state: {
-      panes: Array<{
-        paneId: PaneId;
-        paneLabel: number;
-        paneLineageId?: string;
-        currentContentId: ContentId | null;
-        currentRevision: Revision;
-        contentType: ContentType | null;
-        currentTarget?: PaneCurrentTargetState | null;
-        display?: ContentDisplay;
-      }>;
-      layout: TopologyLayoutNode;
-      topologyRevision: TopologyRevision;
-    };
-  };
-};
-
 export type RuntimeAppBindingRequest = RequestBase<"runtime.app_binding">;
 
 export type RuntimeAppBindingResponse = ResponseBase<"runtime.app_binding"> & {
   payload: {
     runtimeAppBinding: RuntimeAppBindingDiagnostics | null;
-  };
-};
-
-export type RelinquishResponse = ResponseBase<"ownership.relinquish"> & {
-  payload: {
-    relinquished: true;
   };
 };
 
@@ -790,13 +674,6 @@ export type MutationAckResponse = ResponseBase<
     currentRevision: Revision;
     contentType?: ContentType | null;
     contentId: ContentId | null;
-  };
-};
-
-export type AuthorityStateResponse = ResponseBase<"authority.state"> & {
-  payload: {
-    accepted: boolean;
-    reason: string | null;
   };
 };
 
@@ -956,7 +833,6 @@ export type ErrorResponse = {
   op:
     | "surfaces.list"
     | "pair.request"
-    | "ownership.relinquish"
     | "surface.window.open"
     | "surface.window.close"
     | "topology.apply"
@@ -968,7 +844,6 @@ export type ErrorResponse = {
     | "content.clear"
     | "annotations.remove"
     | "snapshot.get"
-    | "authority.state"
     | "heartbeat.ping"
     | "panes.list"
     | "pane.split"
@@ -1149,9 +1024,7 @@ export type PaneRenamedEvent = EventBase<"event.pane_renamed"> & {
 
 export type Request =
   | SurfacesListRequest
-  | PairRequest
   | RuntimeAppBindingRequest
-  | RelinquishRequest
   | SurfaceWindowOpenRequest
   | SurfaceWindowCloseRequest
   | TopologyApplyRequest
@@ -1164,7 +1037,6 @@ export type Request =
   | ContentClearRequest
   | AnnotationsRemoveRequest
   | SnapshotGetRequest
-  | AuthorityStateRequest
   | HeartbeatPingRequest
   | PanesListRequest
   | PaneSplitRequest
@@ -1174,9 +1046,7 @@ export type Request =
 
 export type Response =
   | SurfacesListResponse
-  | PairResponse
   | RuntimeAppBindingResponse
-  | RelinquishResponse
   | SurfaceWindowOpenResponse
   | SurfaceWindowCloseResponse
   | TopologyApplyResponse
@@ -1187,7 +1057,6 @@ export type Response =
   | MutationAckResponse
   | AnnotationsRemoveResponse
   | SnapshotResponse
-  | AuthorityStateResponse
   | HeartbeatPongResponse
   | PanesListResponse
   | PaneSplitResponse
@@ -1219,5 +1088,4 @@ export * from "./message-names.js";
 export * from "./messages.js";
 export * from "./schemas.js";
 export * from "./schemas-manifest.js";
-export * from "./pair-example.js";
 export * from "./lockless.js";

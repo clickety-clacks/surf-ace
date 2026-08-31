@@ -92,7 +92,7 @@
         "not_committed",
         "still_pending",
         "receipt_unavailable",
-        "legacy_overflow",
+        "source_overflow",
         "scope_capacity",
         "record_oversize",
         "cursor",

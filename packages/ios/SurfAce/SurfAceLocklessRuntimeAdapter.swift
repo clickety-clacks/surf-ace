@@ -130,7 +130,6 @@ actor SurfAceLocklessRuntimeAdapter {
 
     init(
         store: SurfAceLocklessGenerationStore,
-        legacy: SurfAceLegacyUserDefaultsSnapshot,
         targetIntentAdmissionPreparation: (@Sendable (String) async -> Void)? = nil
     ) throws {
         self.targetIntentAdmissionPreparation = targetIntentAdmissionPreparation
@@ -139,7 +138,7 @@ actor SurfAceLocklessRuntimeAdapter {
         if let loadedState {
             state = loadedState
         } else {
-            state = try SurfAceLocklessMigration.migrate(legacy)
+            state = try SurfAceLocklessAuthorityState.empty()
         }
         try Self.normalizeTopologies(in: &state)
         var restoredLiveController = false
@@ -195,10 +194,6 @@ actor SurfAceLocklessRuntimeAdapter {
                 guard state.liveSurfaces[surfaceId] != nil else {
                     throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
                 }
-                guard state.negotiatedModes[surfaceId] != .legacy else {
-                    throw SurfAceLocklessRuntimeAdapterError.capabilityMismatch
-                }
-                state.negotiatedModes[surfaceId] = .lockless
                 try Self.ensureScopes(surfaceId: surfaceId, in: &state)
             }
             if state.controllers[controllerInstanceId]?.status == .live {
@@ -261,19 +256,6 @@ actor SurfAceLocklessRuntimeAdapter {
             receiptResolutions: admission.1,
             state: await coordinator.snapshot()
         )
-    }
-
-    func negotiateLegacySurface(_ surfaceId: String) async throws -> SurfAceLocklessAuthorityState {
-        try await coordinator.transact(trigger: "legacy_negotiation") { state in
-            guard state.liveSurfaces[surfaceId] != nil else {
-                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
-            }
-            guard state.negotiatedModes[surfaceId] != .lockless else {
-                throw SurfAceLocklessRuntimeAdapterError.capabilityMismatch
-            }
-            state.negotiatedModes[surfaceId] = .legacy
-            return state
-        }
     }
 
     func disconnect(connectionToken: String, disconnectedAt: Int64) async throws {
@@ -948,7 +930,7 @@ actor SurfAceLocklessRuntimeAdapter {
                         guard case .string(let value) = targetPayload["fallbackSnapshotTargetId"] else { return nil }
                         return value
                     }()
-                    let legacyEntry = SurfAcePaneEntry.browserURL(
+                    let entry = SurfAcePaneEntry.browserURL(
                         targetId: work.targetId,
                         targetEpoch: targetEpoch,
                         url: url,
@@ -956,7 +938,7 @@ actor SurfAceLocklessRuntimeAdapter {
                         allowedSnapshotFallback: allowedSnapshotFallback,
                         fallbackSnapshotTargetId: fallbackSnapshotTargetId
                     )
-                    guard case .object(var content) = try Self.locklessJSON(legacyEntry) else {
+                    guard case .object(var content) = try Self.locklessJSON(entry) else {
                         throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
                     }
                     for field in ["contentId", "contentType", "drawingData", "revision", "strokesById"] {

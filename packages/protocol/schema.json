@@ -17,13 +17,7 @@
       "$ref": "#/$defs/SurfacesListRequest"
     },
     {
-      "$ref": "#/$defs/PairRequest"
-    },
-    {
       "$ref": "#/$defs/RuntimeAppBindingRequest"
-    },
-    {
-      "$ref": "#/$defs/RelinquishRequest"
     },
     {
       "$ref": "#/$defs/SurfaceWindowOpenRequest"
@@ -56,22 +50,13 @@
       "$ref": "#/$defs/SnapshotGetRequest"
     },
     {
-      "$ref": "#/$defs/AuthorityStateRequest"
-    },
-    {
       "$ref": "#/$defs/HeartbeatPingRequest"
     },
     {
       "$ref": "#/$defs/SurfacesListResponse"
     },
     {
-      "$ref": "#/$defs/PairResponse"
-    },
-    {
       "$ref": "#/$defs/RuntimeAppBindingResponse"
-    },
-    {
-      "$ref": "#/$defs/RelinquishResponse"
     },
     {
       "$ref": "#/$defs/SurfaceWindowOpenResponse"
@@ -96,9 +81,6 @@
     },
     {
       "$ref": "#/$defs/SnapshotResponse"
-    },
-    {
-      "$ref": "#/$defs/AuthorityStateResponse"
     },
     {
       "$ref": "#/$defs/HeartbeatPongResponse"
@@ -180,18 +162,6 @@
     "RequestId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9._:-]{1,64}$"
-    },
-    "ProviderId": {
-      "type": "string",
-      "pattern": "^pv_[A-Za-z0-9._:-]{3,64}$"
-    },
-    "ConnectionId": {
-      "type": "string",
-      "pattern": "^cn_[A-Za-z0-9._:-]{3,64}$"
-    },
-    "SessionId": {
-      "type": "string",
-      "pattern": "^sa_[A-Za-z0-9._:-]{8,128}$"
     },
     "SurfaceId": {
       "type": "string",
@@ -403,10 +373,8 @@
             "authority": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["ownershipEpoch", "ownershipSessionId", "paneLineageId", "surfaceId", "targetEpoch"],
+              "required": ["paneLineageId", "surfaceId", "targetEpoch"],
               "properties": {
-                "ownershipEpoch": { "type": "integer" },
-                "ownershipSessionId": { "type": "string" },
                 "paneLineageId": { "type": "string" },
                 "surfaceId": { "$ref": "#/$defs/SurfaceId" },
                 "targetEpoch": { "type": "integer" }
@@ -1207,138 +1175,12 @@
                   },
                   "paired": {
                     "type": "boolean",
-                    "description": "true if the surface currently has an ownership lock, whether or not the owner socket is presently live. New providers need explicit takeover while locked."
+                    "description": "true if the surface currently has an admitted controller connection."
                   }
                 }
               }
             }
           }
-        }
-      }
-    },
-    "PairRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "v",
-        "type",
-        "op",
-        "id",
-        "sentAt",
-        "payload"
-      ],
-      "properties": {
-        "v": {
-          "const": 1
-        },
-        "type": {
-          "const": "request"
-        },
-        "op": {
-          "const": "pair.request"
-        },
-        "id": {
-          "$ref": "#/$defs/RequestId"
-        },
-        "sentAt": {
-          "$ref": "#/$defs/EpochMs"
-        },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "providerId",
-            "connectionId",
-            "protocolVersion",
-            "surfaceId",
-            "windowLabel",
-            "initialPaneId",
-            "initialPaneLabel",
-            "providerName"
-          ],
-          "properties": {
-            "providerId": {
-              "$ref": "#/$defs/ProviderId"
-            },
-            "connectionId": {
-              "$ref": "#/$defs/ConnectionId"
-            },
-            "surfaceId": {
-              "$ref": "#/$defs/SurfaceId"
-            },
-            "windowLabel": {
-              "type": "string",
-              "minLength": 1
-            },
-            "initialPaneId": {
-              "$ref": "#/$defs/PaneId"
-            },
-            "initialPaneLabel": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "providerName": {
-              "type": "string",
-              "minLength": 1
-            },
-            "protocolVersion": {
-              "const": 1
-            },
-            "restoreAttemptId": {
-              "type": "string",
-              "minLength": 1
-            },
-            "takeover": {
-              "type": "boolean",
-              "description": "Explicit ownership transfer request. Normal reconnect/resume by the current owner MUST NOT rely on takeover."
-            },
-            "eventProfile": {
-              "$ref": "#/$defs/EventProfile"
-            },
-            "drawingFlushConfig": {
-              "$ref": "#/$defs/DrawingFlushConfig"
-            },
-            "resume": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "sessionId"
-              ],
-              "properties": {
-                "sessionId": {
-                  "$ref": "#/$defs/SessionId"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "RelinquishRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "v",
-        "type",
-        "op",
-        "id",
-        "sentAt"
-      ],
-      "properties": {
-        "v": {
-          "const": 1
-        },
-        "type": {
-          "const": "request"
-        },
-        "op": {
-          "const": "ownership.relinquish"
-        },
-        "id": {
-          "$ref": "#/$defs/RequestId"
-        },
-        "sentAt": {
-          "$ref": "#/$defs/EpochMs"
         }
       }
     },
@@ -2009,426 +1851,6 @@
         }
       }
     },
-    "AuthorityStateRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "v",
-        "type",
-        "op",
-        "id",
-        "sentAt",
-        "payload"
-      ],
-      "properties": {
-        "v": {
-          "const": 1
-        },
-        "type": {
-          "const": "request"
-        },
-        "op": {
-          "const": "authority.state"
-        },
-        "id": {
-          "$ref": "#/$defs/RequestId"
-        },
-        "sentAt": {
-          "$ref": "#/$defs/EpochMs"
-        },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "actionable",
-            "reason",
-            "ownershipEpoch",
-            "providerId",
-            "sessionId",
-            "surfaceId",
-            "windowLabel",
-            "panes"
-          ],
-          "properties": {
-            "actionable": {
-              "type": "boolean"
-            },
-            "reason": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "ownershipEpoch": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "providerId": {
-              "$ref": "#/$defs/ProviderId"
-            },
-            "sessionId": {
-              "$ref": "#/$defs/SessionId"
-            },
-            "surfaceId": {
-              "$ref": "#/$defs/SurfaceId"
-            },
-            "windowLabel": {
-              "type": "string",
-              "minLength": 1
-            },
-            "panes": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "paneId",
-                  "paneLabel",
-                  "paneLineageId"
-                ],
-                "properties": {
-                  "paneId": {
-                    "$ref": "#/$defs/PaneId"
-                  },
-                  "paneLabel": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "paneLineageId": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "PairResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "v",
-        "type",
-        "op",
-        "id",
-        "ok",
-        "sentAt",
-        "payload"
-      ],
-      "properties": {
-        "v": {
-          "const": 1
-        },
-        "type": {
-          "const": "response"
-        },
-        "op": {
-          "const": "pair.request"
-        },
-        "id": {
-          "$ref": "#/$defs/RequestId"
-        },
-        "ok": {
-          "const": true
-        },
-        "sentAt": {
-          "$ref": "#/$defs/EpochMs"
-        },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "sessionId",
-            "ownershipEpoch",
-            "resumed",
-            "surfaceId",
-            "surfaceName",
-            "viewport",
-            "capabilities",
-            "eventConfig",
-            "limits",
-            "state"
-          ],
-          "properties": {
-            "sessionId": {
-              "$ref": "#/$defs/SessionId"
-            },
-            "resumed": {
-              "type": "boolean"
-            },
-            "surfaceId": {
-              "$ref": "#/$defs/SurfaceId"
-            },
-            "surfaceName": {
-              "type": "string"
-            },
-            "viewport": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "width",
-                "height",
-                "scale"
-              ],
-              "properties": {
-                "width": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "height": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "scale": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                }
-              }
-            },
-            "capabilities": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "contentTypes",
-                "eventTypes"
-              ],
-              "properties": {
-                "contentTypes": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/$defs/ContentType"
-                  },
-                  "uniqueItems": true
-                },
-                "eventTypes": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/$defs/EventType"
-                  },
-                  "uniqueItems": true
-                },
-                "protocolFeatures": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "uniqueItems": true
-                },
-                "runtimeAppBinding": {
-                  "$ref": "#/$defs/RuntimeAppBindingDiagnostics"
-                },
-                "targetCapabilities": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "uniqueItems": true
-                }
-              }
-            },
-            "eventConfig": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "profile",
-                "activeEvents",
-                "drawingFlushConfig"
-              ],
-              "properties": {
-                "profile": {
-                  "$ref": "#/$defs/EventProfile"
-                },
-                "activeEvents": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/$defs/ProfileControlledEventType"
-                  },
-                  "uniqueItems": true,
-                  "description": "Profile-controlled events active for this session. Surface and pane lifecycle events are excluded — they are always active regardless of profile."
-                },
-                "drawingFlushConfig": {
-                  "$ref": "#/$defs/DrawingFlushConfig"
-                }
-              }
-            },
-            "limits": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "maxMessageBytes",
-                "maxFrameBytes",
-                "maxVisibleTextBytes",
-                "maxStrokePointsPerFlush",
-                "maxDrawingFlushBytes",
-                "resumeGraceMs"
-              ],
-              "properties": {
-                "maxMessageBytes": {
-                  "type": "integer",
-                  "minimum": 1024
-                },
-                "maxFrameBytes": {
-                  "type": "integer",
-                  "minimum": 1024
-                },
-                "maxVisibleTextBytes": {
-                  "type": "integer",
-                  "minimum": 256
-                },
-                "maxStrokePointsPerFlush": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "maxDrawingFlushBytes": {
-                  "type": "integer",
-                  "minimum": 1024
-                },
-                "resumeGraceMs": {
-                  "type": "integer",
-                  "minimum": 5000,
-                  "default": 20000,
-                  "description": "Deprecated compatibility field. Implementations MAY advertise a preferred owner-resume retry budget in ms, but ownership lock itself does not auto-expire; another provider still requires explicit takeover or prior relinquish."
-                }
-              }
-            },
-            "state": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "layout",
-                "panes",
-                "topologyRevision"
-              ],
-              "properties": {
-                "panes": {
-                  "type": "array",
-                  "minItems": 1,
-                  "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "paneId",
-                      "paneLabel",
-                      "currentContentId",
-                      "currentRevision",
-                      "contentType"
-                    ],
-                    "properties": {
-                      "paneId": {
-                        "$ref": "#/$defs/PaneId"
-                      },
-                      "paneLabel": {
-                        "type": "integer",
-                        "minimum": 1
-                      },
-                      "paneLineageId": {
-                        "type": "string",
-                        "minLength": 1
-                      },
-                      "currentContentId": {
-                        "oneOf": [
-                          {
-                            "$ref": "#/$defs/ContentId"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "currentRevision": {
-                        "$ref": "#/$defs/Revision"
-                      },
-                  "contentType": {
-                    "oneOf": [
-                      {
-                        "$ref": "#/$defs/ContentType"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "currentTarget": {
-                    "oneOf": [
-                      {
-                        "$ref": "#/$defs/PaneCurrentTargetState"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  },
-                  "display": {
-                    "$ref": "#/$defs/ContentDisplay"
-                  }
-                }
-              }
-            },
-                "layout": {
-                  "$ref": "#/$defs/TopologyLayoutNode"
-                },
-                "topologyRevision": {
-                  "$ref": "#/$defs/TopologyRevision"
-                }
-              }
-            },
-            "ownershipEpoch": {
-              "type": "integer",
-              "minimum": 0
-            }
-          }
-        }
-      }
-    },
-    "RelinquishResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "v",
-        "type",
-        "op",
-        "id",
-        "ok",
-        "sentAt",
-        "payload"
-      ],
-      "properties": {
-        "v": {
-          "const": 1
-        },
-        "type": {
-          "const": "response"
-        },
-        "op": {
-          "const": "ownership.relinquish"
-        },
-        "id": {
-          "$ref": "#/$defs/RequestId"
-        },
-        "ok": {
-          "const": true
-        },
-        "sentAt": {
-          "$ref": "#/$defs/EpochMs"
-        },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "relinquished"
-          ],
-          "properties": {
-            "relinquished": {
-              "const": true
-            }
-          }
-        }
-      }
-    },
     "SurfaceWindowOpenResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -2560,8 +1982,6 @@
             "requestId",
             "targetId",
             "surfaceId",
-            "ownershipSessionId",
-            "ownershipEpoch",
             "paneLineageId",
             "targetEpoch",
             "targetKind",
@@ -2579,13 +1999,6 @@
             },
             "surfaceId": {
               "$ref": "#/$defs/SurfaceId"
-            },
-            "ownershipSessionId": {
-              "type": "string"
-            },
-            "ownershipEpoch": {
-              "type": "integer",
-              "minimum": 0
             },
             "paneLineageId": {
               "type": "string",
@@ -3016,58 +2429,6 @@
         }
       }
     },
-    "AuthorityStateResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "v",
-        "type",
-        "op",
-        "id",
-        "ok",
-        "sentAt",
-        "payload"
-      ],
-      "properties": {
-        "v": {
-          "const": 1
-        },
-        "type": {
-          "const": "response"
-        },
-        "op": {
-          "const": "authority.state"
-        },
-        "id": {
-          "$ref": "#/$defs/RequestId"
-        },
-        "ok": {
-          "const": true
-        },
-        "sentAt": {
-          "$ref": "#/$defs/EpochMs"
-        },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "accepted",
-            "reason"
-          ],
-          "properties": {
-            "accepted": {
-              "type": "boolean"
-            },
-            "reason": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        }
-      }
-    },
     "ErrorResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -3093,7 +2454,6 @@
             "surfaces.list",
             "pair.request",
             "runtime.app_binding",
-            "ownership.relinquish",
             "surface.window.open",
             "surface.window.close",
             "target.apply",
@@ -3104,7 +2464,6 @@
             "content.clear",
             "annotations.remove",
             "snapshot.get",
-            "authority.state",
             "heartbeat.ping",
             "panes.list",
             "pane.split",
@@ -4691,8 +4050,6 @@
             "idempotencyKey",
             "surfaceId",
             "surfaceInstanceId",
-            "ownershipSessionId",
-            "ownershipEpoch",
             "paneLineageId",
             "expectedPreviousTargetEpoch",
             "targetKind",
@@ -4714,13 +4071,6 @@
                 "string",
                 "null"
               ]
-            },
-            "ownershipSessionId": {
-              "type": "string"
-            },
-            "ownershipEpoch": {
-              "type": "integer",
-              "minimum": 0
             },
             "paneLineageId": {
               "type": "string",

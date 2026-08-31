@@ -204,11 +204,6 @@ enum SurfAceLocklessControllerStatus: String, Codable, Equatable, Sendable {
     case live
 }
 
-enum SurfAceLocklessNegotiatedMode: String, Codable, Equatable, Sendable {
-    case legacy
-    case lockless
-}
-
 enum SurfAceLocklessReceiptStatus: String, Codable, Equatable, Sendable {
     case acknowledged
     case pending
@@ -390,7 +385,6 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var generation: Int64
     var limits: SurfAceLocklessCapacityLimits
     var liveSurfaces: [String: SurfAceLocklessSurfaceMaterial]
-    var negotiatedModes: [String: SurfAceLocklessNegotiatedMode]
     var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
     var pendingTombstoneReclamations: [SurfAceLocklessTombstoneReclamation]?
     var sceneSurfaceIds: [String: String]
@@ -410,7 +404,6 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             generation: 0,
             limits: limits,
             liveSurfaces: [:],
-            negotiatedModes: [:],
             pendingControllerRetentionReclamations: [],
             pendingTombstoneReclamations: [],
             sceneSurfaceIds: [:],
@@ -587,7 +580,6 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
 
 enum SurfAceLocklessRecoverableTransition: String, Sendable {
     case configuration
-    case legacyMigration
     case locklessAdmission
     case restart
 }

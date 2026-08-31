@@ -8,7 +8,6 @@ import { WebSocket, WebSocketServer } from "ws";
 
 import type {
   AnnotationsRemoveRequest,
-  AuthorityStateRequest,
   ContentApplyRequest,
   ContentAppendRequest,
   ContentClearRequest,
@@ -19,12 +18,10 @@ import type {
   EventProfile,
   HeartbeatPingRequest,
   HistoryNavigatedEvent,
-  RelinquishRequest,
   RuntimeAppBindingDiagnostics,
   PaneCloseRequest,
   PaneRenameRequest,
   PaneSplitRequest,
-  PairRequest,
   PanesListRequest,
   Request,
   Response,
@@ -95,12 +92,6 @@ type SocketCacheEntry = {
   response: Response;
 };
 
-type PendingPairRequest = {
-  payloadHash: string;
-  resolve: (response: Response | null) => void;
-  settled: Promise<Response | null>;
-};
-
 type ActiveSession = {
   connectionId: string;
   drawingFlushConfig: DrawingFlushConfig;
@@ -121,13 +112,6 @@ type OwnershipLock = {
   ownershipEpoch: number;
   providerId: string;
   sessionId: string;
-};
-
-type PairPostResponseCommit = {
-  providerName: string;
-  session: ActiveSession;
-  supersededSession: ActiveSession | null;
-  surfaceId: string;
 };
 
 type PaneFlushTimers = {
@@ -171,7 +155,6 @@ type BrowserUrlNavigationEvidence = {
 
 type SocketMeta = {
   cache: Map<string, SocketCacheEntry>;
-  pendingPairRequests: Map<string, PendingPairRequest>;
   pairedSurfaceId: string | null;
   remoteAddress: string;
   socketId: string;
@@ -308,9 +291,6 @@ export class SurfaceWsServer {
   private readonly httpServer: http.Server;
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
-  private readonly pendingPairCommits = new WeakMap<Response, PairPostResponseCommit>();
-  private readonly pendingLegacyPairs = new Map<string, number>();
-  private readonly pendingLocklessPairs = new Map<string, number>();
   private readonly transports = new Map<string, SurfaceTransportState>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
@@ -390,7 +370,6 @@ export class SurfaceWsServer {
       const socketId = `sock_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       this.socketMeta.set(socket, {
         cache: new Map(),
-        pendingPairRequests: new Map(),
         pairedSurfaceId: null,
         remoteAddress,
         socketId,
@@ -1067,265 +1046,31 @@ export class SurfaceWsServer {
       socket.close(4410, "protocol_violation");
       return;
     }
+    if (
+      parsedRequest.op === "surfaces.list" &&
+      !this.locklessSessions.has(socket)
+    ) {
+      await this.reply(
+        socket,
+        this.handleSurfacesList(parsedRequest as SurfacesListRequest),
+      );
+      return;
+    }
     if (this.isLocklessWireRequest(socket, parsedRequest)) {
       await this.handleLocklessMessage(socket, parsedRequest);
       return;
     }
     const request = parsedRequest as Request;
-
-    const meta = this.socketMeta.get(socket);
-    if (!meta) {
-      return;
-    }
-
-    if (request.op === "pair.request") {
-      persistentServerDiagnostic(
-        "info",
-        "pair_request_receive",
-        {
-          connection_id: request.payload.connectionId,
-          provider_id: request.payload.providerId,
-          raw_bytes: Buffer.byteLength(raw),
-          request_id: request.id,
-          resume_session_id: request.payload.resume?.sessionId ?? "nil",
-          socket_id: meta.socketId,
-          surface_id: request.payload.surfaceId,
-          takeover: request.payload.takeover ?? false,
-        },
-      );
-    }
-
-    const cache = meta.pairedSurfaceId
-      ? this.transport(meta.pairedSurfaceId).active?.requestCache ?? meta.cache
-      : meta.cache;
-    const payloadHash = JSON.stringify({
-      op: request.op,
-      payload: request.payload,
-    });
-    const pendingPairRequest = request.op === "pair.request"
-      ? meta.pendingPairRequests.get(request.id)
-      : undefined;
-    if (pendingPairRequest) {
-      if (pendingPairRequest.payloadHash !== payloadHash) {
-        persistentServerDiagnostic(
-          "warn",
-          "request_reject",
-          {
-            op: request.op,
-            reason: "request_id_reuse_mismatch",
-            request_id: request.id,
-          },
-        );
-        await this.reply(socket, errorResponse(request.op, request.id, "invalid_request_id_reuse", "Request id was reused with different payload"));
-        return;
-      }
-      const settledResponse = await pendingPairRequest.settled;
-      if (settledResponse) {
-        await this.reply(socket, settledResponse);
-        return;
-      }
-      await this.handleMessage(socket, raw);
-      return;
-    }
-    const cached = cache.get(request.id);
-    if (cached) {
-      if (cached.payloadHash !== payloadHash) {
-        persistentServerDiagnostic(
-          "warn",
-          "request_reject",
-          {
-            op: request.op,
-            reason: "request_id_reuse_mismatch",
-            request_id: request.id,
-          },
-        );
-        await this.reply(socket, errorResponse(request.op, request.id, "invalid_request_id_reuse", "Request id was reused with different payload"));
-        return;
-      }
-      await this.reply(socket, cached.response);
-      return;
-    }
-
-    let ownedPendingPairRequest: PendingPairRequest | null = null;
-    if (request.op === "pair.request") {
-      let resolvePendingPairRequest = (_response: Response | null): void => {};
-      const settled = new Promise<Response | null>((resolve) => {
-        resolvePendingPairRequest = resolve;
-      });
-      ownedPendingPairRequest = {
-        payloadHash,
-        resolve: resolvePendingPairRequest,
-        settled,
-      };
-      meta.pendingPairRequests.set(request.id, ownedPendingPairRequest);
-    }
-    const settlePendingPairRequest = (settledResponse: Response | null): void => {
-      if (!ownedPendingPairRequest) {
-        return;
-      }
-      if (meta.pendingPairRequests.get(request.id) === ownedPendingPairRequest) {
-        meta.pendingPairRequests.delete(request.id);
-      }
-      ownedPendingPairRequest.resolve(settledResponse);
-      ownedPendingPairRequest = null;
-    };
-
-    let response: Response;
-    try {
-      if (request.op === "pair.request") {
-        persistentServerDiagnostic(
-          "info",
-          "pair_request_dispatch_enter",
-          {
-            request_id: request.id,
-            socket_id: meta.socketId,
-            surface_id: request.payload.surfaceId,
-          },
-        );
-      }
-      response = await this.dispatchRequest(socket, request);
-      if (request.op === "pair.request") {
-        persistentServerDiagnostic(
-          "info",
-          "pair_request_dispatch_exit",
-          {
-            request_id: request.id,
-            socket_id: meta.socketId,
-            surface_id: response.ok && response.op === "pair.request" ? response.payload.surfaceId : request.payload.surfaceId,
-          },
-        );
-      }
-    } catch (error) {
-      if (request.op === "pair.request") {
-        persistentServerDiagnostic(
-          "warn",
-          "pair_request_dispatch_throw",
-          {
-            provider_id: request.payload.providerId,
-            request_id: request.id,
-            resume_session_id: request.payload.resume?.sessionId ?? "nil",
-            socket_id: meta.socketId,
-            surface_id: request.payload.surfaceId,
-            takeover: request.payload.takeover ?? false,
-            ...errorDiagnosticFields(error),
-          },
-        );
-      }
-      if (error instanceof SurfaceCoreError) {
-        persistentServerDiagnostic(
-          "warn",
-          "request_error",
-          {
-            code: error.code,
-            op: request.op,
-          },
-        );
-        response = errorResponse(
-          request.op,
-          request.id,
-          error.code,
-          error.message,
-          error.details,
-        );
-      } else {
-        persistentServerDiagnostic(
-          "warn",
-          "request_error",
-          {
-            code: "internal_error",
-            op: request.op,
-          },
-        );
-        response = errorResponse(request.op, request.id, "internal_error", "Unhandled surface error");
-      }
-    }
-
-    cache.set(request.id, { payloadHash, response });
-    trimCache(cache);
-    let responseDelivered: boolean;
-    try {
-      responseDelivered = await this.reply(socket, response);
-      if (
-        response.type === "response" &&
-        response.ok &&
-        response.op === "pair.request"
-      ) {
-        if (responseDelivered) {
-          this.commitPairResponse(response, cache);
-        } else {
-          this.abandonPairResponse(response, cache);
-        }
-      }
-    } catch (error) {
-      this.abandonPairResponse(response, cache);
-      settlePendingPairRequest(
-        response.ok && response.op === "pair.request" ? null : response,
-      );
-      throw error;
-    }
-    settlePendingPairRequest(responseDelivered ? response : null);
-    if (request.op === "pair.request") {
-      persistentServerDiagnostic(
-        response.ok && responseDelivered ? "info" : "warn",
-        "pair_response_sent",
-        {
-          delivered: responseDelivered,
-          error_code: !response.ok ? response.error.code : undefined,
-          ok: response.ok,
-          request_id: request.id,
-          resume_session_id: request.payload.resume?.sessionId ?? "nil",
-          session_id: response.ok && response.op === "pair.request" ? response.payload.sessionId : undefined,
-          socket_id: meta.socketId,
-          surface_id: response.ok && response.op === "pair.request" ? response.payload.surfaceId : request.payload.surfaceId,
-          takeover: request.payload.takeover ?? false,
-        },
-      );
-    }
-    if (
-      response.type === "response" &&
-      !response.ok &&
-      response.op === "pair.request" &&
-      response.error.code === "missing_provider_name"
-    ) {
-      socket.close(1008, "missing_provider_name");
-      return;
-    }
-    if (
-      response.type === "response" &&
-      response.ok &&
-      response.op === "pair.request"
-    ) {
-      this.armAllPendingFlushes(response.payload.surfaceId);
-      this.armAllPendingAnnotationCommits(response.payload.surfaceId);
-    }
-    if (
-      response.type === "response" &&
-      response.ok &&
-      response.op === "ownership.relinquish"
-    ) {
-      const surfaceId = meta.pairedSurfaceId;
-      if (surfaceId) {
-        this.detachActiveSession(surfaceId, "relinquished");
-      }
-      return;
-    }
-    if (
-      response.type === "response" &&
-      response.ok &&
-      response.op === "pair.request" &&
-      response.payload.resumed
-    ) {
-      const surfaceId = response.payload.surfaceId;
-      await this.sendSnapshotHint(surfaceId, "after_reconnect");
-      await this.sendEvent(socket, {
-        eventId: makeEventId(),
-        op: "event.surface_resumed",
-        payload: { surfaceId },
-        sentAt: Date.now() as never,
-        type: "event",
-        v: 1,
-      });
-    }
+    const code = request.op === "pair.request"
+      ? "capability_mismatch"
+      : "not_paired";
+    const message = request.op === "pair.request"
+      ? `pair.request requires ${SURF_ACE_LOCKLESS_V1_CAPABILITY}`
+      : "Operation requires lockless pair.request first";
+    await this.reply(
+      socket,
+      errorResponse(request.op, request.id, code, message),
+    );
   }
 
   private isLocklessWireRequest(
@@ -1335,9 +1080,7 @@ export class SurfaceWsServer {
     if (this.locklessSessions.has(socket)) {
       return true;
     }
-    if (request.op !== "pair.request") {
-      return false;
-    }
+    if (request.op !== "pair.request") return false;
     const features = (request.payload as Partial<LocklessPairPayload>)
       .protocolFeatures;
     return (
@@ -1776,8 +1519,6 @@ export class SurfaceWsServer {
       payload: {
         display:
           request.payload.display as TargetApplyRequest["payload"]["display"],
-        ownershipEpoch: 0,
-        ownershipSessionId: "",
         paneLineageId: pane.paneLineageId,
         requestId: request.payload.requestId,
         restoreReason:
@@ -1856,8 +1597,6 @@ export class SurfaceWsServer {
       op: "target.apply",
       payload: {
         display: payload.display as TargetApplyRequest["payload"]["display"],
-        ownershipEpoch: 0,
-        ownershipSessionId: "",
         paneLineageId: payload.paneLineageId as never,
         requestId: payload.requestId,
         restoreReason:
@@ -2311,8 +2050,6 @@ export class SurfaceWsServer {
         op: "target.apply",
         payload: {
           display: request.payload.display as TargetApplyRequest["payload"]["display"],
-          ownershipEpoch: 0,
-          ownershipSessionId: "",
           paneLineageId: pane.paneLineageId,
           requestId: request.payload.requestId,
           restoreReason:
@@ -3186,12 +2923,8 @@ export class SurfaceWsServer {
     switch (request.op) {
       case "surfaces.list":
         return this.handleSurfacesList(request);
-      case "pair.request":
-        return await this.handlePairRequest(socket, request);
       case "runtime.app_binding":
         return await this.handleRuntimeAppBinding(request);
-      case "ownership.relinquish":
-        return this.handleRelinquish(socket, request);
       case "topology.apply":
         return await this.handleTopologyApply(socket, request);
       case "content.apply":
@@ -3218,8 +2951,6 @@ export class SurfaceWsServer {
         return await this.handleAnnotationsRemove(socket, request);
       case "snapshot.get":
         return await this.handleSnapshotGet(socket, request);
-      case "authority.state":
-        return await this.handleAuthorityState(socket, request);
       case "heartbeat.ping":
         return this.handleHeartbeat(socket, request);
     }
@@ -3278,414 +3009,6 @@ export class SurfaceWsServer {
         runtimeAppBinding: await this.currentRuntimeAppBinding(),
       },
       sentAt: Date.now() as never,
-      type: "response",
-      v: 1,
-    };
-  }
-
-  private async handlePairRequest(socket: WebSocket, request: PairRequest): Promise<Response> {
-    const meta = this.socketMeta.get(socket);
-    if (request.payload.protocolVersion !== 1) {
-      persistentServerDiagnostic(
-        "warn",
-        "pair_request_validation_failed",
-        {
-          code: "unsupported_protocol_version",
-          protocol_version: request.payload.protocolVersion,
-          request_id: request.id,
-          socket_id: meta?.socketId,
-          surface_id: request.payload.surfaceId,
-        },
-      );
-      throw new SurfaceCoreError("unsupported_protocol_version", "Unsupported protocol version");
-    }
-    if (
-      typeof request.payload.providerName !== "string" ||
-      !request.payload.providerName.trim()
-    ) {
-      persistentServerDiagnostic(
-        "warn",
-        "pair_request_validation_failed",
-        {
-          code: "missing_provider_name",
-          request_id: request.id,
-          socket_id: meta?.socketId,
-          surface_id: request.payload.surfaceId,
-        },
-      );
-      throw new SurfaceCoreError("missing_provider_name", "providerName is required");
-    }
-    if (
-      !request.payload.windowLabel ||
-      request.payload.initialPaneId < 1 ||
-      request.payload.initialPaneLabel < 1
-    ) {
-      persistentServerDiagnostic(
-        "warn",
-        "pair_request_validation_failed",
-        {
-          code: "invalid_payload",
-          initial_pane_id: request.payload.initialPaneId,
-          initial_pane_label: request.payload.initialPaneLabel,
-          request_id: request.id,
-          socket_id: meta?.socketId,
-          surface_id: request.payload.surfaceId,
-          window_label: request.payload.windowLabel,
-        },
-      );
-      throw new SurfaceCoreError(
-        "invalid_payload",
-        "pair.request requires windowLabel, initialPaneId, and initialPaneLabel",
-      );
-    }
-    if (!isValidWindowLabel(request.payload.windowLabel)) {
-      persistentServerDiagnostic(
-        "warn",
-        "pair_request_validation_failed",
-        {
-          code: "invalid_window_label",
-          request_id: request.id,
-          socket_id: meta?.socketId,
-          surface_id: request.payload.surfaceId,
-          window_label: request.payload.windowLabel,
-        },
-      );
-      throw new SurfaceCoreError(
-        "invalid_payload",
-        "pair.request windowLabel must be a lowercase alphabetic provider identity label",
-      );
-    }
-
-    return await this.runProviderWindowLabelMutation(async () => {
-      const surfaceId = request.payload.surfaceId;
-      this.core.getSurface(surfaceId);
-      if (this.pendingLocklessPairs.has(surfaceId)) {
-        throw new SurfaceCoreError(
-          "busy",
-          "Surface has an in-flight lockless pair.request; retry provider pairing",
-        );
-      }
-      if (this.hasLocklessSession(surfaceId)) {
-        throw new SurfaceCoreError(
-          "capability_mismatch",
-          "Surface is paired to a lockless controller",
-        );
-      }
-      this.reserveLegacyPair(surfaceId);
-      try {
-        return await this.acceptPairRequest(socket, request, meta);
-      } catch (error) {
-        this.releaseLegacyPair(surfaceId);
-        throw error;
-      }
-    });
-  }
-
-  private async acceptPairRequest(socket: WebSocket, request: PairRequest, meta: SocketMeta | undefined): Promise<Response> {
-    const surfaceId = request.payload.surfaceId;
-    const transport = this.transport(surfaceId);
-    const existing = transport.active;
-    const lock = transport.lock;
-    const providerId = request.payload.providerId;
-    const requestedProfile = request.payload.eventProfile ?? "minimum_deep";
-    const drawingFlushConfig = request.payload.drawingFlushConfig ?? DEFAULT_DRAWING_FLUSH_CONFIG;
-    const resumeSessionId = request.payload.resume?.sessionId ?? null;
-    const existingOpenElsewhere =
-      existing !== null &&
-      existing.socket !== socket &&
-      existing.socket.readyState === WebSocket.OPEN;
-    persistentServerDiagnostic(
-      "info",
-      "pair_request_begin",
-      {
-        existing_open_elsewhere: existingOpenElsewhere,
-        has_lock: Boolean(lock),
-        lock_provider_id: lock?.providerId,
-        lock_session_id: lock?.sessionId,
-        provider_id: providerId,
-        request_id: request.id,
-        resume_session_id: resumeSessionId ?? "nil",
-        socket_id: meta?.socketId,
-        surface_id: surfaceId,
-        takeover: request.payload.takeover ?? false,
-      },
-    );
-    this.core.assertProviderWindowLabelAvailable(surfaceId, request.payload.windowLabel);
-
-    let resumed = false;
-    let sessionId: string;
-    let ownershipEpoch: number;
-    let supersededSession: ActiveSession | null = null;
-
-    if (!lock) {
-      sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-      ownershipEpoch = 1;
-      persistentServerDiagnostic(
-        "info",
-        "pair_request_new_session",
-        {
-          provider_id: providerId,
-          request_id: request.id,
-          session_id: sessionId,
-          socket_id: meta?.socketId,
-          surface_id: surfaceId,
-        },
-      );
-    } else if (lock.providerId === providerId) {
-      if (resumeSessionId === lock.sessionId) {
-        resumed = true;
-        sessionId = lock.sessionId;
-        ownershipEpoch = lock.ownershipEpoch;
-        if (existing && existing.socket !== socket) {
-          supersededSession = existing;
-        }
-        persistentServerDiagnostic(
-          "info",
-          request.payload.takeover === true ? "pair_request_takeover_resumed" : "pair_request_resumed",
-          {
-            provider_id: providerId,
-            request_id: request.id,
-            session_id: sessionId,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-      } else {
-        if (existing && existing.socket !== socket) {
-          supersededSession = existing;
-        }
-        sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-        ownershipEpoch = lock.ownershipEpoch + 1;
-        persistentServerDiagnostic(
-          "info",
-          request.payload.takeover === true ? "pair_request_explicit_takeover" : "pair_request_same_provider_fresh_admission",
-          {
-            existing_open_elsewhere: existingOpenElsewhere,
-            previous_provider_id: lock.providerId,
-            previous_session_id: lock.sessionId,
-            provider_id: providerId,
-            request_id: request.id,
-            same_provider: true,
-            session_id: sessionId,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-      }
-    } else {
-      if (!request.payload.takeover) {
-        persistentServerDiagnostic(
-          "warn",
-          "pair_request_busy",
-          {
-            lock_provider_id: lock.providerId,
-            requested_provider_id: providerId,
-            request_id: request.id,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-        throw new SurfaceCoreError("busy", "Surface ownership lock is held by another provider");
-      }
-      if (existing && existing.socket !== socket) {
-        supersededSession = existing;
-      }
-      sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-      ownershipEpoch = lock.ownershipEpoch + 1;
-      persistentServerDiagnostic(
-        "info",
-        "pair_request_explicit_takeover",
-        {
-          existing_open_elsewhere: existingOpenElsewhere,
-          previous_provider_id: lock.providerId,
-          previous_session_id: lock.sessionId,
-          provider_id: providerId,
-          request_id: request.id,
-          same_provider: false,
-          session_id: sessionId,
-          socket_id: meta?.socketId,
-          surface_id: surfaceId,
-        },
-      );
-    }
-
-    if (resumed) {
-      await this.runSurfaceMutation(surfaceId, async () => {
-        await this.admitProviderWindowLabel(surfaceId, request.payload.windowLabel, "pair.resume", request.id);
-      });
-    } else {
-      const nativeHostedPaneIds = this.core.nativeHostedPaneIdsExcluding(surfaceId, []);
-      if (nativeHostedPaneIds.length > 0) {
-        const releaseFailure = await this.releaseNativePanesBeforeRendererContent(
-          surfaceId,
-          nativeHostedPaneIds,
-          "pair.request fresh admission",
-        );
-        if (releaseFailure) {
-          persistentServerDiagnostic(
-            "warn",
-            "pair_request_fresh_admission_native_release_failed",
-            {
-              error: releaseFailure,
-              pane_ids: nativeHostedPaneIds.map((paneId) => String(paneId)),
-              provider_id: providerId,
-              request_id: request.id,
-              socket_id: meta?.socketId,
-              surface_id: surfaceId,
-            },
-          );
-        }
-      }
-      // Preserve provider-persisted topology/content across provider restart when recoverable state exists.
-      // Only reset to a single bootstrap pane if we truly have no recoverable state.
-      const beforeBootstrapState = this.core.pairState(surfaceId);
-      if (!this.hasRecoverablePairState(surfaceId)) {
-        this.core.resetProviderBootstrapTopology(surfaceId, {
-          initialPaneId: Number(request.payload.initialPaneId),
-          initialPaneLabel: Number(request.payload.initialPaneLabel),
-          windowLabel: request.payload.windowLabel,
-        });
-        persistentServerDiagnostic(
-          "warn",
-          "pair_request_bootstrap_topology_reset",
-          {
-            after_state: pairStateDiagnosticSummary(this.core.pairState(surfaceId)),
-            before_state: pairStateDiagnosticSummary(beforeBootstrapState),
-            request_id: request.id,
-            surface_id: surfaceId,
-          },
-        );
-      } else {
-        persistentServerDiagnostic(
-          "info",
-          "pair_request_preserve_persisted_topology",
-          {
-            pane_count: this.core.pairState(surfaceId).panes.length,
-            request_id: request.id,
-            surface_id: surfaceId,
-          },
-        );
-      }
-    }
-
-    const session: ActiveSession = {
-      connectionId: request.payload.connectionId,
-      drawingFlushConfig,
-      eventProfile: requestedProfile,
-      ownershipEpoch,
-      paneFlushTimers: new Map(),
-      pairConfirmed: false,
-      providerId,
-      providerName: request.payload.providerName,
-      requestCache: new Map(),
-      sessionId,
-      socket,
-    };
-    const response: Response = {
-      id: request.id,
-      ok: true,
-      op: "pair.request",
-      payload: {
-        capabilities: await this.capabilities(),
-        eventConfig: {
-          activeEvents: activeEventsForProfile(requestedProfile),
-          drawingFlushConfig,
-          profile: requestedProfile,
-        },
-        limits: {
-          ...DEFAULT_LIMITS,
-          resumeGraceMs: 20_000,
-        },
-        ownershipEpoch,
-        resumed,
-        sessionId: sessionId as PairRequest["payload"]["resume"]["sessionId"],
-        state: this.core.pairState(surfaceId),
-        surfaceId: surfaceId as PairRequest["payload"]["surfaceId"],
-        surfaceName: this.core.surfaceName(surfaceId),
-        viewport: this.core.viewport(surfaceId),
-      },
-      sentAt: Date.now(),
-      type: "response",
-      v: 1,
-    };
-    this.pendingPairCommits.set(response, {
-      providerName: request.payload.providerName,
-      session,
-      supersededSession,
-      surfaceId,
-    });
-
-    persistentServerDiagnostic(
-      "info",
-      "pair_response_ok",
-      {
-        pane_count: response.payload.state.panes.length,
-        pane_content_count: response.payload.state.panes.filter((pane) => pane.currentContentId !== null).length,
-        pane_ids: response.payload.state.panes.map((pane) => Number(pane.paneId)).join(","),
-        pane_labels: response.payload.state.panes.map((pane) => pane.paneLabel).join(","),
-        pair_state: pairStateDiagnosticSummary(response.payload.state),
-        request_id: request.id,
-        resumed,
-        session_id: sessionId,
-        socket_id: meta?.socketId,
-        surface_id: surfaceId,
-        topology_revision: Number(response.payload.state.topologyRevision),
-      },
-    );
-
-    return response;
-  }
-
-  private hasRecoverablePairState(surfaceId: string): boolean {
-    const state = this.core.pairState(surfaceId);
-    const result = state.topologyRevision > 0 ||
-      state.panes.length > 1 ||
-      state.panes.some((pane) => pane.currentContentId !== null || pane.contentType !== null);
-    persistentServerDiagnostic(
-      "info",
-      "pair_recoverable_state_decision",
-      {
-        content_pane_count: state.panes.filter((pane) => pane.currentContentId !== null || pane.contentType !== null).length,
-        pane_count: state.panes.length,
-        result,
-        surface_id: surfaceId,
-        topology_revision: Number(state.topologyRevision),
-        pair_state: pairStateDiagnosticSummary(state),
-      },
-    );
-    return result;
-  }
-
-  private async admitProviderWindowLabel(
-    surfaceId: string,
-    windowLabel: string,
-    source: "authority.state" | "pair.resume",
-    requestId: string,
-  ): Promise<void> {
-    await this.adoptProviderWindowLabel(surfaceId, windowLabel, source, requestId);
-  }
-
-  private handleRelinquish(socket: WebSocket, request: RelinquishRequest): Response {
-    const surfaceId = this.requirePairedSurfaceId(socket);
-    const transport = this.transport(surfaceId);
-    const active = transport.active;
-    if (!active || active.socket !== socket) {
-      throw new SurfaceCoreError("not_lock_owner", "Only the active lock owner may relinquish");
-    }
-    if (!transport.lock || transport.lock.providerId !== active.providerId) {
-      throw new SurfaceCoreError("not_lock_owner", "Only the current lock owner may relinquish");
-    }
-
-    transport.lock = null;
-    this.core.setConnectionBar(surfaceId, "disconnected");
-    this.onBusyChanged?.();
-
-    return {
-      id: request.id,
-      ok: true,
-      op: "ownership.relinquish",
-      payload: { relinquished: true },
-      sentAt: Date.now(),
       type: "response",
       v: 1,
     };
@@ -3761,52 +3084,12 @@ export class SurfaceWsServer {
     }
   }
 
-  private reserveLegacyPair(surfaceId: string): void {
-    this.pendingLegacyPairs.set(
-      surfaceId,
-      (this.pendingLegacyPairs.get(surfaceId) ?? 0) + 1,
-    );
-  }
-
-  private releaseLegacyPair(surfaceId: string): void {
-    const remaining = (this.pendingLegacyPairs.get(surfaceId) ?? 0) - 1;
-    if (remaining > 0) {
-      this.pendingLegacyPairs.set(surfaceId, remaining);
-    } else {
-      this.pendingLegacyPairs.delete(surfaceId);
-    }
-  }
-
   private async runLocklessPairReservation<T>(
-    surfaceId: string | null,
+    _surfaceId: string | null,
     operation: () => Promise<T>,
   ): Promise<T> {
-    // Pair reservations are live-only and close the pre-session arbitration gap.
-    if (!surfaceId) {
-      return await operation();
-    }
-    if (this.pendingLegacyPairs.has(surfaceId)) {
-      throw new SurfaceCoreError(
-        "busy",
-        "Surface has an in-flight provider pair.request; retry lockless admission",
-      );
-    }
-    this.pendingLocklessPairs.set(
-      surfaceId,
-      (this.pendingLocklessPairs.get(surfaceId) ?? 0) + 1,
-    );
-    try {
-      return await operation();
-    } finally {
-      const remaining = (this.pendingLocklessPairs.get(surfaceId) ?? 0) - 1;
-      if (remaining > 0) {
-        this.pendingLocklessPairs.set(surfaceId, remaining);
-      } else {
-        this.pendingLocklessPairs.delete(surfaceId);
-      }
-    }
+    return await operation();
   }
-
   private async runLifecycleTransaction<T>(
     operation: () => T,
     surfaceId?: string,
@@ -4226,7 +3509,7 @@ export class SurfaceWsServer {
   ): Promise<Response> {
     const appliedAt = new Date().toISOString();
     if (request.payload.surfaceId !== surfaceId) {
-      return this.targetApplyFailureResponse(request, appliedAt, "ownership_session_mismatch", "target.apply surfaceId does not match paired surface");
+      return this.targetApplyFailureResponse(request, appliedAt, "invalid_payload", "target.apply surfaceId does not match the admitted surface");
     }
     const sessionFailure = committedLocklessIntent
       ? null
@@ -5122,38 +4405,6 @@ export class SurfaceWsServer {
     }
   }
 
-  private async adoptProviderAuthorityPaneIdentities(
-    surfaceId: string,
-    panes: AuthorityStateRequest["payload"]["panes"],
-  ): Promise<boolean> {
-    const nativePaneIds = this.core.panesList(surfaceId).panes
-      .filter((pane) => pane.externalNative)
-      .map((pane) => Number(pane.paneId));
-    const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
-    const rollbackNativeGeometry = nativePaneIds.length > 0
-      ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds)
-      : null;
-    const adopted = this.core.adoptProviderAuthorityPaneIdentities(surfaceId, panes);
-    if (!adopted || nativePaneIds.length === 0) {
-      return adopted;
-    }
-    try {
-      await this.waitForResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), "authority.state");
-      const nativeGeometry = this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds);
-      await this.applyResolvedNativePaneGeometry(
-        surfaceId,
-        nativeGeometry,
-        "authority.state",
-        rollbackNativeGeometry,
-      );
-      this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometry);
-      return true;
-    } catch (error) {
-      rollbackSurface();
-      throw error;
-    }
-  }
-
   private recordProviderWindowRelabel(
     surfaceId: string,
     currentWindowLabel: string,
@@ -5251,21 +4502,12 @@ export class SurfaceWsServer {
         "target.apply pane lineage is not present on this surface",
       ) as TargetApplyResponse).payload;
     }
-    const active = this.transport(surfaceId).active;
-    if (!active || active.socket !== socket || request.payload.ownershipSessionId !== active.sessionId) {
+    if (!locklessSession || locklessSession.surfaceId !== surfaceId) {
       return (this.targetApplyFailureResponse(
         request,
         appliedAt,
-        "ownership_session_mismatch",
-        "target.apply ownership session does not match active session",
-      ) as TargetApplyResponse).payload;
-    }
-    if (request.payload.ownershipEpoch !== active.ownershipEpoch) {
-      return (this.targetApplyFailureResponse(
-        request,
-        appliedAt,
-        "ownership_epoch_mismatch",
-        "target.apply ownershipEpoch does not match the active session",
+        "not_paired",
+        "target.apply requires the target surface connection",
       ) as TargetApplyResponse).payload;
     }
     const paneLineages = new Set(this.core.pairState(surfaceId).panes.map((pane) => pane.paneLineageId));
@@ -5536,81 +4778,6 @@ export class SurfaceWsServer {
       ok: true,
       op: "heartbeat.ping",
       payload: { nonce: request.payload.nonce },
-      sentAt: Date.now(),
-      type: "response",
-      v: 1,
-    };
-  }
-
-  private async handleAuthorityState(socket: WebSocket, request: AuthorityStateRequest): Promise<Response> {
-    const surfaceId = this.requirePairedSurfaceId(socket);
-    const transport = this.transport(surfaceId);
-    const active = transport.active;
-    const payload = request.payload;
-    let accepted = false;
-    let reason: string | null = null;
-
-    if (!active || active.socket !== socket) {
-      reason = "not_active_session";
-    } else if (payload.surfaceId !== surfaceId) {
-      reason = "surface_id_mismatch";
-    } else if (payload.providerId !== active.providerId) {
-      reason = "session_identity_mismatch";
-    } else {
-      const surface = this.core.getSurface(surfaceId);
-      if (
-        payload.sessionId !== active.sessionId ||
-        payload.ownershipEpoch !== active.ownershipEpoch
-      ) {
-        persistentServerDiagnostic("info", "authority_state_same_provider_session_metadata_mismatch", {
-          active_ownership_epoch: active.ownershipEpoch,
-          active_session_id: active.sessionId,
-          provider_id: active.providerId,
-          request_id: request.id,
-          received_ownership_epoch: payload.ownershipEpoch,
-          received_session_id: payload.sessionId,
-          surface_id: surfaceId,
-        });
-      }
-      if (!isValidWindowLabel(payload.windowLabel)) {
-        reason = "window_label_mismatch";
-      } else if (payload.windowLabel !== surface.windowLabel) {
-        await this.runProviderWindowLabelMutation(() => this.runSurfaceMutation(surfaceId, async () => {
-          await this.admitProviderWindowLabel(surfaceId, payload.windowLabel, "authority.state", request.id);
-        }));
-      }
-      if (!reason) {
-        const adoptedPaneIdentities = await this.runSurfaceMutation(
-          surfaceId,
-          () => this.adoptProviderAuthorityPaneIdentities(surfaceId, payload.panes),
-        );
-        if (!adoptedPaneIdentities) {
-          persistentServerDiagnostic("info", "authority_state_provider_topology_pending", {
-            pane_count: payload.panes.length,
-            provider_id: active.providerId,
-            request_id: request.id,
-            surface_id: surfaceId,
-          });
-        }
-      }
-      if (!reason && !payload.actionable) {
-        reason = payload.reason ?? "provider_not_actionable";
-      } else if (!reason) {
-        accepted = true;
-        this.core.setProviderName(surfaceId, active.providerName);
-        this.core.setConnectionBar(surfaceId, "connected");
-      }
-    }
-
-    if (!accepted) {
-      this.core.setConnectionBar(surfaceId, "connecting");
-    }
-
-    return {
-      id: request.id,
-      ok: true,
-      op: "authority.state",
-      payload: { accepted, reason },
       sentAt: Date.now(),
       type: "response",
       v: 1,
@@ -5903,19 +5070,6 @@ export class SurfaceWsServer {
     return created;
   }
 
-  private async capabilities() {
-    const capabilities = this.core.capabilities();
-    const runtimeAppBinding = await this.currentRuntimeAppBinding();
-    return {
-      ...capabilities,
-      protocolFeatures: ["authority.state.v1"],
-      ...(runtimeAppBinding ? { runtimeAppBinding } : {}),
-      targetCapabilities: this.compositorSocketPath
-        ? [...capabilities.targetCapabilities, "target.native_app.v1"]
-        : capabilities.targetCapabilities,
-    };
-  }
-
   private async locklessCapabilities() {
     const capabilities = this.core.capabilities();
     const runtimeAppBinding = await this.currentRuntimeAppBinding();
@@ -6006,57 +5160,6 @@ export class SurfaceWsServer {
     transport.active = null;
     this.core.setConnectionBar(surfaceId, "disconnected");
     this.closeSession(surfaceId, active, reason);
-  }
-
-  private commitPairResponse(
-    response: Response,
-    cache: Map<string, SocketCacheEntry>,
-  ): void {
-    const plan = this.pendingPairCommits.get(response);
-    if (!plan) {
-      return;
-    }
-    this.pendingPairCommits.delete(response);
-    const transport = this.transport(plan.surfaceId);
-    transport.active = plan.session;
-    transport.lock = {
-      drawingFlushConfig: plan.session.drawingFlushConfig,
-      eventProfile: plan.session.eventProfile,
-      ownershipEpoch: plan.session.ownershipEpoch,
-      providerId: plan.session.providerId,
-      sessionId: plan.session.sessionId,
-    };
-    this.releaseLegacyPair(plan.surfaceId);
-    const meta = this.socketMeta.get(plan.session.socket);
-    if (meta) {
-      meta.pairedSurfaceId = plan.surfaceId;
-    }
-    const cacheEntry = cache.get(response.id);
-    if (cacheEntry?.response === response) {
-      plan.session.requestCache.set(response.id, cacheEntry);
-      trimCache(plan.session.requestCache);
-    }
-    this.core.setConnectionBar(plan.surfaceId, "connecting");
-    this.core.setProviderName(plan.surfaceId, plan.providerName);
-    this.onBusyChanged?.();
-    if (plan.supersededSession && plan.supersededSession.socket !== plan.session.socket) {
-      this.closeSession(plan.surfaceId, plan.supersededSession, "superseded");
-    }
-  }
-
-  private abandonPairResponse(
-    response: Response,
-    cache: Map<string, SocketCacheEntry>,
-  ): void {
-    const plan = this.pendingPairCommits.get(response);
-    if (!plan) {
-      return;
-    }
-    if (cache.get(response.id)?.response === response) {
-      cache.delete(response.id);
-    }
-    this.pendingPairCommits.delete(response);
-    this.releaseLegacyPair(plan.surfaceId);
   }
 
   private closeSession(surfaceId: string, active: ActiveSession, reason: string): void {
@@ -6531,8 +5634,6 @@ function nativeHostMaterializedState(
   const launchMode = typeof targetPayload.launchMode === "string" ? targetPayload.launchMode : undefined;
   return {
     authority: {
-      ownershipEpoch: payload.ownershipEpoch,
-      ownershipSessionId: payload.ownershipSessionId,
       paneLineageId: payload.paneLineageId,
       surfaceId: payload.surfaceId,
       targetEpoch: payload.targetEpoch,

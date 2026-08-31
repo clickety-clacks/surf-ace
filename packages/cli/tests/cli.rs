@@ -323,7 +323,7 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         "not_committed",
         "still_pending",
         "receipt_unavailable",
-        "legacy_overflow",
+        "source_overflow",
         "scope_capacity",
         "record_oversize",
         "cursor",

@@ -106,7 +106,7 @@ export type ConsumableRecord = {
 };
 
 export type ConsumableGap = {
-  cause: "legacy_overflow" | "scope_capacity" | "record_oversize";
+  cause: "source_overflow" | "scope_capacity" | "record_oversize";
   droppedBytes: number | null;
   droppedEventCount: number | null;
   droppedFrameCount: number | null;
@@ -1090,7 +1090,7 @@ function validConsumableGap(
   }
   const unknownExtent = value.lossExtent === "unknown";
   return (
-    (value.cause === "legacy_overflow" ||
+    (value.cause === "source_overflow" ||
       value.cause === "scope_capacity" ||
       value.cause === "record_oversize") &&
     positiveInteger(value.generation) &&

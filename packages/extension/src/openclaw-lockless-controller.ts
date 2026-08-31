@@ -54,7 +54,7 @@ type LocklessEndpoint = {
   screens: SurfAceScreenSummary[];
 };
 
-type EndpointMode = "legacy" | "lockless" | "probing";
+type EndpointMode = "lockless" | "probing";
 
 function endpointStateKey(endpoint: SurfAceDiscoveryEndpoint): string {
   return createHash("sha256").update(endpoint.endpointId).digest("hex").slice(0, 16);
@@ -121,8 +121,6 @@ export class OpenClawLocklessController {
   private readonly endpointModes = new Map<string, EndpointMode>();
   private readonly endpoints = new Map<string, LocklessEndpoint>();
   private readonly identity: ControllerIdentity;
-  private readonly legacyListeners =
-    new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void>();
   private reconcileWork: Promise<void> = Promise.resolve();
   private started = false;
   private unsubscribeDiscovery: (() => void) | null = null;
@@ -145,20 +143,6 @@ export class OpenClawLocklessController {
         path.join(options.stateDir, "lockless-controller-identity.json"),
       ),
     );
-  }
-
-  legacyDiscovery(): SurfAceDiscoveryService {
-    return {
-      getSnapshot: () => this.legacySnapshot(),
-      refreshNow: async () => await this.discovery.refreshNow(),
-      start: async () => await this.start(),
-      stop: async () => {},
-      subscribe: (listener) => {
-        this.legacyListeners.add(listener);
-        listener(this.legacySnapshot());
-        return () => this.legacyListeners.delete(listener);
-      },
-    };
   }
 
   async start(): Promise<void> {
@@ -965,14 +949,9 @@ export class OpenClawLocklessController {
         this.options.logger?.info?.(
           `[surf-ace:lockless] endpoint ${endpoint.endpointId} admission failed: ${reason}`,
         );
-        if (reason.includes("lockless_capability_not_advertised")) {
-          this.endpointModes.set(endpoint.endpointId, "legacy");
-        } else {
-          this.endpointModes.delete(endpoint.endpointId);
-        }
+        this.endpointModes.delete(endpoint.endpointId);
       }
     }
-    this.notifyLegacyListeners();
   }
 
   private async loadScreens(
@@ -1151,19 +1130,6 @@ export class OpenClawLocklessController {
     return resolved;
   }
 
-  private legacySnapshot(): SurfAceDiscoveryEndpoint[] {
-    return this.discovery.getSnapshot().filter(
-      (endpoint) => this.endpointModes.get(endpoint.endpointId) === "legacy",
-    );
-  }
-
-  private notifyLegacyListeners(): void {
-    const snapshot = this.legacySnapshot();
-    for (const listener of this.legacyListeners) {
-      listener(snapshot);
-    }
-  }
-
   private alertScopeKey(endpointId: string, scopeId: string): string {
     return `${endpointId}\n${scopeId}`;
   }
@@ -1221,9 +1187,9 @@ function projectConsumableRecords(
     const payload = asRecord(record.payload);
     switch (record.recordClass) {
       case "annotation_frame": {
-        const legacyFrame = asRecord(payload.legacyFrame);
-        if (typeof legacyFrame.frameId === "string") {
-          frames.push(structuredClone(legacyFrame) as never);
+        const frame = asRecord(payload.frame);
+        if (typeof frame.frameId === "string") {
+          frames.push(structuredClone(frame) as never);
           break;
         }
         const strokes = Array.isArray(payload.strokes)
@@ -1277,7 +1243,7 @@ function projectConsumableRecords(
       case "tap": {
         const position = asRecord(payload.position);
         taps.push({
-          eventId: stringValue(payload.legacyEventId, record.recordId),
+          eventId: stringValue(payload.eventId, record.recordId),
           kind: payload.kind === "long_press" ? "long_press" : "tap",
           nearestText: typeof payload.nearestContent === "string"
             ? payload.nearestContent

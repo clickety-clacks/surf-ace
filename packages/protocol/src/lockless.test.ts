@@ -444,7 +444,7 @@ test("lockless pair and discovery require exact capability and finite limits", (
         capabilities: {
           protocolFeatures: [
             SURF_ACE_LOCKLESS_V1_CAPABILITY,
-            "authority.state.v1",
+            "feature.additional.v1",
           ],
         },
       },
