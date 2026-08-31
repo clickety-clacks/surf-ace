@@ -344,7 +344,7 @@ For lockless-capable surfaces, the June provider-segregation recon D1/D3/R2..R7 
 ### 4.9 General Standalone Surf Ace CLI and Reusable Consumers
 
 1. Surf Ace exposes one general standalone native Rust `surf-ace` CLI, directly callable by any local program, script, user, or agent. Tight Beam is one separate reusable-skill consumer of the identical installed executable through ordinary command execution; it does not own or redefine the executable, crate, package, commands, controller identity, runtime, configuration, state model, authority, or access gate. The delivered tree contains no Surf Ace MCP declaration/server/tool, MCP-only adapter, dedicated Surf Ace archetype, Tight-Beam-specific binary, or parallel fallback route. Attaching the Tight Beam skill changes neither the archetype identity nor unrelated archetype material.
-2. The supported surface is exactly `list`, `push`, `read`, `topology-intent`, `topology-realize`, `clear`, `annotations-remove`, `capture-pane`, `surface-mode-convert`, `surface-intent`, `target-register`, and `target-apply`. Inputs, acknowledgements, errors, and results are deterministic JSON. Endpoint, state root, controller product label, and per-operation friendly chat label are external inputs; no machine, role, address, surface, topology, or provenance label is compiled in.
+2. The supported surface is exactly `list`, `push`, `read`, `topology-intent`, `topology-realize`, `clear`, `annotations-remove`, `capture-pane`, `surface-intent`, `target-register`, and `target-apply`. Inputs, acknowledgements, errors, and results are deterministic JSON. Endpoint, state root, controller product label, and per-operation friendly chat label are external inputs; no machine, role, address, surface, topology, or provenance label is compiled in.
 3. One state root atomically retains the stable controller instance ID, bounded projection, sticky gaps, projected cursors, acknowledgement outbox, resume metadata, and unresolved request/receipt correlations. An OS lock covers each complete networked invocation. `read` instead performs one locked local transaction, opens no connection, advances only projected consumption, and atomically queues idempotent acknowledgement intent.
 4. Every explicit networked invocation connects directly to the public client WebSocket, pairs or resumes with the durable ID, reconciles client-ordered snapshots/deltas/gaps, flushes acknowledgements, resolves every uncertain request, performs the requested work if permitted, persists resulting state, and disconnects. No sidecar, daemon, resident MCP process, launchd/login item, autostart entry, or persistent service participates.
 5. A mutation remains connected until its exact correlated `operationReceipt` is durably stored and returned. Interruption after send and before durable receipt returns deterministic `outcome_unknown`, never success or an automatic retry. A later networked invocation must resolve all such IDs before another mutation. `target.apply` is the one asynchronous materialization seam: after pure validation and capacity checks, the client atomically persists the exact `intent_committed` response, receipt, and surface-charged work item before handing the response to the transport; browser/native materialization begins only after that send attempt. The receipt proves committed intent, never materialization success.
@@ -417,21 +417,6 @@ The ledger retains at most 256 records and at most 128 KiB of JSON-encoded recor
 
 Within those limits, the client persists the pending record before admission work begins. A failed attempt survives transaction rollback and restart. A successful attempt is committed atomically with the admitted authority and surface state. Lifecycle `surfaces.list` exposes the complete retained ledger; pre-pair and surface-scoped discovery omit it.
 
-### 6.0.1 Surface Admission Mode Conversion
-
-`surface.mode.convert` is an explicit endpoint-lifecycle mutation. It runs only on an admitted lifecycle connection with no target surface bound to the connection. The standalone CLI exposes this operation as `surface-mode-convert`; no connection, pair, resume, or ordinary operation converts a surface implicitly.
-
-**Request fields:** exact non-empty `surfaceId`; `currentMode` equal to the caller's observed `legacy`, `lockless`, or `unknown` admission mode.
-
-**Behavior:**
-1. The client reads the exact surface's persisted admission mode at execution. A supplied `currentMode` that differs from the observed mode returns `capability_mismatch`, names the observed current mode and required `lockless` mode, supplies the exact `surface-mode-convert` remedy for that surface, and commits nothing.
-2. An observed `unknown` mode returns `invalid_operation`, names `unknown` as current and `legacy` as the required conversion source mode, supplies the exact command to run after an explicit legacy admission stamp is restored, and commits nothing. The client never infers or repairs a missing mode stamp.
-3. An observed `legacy` mode with an active or in-flight legacy transport returns `invalid_operation`, names the current and required modes and the exact command remedy, and commits nothing. The operator must wait for in-flight admission to finish or disconnect an active legacy transport before retrying.
-4. For an inactive observed `legacy` surface, the client atomically clears legacy provider ownership, prepares the existing surface for lockless authority, and stamps the same exact surface `lockless`. Success returns `surfaceId`, `previousMode: "legacy"`, `currentMode: "lockless"`, `changed: true`, and the exact correlated `operationReceipt`.
-5. For an already `lockless` surface, the operation is idempotent: it leaves the surface unchanged and returns `surfaceId`, both modes as `lockless`, `changed: false`, and the exact correlated `operationReceipt`.
-
-The success receipt contains `requestId` equal to the request envelope ID and the client-allocated positive `commitSequence`. The ordinary mutation receipt, persistence, replay, and uncertain-outcome rules in §4.9 apply.
-
 ### 6.1 Pair Handshake
 
 Flow:
@@ -464,8 +449,6 @@ Flow:
 6. Current pane state summary (`panes[]` with per-pane `paneId`, `paneLabel`, `currentContentId`, `currentRevision`, and `contentType`) plus current topology/surface revisions, bounded consumable snapshot/cursor/gap state, and retained lifecycle state required by negotiated lockless capability.
 
 A successful `pair.response` MUST include at least one topology pane. Providers MUST treat `state.panes.length < 1` as a protocol failure and MUST NOT mark that surface connected or targetable from that response. Fresh Surf Ace surfaces expose at least one targetable topology pane.
-
-For a surface with legacy provider state but no persisted lockless admission, `pair.request` without migration material returns `admission_failed`, not `capability_mismatch`. The error names the current and required modes, exact surface, and exact `surface-mode-convert` command. The caller may retry with valid migration material to preserve legacy state, or an admitted lifecycle controller may run the explicit conversion command to discard legacy provider ownership. Conversion is safe only under the current/unknown/active refusals in §6.0.1. After conversion, the same surface accepts a new recorded pair attempt. Repeating conversion on an already-lockless surface is idempotent.
 
 ### 6.1.1 Controller Admission, Recoverable Lifecycle, and Shared History Operations (Phase 1)
 
