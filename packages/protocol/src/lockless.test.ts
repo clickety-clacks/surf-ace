@@ -53,7 +53,7 @@ test("production validator accepts every serialized Rust CLI network variant", (
       "utf8",
     ),
   ) as { requests: unknown[] };
-  assert.equal(vector.requests.length, 16);
+  assert.equal(vector.requests.length, 15);
   for (const envelope of vector.requests) {
     assert.deepEqual(validateLocklessEnvelope(envelope), { ok: true });
   }
@@ -307,10 +307,6 @@ test("lockless validator accepts every converted and new request shape", () => {
       expectedSurfaceSetRevision: 2,
       tombstoneId: "st-a",
     }),
-    request("surface.mode.convert", {
-      currentMode: "legacy",
-      surfaceId: "surface-a",
-    }),
     request("topology.apply", {
       allowDestroyPaneIds: [],
       desired: { type: "pane" },
@@ -357,28 +353,6 @@ test("lockless validator accepts every converted and new request shape", () => {
       validateLocklessEnvelope(envelope),
       { ok: true },
       envelope.op,
-    );
-  }
-});
-
-test("surface mode conversion requires an exact surface and observed mode", () => {
-  for (const currentMode of ["legacy", "lockless", "unknown"]) {
-    assert.deepEqual(
-      validateLocklessEnvelope(request("surface.mode.convert", {
-        currentMode,
-        surfaceId: "surface-a",
-      })),
-      { ok: true },
-    );
-  }
-  for (const payload of [
-    { currentMode: "legacy" },
-    { currentMode: "future", surfaceId: "surface-a" },
-    { currentMode: "legacy", surfaceId: "" },
-  ]) {
-    assert.equal(
-      validateLocklessEnvelope(request("surface.mode.convert", payload)).ok,
-      false,
     );
   }
 });
@@ -651,10 +625,6 @@ test("admission failure is a public lockless error with a remedy shape", () => {
       error: {
         code: "admission_failed",
         details: {
-          currentMode: "legacy",
-          remedyCommand:
-            "surface-mode-convert --input-json '{\"currentMode\":\"legacy\",\"surfaceId\":\"surface-a\"}'",
-          requiredMode: "lockless",
           surfaceId: "surface-a",
         },
         message: "Surface surface-a was not admitted to lockless mode",
@@ -853,81 +823,6 @@ test("lockless request rejects nested authority fields and invalid intent ranges
     ),
     { ok: false, reason: "invalid_pane_split" },
   );
-});
-
-test("migration material rejects ambiguous or injected nested authority", () => {
-  const gap = {
-    cause: "legacy_overflow",
-    droppedBytes: null,
-    droppedEventCount: null,
-    droppedFrameCount: null,
-    droppedRecordCount: null,
-    firstLostSequence: null,
-    lastLostSequence: null,
-    lossExtent: "unknown",
-    recordClasses: ["tap"],
-  };
-  const material = {
-    gaps: [{ gap, scopeId: "pane:surface-a:1" }],
-    scopes: [
-      {
-        liveFrames: [{ frameId: "frame-a", payload: {} }],
-        records: [{ payload: {}, recordClass: "tap" }],
-        scopeId: "pane:surface-a:1",
-        scopeKind: "pane",
-      },
-    ],
-  };
-  const pair = (migrationMaterial: unknown) =>
-    request("pair.request", {
-      controllerInstanceId: "controller-a",
-      migrationMaterial,
-      projectionCapacityBytes: 10,
-      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
-      protocolVersion: 1,
-      surfaceId: "sf_surface-a",
-    });
-
-  assert.deepEqual(validateLocklessEnvelope(pair(material)), { ok: true });
-  for (const invalid of [
-    { ...material, unexpected: true },
-    { ...material, scopes: [...material.scopes, material.scopes[0]] },
-    {
-      ...material,
-      gaps: [...material.gaps, material.gaps[0]],
-    },
-    {
-      ...material,
-      gaps: [{ gap, scopeId: "pane:surface-a:2" }],
-    },
-    {
-      ...material,
-      scopes: [
-        {
-          ...material.scopes[0],
-          liveFrames: [
-            material.scopes[0].liveFrames[0],
-            material.scopes[0].liveFrames[0],
-          ],
-        },
-      ],
-    },
-    {
-      ...material,
-      gaps: [
-        {
-          gap: { ...gap, recordClasses: [] },
-          scopeId: "pane:surface-a:1",
-        },
-      ],
-    },
-    {
-      ...material,
-      scopes: [{ ...material.scopes[0], unexpected: true }],
-    },
-  ]) {
-    assert.equal(validateLocklessEnvelope(pair(invalid)).ok, false);
-  }
 });
 
 test("lockless events and stable error responses validate", () => {

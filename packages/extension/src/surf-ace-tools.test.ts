@@ -254,7 +254,6 @@ test("OpenClaw tool surface matches DESIGN.md exactly", () => {
 
   assert.deepEqual(surfAceToolNames, [
     "surf_ace_list",
-    "surf_ace_prepare_migration_now",
     "surf_ace_authority_diagnostics",
     "surf_ace_push",
     "surf_ace_launch_native_app",
@@ -287,20 +286,6 @@ test("OpenClaw tool surface matches DESIGN.md exactly", () => {
   );
   assert.deepEqual(listTool.inputSchema.required, undefined);
   assert.equal(listTool.inputSchema.additionalProperties, false);
-
-  const prepareTool = tools.find((tool) => tool.name === "surf_ace_prepare_migration_now");
-  assert.ok(prepareTool);
-  assert.deepEqual(prepareTool.inputSchema, {
-    additionalProperties: false,
-    properties: {
-      fingerprint: {
-        description: "Window-scoped Surf Ace surface identity (`surfaceId`, exposed as `fingerprint`).",
-        type: "string",
-      },
-    },
-    required: ["fingerprint"],
-    type: "object",
-  });
 
   const pushTool = tools.find((tool) => tool.name === "surf_ace_push");
   assert.ok(pushTool);

@@ -17,7 +17,6 @@ import {
 
 export const surfAceToolNames = [
   "surf_ace_list",
-  "surf_ace_prepare_migration_now",
   "surf_ace_authority_diagnostics",
   "surf_ace_push",
   "surf_ace_launch_native_app",
@@ -288,18 +287,6 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_list",
-    },
-    {
-      description: "Durably freeze the explicit post-read legacy-to-lockless migration boundary for one surface without network I/O.",
-      execute: async (args: { fingerprint: string }) =>
-        await runtime.prepareLegacyLocklessMigrationNow(args.fingerprint),
-      inputSchema: {
-        additionalProperties: false,
-        properties: { fingerprint: fingerprintParam },
-        required: ["fingerprint"],
-        type: "object",
-      },
-      name: "surf_ace_prepare_migration_now",
     },
     {
       description: "Return provider authority diagnostics for stale persisted surfaces, live surfaces, runtime screen snapshots, target/window records, tombstones, pane counters, blockers, and runtime owner state.",

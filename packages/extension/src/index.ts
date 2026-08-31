@@ -6,7 +6,6 @@ import {
   surfAceToolContextFromOpenClawContext,
 } from "./openclaw-tool-context.js";
 import { assertProviderHostAllowed } from "./provider-host-guard.js";
-import { capabilityGatedPreparationRuntime } from "./capability-gated-preparation.js";
 import { OpenClawLocklessController } from "./openclaw-lockless-controller.js";
 import {
   createSurfAceRuntime,
@@ -46,7 +45,6 @@ const plugin = {
           openClawStateDir,
           providerName: "OpenClaw / Surf Ace",
         });
-        locklessController.setLegacyMigrationSource(legacyRuntime);
         return capabilityGatedRuntime(
           legacyRuntime,
           locklessController,
@@ -116,10 +114,6 @@ function capabilityGatedRuntime(
   legacyRuntime: SurfAceRuntime,
   locklessController: OpenClawLocklessController,
 ): SurfAceRuntime {
-  const preparationRuntime = capabilityGatedPreparationRuntime(
-    legacyRuntime,
-    locklessController,
-  );
   return new Proxy(legacyRuntime, {
     get(target, property, receiver) {
       switch (property) {
@@ -139,8 +133,6 @@ function capabilityGatedRuntime(
             const legacy = await target.listScreens();
             return [...lockless, ...legacy];
           };
-        case "prepareLegacyLocklessMigrationNow":
-          return Reflect.get(preparationRuntime, property, receiver);
         case "push":
           return async (
             input: Parameters<SurfAceRuntime["push"]>[0],

@@ -14,7 +14,6 @@
     {"id":"rq-11","op":"surface.window.close","payload":{"expectedSurfaceSetRevision":1,"expectedTopologyRevision":1,"surfaceId":"sf_1"},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-12","op":"surface.window.restore","payload":{"expectedSurfaceSetRevision":1,"tombstoneId":"st_1","placement":{}},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-13","op":"target.register","payload":{"surfaceId":"sf_1","paneId":1,"idempotencyKey":"idem_1","expectedPreviousTargetEpoch":null,"launchedAt":"2026-07-30T00:00:00Z","registrationState":"attached","targetKind":"native_app","targetHeader":{},"targetPayload":{}},"sentAt":1785619273922,"type":"request","v":1},
-    {"id":"rq-14","op":"target.apply","payload":{"surfaceId":"sf_1","paneId":1,"requestId":"target_request_1","restoreReason":"initial","targetId":"tg_1","targetEpoch":1,"targetKind":"native_app","targetHeader":{},"targetPayload":{}},"sentAt":1785619273922,"type":"request","v":1},
-    {"id":"rq-15","op":"surface.mode.convert","payload":{"surfaceId":"sf_1","currentMode":"legacy"},"sentAt":1785619273922,"type":"request","v":1}
+    {"id":"rq-14","op":"target.apply","payload":{"surfaceId":"sf_1","paneId":1,"requestId":"target_request_1","restoreReason":"initial","targetId":"tg_1","targetEpoch":1,"targetKind":"native_app","targetHeader":{},"targetPayload":{}},"sentAt":1785619273922,"type":"request","v":1}
   ]
 }

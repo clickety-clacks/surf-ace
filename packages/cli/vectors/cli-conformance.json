@@ -10,7 +10,6 @@
     "clear",
     "annotations-remove",
     "capture-pane",
-    "surface-mode-convert",
     "surface-intent",
     "target-register",
     "target-apply"

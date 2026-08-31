@@ -253,7 +253,6 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
 
 fn operation_surface_id(invocation: &Invocation) -> Result<Option<String>, CliError> {
     let lifecycle_operation = invocation.command == crate::command::Command::List
-        || invocation.command == crate::command::Command::SurfaceModeConvert
         || (invocation.command == crate::command::Command::SurfaceIntent
             && matches!(
                 invocation.input.get("action").and_then(Value::as_str),

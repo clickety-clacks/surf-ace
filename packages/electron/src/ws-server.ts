@@ -79,7 +79,6 @@ import {
   isValidWindowLabel,
   SurfaceCore,
   SurfaceCoreError,
-  surfaceModeConversionCommand,
   type CoreEvent,
 } from "./surface-core.js";
 import {
@@ -311,6 +310,7 @@ export class SurfaceWsServer {
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly pendingPairCommits = new WeakMap<Response, PairPostResponseCommit>();
   private readonly pendingLegacyPairs = new Map<string, number>();
+  private readonly pendingLocklessPairs = new Map<string, number>();
   private readonly transports = new Map<string, SurfaceTransportState>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
@@ -758,7 +758,7 @@ export class SurfaceWsServer {
   ): Promise<void> {
     const scopeId = locklessPaneScopeId(surfaceId, paneId);
     const record = await this.core.locklessAuthority.transactionAsync(async () => {
-      if (this.core.locklessAuthority.surfaceMode(surfaceId) !== "lockless") {
+      if (this.activeSession(surfaceId)) {
         return null;
       }
       const appended = this.core.locklessAuthority.appendConsumable({
@@ -785,7 +785,7 @@ export class SurfaceWsServer {
   ): Promise<void> {
     const scopeId = `surface:${encodeURIComponent(surfaceId)}`;
     const record = await this.core.locklessAuthority.transactionAsync(async () => {
-      if (this.core.locklessAuthority.surfaceMode(surfaceId) !== "lockless") {
+      if (this.activeSession(surfaceId)) {
         return null;
       }
       const appended = this.core.locklessAuthority.appendConsumable({
@@ -808,7 +808,7 @@ export class SurfaceWsServer {
     surfaceId: string,
     paneId: number,
   ): Promise<void> {
-    if (this.core.locklessAuthority.surfaceMode(surfaceId) !== "lockless") {
+    if (this.activeSession(surfaceId)) {
       return;
     }
     const payload = this.core.buildDrawingFlush(
@@ -1440,12 +1440,15 @@ export class SurfaceWsServer {
       response: Response;
     }> => {
       try {
+        const response = request.op === "pair.request"
+          ? await this.runLocklessPairReservation(
+              request.payload.surfaceId ?? null,
+              async () => await this.dispatchLocklessRequest(socket, request),
+            )
+          : await this.dispatchLocklessRequest(socket, request);
         return {
           rejectionCode: null,
-          response: (await this.dispatchLocklessRequest(
-            socket,
-            request,
-          )) as Response,
+          response: response as Response,
         };
       } catch (error) {
         if (error instanceof LocklessAuthorityError) {
@@ -1963,12 +1966,6 @@ export class SurfaceWsServer {
         );
       }
       const surfaceId = request.payload.surfaceId ?? null;
-      if (!surfaceId && request.payload.migrationMaterial) {
-        throw new LocklessAuthorityError(
-          "invalid_payload",
-          "Legacy migration material requires a surface-scoped pair",
-        );
-      }
       const admissionAttempt = surfaceId
         ? this.core.beginSurfaceAdmissionAttempt({
             controllerInstanceId: request.payload.controllerInstanceId,
@@ -2001,7 +1998,7 @@ export class SurfaceWsServer {
           this.core.getSurface(surfaceId);
           const transport = this.transport(surfaceId);
           if (transport.active || transport.lock) {
-            throw this.surfaceModeMismatch(surfaceId, "legacy");
+            throw this.providerTransportHeld(surfaceId);
           }
           this.core.advanceSurfaceAdmissionAttempt(
             admissionAttempt.attemptSequence,
@@ -2026,9 +2023,6 @@ export class SurfaceWsServer {
               if (surfaceId) {
                 this.core.admitSurfaceToLockless(
                   surfaceId,
-                  request.payload.migrationMaterial,
-                  request.payload.controllerInstanceId,
-                  request.id,
                   admissionAttempt?.attemptSequence,
                 );
                 this.core.locklessAuthority.ensureScope(
@@ -2133,12 +2127,6 @@ export class SurfaceWsServer {
           capabilities: await this.locklessCapabilities(),
           controllerInstanceId: request.payload.controllerInstanceId,
           limits: this.core.locklessAuthority.limits,
-          ...(request.payload.migrationMaterial
-            ? {
-                migrationAccepted: true,
-                migrationReceiptId: request.id,
-              }
-            : {}),
           mode: "lockless",
           receiptResolutions,
           resumed: admission.resumed,
@@ -2205,7 +2193,6 @@ export class SurfaceWsServer {
     if (request.op === "surfaces.list") {
       for (const surface of this.core.listSurfaces()) {
         if (
-          this.core.surfaceAdmissionMode(surface.surfaceId) === "unknown" &&
           this.core
             .activePaneIds(surface.surfaceId)
             .some((paneId) => paneId < 1)
@@ -2235,61 +2222,6 @@ export class SurfaceWsServer {
           topology: this.core.topologyState(surface.surfaceId),
           viewport: this.core.viewport(surface.surfaceId),
         })),
-      });
-    }
-    if (request.op === "surface.mode.convert") {
-      if (session.surfaceId !== null) {
-        throw new SurfaceCoreError(
-          "invalid_operation",
-          "surface.mode.convert requires the lifecycle connection",
-        );
-      }
-      const surfaceId = request.payload.surfaceId;
-      const currentMode = this.core.surfaceAdmissionMode(surfaceId);
-      if (request.payload.currentMode !== currentMode) {
-        throw this.surfaceModeMismatch(surfaceId, currentMode);
-      }
-      if (currentMode === "lockless") {
-        return locklessSuccess(request, {
-          changed: false,
-          currentMode,
-          previousMode: currentMode,
-          surfaceId,
-        });
-      }
-      if (currentMode === "unknown") {
-        const remedyCommand = this.surfaceModeRemedy(surfaceId, "legacy");
-        throw new LocklessAuthorityError(
-          "invalid_operation",
-          `Surface ${surfaceId} is in unknown mode; required conversion source mode is legacy. Restore an explicit legacy admission stamp, then run the exact command: ${remedyCommand}`,
-          {
-            currentMode,
-            remedyCommand,
-            requiredMode: "legacy",
-            surfaceId,
-          },
-        );
-      }
-      const transport = this.transport(surfaceId);
-      if (this.pendingLegacyPairs.has(surfaceId) || transport.active || transport.lock) {
-        throw new LocklessAuthorityError(
-          "invalid_operation",
-          `Surface ${surfaceId} still has an in-flight or active legacy transport; wait for it to finish if in flight, or disconnect it and rerun ${this.surfaceModeRemedy(surfaceId, currentMode)}`,
-          {
-            currentMode,
-            remedyCommand: this.surfaceModeRemedy(surfaceId, currentMode),
-            requiredMode: "lockless",
-            surfaceId,
-          },
-        );
-      }
-      this.core.convertObservedSurfaceToLocklessMode(surfaceId);
-      this.core.markLocklessAuthorityChanged(surfaceId);
-      return locklessSuccess(request, {
-        changed: true,
-        currentMode: "lockless",
-        previousMode: currentMode,
-        surfaceId,
       });
     }
     if (request.op === "panes.list") {
@@ -3427,10 +3359,16 @@ export class SurfaceWsServer {
     return await this.runProviderWindowLabelMutation(async () => {
       const surfaceId = request.payload.surfaceId;
       this.core.getSurface(surfaceId);
-      if (this.core.locklessAuthority.surfaceMode(surfaceId) === "lockless") {
+      if (this.pendingLocklessPairs.has(surfaceId)) {
+        throw new SurfaceCoreError(
+          "busy",
+          "Surface has an in-flight lockless pair.request; retry provider pairing",
+        );
+      }
+      if (this.hasLocklessSession(surfaceId)) {
         throw new SurfaceCoreError(
           "capability_mismatch",
-          "Surface is active in explicitly negotiated lockless mode",
+          "Surface is paired to a lockless controller",
         );
       }
       this.reserveLegacyPair(surfaceId);
@@ -3480,91 +3418,19 @@ export class SurfaceWsServer {
     let supersededSession: ActiveSession | null = null;
 
     if (!lock) {
-      const persistedOwnership = this.core.getProviderOwnership(surfaceId);
-      if (
-        persistedOwnership &&
-        resumeSessionId &&
-        resumeSessionId === persistedOwnership.sessionId &&
-        providerId === persistedOwnership.providerId &&
-        this.hasRecoverablePairState(surfaceId)
-      ) {
-        resumed = true;
-        sessionId = resumeSessionId;
-        ownershipEpoch = persistedOwnership.ownershipEpoch;
-        persistentServerDiagnostic(
-          "info",
-          "pair_request_lockless_resume_recovered",
-          {
-            provider_id: providerId,
-            request_id: request.id,
-            session_id: sessionId,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-      } else if (persistedOwnership && providerId !== persistedOwnership.providerId && !request.payload.takeover) {
-        persistentServerDiagnostic(
-          "warn",
-          "pair_request_busy",
-          {
-            lock_provider_id: persistedOwnership.providerId,
-            requested_provider_id: providerId,
-            request_id: request.id,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-        throw new SurfaceCoreError("busy", "Surface ownership lock is held by another provider");
-      } else if (persistedOwnership && resumeSessionId && resumeSessionId !== persistedOwnership.sessionId) {
-        persistentServerDiagnostic(
-          "warn",
-          "pair_request_invalid_resume",
-          {
-            expected_session_id: persistedOwnership.sessionId,
-            provider_id: providerId,
-            received_session_id: resumeSessionId,
-            request_id: request.id,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-        throw new SurfaceCoreError("invalid_resume", "Resume session did not match active ownership lock");
-      } else if (
-        persistedOwnership &&
-        !resumeSessionId &&
-        !request.payload.takeover &&
-        this.hasRecoverablePairState(surfaceId)
-      ) {
-        // Allow fresh admission without resetting topology when recoverable state exists.
-        sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-        ownershipEpoch = persistedOwnership.ownershipEpoch + 1;
-        persistentServerDiagnostic(
-          "info",
-          "pair_request_same_provider_preserve_recovered_state",
-          {
-            provider_id: providerId,
-            request_id: request.id,
-            session_id: sessionId,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-      } else {
-        sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
-        ownershipEpoch = persistedOwnership ? persistedOwnership.ownershipEpoch + 1 : 1;
-        const event = persistedOwnership ? "pair_request_same_provider_fresh_admission" : "pair_request_new_session";
-        persistentServerDiagnostic(
-          "info",
-          event,
-          {
-            provider_id: providerId,
-            request_id: request.id,
-            session_id: sessionId,
-            socket_id: meta?.socketId,
-            surface_id: surfaceId,
-          },
-        );
-      }
+      sessionId = `sa_${randomUUID().replaceAll("-", "")}`;
+      ownershipEpoch = 1;
+      persistentServerDiagnostic(
+        "info",
+        "pair_request_new_session",
+        {
+          provider_id: providerId,
+          request_id: request.id,
+          session_id: sessionId,
+          socket_id: meta?.socketId,
+          surface_id: surfaceId,
+        },
+      );
     } else if (lock.providerId === providerId) {
       if (resumeSessionId === lock.sessionId) {
         resumed = true;
@@ -3811,7 +3677,6 @@ export class SurfaceWsServer {
     }
 
     transport.lock = null;
-    this.core.clearProviderOwnership(surfaceId);
     this.core.setConnectionBar(surfaceId, "disconnected");
     this.onBusyChanged?.();
 
@@ -3909,6 +3774,36 @@ export class SurfaceWsServer {
       this.pendingLegacyPairs.set(surfaceId, remaining);
     } else {
       this.pendingLegacyPairs.delete(surfaceId);
+    }
+  }
+
+  private async runLocklessPairReservation<T>(
+    surfaceId: string | null,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    // Pair reservations are live-only and close the pre-session arbitration gap.
+    if (!surfaceId) {
+      return await operation();
+    }
+    if (this.pendingLegacyPairs.has(surfaceId)) {
+      throw new SurfaceCoreError(
+        "busy",
+        "Surface has an in-flight provider pair.request; retry lockless admission",
+      );
+    }
+    this.pendingLocklessPairs.set(
+      surfaceId,
+      (this.pendingLocklessPairs.get(surfaceId) ?? 0) + 1,
+    );
+    try {
+      return await operation();
+    } finally {
+      const remaining = (this.pendingLocklessPairs.get(surfaceId) ?? 0) - 1;
+      if (remaining > 0) {
+        this.pendingLocklessPairs.set(surfaceId, remaining);
+      } else {
+        this.pendingLocklessPairs.delete(surfaceId);
+      }
     }
   }
 
@@ -5732,14 +5627,12 @@ export class SurfaceWsServer {
 
   private requireLocklessSurface(surfaceId: string): void {
     this.core.getSurface(surfaceId);
-    const currentMode = this.core.locklessAuthority.surfaceMode(surfaceId);
-    if (currentMode === "lockless") return;
     const transport = this.transport(surfaceId);
     if (
       transport.active ||
       transport.lock
     ) {
-      throw this.surfaceModeMismatch(surfaceId, "legacy");
+      throw this.providerTransportHeld(surfaceId);
     }
     this.core.admitSurfaceToLockless(surfaceId);
   }
@@ -5762,9 +5655,6 @@ export class SurfaceWsServer {
       this.core.getSurface(surfaceId);
       this.core.admitSurfaceToLockless(
         surfaceId,
-        undefined,
-        undefined,
-        undefined,
         attempt.attemptSequence,
       );
       this.core.markLocklessAuthorityChanged(surfaceId);
@@ -5786,27 +5676,17 @@ export class SurfaceWsServer {
     }
   }
 
-  private surfaceModeRemedy(
-    surfaceId: string,
-    currentMode: "legacy" | "lockless" | "unknown",
-  ): string {
-    return surfaceModeConversionCommand(surfaceId, currentMode);
+  private hasLocklessSession(surfaceId: string): boolean {
+    return [...this.locklessSessions.values()].some(
+      (session) => session.surfaceId === surfaceId,
+    );
   }
 
-  private surfaceModeMismatch(
-    surfaceId: string,
-    currentMode: "legacy" | "lockless" | "unknown",
-  ): LocklessAuthorityError {
-    const remedyCommand = this.surfaceModeRemedy(surfaceId, currentMode);
+  private providerTransportHeld(surfaceId: string): LocklessAuthorityError {
     return new LocklessAuthorityError(
       "capability_mismatch",
-      `Surface ${surfaceId} is in ${currentMode} mode; required mode is lockless. Run the CLI with the same global options and exact command: ${remedyCommand}`,
-      {
-        currentMode,
-        remedyCommand,
-        requiredMode: "lockless",
-        surfaceId,
-      },
+      `Surface ${surfaceId} is held by an active provider transport; disconnect it before admitting a lockless controller`,
+      { surfaceId },
     );
   }
 
@@ -6146,11 +6026,6 @@ export class SurfaceWsServer {
       providerId: plan.session.providerId,
       sessionId: plan.session.sessionId,
     };
-    this.core.setProviderOwnership(plan.surfaceId, {
-      ownershipEpoch: plan.session.ownershipEpoch,
-      providerId: plan.session.providerId,
-      sessionId: plan.session.sessionId,
-    });
     this.releaseLegacyPair(plan.surfaceId);
     const meta = this.socketMeta.get(plan.session.socket);
     if (meta) {
@@ -6243,7 +6118,7 @@ export class SurfaceWsServer {
   }
 
   private async maybeSendAnnotationCommitted(surfaceId: string, paneId: number): Promise<void> {
-    if (this.core.locklessAuthority.surfaceMode(surfaceId) === "lockless") {
+    if (!this.activeSession(surfaceId)) {
       await this.updateLocklessAnnotationFrame(surfaceId, paneId);
       const snapshot = this.tryCaptureSnapshot(surfaceId, paneId);
       if (!snapshot?.contentId) return;

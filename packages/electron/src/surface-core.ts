@@ -57,8 +57,6 @@ import {
   LOCKLESS_MAX_ADMISSION_REASON_JSON_BYTES,
   LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
   LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
-  locklessPaneScopeId,
-  locklessSurfaceScopeId,
   validLocklessAdmissionReasonCode,
   validLocklessControllerInstanceId,
   validLocklessRequestId,
@@ -67,7 +65,6 @@ import {
   type LocklessContentCommit,
   type LocklessContentPush,
   type LocklessEntryProvenance,
-  type LocklessPairPayload,
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
@@ -170,7 +167,6 @@ type SurfaceState = {
   name: string;
   paneOrder: number[];
   panes: Map<number, PaneState>;
-  providerOwnership: PersistentProviderOwnership | null;
   providerName: string | null;
   surfaceId: string;
   surfaceEpoch: string;
@@ -179,12 +175,6 @@ type SurfaceState = {
   viewport: SurfaceViewport;
   windowPlacement: WindowPlacement | null;
   windowLabel: string;
-};
-
-export type PersistentProviderOwnership = {
-  ownershipEpoch: number;
-  providerId: string;
-  sessionId: string;
 };
 
 export type PersistentSurfaceAdmissionAttempt = LocklessSurfaceAdmissionAttempt;
@@ -224,7 +214,6 @@ type PersistentSurfaceRecord = {
   name: string;
   paneOrder: number[];
   panes: PersistentPaneRecord[];
-  providerOwnership?: PersistentProviderOwnership | null;
   surfaceEpochRevision: number;
   surfaceId: string;
   topologyRevision: number;
@@ -366,13 +355,6 @@ export function assertValidWindowLabel(windowLabel: unknown): asserts windowLabe
 function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
   void windowLabel;
   return paneLabel > 0 ? String(paneLabel) : "";
-}
-
-export function surfaceModeConversionCommand(
-  surfaceId: string,
-  currentMode: "legacy" | "lockless" | "unknown",
-): string {
-  return `surface-mode-convert --input-json '${JSON.stringify({ currentMode, surfaceId })}'`;
 }
 
 function alphabeticLabel(ordinal: number): string {
@@ -750,47 +732,11 @@ export class SurfaceCore {
 
   admitSurfaceToLockless(
     surfaceId: string,
-    migrationMaterial?: LocklessPairPayload["migrationMaterial"],
-    controllerInstanceId?: string,
-    pairRequestId?: string,
     admissionAttemptSequence?: number,
   ): void {
-    this.locklessAuthority.assertRetainedTombstoneTransition(
-      migrationMaterial ? "legacy_migration" : "admission",
-    );
-    if (this.locklessAuthority.surfaceMode(surfaceId) === "lockless") {
-      if (migrationMaterial) {
-        if (!controllerInstanceId || !pairRequestId) {
-          throw new LocklessAuthorityError(
-            "invalid_payload",
-            "Migration receipt resolution requires stable controller and request identities",
-          );
-        }
-        const receipt = this.locklessAuthority.resolveMigrationReceipt({
-          controllerInstanceId,
-          material: migrationMaterial,
-          requestId: pairRequestId,
-          surfaceId,
-        });
-        if (!receipt) {
-          throw new LocklessAuthorityError(
-            "invalid_operation",
-            "Already-lockless surface has no durable receipt for migration replay",
-            { requestId: pairRequestId, surfaceId },
-          );
-        }
-      }
-      if (admissionAttemptSequence !== undefined) {
-        this.advanceSurfaceAdmissionAttempt(
-          admissionAttemptSequence,
-          "mode_commit",
-        );
-      }
-      return;
-    }
+    this.locklessAuthority.assertRetainedTombstoneTransition("admission");
     const surface = this.getSurface(surfaceId);
     const rollback = serializeSurface(surface);
-    const hadLegacyOwnership = surface.providerOwnership !== null;
     const usedLabels = new Set<number>();
     let nextLabel = 1;
     try {
@@ -800,23 +746,6 @@ export class SurfaceCore {
           "surface_preflight",
         );
       }
-      if (hadLegacyOwnership && !migrationMaterial) {
-        const remedyCommand = surfaceModeConversionCommand(surfaceId, "legacy");
-        throw new LocklessAuthorityError(
-          "admission_failed",
-          `Surface ${surfaceId} was not admitted to lockless mode because its legacy provider state requires migration material. Retry pair.request with migrationMaterial, or explicitly discard legacy provider ownership with the exact command: ${remedyCommand}`,
-          {
-            ...(admissionAttemptSequence !== undefined
-              ? { admissionAttemptSequence }
-              : {}),
-            currentMode: "legacy",
-            remedyCommand,
-            requiredMode: "lockless",
-            surfaceId,
-          },
-        );
-      }
-      surface.providerOwnership = null;
       const bootstrapPane = surface.panes.get(BOOTSTRAP_PANE_ID);
       if (
         surface.panes.size === 1 &&
@@ -880,53 +809,9 @@ export class SurfaceCore {
       ) {
         throw new LocklessAuthorityError(
           "pane_capacity",
-          "Legacy surface exceeds lockless live-plus-tombstone envelope",
+          "Surface exceeds the lockless live-plus-tombstone envelope",
         );
       }
-      if (migrationMaterial) {
-        if (admissionAttemptSequence !== undefined) {
-          this.advanceSurfaceAdmissionAttempt(
-            admissionAttemptSequence,
-            "legacy_migration",
-          );
-        }
-        if (!controllerInstanceId || !pairRequestId) {
-          throw new LocklessAuthorityError(
-            "invalid_controller_instance",
-            "Legacy migration requires stable controller and request identities",
-          );
-        }
-        const admittedScopeIds = new Set([
-          locklessSurfaceScopeId(surfaceId),
-          ...this.activePaneIds(surfaceId).map((paneId) =>
-            locklessPaneScopeId(surfaceId, paneId),
-          ),
-          ...this.locklessAuthority
-            .retainedPaneIds(surfaceId)
-            .map((paneId) => locklessPaneScopeId(surfaceId, paneId)),
-        ]);
-        const foreignScope = migrationMaterial.scopes.find(
-          (candidate) => !admittedScopeIds.has(candidate.scopeId),
-        );
-        if (foreignScope) {
-          throw new LocklessAuthorityError(
-            "invalid_payload",
-            "Legacy migration scope does not belong to the paired surface",
-            { scopeId: foreignScope.scopeId, surfaceId },
-          );
-        }
-        this.locklessAuthority.importLegacyMigrationMaterial(
-          controllerInstanceId,
-          migrationMaterial,
-        );
-        this.locklessAuthority.commitMigrationReceipt({
-          controllerInstanceId,
-          material: migrationMaterial,
-          requestId: pairRequestId,
-          surfaceId,
-        });
-      }
-      this.locklessAuthority.convertSurfaceToLocklessMode(surfaceId);
       if (admissionAttemptSequence !== undefined) {
         this.advanceSurfaceAdmissionAttempt(
           admissionAttemptSequence,
@@ -945,52 +830,6 @@ export class SurfaceCore {
 
   getWindowPlacement(surfaceId: string): WindowPlacement | null {
     return cloneWindowPlacement(this.getSurface(surfaceId).windowPlacement);
-  }
-
-  getProviderOwnership(surfaceId: string): PersistentProviderOwnership | null {
-    const ownership = this.getSurface(surfaceId).providerOwnership;
-    return ownership ? structuredClone(ownership) : null;
-  }
-
-  surfaceAdmissionMode(surfaceId: string): "legacy" | "lockless" | "unknown" {
-    const surface = this.getSurface(surfaceId);
-    const explicit = this.locklessAuthority.surfaceMode(surfaceId);
-    if (explicit) return explicit;
-    return surface.providerOwnership ? "legacy" : "unknown";
-  }
-
-  convertObservedSurfaceToLocklessMode(surfaceId: string): void {
-    const surface = this.getSurface(surfaceId);
-    const rollback = serializeSurface(surface);
-    try {
-      surface.providerOwnership = null;
-      this.admitSurfaceToLockless(surfaceId);
-    } catch (error) {
-      const restored = deserializeSurface(rollback, this.now());
-      if (restored) {
-        this.surfaces.set(surfaceId, restored);
-      }
-      throw error;
-    }
-  }
-
-  setProviderOwnership(surfaceId: string, ownership: PersistentProviderOwnership): void {
-    const surface = this.getSurface(surfaceId);
-    surface.providerOwnership = {
-      ownershipEpoch: Math.max(1, Math.trunc(Number(ownership.ownershipEpoch))),
-      providerId: ownership.providerId,
-      sessionId: ownership.sessionId,
-    };
-    this.emit({ surfaceId, type: "surface-changed" });
-  }
-
-  clearProviderOwnership(surfaceId: string): void {
-    const surface = this.getSurface(surfaceId);
-    if (surface.providerOwnership === null) {
-      return;
-    }
-    surface.providerOwnership = null;
-    this.emit({ surfaceId, type: "surface-changed" });
   }
 
   setWindowPlacement(surfaceId: string, placement: WindowPlacement | null): void {
@@ -1097,7 +936,6 @@ export class SurfaceCore {
         "Surface tombstone payload is invalid",
       );
     }
-    surface.providerOwnership = null;
     this.surfaces.set(surface.surfaceId, surface);
     this.emit({ surfaceId: surface.surfaceId, type: "surface-created" });
     this.emit({ surfaceId: surface.surfaceId, type: "surface-changed" });
@@ -3240,7 +3078,6 @@ export class SurfaceCore {
       name,
       paneOrder: [BOOTSTRAP_PANE_ID],
       panes: new Map([[BOOTSTRAP_PANE_ID, bootstrapPane]]),
-      providerOwnership: null,
       providerName: null,
       surfaceId,
       surfaceEpoch: `${surfaceId}:1`,
@@ -3433,7 +3270,6 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         snapshot: structuredClone(pane.snapshot),
         toast: pane.toast,
       })),
-    providerOwnership: surface.providerOwnership ? structuredClone(surface.providerOwnership) : null,
     surfaceEpochRevision: surface.surfaceEpochRevision,
     surfaceId: surface.surfaceId,
     topologyRevision: surface.topologyRevision,
@@ -3535,7 +3371,6 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     name: typeof record.name === "string" && record.name.length > 0 ? record.name : "Surf Ace",
     paneOrder: finalPaneOrder,
     panes,
-    providerOwnership: deserializeProviderOwnership(record.providerOwnership),
     providerName: null,
     surfaceEpoch: `${record.surfaceId}:${surfaceEpochRevision}`,
     surfaceEpochRevision,
@@ -3548,27 +3383,6 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     },
     windowPlacement: cloneWindowPlacement(record.windowPlacement),
     windowLabel: isValidWindowLabel(record.windowLabel) ? record.windowLabel : "",
-  };
-}
-
-function deserializeProviderOwnership(input: unknown): PersistentProviderOwnership | null {
-  if (!input || typeof input !== "object") {
-    return null;
-  }
-  const record = input as Partial<PersistentProviderOwnership>;
-  if (
-    typeof record.providerId !== "string" ||
-    record.providerId.length === 0 ||
-    typeof record.sessionId !== "string" ||
-    record.sessionId.length === 0 ||
-    !Number.isFinite(record.ownershipEpoch)
-  ) {
-    return null;
-  }
-  return {
-    ownershipEpoch: Math.max(1, Math.trunc(Number(record.ownershipEpoch))),
-    providerId: record.providerId,
-    sessionId: record.sessionId,
   };
 }
 

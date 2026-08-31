@@ -5,7 +5,6 @@ Use `surf_ace_list` before any pane-scoped write or read. Every pane-scoped call
 ## Tool summary
 
 - `surf_ace_list`: local-only. Returns surfaces, connection state, topology/topologyRevision, panes, globally unambiguous user-facing `displayId`/`paneAddress`, active content, and pending provider-side events.
-- `surf_ace_prepare_migration_now`: explicit local-only legacy cutover preparation. Invoke only after `surf_ace_read` has durably completed every current pane; it performs no pairing or network request.
 - `surf_ace_push`: write tool for `content.set`.
 - `surf_ace_clear`: clears the currently visible content for the targeted pane.
 - `surf_ace_launch_native_app`: launches a provider-owned native app/process target through Surf Ace materialization. Native GUI/app proof must use this official provider path; direct compositor/native-pane hosting is diagnostic only.
@@ -23,4 +22,3 @@ Use `surf_ace_list` before any pane-scoped write or read. Every pane-scoped call
 5. For multi-pane layout changes, prefer `surf_ace_realize_topology` with the `topologyRevision` returned by `surf_ace_list`.
 6. For top-level Spatial surface-window lifecycle, use `surf_ace_realize_topologies` with `openWindow` or `closeWindow`; use pane topology tools only for panes inside an existing surface window.
 7. Use `surf_ace_read` for readback and annotation interpretation. Do not expect it to make a live network call.
-8. `surf_ace_list` never prepares migration. For an authorized cutover, read every current pane to completion and then invoke `surf_ace_prepare_migration_now` once with the surface fingerprint; retain its receipt for retry/recovery.
