@@ -768,63 +768,6 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         }
     }
 
-    func testProviderFreshAdmissionPreservesVisiblePaneContentUntilExplicitMutation() async throws {
-        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
-        let surface = runtime.registerSurface(sceneKey: "provider-absence-retains-content")
-        let pane = try XCTUnwrap(surface.panes.first)
-        let originalPaneId = pane.paneId
-        let bridge = RecordingPaneBridge()
-        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
-
-        let pushResponse = await runtime.handleContentApply(
-            id: "rq_t1206_initial_content",
-            payload: htmlApplyPayload(paneId: pane.paneId, revision: 1, title: "Still visible"),
-            surfaceId: surface.surfaceId
-        )
-        XCTAssertEqual(pushResponse["ok"] as? Bool, true)
-        XCTAssertEqual(pane.currentEntry.contentId, "ct_1234abcd")
-        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd"])
-
-        runtime.applyFreshProviderAdmissionTopology(
-            surface: surface,
-            windowLabel: "b",
-            initialPaneId: 77,
-            initialPaneLabel: 77,
-            requestId: "rq_provider_admission"
-        )
-
-        XCTAssertEqual(surface.windowLabel, "b")
-        XCTAssertEqual(pane.paneId, originalPaneId)
-        XCTAssertEqual(surface.panes.map(\.paneId), [originalPaneId])
-        XCTAssertEqual(pane.currentEntry.contentId, "ct_1234abcd")
-        XCTAssertEqual(pane.currentEntry.contentType, .html)
-        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd"])
-
-        let replacementResponse = await runtime.handleContentApply(
-            id: "rq_t1206_replacement",
-            payload: imageApplyPayload(paneId: pane.paneId, revision: 2),
-            surfaceId: surface.surfaceId
-        )
-        XCTAssertEqual(replacementResponse["ok"] as? Bool, true)
-        XCTAssertEqual(pane.currentEntry.contentId, "ct_1234abce")
-        XCTAssertEqual(pane.currentEntry.contentType, .image)
-        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["ct_1234abcd", "ct_1234abce"])
-
-        let clearResponse = await runtime.handleContentApply(
-            id: "rq_t1206_clear",
-            payload: [
-                "clear": true,
-                "paneId": pane.paneId,
-                "revision": 3,
-            ],
-            surfaceId: surface.surfaceId
-        )
-        XCTAssertEqual(clearResponse["ok"] as? Bool, true)
-        XCTAssertTrue(surfAceEntryIsVisibleEmpty(pane.currentEntry))
-        let lastRenderCall = try XCTUnwrap(bridge.renderCallEntries.last)
-        XCTAssertNil(lastRenderCall)
-    }
-
     func testClearAfterPushedContentRendersEmptyPaneState() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "pushed-clear-empty-pane")

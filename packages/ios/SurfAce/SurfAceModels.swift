@@ -99,53 +99,12 @@ func surfAcePaneContentCanScale(_ entry: SurfAcePaneEntry) -> Bool {
     }
 }
 
-enum SurfAceEventProfile: String {
-    case minimumDeep = "minimum_deep"
-    case deepPlusScroll = "deep_plus_scroll"
-
-    var activeEvents: [String] {
-        switch self {
-        case .minimumDeep:
-            return [
-                "event.drawing_flush",
-                "event.annotation_committed",
-                "event.history_navigated",
-                "event.tap",
-                "event.selection",
-                "event.page",
-                "event.navigation",
-                "event.snapshot_hint",
-            ]
-        case .deepPlusScroll:
-            return [
-                "event.drawing_flush",
-                "event.annotation_committed",
-                "event.history_navigated",
-                "event.tap",
-                "event.selection",
-                "event.page",
-                "event.navigation",
-                "event.snapshot_hint",
-                "event.scroll",
-            ]
-        }
-    }
-}
-
 struct SurfAceDrawingFlushConfig {
     let idleWindowMs: Int
     let maxIntervalMs: Int
 
     static let `default` = SurfAceDrawingFlushConfig(idleWindowMs: 8_000, maxIntervalMs: 30_000)
 
-    static func from(requestedIdleWindowMs: Int?, requestedMaxIntervalMs: Int?) -> SurfAceDrawingFlushConfig {
-        let idle = requestedIdleWindowMs ?? Self.default.idleWindowMs
-        let maxInterval = requestedMaxIntervalMs ?? Self.default.maxIntervalMs
-        return SurfAceDrawingFlushConfig(
-            idleWindowMs: min(max(idle, 5_000), 10_000),
-            maxIntervalMs: max(maxInterval, 10_000)
-        )
-    }
 }
 
 enum SurfAceFrameParseError: Error {
@@ -723,33 +682,6 @@ struct SurfAcePaneEntry: Codable {
 
 func surfAceEntryIsVisibleEmpty(_ entry: SurfAcePaneEntry) -> Bool {
     entry.contentId == nil && entry.contentType == nil && entry.payload == nil && entry.url == nil
-}
-
-@MainActor
-func surfAcePaneIsPristineProviderBootstrap(_ pane: SurfAcePaneModel) -> Bool {
-    surfAceEntryIsVisibleEmpty(pane.currentEntry) &&
-        pane.currentEntry.revision == 0 &&
-        pane.currentEntry.drawingData.isEmpty &&
-        pane.currentEntry.strokesById.isEmpty &&
-        pane.backStack.isEmpty &&
-        pane.forwardStack.isEmpty &&
-        pane.annotationMode == false &&
-        pane.fingerDrawEnabled == false &&
-        pane.isDrawingFlushSending == false &&
-        pane.drawingRestoreWarningVisible == false &&
-        pane.toast == nil &&
-        pane.lastVisibleText.isEmpty &&
-        pane.lastSelection == nil &&
-        pane.pendingSnapshotHintReason == nil &&
-        pane.lastNavigationURL == nil &&
-        pane.lastPage == nil &&
-        pane.pendingFlushStrokes.isEmpty &&
-        pane.firstPendingStrokeAt == nil &&
-        pane.lastPendingStrokeAt == nil &&
-        pane.pendingAnnotationCommit == false &&
-        pane.currentTarget == nil &&
-        pane.canBrowserGoBack == false &&
-        pane.canBrowserGoForward == false
 }
 
 struct SurfAcePaneTargetState: Codable, Equatable {

@@ -325,7 +325,6 @@ export class SurfaceCoreError extends Error {
       | "invalid_operation"
       | "invalid_payload"
       | "missing_provider_name"
-      | "not_lock_owner"
       | "not_paired"
       | "render_failed"
       | "stale_content"

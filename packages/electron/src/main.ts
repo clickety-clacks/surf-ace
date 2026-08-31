@@ -208,7 +208,6 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
       core: coreValue,
       endpointName: endpointName(),
       hostName: shortHostName(),
-      onBusyChanged: scheduleAdvertiserTxtRefresh,
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
       onNativeMaterialized: (surfaceId, materialization) => {
@@ -1278,7 +1277,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
             console.warn(`[surf-ace] compositor overlay region clear failed: ${overlayError}`);
           });
         }
-        server.disconnectSurface(surfaceId, "provider_shutdown");
+        server.disconnectLocklessSurfaceSessions(surfaceId, "surface_closed");
         await server.closeSurfaceFromLocalUser(surfaceId);
         void persistState();
       })();

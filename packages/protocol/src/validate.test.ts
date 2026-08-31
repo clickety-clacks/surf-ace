@@ -129,8 +129,6 @@ test("authority conformance vector set covers omnibus blocker contracts", () => 
   const vectorsById = new Map(authorityVectorSet.vectors.map((vector) => [vector.id, vector]));
   for (const id of [
     "target-register-quarantine",
-    "pair-response-before-commit",
-    "same-provider-live-resume-supersedes-after-response",
     "browser-url-visible-history-restart",
     "html-navigation-normalized-browser-url",
     "annotation-mode-freezes-visible-navigation",

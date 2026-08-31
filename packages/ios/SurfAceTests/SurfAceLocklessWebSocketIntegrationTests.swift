@@ -259,7 +259,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         controller.cancel(with: .normalClosure, reason: nil)
     }
 
-    func testTwoControllersShareAuthorityReceiptsReadsEventsAndReconnectWithoutOwnership() async throws {
+    func testTwoControllersShareAuthorityReceiptsReadsEventsAndReconnectLocklessly() async throws {
         let identifier = UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "SurfAceLocklessWebSocketIntegrationTests-\(identifier)"))
         defaults.removePersistentDomain(forName: "SurfAceLocklessWebSocketIntegrationTests-\(identifier)")

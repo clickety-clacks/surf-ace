@@ -9,18 +9,6 @@
       "expected": "schema-valid inbound target.register receives target.register.rejected and is never silently accepted or dropped"
     },
     {
-      "id": "pair-response-before-commit",
-      "requirements": ["D9", "T2"],
-      "contract": "pair.response delivery precedes active session and ownership lock commit",
-      "expected": "failed response delivery leaves previous ownership state unchanged and does not close the old socket"
-    },
-    {
-      "id": "same-provider-live-resume-supersedes-after-response",
-      "requirements": ["D8", "D9", "T2"],
-      "contract": "same-provider live resume may supersede an older open socket only after pair.response delivery",
-      "expected": "new socket receives resumed pair response, then old socket closes with superseded"
-    },
-    {
       "id": "browser-url-visible-history-restart",
       "requirements": ["D2", "D3", "D12", "T3"],
       "contract": "browser_url is first-class visible history state",

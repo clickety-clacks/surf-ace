@@ -1007,7 +1007,6 @@ The schema below defines every v1 application message type over WS.
             "malformed_controller_id",
             "controller_capacity",
             "invalid_resume",
-            "not_lock_owner",
             "not_paired",
             "invalid_payload",
             "invalid_request_id_reuse",

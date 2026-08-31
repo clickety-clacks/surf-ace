@@ -15,7 +15,6 @@ import type {
   ContentSetRequest,
   DrawingFlushConfig,
   Event,
-  EventProfile,
   HeartbeatPingRequest,
   HistoryNavigatedEvent,
   RuntimeAppBindingDiagnostics,
@@ -27,7 +26,6 @@ import type {
   Response,
   Selection,
   SnapshotGetRequest,
-  SnapshotHintEvent,
   SurfaceViewport,
   SurfacesListRequest,
   TargetApplyRequest,
@@ -92,39 +90,6 @@ type SocketCacheEntry = {
   response: Response;
 };
 
-type ActiveSession = {
-  connectionId: string;
-  drawingFlushConfig: DrawingFlushConfig;
-  eventProfile: EventProfile;
-  ownershipEpoch: number;
-  paneFlushTimers: Map<number, PaneFlushTimers>;
-  pairConfirmed: boolean;
-  providerId: string;
-  providerName: string;
-  requestCache: Map<string, SocketCacheEntry>;
-  sessionId: string;
-  socket: WebSocket;
-};
-
-type OwnershipLock = {
-  drawingFlushConfig: DrawingFlushConfig;
-  eventProfile: EventProfile;
-  ownershipEpoch: number;
-  providerId: string;
-  sessionId: string;
-};
-
-type PaneFlushTimers = {
-  commitAfterFlush: boolean;
-  idleTimer: NodeJS.Timeout | null;
-  maxTimer: NodeJS.Timeout | null;
-};
-
-type SurfaceTransportState = {
-  active: ActiveSession | null;
-  lock: OwnershipLock | null;
-};
-
 type LocklessTransportSession = {
   connectionSlot: string;
   connectionToken: string;
@@ -171,7 +136,6 @@ export type SurfaceWsServerOptions = {
   nativeOverlayLivenessRetryCount?: number;
   nativeOverlayLivenessRetryDelayMs?: number;
   getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
-  onBusyChanged?: () => void;
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   persistLocklessState?: () => Promise<void>;
@@ -276,7 +240,6 @@ export class SurfaceWsServer {
   private readonly nativeOverlayLivenessRetryCount: number;
   private readonly nativeOverlayLivenessRetryDelayMs: number;
   private readonly getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
-  private readonly onBusyChanged?: () => void;
   private readonly onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   private readonly onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   private readonly port: number;
@@ -291,7 +254,6 @@ export class SurfaceWsServer {
   private readonly httpServer: http.Server;
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
-  private readonly transports = new Map<string, SurfaceTransportState>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
   private lifecycleMutationQueue: Promise<void> = Promise.resolve();
@@ -312,7 +274,6 @@ export class SurfaceWsServer {
     this.hostName = options.hostName;
     this.nativeOverlayLivenessRetryCount = options.nativeOverlayLivenessRetryCount ?? NATIVE_OVERLAY_LIVENESS_RETRY_COUNT;
     this.nativeOverlayLivenessRetryDelayMs = options.nativeOverlayLivenessRetryDelayMs ?? NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS;
-    this.onBusyChanged = options.onBusyChanged;
     this.onNativeMaterialized = options.onNativeMaterialized;
     this.onNativeReleased = options.onNativeReleased;
     this.port = options.port;
@@ -467,15 +428,9 @@ export class SurfaceWsServer {
       "info",
       "server_stop_begin",
       {
-        active_sessions: [...this.transports.values()].filter((transport) => Boolean(transport.active)).length,
+        controller_connections: this.locklessSessions.size,
       },
     );
-    for (const transport of this.transports.values()) {
-      clearTransport(transport);
-      if (transport.active) {
-        transport.active.socket.close(1000, "provider_shutdown");
-      }
-    }
     for (const session of this.locklessSessions.values()) {
       session.socket.close(1000, "provider_shutdown");
     }
@@ -511,7 +466,7 @@ export class SurfaceWsServer {
   advertisedTxt(fingerprintPrefix: string): Record<string, string> {
     const viewport = this.viewportProvider();
     return {
-      busy: this.isEndpointBusy() ? "1" : "0",
+      busy: "0",
       cap: String(contentBitmask(this.core.capabilities().contentTypes)),
       h: String(viewport.height),
       name: this.endpointName,
@@ -558,10 +513,6 @@ export class SurfaceWsServer {
       event.payload,
       "renderer.tap",
     );
-    const session = this.activeSession(surfaceId);
-    if (session && isEventEnabled(session.eventProfile, "event.tap")) {
-      await this.sendEvent(session.socket, event);
-    }
   }
 
   async emitSelection(
@@ -596,10 +547,6 @@ export class SurfaceWsServer {
       event.payload,
       "renderer.selection",
     );
-    const session = this.activeSession(surfaceId);
-    if (session && isEventEnabled(session.eventProfile, "event.selection")) {
-      await this.sendEvent(session.socket, event);
-    }
   }
 
   async emitScroll(
@@ -637,10 +584,6 @@ export class SurfaceWsServer {
       event.payload,
       "renderer.scroll",
     );
-    const session = this.activeSession(surfaceId);
-    if (session && isEventEnabled(session.eventProfile, "event.scroll")) {
-      await this.sendEvent(session.socket, event);
-    }
   }
 
   async emitNavigation(
@@ -682,10 +625,6 @@ export class SurfaceWsServer {
       event.payload,
       "renderer.navigation",
     );
-    const session = this.activeSession(surfaceId);
-    if (session && isEventEnabled(session.eventProfile, "event.navigation")) {
-      await this.sendEvent(session.socket, event);
-    }
   }
 
   async emitPage(
@@ -722,10 +661,6 @@ export class SurfaceWsServer {
       event.payload,
       "renderer.page",
     );
-    const session = this.activeSession(surfaceId);
-    if (session && isEventEnabled(session.eventProfile, "event.page")) {
-      await this.sendEvent(session.socket, event);
-    }
   }
 
   private async ingestLocklessPaneConsumable(
@@ -737,9 +672,6 @@ export class SurfaceWsServer {
   ): Promise<void> {
     const scopeId = locklessPaneScopeId(surfaceId, paneId);
     const record = await this.core.locklessAuthority.transactionAsync(async () => {
-      if (this.activeSession(surfaceId)) {
-        return null;
-      }
       const appended = this.core.locklessAuthority.appendConsumable({
         payload,
         recordClass,
@@ -764,9 +696,6 @@ export class SurfaceWsServer {
   ): Promise<void> {
     const scopeId = `surface:${encodeURIComponent(surfaceId)}`;
     const record = await this.core.locklessAuthority.transactionAsync(async () => {
-      if (this.activeSession(surfaceId)) {
-        return null;
-      }
       const appended = this.core.locklessAuthority.appendConsumable({
         payload,
         recordClass,
@@ -787,9 +716,6 @@ export class SurfaceWsServer {
     surfaceId: string,
     paneId: number,
   ): Promise<void> {
-    if (this.activeSession(surfaceId)) {
-      return;
-    }
     const payload = this.core.buildDrawingFlush(
       surfaceId,
       paneId,
@@ -913,16 +839,6 @@ export class SurfaceWsServer {
     return result;
   }
 
-  disconnectSurface(surfaceId: string, reason = "provider_shutdown"): void {
-    const transport = this.transport(surfaceId);
-    if (transport.active) {
-      this.detachActiveSession(surfaceId, reason);
-    }
-    transport.lock = null;
-    this.core.setConnectionBar(surfaceId, "disconnected");
-    this.onBusyChanged?.();
-  }
-
   disconnectLocklessSurfaceSessions(
     surfaceId: string,
     reason = "surface_closed",
@@ -946,7 +862,6 @@ export class SurfaceWsServer {
           event.surfaceId,
           event.paneId,
         );
-        this.schedulePaneFlush(event.surfaceId, event.paneId);
         return;
       case "history-navigated":
         await this.maybeSendHistoryNavigated(event);
@@ -1735,10 +1650,6 @@ export class SurfaceWsServer {
             "surface_lookup",
           );
           this.core.getSurface(surfaceId);
-          const transport = this.transport(surfaceId);
-          if (transport.active || transport.lock) {
-            throw this.providerTransportHeld(surfaceId);
-          }
           this.core.advanceSurfaceAdmissionAttempt(
             admissionAttempt.attemptSequence,
             "controller_admission",
@@ -2989,7 +2900,7 @@ export class SurfaceWsServer {
           this.core.locklessAuthority.listTombstones("surface"),
         surfaces: this.core.listSurfaces().map((surface) => ({
           name: surface.name,
-          paired: this.isSurfaceBusy(surface.surfaceId),
+          paired: this.hasLocklessSession(surface.surfaceId),
           surfaceId: surface.surfaceId,
           viewport: this.core.viewport(surface.surfaceId),
         })),
@@ -3383,7 +3294,7 @@ export class SurfaceWsServer {
           await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "topology.apply", releaseFailure);
           throw new SurfaceCoreError("render_failed", releaseFailure);
         }
-        this.recordProviderWindowRelabel(surfaceId, previousWindowLabel, request.payload.windowLabel, "topology.apply", request.id);
+        this.recordWindowRelabel(surfaceId, previousWindowLabel, request.payload.windowLabel, request.id);
         this.markUpdatedNativePaneGeometry(surfaceId, nativeGeometryUpdate);
         return result;
       } catch (error) {
@@ -4371,45 +4282,10 @@ export class SurfaceWsServer {
     return true;
   }
 
-  private async adoptProviderWindowLabel(
-    surfaceId: string,
-    windowLabel: string,
-    source: "authority.state" | "pair.resume",
-    requestId: string,
-  ): Promise<void> {
-    const currentWindowLabel = this.core.surfaceWindowLabel(surfaceId);
-    if (windowLabel === currentWindowLabel) {
-      return;
-    }
-    this.core.assertProviderWindowLabelAvailable(surfaceId, windowLabel);
-    const nativePaneIds = this.core.panesList(surfaceId).panes
-      .filter((pane) => pane.externalNative)
-      .map((pane) => Number(pane.paneId));
-    const rollbackSurface = this.core.captureSurfaceMutationRollback(surfaceId);
-    const rollbackNativeGeometry = nativePaneIds.length > 0
-      ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds)
-      : null;
-    try {
-      this.core.applyWindowLabelOnly(surfaceId, windowLabel);
-      let nativeOverlayUpdate: NativePaneMaterialization | null = null;
-      if (nativePaneIds.length > 0) {
-        await this.waitForResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), source);
-        nativeOverlayUpdate = this.core.projectCurrentNativePaneGeometry(surfaceId, nativePaneIds);
-        await this.applyResolvedNativePaneGeometry(surfaceId, nativeOverlayUpdate, source, rollbackNativeGeometry);
-      }
-      this.recordProviderWindowRelabel(surfaceId, currentWindowLabel, windowLabel, source, requestId);
-      this.markUpdatedNativePaneGeometry(surfaceId, nativeOverlayUpdate);
-    } catch (error) {
-      rollbackSurface();
-      throw error;
-    }
-  }
-
-  private recordProviderWindowRelabel(
+  private recordWindowRelabel(
     surfaceId: string,
     currentWindowLabel: string,
     windowLabel: string,
-    source: "authority.state" | "pair.resume" | "topology.apply",
     requestId: string,
   ): void {
     if (windowLabel === currentWindowLabel) {
@@ -4421,7 +4297,7 @@ export class SurfaceWsServer {
       {
         current_window_label: currentWindowLabel || "nil",
         request_id: requestId,
-        source,
+        source: "topology.apply",
         surface_id: surfaceId,
         window_label: windowLabel,
       },
@@ -4765,14 +4641,7 @@ export class SurfaceWsServer {
   }
 
   private handleHeartbeat(socket: WebSocket, request: HeartbeatPingRequest): Response {
-    const surfaceId = this.requirePairedSurfaceId(socket);
-    const transport = this.transport(surfaceId);
-    if (transport.active?.socket !== socket) {
-      throw new SurfaceCoreError("not_paired", "Operation requires active pair.request first");
-    }
-    if (!transport.active.pairConfirmed) {
-      transport.active.pairConfirmed = true;
-    }
+    this.requirePairedSurfaceId(socket);
     return {
       id: request.id,
       ok: true,
@@ -4794,13 +4663,6 @@ export class SurfaceWsServer {
 
   private requireLocklessSurface(surfaceId: string): void {
     this.core.getSurface(surfaceId);
-    const transport = this.transport(surfaceId);
-    if (
-      transport.active ||
-      transport.lock
-    ) {
-      throw this.providerTransportHeld(surfaceId);
-    }
     this.core.admitSurfaceToLockless(surfaceId);
   }
 
@@ -4846,14 +4708,6 @@ export class SurfaceWsServer {
   private hasLocklessSession(surfaceId: string): boolean {
     return [...this.locklessSessions.values()].some(
       (session) => session.surfaceId === surfaceId,
-    );
-  }
-
-  private providerTransportHeld(surfaceId: string): LocklessAuthorityError {
-    return new LocklessAuthorityError(
-      "capability_mismatch",
-      `Surface ${surfaceId} is held by an active provider transport; disconnect it before admitting a lockless controller`,
-      { surfaceId },
     );
   }
 
@@ -5060,16 +4914,6 @@ export class SurfaceWsServer {
     }
   }
 
-  private transport(surfaceId: string): SurfaceTransportState {
-    const existing = this.transports.get(surfaceId);
-    if (existing) {
-      return existing;
-    }
-    const created: SurfaceTransportState = { active: null, lock: null };
-    this.transports.set(surfaceId, created);
-    return created;
-  }
-
   private async locklessCapabilities() {
     const capabilities = this.core.capabilities();
     const runtimeAppBinding = await this.currentRuntimeAppBinding();
@@ -5087,10 +4931,6 @@ export class SurfaceWsServer {
 
   private async currentRuntimeAppBinding(): Promise<RuntimeAppBindingDiagnostics | null> {
     return await this.getRuntimeAppBinding?.() ?? null;
-  }
-
-  private activeSession(surfaceId: string): ActiveSession | null {
-    return this.transport(surfaceId).active;
   }
 
   private handleSocketClosed(socket: WebSocket): void {
@@ -5125,241 +4965,34 @@ export class SurfaceWsServer {
       }
       return;
     }
-    const meta = this.socketMeta.get(socket);
-    if (!meta?.pairedSurfaceId) {
-      return;
-    }
-    const surfaceId = meta.pairedSurfaceId;
-    const transport = this.transport(surfaceId);
-    if (!transport.active || transport.active.socket !== socket) {
-      return;
-    }
-
-    const session = transport.active;
-    clearPaneTimers(session.paneFlushTimers);
-    transport.active = null;
-    persistentServerDiagnostic(
-      "info",
-      "session_detached",
-      {
-        provider_id: session.providerId,
-        session_id: session.sessionId,
-        surface_id: surfaceId,
-      },
-    );
-    this.core.setConnectionBar(surfaceId, "disconnected");
-    this.onBusyChanged?.();
-  }
-
-  private detachActiveSession(surfaceId: string, reason: string): void {
-    const transport = this.transport(surfaceId);
-    const active = transport.active;
-    if (!active) {
-      return;
-    }
-    transport.active = null;
-    this.core.setConnectionBar(surfaceId, "disconnected");
-    this.closeSession(surfaceId, active, reason);
-  }
-
-  private closeSession(surfaceId: string, active: ActiveSession, reason: string): void {
-    clearPaneTimers(active.paneFlushTimers);
-    const meta = this.socketMeta.get(active.socket);
-    if (meta?.pairedSurfaceId === surfaceId) {
-      meta.pairedSurfaceId = null;
-    }
-    persistentServerDiagnostic(
-      "info",
-      "session_detach_request",
-      {
-        provider_id: active.providerId,
-        reason,
-        session_id: active.sessionId,
-        surface_id: surfaceId,
-      },
-    );
-    active.socket.close(1000, reason);
-  }
-
-  private schedulePaneFlush(surfaceId: string, paneId: number): void {
-    const session = this.activeSession(surfaceId);
-    if (!session) {
-      return;
-    }
-    const meta = this.core.flushMeta(surfaceId, paneId);
-    const timers = ensurePaneTimers(session.paneFlushTimers, paneId);
-    if (timers.idleTimer) {
-      clearTimeout(timers.idleTimer);
-    }
-    timers.idleTimer = setTimeout(() => {
-      void this.flushPane(surfaceId, paneId, "idle_window");
-    }, session.drawingFlushConfig.idleWindowMs);
-
-    if (!timers.maxTimer && meta.lastSuccessfulFlushAt !== null) {
-      const elapsed = Date.now() - meta.lastSuccessfulFlushAt;
-      const delay = Math.max(0, session.drawingFlushConfig.maxIntervalMs - elapsed);
-      timers.maxTimer = setTimeout(() => {
-        void this.flushPane(surfaceId, paneId, "max_interval");
-      }, delay);
-    }
-  }
-
-  private armAllPendingFlushes(surfaceId: string): void {
-    for (const paneId of this.core.activePaneIds(surfaceId)) {
-      if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
-        this.schedulePaneFlush(surfaceId, paneId);
-      }
-    }
-  }
-
-  private armAllPendingAnnotationCommits(surfaceId: string): void {
-    for (const paneId of this.core.activePaneIds(surfaceId)) {
-      if (this.core.hasPendingAnnotationCommit(surfaceId, paneId)) {
-        void this.maybeSendAnnotationCommitted(surfaceId, paneId);
-      }
-    }
   }
 
   private async maybeSendAnnotationCommitted(surfaceId: string, paneId: number): Promise<void> {
-    if (!this.activeSession(surfaceId)) {
-      await this.updateLocklessAnnotationFrame(surfaceId, paneId);
-      const snapshot = this.tryCaptureSnapshot(surfaceId, paneId);
-      if (!snapshot?.contentId) return;
-      const scopeId = locklessPaneScopeId(surfaceId, paneId);
-      const record = await this.core.locklessAuthority.transactionAsync(async () => {
-        const finalized = this.core.locklessAuthority.finalizeLiveFrame(
-          scopeId,
-          `annotation:${snapshot.contentId}`,
-          "renderer.annotation_finalized",
-        );
-        if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
-          this.core.markDrawingFlushSent(surfaceId, paneId);
-        }
-        this.core.markAnnotationCommittedSent(surfaceId, paneId);
-        this.core.markLocklessAuthorityChanged(surfaceId);
-        await this.persistLocklessState();
-        return finalized;
-      });
-      if (record) {
-        await this.broadcastLocklessDelta(scopeId, [record]);
+    await this.updateLocklessAnnotationFrame(surfaceId, paneId);
+    const snapshot = this.tryCaptureSnapshot(surfaceId, paneId);
+    if (!snapshot?.contentId) return;
+    const scopeId = locklessPaneScopeId(surfaceId, paneId);
+    const record = await this.core.locklessAuthority.transactionAsync(async () => {
+      const finalized = this.core.locklessAuthority.finalizeLiveFrame(
+        scopeId,
+        `annotation:${snapshot.contentId}`,
+        "renderer.annotation_finalized",
+      );
+      if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
+        this.core.markDrawingFlushSent(surfaceId, paneId);
       }
-      return;
-    }
-    const session = this.activeSession(surfaceId);
-    if (!session) {
-      return;
-    }
-    const timers = ensurePaneTimers(session.paneFlushTimers, paneId);
-    const meta = this.core.flushMeta(surfaceId, paneId);
-    if (meta.flushInFlight) {
-      timers.commitAfterFlush = true;
-      return;
-    }
-    if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
-      timers.commitAfterFlush = true;
-      if (timers.idleTimer) {
-        clearTimeout(timers.idleTimer);
-        timers.idleTimer = null;
-      }
-      if (timers.maxTimer) {
-        clearTimeout(timers.maxTimer);
-        timers.maxTimer = null;
-      }
-      await this.flushPane(surfaceId, paneId, "idle_window");
-      return;
-    }
-
-    const payload = this.core.buildAnnotationCommitted(surfaceId, paneId);
-    if (!payload) {
-      return;
-    }
-
-    await this.sendEvent(session.socket, {
-      eventId: makeEventId(),
-      op: "event.annotation_committed",
-      payload,
-      sentAt: Date.now(),
-      type: "event",
-      v: 1,
+      this.core.markAnnotationCommittedSent(surfaceId, paneId);
+      this.core.markLocklessAuthorityChanged(surfaceId);
+      await this.persistLocklessState();
+      return finalized;
     });
-    timers.commitAfterFlush = false;
-    this.core.markAnnotationCommittedSent(surfaceId, paneId);
-  }
-
-  private async flushPane(
-    surfaceId: string,
-    paneId: number,
-    reason: "idle_window" | "max_interval",
-  ): Promise<void> {
-    const session = this.activeSession(surfaceId);
-    if (!session) {
-      return;
+    if (record) {
+      await this.broadcastLocklessDelta(scopeId, [record]);
     }
-    const timers = ensurePaneTimers(session.paneFlushTimers, paneId);
-    if (reason === "idle_window" && timers.idleTimer) {
-      clearTimeout(timers.idleTimer);
-      timers.idleTimer = null;
-    }
-    if (reason === "max_interval" && timers.maxTimer) {
-      clearTimeout(timers.maxTimer);
-      timers.maxTimer = null;
-    }
-
-    const payload = this.core.buildDrawingFlush(
-      surfaceId,
-      paneId,
-      session.drawingFlushConfig,
-      reason,
-    );
-    if (!payload) {
-      return;
-    }
-
-    this.core.setFlushInFlight(surfaceId, paneId, true);
-    try {
-      await this.sendEvent(session.socket, {
-        eventId: makeEventId(),
-        op: "event.drawing_flush",
-        payload,
-        sentAt: Date.now(),
-        type: "event",
-        v: 1,
-      });
-      this.core.markDrawingFlushSent(surfaceId, paneId);
-      if (timers.maxTimer) {
-        clearTimeout(timers.maxTimer);
-        timers.maxTimer = null;
-      }
-      if (timers.commitAfterFlush) {
-        await this.maybeSendAnnotationCommitted(surfaceId, paneId);
-      }
-    } catch {
-      this.core.setFlushInFlight(surfaceId, paneId, false);
-    }
-  }
-
-  private async sendSnapshotHint(
-    surfaceId: string,
-    reason: SnapshotHintEvent["payload"]["reason"],
-  ): Promise<void> {
-    const session = this.activeSession(surfaceId);
-    if (!session || !isEventEnabled(session.eventProfile, "event.snapshot_hint")) {
-      return;
-    }
-    await this.sendEvent(session.socket, {
-      eventId: makeEventId(),
-      op: "event.snapshot_hint",
-      payload: { reason },
-      sentAt: Date.now(),
-      type: "event",
-      v: 1,
-    });
   }
 
   private async broadcastLifecycleEvent(event: Event): Promise<void> {
-    const activeSockets = new Set([...this.transports.values()]
-      .map((transport) => transport.active?.socket)
-      .filter((socket): socket is WebSocket => Boolean(socket)));
+    const activeSockets = new Set<WebSocket>();
     const affectedSurfaceId = (
       event.payload as { surfaceId?: string }
     ).surfaceId;
@@ -5404,15 +5037,6 @@ export class SurfaceWsServer {
     });
   }
 
-  private isSurfaceBusy(surfaceId: string): boolean {
-    const transport = this.transport(surfaceId);
-    return Boolean(transport.lock);
-  }
-
-  private isEndpointBusy(): boolean {
-    return this.core.listSurfaces().some((surface) => this.isSurfaceBusy(surface.surfaceId));
-  }
-
   private tryCaptureSnapshot(surfaceId: string, paneId: number): SnapshotResponse["payload"] | null {
     try {
       return this.core.captureSnapshot(surfaceId, paneId);
@@ -5438,18 +5062,6 @@ export class SurfaceWsServer {
       payload,
       "client.history",
     );
-    const session = this.activeSession(event.surfaceId);
-    if (!session || !isEventEnabled(session.eventProfile, "event.history_navigated")) {
-      return;
-    }
-    await this.sendEvent(session.socket, {
-      eventId: makeEventId(),
-      op: "event.history_navigated",
-      payload,
-      sentAt: Date.now(),
-      type: "event",
-      v: 1,
-    });
   }
 }
 
@@ -5552,47 +5164,6 @@ function trimCache(cache: Map<string, SocketCacheEntry>): void {
     }
     cache.delete(firstKey);
   }
-}
-
-function activeEventsForProfile(profile: EventProfile) {
-  if (profile === "deep_plus_scroll") {
-    return [
-      "event.annotation_committed",
-      "event.drawing_flush",
-      "event.history_navigated",
-      "event.tap",
-      "event.scroll",
-      "event.selection",
-      "event.page",
-      "event.navigation",
-      "event.snapshot_hint",
-    ] as const;
-  }
-  return [
-    "event.annotation_committed",
-    "event.drawing_flush",
-    "event.history_navigated",
-    "event.tap",
-    "event.selection",
-    "event.page",
-    "event.navigation",
-    "event.snapshot_hint",
-  ] as const;
-}
-
-function isEventEnabled(profile: EventProfile, eventName: Event["op"]): boolean {
-  if (
-    eventName === "event.surface_appeared" ||
-    eventName === "event.surface_removed" ||
-    eventName === "event.surface_resumed" ||
-    eventName === "event.history_navigated" ||
-    eventName === "event.pane_created" ||
-    eventName === "event.pane_removed" ||
-    eventName === "event.pane_renamed"
-  ) {
-    return true;
-  }
-  return activeEventsForProfile(profile).includes(eventName as never);
 }
 
 function browserUrlApplyKey(surfaceId: string, paneId: number): string {
@@ -5939,34 +5510,6 @@ function browserUrlApplyResult(
 
 function makeEventId(): Event["eventId"] {
   return `ev_${randomUUID().replaceAll("-", "")}` as Event["eventId"];
-}
-
-function ensurePaneTimers(map: Map<number, PaneFlushTimers>, paneId: number): PaneFlushTimers {
-  const existing = map.get(paneId);
-  if (existing) {
-    return existing;
-  }
-  const created = { commitAfterFlush: false, idleTimer: null, maxTimer: null };
-  map.set(paneId, created);
-  return created;
-}
-
-function clearPaneTimers(map: Map<number, PaneFlushTimers>): void {
-  for (const timers of map.values()) {
-    if (timers.idleTimer) {
-      clearTimeout(timers.idleTimer);
-    }
-    if (timers.maxTimer) {
-      clearTimeout(timers.maxTimer);
-    }
-  }
-  map.clear();
-}
-
-function clearTransport(transport: SurfaceTransportState): void {
-  if (transport.active) {
-    clearPaneTimers(transport.active.paneFlushTimers);
-  }
 }
 
 function contentBitmask(contentTypes: string[]): number {

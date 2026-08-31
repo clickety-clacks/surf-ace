@@ -856,7 +856,6 @@ export type ErrorResponse = {
     code:
       | "busy"
       | "invalid_resume"
-      | "not_lock_owner"
       | "not_paired"
       | "invalid_payload"
       | "invalid_request_id_reuse"
