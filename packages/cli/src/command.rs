@@ -3,20 +3,6 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
-const LEGACY_AUTHORITY_FIELDS: [&str; 12] = [
-    "connectionId",
-    "historyOwnerToken",
-    "initialPaneId",
-    "initialPaneLabel",
-    "newPaneIds",
-    "newPaneLabels",
-    "ownershipEpoch",
-    "ownershipSessionId",
-    "providerId",
-    "revision",
-    "takeover",
-    "windowLabel",
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -348,9 +334,6 @@ impl Command {
     }
 
     pub fn wire_payload(self, mut input: Map<String, Value>) -> Result<Value, String> {
-        if let Some(path) = forbidden_legacy_path(&Value::Object(input.clone()), "payload", true) {
-            return Err(format!("forbidden_legacy_field:{path}"));
-        }
         match self {
             Self::TopologyIntent => {
                 input.remove("action");
@@ -458,9 +441,6 @@ fn exact_fields(
     }
     for key in input.keys() {
         if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
-            if LEGACY_AUTHORITY_FIELDS.contains(&key.as_str()) {
-                return Err(format!("forbidden_legacy_field:{key}"));
-            }
             return Err(format!("invalid_input:unknown_property:{key}"));
         }
     }
@@ -649,21 +629,6 @@ fn launched_at(input: &Map<String, Value>) -> Result<(), String> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|_| ())
         .map_err(|_| "invalid_input:launchedAt".to_owned())
-}
-
-fn forbidden_legacy_path(value: &Value, path: &str, root: bool) -> Option<String> {
-    match value {
-        Value::Array(values) => values.iter().enumerate().find_map(|(index, child)| {
-            forbidden_legacy_path(child, &format!("{path}[{index}]"), false)
-        }),
-        Value::Object(fields) => fields.iter().find_map(|(key, child)| {
-            if (root || key != "revision") && LEGACY_AUTHORITY_FIELDS.contains(&key.as_str()) {
-                return Some(format!("{path}.{key}"));
-            }
-            forbidden_legacy_path(child, &format!("{path}.{key}"), false)
-        }),
-        _ => None,
-    }
 }
 
 fn desired_topology(value: &Value) -> Result<(), String> {

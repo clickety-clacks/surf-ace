@@ -130,116 +130,6 @@ private func surfAceLifecycleLog(_ message: String) {
     print("[SurfAce-Lifecycle] \(message)")
 }
 
-func surfAceValidatedProviderWindowLabel(from value: Any?) -> String? {
-    guard let label = value as? String else { return nil }
-    guard label.range(of: #"^[a-z]+$"#, options: .regularExpression) != nil else { return nil }
-    return label
-}
-
-func surfAceValidatedPositiveProviderIdentifier(from value: Any?) -> Int? {
-    guard let identifier = value as? Int, identifier > 0 else { return nil }
-    return identifier
-}
-
-struct SurfAceProviderBootstrapIdentity {
-    let windowLabel: String
-    let initialPaneId: Int
-    let initialPaneLabel: Int
-}
-
-struct SurfAceAuthorityPaneIdentity {
-    let paneId: Int
-    let paneLabel: Int
-    let paneLineageId: String
-}
-
-func surfAceValidatedProviderNewPaneLabels(from value: Any?, count: Int) -> [Int]? {
-    guard count >= 2,
-          let labels = value as? [Int],
-          labels.count == count - 1 else {
-        return nil
-    }
-    return labels
-}
-
-func surfAceValidatedProviderBootstrapIdentity(from payload: [String: Any]) -> SurfAceProviderBootstrapIdentity? {
-    guard let windowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
-          let initialPaneId = surfAceValidatedPositiveProviderIdentifier(from: payload["initialPaneId"]),
-          let initialPaneLabel = surfAceValidatedPositiveProviderIdentifier(from: payload["initialPaneLabel"]) else {
-        return nil
-    }
-    return SurfAceProviderBootstrapIdentity(
-        windowLabel: windowLabel,
-        initialPaneId: initialPaneId,
-        initialPaneLabel: initialPaneLabel
-    )
-}
-
-func surfAceAuthorityStateRejectionReason(
-    payload: [String: Any],
-    surfaceId: String,
-    providerId: String,
-    sessionId: String,
-    ownershipEpoch: Int,
-    lockProviderId: String,
-    lockSessionId: String,
-    windowLabel: String,
-    panes: [SurfAceAuthorityPaneIdentity]
-) -> String? {
-    if payload["surfaceId"] as? String != surfaceId {
-        return "surface_id_mismatch"
-    }
-    if payload["providerId"] as? String != providerId ||
-        payload["sessionId"] as? String != sessionId ||
-        payload["ownershipEpoch"] as? Int != ownershipEpoch ||
-        lockProviderId != providerId ||
-        lockSessionId != sessionId {
-        return "session_identity_mismatch"
-    }
-    if surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]) == nil {
-        return "window_label_mismatch"
-    }
-    guard surfAceProviderAuthorityPaneIdentityMap(from: payload, matching: panes) != nil else {
-        return "pane_identity_mismatch"
-    }
-    if payload["actionable"] as? Bool != true {
-        return payload["reason"] as? String ?? "provider_not_actionable"
-    }
-    return nil
-}
-
-func surfAceProviderAuthorityPaneIdentityMap(
-    from payload: [String: Any],
-    matching panes: [SurfAceAuthorityPaneIdentity]
-) -> [Int: SurfAceAuthorityPaneIdentity]? {
-    guard let payloadPanes = payload["panes"] as? [[String: Any]],
-          payloadPanes.count == panes.count else {
-        return nil
-    }
-    let paneIds = Set(panes.map { $0.paneId })
-    var seenPaneIds = Set<Int>()
-    var seenPaneLabels = Set<Int>()
-    var identitiesByPaneId: [Int: SurfAceAuthorityPaneIdentity] = [:]
-    for candidate in payloadPanes {
-        guard let paneId = candidate["paneId"] as? Int,
-              seenPaneIds.insert(paneId).inserted,
-              paneIds.contains(paneId),
-              let paneLabel = candidate["paneLabel"] as? Int,
-              paneLabel > 0,
-              seenPaneLabels.insert(paneLabel).inserted,
-              let paneLineageId = candidate["paneLineageId"] as? String,
-              !paneLineageId.isEmpty else {
-            return nil
-        }
-        identitiesByPaneId[paneId] = SurfAceAuthorityPaneIdentity(
-            paneId: paneId,
-            paneLabel: paneLabel,
-            paneLineageId: paneLineageId
-        )
-    }
-    return identitiesByPaneId
-}
-
 actor SurfAceOutboundSender {
     enum Priority: Int {
         case event = 0
@@ -323,53 +213,17 @@ private struct SurfAceRequestReplayEntry {
     let responseJSON: String
 }
 
-private struct SurfAcePairCommitPlan {
-    let surfaceId: String
-    let session: SurfAceSessionState
-    let supersededSession: SurfAceSessionState?
-    let resumed: Bool
-    let providerName: String?
-    let providerInitialPaneId: Int
-    let providerInitialPaneLabel: Int
-    let providerWindowLabel: String
-    let shouldEnqueuePostReconnectEvents: Bool
-}
-
 private struct SurfAceProcessedRequestResult {
     let responseObject: [String: Any]
-    let postSendPairCommit: SurfAcePairCommitPlan?
     let postSendAction: (@MainActor () async -> Void)?
 
     init(
         responseObject: [String: Any],
-        postSendPairCommit: SurfAcePairCommitPlan?,
         postSendAction: (@MainActor () async -> Void)? = nil
     ) {
         self.responseObject = responseObject
-        self.postSendPairCommit = postSendPairCommit
         self.postSendAction = postSendAction
     }
-}
-
-private struct SurfAceSessionState {
-    let sessionId: String
-    let providerId: String
-    let connectionId: String
-    let connectionUUID: String
-    let socket: SurfAceWebSocket
-    let sender: SurfAceOutboundSender
-    let eventProfile: SurfAceEventProfile
-    let drawingFlushConfig: SurfAceDrawingFlushConfig
-    let ownershipEpoch: Int
-    let pairedAt: Date
-    var pairConfirmed: Bool
-    var authorityConfirmed: Bool
-}
-
-private struct SurfAceOwnershipLockState {
-    let sessionId: String
-    let providerId: String
-    let ownershipEpoch: Int
 }
 
 final class SurfAceSceneDisconnectObserver {
@@ -490,16 +344,10 @@ final class SurfAceRuntime {
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
     @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
     @ObservationIgnored private var sceneDisconnectObserversBySceneKey: [String: SurfAceSceneDisconnectObserver] = [:]
-    @ObservationIgnored private var activeSessions: [String: SurfAceSessionState] = [:]
-    @ObservationIgnored private var lastHeartbeatAtBySurfaceId: [String: Date] = [:]
-    @ObservationIgnored private var ownershipLocksBySurfaceId: [String: SurfAceOwnershipLockState] = [:]
-    @ObservationIgnored private var surfaceNeedsResumedEvent: Set<String> = []
     @ObservationIgnored private var terminatedConnectionUUIDs: Set<String> = []
     @ObservationIgnored private var identityMapping = SurfAceIdentityMapping()
     @ObservationIgnored private var persistedSurfaceTopologies: [String: SurfAcePersistedSurfaceTopology] = [:]
-    @ObservationIgnored private var heartbeatWatchdogTask: Task<Void, Never>?
     @ObservationIgnored private var locklessAdapter: SurfAceLocklessRuntimeAdapter?
-    @ObservationIgnored private var legacyNegotiatedSurfaceIds: Set<String> = []
     @ObservationIgnored private var locklessConnectionsByConnectionUUID: [String: (
         controllerInstanceId: String,
         sender: SurfAceOutboundSender,
@@ -514,9 +362,6 @@ final class SurfAceRuntime {
     private let maxVisibleTextBytes = 4_096
     private let maxStrokePointsPerFlush = 8_192
     private let maxDrawingFlushBytes = 2 * 1024 * 1024
-    private let resumeGraceMilliseconds = 20_000
-    private let heartbeatTimeoutMilliseconds = 25_000
-    private let heartbeatWatchdogCheckMilliseconds = 5_000
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
@@ -621,7 +466,6 @@ final class SurfAceRuntime {
             surfAceServerRuntimeLog(
                 "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "0.0.0.0:\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
             )
-            startHeartbeatWatchdog()
             publishBonjour()
         } catch {
             let details = startupFailureMessage(for: error)
@@ -634,10 +478,8 @@ final class SurfAceRuntime {
 
     func stop() async {
         surfAceLifecycleLog(
-            "event=app_stop \(surfAceDiagnosticFields([("active_sessions", activeSessions.count), ("surface_count", surfaces.count)]))"
+            "event=app_stop \(surfAceDiagnosticFields([("controller_connections", locklessConnectionsByConnectionUUID.count), ("surface_count", surfaces.count)]))"
         )
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
 
         for surface in surfaces {
             for pane in surface.panes {
@@ -646,14 +488,7 @@ final class SurfAceRuntime {
             }
         }
 
-        let sessions = activeSessions
-        activeSessions.removeAll()
-        lastHeartbeatAtBySurfaceId.removeAll()
-        ownershipLocksBySurfaceId.removeAll()
         await closeLocklessConnectionsForLifecycle(reason: "provider_shutdown")
-        for (_, session) in sessions {
-            await session.socket.close(code: 1000, reason: "provider_shutdown")
-        }
 
         await server.stop()
         bonjourPublisher.stop()
@@ -703,7 +538,6 @@ final class SurfAceRuntime {
         surfAceLifecycleLog(
             "event=scene_connect \(surfAceDiagnosticFields([("persisted_content_count", persistedContentCount), ("persisted_pane_count", persistedPaneCount), ("restored_topology", persistedSurfaceTopologies[surfaceId] != nil), ("restore_attempt_id", restoreAttemptId), ("scene_key", sceneKey), ("surface_id", surfaceId)]))"
         )
-        refreshConnectionState(surfaceId: surfaceId)
         refreshBonjourTXT()
         broadcastLifecycleEvent(
             op: "event.surface_appeared",
@@ -717,14 +551,10 @@ final class SurfAceRuntime {
     }
 
     func unregisterSurface(sceneKey: String) {
-        removeSurfaceModel(sceneKey: sceneKey, persistLegacyProjection: true)
+        removeSurfaceModel(sceneKey: sceneKey, persistProjection: true)
     }
 
     func registerSurfaceForScene(sceneKey: String, scene: UIScene? = nil) async -> SurfAceSurfaceModel? {
-        if let surfaceId = identityMapping.surfacesBySceneKey[sceneKey]?.surfaceId,
-           legacyNegotiatedSurfaceIds.contains(surfaceId) {
-            return registerSurface(sceneKey: sceneKey, scene: scene)
-        }
         guard let adapter = locklessAdapter else {
             return registerSurface(sceneKey: sceneKey, scene: scene)
         }
@@ -826,11 +656,6 @@ final class SurfAceRuntime {
     }
 
     func unregisterSurfaceForScene(sceneKey: String) async {
-        if let surfaceId = surfaceIdBySceneKey[sceneKey],
-           legacyNegotiatedSurfaceIds.contains(surfaceId) {
-            unregisterSurface(sceneKey: sceneKey)
-            return
-        }
         guard let adapter = locklessAdapter,
               let surfaceId = surfaceIdBySceneKey[sceneKey] else {
             unregisterSurface(sceneKey: sceneKey)
@@ -854,7 +679,7 @@ final class SurfAceRuntime {
                     "tombstoneId": .string(result.tombstoneId),
                 ])
             }
-            removeSurfaceModel(sceneKey: sceneKey, persistLegacyProjection: false)
+            removeSurfaceModel(sceneKey: sceneKey, persistProjection: false)
             await fanoutLocklessCommittedEvent(
                 op: "event.surface_removed",
                 payload: .object(["surfaceId": .string(surfaceId)])
@@ -955,14 +780,14 @@ final class SurfAceRuntime {
         return Int(paneId)
     }
 
-    private func removeSurfaceModel(sceneKey: String, persistLegacyProjection: Bool) {
+    private func removeSurfaceModel(sceneKey: String, persistProjection: Bool) {
         sceneDisconnectObserversBySceneKey.removeValue(forKey: sceneKey)?.invalidate()
         guard let surfaceId = surfaceIdBySceneKey.removeValue(forKey: sceneKey),
               let surface = surfaceById.removeValue(forKey: surfaceId) else {
             return
         }
 
-        if persistLegacyProjection {
+        if persistProjection {
             persistedSurfaceTopologies[surfaceId] = SurfAcePersistedSurfaceTopology(surface: surface)
             persistSurfaceTopologies()
         }
@@ -980,13 +805,6 @@ final class SurfAceRuntime {
             payload: ["surfaceId": surfaceId]
         )
 
-        if let session = activeSessions.removeValue(forKey: surfaceId) {
-            lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
-            Task {
-                await session.socket.close(code: 1000, reason: "surface_removed")
-            }
-        }
-        ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
         refreshBonjourTXT()
     }
 
@@ -1009,7 +827,6 @@ final class SurfAceRuntime {
             guard readiness.targetWorkRecovered else {
                 throw SurfAceLocklessAuthorityError.invalidState("target_work_not_recovered")
             }
-            applyNegotiatedModes(readiness.state)
             try projectLocklessAuthorityState(readiness.state)
             for result in recovered {
                 await fanoutLocklessTargetResult(result)
@@ -1033,11 +850,7 @@ final class SurfAceRuntime {
         _ state: SurfAceLocklessAuthorityState,
         connectedSceneKey: String? = nil
     ) throws {
-        let preview = try SurfAceLocklessMigration.rollbackPreview(state)
-        var topologies = try JSONDecoder().decode(
-            [String: SurfAcePersistedSurfaceTopology].self,
-            from: preview.projection.surfaceTopologies
-        )
+        var topologies = try SurfAceLocklessUIProjection.topologies(from: state)
         for (surfaceId, authoritySurface) in state.liveSurfaces {
             topologies[surfaceId]?.paneLayout = try persistedPaneLayout(
                 fromCanonical: authoritySurface.topology
@@ -1061,7 +874,7 @@ final class SurfAceRuntime {
             surfaces.append(surface)
         }
 
-        for surface in surfaces where !legacyNegotiatedSurfaceIds.contains(surface.surfaceId) {
+        for surface in surfaces {
             guard let topology = topologies[surface.surfaceId] else { continue }
             project(topology: topology, onto: surface)
             if let authoritySurface = state.liveSurfaces[surface.surfaceId] {
@@ -1199,7 +1012,7 @@ final class SurfAceRuntime {
         fingerDrawEnabled: Bool,
         source: String? = nil
     ) {
-        if let adapter = locklessAdapter, !legacyNegotiatedSurfaceIds.contains(surfaceId) {
+        if let adapter = locklessAdapter {
             Task { @MainActor in
                 await commitLocalAnnotationMode(
                     adapter: adapter,
@@ -1244,7 +1057,7 @@ final class SurfAceRuntime {
     }
 
     func navigateHistory(surfaceId: String, paneId: Int, direction: HistoryDirection) {
-        if let adapter = locklessAdapter, !legacyNegotiatedSurfaceIds.contains(surfaceId) {
+        if let adapter = locklessAdapter {
             Task { @MainActor in
                 await commitLocalHistoryNavigation(
                     adapter: adapter,
@@ -1639,9 +1452,7 @@ final class SurfAceRuntime {
         strokes: [SurfAceStroke],
         drawingData: Data
     ) {
-        if let adapter = locklessAdapter,
-           !legacyNegotiatedSurfaceIds.contains(surfaceId),
-           !strokes.isEmpty {
+        if let adapter = locklessAdapter, !strokes.isEmpty {
             Task { @MainActor in
                 await commitLocalStrokes(
                     adapter: adapter,
@@ -1775,18 +1586,8 @@ final class SurfAceRuntime {
 
     func handleDidEnterBackground() async {
         surfAceLifecycleLog(
-            "event=app_background \(surfAceDiagnosticFields([("active_sessions", activeSessions.count), ("surface_count", surfaces.count)]))"
+            "event=app_background \(surfAceDiagnosticFields([("controller_connections", locklessConnectionsByConnectionUUID.count), ("surface_count", surfaces.count)]))"
         )
-        let currentSessions = activeSessions
-        for surfaceId in currentSessions.keys {
-            surfaceNeedsResumedEvent.insert(surfaceId)
-            surfaceById[surfaceId]?.connectionBarState = .connecting
-        }
-        for (_, session) in currentSessions {
-            Task {
-                await session.socket.close(code: 1000, reason: "background")
-            }
-        }
         await closeLocklessConnectionsForLifecycle(reason: "background")
     }
 
@@ -1808,22 +1609,16 @@ final class SurfAceRuntime {
 
     private func handleWillEnterForeground() {
         surfAceLifecycleLog(
-            "event=app_foreground \(surfAceDiagnosticFields([("pending_resumed_events", surfaceNeedsResumedEvent.count), ("surface_count", surfaces.count)]))"
+            "event=app_foreground \(surfAceDiagnosticFields([("surface_count", surfaces.count)]))"
         )
         if locklessAdapter != nil {
             Task { @MainActor in
                 await restoreLocklessAuthority(reason: "foreground")
                 publishBonjour()
-                for surfaceId in surfaceNeedsResumedEvent {
-                    refreshConnectionState(surfaceId: surfaceId)
-                }
             }
             return
         }
         publishBonjour()
-        for surfaceId in surfaceNeedsResumedEvent {
-            refreshConnectionState(surfaceId: surfaceId)
-        }
     }
 
     private func handleHTTP(request: HTTPServerRequest) async -> HTTPServerResponse {
@@ -1836,12 +1631,12 @@ final class SurfAceRuntime {
                 statusCode: 200,
                 body: [
                     "status": "ok",
-                    "busy": ownershipLocksBySurfaceId.isEmpty ? 0 : 1,
+                    "busy": 0,
                     "surfaces": surfaces.map { surface in
                         [
                             "surfaceId": surface.surfaceId,
                             "name": surface.name,
-                            "paired": ownershipLocksBySurfaceId[surface.surfaceId] != nil,
+                            "paired": false,
                         ]
                     },
                     "http": [
@@ -1853,22 +1648,27 @@ final class SurfAceRuntime {
                         "implementedOps": [
                             "surfaces.list",
                             "pair.request",
+                            "panes.list",
+                            "operation.receipt.sync",
+                            "operation.receipt.ack",
+                            "consumable.sync",
+                            "consumable.ack",
                             "content.set",
                             "content.append",
                             "content.patch",
                             "content.clear",
                             "annotations.remove",
                             "snapshot.get",
-                            "authority.state",
+                            "target.apply",
+                            "topology.apply",
                             "heartbeat.ping",
-                            "ownership.relinquish",
                             "surface.window.open",
                             "surface.window.close",
-                            "panes.list",
+                            "surface.window.restore",
                             "pane.split",
                             "pane.rename",
                             "pane.close",
-                            "diagnostics.flight_recorder",
+                            "pane.restore",
                         ],
                     ],
                 ]
@@ -1976,10 +1776,6 @@ final class SurfAceRuntime {
 
                     let priority: SurfAceOutboundSender.Priority = (op == "heartbeat.ping") ? .heartbeat : .response
                     try await sender.send(text: responseJSON, priority: priority)
-                    if let pairCommit = processed.postSendPairCommit,
-                       !terminatedConnectionUUIDs.contains(connectionUUID) {
-                        commitPairRequest(pairCommit)
-                    }
                     if let postSendAction = processed.postSendAction,
                        !terminatedConnectionUUIDs.contains(connectionUUID) {
                         await postSendAction()
@@ -1988,19 +1784,6 @@ final class SurfAceRuntime {
                     replayOrder.append(id)
                     if replayOrder.count > 1_024 {
                         replayCache.removeValue(forKey: replayOrder.removeFirst())
-                    }
-                    if op == "ownership.relinquish",
-                       (processed.responseObject["ok"] as? Bool) == true {
-                        await socket.close(code: 1000, reason: "relinquished")
-                        return
-                    }
-                    if op == "pair.request",
-                       (processed.responseObject["ok"] as? Bool) == false,
-                       let error = processed.responseObject["error"] as? [String: Any],
-                       let code = error["code"] as? String,
-                       code == "missing_provider_name" {
-                        await socket.close(code: 1008, reason: "missing_provider_name")
-                        return
                     }
                 }
             } catch {
@@ -2030,7 +1813,7 @@ final class SurfAceRuntime {
         switch op {
         case "surfaces.list":
             return SurfAceProcessedRequestResult(
-                responseObject: await handleSurfacesList(id: id), postSendPairCommit: nil
+                responseObject: await handleSurfacesList(id: id)
             )
         case "pair.request":
             return await handlePairRequest(
@@ -2040,123 +1823,9 @@ final class SurfAceRuntime {
                 sender: sender,
                 connectionUUID: connectionUUID
             )
-        case "topology.apply":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleTopologyApply(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "target.apply":
-            return SurfAceProcessedRequestResult(
-                responseObject: await handleTargetApply(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "surface.window.open":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleSurfaceWindowOpen(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "surface.window.close":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleSurfaceWindowClose(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "target.register":
-            return SurfAceProcessedRequestResult(
-                responseObject: [
-                    "v": 1,
-                    "type": "response",
-                    "op": "target.register.rejected",
-                    "id": id,
-                    "ok": true,
-                    "sentAt": timestampNow(),
-                    "payload": [
-                        "idempotencyKey": payload["idempotencyKey"] as? String ?? "",
-                        "status": "rejected",
-                        "errorCode": "registration_failed",
-                        "message": "target.register is provider-bound and is not accepted by the surface runtime",
-                    ],
-                ],
-                postSendPairCommit: nil
-            )
-        case "content.apply":
-            return SurfAceProcessedRequestResult(
-                responseObject: await handleContentApply(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "panes.list":
-            return SurfAceProcessedRequestResult(
-                responseObject: handlePanesList(id: id, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "pane.split":
-            return SurfAceProcessedRequestResult(
-                responseObject: handlePaneSplit(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "pane.rename":
-            return SurfAceProcessedRequestResult(
-                responseObject: handlePaneRename(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "pane.close":
-            return SurfAceProcessedRequestResult(
-                responseObject: handlePaneClose(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "content.set":
-            return SurfAceProcessedRequestResult(
-                responseObject: await handleContentSet(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "content.append":
-            return SurfAceProcessedRequestResult(
-                responseObject: await handleContentAppend(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "content.patch":
-            return SurfAceProcessedRequestResult(
-                responseObject: await handleContentPatch(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "content.clear":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleContentClear(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "annotations.remove":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleAnnotationsRemove(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "snapshot.get":
-            return SurfAceProcessedRequestResult(
-                responseObject: await handleSnapshotGet(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "authority.state":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleAuthorityState(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "heartbeat.ping":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleHeartbeatPing(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "ownership.relinquish":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleOwnershipRelinquish(id: id, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
-        case "diagnostics.flight_recorder":
-            return SurfAceProcessedRequestResult(
-                responseObject: handleFlightRecorderDiagnostics(id: id, payload: payload, connectionUUID: connectionUUID),
-                postSendPairCommit: nil
-            )
         default:
             return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(op: op, id: id, code: "invalid_payload", message: "unsupported operation"),
-                postSendPairCommit: nil
+                responseObject: makeErrorResponse(op: op, id: id, code: "not_paired", message: "pair.request required")
             )
         }
     }
@@ -2212,35 +1881,9 @@ final class SurfAceRuntime {
                         "surfaceId": surface.surfaceId,
                         "name": surface.name,
                         "viewport": viewportPayload(for: surface),
-                        "paired": ownershipLocksBySurfaceId[surface.surfaceId] != nil,
+                        "paired": false,
                     ]
                 },
-            ],
-        ]
-    }
-
-    private func handleFlightRecorderDiagnostics(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID) else {
-            return makeErrorResponse(op: "diagnostics.flight_recorder", id: id, code: "not_paired", message: "pair.request required")
-        }
-        let requestedLines = payload["maxLines"] as? Int ?? 240
-        let lineCount = min(max(requestedLines, 1), 512)
-        let restoreAttemptId = payload["restoreAttemptId"] as? String
-        surfAceLifecycleLog(
-            "event=flight_recorder_requested \(surfAceDiagnosticFields([("line_count", lineCount), ("restore_attempt_id", restoreAttemptId), ("surface_id", surfaceId)]))"
-        )
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "diagnostics.flight_recorder",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "logPath": surfAceFlightRecorderLogPath(),
-                "lines": surfAceFlightRecorderTail(maxLines: lineCount),
-                "restoreAttemptId": restoreAttemptId as Any? ?? NSNull(),
-                "surfaceId": surfaceId,
             ],
         ]
     }
@@ -2261,8 +1904,7 @@ final class SurfAceRuntime {
                     id: id,
                     code: "invalid_payload",
                     message: "lockless controllerInstanceId, projectionCapacityBytes, and protocolFeatures are required"
-                ),
-                postSendPairCommit: nil
+                )
             )
         }
         await beginLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID)
@@ -2286,7 +1928,6 @@ final class SurfAceRuntime {
             )
             locklessConnectionsByConnectionUUID[connectionUUID] = (controllerInstanceId, sender, socket)
             let admittedState = await adapter.snapshot()
-            applyNegotiatedModes(admittedState)
             let state = try Self.jsonObject(admittedState)
             let limits = try Self.jsonObject(admission.limits)
             let admittedScopeIds: [String]
@@ -2326,7 +1967,6 @@ final class SurfAceRuntime {
                         "surfaceSetRevision": admittedState.surfaceSetRevision,
                     ],
                 ],
-                postSendPairCommit: nil,
                 postSendAction: { [weak self, weak adapter] in
                     guard let self else { return }
                     defer { self.endLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID) }
@@ -2347,14 +1987,12 @@ final class SurfAceRuntime {
             default: code = "invalid_payload"
             }
             return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(op: "pair.request", id: id, code: code, message: String(describing: error)),
-                postSendPairCommit: nil
+                responseObject: makeErrorResponse(op: "pair.request", id: id, code: code, message: String(describing: error))
             )
         } catch {
             endLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID)
             return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(op: "pair.request", id: id, code: "client_state_unavailable", message: error.localizedDescription),
-                postSendPairCommit: nil
+                responseObject: makeErrorResponse(op: "pair.request", id: id, code: "client_state_unavailable", message: error.localizedDescription)
             )
         }
     }
@@ -2367,38 +2005,10 @@ final class SurfAceRuntime {
     ) async -> SurfAceProcessedRequestResult {
         guard let adapter = locklessAdapter else {
             return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(op: op, id: id, code: "not_paired", message: "pair.request required"),
-                postSendPairCommit: nil
+                responseObject: makeErrorResponse(op: op, id: id, code: "not_paired", message: "pair.request required")
             )
         }
         do {
-            if let surfaceId = payload["surfaceId"] as? String {
-                let authority = await adapter.snapshot()
-                if authority.negotiatedModes[surfaceId] != .lockless {
-                    return SurfAceProcessedRequestResult(
-                        responseObject: makeErrorResponse(
-                            op: op, id: id, code: "capability_mismatch",
-                            message: "surface is not negotiated in lockless mode"
-                        ),
-                        postSendPairCommit: nil
-                    )
-                }
-            } else if op == "surface.window.restore",
-                      let tombstoneId = payload["tombstoneId"] as? String {
-                let authority = await adapter.snapshot()
-                let retainedSurfaceId = authority.surfaceTombstones.first(where: {
-                    $0.tombstoneId == tombstoneId
-                })?.surface.surfaceId
-                if retainedSurfaceId.flatMap({ authority.negotiatedModes[$0] }) != .lockless {
-                    return SurfAceProcessedRequestResult(
-                        responseObject: makeErrorResponse(
-                            op: op, id: id, code: "capability_mismatch",
-                            message: "retained surface is not negotiated in lockless mode"
-                        ),
-                        postSendPairCommit: nil
-                    )
-                }
-            }
             let responsePayload: Any
             switch op {
             case "surfaces.list":
@@ -2494,8 +2104,7 @@ final class SurfAceRuntime {
                         id: id,
                         code: "unsupported_operation",
                         message: "native lockless operation is not yet routed through client authority"
-                    ),
-                    postSendPairCommit: nil
+                    )
                 )
             }
             return SurfAceProcessedRequestResult(
@@ -2507,15 +2116,13 @@ final class SurfAceRuntime {
                     "ok": true,
                     "sentAt": timestampNow(),
                     "payload": responsePayload,
-                ],
-                postSendPairCommit: nil
+                ]
             )
         } catch let error as SurfAceLocklessRuntimeAdapterError {
             return locklessAdapterErrorResult(op: op, id: id, error: error)
         } catch {
             return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(op: op, id: id, code: "invalid_payload", message: String(describing: error)),
-                postSendPairCommit: nil
+                responseObject: makeErrorResponse(op: op, id: id, code: "invalid_payload", message: String(describing: error))
             )
         }
     }
@@ -2853,8 +2460,7 @@ final class SurfAceRuntime {
                 responseObject: makeErrorResponse(
                     op: "snapshot.get", id: id, code: "invalid_payload",
                     message: "surfaceId and paneId are required"
-                ),
-                postSendPairCommit: nil
+                )
             )
         }
         let authority = await adapter.snapshot()
@@ -2864,8 +2470,7 @@ final class SurfAceRuntime {
                 responseObject: makeErrorResponse(
                     op: "snapshot.get", id: id, code: "invalid_payload",
                     message: "surface or pane is unavailable"
-                ),
-                postSendPairCommit: nil
+                )
             )
         }
         let includeImage = payload["includeImage"] as? Bool ?? false
@@ -2899,8 +2504,7 @@ final class SurfAceRuntime {
             responseObject: [
                 "v": 1, "type": "response", "op": "snapshot.get", "id": id,
                 "ok": true, "sentAt": timestampNow(), "payload": responsePayload,
-            ],
-            postSendPairCommit: nil
+            ]
         )
     }
 
@@ -2965,8 +2569,7 @@ final class SurfAceRuntime {
                     id: id,
                     code: "invalid_payload",
                     message: String(describing: error)
-                ),
-                postSendPairCommit: nil
+                )
             )
         }
     }
@@ -3178,7 +2781,6 @@ final class SurfAceRuntime {
                     let result = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
                         state: &state, expectedSurfaceSetRevision: expected, placement: placement
                     )
-                    state.negotiatedModes[result.surface.surfaceId] = .lockless
                     let terminal: SurfAceLocklessJSON = .object([
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
                         "surface": try Self.locklessJSON(result.surface),
@@ -3348,7 +2950,8 @@ final class SurfAceRuntime {
 
     func fanoutLocklessCommittedEvent(
         op: String,
-        payload: SurfAceLocklessJSON
+        payload: SurfAceLocklessJSON,
+        sentAt: Int64? = nil
     ) async {
         guard let locklessAdapter else { return }
         await withLocklessDeliveryTurn {
@@ -3367,7 +2970,7 @@ final class SurfAceRuntime {
                 "type": "event",
                 "op": op,
                 "eventId": randomHex(prefix: "ev", byteCount: 8),
-                "sentAt": timestampNow(),
+                "sentAt": sentAt ?? timestampNow(),
                 "payload": Self.foundationJSON(payload),
             ]
             guard let json = encodeJSON(envelope) else { return }
@@ -3684,10 +3287,7 @@ final class SurfAceRuntime {
                 .appendingPathComponent("lockless-authority-v1.json")
         }
         let store = SurfAceLocklessGenerationStore(stateURL: stateURL)
-        let adapter = try SurfAceLocklessRuntimeAdapter(
-            store: store,
-            legacy: SurfAceLegacyUserDefaultsSnapshot(userDefaults: userDefaults)
-        )
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
         locklessAdapter = adapter
         return adapter
     }
@@ -3771,14 +3371,6 @@ final class SurfAceRuntime {
         )
     }
 
-    private func applyNegotiatedModes(_ state: SurfAceLocklessAuthorityState) {
-        legacyNegotiatedSurfaceIds = Set(
-            state.negotiatedModes.compactMap { surfaceId, mode in
-                mode == .legacy ? surfaceId : nil
-            }
-        )
-    }
-
     nonisolated private static func locklessSurfaceScopeId(_ surfaceId: String) -> String {
         let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
         let encoded = surfaceId.addingPercentEncoding(withAllowedCharacters: unreserved) ?? surfaceId
@@ -3808,8 +3400,7 @@ final class SurfAceRuntime {
                         id: id,
                         code: "unsupported_capability",
                         message: reason
-                    ),
-                    postSendPairCommit: nil
+                    )
                 )
             }
             return await handleLocklessPairRequest(
@@ -3820,496 +3411,14 @@ final class SurfAceRuntime {
                 connectionUUID: connectionUUID
             )
         }
-        let takeover = payload["takeover"] as? Bool ?? false
-        let resumePayload = payload["resume"] as? [String: Any]
-        let resumeSessionId = resumePayload?["sessionId"] as? String
-        let restoreAttemptId = payload["restoreAttemptId"] as? String
-        surfAceGatewayLog(
-            "event=pair_request_received \(surfAceDiagnosticFields([("connection_uuid", connectionUUID), ("provider_id", payload["providerId"] as? String), ("restore_attempt_id", restoreAttemptId), ("resume_session_id", resumeSessionId), ("surface_id", payload["surfaceId"] as? String), ("takeover", takeover)]))"
-        )
-        guard let providerId = payload["providerId"] as? String,
-              let connectionId = payload["connectionId"] as? String,
-              let protocolVersion = payload["protocolVersion"] as? Int,
-              let surfaceId = payload["surfaceId"] as? String,
-              let surface = surfaceById[surfaceId] else {
-            surfAceGatewayLog(
-                "event=pair_request_invalid_payload \(surfAceDiagnosticFields([("connection_uuid", connectionUUID)]))"
-            )
-            return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(
-                    op: "pair.request",
-                    id: id,
-                    code: "invalid_payload",
-                    message: "providerId, connectionId, protocolVersion, surfaceId are required"
-                ),
-                postSendPairCommit: nil
-            )
-        }
-        guard protocolVersion == 1 else {
-            return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(
-                    op: "pair.request",
-                    id: id,
-                    code: "unsupported_protocol_version",
-                    message: "protocolVersion must be 1"
-                ),
-                postSendPairCommit: nil
-            )
-        }
-
-        let eventProfile = SurfAceEventProfile(rawValue: payload["eventProfile"] as? String ?? "") ?? .minimumDeep
-        let drawingConfigPayload = payload["drawingFlushConfig"] as? [String: Any]
-        let drawingFlushConfig = SurfAceDrawingFlushConfig.from(
-            requestedIdleWindowMs: drawingConfigPayload?["idleWindowMs"] as? Int,
-            requestedMaxIntervalMs: drawingConfigPayload?["maxIntervalMs"] as? Int
-        )
-        guard let bootstrapIdentity = surfAceValidatedProviderBootstrapIdentity(from: payload) else {
-            return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(
-                    op: "pair.request",
-                    id: id,
-                    code: "invalid_payload",
-                    message: "windowLabel, initialPaneId, and initialPaneLabel are required; windowLabel must be a lowercase alphabetic provider identity label"
-                ),
-                postSendPairCommit: nil
-            )
-        }
-        let providerWindowLabel = bootstrapIdentity.windowLabel
-        let providerInitialPaneId = bootstrapIdentity.initialPaneId
-        let providerInitialPaneLabel = bootstrapIdentity.initialPaneLabel
-        guard let rawProviderName = payload["providerName"] as? String else {
-            surfAceGatewayLog(
-                "event=pair_request_missing_provider_name \(surfAceDiagnosticFields([("connection_uuid", connectionUUID)]))"
-            )
-            return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(
-                    op: "pair.request",
-                    id: id,
-                    code: "missing_provider_name",
-                    message: "providerName is required"
-                ),
-                postSendPairCommit: nil
-            )
-        }
-        let providerName = rawProviderName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !providerName.isEmpty else {
-            surfAceGatewayLog(
-                "event=pair_request_empty_provider_name \(surfAceDiagnosticFields([("connection_uuid", connectionUUID)]))"
-            )
-            return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(
-                    op: "pair.request",
-                    id: id,
-                    code: "missing_provider_name",
-                    message: "providerName is required"
-                ),
-                postSendPairCommit: nil
-            )
-        }
-
-        if let adapter = locklessAdapter {
-            do {
-                let state = try await adapter.negotiateLegacySurface(surfaceId)
-                applyNegotiatedModes(state)
-            } catch SurfAceLocklessRuntimeAdapterError.capabilityMismatch {
-                return SurfAceProcessedRequestResult(
-                    responseObject: makeErrorResponse(
-                        op: "pair.request", id: id, code: "capability_mismatch",
-                        message: "surface is already negotiated in lockless mode"
-                    ),
-                    postSendPairCommit: nil
-                )
-            } catch {
-                return SurfAceProcessedRequestResult(
-                    responseObject: makeErrorResponse(
-                        op: "pair.request", id: id, code: "client_state_unavailable",
-                        message: error.localizedDescription
-                    ),
-                    postSendPairCommit: nil
-                )
-            }
-        }
-
-        let activeSession = activeSessions[surfaceId]
-        let ownershipLock = ownershipLocksBySurfaceId[surfaceId]
-        let resumed: Bool
-        let sessionId: String
-        let ownershipEpoch: Int
-        var supersededSession: SurfAceSessionState? = nil
-
-        if let ownershipLock {
-            if ownershipLock.providerId == providerId {
-                if resumeSessionId == ownershipLock.sessionId {
-                    resumed = true
-                    sessionId = ownershipLock.sessionId
-                    ownershipEpoch = ownershipLock.ownershipEpoch
-                    surfAceGatewayLog(
-                        "event=\(takeover ? "pair_request_takeover_resumed" : "pair_request_resumed") \(surfAceDiagnosticFields([("provider_id", providerId), ("session_id", sessionId), ("surface_id", surfaceId)]))"
-                    )
-                    if let activeSession, activeSession.connectionUUID != connectionUUID {
-                        supersededSession = activeSession
-                    }
-                } else {
-                    resumed = false
-                    sessionId = randomHex(prefix: "sa", byteCount: 12)
-                    ownershipEpoch = ownershipLock.ownershipEpoch + 1
-                    surfAceGatewayLog(
-                        "event=\(takeover ? "pair_request_explicit_takeover" : "pair_request_same_provider_fresh_admission") \(surfAceDiagnosticFields([("active_session", activeSession != nil), ("previous_provider_id", ownershipLock.providerId), ("previous_session_id", ownershipLock.sessionId), ("provider_id", providerId), ("received_session_id", resumeSessionId ?? "nil"), ("same_provider", true), ("surface_id", surfaceId)]))"
-                    )
-                    if let activeSession, activeSession.connectionUUID != connectionUUID {
-                        supersededSession = activeSession
-                    }
-                }
-            } else if takeover {
-                surfAceGatewayLog(
-                    "event=pair_request_explicit_takeover \(surfAceDiagnosticFields([("active_session", activeSession != nil), ("previous_provider_id", ownershipLock.providerId), ("previous_session_id", ownershipLock.sessionId), ("provider_id", providerId), ("same_provider", false), ("surface_id", surfaceId)]))"
-                )
-                resumed = false
-                sessionId = randomHex(prefix: "sa", byteCount: 12)
-                ownershipEpoch = ownershipLock.ownershipEpoch + 1
-                if let activeSession, activeSession.connectionUUID != connectionUUID {
-                    supersededSession = activeSession
-                }
-            } else {
-                surfAceGatewayLog(
-                    "event=pair_request_busy \(surfAceDiagnosticFields([("lock_provider_id", ownershipLock.providerId), ("requested_provider_id", providerId), ("surface_id", surfaceId)]))"
-                )
-                return SurfAceProcessedRequestResult(
-                    responseObject: makeErrorResponse(
-                        op: "pair.request",
-                        id: id,
-                        code: "busy",
-                        message: "surface ownership lock is held by another provider"
-                    ),
-                    postSendPairCommit: nil
-                )
-            }
-        } else {
-            resumed = false
-            sessionId = randomHex(prefix: "sa", byteCount: 12)
-            ownershipEpoch = 1
-            surfAceGatewayLog(
-                "event=pair_request_new_session \(surfAceDiagnosticFields([("provider_id", providerId), ("session_id", sessionId), ("surface_id", surfaceId)]))"
-            )
-        }
-
-        if !resumed {
-            applyFreshProviderAdmissionTopology(
-                surface: surface,
-                windowLabel: providerWindowLabel,
-                initialPaneId: providerInitialPaneId,
-                initialPaneLabel: providerInitialPaneLabel,
-                requestId: id
-            )
-        }
-
-        let session = SurfAceSessionState(
-            sessionId: sessionId,
-            providerId: providerId,
-            connectionId: connectionId,
-            connectionUUID: connectionUUID,
-            socket: socket,
-            sender: sender,
-            eventProfile: eventProfile,
-            drawingFlushConfig: drawingFlushConfig,
-            ownershipEpoch: ownershipEpoch,
-            pairedAt: Date(),
-            pairConfirmed: false,
-            authorityConfirmed: false
-        )
-
-        surfAceGatewayLog(
-            "event=pair_response_ready \(surfAceDiagnosticFields([("content_count", surface.panes.filter { $0.currentEntry.contentId != nil }.count), ("pane_count", surface.panes.count), ("restore_attempt_id", restoreAttemptId), ("resumed", resumed), ("session_id", sessionId), ("surface_id", surfaceId)]))"
-        )
-        let response: [String: Any] = [
-            "v": 1,
-            "type": "response",
-            "op": "pair.request",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "sessionId": sessionId,
-                "ownershipEpoch": ownershipEpoch,
-                "resumed": resumed,
-                "surfaceId": surface.surfaceId,
-                "surfaceName": surface.name,
-                "viewport": viewportPayload(for: surface),
-                "capabilities": [
-                    "contentTypes": supportedContentTypes.map(\.rawValue),
-                    "eventTypes": eventTypes,
-                    "protocolFeatures": ["authority.state.v1"],
-                    "targetCapabilities": targetCapabilities,
-                ],
-                "eventConfig": [
-                    "profile": eventProfile.rawValue,
-                    "activeEvents": eventProfile.activeEvents,
-                    "drawingFlushConfig": [
-                        "idleWindowMs": drawingFlushConfig.idleWindowMs,
-                        "maxIntervalMs": drawingFlushConfig.maxIntervalMs,
-                    ],
-                ],
-                "limits": [
-                    "maxMessageBytes": maxMessageBytes,
-                    "maxFrameBytes": maxFrameBytes,
-                    "maxVisibleTextBytes": maxVisibleTextBytes,
-                    "maxStrokePointsPerFlush": maxStrokePointsPerFlush,
-                    "maxDrawingFlushBytes": maxDrawingFlushBytes,
-                    "resumeGraceMs": resumeGraceMilliseconds,
-                ],
-                "state": [
-                    "panes": surface.panes.map { pane in
-                        var paneState: [String: Any] = [
-                            "paneId": pane.paneId,
-                            "paneLineageId": pane.paneLineageId,
-                            "paneLabel": pane.paneLabel,
-                            "currentContentId": jsonValue(pane.currentEntry.contentId),
-                            "currentRevision": pane.currentEntry.revision,
-                            "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
-                        ]
-                        if let display = contentDisplayPayload(for: pane.currentEntry) {
-                            paneState["display"] = display
-                        }
-                        return paneState
-                    },
-                    "layout": topologyLayoutPayload(surface.paneLayout),
-                    "topologyRevision": surface.topologyEpoch,
-                ],
-            ],
-        ]
-
         return SurfAceProcessedRequestResult(
-            responseObject: response,
-            postSendPairCommit: SurfAcePairCommitPlan(
-                surfaceId: surfaceId,
-                session: session,
-                supersededSession: supersededSession,
-                resumed: resumed,
-                providerName: providerName,
-                providerInitialPaneId: providerInitialPaneId,
-                providerInitialPaneLabel: providerInitialPaneLabel,
-                providerWindowLabel: providerWindowLabel,
-                shouldEnqueuePostReconnectEvents: resumed || surfaceNeedsResumedEvent.contains(surfaceId)
-            )
-        )
-    }
-
-    private func commitPairRequest(_ plan: SurfAcePairCommitPlan) {
-        guard let surface = surfaceById[plan.surfaceId] else { return }
-        surfAceGatewayLog(
-            "event=pair_commit \(surfAceDiagnosticFields([("provider_id", plan.session.providerId), ("resumed", plan.resumed), ("session_id", plan.session.sessionId), ("surface_id", plan.surfaceId)]))"
-        )
-        if plan.resumed {
-            applyProviderWindowLabel(surface: surface, windowLabel: plan.providerWindowLabel)
-        }
-        activeSessions[plan.surfaceId] = plan.session
-        surface.providerName = plan.providerName
-        ownershipLocksBySurfaceId[plan.surfaceId] = SurfAceOwnershipLockState(
-            sessionId: plan.session.sessionId,
-            providerId: plan.session.providerId,
-            ownershipEpoch: plan.session.ownershipEpoch
-        )
-        lastHeartbeatAtBySurfaceId[plan.surfaceId] = Date()
-        refreshConnectionState(surfaceId: plan.surfaceId)
-        reschedulePendingFlushes(surfaceId: plan.surfaceId)
-        refreshBonjourTXT()
-        if let supersededSession = plan.supersededSession,
-           supersededSession.connectionUUID != plan.session.connectionUUID {
-            Task {
-                await supersededSession.socket.close(code: 1000, reason: "superseded")
-            }
-        }
-
-        if plan.shouldEnqueuePostReconnectEvents {
-            surfaceNeedsResumedEvent.remove(plan.surfaceId)
-            enqueuePostReconnectEvents(surfaceId: plan.surfaceId)
-        }
-    }
-
-    private func handleSurfaceWindowOpen(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let activeSession = activeSessions[surfaceId],
-              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
-            return makeErrorResponse(op: "surface.window.open", id: id, code: "not_paired", message: "pair.request required")
-        }
-        guard activeSession.connectionUUID == connectionUUID,
-              ownershipLock.providerId == activeSession.providerId else {
-            return makeErrorResponse(op: "surface.window.open", id: id, code: "not_lock_owner", message: "Only the current lock owner may open Surf Ace windows")
-        }
-
-        let requestedBy = payload["requestedBy"] as? String ?? "provider_tool"
-        #if os(visionOS)
-        let accepted = UIApplication.shared.supportsMultipleScenes
-        if accepted {
-            SurfAceSceneActivation.requestNewWindow(source: "provider:\(requestedBy)")
-        }
-        #else
-        let accepted = false
-        #endif
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "surface.window.open",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "accepted": accepted,
-            ],
-        ]
-    }
-
-    private func handleSurfaceWindowClose(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
-              let activeSession = activeSessions[surfaceId],
-              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
-            return makeErrorResponse(op: "surface.window.close", id: id, code: "not_paired", message: "pair.request required")
-        }
-        guard activeSession.connectionUUID == connectionUUID,
-              ownershipLock.providerId == activeSession.providerId else {
-            return makeErrorResponse(op: "surface.window.close", id: id, code: "not_lock_owner", message: "Only the current lock owner may close this Surf Ace window")
-        }
-
-        let requestedBy = payload["requestedBy"] as? String ?? "provider_tool"
-        #if os(visionOS)
-        let scene = UIApplication.shared.connectedScenes.first { $0.session.persistentIdentifier == surface.sceneKey }
-        if let scene {
-            SurfAceSceneActivation.log(event: "scene_destruction_request", fields: [("source", "provider:\(requestedBy)"), ("surface_id", surfaceId)])
-            UIApplication.shared.requestSceneSessionDestruction(scene.session, options: nil)
-        }
-        let closed = scene != nil
-        #else
-        _ = requestedBy
-        let closed = false
-        #endif
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "surface.window.close",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "closed": closed,
-                "surfaceId": surfaceId,
-            ],
-        ]
-    }
-
-    private func handlePanesList(id: String, connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID) else {
-            return makeErrorResponse(op: "panes.list", id: id, code: "not_paired", message: "pair.request required")
-        }
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "panes.list",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "panes": surface.panes.map { pane in
-                    var paneState: [String: Any] = [
-                        "paneId": pane.paneId,
-                        "paneLineageId": pane.paneLineageId,
-                        "paneLabel": pane.paneLabel,
-                        "name": jsonValue(pane.name),
-                        "activeContentId": jsonValue(pane.currentEntry.contentId),
-                        "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
-                        "currentTarget": jsonValue(targetStatePayload(pane.currentTarget)),
-                        "viewport": paneViewportPayload(surfaceId: surfaceId, paneId: pane.paneId),
-                        "geometry": paneGeometryPayload(surfaceId: surfaceId, paneId: pane.paneId),
-                    ]
-                    if let display = contentDisplayPayload(for: pane.currentEntry) {
-                        paneState["display"] = display
-                    }
-                    return paneState
-                },
-            ],
-        ]
-    }
-
-    private func handleTopologyApply(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        surfAceGatewayLog(
-            "event=topology_apply_receive \(surfAceDiagnosticFields([("connection_uuid", connectionUUID), ("pane_count", (payload["panes"] as? [[String: Any]])?.count), ("surface_id", payload["surfaceId"] as? String), ("topology_revision", payload["topologyRevision"] as? Int), ("window_label", payload["windowLabel"] as? String)]))"
-        )
-        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
-              let topologyRevision = payload["topologyRevision"] as? Int,
-              let windowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
-              let panesPayload = payload["panes"] as? [[String: Any]],
-              let layoutPayload = payload["layout"] as? [String: Any] else {
-            return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply payload")
-        }
-        guard surface.windowLabel == windowLabel else {
-            return makeErrorResponse(
-                op: "topology.apply",
+            responseObject: makeErrorResponse(
+                op: "pair.request",
                 id: id,
-                code: "invalid_payload",
-                message: "topology.apply windowLabel must match the paired surface identity"
+                code: "capability_mismatch",
+                message: "surf-ace.lockless-multi-controller.v1 is required"
             )
-        }
-
-        var panesById: [Int: SurfAcePaneModel] = [:]
-        var visiblePaneLabels = Set<Int>()
-        for panePayload in panesPayload {
-            guard let paneId = panePayload["paneId"] as? Int,
-                  let paneLabel = panePayload["paneLabel"] as? Int else {
-                return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply panes")
-            }
-            guard paneLabel > 0, !visiblePaneLabels.contains(paneLabel) else {
-                return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "duplicate or invalid paneLabel in surface payload")
-            }
-            visiblePaneLabels.insert(paneLabel)
-            let pane = surface.panesById[paneId] ?? SurfAcePaneModel(paneId: paneId, paneLabel: paneLabel)
-            pane.paneLabel = paneLabel
-            pane.name = (panePayload["name"] as? String)?.isEmpty == true ? nil : panePayload["name"] as? String
-            panesById[paneId] = pane
-        }
-
-        guard let layout = parseTopologyLayoutNode(layoutPayload, panesById: panesById) else {
-            return makeErrorResponse(op: "topology.apply", id: id, code: "invalid_payload", message: "invalid topology.apply layout")
-        }
-
-        surface.windowLabel = windowLabel
-        surface.name = "\(screenName) \(windowLabel.uppercased())"
-        surface.panesById = panesById
-        surface.paneLayout = layout
-        surface.topologyEpoch += 1
-        surface.providerTopologyInitialized = topologyRevision > 0
-        ensureActiveKeyboardPane(surface: surface)
-        persistSurfaceTopology(surfaceId: surfaceId)
-        surfAceGatewayLog(
-            "event=topology_apply_applied \(surfAceDiagnosticFields([("active_pane_id", surface.activeKeyboardPaneId), ("pane_ids", layout.paneIDs.map(String.init).joined(separator: ",")), ("surface_id", surfaceId), ("topology_revision", topologyRevision), ("window_label", windowLabel)]))"
         )
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "topology.apply",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "topologyRevision": topologyRevision,
-                "panes": layout.paneIDs.compactMap { paneId -> [String: Any]? in
-                    guard let pane = panesById[paneId] else { return nil }
-                    return [
-                        "paneId": pane.paneId,
-                        "paneLineageId": pane.paneLineageId,
-                        "paneLabel": pane.paneLabel,
-                        "name": jsonValue(pane.name),
-                    ]
-                },
-            ],
-        ]
-    }
-
-    private func handleContentApply(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID) else {
-            return makeErrorResponse(op: "content.apply", id: id, code: "not_paired", message: "pair.request required")
-        }
-        return await handleContentApply(id: id, payload: payload, surfaceId: surfaceId)
     }
 
     func handleContentApply(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
@@ -4463,55 +3572,6 @@ final class SurfAceRuntime {
         return response
     }
 
-    private func handleTargetApply(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
-        func result(
-            requestId: String,
-            targetId: String,
-            paneLineageId: String,
-            targetEpoch: Int,
-            status: String,
-            errorCode: String? = nil,
-            message: String? = nil,
-            materializedState: [String: Any]? = nil
-        ) -> [String: Any] {
-            var resultPayload: [String: Any] = [
-                "requestId": requestId,
-                "targetId": targetId,
-                "paneLineageId": paneLineageId,
-                "targetEpoch": targetEpoch,
-                "status": status,
-                "appliedAt": isoTimestampNow(),
-            ]
-            if let errorCode { resultPayload["errorCode"] = errorCode }
-            if let message { resultPayload["message"] = message }
-            if let materializedState { resultPayload["materializedState"] = materializedState }
-            return [
-                "v": 1,
-                "type": "response",
-                "op": "target.apply.result",
-                "id": id,
-                "ok": true,
-                "sentAt": timestampNow(),
-                "payload": resultPayload,
-            ]
-        }
-
-        let requestId = payload["requestId"] as? String ?? ""
-        let targetId = payload["targetId"] as? String ?? ""
-        let paneLineageId = payload["paneLineageId"] as? String ?? ""
-        let targetEpoch = payload["targetEpoch"] as? Int ?? 0
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID) else {
-            return makeErrorResponse(op: "target.apply", id: id, code: "not_paired", message: "pair.request required")
-        }
-        if activeSessions[surfaceId]?.sessionId != payload["ownershipSessionId"] as? String {
-            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "ownership_session_mismatch", message: "target.apply ownershipSessionId does not match the active session")
-        }
-        if activeSessions[surfaceId]?.ownershipEpoch != payload["ownershipEpoch"] as? Int {
-            return result(requestId: requestId, targetId: targetId, paneLineageId: paneLineageId, targetEpoch: targetEpoch, status: "rejected", errorCode: "ownership_epoch_mismatch", message: "target.apply ownershipEpoch does not match the active session")
-        }
-        return await materializeTargetApply(id: id, payload: payload, surfaceId: surfaceId)
-    }
-
     func materializeTargetApply(id: String, payload: [String: Any], surfaceId: String) async -> [String: Any] {
         func result(
             requestId: String,
@@ -4648,601 +3708,6 @@ final class SurfAceRuntime {
         requiredCapabilities.allSatisfy { targetCapabilities.contains($0) }
     }
 
-    private func handlePaneSplit(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID) else {
-            return makeErrorResponse(op: "pane.split", id: id, code: "not_paired", message: "pair.request required")
-        }
-
-        guard let paneId = payload["paneId"] as? Int,
-              let count = payload["count"] as? Int,
-              let directionRaw = payload["direction"] as? String,
-              let direction = SurfAceLayoutDirection(rawValue: directionRaw),
-              let newPaneIds = payload["newPaneIds"] as? [Int],
-              let newPaneLabels = surfAceValidatedProviderNewPaneLabels(from: payload["newPaneLabels"], count: count),
-              count >= 2,
-              newPaneIds.count == count - 1,
-              let _ = surface.panesById[paneId] else {
-            return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "invalid pane.split payload")
-        }
-
-        for newPaneId in newPaneIds where surface.panesById[newPaneId] != nil {
-            return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "newPaneIds must be unique")
-        }
-        var visiblePaneLabels = Set(surface.panesById.values.map(\.paneLabel))
-        for newPaneLabel in newPaneLabels {
-            guard newPaneLabel > 0, !visiblePaneLabels.contains(newPaneLabel) else {
-                return makeErrorResponse(op: "pane.split", id: id, code: "invalid_payload", message: "duplicate or invalid paneLabel in surface payload")
-            }
-            visiblePaneLabels.insert(newPaneLabel)
-        }
-        let children: [SurfAcePaneLayoutNode] = [.leaf(paneId)] + newPaneIds.map { .leaf($0) }
-        surface.activeKeyboardPaneId = paneId
-        surface.paneLayout = surface.paneLayout.replacingLeaf(
-            paneId: paneId,
-            with: .split(direction: direction, children: children)
-        )
-        surface.topologyEpoch += 1
-
-        for (index, newPaneId) in newPaneIds.enumerated() {
-            let newPaneLabel = newPaneLabels[index]
-            surface.panesById[newPaneId] = SurfAcePaneModel(paneId: newPaneId, paneLabel: newPaneLabel)
-            sendLifecycleEvent(
-                surfaceId: surfaceId,
-                op: "event.pane_created",
-                payload: [
-                    "surfaceId": surfaceId,
-                    "paneId": newPaneId,
-                    "paneLabel": newPaneLabel,
-                    "parentPaneId": paneId,
-                    "fromSplit": true,
-                ]
-            )
-        }
-        persistSurfaceTopology(surfaceId: surfaceId)
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "pane.split",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "panes": surface.panes.map { ["paneId": $0.paneId, "paneLineageId": $0.paneLineageId, "paneLabel": $0.paneLabel] },
-            ],
-        ]
-    }
-
-    private func handlePaneRename(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
-              let pane = pane(surfaceId: surfaceId, paneId: paneId) else {
-            return makeErrorResponse(op: "pane.rename", id: id, code: "invalid_payload", message: "paneId is required")
-        }
-
-        let name = payload["name"] as? String
-        pane.name = name?.isEmpty == true ? nil : name
-        persistSurfaceTopology(surfaceId: surfaceId)
-        sendLifecycleEvent(
-            surfaceId: surfaceId,
-            op: "event.pane_renamed",
-            payload: [
-                "surfaceId": surfaceId,
-                "paneId": paneId,
-                "name": jsonValue(pane.name),
-            ]
-        )
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "pane.rename",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "paneId": paneId,
-                "name": jsonValue(pane.name),
-            ],
-        ]
-    }
-
-    private func handlePaneClose(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
-              surface.panes.count > 1,
-              let pane = pane(surfaceId: surfaceId, paneId: paneId) else {
-            return makeErrorResponse(op: "pane.close", id: id, code: "invalid_operation", message: "cannot close pane")
-        }
-
-        let closedFramesDiscarded = pane.deliveredClosedFrameCount
-        pane.pendingFlushTask?.cancel()
-        pane.pendingFlushTask = nil
-        surface.panesById.removeValue(forKey: paneId)
-        if let newLayout = surface.paneLayout.removingLeaf(paneId: paneId) {
-            surface.paneLayout = newLayout
-        }
-        surface.topologyEpoch += 1
-        ensureActiveKeyboardPane(surface: surface)
-        persistSurfaceTopology(surfaceId: surfaceId)
-
-        sendLifecycleEvent(
-            surfaceId: surfaceId,
-            op: "event.pane_removed",
-            payload: [
-                "surfaceId": surfaceId,
-                "paneId": paneId,
-            ]
-        )
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "pane.close",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "paneId": paneId,
-                "closedFramesDiscarded": closedFramesDiscarded,
-            ],
-        ]
-    }
-
-    private func handleContentSet(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
-              let pane = pane(surfaceId: surfaceId, paneId: paneId),
-              let contentId = payload["contentId"] as? String,
-              let revision = payload["revision"] as? Int else {
-            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "paneId, contentId, revision are required")
-        }
-
-        guard revision == pane.currentEntry.revision + 1 else {
-            return staleRevisionResponse(op: "content.set", id: id, expectedRevision: pane.currentEntry.revision + 1)
-        }
-        guard !pane.annotationMode else {
-            pane.toast = "Finish annotation (Done) to navigate"
-            return makeErrorResponse(op: "content.set", id: id, code: "invalid_operation", message: "annotation mode is active")
-        }
-        guard payloadByteCount(payload) <= maxFrameBytes else {
-            return makeErrorResponse(op: "content.set", id: id, code: "content_too_large", message: "content exceeds maxFrameBytes")
-        }
-
-        let frame: SurfAceFrame
-        do {
-            frame = try SurfAceFrame.from(contentId: contentId, revision: revision, jsonObject: payload)
-        } catch SurfAceFrameParseError.unsupportedType {
-            return makeErrorResponse(op: "content.set", id: id, code: "unsupported_content_type", message: "unsupported contentType")
-        } catch SurfAceFrameParseError.invalidContentID {
-            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "contentId must match ct_<8hex>")
-        } catch SurfAceFrameParseError.missingField(let field) {
-            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "missing \(field)")
-        } catch {
-            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "invalid content.set payload")
-        }
-
-        if frame.contentType == .canvas {
-            return makeErrorResponse(op: "content.set", id: id, code: "unsupported_content_type", message: "unsupported contentType")
-        }
-
-        guard let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"]) else {
-            return makeErrorResponse(op: "content.set", id: id, code: "invalid_payload", message: "historyOwnerToken is required")
-        }
-        let shouldRestoreViewport = shouldPreserveHTMLViewportAcrossContentSet(
-            currentEntry: pane.currentEntry,
-            incomingFrame: frame,
-            historyOwnerToken: historyOwnerToken
-        )
-        let restoreViewport: SurfAceViewport?
-        if shouldRestoreViewport,
-           let snapshot = await pane.bridge?.fetchSnapshot(includeImage: false) {
-            pane.lastViewport = snapshot.viewport
-            pane.lastVisibleText = snapshot.visibleText
-            pane.lastSelection = snapshot.selection ?? pane.lastSelection
-            restoreViewport = snapshot.viewport
-        } else if shouldRestoreViewport {
-            restoreViewport = pane.lastViewport
-        } else {
-            restoreViewport = nil
-        }
-        let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
-        applyRestoredDrawingsPayload(payload["restoredDrawings"], to: pane)
-        pane.currentTarget = nil
-
-        pane.pendingFlushStrokes.removeAll()
-        pane.firstPendingStrokeAt = nil
-        pane.lastPendingStrokeAt = nil
-        pane.lastSelection = nil
-        pane.lastNavigationURL = nil
-        pane.lastPage = nil
-        pane.pendingSnapshotHintReason = frame.contentType == .html ? "after_render" : nil
-        pane.bridge?.render(entry: pane.currentEntry, restoreViewport: restoreViewport)
-        restorePaneDrawing(surfaceId: surfaceId, pane: pane)
-        if frame.contentType != .html {
-            sendSnapshotHint(surfaceId: surfaceId, reason: "after_render")
-        }
-
-        return mutationAck(
-            id: id,
-            op: "content.set",
-            paneId: paneId,
-            entry: pane.currentEntry,
-            historyInfo: historyInfo
-        )
-    }
-
-    private func handleContentAppend(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
-              let pane = pane(surfaceId: surfaceId, paneId: paneId),
-              let contentId = payload["contentId"] as? String,
-              let revision = payload["revision"] as? Int,
-              let lines = payload["lines"] as? [String] else {
-            return makeErrorResponse(op: "content.append", id: id, code: "invalid_payload", message: "invalid content.append payload")
-        }
-
-        guard !pane.annotationMode else {
-            pane.toast = "Finish annotation (Done) to navigate"
-            return makeErrorResponse(op: "content.append", id: id, code: "invalid_operation", message: "annotation mode is active")
-        }
-        guard pane.currentEntry.contentId == contentId else {
-            return makeErrorResponse(op: "content.append", id: id, code: "stale_content", message: "contentId is not current")
-        }
-        guard revision == pane.currentEntry.revision + 1 else {
-            return staleRevisionResponse(op: "content.append", id: id, expectedRevision: pane.currentEntry.revision + 1)
-        }
-        guard case .terminal(let existingLines, let scrollback) = pane.currentEntry.payload else {
-            return makeErrorResponse(op: "content.append", id: id, code: "unsupported_operation_for_content_type", message: "append is terminal-only")
-        }
-
-        let nextLines = existingLines + lines
-        let nextPayload = SurfAceFramePayload.terminal(lines: nextLines, scrollback: scrollback)
-        pane.currentEntry.payload = nextPayload
-        pane.currentEntry.revision = revision
-        pane.bridge?.render(entry: pane.currentEntry, restoreViewport: nil)
-
-        return mutationAck(id: id, op: "content.append", paneId: paneId, entry: pane.currentEntry)
-    }
-
-    private func handleContentPatch(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
-              let pane = pane(surfaceId: surfaceId, paneId: paneId),
-              let contentId = payload["contentId"] as? String,
-              let revision = payload["revision"] as? Int,
-              let patchObject = payload["patch"] as? [String: Any],
-              let selector = patchObject["selector"] as? String,
-              let action = patchObject["action"] as? String else {
-            return makeErrorResponse(op: "content.patch", id: id, code: "invalid_payload", message: "invalid content.patch payload")
-        }
-
-        guard !pane.annotationMode else {
-            pane.toast = "Finish annotation (Done) to navigate"
-            return makeErrorResponse(op: "content.patch", id: id, code: "invalid_operation", message: "annotation mode is active")
-        }
-        guard pane.currentEntry.contentId == contentId else {
-            return makeErrorResponse(op: "content.patch", id: id, code: "stale_content", message: "contentId is not current")
-        }
-        guard revision == pane.currentEntry.revision + 1 else {
-            return staleRevisionResponse(op: "content.patch", id: id, expectedRevision: pane.currentEntry.revision + 1)
-        }
-        guard case .html(_, let baseURL) = pane.currentEntry.payload else {
-            return makeErrorResponse(op: "content.patch", id: id, code: "unsupported_operation_for_content_type", message: "patch is html-only")
-        }
-        guard let bridge = pane.bridge else {
-            return makeErrorResponse(op: "content.patch", id: id, code: "render_failed", message: "pane renderer unavailable")
-        }
-
-        let patch = SurfAceFramePatchRequest(
-            contentId: contentId,
-            selector: selector,
-            action: action,
-            html: patchObject["html"] as? String
-        )
-
-        switch await bridge.applyHTMLPatch(patch) {
-        case .success(let updatedHTML):
-            pane.currentEntry.payload = .html(html: updatedHTML, baseURL: baseURL)
-            pane.currentEntry.revision = revision
-            return mutationAck(id: id, op: "content.patch", paneId: paneId, entry: pane.currentEntry)
-        case .selectorNotFound:
-            return makeErrorResponse(op: "content.patch", id: id, code: "render_failed", message: "patch selector did not match any element")
-        case .invalidAction:
-            return makeErrorResponse(op: "content.patch", id: id, code: "render_failed", message: "patch action is not supported")
-        case .failed(let message):
-            return makeErrorResponse(op: "content.patch", id: id, code: "render_failed", message: message)
-        }
-    }
-
-    private func handleContentClear(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
-              let pane = pane(surfaceId: surfaceId, paneId: paneId),
-              let revision = payload["revision"] as? Int else {
-            return makeErrorResponse(op: "content.clear", id: id, code: "invalid_payload", message: "paneId and revision are required")
-        }
-        let restoreAttemptId = payload["restoreAttemptId"] as? String
-        surfAceGatewayLog(
-            "event=incoming_content_clear \(surfAceDiagnosticFields([("pane_id", paneId), ("restore_attempt_id", restoreAttemptId), ("revision", revision), ("surface_id", surfaceId)]))"
-        )
-
-        guard revision == pane.currentEntry.revision + 1 else {
-            return staleRevisionResponse(op: "content.clear", id: id, expectedRevision: pane.currentEntry.revision + 1)
-        }
-        guard !pane.annotationMode else {
-            pane.toast = "Finish annotation (Done) to navigate"
-            return makeErrorResponse(op: "content.clear", id: id, code: "invalid_operation", message: "annotation mode is active")
-        }
-
-        if !surfAceEntryIsVisibleEmpty(pane.currentEntry) {
-            pane.backStack.append(pane.currentEntry)
-            trimVisibleHistory(pane)
-        }
-        pane.forwardStack.removeAll()
-        pane.currentTarget = nil
-        pane.currentEntry = .empty(revision: revision)
-        pane.drawingRestoreWarningVisible = false
-        pane.pendingFlushStrokes.removeAll()
-        pane.firstPendingStrokeAt = nil
-        pane.lastPendingStrokeAt = nil
-        pane.bridge?.render(entry: nil, restoreViewport: nil)
-        surfAceLifecycleLog(
-            "event=render_transition_empty \(surfAceDiagnosticFields([("actor", "content.clear"), ("pane_id", paneId), ("restore_attempt_id", restoreAttemptId), ("revision", revision), ("surface_id", surfaceId)]))"
-        )
-        pane.bridge?.clearDrawings()
-
-        return mutationAck(id: id, op: "content.clear", paneId: paneId, entry: pane.currentEntry)
-    }
-
-    private func handleAnnotationsRemove(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
-              let pane = pane(surfaceId: surfaceId, paneId: paneId),
-              let contentId = payload["contentId"] as? String,
-              let strokeIds = payload["strokeIds"] as? [String] else {
-            return makeErrorResponse(op: "annotations.remove", id: id, code: "invalid_payload", message: "paneId, contentId, strokeIds are required")
-        }
-
-        guard pane.currentEntry.contentId == contentId else {
-            return makeErrorResponse(op: "annotations.remove", id: id, code: "stale_content", message: "contentId is not current")
-        }
-
-        var removed: [String] = []
-        var notFound: [String] = []
-        for strokeId in strokeIds {
-            if pane.currentEntry.strokesById.removeValue(forKey: strokeId) != nil {
-                removed.append(strokeId)
-                pane.pendingFlushStrokes.removeAll { $0.strokeId == strokeId }
-            } else {
-                notFound.append(strokeId)
-            }
-        }
-
-        pane.bridge?.removeDrawingStrokeIDs(removed)
-        pane.currentEntry.drawingData = pane.bridge?.captureDrawingData() ?? Data()
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "annotations.remove",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "paneId": paneId,
-                "contentId": contentId,
-                "removedStrokeIds": removed,
-                "notFoundStrokeIds": notFound,
-                "remainingStrokeCount": pane.currentEntry.strokesById.count,
-            ],
-        ]
-    }
-
-    private func handleSnapshotGet(id: String, payload: [String: Any], connectionUUID: String) async -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let paneId = payload["paneId"] as? Int,
-              let pane = pane(surfaceId: surfaceId, paneId: paneId) else {
-            return makeErrorResponse(op: "snapshot.get", id: id, code: "invalid_payload", message: "paneId is required")
-        }
-
-        let includeImage = payload["includeImage"] as? Bool ?? false
-        let includeVisibleText = payload["includeVisibleText"] as? Bool ?? true
-        let includeDrawings = payload["includeDrawings"] as? Bool ?? false
-        let snapshot = await pane.bridge?.fetchSnapshot(includeImage: includeImage)
-
-        pane.lastViewport = snapshot?.viewport ?? defaultViewport(surface: surfaceById[surfaceId])
-        if let visibleText = snapshot?.visibleText {
-            pane.lastVisibleText = visibleText
-        }
-        pane.lastSelection = snapshot?.selection ?? pane.lastSelection
-
-        var responsePayload: [String: Any] = [
-            "paneId": paneId,
-            "contentId": jsonValue(pane.currentEntry.contentId),
-            "revision": pane.currentEntry.revision,
-            "contentType": jsonValue(pane.currentEntry.contentType?.rawValue),
-            "currentTarget": jsonValue(targetStatePayload(pane.currentTarget)),
-            "viewport": jsonObject(fromEncodable: pane.lastViewport) ?? NSNull(),
-            "selection": jsonObject(fromEncodable: pane.lastSelection) ?? NSNull(),
-        ]
-        if includeVisibleText {
-            responsePayload["visibleText"] = pane.lastVisibleText.prefix(maxVisibleTextBytes).description
-        }
-        if includeDrawings {
-            responsePayload["drawings"] = jsonObject(fromEncodable: pane.activeStrokes) ?? []
-        }
-        if includeImage, let image = snapshot?.imageBase64 {
-            responsePayload["image"] = image
-        }
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "snapshot.get",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": responsePayload,
-        ]
-    }
-
-    private func handleHeartbeatPing(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID) else {
-            return makeErrorResponse(op: "heartbeat.ping", id: id, code: "not_paired", message: "pair.request required")
-        }
-        guard let nonce = payload["nonce"] as? String else {
-            return makeErrorResponse(op: "heartbeat.ping", id: id, code: "invalid_payload", message: "nonce is required")
-        }
-        lastHeartbeatAtBySurfaceId[surfaceId] = Date()
-        if var session = activeSessions[surfaceId],
-           !session.pairConfirmed {
-            session.pairConfirmed = true
-            activeSessions[surfaceId] = session
-            refreshConnectionState(surfaceId: surfaceId)
-        }
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "heartbeat.ping",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": ["nonce": nonce],
-        ]
-    }
-
-    private func handleAuthorityState(id: String, payload: [String: Any], connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, surface) = pairedSurface(for: connectionUUID),
-              var session = activeSessions[surfaceId],
-              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
-            return makeErrorResponse(op: "authority.state", id: id, code: "not_paired", message: "pair.request required")
-        }
-
-        let providerMatches = payload["surfaceId"] as? String == surfaceId &&
-            payload["providerId"] as? String == session.providerId &&
-            ownershipLock.providerId == session.providerId
-        if providerMatches,
-           ((payload["sessionId"] as? String) != session.sessionId ||
-            (payload["ownershipEpoch"] as? Int) != session.ownershipEpoch ||
-            ownershipLock.sessionId != session.sessionId) {
-            surfAceGatewayLog(
-                "event=authority_state_same_provider_session_metadata_mismatch \(surfAceDiagnosticFields([("active_ownership_epoch", session.ownershipEpoch), ("active_session_id", session.sessionId), ("provider_id", session.providerId), ("received_ownership_epoch", payload["ownershipEpoch"] as? Int), ("received_session_id", payload["sessionId"] as? String), ("surface_id", surfaceId)]))"
-            )
-        }
-        if providerMatches,
-           let providerWindowLabel = surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]),
-           providerWindowLabel != surface.windowLabel {
-            applyProviderWindowLabel(surface: surface, windowLabel: providerWindowLabel)
-        }
-        if providerMatches,
-           let providerPaneIdentities = surfAceProviderAuthorityPaneIdentityMap(
-            from: payload,
-            matching: surface.panes.map {
-                SurfAceAuthorityPaneIdentity(
-                    paneId: $0.paneId,
-                    paneLabel: $0.paneLabel,
-                    paneLineageId: $0.paneLineageId
-                )
-            }
-           ) {
-            applyProviderAuthorityPaneIdentities(surface: surface, providerPaneIdentities: providerPaneIdentities)
-        } else if providerMatches {
-            let paneCount = (payload["panes"] as? [[String: Any]])?.count
-            surfAceGatewayLog(
-                "event=authority_state_provider_topology_pending \(surfAceDiagnosticFields([("pane_count", paneCount), ("provider_id", session.providerId), ("surface_id", surfaceId)]))"
-            )
-        }
-
-        let reason: String?
-        if payload["surfaceId"] as? String != surfaceId {
-            reason = "surface_id_mismatch"
-        } else if payload["providerId"] as? String != session.providerId ||
-                    ownershipLock.providerId != session.providerId {
-            reason = "session_identity_mismatch"
-        } else if surfAceValidatedProviderWindowLabel(from: payload["windowLabel"]) == nil {
-            reason = "window_label_mismatch"
-        } else if payload["actionable"] as? Bool != true {
-            reason = payload["reason"] as? String ?? "provider_not_actionable"
-        } else {
-            reason = nil
-        }
-        let accepted = reason == nil
-
-        if accepted {
-            session.authorityConfirmed = true
-            activeSessions[surfaceId] = session
-        } else {
-            session.authorityConfirmed = false
-            activeSessions[surfaceId] = session
-        }
-        refreshConnectionState(surfaceId: surfaceId)
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "authority.state",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "accepted": accepted,
-                "reason": reason.map { $0 as Any } ?? NSNull(),
-            ],
-        ]
-    }
-
-    private func handleOwnershipRelinquish(id: String, connectionUUID: String) -> [String: Any] {
-        guard let (surfaceId, _) = pairedSurface(for: connectionUUID),
-              let activeSession = activeSessions[surfaceId],
-              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
-            return makeErrorResponse(
-                op: "ownership.relinquish",
-                id: id,
-                code: "not_paired",
-                message: "pair.request required"
-            )
-        }
-        guard activeSession.connectionUUID == connectionUUID,
-              ownershipLock.providerId == activeSession.providerId else {
-            return makeErrorResponse(
-                op: "ownership.relinquish",
-                id: id,
-                code: "not_lock_owner",
-                message: "Only the current lock owner may relinquish ownership"
-            )
-        }
-
-        ownershipLocksBySurfaceId.removeValue(forKey: surfaceId)
-        activeSessions.removeValue(forKey: surfaceId)
-        lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
-        surfaceNeedsResumedEvent.remove(surfaceId)
-        surfaceById[surfaceId]?.providerName = nil
-        refreshConnectionState(surfaceId: surfaceId)
-        refreshBonjourTXT()
-
-        return [
-            "v": 1,
-            "type": "response",
-            "op": "ownership.relinquish",
-            "id": id,
-            "ok": true,
-            "sentAt": timestampNow(),
-            "payload": [
-                "relinquished": true,
-            ],
-        ]
-    }
-
-    private func pairedSurface(for connectionUUID: String) -> (String, SurfAceSurfaceModel)? {
-        guard let pair = activeSessions.first(where: { $0.value.connectionUUID == connectionUUID }),
-              let surface = surfaceById[pair.key] else {
-            return nil
-        }
-        return (pair.key, surface)
-    }
-
     private func handleSocketTermination(connectionUUID: String) async {
         terminatedConnectionUUIDs.insert(connectionUUID)
         endLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID)
@@ -5254,81 +3719,7 @@ final class SurfAceRuntime {
             if let locklessAdapter {
                 await drainControllerRetentionReclamations(adapter: locklessAdapter)
             }
-            return
         }
-        guard let pair = activeSessions.first(where: { $0.value.connectionUUID == connectionUUID }) else { return }
-        let surfaceId = pair.key
-        surfAceGatewayLog(
-            "event=socket_terminated \(surfAceDiagnosticFields([("connection_uuid", connectionUUID), ("provider_id", pair.value.providerId), ("session_id", pair.value.sessionId), ("surface_id", surfaceId)]))"
-        )
-        activeSessions.removeValue(forKey: surfaceId)
-        lastHeartbeatAtBySurfaceId.removeValue(forKey: surfaceId)
-        surfaceById[surfaceId]?.providerName = nil
-        refreshConnectionState(surfaceId: surfaceId)
-        refreshBonjourTXT()
-    }
-
-    private func startHeartbeatWatchdog() {
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = Task { [weak self] in
-            while let self, !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(self.heartbeatWatchdogCheckMilliseconds))
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    self.expireStaleSessionsForHeartbeat()
-                }
-            }
-        }
-    }
-
-    private func expireStaleSessionsForHeartbeat() {
-        guard !activeSessions.isEmpty else { return }
-        let now = Date()
-        var expired: [(surfaceId: String, session: SurfAceSessionState)] = []
-
-        for (surfaceId, session) in activeSessions {
-            let lastHeartbeatAt = lastHeartbeatAtBySurfaceId[surfaceId] ?? session.pairedAt
-            let ageMilliseconds = now.timeIntervalSince(lastHeartbeatAt) * 1000
-            if ageMilliseconds > Double(heartbeatTimeoutMilliseconds) {
-                expired.append((surfaceId, session))
-            }
-        }
-
-        guard !expired.isEmpty else { return }
-
-        for expiredSession in expired {
-            activeSessions.removeValue(forKey: expiredSession.surfaceId)
-            lastHeartbeatAtBySurfaceId.removeValue(forKey: expiredSession.surfaceId)
-            surfaceById[expiredSession.surfaceId]?.providerName = nil
-            refreshConnectionState(surfaceId: expiredSession.surfaceId)
-            Task {
-                await expiredSession.session.socket.close(code: 1000, reason: "heartbeat_timeout")
-            }
-        }
-        refreshBonjourTXT()
-    }
-
-    private func refreshConnectionState(surfaceId: String) {
-        guard let surface = surfaceById[surfaceId] else { return }
-        if hasLiveActiveSession(surfaceId: surfaceId) {
-            surface.connectionBarState = .connected
-        } else if ownershipLocksBySurfaceId[surfaceId] != nil {
-            surface.connectionBarState = .connecting
-        } else {
-            surface.connectionBarState = .disconnected
-            surface.providerName = nil
-        }
-    }
-
-    private func hasLiveActiveSession(surfaceId: String) -> Bool {
-        guard let session = activeSessions[surfaceId],
-              let ownershipLock = ownershipLocksBySurfaceId[surfaceId] else {
-            return false
-        }
-        return session.pairConfirmed
-            && session.authorityConfirmed
-            && ownershipLock.providerId == session.providerId
-            && ownershipLock.sessionId == session.sessionId
     }
 
     private func mutationAck(
@@ -5414,18 +3805,10 @@ final class SurfAceRuntime {
         payload: [String: Any],
         sentAt: Int64? = nil
     ) async -> Bool {
-        guard let session = activeSessions[surfaceId] else { return false }
-        let envelope: [String: Any] = [
-            "v": 1,
-            "type": "event",
-            "op": op,
-            "eventId": randomHex(prefix: "ev", byteCount: 8),
-            "sentAt": sentAt ?? timestampNow(),
-            "payload": payload,
-        ]
-        guard let json = encodeJSON(envelope) else { return false }
         do {
-            try await session.sender.send(text: json, priority: .event)
+            guard locklessAdapter != nil else { return false }
+            let locklessPayload = try Self.locklessJSON(fromFoundation: payload)
+            await fanoutLocklessCommittedEvent(op: op, payload: locklessPayload, sentAt: sentAt)
             return true
         } catch {
             surfaceById[surfaceId]?.lastError = "Event send failed: \(error.localizedDescription)"
@@ -5438,9 +3821,7 @@ final class SurfAceRuntime {
     }
 
     private func broadcastLifecycleEvent(op: String, payload: [String: Any]) {
-        for surfaceId in activeSessions.keys {
-            sendEvent(surfaceId: surfaceId, op: op, payload: payload)
-        }
+        sendEvent(surfaceId: payload["surfaceId"] as? String ?? "", op: op, payload: payload)
     }
 
     private func sendSnapshotHint(surfaceId: String, reason: String) {
@@ -5475,7 +3856,7 @@ final class SurfAceRuntime {
         guard case .split(_, let children, _) = target,
               weights.count == children.count else { return }
         let nextLayout = surface.paneLayout.updatingSplitWeights(path: path, weights: weights)
-        if let adapter = locklessAdapter, !legacyNegotiatedSurfaceIds.contains(surfaceId) {
+        if let adapter = locklessAdapter {
             do {
                 let topology = try canonicalTopologyJSON(
                     from: SurfAcePersistedPaneLayoutNode(from: nextLayout)
@@ -5567,25 +3948,10 @@ final class SurfAceRuntime {
         )
     }
 
-    private func enqueuePostReconnectEvents(surfaceId: String) {
-        Task { @MainActor in
-            if self.eventIsEnabled(surfaceId: surfaceId, eventName: "event.snapshot_hint") {
-                _ = await self.sendEventAsync(
-                    surfaceId: surfaceId,
-                    op: "event.snapshot_hint",
-                    payload: ["reason": "after_reconnect"]
-                )
-            }
-            _ = await self.sendEventAsync(
-                surfaceId: surfaceId,
-                op: "event.surface_resumed",
-                payload: ["surfaceId": surfaceId]
-            )
-        }
-    }
-
     private func eventIsEnabled(surfaceId: String, eventName: String) -> Bool {
-        activeSessions[surfaceId]?.eventProfile.activeEvents.contains(eventName) == true
+        _ = surfaceId
+        _ = eventName
+        return locklessAdapter != nil
     }
 
     private func restorePaneDrawing(surfaceId: String, pane: SurfAcePaneModel) {
@@ -5625,13 +3991,11 @@ final class SurfAceRuntime {
         pane.pendingFlushTask?.cancel()
 
         guard !pane.pendingFlushStrokes.isEmpty,
-              let session = activeSessions[surfaceId],
               let lastDirtyAt = pane.lastPendingStrokeAt else { return }
 
-        let lastSuccessfulSendAt = pane.lastSuccessfulFlushAt ?? session.pairedAt
-        let config = session.drawingFlushConfig
+        let config = SurfAceDrawingFlushConfig.default
         let idleDeadline = lastDirtyAt + Int64(config.idleWindowMs)
-        let maxDeadline = Int64(lastSuccessfulSendAt.timeIntervalSince1970 * 1000) + Int64(config.maxIntervalMs)
+        let maxDeadline = (pane.firstPendingStrokeAt ?? lastDirtyAt) + Int64(config.maxIntervalMs)
         let fireAt = min(idleDeadline, maxDeadline)
         let delay = max(0, fireAt - timestampNow())
 
@@ -5644,22 +4008,14 @@ final class SurfAceRuntime {
         }
     }
 
-    private func reschedulePendingFlushes(surfaceId: String) {
-        guard let surface = surfaceById[surfaceId] else { return }
-        for pane in surface.panes where !pane.pendingFlushStrokes.isEmpty {
-            scheduleDrawingFlush(surfaceId: surfaceId, paneId: pane.paneId)
-        }
-    }
-
     private func flushDrawing(surfaceId: String, paneId: Int) {
-        guard let session = activeSessions[surfaceId],
-              let pane = pane(surfaceId: surfaceId, paneId: paneId),
+        guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
               let contentId = pane.currentEntry.contentId,
               !pane.pendingFlushStrokes.isEmpty else {
             return
         }
 
-        let config = session.drawingFlushConfig
+        let config = SurfAceDrawingFlushConfig.default
         let lastDirtyAt = pane.lastPendingStrokeAt ?? timestampNow()
         let reason: String
         if let lastSuccessfulFlushAt = pane.lastSuccessfulFlushAt {
@@ -5796,148 +4152,6 @@ final class SurfAceRuntime {
             && currentEntry.contentType == .html
             && incomingFrame.contentType == .html
             && currentEntry.historyOwnerToken == historyOwnerToken
-    }
-
-    private func applyProviderBootstrapTopology(
-        surface: SurfAceSurfaceModel,
-        windowLabel: String,
-        initialPaneId: Int,
-        initialPaneLabel: Int
-    ) {
-        applyProviderWindowLabel(surface: surface, windowLabel: windowLabel)
-
-        guard initialPaneId > 0, initialPaneLabel > 0, !surface.providerTopologyInitialized else {
-            return
-        }
-
-        if case .leaf(let currentPaneId, _) = surface.paneLayout,
-           let bootstrapPane = surface.panesById[currentPaneId] {
-            if currentPaneId != initialPaneId {
-                surface.panesById.removeValue(forKey: currentPaneId)
-                bootstrapPane.paneId = initialPaneId
-                surface.panesById[initialPaneId] = bootstrapPane
-                surface.paneLayout = surface.paneLayout.replacingPaneID(from: currentPaneId, to: initialPaneId)
-                surface.activeKeyboardPaneId = initialPaneId
-                surface.topologyEpoch += 1
-            }
-            bootstrapPane.paneLabel = initialPaneLabel
-        }
-        surface.panesById[initialPaneId]?.paneLabel = initialPaneLabel
-        ensureActiveKeyboardPane(surface: surface)
-        surface.providerTopologyInitialized = true
-        persistSurfaceTopology(surfaceId: surface.surfaceId)
-        surfAceLifecycleLog(
-            "event=topology_restore_attempt \(surfAceDiagnosticFields([("initial_pane_id", initialPaneId), ("initial_pane_label", initialPaneLabel), ("pane_ids", surface.panes.map { String($0.paneId) }.joined(separator: ",")), ("surface_id", surface.surfaceId), ("window_label", windowLabel)]))"
-        )
-    }
-
-    func applyFreshProviderAdmissionTopology(
-        surface: SurfAceSurfaceModel,
-        windowLabel: String,
-        initialPaneId: Int,
-        initialPaneLabel: Int,
-        requestId: String?
-    ) {
-        if hasRecoverablePairState(surface: surface) {
-            applyProviderWindowLabel(surface: surface, windowLabel: windowLabel)
-            persistSurfaceTopology(surfaceId: surface.surfaceId)
-            surfAceGatewayLog(
-                "event=pair_request_preserve_persisted_topology \(surfAceDiagnosticFields([("pane_count", surface.panes.count), ("request_id", requestId), ("surface_id", surface.surfaceId)]))"
-            )
-            return
-        }
-
-        resetProviderBootstrapTopology(
-            surface: surface,
-            windowLabel: windowLabel,
-            initialPaneId: initialPaneId,
-            initialPaneLabel: initialPaneLabel
-        )
-    }
-
-    private func hasRecoverablePairState(surface: SurfAceSurfaceModel) -> Bool {
-        let contentPaneCount = surface.panes.filter { pane in
-            pane.currentEntry.contentId != nil || pane.currentEntry.contentType != nil
-        }.count
-        let result = surface.topologyEpoch > 0 || surface.panes.count > 1 || contentPaneCount > 0
-        surfAceGatewayLog(
-            "event=pair_recoverable_state_decision \(surfAceDiagnosticFields([("content_pane_count", contentPaneCount), ("pane_count", surface.panes.count), ("result", result), ("surface_id", surface.surfaceId), ("topology_revision", surface.topologyEpoch)]))"
-        )
-        return result
-    }
-
-    private func resetProviderBootstrapTopology(
-        surface: SurfAceSurfaceModel,
-        windowLabel: String,
-        initialPaneId: Int,
-        initialPaneLabel: Int
-    ) {
-        applyProviderWindowLabel(surface: surface, windowLabel: windowLabel)
-        guard initialPaneId > 0, initialPaneLabel > 0 else {
-            return
-        }
-        if surface.panesById.count == 1,
-           case .leaf(let currentPaneId, _) = surface.paneLayout,
-           let currentPane = surface.panesById[currentPaneId],
-           surfAcePaneIsPristineProviderBootstrap(currentPane) {
-            if currentPaneId != initialPaneId {
-                surface.panesById.removeValue(forKey: currentPaneId)
-                currentPane.paneId = initialPaneId
-                surface.panesById[initialPaneId] = currentPane
-                surface.paneLayout = .leaf(initialPaneId)
-                surface.activeKeyboardPaneId = initialPaneId
-            }
-            currentPane.paneLabel = initialPaneLabel
-            surface.providerTopologyInitialized = true
-            persistSurfaceTopology(surfaceId: surface.surfaceId)
-            return
-        }
-        surface.panesById = [
-            initialPaneId: SurfAcePaneModel(paneId: initialPaneId, paneLabel: initialPaneLabel)
-        ]
-        surface.paneLayout = .leaf(initialPaneId)
-        surface.activeKeyboardPaneId = initialPaneId
-        surface.providerTopologyInitialized = true
-        surface.topologyEpoch += 1
-        surface.geometryRevision += 1
-        persistSurfaceTopology(surfaceId: surface.surfaceId)
-        surfAceLifecycleLog(
-            "event=provider_bootstrap_topology_reset \(surfAceDiagnosticFields([("initial_pane_id", initialPaneId), ("initial_pane_label", initialPaneLabel), ("surface_id", surface.surfaceId), ("window_label", windowLabel)]))"
-        )
-    }
-
-    private func applyProviderWindowLabel(surface: SurfAceSurfaceModel, windowLabel: String) {
-        guard surface.windowLabel != windowLabel else { return }
-        surface.windowLabel = windowLabel
-        surface.name = "\(screenName) \(windowLabel.uppercased())"
-        persistSurfaceTopology(surfaceId: surface.surfaceId)
-        surfAceLifecycleLog(
-            "event=surface_identity_changed \(surfAceDiagnosticFields([("surface_id", surface.surfaceId), ("window_label", windowLabel)]))"
-        )
-    }
-
-    private func applyProviderAuthorityPaneIdentities(
-        surface: SurfAceSurfaceModel,
-        providerPaneIdentities: [Int: SurfAceAuthorityPaneIdentity]
-    ) {
-        var changed = false
-        for pane in surface.panes {
-            guard let providerPane = providerPaneIdentities[pane.paneId] else {
-                continue
-            }
-            if pane.paneLabel != providerPane.paneLabel {
-                pane.paneLabel = providerPane.paneLabel
-                changed = true
-            }
-            if pane.paneLineageId != providerPane.paneLineageId {
-                pane.paneLineageId = providerPane.paneLineageId
-                changed = true
-            }
-        }
-        if changed {
-            surface.topologyEpoch += 1
-            persistSurfaceTopology(surfaceId: surface.surfaceId)
-        }
     }
 
     private func ensureActiveKeyboardPane(surface: SurfAceSurfaceModel) {
@@ -6165,7 +4379,7 @@ final class SurfAceRuntime {
     private func refreshBonjourTXT() {
         guard isStarted else { return }
         surfAceServerRuntimeLog(
-            "event=bonjour_refresh \(surfAceDiagnosticFields([("busy", ownershipLocksBySurfaceId.isEmpty ? 0 : 1), ("surface_count", surfaces.count)]))"
+            "event=bonjour_refresh \(surfAceDiagnosticFields([("busy", 0), ("surface_count", surfaces.count)]))"
         )
         bonjourPublisher.updateTXTRecord(bonjourTXTRecord())
     }
@@ -6180,7 +4394,7 @@ final class SurfAceRuntime {
             "h": "\(viewport["height"] ?? 1)",
             "s": "\(viewport["scale"] ?? 1)",
             "cap": "\(contentBitmask(for: supportedContentTypes))",
-            "busy": ownershipLocksBySurfaceId.isEmpty ? "0" : "1",
+            "busy": "0",
             "pk": fingerprint,
             "ws": webSocketPath,
             "tls": "0",
@@ -6246,8 +4460,7 @@ final class SurfAceRuntime {
                 code: mapped.code,
                 message: mapped.message,
                 details: details.isEmpty ? nil : details
-            ),
-            postSendPairCommit: nil
+            )
         )
     }
 
@@ -6269,8 +4482,7 @@ final class SurfAceRuntime {
         }
         return SurfAceProcessedRequestResult(
             responseObject: response,
-            postSendPairCommit: nil,
-            postSendAction: { [weak self, weak adapter] in
+                postSendAction: { [weak self, weak adapter] in
                 guard let self, let adapter else { return }
                 if let postSendAction {
                     await postSendAction()
@@ -6300,8 +4512,7 @@ final class SurfAceRuntime {
         }
         if case .surfaceStateCapacity = error as? SurfAceLocklessTopologyOperationError {
             return SurfAceProcessedRequestResult(
-                responseObject: makeErrorResponse(op: op, id: id, code: code, message: code, details: details),
-                postSendPairCommit: nil
+                responseObject: makeErrorResponse(op: op, id: id, code: code, message: code, details: details)
             )
         }
         let response = makeErrorResponse(op: op, id: id, code: code, message: code, details: details)
@@ -6314,12 +4525,12 @@ final class SurfAceRuntime {
                 terminalResponse: exact
             )
             return locklessCommittedFailureResult(committed, adapter: adapter) ?? SurfAceProcessedRequestResult(
-                responseObject: response, postSendPairCommit: nil
+                responseObject: response
             )
         } catch let adapterError as SurfAceLocklessRuntimeAdapterError {
             return locklessAdapterErrorResult(op: op, id: id, error: adapterError)
         } catch {
-            return SurfAceProcessedRequestResult(responseObject: response, postSendPairCommit: nil)
+            return SurfAceProcessedRequestResult(responseObject: response)
         }
     }
 

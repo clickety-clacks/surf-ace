@@ -106,7 +106,7 @@ export type ConsumableRecord = {
 };
 
 export type ConsumableGap = {
-  cause: "legacy_overflow" | "scope_capacity" | "record_oversize";
+  cause: "source_overflow" | "scope_capacity" | "record_oversize";
   droppedBytes: number | null;
   droppedEventCount: number | null;
   droppedFrameCount: number | null;
@@ -812,21 +812,6 @@ const LOCKLESS_ERROR_CODES = new Set<LocklessErrorCode>([
   "unsupported_operation",
 ]);
 
-const LEGACY_AUTHORITY_FIELDS = new Set([
-  "connectionId",
-  "historyOwnerToken",
-  "initialPaneId",
-  "initialPaneLabel",
-  "newPaneIds",
-  "newPaneLabels",
-  "ownershipEpoch",
-  "ownershipSessionId",
-  "providerId",
-  "revision",
-  "takeover",
-  "windowLabel",
-]);
-
 function plainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -843,31 +828,6 @@ function hasExactKeys(
     ) &&
     Object.keys(value).every((key) => allowed.has(key))
   );
-}
-
-function forbiddenLegacyPath(
-  value: unknown,
-  path = "payload",
-): string | null {
-  if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      const found = forbiddenLegacyPath(value[index], `${path}[${index}]`);
-      if (found) return found;
-    }
-    return null;
-  }
-  if (!plainRecord(value)) return null;
-  for (const [key, child] of Object.entries(value)) {
-    if (
-      LEGACY_AUTHORITY_FIELDS.has(key) &&
-      !(key === "revision" && path !== "payload")
-    ) {
-      return `${path}.${key}`;
-    }
-    const found = forbiddenLegacyPath(child, `${path}.${key}`);
-    if (found) return found;
-  }
-  return null;
 }
 
 function positiveInteger(value: unknown): boolean {
@@ -1130,7 +1090,7 @@ function validConsumableGap(
   }
   const unknownExtent = value.lossExtent === "unknown";
   return (
-    (value.cause === "legacy_overflow" ||
+    (value.cause === "source_overflow" ||
       value.cause === "scope_capacity" ||
       value.cause === "record_oversize") &&
     positiveInteger(value.generation) &&
@@ -1605,19 +1565,9 @@ export function validateLocklessEnvelope(
     }
     const allowed = new Set([...fields.required, ...(fields.optional ?? [])]);
     for (const key of Object.keys(envelope.payload)) {
-      if (LEGACY_AUTHORITY_FIELDS.has(key)) {
-        return { ok: false, reason: `forbidden_legacy_field:${key}` };
-      }
       if (!allowed.has(key)) {
         return { ok: false, reason: `unknown_property:${key}` };
       }
-    }
-    const forbiddenPath = forbiddenLegacyPath(envelope.payload);
-    if (forbiddenPath) {
-      return {
-        ok: false,
-        reason: `forbidden_legacy_field:${forbiddenPath}`,
-      };
     }
     const payloadFailure = validateLocklessRequestPayload(
       envelope.op as LocklessRequest["op"],
@@ -1740,11 +1690,6 @@ export function validateLocklessEnvelope(
           ok: false,
           reason: error instanceof Error ? error.message : "invalid_limits",
         };
-      }
-      for (const key of LEGACY_AUTHORITY_FIELDS) {
-        if (key in envelope.payload) {
-          return { ok: false, reason: `forbidden_legacy_field:${key}` };
-        }
       }
       const capabilities = envelope.payload.capabilities;
       if (

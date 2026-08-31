@@ -1,7 +1,6 @@
 export const REQUEST_MESSAGES = [
   "surfaces.list",
   "pair.request",
-  "ownership.relinquish",
   "surface.window.open",
   "surface.window.close",
   "target.apply",
@@ -12,7 +11,6 @@ export const REQUEST_MESSAGES = [
   "content.clear",
   "annotations.remove",
   "snapshot.get",
-  "authority.state",
   "heartbeat.ping",
   "panes.list",
   "pane.split",
@@ -23,7 +21,6 @@ export const REQUEST_MESSAGES = [
 export const RESPONSE_MESSAGES = [
   "surfaces.list",
   "pair.request",
-  "ownership.relinquish",
   "surface.window.open",
   "surface.window.close",
   "target.apply.result",
@@ -35,7 +32,6 @@ export const RESPONSE_MESSAGES = [
   "content.clear",
   "annotations.remove",
   "snapshot.get",
-  "authority.state",
   "heartbeat.ping",
   "panes.list",
   "pane.split",

@@ -71,7 +71,7 @@ Constraint: annotation semantics in §§13–14 are normative architecture and m
 4. **`paneId` is required** on all pane-scoped tool calls. OpenClaw MUST always specify which pane it is targeting once it has resolved the intended pane from `windowLabel` / `paneLabel`. There is no default-pane fallback.
 5. `surfaces.list` enumerates active window surfaces for an endpoint; after pair/resume, `panes.list` and `surf_ace_list` expose pane topology and active content per pane.
 6. Content operations are isolated per pane (push/clear in pane A does not mutate pane B).
-7. Lockless-capable surfaces use concurrent controller admission and client-local authority. Ownership lock semantics remain only for explicitly negotiated legacy surfaces.
+7. Surfaces require lockless capability, concurrent controller admission, and client-local authority.
 8. At least one iOS and one Electron implementation pass topology tests for pane isolation and routing.
 9. History model is active: every accepted `content.set` creates a distinct entry and makes it visible. The prior visible entry enters one shared per-pane pool of at most 20 non-visible Back/Forward entries, evicted by client `lastVisibleSequence` LRU. Surface provides Back/Forward navigation.
 10. Annotation reads are pane-scoped at the OpenClaw boundary; any finer-grained history bookkeeping needed for Back/Forward restore is implementation-internal to the surface/provider.
@@ -89,7 +89,7 @@ Rules:
 4. This boundary is enforced to prevent cross-project leakage and to keep extraction to a true standalone plugin clean if that becomes necessary.
 5. Both extensions benefit from monorepo-level access to core internals (`src/`) while this boundary is maintained.
 
-Ownership: `extensions/surf-ace/` owns the Surf Ace provider runtime — mDNS discovery, WS connection management, local state buffers, and all `surf_ace_*` OpenClaw tools. The corresponding surface-side core module (if needed) lives in `src/surf-ace/`. Neither Clawline nor any other extension imports from these paths.
+Module boundary: `extensions/surf-ace/` contains the Surf Ace controller runtime — mDNS discovery, WS connection management, local state buffers, and all `surf_ace_*` OpenClaw tools. The corresponding surface-side core module (if needed) lives in `src/surf-ace/`. Neither Clawline nor any other extension imports from these paths.
 
 ## 2a. Concepts
 
@@ -124,15 +124,15 @@ Before the protocol details, these terms are used consistently throughout this s
 These are normative, settled statements about Surf Ace behavior. Implementations MUST conform to every invariant listed here. These statements are not subject to the open topics in `## Open Topics`.
 
 1. **WebSocket-only transport.** All provider↔surface communication runs over the public WebSocket protocol. The provider is the WS client; the surface app runs the WS server. There is no REST API. OpenClaw holds its socket persistently; the general standalone `surf-ace` CLI connects directly only for each explicit networked invocation, regardless of caller.
-2. **Lockless client-local authority.** A client advertising the T1770 lockless capability admits multiple controllers concurrently. No provider, controller, product, chat, or identity owns a client, surface, window, pane, history entry, unread record, tombstone, mutation, or restore right. Every surface mutation traverses one client-owned ordered seam and all admission, ordering, validation, capacity, retention, close, restore, and reclamation rules are identity-independent. Clients without the lockless capability retain the explicitly scoped legacy ownership behavior in this document and MUST NOT admit multiple T1770 controllers.
+2. **Lockless client-local authority.** A client advertising the required T1770 lockless capability admits multiple controllers concurrently. No provider, controller, product, chat, or identity owns a client, surface, window, pane, history entry, unread record, tombstone, mutation, or restore right. Every surface mutation traverses one client-owned ordered seam and all admission, ordering, validation, capacity, retention, close, restore, and reclamation rules are identity-independent. A client without the capability is not admitted.
 3. **Content persistence through connection changes.** Connection state MUST NOT affect displayed content or mutate client truth. Content changes only through an accepted explicit content operation.
 4. **Reads are local-only projections.** Ordinary OpenClaw reads use the controller's bounded local projection and never synchronously contact a surface. The client remains authoritative for bounded consumable scopes, per-controller cursor floors, pending truth, and structured gaps; a local read durably queues an idempotent acknowledgement. OpenClaw's connection job delivers it in the background; `surf-ace` delivers it during the next explicit networked CLI invocation for any standalone caller.
 5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a stable internal `paneId` and a stable visible `paneLabel`. OpenClaw resolves human references through `surf_ace_list` using `windowLabel` / `paneLabel`, then targets the pane explicitly by `paneId`. Keyboard focus is a local input affordance only; it does not create default-pane routing or default-pane resolution.
 6. **One visible entry with shared history.** Each pane shows one entry at a time. Every accepted push creates a distinct client-identified entry, becomes visible, and moves the previously visible entry into the shared retained pool. Back and Forward use one cross-controller 20-entry non-visible LRU pool; controller identity never creates replacement-in-place, quota, pinning, priority, or eviction preference.
-7. **Connection-context identity.** In lockless mode, the adapter supplies its asserted stable controller instance ID at admission and the client binds operations to that admitted socket context. OpenClaw does not pass controller/session identity on individual operation payloads, and friendly provenance is never authentication. Legacy `sessionId` injection remains legacy-capability behavior.
+7. **Connection-context identity.** The adapter supplies its asserted stable controller instance ID at admission and the client binds operations to that admitted socket context. OpenClaw does not pass controller/session identity on individual operation payloads, and friendly provenance is never authentication.
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
 9. **Annotation mode locks the viewport.** When annotation mode is active, scroll is disabled and link following is disabled. The drawing layer captures all touch and stylus input until annotation mode exits.
-10. **Client-allocated content revisions.** For lockless-capable surfaces, accepted append-style content operations traverse the client mutation seam; the client allocates the next content revision and a new history-entry ID atomically. Controllers do not submit authoritative content revisions or history-owner tokens. Legacy clients retain the caller-supplied monotonic revision gate only within legacy capability mode.
+10. **Client-allocated content revisions.** Accepted append-style content operations traverse the client mutation seam; the client allocates the next content revision and a new history-entry ID atomically. Controllers do not submit authoritative content revisions or history-owner tokens.
 11. **Annotation reads are pane-scoped at the OpenClaw boundary.** `surf_ace_read` and related OpenClaw-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but OpenClaw does not pass or track history identifiers.
 12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. Lockless committed content/history/topology/lifecycle events fan out to every admitted controller for the affected surface; cursor-specific availability/overflow signals target only the affected controller without conferring authority.
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
@@ -156,10 +156,10 @@ Window rules:
 1. Each window has its own stable `surfaceId` and independent local state (capture frame queue, taps, selection, scroll, etc.).
 2. The app advertises one device endpoint over mDNS (one host/port), not one mDNS record per window.
 3. Windows are enumerated in-band over WS (`surfaces.list`) and can appear/disappear at runtime (`event.surface_appeared`, `event.surface_removed`).
-4. In lockless mode, each admitted controller may maintain one active WS session per target window/surface, even when multiple windows share one endpoint. Legacy mode retains one owner session.
+4. Each admitted controller may maintain one active WS session per target window/surface, even when multiple windows share one endpoint.
 5. Creating/removing a window does not require mDNS rebroadcast; only app endpoint lifecycle affects mDNS advertisement/goodbye.
 6. On iPadOS, each Surf Ace scene MUST occupy the full device extent in landscape and portrait. The app MUST opt out of iPad multitasking/Stage Manager compatibility sizing when needed so the system does not hand Surf Ace a narrow letterboxed or resized scene. Reported viewport, visible content, pane geometry, and chrome must all derive from the same full-size scene.
-7. Closing a window on a lockless-capable client removes it from the live projection but atomically creates a recoverable surface tombstone before `event.surface_removed` and socket closure. The endpoint lifecycle seam remains discoverable with zero live surfaces, and `surfaces.list` exposes the authoritative live/tombstone state required for restore. A client without lockless capability retains the legacy permanent-removal behavior.
+7. Closing a window removes it from the live projection but atomically creates a recoverable surface tombstone before `event.surface_removed` and socket closure. The endpoint lifecycle seam remains discoverable with zero live surfaces, and `surfaces.list` exposes the authoritative live/tombstone state required for restore.
 
 Pane rules (Phase 1 committed work, see §2.3):
 1. Each window may contain one or more panes, each with a stable internal numeric `paneId` and a stable visible numeric `paneLabel`.
@@ -190,7 +190,7 @@ TXT keys used by WS protocol:
 | `h` | int | `1080` | Viewport height (points) |
 | `s` | int | `2` | Scale factor |
 | `cap` | int | `31` | Content type bitmask |
-| `busy` | `0|1` | `0` | Legacy-capability ownership status only. Lockless-capable clients advertise `0`; controller admission is reported through lockless capability/state instead. |
+| `busy` | `0|1` | `0` | Reserved at `0`; controller admission is reported through lockless capability/state. |
 | `pk` | hex8 | `a1b2c3d4` | Device public key fingerprint prefix (endpoint identity only; not used as screen selector in OpenClaw tools) |
 | `ws` | path | `/ws` | WS upgrade path |
 | `tls` | `0|1` | `0` | Reserved for future WSS profile; ignored by v1 |
@@ -216,11 +216,11 @@ The surface runs a WebSocket server. There is no REST HTTP API — the only HTTP
 
 ### 4.2 Capability-Scoped Controller Admission
 1. A client advertising the T1770 lockless capability maintains one finite admitted-controller registry and may admit multiple live controller connections concurrently.
-2. Each controller asserts a mandatory stable opaque controller instance ID. The ID is durable across reconnect/restart/redeploy and scopes live deconfliction, cursors, retry correlation, provenance correlation, and diagnostics only; it grants no ownership, priority, quota, veto, or restore right.
-3. Missing or malformed instance identity fails admission. If the same instance ID is already live, the newcomer receives a distinct duplicate-ID error and the incumbent is preserved. There is no takeover path; retry waits for normal liveness reaping.
+2. Each controller asserts a mandatory stable opaque controller instance ID. The ID is durable across reconnect/restart/redeploy and scopes live deconfliction, cursors, retry correlation, provenance correlation, and diagnostics only; it grants no priority, quota, veto, or restore right.
+3. Missing or malformed instance identity fails admission. If the same instance ID is already live, the newcomer receives a distinct duplicate-ID error and the incumbent is preserved. Retry waits for normal liveness reaping.
 4. Every controller acts through the same client-local ordered mutation and lifecycle seams. Ordering follows client serialization, never controller identity, product, label, retry count, or prior success.
 5. Admission and retained controller state are bounded by the advertised CTLRET limits in §4.8. A capacity refusal never evicts a live controller or selects by identity.
-6. A client that does not advertise T1770 lockless capability remains in legacy single-provider mode. Only in that explicitly negotiated legacy mode do `providerId`, `busy`, owner resume, relinquish, and takeover retain their historical meanings. Legacy and lockless mode are mutually exclusive for one surface.
+6. A client that does not advertise the T1770 lockless capability is not admitted.
 
 **Multi-controller/session routing** is settled: every accepted `content.set` creates a distinct client-identified entry and becomes visible immediately. The displaced visible entry remains in the shared retained pool, and committed content/history events fan out in client order without owner-only delivery.
 
@@ -228,26 +228,24 @@ The surface runs a WebSocket server. There is no REST HTTP API — the only HTTP
 
 All operations other than `surfaces.list` and `pair.request` are invalid until pairing succeeds.
 
-`surfaces.list` remains the pre-pair discovery operation for multi-window endpoints. In lockless mode it exposes client-authoritative lifecycle/capability state without implying ownership availability. Pane topology discovery follows successful controller admission through `panes.list`. Legacy clients retain legacy lock availability semantics.
+`surfaces.list` remains the pre-pair discovery operation for multi-window endpoints. It exposes client-authoritative lifecycle and capability state. Pane topology discovery follows successful controller admission through `panes.list`.
 
-### 4.4 Reconnect, Resume, and Legacy Ownership Operations
+### 4.4 Reconnect and Resume
 
 Provider reconnect policy:
 1. Exponential backoff with jitter: 0.5s, 1s, 2s, 4s, 8s, 16s, max 30s.
 2. Reconnect uses the same discovered surface address.
 3. Lockless recovery sends `pair.request` with the same stable controller instance ID and the controller's resume/synchronization state. The client resumes the retained cursor/gap bundle only while it remains in the bounded dormant pool.
 4. A regenerated ID or an ID whose dormant bundle was reclaimed is a new admission at current scope tails. Human-readable labels never recover cursor state.
-5. Duplicate-live-ID refusal is not takeover: the newcomer waits for the heartbeat/liveness path to reap a dead incumbent.
+5. After a duplicate-live-ID refusal, the newcomer waits for the heartbeat/liveness path to reap a dead incumbent.
 6. Resume exchanges client cursor/gap generations and the controller's durable acknowledgement outbox, retransmits idempotently, and rebuilds the bounded local projection from client snapshots and ordered deltas.
-
-**Legacy capability only:** A non-lockless client retains the historical same-`providerId` owner resume, `busy`, explicit user-directed takeover, self-reclaim, and `ownership.relinquish` behavior. Lockless controllers MUST NOT send or interpret those operations.
 
 **Invariant: connection state MUST NOT affect displayed content or client truth.** A controller crash, restart, disconnect, or partition does not mutate content/topology, free or transfer a right, elect a controller, or stop other admitted controllers.
 
 ### 4.5 Keepalive
 
 Application-level keepalive is required:
-1. In lockless mode, each controller starts heartbeat only after successful admission and initial client snapshot/capability validation. Legacy mode retains its provider-authority prerequisite.
+1. Each controller starts heartbeat only after successful admission and initial client snapshot/capability validation.
 2. Provider sends `heartbeat.ping` every 10s.
 3. Surface replies with `heartbeat.pong` within 3s.
 4. Surface MUST prioritize heartbeat handling above queued frame/render work and MUST NOT queue `heartbeat.pong` behind render/mutation tasks.
@@ -286,7 +284,7 @@ Rules:
 
 ### 4.8 T1770 Lockless Authority, Capacity, Retention, and Retired Model
 
-This subsection is the compact canonical amendment for a client advertising `surf-ace.lockless-multi-controller.v1`. It does not change legacy behavior on a client that omits that capability. Legacy and lockless behavior MUST NOT be mixed for one surface.
+This subsection is the compact canonical contract for a client advertising `surf-ace.lockless-multi-controller.v1`. A client that omits that capability is not admitted.
 
 #### Client-local mutation and topology authority
 
@@ -308,14 +306,14 @@ This subsection is the compact canonical amendment for a client advertising `sur
 2. `P` is a pane-creating admission cap, not a live-pane invariant. After stale-revision validation, each pane-creating transaction computes its prospective count before ID allocation. For `pane.split`, `prospectiveLivePaneCount = currentLivePaneCount - 1 + count`; the initial pane on surface open has prospective count one. Exceeding `P` returns stable identity-independent `pane_capacity` with current/requested/maximum values and commits nothing.
 3. Before any state-growing mutation, the client applies normal history LRU, computes the greater exact live-or-tombstoned representation for each affected surface base and pane, and returns `surface_state_capacity` or `pane_state_capacity` with current/prospective/maximum values if a bound would be exceeded. This reserves all tombstone-only durable bytes before close. Failure commits nothing and never truncates or silently evicts content, history, provenance, or annotations.
 4. Pane/surface close and restore move already-conforming state and never perform the pane or recoverable-byte capacity refusals above. A retained pane restore reactivates the same ID; if `(L,R)` are live panes and retained pane tombstones, restore changes them to `(L + 1,R - 1)`. It may produce a valid live count above `P`, up to `P + T`, and topology/list projections MUST accept that state rather than clamp it. Pane creation remains refused until its prospective count is at most `P`.
-5. Admission, migration, restart, and configuration changes prove every exact byte limit and `L + R <= P + T`; over-limit state fails with its specific capacity class without truncation or identity-based selection.
+5. Admission, restart, and configuration changes prove every exact byte limit and `L + R <= P + T`; over-limit state fails with its specific capacity class without truncation or identity-based selection.
 
 #### Recoverable pane close and shared tombstone retention
 
 1. Accepted pane close atomically removes the pane from visible topology, creates a durable tombstone, advances topology revision once, and then emits the committed close event. The tombstone preserves stable identity/lineage, label hint/name, visible and retained history with revisions/provenance, bounded annotation/restore state, bounded consumable scope, all retained controller cursors, and uncleared gaps. Close does not read, discard, truncate, or advance any of them.
 2. Any admitted controller may restore any retained tombstone using current topology revision and placement intent. Missing tombstone, stale revision, or invalid placement changes nothing. Accepted restore reinserts the same pane ID/state, consumes the tombstone, advances one revision, and emits events after commit. Current live count and retained-state size never produce `pane_capacity`, `pane_state_capacity`, or `surface_state_capacity` on restore.
 3. The last live pane cannot close. Restore reuses its label only if still valid/unassigned; otherwise the client allocates a new unique live label without changing identity/state.
-4. The client advertises finite positive `maxRetainedTombstones` (`T`) and `maxRetainedTombstoneBytes`, shared across pane and surface tombstones. Exact serialized bytes are used for accounting. Because admission proves the exact full recoverable surface envelope from exhaustive non-overlapping partitions whose base/pane limits include every tombstone-only durable byte, and proves `maxRecoverableSurfaceBytes <= maxRetainedTombstoneBytes`, valid controller/user close never returns `tombstone_capacity`; the close transaction instead reclaims existing tombstones by ascending client `closedSequence` until both bounds hold, rolling back reclamation if close cannot commit. `tombstone_capacity` is reserved for admission, migration, restart, or configuration state whose exact retained-tombstone aggregate already exceeds the shared byte bound; rejection preserves the source or prior durable generation without trim, reclamation, or drop.
+4. The client advertises finite positive `maxRetainedTombstones` (`T`) and `maxRetainedTombstoneBytes`, shared across pane and surface tombstones. Exact serialized bytes are used for accounting. Because admission proves the exact full recoverable surface envelope from exhaustive non-overlapping partitions whose base/pane limits include every tombstone-only durable byte, and proves `maxRecoverableSurfaceBytes <= maxRetainedTombstoneBytes`, valid controller/user close never returns `tombstone_capacity`; the close transaction instead reclaims existing tombstones by ascending client `closedSequence` until both bounds hold, rolling back reclamation if close cannot commit. `tombstone_capacity` is reserved for admission, restart, or configuration state whose exact retained-tombstone aggregate already exceeds the shared byte bound; rejection preserves the source or prior durable generation without trim, reclamation, or drop.
 5. Reclamation permanently deletes the selected retained state/cursors, emits an ordered reclamation event to all live admitted controllers, and writes durable exact diagnostics. Listing, reading, or failed restore never refreshes order; selection never uses controller identity, labels, provenance, creator, closer, or unread amount.
 
 #### Consumable truth, local projections, and dormant controllers
@@ -339,7 +337,7 @@ The first term charges the enclosing live/surface-tombstone record exactly once;
 
 #### Retired model register
 
-For lockless-capable surfaces, the June provider-segregation recon D1/D3/R2..R7 and all Revision 1–5 designation, claim-scope, ownership, takeover, owner-only, provider-partitioned history/cursor, and namespace requirements are superseded by T1770 client-local authority. Historical `providerId`, namespace, designation, lineage, and owner tokens MUST NOT be renamed into controller identity or retained as comparison, partitioning, priority, quota, routing, or refusal behavior. Controller instance identity has only the uses allowed in §4.2. `ARCH-10` survives: hosts, addresses, runtime placement, and state roots remain external configuration, never product truth.
+Controller instance identity has only the uses allowed in §4.2. It does not partition content, history, cursors, routing, admission priority, or mutation rights. `ARCH-10` survives: hosts, addresses, runtime placement, and state roots remain external configuration, never product truth.
 
 ### 4.9 General Standalone Surf Ace CLI and Reusable Consumers
 
@@ -375,7 +373,6 @@ For lockless-capable surfaces, the June provider-segregation recon D1/D3/R2..R7 
 2. `content.set` is append-style: the client allocates the next content revision and a new history-entry ID and commits the new visible entry atomically. Controllers do not submit an authoritative revision or `historyOwnerToken`.
 3. `content.append`, `content.patch`, and `content.clear` target current client state with the operation's required expected-state token; the client allocates the committed revision.
 4. Expected-state mismatch returns the applicable stable stale error with current authoritative state and commits nothing.
-5. A legacy-capability client retains the historical caller-supplied monotonic `revision == currentRevision + 1` gate only in legacy mode.
 6. Drawing overlay mutations are provider-controlled through `annotations.remove`; surface never autonomously deletes strokes.
 
 ### 5.5 Size Limits
@@ -405,11 +402,10 @@ Severe violation threshold:
 
 Rules:
 1. Provider MAY call `surfaces.list` immediately after WS connect.
-2. After lifecycle admission, the lockless response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, admission availability, and the bounded durable admission-attempt ledger without ownership fields. `paired` is legacy capability state only. Pre-pair and surface-scoped discovery omit the ledger.
+2. After lifecycle admission, the response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, admission availability, and the bounded durable admission-attempt ledger. Pre-pair and surface-scoped discovery omit the ledger.
 3. `surfaces.list` is discovery-only and grants no pane/topology/lifecycle right.
 4. Any controller meeting lockless identity/capacity admission may send `pair.request`; a duplicate live ID or full all-live controller registry receives its distinct stable refusal.
 5. Full pane topology discovery follows admission via `panes.list`, and valid restored live pane counts above `maxPanesPerSurface` are reported without clamping.
-6. Legacy clients retain the historical `paired`/claim/owner-resume/takeover behavior only in legacy mode.
 
 Each admission-attempt ledger record contains the exact `surfaceId`, `controllerInstanceId`, triggering request ID, monotonic attempt sequence, start/update times, last reached stage, outcome, and failure code/message. Request and controller IDs use `[A-Za-z0-9._:-]{1,64}`; surface IDs use `sf_` followed by 3–64 characters from the same set. Failure codes use `[a-z_]{1,64}`. Failure messages retain at most 512 UTF-8 bytes in their JSON string encoding and carry `…[truncated]` when the exact message exceeds that bound.
 
@@ -423,21 +419,17 @@ Flow:
 1. Provider opens WS.
 2. Provider may call `surfaces.list` to discover available surfaces.
 3. Provider sends `pair.request`.
-4. Surface replies `pair.response` (success or error). In lockless mode success means new controller admission or same-ID retained-state resume; it never means ownership acquisition or transfer. A surface-scoped success includes the committed admission-attempt record.
+4. Surface replies `pair.response` (success or error). Success means new controller admission or same-ID retained-state resume. A surface-scoped success includes the committed admission-attempt record.
 5. If success, connection enters active mode and event streaming starts immediately.
 
 `pair.request` fields include:
-1. `controllerInstanceId` (mandatory stable opaque asserted instance identity in lockless mode). It is persisted across restart/redeploy and scopes only deconfliction, cursors, correlation, and diagnostics. `providerId` remains a legacy ownership field only.
+1. `controllerInstanceId` (mandatory stable opaque asserted instance identity). It is persisted across restart/redeploy and scopes only deconfliction, cursors, correlation, and diagnostics.
 2. `connectionId` (unique per socket attempt).
 3. `surfaceId` (target window surface on multi-window endpoints).
-4. `resume` (optional prior synchronization/cursor/gap generation state for the same controller instance; legacy `sessionId` owner resume is legacy-mode only).
-5. `takeover` (legacy capability only; prohibited in lockless mode).
+4. `resume` (optional prior synchronization/cursor/gap generation state for the same controller instance).
 6. `providerName` (required human-readable provider/product display metadata and diagnostics only; never identity, routing, or authority).
 7. `eventProfile` (optional, default `minimum_deep`).
 8. `drawingFlushConfig` (optional, provider-preferred idle/max interval values).
-9. `windowLabel` (legacy capability bootstrap only; lockless labels are client-allocated).
-10. `initialPaneId` (legacy capability bootstrap only; lockless pane IDs are client-allocated).
-11. `initialPaneLabel` (legacy capability bootstrap only; lockless pane labels are client-allocated).
 12. `protocolVersion` (`1` for this spec).
 
 `pair.response` success includes:
@@ -452,7 +444,7 @@ A successful `pair.response` MUST include at least one topology pane. Providers 
 
 ### 6.1.1 Controller Admission, Recoverable Lifecycle, and Shared History Operations (Phase 1)
 
-These operations are post-admission and scoped to client authority. Lockless operations implement §§4.2–4.8; explicitly negotiated legacy clients retain the historical ownership behavior.
+These operations are post-admission and scoped to client authority. They implement §§4.2–4.8.
 
 #### `surface.window.open`
 Requests that the paired Surf Ace Spatial app endpoint create a new top-level Surf Ace Spatial surface window.
@@ -476,19 +468,6 @@ Requests that the paired Surf Ace Spatial app close the currently paired top-lev
 3. The endpoint lifecycle/restore seam remains available with zero live surfaces. Any admitted controller or the local user may restore the retained surface with the same IDs/state.
 4. A client that omits controller window lifecycle still makes every local-user close recoverable.
 
-#### `ownership.relinquish` (legacy capability only)
-Voluntarily clears ownership for a legacy-mode paired surface. Lockless controllers MUST NOT send this operation.
-
-**Request fields:** none.
-
-**Behavior:**
-1. Only the current lock owner may call `ownership.relinquish`. Non-owners receive `not_lock_owner`.
-2. On success, the surface clears ownership immediately but preserves displayed content, pane topology, and annotations.
-3. After success, the relinquishing provider MUST disable auto-retry for that surface. Reconnect after relinquish requires a new fresh claim, not owner resume.
-4. `ownership.relinquish` is the normal, voluntary way to make a surface available for another provider later. It is distinct from `takeover`, which is an explicit transfer initiated by another provider.
-
-**Response fields:** `relinquished: true`.
-
 #### `panes.list`
 Returns current pane layout for the paired surface.
 
@@ -499,7 +478,7 @@ The OpenClaw-facing `surf_ace_list` response exposes the client-owned `topologyR
 #### `pane.split`
 Splits an existing pane into N panes.
 
-**Request fields:** `paneId` (required — pane to split), `expectedTopologyRevision`, `count` (total pane count after split, including the source pane; min 2), and `direction` (`horizontal` | `vertical`). `newPaneIds`/`newPaneLabels` are legacy-capability fields only.
+**Request fields:** `paneId` (required — pane to split), `expectedTopologyRevision`, `count` (total pane count after split, including the source pane; min 2), and `direction` (`horizontal` | `vertical`).
 
 **Behavior:** The source pane retains its `paneId`, `paneLabel`, and content. In lockless mode the client checks the expected revision, computes `currentLivePaneCount - 1 + count`, returns `pane_capacity` without mutation when that exceeds the advertised admission cap, then performs exact recoverable-state byte checks. On success it allocates IDs/labels and emits `event.pane_created` after atomic commit.
 
@@ -581,9 +560,9 @@ These rules are normative for the lockless shared history model:
 #### Protocol forward compatibility
 The `video` and `canvas` content types are included in the `ContentType` schema enum in v1 so that implementations can reject them with `unsupported_content_type` rather than `invalid_payload`. This preserves forward compatibility: a v1 surface that does not implement these types still handles the message gracefully. A surface advertises supported content types via `cap` bitmask in mDNS TXT and in the `pair.response` capabilities field.
 
-`authority.state.v1` is a legacy capability only. In lockless mode, `surf-ace.lockless-multi-controller.v1` plus the complete client snapshot, advertised limits, revisions, stable IDs/labels, and controller-specific cursor/gap state determine actionability. A controller fails lockless admission if any required capability or projection capacity is absent; it never sends provider-owned identity/topology for client adoption.
+`surf-ace.lockless-multi-controller.v1` plus the complete client snapshot, advertised limits, revisions, stable IDs/labels, and controller-specific cursor/gap state determine actionability. A controller fails admission if any required capability or projection capacity is absent; it never sends provider-owned identity/topology for client adoption.
 
-Lockless authority reconciliation invariant: the client-authored stable IDs, labels, revisions, topology, lifecycle state, limits, consumable scopes, cursor floors, and gaps are authoritative. Controller caches and runtime/process/session metadata reconcile to that state and cannot create terminal non-actionability based on controller identity, ownership epoch, provider lineage, or label disagreement. The historical `authority.state`/stable-`providerId` ownership reconciliation invariant applies only to explicitly negotiated legacy clients.
+Authority reconciliation invariant: the client-authored stable IDs, labels, revisions, topology, lifecycle state, limits, consumable scopes, cursor floors, and gaps are authoritative. Controller caches and runtime/process/session metadata reconcile to that state and cannot create terminal non-actionability based on controller identity, provider lineage, or label disagreement.
 
 ## 7. Always-On Event Delivery
 
@@ -668,7 +647,7 @@ Event behavior rules:
 2. Events are not replayed across reconnect.
 3. After reconnect, provider must request `snapshot.get` before acting on new events.
 4. Provider MUST buffer events that arrive while this mandatory `snapshot.get` is in-flight.
-5. In lockless mode, the client-authoritative bounded scopes and structured gap rules in §4.8 replace the legacy 128-event snapshot buffer and local warning. A controller snapshot projection must hold the negotiated retained window; inability to do so fails lockless admission. The 128-event rule remains legacy capability behavior only.
+5. The client-authoritative bounded scopes and structured gap rules in §4.8 define retention. A controller snapshot projection must hold the negotiated retained window; inability to do so fails admission.
 6. On snapshot success, provider applies snapshot state first, then processes buffered events in receive order.
 7. On snapshot failure (`internal_error` or `content_too_large`), provider MUST close socket and re-enter reconnect backoff.
 8. On backpressure, surface may coalesce/delay high-rate events (`event.scroll`) and delay `event.drawing_flush` emission until sendable; if any events were dropped/coalesced, emit `event.snapshot_hint` with reason `backpressure_drop`.
@@ -694,15 +673,13 @@ Required behavior:
 
 | Code | Meaning |
 |---|---|
-| `busy` | Legacy capability only: surface ownership lock is held by another provider and no takeover was granted |
-| `invalid_resume` | Resume token/session is invalid for the current ownership state |
-| `not_lock_owner` | Legacy capability only: ownership-changing operation attempted by a non-owner provider |
+| `invalid_resume` | Resume token/session is invalid for the retained controller state |
 | `duplicate_controller_id` | Lockless admission found the same instance ID already live |
 | `controller_capacity` | All admitted-controller entries are live and the advertised bound is full |
 | `pane_capacity` | Pane-creating prospective live count exceeds the advertised admission cap |
 | `surface_state_capacity` | Exact prospective serialized surface base bytes exceed the advertised bound |
 | `pane_state_capacity` | Exact prospective pane/annotation recoverable bytes exceed an advertised bound |
-| `tombstone_capacity` | Admission, migration, restart, or configuration retained-tombstone aggregate exceeds the advertised shared byte bound; never returned by valid close |
+| `tombstone_capacity` | Admission, restart, or configuration retained-tombstone aggregate exceeds the advertised shared byte bound; never returned by valid close |
 | `not_paired` | Operation attempted before successful pair |
 | `invalid_payload` | JSON shape/type invalid |
 | `invalid_request_id_reuse` | Duplicate request ID with different payload |
@@ -721,9 +698,7 @@ Required behavior:
 
 | Code | Reason |
 |---|---|
-| `1000` + `provider_shutdown` | Controller/provider graceful shutdown. In lockless mode client truth is unchanged and other controllers continue; the historical retained lock meaning is legacy-only. |
-| `1000` + `superseded` | Legacy capability only: explicit takeover accepted. |
-| `1000` + `relinquished` | Legacy capability only: current owner voluntarily cleared ownership. |
+| `1000` + `provider_shutdown` | Controller/provider graceful shutdown. Client truth is unchanged and other controllers continue. |
 | `4401` | Pair/auth failure |
 | `4409` | Busy/occupied |
 | `4410` | Protocol violation (malformed envelope/op mismatch) |
@@ -748,11 +723,10 @@ Required behavior:
 3. Implementations MAY experiment with WSS privately, but v1 interoperability requirements are defined only for `ws`.
 
 ### 9.4 Session and Controller Identity
-1. In lockless mode, a stable asserted `controllerInstanceId` deconflicts live connections and scopes cursors/correlation only. It is not authentication, ownership, permission, priority, quota, or routing authority.
-2. A session is bound to an individual admitted socket. Retained same-ID reconnect resumes only the bounded cursor/gap state described in §4.8; there is no owner resume or takeover.
+1. A stable asserted `controllerInstanceId` deconflicts live connections and scopes cursors/correlation only. It is not authentication, permission, priority, quota, or routing authority.
+2. A session is bound to an individual admitted socket. Retained same-ID reconnect resumes only the bounded cursor/gap state described in §4.8.
 3. No callback token model exists.
 4. No watch subscription tokens exist.
-5. On explicitly negotiated legacy clients only, the historical `surfaceId + providerId` ownership lock and owner-resume behavior remain in force.
 
 ## 10. JSON Schemas (All Message Types)
 
@@ -767,7 +741,6 @@ The schema below defines every v1 application message type over WS.
   "oneOf": [
     { "$ref": "#/$defs/SurfacesListRequest" },
     { "$ref": "#/$defs/PairRequest" },
-    { "$ref": "#/$defs/RelinquishRequest" },
     { "$ref": "#/$defs/ContentSetRequest" },
     { "$ref": "#/$defs/ContentAppendRequest" },
     { "$ref": "#/$defs/ContentPatchRequest" },
@@ -778,7 +751,6 @@ The schema below defines every v1 application message type over WS.
 
     { "$ref": "#/$defs/SurfacesListResponse" },
     { "$ref": "#/$defs/PairResponse" },
-    { "$ref": "#/$defs/RelinquishResponse" },
     { "$ref": "#/$defs/MutationAckResponse" },
     { "$ref": "#/$defs/AnnotationsRemoveResponse" },
     { "$ref": "#/$defs/SnapshotResponse" },
@@ -1035,7 +1007,6 @@ The schema below defines every v1 application message type over WS.
             "malformed_controller_id",
             "controller_capacity",
             "invalid_resume",
-            "not_lock_owner",
             "not_paired",
             "invalid_payload",
             "invalid_request_id_reuse",
@@ -1163,7 +1134,7 @@ The schema below defines every v1 application message type over WS.
                   "surfaceId": { "$ref": "#/$defs/SurfaceId" },
                   "name": { "type": "string" },
                   "viewport": { "$ref": "#/$defs/SurfaceViewport" },
-                  "paired": { "type": "boolean", "description": "Legacy capability ownership status only. Lockless admission is reported through negotiated capability/controller state." }
+                  "paired": { "type": "boolean", "description": "Deprecated discovery projection; admission is reported through negotiated capability/controller state." }
                 }
               }
             }
@@ -1185,62 +1156,23 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["connectionId", "protocolVersion", "surfaceId"],
+          "required": ["controllerInstanceId", "projectionCapacityBytes", "protocolFeatures", "protocolVersion"],
           "properties": {
-            "controllerInstanceId": { "type": "string", "minLength": 1, "description": "Required for lockless capability. Stable opaque asserted instance identity; never an authority principal." },
-            "providerId": { "$ref": "#/$defs/ProviderId", "description": "Legacy capability ownership identity only." },
-            "connectionId": { "$ref": "#/$defs/ConnectionId" },
+            "controllerInstanceId": { "type": "string", "minLength": 1, "description": "Stable opaque asserted instance identity; never an authority principal." },
+            "controllerProductName": { "type": "string", "description": "Human-facing product provenance only." },
+            "projectionCapacityBytes": { "type": "integer", "minimum": 1 },
+            "protocolFeatures": {
+              "type": "array",
+              "contains": { "const": "surf-ace.lockless-multi-controller.v1" },
+              "minItems": 1,
+              "items": { "type": "string" }
+            },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
-            "windowLabel": { "type": "string", "minLength": 1, "description": "Legacy capability bootstrap only; lockless labels are client allocated." },
-            "initialPaneId": { "$ref": "#/$defs/PaneId", "description": "Legacy capability bootstrap only." },
-            "initialPaneLabel": { "$ref": "#/$defs/PaneLabel", "description": "Legacy capability bootstrap only." },
-            "friendlyChatName": { "type": "string", "description": "Human-facing provenance metadata only." },
-            "providerName": { "type": "string", "description": "Human-facing provider/product provenance and diagnostics only; never identity or authority." },
             "protocolVersion": { "const": 1 },
-            "takeover": { "type": "boolean", "description": "Legacy capability ownership transfer only; prohibited in lockless mode." },
-            "eventProfile": { "$ref": "#/$defs/EventProfile" },
-            "drawingFlushConfig": { "$ref": "#/$defs/DrawingFlushConfig" },
             "resume": {
               "type": "object",
-              "additionalProperties": false,
-              "required": ["sessionId"],
-              "properties": {
-                "sessionId": { "$ref": "#/$defs/SessionId" }
-              }
+              "description": "Bounded cursor, gap, and receipt state for the same controller instance."
             }
-          }
-        }
-      }
-    },
-    "RelinquishRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "id", "sentAt"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "request" },
-        "op": { "const": "ownership.relinquish" },
-        "id": { "$ref": "#/$defs/RequestId" },
-        "sentAt": { "$ref": "#/$defs/EpochMs" }
-      }
-    },
-    "RelinquishResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
-      "properties": {
-        "v": { "const": 1 },
-        "type": { "const": "response" },
-        "op": { "const": "ownership.relinquish" },
-        "id": { "$ref": "#/$defs/RequestId" },
-        "ok": { "const": true },
-        "sentAt": { "$ref": "#/$defs/EpochMs" },
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["relinquished"],
-          "properties": {
-            "relinquished": { "const": true }
           }
         }
       }
@@ -1267,8 +1199,6 @@ The schema below defines every v1 application message type over WS.
                   "description": "Target pane. Required — OpenClaw must always specify which pane to target."
                 },
                 "contentId": { "$ref": "#/$defs/ContentId" },
-                "historyOwnerToken": { "type": "string", "minLength": 1, "description": "Legacy capability replacement token only; prohibited in lockless mode." },
-                "revision": { "$ref": "#/$defs/Revision", "description": "Legacy capability caller revision only; lockless clients allocate the committed revision." },
                 "friendlyChatName": { "type": "string", "description": "Entry-bound human-facing provenance component." },
                 "providerName": { "type": "string", "description": "Entry-bound provider/product provenance component." },
                 "contentType": { "$ref": "#/$defs/ContentType" },
@@ -1602,7 +1532,6 @@ The schema below defines every v1 application message type over WS.
                 "maxVisibleTextBytes": { "type": "integer", "minimum": 256 },
                 "maxStrokePointsPerFlush": { "type": "integer", "minimum": 1 },
                 "maxDrawingFlushBytes": { "type": "integer", "minimum": 1024 },
-                "resumeGraceMs": { "type": "integer", "minimum": 5000, "default": 20000, "description": "Legacy capability owner-resume field only." },
                 "maxPanesPerSurface": { "type": "integer", "minimum": 1, "description": "Lockless pane-creating admission cap, not a post-restore live-count invariant." },
                 "maxSurfaceRecoverableBaseBytes": { "type": "integer", "minimum": 1 },
                 "maxPaneRecoverableStateBytes": { "type": "integer", "minimum": 1 },
@@ -2268,20 +2197,6 @@ The schema below defines every v1 application message type over WS.
             "direction": {
               "type": "string",
               "enum": ["horizontal", "vertical"]
-            },
-            "newPaneIds": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/PaneId" },
-              "minItems": 1,
-              "uniqueItems": true,
-              "description": "Legacy capability only. Lockless clients allocate new pane IDs."
-            },
-            "newPaneLabels": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/PaneLabel" },
-              "minItems": 1,
-              "uniqueItems": true,
-              "description": "Legacy capability only. Lockless clients allocate new pane labels."
             }
           }
         }
@@ -2514,7 +2429,7 @@ The schema below defines every v1 application message type over WS.
 This section documents the hardening decisions locked into the protocol.
 
 1. Race: duplicate sockets from reconnect overlap.
-Resolution: lockless pair includes stable asserted `controllerInstanceId` plus per-attempt `connectionId`; duplicate live identity is refused deterministically, retained same-ID resume restores only bounded cursor/gap state, and there is no ownership/takeover path. The historical `providerId` ownership resolution applies only to explicitly negotiated legacy clients.
+Resolution: pair includes stable asserted `controllerInstanceId`; duplicate live identity is refused deterministically, and retained same-ID resume restores only bounded cursor/gap state.
 
 2. Out-of-order or retried content mutations.
 Resolution: mandatory monotonic `revision`; strict `expectedRevision` gate; request-ID idempotency cache.
@@ -2523,7 +2438,7 @@ Resolution: mandatory monotonic `revision`; strict `expectedRevision` gate; requ
 Resolution: event stream is best-effort across reconnect by design; provider must issue `snapshot.get` after reconnect; backpressure coalesces high-rate events and emits `event.snapshot_hint`; drawing flushes are dual-gated (idle + max interval) to bound send frequency.
 
 4. Ghost occupancy after crash.
-Resolution: socket loss never clears displayed content or mutates client truth. Lockless clients retain no ownership to release and other admitted controllers continue. The historical retained lock until relinquish/takeover applies only to explicitly negotiated legacy clients.
+Resolution: socket loss never clears displayed content or mutates client truth. Other admitted controllers continue.
 
 5. Payload abuse and parser risk.
 Resolution: explicit max-byte limits in pair response; typed schemas; `content_too_large` and WS close `4413`; malformed envelope closes `4410`.
@@ -2581,7 +2496,7 @@ Protocol is ready for implementation when these checks pass in integration tests
 3. Surface flushes drawings only under dual-gate timing (`idleWindowMs` + `maxIntervalMs`) and never flushes unchanged data.
 4. Every stroke in `event.drawing_flush` and `snapshot.get` has stable `strokeId` and retains ID stability until explicitly removed.
 5. `annotations.remove` removes only requested stroke IDs, reports `removedStrokeIds`/`notFoundStrokeIds`, and preserves all unspecified strokes.
-6. Lockless reconnect uses stable controller identity and bounded resume state; socket loss does not mutate client truth or block other admitted controllers. The historical owner-only reconnect/relinquish/takeover rule applies only to explicitly negotiated legacy clients.
+6. Reconnect uses stable controller identity and bounded resume state; socket loss does not mutate client truth or block other admitted controllers.
 7. Revision errors and idempotency replay behave exactly as specified.
 8. Visual send indicator is visible while each drawing flush transmission is in-flight.
 9. `content.set` and `content.clear` both clear drawing overlay state.
@@ -2736,7 +2651,7 @@ The following declared record classes handle non-annotation surface events. Appe
 
 #### Overflow
 
-The legacy 512-entry taps cap and next-read `overflowed` boolean do not apply in lockless mode. Each record/live-frame ingress transaction applies declared coalescing, computes exact versioned serialized count/bytes, and removes complete oldest records by `consumableSequence` until the advertised scope bounds hold. An oversized candidate or removed unread range creates/extends one bounded sticky client `consumableGap` per affected controller/scope, sends targeted `event.consumable_overflow`, and writes durable diagnostics. Local reads project that gap as structured `consumableLoss`; they cannot invent or erase it.
+Each record/live-frame ingress transaction applies declared coalescing, computes exact versioned serialized count/bytes, and removes complete oldest records by `consumableSequence` until the advertised scope bounds hold. An oversized candidate or removed unread range creates or extends one bounded sticky client `consumableGap` per affected controller/scope, sends targeted `event.consumable_overflow`, and writes durable diagnostics. Local reads project that gap as structured `consumableLoss`; they cannot invent or erase it.
 
 ### 13.3 Alert Gate (Dual-Channel Activity Gate)
 
@@ -2832,7 +2747,7 @@ Connection states visible to OpenClaw (via `surf_ace_list`):
 
 OpenClaw's tool surface has a strict read/write split:
 
-**Writes** either go to the surface over the WS connection (pushing content, clearing content, removing annotations) or, for the explicit legacy-to-lockless cutover preparation action, durably freeze a local migration boundary without network I/O. These are explicit OpenClaw intent.
+**Writes** go to the surface over the WS connection (pushing content, clearing content, removing annotations). These are explicit OpenClaw intent.
 
 **Reads** are always local projection transactions. The client owns authoritative bounded consumable scopes, cursor floors, pending truth, and structured gaps. Pair/resume snapshots plus ordered deltas received during OpenClaw's connection job or the standalone CLI's explicit networked invocations keep the controller projection current. An ordinary read returns cached data/loss/status, durably advances the projected cursor and queues an idempotent acknowledgement intent, and never triggers synchronous network I/O. Only client acceptance of the acknowledgement advances authoritative state.
 
@@ -2869,11 +2784,11 @@ pendingEvents     int       Count of buffered events not yet read by OpenClaw
 
 #### `surf_ace_authority_diagnostics`
 
-Returns the local projection of client-authored admission, capability, revision, topology, lifecycle, capacity, cursor/gap, and cache-health truth used to decide which surfaces are actionable. Read-only and local. Legacy clients may additionally expose legacy provider authority.
+Returns the local projection of client-authored admission, capability, revision, topology, lifecycle, capacity, cursor/gap, and cache-health truth used to decide which surfaces are actionable. Read-only and local.
 
 **Params:** none
 
-**Returns:** a diagnostic record containing persisted/live surfaces, runtime snapshot IDs, target/window records, pane and surface tombstones, pane counters, lockless capability/limits, admitted/dormant controller IDs and retention state, cursor/gap/cache health, blocked surface IDs/reasons, and runtime process state. Legacy mode may additionally report provider ownership diagnostics.
+**Returns:** a diagnostic record containing persisted/live surfaces, runtime snapshot IDs, target/window records, pane and surface tombstones, pane counters, lockless capability/limits, admitted/dormant controller IDs and retention state, cursor/gap/cache health, blocked surface IDs/reasons, and runtime process state.
 
 **Behavior:** This tool is available even when `surf_ace_list` is empty, so stale self-owned persisted surfaces and disabled/passive runtime state remain inspectable without first admitting a usable surface.
 
@@ -2930,7 +2845,7 @@ summary           string?   Optional human-readable target summary shown in diag
 
 **Returns:** same pane/target result shape as `surf_ace_push`, with `contentId: null`, `targetKind: "native_app"`, and target apply evidence.
 
-**Behavior:** The controller requests a `native_app` target for a stable pane; the client validates/commits the pane content intent and projects client-resolved pane geometry to the compositor. Evidence must make launch readiness checkable: target app identity, args, pane geometry identity, client admission/revision tuple, host/overlay application state, and compositor lifecycle/input/focus diagnostics. Runtime binding readiness is not controller authority and cannot become ownership/takeover behavior. The compositor receives resolved native-host and overlay regions and must not infer layout intent from controller payload. Without `confirmed:true`, an admitted/actionable pane, trusted runtime app binding, or `target.native_app.v1`, the operation fails closed and does not launch a process.
+**Behavior:** The controller requests a `native_app` target for a stable pane; the client validates/commits the pane content intent and projects client-resolved pane geometry to the compositor. Evidence must make launch readiness checkable: target app identity, args, pane geometry identity, client admission/revision tuple, host/overlay application state, and compositor lifecycle/input/focus diagnostics. Runtime binding readiness cannot affect admission or routing. The compositor receives resolved native-host and overlay regions and must not infer layout intent from controller payload. Without `confirmed:true`, an admitted/actionable pane, trusted runtime app binding, or `target.native_app.v1`, the operation fails closed and does not launch a process.
 
 **Product proof gate:** Native GUI/app materialization is production-proven only when this official Surf Ace provider/tool path owns the target apply. A valid proof starts from `surf_ace_list` showing the target pane admitted/actionable, launches through `surf_ace_launch_native_app`, receives target apply evidence for the same pane with `nativeHost: "applied"` and `overlayRegions: "applied"`, and captures visible rendering in that Surf Ace pane. Direct compositor/native-pane calls such as `native_pane.host`, manually hosted windows, demo fixtures, fake WS servers, mocked compositor status, or lower-layer logs are diagnostic evidence only. They may explain a failure inside the Electron/compositor seam, but they cannot satisfy Surf Ace spec/product verification by themselves.
 
@@ -2962,7 +2877,7 @@ revision       int      Revision after clear
 
 #### `surf_ace_reattempt_connections`
 
-Operator-scoped control tool that resets open Surf Ace connection circuits and reattempts stopped reconnect/probe workers. In lockless mode it only wakes identity/capacity-eligible connection work and grants no right or priority. Legacy mode retains its ownership constraints. Write.
+Operator-scoped control tool that resets open Surf Ace connection circuits and reattempts stopped reconnect/probe workers. It only wakes identity/capacity-eligible connection work and grants no right or priority. Write.
 
 **Params:**
 ```
@@ -3184,18 +3099,6 @@ consumableLoss    object?  Structured sticky client-authored loss/gap projected 
 cacheStatus       string   "current" | "stale" | "repairing"; stale data remains local and schedules background repair.
 readAt            epochMs
 
-// Legacy-mode migration-read proof; omitted in lockless mode
-legacyCompatibilityReadBoundary object? {
-  schemaVersion                    1
-  endpointId                       string
-  surfaceId                        string
-  paneInventorySha256              string
-  requiredPaneIds                  string[]  Canonically sorted complete pane set.
-  completedPaneIds                 string[]  Canonically sorted panes with no compatibility-readable pending material after durable consumption.
-  panePostReadSha256               object    Map from completed pane id to canonical post-read source SHA-256.
-  complete                         bool      True only when completedPaneIds exactly equals requiredPaneIds.
-  compatibilityReadBoundarySha256 string    SHA-256 of the canonical fields above, excluding this digest.
-}
 ```
 
 **Read priority + dedupe contract:**
@@ -3206,19 +3109,12 @@ legacyCompatibilityReadBoundary object? {
 - Closed frames should still be processed even when some strokes were already seen live (frame image/context is authoritative).
 - A stroke may appear in both channels; dedupe by `strokeId` per `frameId`/`contextKey`.
 
-**Errors:** `screen_not_found`, `migration_already_prepared`
+**Errors:** `screen_not_found`
 
 `surf_ace_read` may be called regardless of connection state. It never synchronously repairs the cache; an unsynchronized projection returns explicit `cacheStatus` with available data and schedules background repair.
 
-In legacy mode, the read's consumptive update and
-`legacyCompatibilityReadBoundary` update are one durable transaction. When a
-non-complete migration transaction exists for the surface,
-`migration_already_prepared` returns before consumption so prepared material
-cannot later be consumed and replayed.
-
-**Migration notes (frame-queue-only → dual-channel):**
-- Existing callers that only read `frames[]` continue to work unchanged.
-- New callers should also inspect `liveFrame`/`liveDirtyStrokeIds` for near-real-time response while annotation is active.
+**Delivery notes:**
+- Callers should inspect `liveFrame`/`liveDirtyStrokeIds` for near-real-time response while annotation is active.
 - Dedup is required when consuming both channels: use `strokeId`.
 - No new mandatory read tool was introduced; `surf_ace_read_buffer` remains deprecated.
 
@@ -3554,7 +3450,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Viewport Overlay Positioning (Electron)** — "Position the annotation canvas element as a fixed overlay ... over the content frame." Source: §A.1
 - **No Explicit Browsing Modes** — "The surface always behaves like a real browser." Source: §A.7
 - **UI-Only Mode Distinction** — "This is the only surface-level mode distinction and it is UI-only." Source: §A.7
-- **Legacy Canvas Presentation** — "The surface renders a blank or gridded background." Source: §A.9
+- **Canvas Presentation** — "The surface renders a blank or gridded background." Source: §A.9
 - **Native Overlay Model Markup Goal** — "Model markups render visually on the surface alongside (but distinguishable from) user strokes." Source: §A.12
 - **Future Interactive Affordances** — "widgets, buttons, state displays" may become part of a future native-overlay markup model. Source: §A.12
 
@@ -3854,7 +3750,7 @@ Rationale: Annotation settlement is a surface-owned state transition ("Done"/ann
 
 **Video** (`video`) — fundamentally temporal rather than spatial. Annotations carry an optional `videoTimestamp` field anchoring strokes to playback position. Two additional registers: `playbackPosition` and `playbackState`. The multi-scroll / bounding-box problems from A.2/A.3 have a temporal analog here — strokes made at different playback times may span content that is no longer visible. Full semantics deferred to v2. See the `video` characteristics in §6.1.1.
 
-**Blank canvas** (`canvas`) — an optional/legacy content type where annotations are the primary artifact and there is no underlying document. The surface renders a blank or gridded background. `content.clear` removes all annotations (same global rule as all content types). In v1, OpenClaw observes user strokes via the existing register model (read-only for the native annotation layer). OpenClaw does not need this content type in order to present draw-capable experiences, because normal HTML/SVG content can already render its own `<canvas>` or similar drawing UI. Dedicated native-overlay annotation writes remain undefined in v1 and would require a future protocol extension. Useful for whiteboard-style collaboration. See the `canvas` characteristics in §6.1.1.
+**Blank canvas** (`canvas`) — an optional content type where annotations are the primary artifact and there is no underlying document. The surface renders a blank or gridded background. `content.clear` removes all annotations (same global rule as all content types). In v1, OpenClaw observes user strokes via the existing register model (read-only for the native annotation layer). OpenClaw does not need this content type in order to present draw-capable experiences, because normal HTML/SVG content can already render its own `<canvas>` or similar drawing UI. Dedicated native-overlay annotation writes remain undefined in v1 and would require a future protocol extension. Useful for whiteboard-style collaboration. See the `canvas` characteristics in §6.1.1.
 
 **Default empty/degraded presentation:** Unsupported content should use a centered empty-state message. Blank-canvas presentations may use a blank or gridded background.
 
@@ -3951,7 +3847,7 @@ At accepted push, the client snapshots the controller's friendly chat name and p
 **Protocol integration:**
 - Lockless pair metadata supplies friendly-chat/provider-product display values as explanation only.
 - Each accepted history append stores those values in the entry; disconnect or later metadata changes do not alter them.
-- Neither component nor the composite is controller identity, cursor key, routing, authentication, permission, priority, quota, ownership, topology, or restore authority.
+- Neither component nor the composite is controller identity, cursor key, routing, authentication, permission, priority, quota, topology, or restore authority.
 
 **Invariant index entry:**
 - **Entry-Bound Composite Provenance** — "The left navigation pill shows the current visible history entry's localized friendly-chat — provider/product composite; Back/Forward updates it from the visible entry and never from connection authority." Source: §15.8

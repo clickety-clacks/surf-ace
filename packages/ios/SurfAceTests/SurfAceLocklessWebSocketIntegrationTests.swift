@@ -259,7 +259,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         controller.cancel(with: .normalClosure, reason: nil)
     }
 
-    func testTwoControllersShareAuthorityReceiptsReadsEventsAndReconnectWithoutOwnership() async throws {
+    func testTwoControllersShareAuthorityReceiptsReadsEventsAndReconnectLocklessly() async throws {
         let identifier = UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "SurfAceLocklessWebSocketIntegrationTests-\(identifier)"))
         defaults.removePersistentDomain(forName: "SurfAceLocklessWebSocketIntegrationTests-\(identifier)")
@@ -301,22 +301,19 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertEqual(payload(secondPair)["mode"] as? String, "lockless")
         XCTAssertFalse((payload(firstPair)["scopes"] as? [[String: Any]])?.isEmpty ?? true)
 
-        let legacy = socket(port: port)
-        legacy.resume()
-        try await send(legacy, op: "pair.request", id: "legacy-pair", payload: [
-            "connectionId": "legacy-connection",
-            "initialPaneId": paneId,
-            "initialPaneLabel": 1,
+        let unsupported = socket(port: port)
+        unsupported.resume()
+        try await send(unsupported, op: "pair.request", id: "unsupported-pair", payload: [
+            "controllerInstanceId": "controller-unsupported",
+            "controllerProductName": "integration-client",
             "protocolVersion": 1,
-            "providerId": "legacy-provider",
-            "providerName": "Legacy integration client",
+            "protocolFeatures": [],
             "surfaceId": surface.surfaceId,
-            "windowLabel": "legacy",
         ])
-        let legacyPair = try await receive(legacy, matchingId: "legacy-pair")
-        XCTAssertEqual(legacyPair["ok"] as? Bool, false)
-        XCTAssertEqual((legacyPair["error"] as? [String: Any])?["code"] as? String, "capability_mismatch")
-        legacy.cancel(with: .normalClosure, reason: nil)
+        let unsupportedPair = try await receive(unsupported, matchingId: "unsupported-pair")
+        XCTAssertEqual(unsupportedPair["ok"] as? Bool, false)
+        XCTAssertEqual((unsupportedPair["error"] as? [String: Any])?["code"] as? String, "capability_mismatch")
+        unsupported.cancel(with: .normalClosure, reason: nil)
 
         let malformedResume = socket(port: port)
         malformedResume.resume()

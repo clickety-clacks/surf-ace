@@ -323,7 +323,7 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         "not_committed",
         "still_pending",
         "receipt_unavailable",
-        "legacy_overflow",
+        "source_overflow",
         "scope_capacity",
         "record_oversize",
         "cursor",
@@ -586,7 +586,7 @@ fn rust_validation_matches_the_shared_production_boundary_vector() {
     )
     .unwrap();
     let cases = shared["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 74);
+    assert_eq!(cases.len(), 64);
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let command = Command::parse(case["command"].as_str().unwrap()).unwrap();

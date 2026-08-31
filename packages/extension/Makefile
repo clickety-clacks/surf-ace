@@ -26,7 +26,7 @@ SURF_ACE_CONTINUITY_HIDE_FILTERS := \
 	$(foreach directory,$(SURF_ACE_CONTINUITY_DIRECTORIES),--filter='H /$(directory)/***')
 SURF_ACE_CONTINUITY_FILTERS := $(SURF_ACE_CONTINUITY_PROTECT_FILTERS) $(SURF_ACE_CONTINUITY_HIDE_FILTERS)
 
-.PHONY: package verify-package verify-deploy-state-preservation rollback-preflight deploy-provider guard-extension-deploy-config clean
+.PHONY: package verify-package verify-deploy-state-preservation deploy-provider guard-extension-deploy-config clean
 
 package:
 	pnpm --dir ../protocol build
@@ -84,10 +84,6 @@ verify-deploy-state-preservation:
 	test ! -e "$$tmpdir/dest/stale-build-artifact.txt" || { echo "Stale build artifact was not deleted" >&2; exit 1; }; \
 	test ! -e "$$tmpdir/dest/stale-package-directory" || { echo "Stale package directory was not deleted" >&2; exit 1; }; \
 	test "$$(cat "$$tmpdir/dest/dist/surf-ace.js")" = "current-build" || { echo "Build artifact was not synced" >&2; exit 1; }
-
-rollback-preflight:
-	@test -n "$(STATE_FILE)" || { printf '%s\n' "STATE_FILE is required" >&2; exit 1; }
-	node scripts/rollback-preflight.mjs --state-file "$(STATE_FILE)"
 
 guard-extension-deploy-config:
 	node scripts/validate-deploy-host.mjs

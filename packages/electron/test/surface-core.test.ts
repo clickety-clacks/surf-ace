@@ -396,8 +396,6 @@ test("surface core marks unresolved single-pane geometry as non-authoritative", 
   assert.deepEqual(core.missingResolvedPaneGeometry(surface.surfaceId, [paneId]), [paneId]);
   assert.throws(
     () => core.projectNativePaneMaterialization(surface.surfaceId, {
-      ownershipEpoch: 1,
-      ownershipSessionId: "sa_test" as never,
       paneLineageId: listedPane.paneLineageId!,
       requestId: "restore_btop",
       restoreReason: "resume_restore",
@@ -1000,8 +998,6 @@ test("surface core starts browser_url targets without reporting unverified navig
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
@@ -1053,8 +1049,6 @@ test("surface core persists browser_url renderer history across restart", () => 
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
@@ -1117,8 +1111,6 @@ test("surface core exposes reload only for browser_url and file-backed content",
   assert.deepEqual(core.reloadSource(surface.surfaceId, paneId), { kind: "file", path: "/tmp/source.html" });
 
   core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_browser",
     restoreReason: "initial_apply",
@@ -1326,8 +1318,6 @@ test("surface core clears browser_url renderer content when native pane material
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_browser",
     restoreReason: "initial_apply",
@@ -1424,8 +1414,6 @@ test("surface core rejects browser_url targets while the pane is native-hosted",
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
@@ -1691,8 +1679,6 @@ test("surface core records confirmed browser_url navigation success evidence", (
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
   core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
@@ -1739,8 +1725,6 @@ test("surface core records confirmed browser_url navigation failure evidence", (
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
   core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
@@ -1784,8 +1768,6 @@ test("surface core rejects browser_url target when live browser capability is no
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
@@ -1821,8 +1803,6 @@ test("surface core rejects browser_url target with unsupported extra required ca
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
@@ -1859,8 +1839,6 @@ test("surface core rejects browser_url targets for non-web schemes", () => {
   const paneLineageId = core.pairState(surface.surfaceId).panes[0]!.paneLineageId;
 
   const result = core.targetApply(surface.surfaceId, {
-    ownershipEpoch: 0,
-    ownershipSessionId: "sa_test",
     paneLineageId,
     requestId: "tr_test",
     restoreReason: "initial_apply",
@@ -2433,8 +2411,6 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
   const pane = core.pairState(surface.surfaceId).panes[0]!;
 
   const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
-    ownershipEpoch: 1,
-    ownershipSessionId: "sa_test" as never,
     paneLineageId: pane.paneLineageId,
     requestId: "restore_btop",
     restoreReason: "resume_restore",
@@ -2495,8 +2471,6 @@ for (const { command, processEnv } of [
     const pane = core.pairState(surface.surfaceId).panes[0]!;
 
     const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
-      ownershipEpoch: 1,
-      ownershipSessionId: "sa_test" as never,
       paneLineageId: pane.paneLineageId,
       requestId: "restore_weston_simple_egl",
       restoreReason: "resume_restore",
@@ -2547,8 +2521,6 @@ test("surface core materializes KolourPaint native_app with direct native pane p
   const pane = core.pairState(surface.surfaceId).panes[0]!;
 
   const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
-    ownershipEpoch: 1,
-    ownershipSessionId: "sa_test" as never,
     paneLineageId: pane.paneLineageId,
     requestId: "restore_kolourpaint",
     restoreReason: "resume_restore",
@@ -2600,8 +2572,6 @@ test("surface core snaps terminal native geometry to compositor integer bounds",
   const bottomPane = core.pairState(surface.surfaceId).panes.find((pane) => pane.paneId === 7)!;
 
   const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
-    ownershipEpoch: 1,
-    ownershipSessionId: "sa_test" as never,
     paneLineageId: bottomPane.paneLineageId,
     requestId: "restore_btop",
     restoreReason: "resume_restore",

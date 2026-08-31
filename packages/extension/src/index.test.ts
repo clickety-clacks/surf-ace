@@ -225,8 +225,6 @@ test("Surf Ace wire client rejects inbound target.register as unsupported produc
           expectedPreviousTargetEpoch: null,
           idempotencyKey: "idem_1",
           launchedAt: new Date(0).toISOString(),
-          ownershipEpoch: 1,
-          ownershipSessionId: "sa_1",
           paneLineageId: "pl_1",
           registrationState: "attached",
           surfaceId: "sf_1",
@@ -399,7 +397,7 @@ test("settled annotation delivery connects to the gateway and sends the image at
 test("gateway delivery config prefers env overrides for local token auth", () => {
   const previousUrl = process.env.OPENCLAW_GATEWAY_URL;
   const previousToken = process.env.OPENCLAW_GATEWAY_TOKEN;
-  const previousLegacyToken = process.env.CLAWDBOT_GATEWAY_TOKEN;
+  const previousClawdbotToken = process.env.CLAWDBOT_GATEWAY_TOKEN;
 
   try {
     process.env.OPENCLAW_GATEWAY_URL = "ws://127.0.0.1:19999";
@@ -436,10 +434,10 @@ test("gateway delivery config prefers env overrides for local token auth", () =>
     } else {
       process.env.OPENCLAW_GATEWAY_TOKEN = previousToken;
     }
-    if (previousLegacyToken === undefined) {
+    if (previousClawdbotToken === undefined) {
       delete process.env.CLAWDBOT_GATEWAY_TOKEN;
     } else {
-      process.env.CLAWDBOT_GATEWAY_TOKEN = previousLegacyToken;
+      process.env.CLAWDBOT_GATEWAY_TOKEN = previousClawdbotToken;
     }
   }
 });

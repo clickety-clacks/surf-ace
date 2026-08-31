@@ -76,7 +76,6 @@ await build({
     path.join(rootDir, "test", "webauthn-support.test.ts"),
     path.join(rootDir, "test", "window-options.test.ts"),
     path.join(rootDir, "test", "window-placement.test.ts"),
-    path.join(rootDir, "test", "ws-server.test.ts"),
   ],
   external: [
     "@surf-ace/protocol",
