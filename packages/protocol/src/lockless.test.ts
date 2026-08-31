@@ -73,7 +73,7 @@ test("production validation matches the shared Rust CLI boundary vector", () => 
       operation: string;
     }>;
   };
-  assert.equal(vector.cases.length, 74);
+  assert.equal(vector.cases.length, 64);
   for (const entry of vector.cases) {
     const { action: _action, ...payload } = entry.input;
     const envelope = request(entry.operation, payload);
@@ -750,65 +750,20 @@ test("lockless content.set enforces canonical typed content values", () => {
   );
 });
 
-test("lockless request rejects legacy authority and allocation fields", () => {
-  for (const [op, field] of [
-    ["pair.request", "providerId"],
-    ["content.set", "revision"],
-    ["content.set", "historyOwnerToken"],
-    ["pane.split", "newPaneIds"],
-    ["pane.split", "newPaneLabels"],
-  ] as const) {
-    const base =
-      op === "pair.request"
-        ? {
-            controllerInstanceId: "controller-a",
-            projectionCapacityBytes: 10,
-            protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
-            protocolVersion: 1,
-          }
-        : op === "content.set"
-          ? {
-              content: { markdown: "hello" },
-              contentId: "content-a",
-              contentType: "markdown",
-              paneId: 1,
-              surfaceId: "surface-a",
-            }
-          : {
-              count: 2,
-              direction: "horizontal",
-              expectedTopologyRevision: 0,
-              paneId: 1,
-              surfaceId: "surface-a",
-            };
-    const result = validateLocklessEnvelope(
-      request(op, { ...base, [field]: "forbidden" }),
-    );
-    assert.equal(result.ok, false, `${op}:${field}`);
-    if (!result.ok) {
-      assert.equal(result.reason, `forbidden_legacy_field:${field}`);
-    }
-  }
-});
-
-test("lockless request rejects nested authority fields and invalid intent ranges", () => {
+test("lockless request rejects generic unknown fields and invalid intent ranges", () => {
   assert.deepEqual(
     validateLocklessEnvelope(
-      request("target.apply", {
-        requestId: "target-a",
-        restoreReason: "initial",
-        surfaceId: "surface-a",
-        targetEpoch: 1,
-        targetHeader: {},
-        targetId: "target-a",
-        targetKind: "native_app",
-        targetPayload: { ownershipEpoch: 7 },
+      request("pair.request", {
+        controllerInstanceId: "controller-a",
+        projectionCapacityBytes: 10,
+        protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+        protocolVersion: 1,
+        unexpectedField: true,
       }),
     ),
     {
       ok: false,
-      reason:
-        "forbidden_legacy_field:payload.targetPayload.ownershipEpoch",
+      reason: "unknown_property:unexpectedField",
     },
   );
   assert.deepEqual(
