@@ -310,6 +310,7 @@ export class SurfaceWsServer {
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly pendingPairCommits = new WeakMap<Response, PairPostResponseCommit>();
   private readonly pendingLegacyPairs = new Map<string, number>();
+  private readonly pendingLocklessPairs = new Map<string, number>();
   private readonly transports = new Map<string, SurfaceTransportState>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
@@ -1439,12 +1440,15 @@ export class SurfaceWsServer {
       response: Response;
     }> => {
       try {
+        const response = request.op === "pair.request"
+          ? await this.runLocklessPairReservation(
+              request.payload.surfaceId ?? null,
+              async () => await this.dispatchLocklessRequest(socket, request),
+            )
+          : await this.dispatchLocklessRequest(socket, request);
         return {
           rejectionCode: null,
-          response: (await this.dispatchLocklessRequest(
-            socket,
-            request,
-          )) as Response,
+          response: response as Response,
         };
       } catch (error) {
         if (error instanceof LocklessAuthorityError) {
@@ -3355,6 +3359,12 @@ export class SurfaceWsServer {
     return await this.runProviderWindowLabelMutation(async () => {
       const surfaceId = request.payload.surfaceId;
       this.core.getSurface(surfaceId);
+      if (this.pendingLocklessPairs.has(surfaceId)) {
+        throw new SurfaceCoreError(
+          "busy",
+          "Surface has an in-flight lockless pair.request; retry provider pairing",
+        );
+      }
       if (this.hasLocklessSession(surfaceId)) {
         throw new SurfaceCoreError(
           "capability_mismatch",
@@ -3764,6 +3774,36 @@ export class SurfaceWsServer {
       this.pendingLegacyPairs.set(surfaceId, remaining);
     } else {
       this.pendingLegacyPairs.delete(surfaceId);
+    }
+  }
+
+  private async runLocklessPairReservation<T>(
+    surfaceId: string | null,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    // Pair reservations are live-only and close the pre-session arbitration gap.
+    if (!surfaceId) {
+      return await operation();
+    }
+    if (this.pendingLegacyPairs.has(surfaceId)) {
+      throw new SurfaceCoreError(
+        "busy",
+        "Surface has an in-flight provider pair.request; retry lockless admission",
+      );
+    }
+    this.pendingLocklessPairs.set(
+      surfaceId,
+      (this.pendingLocklessPairs.get(surfaceId) ?? 0) + 1,
+    );
+    try {
+      return await operation();
+    } finally {
+      const remaining = (this.pendingLocklessPairs.get(surfaceId) ?? 0) - 1;
+      if (remaining > 0) {
+        this.pendingLocklessPairs.set(surfaceId, remaining);
+      } else {
+        this.pendingLocklessPairs.delete(surfaceId);
+      }
     }
   }
 

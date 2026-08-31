@@ -163,6 +163,23 @@ async function pair(
   });
 }
 
+function providerPairPayload(
+  surfaceId: string,
+  suffix: string,
+): Record<string, unknown> {
+  return {
+    connectionId: `provider-connection-${suffix}`,
+    initialPaneId: 1,
+    initialPaneLabel: 1,
+    protocolVersion: 1,
+    providerId: `provider-${suffix}`,
+    providerName: `Provider ${suffix}`,
+    surfaceId,
+    takeover: false,
+    windowLabel: "a",
+  };
+}
+
 type TargetAdmissionVectorCase = {
   id: string;
   input: {
@@ -2026,6 +2043,284 @@ test("three surfaces recover independently and complete the offline push-capture
   } finally {
     for (const socket of surfaceSockets) socket.close();
     lifecycle.close();
+    await server.stop();
+  }
+});
+
+test("an in-flight provider pair wins once and lockless replays the same precise busy refusal", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Provider Wins", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  let reportProviderBlocked = (): void => {};
+  const providerBlocked = new Promise<void>((resolve) => {
+    reportProviderBlocked = resolve;
+  });
+  let releaseProvider = (): void => {};
+  const providerReleased = new Promise<void>((resolve) => {
+    releaseProvider = resolve;
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    getRuntimeAppBinding: async () => {
+      reportProviderBlocked();
+      await providerReleased;
+      return null;
+    },
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const provider = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const lockless = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const locklessPayload = {
+    controllerInstanceId: "provider-wins-controller",
+    controllerProductName: "OpenClaw",
+    projectionCapacityBytes: 5 * 1024 * 1024,
+    protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+    protocolVersion: 1,
+    surfaceId: surface.surfaceId,
+  };
+  try {
+    const providerPair = request(
+      provider,
+      "pair.request",
+      providerPairPayload(surface.surfaceId, "wins"),
+      { id: "rq_provider_wins" },
+    );
+    await providerBlocked;
+
+    const rejected = await request(
+      lockless,
+      "pair.request",
+      locklessPayload,
+      { id: "rq_lockless_loses" },
+    );
+    assert.equal(rejected.ok, false, JSON.stringify(rejected));
+    assert.equal(rejected.error.code, "busy");
+    assert.notEqual(rejected.error.code, "capability_mismatch");
+    assert.match(rejected.error.message, /in-flight provider pair\.request; retry lockless admission/);
+
+    const replayed = await request(
+      lockless,
+      "pair.request",
+      locklessPayload,
+      { id: "rq_lockless_loses" },
+    );
+    assert.deepEqual(replayed, rejected);
+
+    releaseProvider();
+    const admitted = await providerPair;
+    assert.equal(admitted.ok, true, JSON.stringify(admitted));
+    const panes = await request(provider, "panes.list", {});
+    assert.equal(panes.ok, true, JSON.stringify(panes));
+  } finally {
+    releaseProvider();
+    provider.close();
+    lockless.close();
+    await server.stop();
+  }
+});
+
+test("an aborted provider reservation lets lockless retry with a new request id", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Provider Aborts", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  let reportProviderBlocked = (): void => {};
+  const providerBlocked = new Promise<void>((resolve) => {
+    reportProviderBlocked = resolve;
+  });
+  let releaseProvider = (): void => {};
+  const providerReleased = new Promise<void>((resolve) => {
+    releaseProvider = resolve;
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    getRuntimeAppBinding: async () => {
+      reportProviderBlocked();
+      await providerReleased;
+      return null;
+    },
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  const interceptableServer = server as unknown as {
+    abandonPairResponse(...args: unknown[]): void;
+  };
+  const originalAbandonPairResponse =
+    interceptableServer.abandonPairResponse.bind(server);
+  let reportProviderAbandoned = (): void => {};
+  const providerAbandoned = new Promise<void>((resolve) => {
+    reportProviderAbandoned = resolve;
+  });
+  interceptableServer.abandonPairResponse = (...args): void => {
+    originalAbandonPairResponse(...args);
+    reportProviderAbandoned();
+  };
+  await server.start();
+  const provider = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const lockless = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const locklessPayload = {
+    controllerInstanceId: "provider-aborts-controller",
+    controllerProductName: "OpenClaw",
+    projectionCapacityBytes: 5 * 1024 * 1024,
+    protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+    protocolVersion: 1,
+    surfaceId: surface.surfaceId,
+  };
+  try {
+    provider.send(JSON.stringify({
+      id: "rq_provider_aborts",
+      op: "pair.request",
+      payload: providerPairPayload(surface.surfaceId, "aborts"),
+      sentAt: Date.now(),
+      type: "request",
+      v: 1,
+    }));
+    await providerBlocked;
+
+    const rejected = await request(
+      lockless,
+      "pair.request",
+      locklessPayload,
+      { id: "rq_lockless_before_abort" },
+    );
+    assert.equal(rejected.ok, false, JSON.stringify(rejected));
+    assert.equal(rejected.error.code, "busy");
+
+    const providerClosed = new Promise<void>((resolve) => {
+      provider.once("close", () => resolve());
+    });
+    provider.close();
+    await providerClosed;
+    releaseProvider();
+    await providerAbandoned;
+
+    const replayed = await request(
+      lockless,
+      "pair.request",
+      locklessPayload,
+      { id: "rq_lockless_before_abort" },
+    );
+    assert.deepEqual(replayed, rejected);
+
+    const retried = await request(
+      lockless,
+      "pair.request",
+      locklessPayload,
+      { id: "rq_lockless_after_abort" },
+    );
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    const panes = await request(lockless, "panes.list", {
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(panes.ok, true, JSON.stringify(panes));
+  } finally {
+    releaseProvider();
+    provider.close();
+    lockless.close();
+    await server.stop();
+  }
+});
+
+test("an in-flight lockless pair wins once and provider replays the same precise busy refusal", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Lockless Wins", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  let reportPersistenceStarted = (): void => {};
+  const persistenceStarted = new Promise<void>((resolve) => {
+    reportPersistenceStarted = resolve;
+  });
+  let releasePersistence = (): void => {};
+  const persistenceReleased = new Promise<void>((resolve) => {
+    releasePersistence = resolve;
+  });
+  let persistenceCalls = 0;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      persistenceCalls += 1;
+      if (persistenceCalls === 1) {
+        reportPersistenceStarted();
+        await persistenceReleased;
+      }
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const provider = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const lockless = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const locklessPair = request(
+      lockless,
+      "pair.request",
+      {
+        controllerInstanceId: "lockless-wins-controller",
+        controllerProductName: "OpenClaw",
+        projectionCapacityBytes: 5 * 1024 * 1024,
+        protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+        protocolVersion: 1,
+        surfaceId: surface.surfaceId,
+      },
+      { id: "rq_lockless_wins" },
+    );
+    await persistenceStarted;
+
+    const providerPayload = providerPairPayload(surface.surfaceId, "loses");
+    const rejected = await request(
+      provider,
+      "pair.request",
+      providerPayload,
+      { id: "rq_provider_loses" },
+    );
+    assert.equal(rejected.ok, false, JSON.stringify(rejected));
+    assert.equal(rejected.error.code, "busy");
+    assert.notEqual(rejected.error.code, "capability_mismatch");
+    assert.match(rejected.error.message, /in-flight lockless pair\.request; retry provider pairing/);
+
+    const replayed = await request(
+      provider,
+      "pair.request",
+      providerPayload,
+      { id: "rq_provider_loses" },
+    );
+    assert.deepEqual(replayed, rejected);
+
+    releasePersistence();
+    const admitted = await locklessPair;
+    assert.equal(admitted.ok, true, JSON.stringify(admitted));
+    const panes = await request(lockless, "panes.list", {
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(panes.ok, true, JSON.stringify(panes));
+  } finally {
+    releasePersistence();
+    provider.close();
+    lockless.close();
     await server.stop();
   }
 });
