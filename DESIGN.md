@@ -169,10 +169,51 @@ Pane rules (Phase 1 committed work, see §2.3):
 5. Pane lifecycle (create/split/resize/rename/close) is managed in-band; pane changes do not affect window-level session or mDNS state.
 
 Naming system:
-1. **Window labels** (a, b, c … z, aa, ab …) are allocated, validated, persisted, and projected by the **client-local authority**.
+
+> **CORE INVARIANT — FLEET-UNIQUE WINDOW LABELS (Mike, ruled 2026-09-03).**
+> A window label is unique across the ENTIRE FLEET, not merely within one
+> client. Two windows on two different machines MUST NEVER both be labelled
+> `a`. This is a product requirement, not an implementation preference, and it
+> is not subject to the Open Topics section.
+>
+> Source, the original Surf Ace specification (commit 236a999, §15.1):
+> "Each window is assigned a short alphabetic identifier using an
+> auto-incrementing sequence: A, B, C … Z, AA, AB, …" and "The window label is
+> the primary addressing handle. It MUST be visible at all times so that a user
+> can tell CLU 'move content to window B' without ambiguity."
+>
+> These two sentences together REQUIRE a single allocator. An auto-incrementing
+> sequence is one counter; N independent clients each running their own counter
+> are N sequences, and N sequences over one symbol set produce duplicate labels.
+> Duplicate labels make "move content to window B" ambiguous, which §15.1
+> forbids. Therefore fleet-wide label allocation MUST be owned by exactly one
+> authority.
+>
+> Consequences that are also normative:
+> - Exactly one label allocator exists fleet-wide. It persists across client
+>   restarts so that a window keeps its label.
+> - A client that cannot obtain a label from the allocator DISPLAYS NO LABEL and
+>   is not addressable. A provisional, local, or optimistic label is FORBIDDEN:
+>   showing a possibly-duplicate label is worse than showing none, because the
+>   user directs content at it and it lands on the wrong screen.
+> - Host-qualifying the token (`shrdlu b1`) does NOT satisfy this requirement.
+>   The addressing token must remain a short alphabetic label because it is
+>   spoken aloud, including through a voice interface, where a hostname is far
+>   more error-prone than a single letter.
+> - Per-client uniqueness does NOT satisfy this requirement.
+>
+> Historical note: the OpenClaw provider satisfied this invariant implicitly,
+> because exactly one provider process held the surface map and the label
+> counter for every client it managed. The CLI rewrite removed that process
+> without replacing the allocator, which silently reduced the guarantee to
+> per-client. That reduction was never authorized.
+
+1. **Window labels** (a, b, c … z, aa, ab …) are allocated and persisted by the
+   single fleet-wide label allocator, then validated and projected by the client.
+   Allocation is NOT client-local; see the core invariant above.
 2. `windowLabel` is a visible coordinate for users and diagnostics, not durable target authority. The client may preserve it across ordinary reconnect and recoverable close/restore when still valid and unassigned. Otherwise restore allocates a new unique live label without changing surface identity or preserved state.
 3. **Pane IDs** are allocated by the **client-local authority**. They are stable internal routing identifiers. Controllers target existing stable IDs or submit pane-creating intent; they do not preallocate new pane IDs.
-4. **Pane labels** are allocated, validated, persisted, and uniquely projected by the **client-local authority**. The OpenClaw/user-facing pane token is the `displayId` / `paneAddress`, derived from `windowLabel + paneLabel`; `paneLabel` alone is not durable target authority and is not globally unique. The client enforces unique live `windowLabel + paneLabel` coordinates and repairs invalid persisted state before lockless admission without matching or partitioning by controller identity.
+4. **Pane labels** are allocated, validated, persisted, and uniquely projected by the **client-local authority**. The OpenClaw/user-facing pane token is the `displayId` / `paneAddress`, derived from `windowLabel + paneLabel`. `paneLabel` alone is not durable target authority and is not fleet-unique on its own; fleet uniqueness of the user-facing token comes from the fleet-unique `windowLabel` it is paired with, per the core invariant above. A pane label is unique within its window, and the window label is unique across the fleet, so the pair is unique across the fleet. The client enforces unique live `windowLabel + paneLabel` coordinates and repairs invalid persisted state before lockless admission without matching or partitioning by controller identity.
 5. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. Pane names are optional metadata and MUST NOT replace `paneLabel` as the visible identity or addressing token.
 6. The client is the sole authority on topology and visible labeling. Controllers submit intent against stable IDs and expected revisions; the client validates, allocates, commits, and emits lifecycle events.
 7. When a pane is split, the controller specifies the target, count, and layout intent. After the stale-revision and pane-creation capacity checks, the client allocates each new `paneId` and `paneLabel`, commits atomically, and emits `event.pane_created`.
@@ -3405,7 +3446,7 @@ Connection state MUST be expressed only through the window ID outline/text in th
 
 This section is a consolidated copy/reference index of existing UI/UX mentions elsewhere in the document; it does not supersede the original normative or contextual locations.
 
-- **Window Letter Labels** — "Window labels (a, b, c…) are allocated and uniquely projected by the client-local authority." Source: §3.1.1
+- **Window Letter Labels** — "Window labels (a, b, c…) are allocated by the single fleet-wide label allocator and are unique across the entire fleet; a client that cannot obtain one displays no label." Source: §3.1.1 core invariant
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
 - **Pane Label Authority** — "Pane labels are client-assigned visible numeric identifiers distinct from internal `paneId`." Source: §3.1.1
 - **Prominent Surface Labels** — "Window label and pane label render together as an always-visible bottom-right identity overlay in each pane." Source: §3.1.1 / §15.1
