@@ -44,7 +44,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         )
     }
 
-    func testCanonicalTopologyCodecRejectsLegacyAuthorityAndRoundTripsCanonicalTree() throws {
+    func testCanonicalTopologyCodecRejectsNoncanonicalShapeAndRoundTripsCanonicalTree() throws {
         let canonical = try canonicalTopologyJSON(from: .split(
             direction: .horizontal,
             children: [.leaf(7, weight: 0.25), .leaf(9, weight: 0.75)],
@@ -66,7 +66,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         ])))
     }
 
-    func testCompleteNativeTargetAdvertisesWithoutChangingLegacyRequestDetection() {
+    func testCompleteNativeTargetAdvertisesAndRejectsRequestsWithoutTheCurrentCapability() {
         XCTAssertTrue(SurfAceLocklessTargetAdmission.platformPermitsLockless)
         XCTAssertTrue(SurfAceLocklessTargetAdmission.implementationComplete)
         XCTAssertEqual(SurfAceLocklessTargetAdmission.unroutedNetworkOperations, [])
@@ -75,7 +75,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             "protocolFeatures": [surfAceLocklessCapability],
         ]))
         XCTAssertFalse(SurfAceLocklessTargetAdmission.isLocklessRequest([
-            "providerId": "legacy-provider",
+            "protocolFeatures": [],
         ]))
     }
 
@@ -155,7 +155,6 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         }
         let rejected = try XCTUnwrap(fixture.store.load())
         XCTAssertNil(rejected.controllers["controller-too-small"])
-        XCTAssertNil(rejected.negotiatedModes["sf_1"])
 
         let admitted = try await fixture.adapter.admit(
             controllerInstanceId: "controller-exact",
@@ -169,7 +168,6 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             admitted.state.controllers["controller-exact"]?.projectionCapacityBytes,
             requiredCapacity
         )
-        XCTAssertEqual(admitted.state.negotiatedModes["sf_1"], .lockless)
     }
 
     func testAdmissionCapacityReclamationRecordsExactTriggerAndReason() async throws {
@@ -242,40 +240,6 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         )
     }
 
-    func testNegotiatedSurfaceModePersistsAndRejectsMixedModeAdmission() async throws {
-        let lockless = try makeFixture()
-        _ = try await lockless.adapter.admit(
-            controllerInstanceId: "controller-a",
-            controllerProductName: nil,
-            connectionToken: "connection-a",
-            projectionCapacityBytes: 8 * 1_024 * 1_024,
-            protocolFeatures: [surfAceLocklessCapability],
-            surfaceId: "sf_1"
-        )
-        XCTAssertEqual(try lockless.store.load()?.negotiatedModes["sf_1"], .lockless)
-        await XCTAssertThrowsErrorAsync {
-            _ = try await lockless.adapter.negotiateLegacySurface("sf_1")
-        } verify: { error in
-            XCTAssertEqual(error as? SurfAceLocklessRuntimeAdapterError, .capabilityMismatch)
-        }
-
-        let legacy = try makeFixture()
-        _ = try await legacy.adapter.negotiateLegacySurface("sf_1")
-        XCTAssertEqual(try legacy.store.load()?.negotiatedModes["sf_1"], .legacy)
-        await XCTAssertThrowsErrorAsync {
-            _ = try await legacy.adapter.admit(
-                controllerInstanceId: "controller-a",
-                controllerProductName: nil,
-                connectionToken: "connection-a",
-                projectionCapacityBytes: 8 * 1_024 * 1_024,
-                protocolFeatures: [surfAceLocklessCapability],
-                surfaceId: "sf_1"
-            )
-        } verify: { error in
-            XCTAssertEqual(error as? SurfAceLocklessRuntimeAdapterError, .capabilityMismatch)
-        }
-    }
-
     func testDormantCountPressureReclaimsOldestAndReadmissionStartsAtCurrentTail() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SurfAceLocklessDormantCountTests-\(UUID().uuidString)", isDirectory: true)
@@ -289,10 +253,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             scopeId: "surface:one", scopeKind: "surface"
         )
         try store.save(state)
-        let adapter = try SurfAceLocklessRuntimeAdapter(
-            store: store,
-            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
-        )
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
 
         _ = try await admit(adapter, id: "controller-z", token: "connection-z")
         _ = try await adapter.commitMutation(
@@ -342,10 +303,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         var state = try SurfAceLocklessAuthorityState.empty()
         state.limits.maxDormantControllerBytes = 1
         try store.save(state)
-        let adapter = try SurfAceLocklessRuntimeAdapter(
-            store: store,
-            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
-        )
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
 
         _ = try await admit(adapter, id: "controller-a", token: "connection-a")
         try await adapter.disconnect(connectionToken: "connection-a", disconnectedAt: 10)
@@ -388,10 +346,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         state.limits.maxDormantControllerBytes = try XCTUnwrap(usage.bytesByController["controller-z"])
         try store.save(state)
 
-        _ = try SurfAceLocklessRuntimeAdapter(
-            store: store,
-            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
-        )
+        _ = try SurfAceLocklessRuntimeAdapter(store: store)
         let restored = try XCTUnwrap(store.load())
         XCTAssertNil(restored.controllers["controller-a"])
         XCTAssertEqual(restored.controllers["controller-z"]?.status, .dormant)
@@ -499,10 +454,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             committed.terminalResponse
         )
 
-        let restored = try SurfAceLocklessRuntimeAdapter(
-            store: fixture.store,
-            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
-        )
+        let restored = try SurfAceLocklessRuntimeAdapter(store: fixture.store)
         let resumed = try await restored.admit(
             controllerInstanceId: "controller-a",
             controllerProductName: nil,
@@ -602,10 +554,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertGreaterThan(occurrence.unreadBytesDiscarded, 0)
         XCTAssertEqual(occurrence.maxDormantControllerBytes, 1)
 
-        let restored = try SurfAceLocklessRuntimeAdapter(
-            store: fixture.store,
-            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
-        )
+        let restored = try SurfAceLocklessRuntimeAdapter(store: fixture.store)
         let pending = await restored.pendingControllerRetentionReclamations()
         XCTAssertEqual(pending.map(\.record), [occurrence])
         try await restored.acknowledgeControllerRetentionReclamation(
@@ -739,10 +688,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         )
         XCTAssertEqual(pendingAfterLaterRetention.count, 6)
 
-        let restored = try SurfAceLocklessRuntimeAdapter(
-            store: fixture.store,
-            legacy: SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
-        )
+        let restored = try SurfAceLocklessRuntimeAdapter(store: fixture.store)
         let restoredPending = await restored.pendingControllerRetentionReclamations().map(\.record)
         XCTAssertEqual(restoredPending, pendingAfterLaterRetention)
     }
@@ -1212,11 +1158,9 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         }
         try configure(&state)
         try store.save(state)
-        let legacy = SurfAceLegacyUserDefaultsSnapshot(identityMapping: nil, surfaceTopologies: nil)
         return (
             try SurfAceLocklessRuntimeAdapter(
                 store: store,
-                legacy: legacy,
                 targetIntentAdmissionPreparation: targetIntentAdmissionPreparation
             ),
             store
@@ -1362,9 +1306,7 @@ extension SurfAceLocklessRuntimeAdapterTests {
         let afterRefusal = await fixture.adapter.snapshot()
         XCTAssertEqual(afterRefusal, before)
         try await fixture.adapter.disconnect(connectionToken: "tz", disconnectedAt: 1)
-        let restarted = try SurfAceLocklessRuntimeAdapter(
-            store: fixture.store, legacy: .init(identityMapping: nil, surfaceTopologies: nil)
-        )
+        let restarted = try SurfAceLocklessRuntimeAdapter(store: fixture.store)
         _ = try await admit(restarted, id: "new", token: "tn")
         let state = await restarted.snapshot()
         XCTAssertNil(state.controllers["z"])
@@ -1431,10 +1373,7 @@ extension SurfAceLocklessRuntimeAdapterTests {
             return .integer(sequence)
         }
         XCTAssertEqual(commit.commitSequence, 1)
-        let restarted = try SurfAceLocklessRuntimeAdapter(
-            store: fixture.store,
-            legacy: .init(identityMapping: nil, surfaceTopologies: nil)
-        )
+        let restarted = try SurfAceLocklessRuntimeAdapter(store: fixture.store)
         let resumed = try await admit(restarted, id: "b", token: "tb2")
         let restartedState = await restarted.snapshot()
         XCTAssertTrue(resumed.resumed)
@@ -1527,23 +1466,6 @@ extension SurfAceLocklessRuntimeAdapterTests {
         XCTAssertGreaterThan(fresh.commitSequence, original.commitSequence)
     }
 
-    func testACMIG01NativeTargetGateSeparatesLegacyLocklessAndSpatial() async throws {
-        XCTAssertEqual(SurfAceLocklessTargetAdmission.advertisedProtocolFeatures, [surfAceLocklessCapability])
-        #if os(visionOS)
-        XCTFail("SurfAceTests must not be admitted as the Spatial target")
-        #else
-        XCTAssertTrue(SurfAceLocklessTargetAdmission.platformPermitsLockless)
-        #endif
-        let fixture = try makeFixture()
-        _ = try await fixture.adapter.negotiateLegacySurface("sf_1")
-        await XCTAssertThrowsErrorAsync {
-            _ = try await fixture.adapter.admit(
-                controllerInstanceId: "a", controllerProductName: nil,
-                connectionToken: "ta", projectionCapacityBytes: 8_388_608,
-                protocolFeatures: [surfAceLocklessCapability], surfaceId: "sf_1"
-            )
-        } verify: { XCTAssertEqual($0 as? SurfAceLocklessRuntimeAdapterError, .capabilityMismatch) }
-    }
 }
 
 private actor SurfAceTargetAdmissionTestGate {

@@ -241,8 +241,6 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
             "requestId": "tr_\(targetId)",
             "targetId": targetId,
             "surfaceId": surface.surfaceId,
-            "ownershipSessionId": "sa_test",
-            "ownershipEpoch": 1,
             "paneLineageId": pane.paneLineageId,
             "targetEpoch": 2,
             "targetKind": "browser_url",

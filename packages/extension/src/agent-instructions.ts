@@ -7,7 +7,6 @@ export function buildSurfAceAgentInstructions(): string {
     "Treat native GUI/app materialization as product-proven only through the official Surf Ace provider path: `surf_ace_list` must show an actionable pane, `surf_ace_launch_native_app` must return target apply evidence for that pane with `nativeHost` and `overlayRegions` applied, and product-approved capture must show visible rendering.",
     "Do not use direct compositor/native-pane hosting, manually hosted windows, demo fixtures, fake WS servers, or mocked compositor status as Surf Ace product proof; those are diagnostics only.",
     "Use `surf_ace_clear` to clear the currently visible content in a pane.",
-    "Use `surf_ace_relinquish` to voluntarily release a surface lock; after that, the provider will not auto-reconnect until it is explicitly claimed again.",
     "Use `surf_ace_realize_topology` for one-window root/subtree layout changes after reading `topology` and `topologyRevision` from `surf_ace_list`.",
     "Use `surf_ace_realize_topologies` when one requested layout operation spans multiple Surf Ace windows/surfaces/devices, or when an authorized request must open or close a top-level Surf Ace Spatial surface window.",
     "Use `surf_ace_split` only as a compatibility helper to split a specific pane into a larger provider-assigned pane topology.",

@@ -246,13 +246,7 @@ final class SurfAceAuthorityConformanceVectorTests: XCTestCase {
         }
         try store.save(state)
         return (
-            try SurfAceLocklessRuntimeAdapter(
-                store: store,
-                legacy: SurfAceLegacyUserDefaultsSnapshot(
-                    identityMapping: nil,
-                    surfaceTopologies: nil
-                )
-            ),
+            try SurfAceLocklessRuntimeAdapter(store: store),
             currentPaneLineage
         )
     }
@@ -330,7 +324,7 @@ final class SurfAceAuthorityConformanceVectorTests: XCTestCase {
         "not_committed",
         "still_pending",
         "receipt_unavailable",
-        "legacy_overflow",
+        "source_overflow",
         "scope_capacity",
         "record_oversize",
         "cursor",

@@ -4,7 +4,6 @@ import { parseHTML } from "linkedom";
 
 import type {
   AnnotationCommittedEvent,
-  AuthorityPaneIdentity,
   ContentApplyRequest,
   ContentApplyResponse,
   ContentAppendRequest,
@@ -24,7 +23,6 @@ import type {
   PaneId,
   PaneRemovedEvent,
   PaneRenamedEvent,
-  PairResponse,
   PaneCurrentTargetState,
   PanesListResponse,
   PaneGeometryProjection,
@@ -327,7 +325,6 @@ export class SurfaceCoreError extends Error {
       | "invalid_operation"
       | "invalid_payload"
       | "missing_provider_name"
-      | "not_lock_owner"
       | "not_paired"
       | "render_failed"
       | "stale_content"
@@ -2025,7 +2022,7 @@ export class SurfaceCore {
     }
   }
 
-  pairState(surfaceId: string): PairResponse["payload"]["state"] {
+  pairState(surfaceId: string) {
     const surface = this.getSurface(surfaceId);
     return {
       layout: surfaceLayoutToTopologyLayout(collapseLayout(surface.layout)),
@@ -2075,56 +2072,6 @@ export class SurfaceCore {
       surface.windowLabel = windowLabel;
       this.emit({ surfaceId, type: "surface-changed" });
     }
-  }
-
-  adoptProviderAuthorityPaneIdentities(surfaceId: string, providerPanes: AuthorityPaneIdentity[]): boolean {
-    const surface = this.getSurface(surfaceId);
-    if (providerPanes.length !== surface.panes.size) {
-      return false;
-    }
-
-    const seenPaneIds = new Set<number>();
-    const seenPaneLabels = new Set<number>();
-    const updates: Array<{ pane: PaneState; paneLabel: number; paneLineageId: string }> = [];
-    for (const candidate of providerPanes) {
-      const paneId = Number(candidate.paneId);
-      const paneLabel = Number(candidate.paneLabel);
-      const paneLineageId = candidate.paneLineageId;
-      const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
-      if (
-        !pane ||
-        seenPaneIds.has(paneId) ||
-        !Number.isInteger(paneLabel) ||
-        paneLabel < 1 ||
-        seenPaneLabels.has(paneLabel) ||
-        typeof paneLineageId !== "string" ||
-        paneLineageId.length === 0
-      ) {
-        return false;
-      }
-      seenPaneIds.add(paneId);
-      seenPaneLabels.add(paneLabel);
-      updates.push({ pane, paneLabel, paneLineageId });
-    }
-
-    let didChange = false;
-    for (const update of updates) {
-      if (update.pane.paneLabel !== update.paneLabel) {
-        update.pane.paneLabel = update.paneLabel;
-        didChange = true;
-      }
-      if (update.pane.paneLineageId !== update.paneLineageId) {
-        update.pane.paneLineageId = update.paneLineageId;
-        didChange = true;
-      }
-    }
-    if (didChange) {
-      if ([...surface.panes.values()].some((pane) => pane.externalNative)) {
-        bumpGeometryRevision(surface);
-      }
-      this.emit({ surfaceId, type: "surface-changed" });
-    }
-    return true;
   }
 
   assertProviderWindowLabelAvailable(surfaceId: string, windowLabel: string): void {

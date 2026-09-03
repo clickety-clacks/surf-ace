@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Surf Ace Native Pane Window Groups Requirements</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --fg: light-dark(#1f2328, #e8eaed);
+      --muted: light-dark(#5d6673, #aeb6c2);
+      --line: light-dark(rgba(31,35,40,.18), rgba(232,234,237,.18));
+      --panel: light-dark(rgba(31,35,40,.045), rgba(232,234,237,.055));
+      --soft: light-dark(rgba(31,35,40,.03), rgba(232,234,237,.035));
+      --accent: light-dark(#8a4b16, #f1ca70);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: transparent; color: var(--fg); font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 1180px; margin: 0 auto; padding: 24px; }
+    section { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 18px 20px; margin: 0 0 14px; }
+    h1, h2, h3 { margin: 0 0 10px; line-height: 1.2; }
+    h1 { font-size: 28px; }
+    h2 { font-size: 19px; }
+    h3 { font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .08em; }
+    p { margin: 8px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { text-align: left; vertical-align: top; border-top: 1px solid var(--line); padding: 9px 8px; }
+    th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    code { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+    .card { border: 1px solid var(--line); border-radius: 8px; background: var(--soft); padding: 12px; }
+    .pill { display: inline-block; border-radius: 999px; padding: 2px 8px; font-weight: 700; font-size: 11px; color: var(--accent); border: 1px solid var(--line); }
+  </style>
+</head>
+<body>
+<main>
+  <section>
+    <h1>Surf Ace Native Pane Window Groups Requirements</h1>
+    <p><span class="pill">Amended 2026-09-01</span></p>
+    <p>Authority: T368 decision <code>dr_eddcae41-3f78-4d3a-aa19-7be09abe6d47</code>, plus Mike's 2026-09-01 clarification that focus-gated hiding is not surface disappearance.</p>
+    <p>A launched native GUI app may create dialogs, palettes, popups, and tool windows. Surf Ace keeps those accessory windows in the app's pane-owned window group, but it does not confine them to the pane rectangle.</p>
+    <p>Focus-gated visibility is the containment mechanism. Exactly one pane has keyboard focus. Surf Ace identifies that pane visually. Only the accessory windows of the focused pane are visible.</p>
+  </section>
+
+  <section>
+    <h2>Product Goal</h2>
+    <div class="grid">
+      <div class="card"><h3>Model</h3><p>A native pane owns a physical window family. It is not a global desktop or a single-surface slot.</p></div>
+      <div class="card"><h3>Placement</h3><p>Accessory windows may float outside their pane, over other panes, and over Surf Ace chrome.</p></div>
+      <div class="card"><h3>Containment</h3><p>Only the focused pane's accessory windows are visible. Blur hides them without destroying them.</p></div>
+      <div class="card"><h3>Proof</h3><p>Real packaged GUI apps must pass through the official Surf Ace provider and materialization path on Racter and Shrdlu.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Focus and Overlap Model</h2>
+    <table>
+      <thead><tr><th>State</th><th>Meaning</th><th>Input Consequence</th></tr></thead>
+      <tbody>
+        <tr><td>Pane focus</td><td>Selects the one pane whose native group may show accessories and receive keyboard input.</td><td>Surf Ace always shows one unambiguous focused-pane indicator.</td></tr>
+        <tr><td>Surface focus</td><td>Selects the primary surface, accessory, or Surf Ace recipient inside the focused pane context.</td><td>The disappearance fallback returns surface focus to Surf Ace without erasing the focused-pane invariant.</td></tr>
+        <tr><td>Overflow overlap</td><td>A visible accessory may cover another pane or Surf Ace chrome.</td><td>The topmost visible accessory wins hit-testing at covered pixels. An exposed pane region or explicit Surf Ace focus affordance changes pane focus.</td></tr>
+      </tbody>
+    </table>
+    <p>Accessory overlap must not make the required focused-pane indication ambiguous. The implementation may choose its layering or location.</p>
+  </section>
+
+  <section>
+    <h2>Lifecycle Boundary</h2>
+    <table>
+      <thead><tr><th>Event</th><th>Required State Change</th><th>Forbidden Interpretation</th></tr></thead>
+      <tbody>
+        <tr><td>Owning pane loses focus</td><td>Hide every accessory window in that pane group. Preserve each surface, group identity, position, size, z-order, focus history, application state, and restoration state.</td><td>Do not close, destroy, cancel, or treat the hidden surface as missing.</td></tr>
+        <tr><td>Owning pane regains focus</td><td>Restore every still-existing accessory at its prior position, size, z-order, and application state. Reapply group-local focus according to the preserved state.</td><td>Do not relaunch or reconstruct the windows as new surfaces.</td></tr>
+        <tr><td>App destroys an accessory while it is hidden</td><td>Record the genuine lifecycle change and remove that member from restoration state.</td><td>Do not synthesize a replacement or claim that refocus restored it. Do not invoke interaction cancellation unless an active interaction actually existed.</td></tr>
+        <tr><td>Native content genuinely disappears during an active interaction</td><td>Apply <code>dr_595d4764-a089-4345-8167-6b3df807f5f2</code>: cancel the interaction, record a durable diagnostic, and return subsequent focus and input to Surf Ace.</td><td>Do not redirect the interaction to another pane or app.</td></tr>
+      </tbody>
+    </table>
+    <p>The disappearance fallback never runs solely because focus-gated policy hid a still-existing window.</p>
+  </section>
+
+  <section>
+    <h2>Source Truth</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Fact</th><th>Requirement Impact</th></tr></thead>
+      <tbody>
+        <tr><td>ST1</td><td>The compositor historically bound one external native surface id per pane.</td><td>The implementation must represent a pane-owned window group.</td></tr>
+        <tr><td>ST2</td><td>Historical code closed a second different toplevel for an already-bound native pane.</td><td>Secondary toplevels that belong to the launched app group must be accepted.</td></tr>
+        <tr><td>ST3</td><td>Live Racter status reported denied toplevels during real GUI use.</td><td>Acceptance must retain accepted and denied secondary-window diagnostics.</td></tr>
+        <tr><td>ST4</td><td>Direct compositor or native-host success is diagnostic only.</td><td>Product acceptance must use the official Surf Ace provider and materialization path.</td></tr>
+        <tr><td>ST5</td><td>The former spec required pane clipping and edge clamping.</td><td>Those rules are withdrawn. Existing clipping and containment proofs are not evidence for this product boundary.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Requirements</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Requirement</th><th>Acceptance</th></tr></thead>
+      <tbody>
+        <tr><td>R1</td><td>Represent each native pane as a <code>NativePaneWindowGroup</code> or equivalent model with one primary toplevel and zero or more accessory toplevels or popups.</td><td>Status enumerates stable member ids, roles, bounds, z-order, focus, visibility, hidden reason, and lifecycle.</td></tr>
+        <tr><td>R2</td><td>Classify secondary toplevels from the same launched process tree or launch token as members of the launching pane group.</td><td>A KolourPaint dialog or tool window joins the same group and is not closed as an unknown global toplevel.</td></tr>
+        <tr><td>R3</td><td>Reject or close toplevels that cannot be tied to the pane launch identity.</td><td>Status records a denied count and reason for every foreign or unowned toplevel.</td></tr>
+        <tr><td>R4</td><td>Allow accessory windows to move, resize, and render outside the owning pane, including over other panes and Surf Ace chrome.</td><td>A dialog crosses each pane edge without clipping or edge clamping. Capture shows its actual bounds and pixels. The topmost visible accessory receives input at covered pixels.</td></tr>
+        <tr><td>R5</td><td>Maintain pane-group z-order and group-local activation for primary, dialog, palette, popup, and tool windows.</td><td>Clicking an accessory raises and focuses it within the focused pane group without changing group ownership.</td></tr>
+        <tr><td>R6</td><td>Maintain exactly one keyboard-focused pane and show an unambiguous Surf Ace focus indicator.</td><td>Every pane-focus transition has one focused pane, one visible focus indication, and deterministic input ownership. Accessory overlap never obscures the focus truth.</td></tr>
+        <tr><td>R7</td><td>Show accessory windows only for the focused pane. Hide all accessories of every unfocused pane, including accessories that fit within the pane. Keep each pane's primary content visible.</td><td>Focusing another pane hides the prior pane's dialogs, palettes, popups, and tool windows without hiding its primary content. The newly focused pane's still-existing accessories become visible.</td></tr>
+        <tr><td>R8</td><td>Treat focus-gated hiding as visibility only for surfaces that still exist.</td><td>After blur and refocus, every still-existing accessory restores with the same surface identity, position, size, z-order, and app state. A surface genuinely destroyed while hidden remains destroyed and is reported. No close, relaunch, or disappearance fallback occurs solely because of blur.</td></tr>
+        <tr><td>R9</td><td>Route pointer and keyboard input only through the active focus, z-order, and visibility state, translated into the target window's local coordinates.</td><td>The topmost visible accessory wins at overlapping pixels. Hidden accessories receive no input. Clicking an exposed region of another pane or an explicit focus affordance transfers pane focus before that pane's accessories accept input.</td></tr>
+        <tr><td>R10</td><td>Apply the cancel-and-return fallback only when native content genuinely ceases to exist during an interaction.</td><td>A destruction test cancels the interaction, records a durable diagnostic, and returns subsequent focus to Surf Ace. A blur test does none of those things.</td></tr>
+        <tr><td>R11</td><td>Expose diagnostics that distinguish visible, focus-hidden, closed, rejected, and genuinely disappeared surfaces.</td><td><code>get_status</code> and Surf Ace tool state prove the pane owner, group members, focused pane, visible accessories, hidden reason, preserved restore state, destroyed-while-hidden state, and denied counts.</td></tr>
+        <tr><td>R12</td><td>Use packaged real GUI apps and the official Surf Ace launch and materialization path as product proof.</td><td>Direct compositor injection and demo state are excluded from the acceptance record.</td></tr>
+        <tr><td>R13</td><td>Keep terminal and simple single-window apps working as one-member pane groups.</td><td>Existing one-window behavior remains green under the new focus model.</td></tr>
+        <tr><td>R14</td><td>Avoid persistent service, launchd, systemd, or auto-start changes unless separately authorized.</td><td>Implementation and proof remain test-scoped unless deployment persistence receives explicit approval.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Non-Goals</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Non-Goal</th></tr></thead>
+      <tbody>
+        <tr><td>NG1</td><td>Do not create a global desktop, task switcher, workspace system, or general window manager.</td></tr>
+        <tr><td>NG2</td><td>Do not clip accessory windows to the pane rectangle or clamp their movement to pane edges.</td></tr>
+        <tr><td>NG3</td><td>Do not use pane confinement as the containment mechanism.</td></tr>
+        <tr><td>NG4</td><td>Do not treat a focus-hidden window as closed, destroyed, missing, or relaunched.</td></tr>
+        <tr><td>NG5</td><td>Do not accept direct compositor or native-pane hosting as product proof.</td></tr>
+        <tr><td>NG6</td><td>Do not solve arbitrary cross-app drag and drop, clipboard behavior, or session restore unless the window-group implementation requires it.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Implementation Slices</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Slice</th><th>Exit Gate</th></tr></thead>
+      <tbody>
+        <tr><td>S1</td><td>Model pane window groups, member identity, focus, visibility, and preserved restoration state.</td><td>Tests track multiple windows for one pane and distinguish focus-hidden from destroyed.</td></tr>
+        <tr><td>S2</td><td>Classify same-launch secondary toplevels into the existing pane group.</td><td>A same-token toplevel is accepted and a foreign toplevel is denied with a reason.</td></tr>
+        <tr><td>S3</td><td>Render accessory windows without pane clipping or movement clamps.</td><td>Capture proves a real accessory can cross pane and chrome boundaries.</td></tr>
+        <tr><td>S4</td><td>Implement single-pane keyboard focus, persistent focus indication, accessory hide and restore, group-local z-order, overlap hit-testing, and input routing.</td><td>Repeated pane switches preserve every still-existing hidden accessory and restore it intact. Covered pixels route to the visible accessory.</td></tr>
+        <tr><td>S5</td><td>Implement genuine-disappearance handling separately from visibility transitions.</td><td>Tests prove blur does not cancel, hidden destruction does not synthesize restoration, and real destruction during interaction cancels, diagnoses, and returns surface focus to Surf Ace.</td></tr>
+        <tr><td>S6</td><td>Plumb official provider and tool diagnostics.</td><td>Surf Ace status reports accepted, denied, visible, focus-hidden, and disappeared surfaces with group ownership.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Verification Matrix</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Gate</th><th>Pass Condition</th></tr></thead>
+      <tbody>
+        <tr><td>V1</td><td>Source tests</td><td>Tests cover group acceptance, denial, free placement, z-order, single-pane focus, hide and restore, input exclusion while hidden, and genuine disappearance.</td></tr>
+        <tr><td>V2</td><td>Official launch path</td><td>The official Surf Ace tool returns admitted and actionable pane state with native-host and overlay materialization applied.</td></tr>
+        <tr><td>V3</td><td>Real app accessories</td><td>A packaged GUI app opens a dialog, palette, popup, or tool window in its pane-owned group.</td></tr>
+        <tr><td>V4</td><td>Free placement</td><td>An accessory moves outside its pane, over another pane, and over Surf Ace chrome without clipping or clamping. Covered pixels hit the accessory, not the pane beneath it.</td></tr>
+        <tr><td>V5</td><td>Focus-gated visibility</td><td>Switching panes hides all prior-pane accessories, keeps primary pane content visible, shows only focused-pane accessories, and maintains one unambiguous pane-focus indicator under overlap.</td></tr>
+        <tr><td>V6</td><td>Intact restoration</td><td>Refocusing restores each still-existing accessory at the same position, size, z-order, surface identity, and application state. A deliberately destroyed hidden accessory does not return.</td></tr>
+        <tr><td>V7</td><td>Lifecycle distinction</td><td>Blur generates no cancellation or disappearance diagnostic. Hidden destruction is reported without synthetic restoration. Real destruction during interaction generates cancellation and a diagnostic, then returns surface focus to Surf Ace while preserving pane focus.</td></tr>
+        <tr><td>V8</td><td>Input routing</td><td>The topmost visible focused-group window receives correct pointer and keyboard input. Hidden accessories receive none. Exposed-pane and explicit-focus actions change pane focus deterministically.</td></tr>
+        <tr><td>V9</td><td>Two-host proof</td><td>Racter and Shrdlu pass through the official path with exact revisions and host state recorded. Normal documented Shrdlu activation may precede proof.</td></tr>
+        <tr><td>V10</td><td>No obsolete proof</td><td>The acceptance report does not cite historical clipping, edge-clamping, or pane-containment evidence as proof.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Pane Target Restore Boundary</h2>
+    <p>The first slice covers launch-time and runtime window-group behavior. It does not promise child-window persistence across an explicit pane target restore.</p>
+    <p>Target restore is a controller-driven lifecycle transition, not focus blur. If it ends a native group, status must report the resulting lifecycle changes. The implementation must not reuse blur-hiding to disguise closure, or reuse closure to implement ordinary blur.</p>
+  </section>
+
+  <section>
+    <h2>Open Technical Questions</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Question</th><th>Boundary</th></tr></thead>
+      <tbody>
+        <tr><td>Q1</td><td>Which decoration mechanism supplies accessory titlebars and movement affordances?</td><td>The choice must not reintroduce pane clipping or weaken group ownership.</td></tr>
+        <tr><td>Q2</td><td>Which compositor primitive hides and restores accessories?</td><td>The primitive must preserve surface identity and app state and must remain distinct from destruction.</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>

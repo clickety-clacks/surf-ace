@@ -12,11 +12,9 @@
   },
   "tools": [
     "surf_ace_list",
-    "surf_ace_authority_diagnostics",
     "surf_ace_push",
     "surf_ace_launch_native_app",
     "surf_ace_clear",
-    "surf_ace_relinquish",
     "surf_ace_reattempt_connections",
     "surf_ace_split",
     "surf_ace_realize_topology",
@@ -34,11 +32,9 @@
   "contracts": {
     "tools": [
       "surf_ace_list",
-        "surf_ace_authority_diagnostics",
       "surf_ace_push",
       "surf_ace_launch_native_app",
       "surf_ace_clear",
-      "surf_ace_relinquish",
       "surf_ace_reattempt_connections",
       "surf_ace_split",
       "surf_ace_realize_topology",

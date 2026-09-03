@@ -18,41 +18,21 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         }
     }
 
-    func testLegacyMigrationPreservesRepresentableMaterialAndDoesNotMutateSource() throws {
-        let suite = "SurfAceLocklessAuthorityTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let legacy = legacySnapshot()
-        defaults.set(legacy.identityMapping, forKey: SurfAceLegacyUserDefaultsSnapshot.identityMappingKey)
-        defaults.set(legacy.surfaceTopologies, forKey: SurfAceLegacyUserDefaultsSnapshot.surfaceTopologyKey)
-        let before = SurfAceLegacyUserDefaultsSnapshot(userDefaults: defaults)
-
-        let state = try SurfAceLocklessMigration.migrate(before)
-
-        XCTAssertEqual(SurfAceLegacyUserDefaultsSnapshot(userDefaults: defaults), before)
-        XCTAssertEqual(state.capability, surfAceLocklessCapability)
-        XCTAssertEqual(state.liveSurfaces.keys.sorted(), ["sf_1"])
-        let surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
-        XCTAssertEqual(surface.sceneKeys, ["scene-1"])
-        XCTAssertEqual(surface.windowLabel, "a")
-        XCTAssertEqual(surface.panes.keys.sorted(), ["7"])
-        let pane = try XCTUnwrap(surface.panes["7"])
-        XCTAssertEqual(pane.paneLabel, 2)
-        XCTAssertEqual(pane.paneLineageId, "pl_7")
-        XCTAssertEqual(pane.history.visible.contentId, "ct_00000001")
-        XCTAssertEqual(pane.history.visible.revision, 4)
-        XCTAssertEqual(pane.history.back.count, 1)
-        XCTAssertEqual(pane.history.forward.count, 1)
-        XCTAssertNotNil(state.scopes["surface:sf_1"])
-        XCTAssertNotNil(state.scopes["pane:sf_1:7"])
-    }
-
     func testGenerationStoreRoundTripsCompleteStateAcrossRestart() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SurfAceLocklessAuthorityTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
-        var state = try SurfAceLocklessMigration.migrate(legacySnapshot())
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state,
+            expectedSurfaceSetRevision: state.surfaceSetRevision
+        )
+        let sourceSurfaceId = opened.surface.surfaceId
+        var sourceSurface = try XCTUnwrap(state.liveSurfaces.removeValue(forKey: sourceSurfaceId))
+        sourceSurface.surfaceId = "sf_1"
+        sourceSurface.sceneKeys = ["scene-1"]
+        state.liveSurfaces["sf_1"] = sourceSurface
         state.generation = 8
         state.controllers["controller-a"] = controllerBundle()
         let work = targetWork()
@@ -70,7 +50,7 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         XCTAssertEqual(restored, state)
         XCTAssertEqual(restored.controllers["controller-a"]?.pendingOperationReceipts["rq-1"]?.commitSequence, 11)
         XCTAssertEqual(restored.targetApplyWorkItems[work.identity.storageKey]?.state, .materializing)
-        XCTAssertEqual(restored.surfaceTombstones.first?.surface.panes["7"]?.history.visible.contentId, "ct_00000001")
+        XCTAssertNotNil(restored.surfaceTombstones.first?.surface.panes.values.first)
     }
 
     func testCoordinatorPersistsBeforeReturningAndSerializesGenerations() async throws {
@@ -276,91 +256,6 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         XCTAssertEqual(state.pendingControllerRetentionReclamations, [occurrence])
     }
 
-    func testRollbackPreviewIsDeterministicAndDoesNotMutateAuthority() throws {
-        var state = try SurfAceLocklessMigration.migrate(legacySnapshot())
-        state.generation = 5
-        state.controllers["controller-a"] = controllerBundle()
-        let work = targetWork()
-        state.targetApplyWorkItems[work.identity.storageKey] = work
-        let before = state
-
-        let first = try SurfAceLocklessMigration.rollbackPreview(state)
-        let second = try SurfAceLocklessMigration.rollbackPreview(state)
-
-        XCTAssertEqual(state, before)
-        XCTAssertEqual(first, second)
-        XCTAssertEqual(first.sourceGeneration, 5)
-        XCTAssertTrue(first.omissions.contains {
-            $0.path == "/lockless/controllers/controller-a/pendingOperationReceipts/rq-1"
-        })
-        let projected = SurfAceLegacyUserDefaultsSnapshot(
-            identityMapping: first.projection.identityMapping,
-            surfaceTopologies: first.projection.surfaceTopologies
-        )
-        let migratedAgain = try SurfAceLocklessMigration.migrate(projected)
-        XCTAssertEqual(migratedAgain.liveSurfaces["sf_1"]?.panes["7"]?.history.visible.contentId, "ct_00000001")
-    }
-
-    private func legacySnapshot() -> SurfAceLegacyUserDefaultsSnapshot {
-        let entry: [String: Any] = [
-            "contentId": "ct_00000001",
-            "contentType": "markdown",
-            "drawingData": "",
-            "interactive": true,
-            "payload": ["kind": "markdown", "markdown": "hello"],
-            "provenanceDisplayName": "OpenClaw",
-            "senderDisplayName": "Clawline",
-            "revision": 4,
-            "scrollable": true,
-            "strokesById": [:],
-        ]
-        let older: [String: Any] = [
-            "contentId": "ct_00000000",
-            "contentType": "markdown",
-            "drawingData": "",
-            "interactive": true,
-            "payload": ["kind": "markdown", "markdown": "older"],
-            "revision": 3,
-            "scrollable": true,
-            "strokesById": [:],
-        ]
-        let newer: [String: Any] = [
-            "contentId": "ct_00000002",
-            "contentType": "markdown",
-            "drawingData": "",
-            "interactive": true,
-            "payload": ["kind": "markdown", "markdown": "newer"],
-            "revision": 5,
-            "scrollable": true,
-            "strokesById": [:],
-        ]
-        let identities: [String: Any] = [
-            "surfacesBySceneKey": ["scene-1": ["surfaceId": "sf_1"]],
-        ]
-        let topologies: [String: Any] = [
-            "sf_1": [
-                "name": "Surf Ace",
-                "paneLayout": ["kind": "leaf", "paneId": 7],
-                "panes": [[
-                    "annotationMode": true,
-                    "backStack": [older],
-                    "currentEntry": entry,
-                    "currentTarget": ["targetId": "target-1", "targetEpoch": 2],
-                    "forwardStack": [newer],
-                    "name": "Notes",
-                    "paneId": 7,
-                    "paneLabel": 2,
-                    "paneLineageId": "pl_7",
-                ]],
-                "windowLabel": "a",
-            ],
-        ]
-        return SurfAceLegacyUserDefaultsSnapshot(
-            identityMapping: try! JSONSerialization.data(withJSONObject: identities, options: [.sortedKeys]),
-            surfaceTopologies: try! JSONSerialization.data(withJSONObject: topologies, options: [.sortedKeys])
-        )
-    }
-
     private func controllerBundle() -> SurfAceLocklessControllerBundle {
         var receipt = SurfAceLocklessOperationReceiptState(
             bytes: 0,
@@ -493,7 +388,7 @@ extension SurfAceLocklessAuthorityTests {
             let equalitySource = equality
             for transition in [
                 SurfAceLocklessRecoverableTransition.locklessAdmission,
-                .legacyMigration, .restart, .configuration,
+                .restart, .configuration,
             ] {
                 XCTAssertEqual(try equality.validated(for: transition), equality)
                 XCTAssertEqual(equality, equalitySource)
@@ -508,7 +403,7 @@ extension SurfAceLocklessAuthorityTests {
             let priorGeneration = equality
             for transition in [
                 SurfAceLocklessRecoverableTransition.locklessAdmission,
-                .legacyMigration, .restart, .configuration,
+                .restart, .configuration,
             ] {
                 XCTAssertThrowsError(try equality.validated(for: transition, limits: overLimits)) { error in
                     XCTAssertEqual(
@@ -523,122 +418,6 @@ extension SurfAceLocklessAuthorityTests {
         let normal = try retainedAggregateTransitionState(reversedIdentities: false)
         let reversed = try retainedAggregateTransitionState(reversedIdentities: true)
         XCTAssertEqual(normal.surfaceTombstones.map(\.bytes), reversed.surfaceTombstones.map(\.bytes))
-    }
-
-    func testACMIG02OverPPreservedStateMigratesWithoutClampAndTrueCombinedOverflowRejects() throws {
-        var limits = SurfAceLocklessCapacityLimits.production
-        limits.maxPanesPerSurface = 2
-        limits.maxRetainedTombstones = 3
-        let valid = try legacySnapshotWithPaneCount(3)
-        let migrated = try SurfAceLocklessMigration.migrate(valid, limits: limits)
-        XCTAssertEqual(migrated.liveSurfaces["sf_1"]?.panes.count, 3)
-        XCTAssertEqual(migrated.liveSurfaces["sf_1"]?.panes.keys.sorted(), ["7", "8", "9"])
-        let before = migrated
-        var refusal = migrated
-        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneSplit(
-            state: &refusal, surfaceId: "sf_1", paneId: 7, count: 2,
-            direction: "horizontal", expectedTopologyRevision: 0
-        )) { error in
-            XCTAssertEqual(
-                error as? SurfAceLocklessTopologyOperationError,
-                .paneCapacity(current: 3, requested: 4, maximum: 2)
-            )
-        }
-        XCTAssertEqual(refusal, before)
-        XCTAssertThrowsError(try SurfAceLocklessMigration.migrate(
-            legacySnapshotWithPaneCount(6), limits: limits
-        )) { error in
-            XCTAssertTrue(
-                error is SurfAceLocklessAuthorityError || error is SurfAceLocklessMigrationError,
-                "unexpected migration failure \(error)"
-            )
-        }
-    }
-
-    func testACCAP03AndACOPS01ExactOverPGenerationRestoresBeforeAdmission() async throws {
-        var limits = SurfAceLocklessCapacityLimits.production
-        limits.maxPanesPerSurface = 2
-        limits.maxRetainedTombstones = 3
-        var state = try SurfAceLocklessMigration.migrate(
-            legacySnapshotWithPaneCount(3), limits: limits
-        )
-        state.controllers["live"] = SurfAceLocklessControllerBundle(
-            controllerInstanceId: "live", controllerProductName: "A", disconnectedAt: nil,
-            dormantSequence: nil, pendingOperationReceipts: [:], projectionCapacityBytes: 8_388_608,
-            status: .live
-        )
-        state.controllers["dormant"] = SurfAceLocklessControllerBundle(
-            controllerInstanceId: "dormant", controllerProductName: "B", disconnectedAt: 10,
-            dormantSequence: 1, pendingOperationReceipts: [:], projectionCapacityBytes: 8_388_608,
-            status: .dormant
-        )
-        state.sequences.nextDormantSequence = 2
-        SurfAceLocklessConsumableOperations.admitController("live", in: &state)
-        SurfAceLocklessConsumableOperations.admitController("dormant", in: &state)
-        XCTAssertEqual(limits.recoverableSurfaceMinimumBytes,
-            limits.maxSurfaceRecoverableBaseBytes
-                + limits.maxSurfaceConsumableBytes
-                + limits.maxAdmittedControllerEntries * limits.maxConsumableCursorStateBytesPerScope
-                + (limits.maxPanesPerSurface + limits.maxRetainedTombstones)
-                    * (limits.maxPaneRecoverableStateBytes + limits.maxPaneConsumableBytes
-                        + limits.maxAdmittedControllerEntries * limits.maxConsumableCursorStateBytesPerScope)
-        )
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ACOPS01-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
-        try store.save(state)
-        let adapter = try SurfAceLocklessRuntimeAdapter(
-            store: store, legacy: .init(identityMapping: nil, surfaceTopologies: nil)
-        )
-        let readiness = await adapter.readinessSnapshot()
-        XCTAssertTrue(readiness.fullGenerationLoaded)
-        XCTAssertTrue(readiness.readyForAdmission)
-        XCTAssertEqual(readiness.state.liveSurfaces["sf_1"]?.panes.count, 3)
-        XCTAssertEqual(readiness.state.limits, limits)
-        XCTAssertEqual(readiness.state.controllers.keys.sorted(), ["dormant", "live"])
-        XCTAssertTrue(readiness.state.controllers.values.allSatisfy { $0.status == .dormant })
-    }
-
-    func testRollbackProjectionPreservesBothCompositeProvenanceComponents() throws {
-        let state = try SurfAceLocklessMigration.migrate(legacySnapshot())
-        let preview = try SurfAceLocklessMigration.rollbackPreview(state)
-        let root = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: preview.projection.surfaceTopologies) as? [String: Any]
-        )
-        let surface = try XCTUnwrap(root["sf_1"] as? [String: Any])
-        let panes = try XCTUnwrap(surface["panes"] as? [[String: Any]])
-        let current = try XCTUnwrap(panes.first?["currentEntry"] as? [String: Any])
-        XCTAssertEqual(current["provenanceDisplayName"] as? String, "OpenClaw")
-        XCTAssertEqual(current["senderDisplayName"] as? String, "Clawline")
-    }
-
-    private func legacySnapshotWithPaneCount(_ count: Int) throws -> SurfAceLegacyUserDefaultsSnapshot {
-        let source = legacySnapshot()
-        var root = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: XCTUnwrap(source.surfaceTopologies)) as? [String: Any]
-        )
-        var surface = try XCTUnwrap(root["sf_1"] as? [String: Any])
-        let template = try XCTUnwrap((surface["panes"] as? [[String: Any]])?.first)
-        var panes: [[String: Any]] = []
-        var leaves: [[String: Any]] = []
-        for index in 0..<count {
-            var pane = template
-            pane["paneId"] = 7 + index
-            pane["paneLabel"] = 2 + index
-            pane["paneLineageId"] = "pl_\(7 + index)"
-            panes.append(pane)
-            leaves.append(["kind": "leaf", "paneId": 7 + index, "weight": 1.0 / Double(count)])
-        }
-        surface["panes"] = panes
-        surface["paneLayout"] = count == 1
-            ? leaves[0]
-            : ["kind": "split", "direction": "horizontal", "children": leaves]
-        root["sf_1"] = surface
-        return SurfAceLegacyUserDefaultsSnapshot(
-            identityMapping: source.identityMapping,
-            surfaceTopologies: try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
-        )
     }
 
     private func retainedAggregateTransitionState(

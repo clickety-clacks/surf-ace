@@ -16,7 +16,7 @@ Use `surf_ace_list` before any pane-scoped write or read. Every pane-scoped call
 ## Operating rules
 
 1. Never assume pane topology. Read it with `surf_ace_list`.
-2. Treat `content.set` as immediate visible ownership for that pane.
+2. Treat `content.set` as the pane's immediately visible content.
 3. Treat native GUI/app materialization as proven only when `surf_ace_launch_native_app` returns target evidence for the same actionable pane with `nativeHost` and `overlayRegions` applied, and product-approved capture shows visible rendering.
 4. Never use direct compositor/native-pane hosting, demo fixtures, mocked compositor status, or manually hosted windows as Surf Ace product proof.
 5. For multi-pane layout changes, prefer `surf_ace_realize_topology` with the `topologyRevision` returned by `surf_ace_list`.

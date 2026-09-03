@@ -1,4 +1,3 @@
-import { buildSurfAceAgentInstructions } from "./agent-instructions.js";
 import type { PusherProvenance } from "../../protocol/src/index.js";
 import {
   type SurfAceAnnotateRemoveInput,
@@ -11,17 +10,13 @@ import {
   type SurfAcePushInput,
   type SurfAceScreenSummary,
   type SurfAceRuntime,
-  type SurfAceRuntimeOptions,
-  createSurfAceRuntime,
 } from "./surf-ace-runtime.js";
 
 export const surfAceToolNames = [
   "surf_ace_list",
-  "surf_ace_authority_diagnostics",
   "surf_ace_push",
   "surf_ace_launch_native_app",
   "surf_ace_clear",
-  "surf_ace_relinquish",
   "surf_ace_reattempt_connections",
   "surf_ace_split",
   "surf_ace_realize_topology",
@@ -59,12 +54,6 @@ export type SurfAceToolDefinition<TArgs = unknown, TResult = unknown> = {
   name: SurfAceToolName;
 };
 
-export type SurfAceExtensionRegistration = {
-  agentInstructions: string;
-  runtime: SurfAceRuntime;
-  tools: SurfAceToolDefinition<any>[];
-};
-
 const fingerprintParam = {
   description: "Window-scoped Surf Ace surface identity (`surfaceId`, exposed as `fingerprint`).",
   type: "string",
@@ -75,7 +64,7 @@ const paneIdParam = {
   type: "string",
 };
 
-type PublicSurfAceScreenSummary = Omit<SurfAceScreenSummary, "_debug">;
+type PublicSurfAceScreenSummary = SurfAceScreenSummary;
 
 type SurfAceListInput = {
   actionableOnly?: boolean;
@@ -93,7 +82,7 @@ function compactSurfAceListOutput(
   const hasPaneFilter = input.paneAddress !== undefined || input.paneId !== undefined;
   return screens
     .filter((screen) => screenMatchesSurfAceListInput(screen, input))
-    .map(({ _debug, ...screen }) => {
+    .map((screen) => {
       const panes = hasPaneFilter
         ? screen.panes.filter((pane) => paneMatchesSurfAceListInput(pane, input))
         : screen.panes;
@@ -130,11 +119,7 @@ function screenSearchAliases(screen: SurfAceScreenSummary): string[] {
     screen.name,
     screen.fingerprint,
     screen.windowLabel,
-    screen._debug?.endpointId,
-    screen._debug?.localOwnership?.endpointHost,
-    screen._debug?.localOwnership?.endpointName,
-    screen._debug?.remoteOwnership?.endpointHost,
-    screen._debug?.remoteOwnership?.endpointName,
+    screen.endpointId,
   ];
   return aliases.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0);
 }
@@ -289,16 +274,6 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_list",
     },
     {
-      description: "Return provider authority diagnostics for stale persisted surfaces, live surfaces, runtime screen snapshots, target/window records, tombstones, pane counters, blockers, and runtime owner state.",
-      execute: async () => await runtime.providerAuthorityDiagnostics(),
-      inputSchema: {
-        additionalProperties: false,
-        properties: {},
-        type: "object",
-      },
-      name: "surf_ace_authority_diagnostics",
-    },
-    {
       description: "Push content or a live browser URL target to a Surf Ace pane, replacing whatever is currently visible.",
       execute: async (args: SurfAcePushInput, context?: SurfAceToolContext) =>
         await runtime.push(args, {
@@ -419,19 +394,6 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
         type: "object",
       },
       name: "surf_ace_clear",
-    },
-    {
-      description: "Relinquish ownership of a Surf Ace surface and stop automatic reconnects for it.",
-      execute: async (args: { fingerprint: string }) => await runtime.relinquish(args),
-      inputSchema: {
-        additionalProperties: false,
-        properties: {
-          fingerprint: fingerprintParam,
-        },
-        required: ["fingerprint"],
-        type: "object",
-      },
-      name: "surf_ace_relinquish",
     },
     {
       description: "Operator tool to reset Surf Ace connection circuits and reattempt stopped reconnect/probe workers.",
@@ -633,7 +595,7 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_surface_intent",
     },
     {
-      description: "Register client-restorable target material without legacy ownership fields.",
+      description: "Register client-restorable target material through the current lockless contract.",
       execute: async (
         args: Parameters<SurfAceRuntime["registerTarget"]>[0],
       ) => await runtime.registerTarget(args),
@@ -716,13 +678,4 @@ export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefiniti
       name: "surf_ace_annotations_remove",
     },
   ];
-}
-
-export function register(options: SurfAceRuntimeOptions = {}): SurfAceExtensionRegistration {
-  const runtime = createSurfAceRuntime(options);
-  return {
-    agentInstructions: buildSurfAceAgentInstructions(),
-    runtime,
-    tools: createSurfAceTools(runtime),
-  };
 }

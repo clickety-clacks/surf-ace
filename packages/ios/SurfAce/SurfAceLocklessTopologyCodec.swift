@@ -84,7 +84,7 @@ enum SurfAceLocklessTopologyCodec {
         throw SurfAceLocklessAuthorityError.invalidState("topology_shape")
     }
 
-    static func legacyProjection(_ value: SurfAceLocklessJSON) throws -> SurfAceLocklessJSON {
+    static func persistedProjection(_ value: SurfAceLocklessJSON) throws -> SurfAceLocklessJSON {
         let canonical = try canonical(value)
         guard case .object(let object) = canonical else {
             throw SurfAceLocklessAuthorityError.invalidState("topology_root")
@@ -98,7 +98,7 @@ enum SurfAceLocklessTopologyCodec {
             throw SurfAceLocklessAuthorityError.invalidState("topology_shape")
         }
         return .object([
-            "children": .array(try children.map(legacyProjection)),
+            "children": .array(try children.map(persistedProjection)),
             "direction": direction,
             "kind": .string("split"),
         ])

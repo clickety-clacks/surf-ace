@@ -19,11 +19,7 @@ import {
   advertisesLocklessCapability,
   OpenClawLocklessController,
 } from "./openclaw-lockless-controller.js";
-import {
-  DefaultSurfAceRuntime,
-  SurfAceToolError,
-  type PaneId,
-} from "./surf-ace-runtime.js";
+import type { PaneId } from "./surf-ace-runtime.js";
 import { createSurfAceTools, surfAceToolNames } from "./surf-ace-tools.js";
 import { SurfaceCore } from "../../electron/src/surface-core.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
@@ -362,21 +358,21 @@ test("lockless mode requires the exact pre-pair advertised capability", () => {
     },
   }), true);
   assert.equal(advertisesLocklessCapability({
-    capabilities: { protocolFeatures: ["authority.state.v1"] },
+    capabilities: { protocolFeatures: ["feature.additional.v1"] },
   }), false);
   assert.equal(advertisesLocklessCapability({ surfaces: [] }), false);
 });
 
-test("only a genuinely non-capable endpoint enters the unchanged legacy route", async () => {
+test("an endpoint without the current capability is not admitted", async () => {
   const endpoint: SurfAceDiscoveryEndpoint = {
     busy: false,
     capabilitiesBitmask: 0,
-    endpointId: "electron-legacy",
-    fingerprintPrefix: "legacy",
+    endpointId: "electron-unsupported",
+    fingerprintPrefix: "unsupported",
     host: "127.0.0.1",
     instanceName: "Surf Ace",
     lastSeenAt: 1,
-    name: "Legacy",
+    name: "Unsupported",
     port: 17_700,
     protocolVersion: 1,
     viewport: { height: 1, scale: 1, width: 1 },
@@ -393,7 +389,7 @@ test("only a genuinely non-capable endpoint enters the unchanged legacy route", 
         return response(op, { capabilities: { protocolFeatures } }, id);
       }
       return {
-        error: { code: "migration_rejected", message: "rejected" },
+        error: { code: "capability_mismatch", message: "rejected" },
         id,
         ok: false,
         op,
@@ -402,33 +398,15 @@ test("only a genuinely non-capable endpoint enters the unchanged legacy route", 
       };
     },
   });
-  const legacy = new OpenClawLocklessController({
+  const controller = new OpenClawLocklessController({
     discovery: new StaticDiscovery(endpoint),
     stateDir: "/unused",
     storeFactory: () => new MemoryStore(),
     wireFactory: () => wireForFeatures([]),
   });
-  await legacy.start();
-  assert.deepEqual(
-    legacy.legacyDiscovery().getSnapshot().map((value) => value.endpointId),
-    ["electron-legacy"],
-  );
-  await legacy.stop();
-
-  const capableButRejected = new OpenClawLocklessController({
-    discovery: new StaticDiscovery(endpoint),
-    stateDir: "/unused",
-    storeFactory: () => new MemoryStore(),
-    wireFactory: () =>
-      wireForFeatures([SURF_ACE_LOCKLESS_V1_CAPABILITY]),
-  });
-  await capableButRejected.start();
-  assert.deepEqual(
-    capableButRejected.legacyDiscovery().getSnapshot(),
-    [],
-    "lockless admission failure must not fall back to legacy",
-  );
-  await capableButRejected.stop();
+  await controller.start();
+  assert.deepEqual(await controller.listScreens(), []);
+  await controller.stop();
 });
 
 test("OpenClaw manifest exposes every registered official Surf Ace tool", async () => {
