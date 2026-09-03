@@ -3028,3 +3028,74 @@ test("a successful saturated pair survives a FRESH-CORE reload with no unresolve
 // example by observing the ledger grow by a discovery-created row.
 // Not left armed: a non-discriminating regression is worse than none, because
 // it reads as coverage it does not provide.
+
+test("a successful DISCOVERY admission is durably terminal and leaves admission open", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  assert(
+    core.activePaneIds(surface.surfaceId).some((paneId) => paneId < 1),
+    "expected the bootstrap pane id below 1",
+  );
+  seedFullTerminalLedger(core);
+
+  let persisted: string | null = null;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    persistLocklessState: async () => {
+      persisted = JSON.stringify(core.getPersistentState());
+    },
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    // Lifecycle pairing WITHOUT a surfaceId, so the bootstrap pane is not
+    // materialised and the pane-id-below-1 discovery trigger survives.
+    const paired = await pair(socket, "openclaw");
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+    assert(
+      core.activePaneIds(surface.surfaceId).some((paneId) => paneId < 1),
+      "pairing materialised the bootstrap pane; discovery would not run",
+    );
+
+    const beforeSeq = core.getPersistentState().nextAdmissionAttemptSequence;
+    const listed = await request(socket, "surfaces.list", {});
+    assert.equal(listed.ok, true, JSON.stringify(listed));
+
+    // PRECONDITION: prove admitSurfaceForDiscovery actually ran. Without this
+    // the rest is unattributable and the test would not discriminate.
+    const afterSeq = core.getPersistentState().nextAdmissionAttemptSequence;
+    assert(
+      afterSeq > beforeSeq,
+      `discovery created no admission row (${beforeSeq} -> ${afterSeq})`,
+    );
+    assert(persisted !== null, "nothing reached disk");
+
+    // Fresh core from the bytes that actually reached disk.
+    const reloaded = new SurfaceCore({
+      persistentState: JSON.parse(persisted as string),
+    });
+    assert.deepEqual(
+      reloaded.listUnresolvedSurfaceAdmissionAttempts(),
+      [],
+      "successful discovery left an unresolved row in durable state",
+    );
+    const admitted = reloaded.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: "controller_post_discovery",
+      requestId: "rq_post_discovery",
+      surfaceId: "sf_other0aaaaa",
+    });
+    assert(admitted.attemptSequence > 0);
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
