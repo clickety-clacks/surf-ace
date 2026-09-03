@@ -16,6 +16,7 @@ import {
 import { SurfaceCore } from "../src/surface-core.js";
 import {
   DEFAULT_LOCKLESS_LIMITS,
+  LocklessAuthorityError,
   createEmptyLocklessClientState,
 } from "../src/lockless-client-authority.js";
 import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
@@ -3101,4 +3102,291 @@ test("a successful DISCOVERY admission is durably terminal and leaves admission 
     socket.close();
     await server.stop();
   }
+});
+// --- Witness-driven never-began recovery: real socket-path regressions
+// (V6 scope, capacity review item 7) ---
+//
+// These reuse the already-proven unknown-outcome fail-stop mechanism to
+// interrupt a real admission at an exact, known point, rather than
+// hand-constructing a persisted-state object. Each row is produced by a real
+// pair.request through a real SurfaceWsServer; only the merge step for the
+// two-owner cases (explicitly marked) assembles independently-produced real
+// rows into one ledger, since two owners genuinely mid-flight at once is not
+// reachable through the serialized boundary by design — one caller fully
+// releases the boundary before the next may enter it.
+
+async function admitOneNotStartedOwner(
+  requestIdSuffix: string,
+): Promise<{ attempt: LocklessSurfaceAdmissionAttempt; state: any }> {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface(`Surf Ace ${requestIdSuffix}`, {
+    height: 800, scale: 2, width: 1200,
+  });
+  let persisted: string | null = null;
+  let calls = 0;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null, compositorSocketPath: null, core,
+    endpointName: "Surf Ace", hostName: "localhost", port,
+    persistLocklessState: async () => {
+      calls += 1;
+      if (calls === 1) {
+        // Real prepare persist: candidate durably not_started. Captured.
+        persisted = JSON.stringify(core.getPersistentState());
+        return;
+      }
+      // Interrupt before markSurfaceAdmissionAttemptStarted's own persist
+      // ever succeeds, so the candidate never advances past not_started.
+      throw new PersistentStateOutcomeUnknownError(new Error(`crash-${requestIdSuffix}`));
+    },
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  socket.on("error", () => {});
+  await Promise.race([
+    pair(socket, `openclaw-${requestIdSuffix}`, surface.surfaceId),
+    new Promise((resolve) => setTimeout(resolve, 4000)),
+  ]);
+  socket.close();
+  await server.stop();
+  assert(persisted, "prepare's own persist never captured");
+  const state = JSON.parse(persisted as string);
+  const attempt = state.admissionAttempts[0] as LocklessSurfaceAdmissionAttempt;
+  assert.equal(attempt.outcome, "pending");
+  assert.equal(attempt.witness, "not_started");
+  return { attempt, state };
+}
+
+async function admitOneStartedNoReceiptOwner(
+  requestIdSuffix: string,
+): Promise<{ attempt: LocklessSurfaceAdmissionAttempt; state: any }> {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface(`Surf Ace ${requestIdSuffix}`, {
+    height: 800, scale: 2, width: 1200,
+  });
+  let persisted: string | null = null;
+  let calls = 0;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null, compositorSocketPath: null, core,
+    endpointName: "Surf Ace", hostName: "localhost", port,
+    persistLocklessState: async () => {
+      calls += 1;
+      if (calls <= 2) {
+        // Real prepare (1) then real markSurfaceAdmissionAttemptStarted (2):
+        // the candidate is durably "started". Captured after call 2.
+        persisted = JSON.stringify(core.getPersistentState());
+        return;
+      }
+      // Interrupt the terminal write: no receipt evidence will ever exist.
+      throw new PersistentStateOutcomeUnknownError(new Error(`crash-${requestIdSuffix}`));
+    },
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  socket.on("error", () => {});
+  await Promise.race([
+    pair(socket, `openclaw-${requestIdSuffix}`, surface.surfaceId),
+    new Promise((resolve) => setTimeout(resolve, 4000)),
+  ]);
+  socket.close();
+  await server.stop();
+  assert(persisted, "markSurfaceAdmissionAttemptStarted's own persist never captured");
+  const state = JSON.parse(persisted as string);
+  const attempt = state.admissionAttempts[0] as LocklessSurfaceAdmissionAttempt;
+  assert.equal(attempt.outcome, "pending");
+  assert.equal(attempt.witness, "started");
+  return { attempt, state };
+}
+
+test("real socket-path: a not_started candidate survives a fresh reload, recovers as never-began, and admission resumes", async () => {
+  const { attempt } = await admitOneNotStartedOwner("solo-a");
+  const reloaded = new SurfaceCore({
+    persistentState: {
+      admissionAttempts: [attempt],
+      nextAdmissionAttemptSequence: attempt.attemptSequence + 1,
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const admitted = reloaded.beginSurfaceAdmissionAttempt({
+    controllerInstanceId: "controller_after_never_began",
+    requestId: "rq_after_never_began",
+    surfaceId: "sf_other0aaaaa",
+  });
+  assert(admitted.attemptSequence > 0);
+  const recovered = reloaded
+    .listSurfaceAdmissionAttempts()
+    .find((row) => row.attemptSequence === attempt.attemptSequence);
+  assert.equal(recovered?.outcome, "failed");
+  // The only remaining pending row is the NEW candidate itself, still
+  // in-flight from this call; the never-began row is gone from that list.
+  assert.deepEqual(
+    reloaded.listUnresolvedSurfaceAdmissionAttempts(),
+    [admitted.attemptSequence],
+  );
+});
+
+test("real socket-path: a started-without-receipt candidate survives a fresh reload as indeterminate and blocks admission", async () => {
+  const { attempt } = await admitOneStartedNoReceiptOwner("solo-b");
+  const reloaded = new SurfaceCore({
+    persistentState: {
+      admissionAttempts: [attempt],
+      nextAdmissionAttemptSequence: attempt.attemptSequence + 1,
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  let raised: unknown = null;
+  try {
+    reloaded.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: "controller_blocked",
+      requestId: "rq_blocked",
+      surfaceId: "sf_other0aaaaa",
+    });
+  } catch (error) {
+    raised = error;
+  }
+  assert(raised instanceof LocklessAuthorityError);
+  assert.equal(raised.code, "admission_recovery_pending");
+  const still = reloaded
+    .listSurfaceAdmissionAttempts()
+    .find((row) => row.attemptSequence === attempt.attemptSequence);
+  assert.equal(still?.outcome, "pending");
+  assert.equal(still?.witness, "started");
+});
+
+async function twoOwnerMixedOrdering(
+  firstKind: "not_started" | "started",
+): Promise<void> {
+  // Two owners genuinely mid-flight at the same instant is not reachable
+  // through the serialized boundary by construction: one caller's admission
+  // work fully releases the boundary before the next may enter it. Each
+  // row below is produced by its OWN real socket-path admission, exactly as
+  // the single-owner tests above; only this merge step is a test
+  // construction, assembling two independently real rows into the ledger a
+  // restart would actually reload — content each row carries is real,
+  // production-produced bytes.
+  const first = firstKind === "not_started"
+    ? await admitOneNotStartedOwner("mix-first")
+    : await admitOneStartedNoReceiptOwner("mix-first");
+  const second = firstKind === "not_started"
+    ? await admitOneStartedNoReceiptOwner("mix-second")
+    : await admitOneNotStartedOwner("mix-second");
+  const rowA = { ...first.attempt, attemptSequence: 1 };
+  const rowB = { ...second.attempt, attemptSequence: 2 };
+
+  let reloaded = new SurfaceCore({
+    persistentState: {
+      admissionAttempts: [rowA, rowB],
+      nextAdmissionAttemptSequence: 3,
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  // Every row has a defined outcome field going in; none is silently
+  // undefined or guessed.
+  for (const row of reloaded.listSurfaceAdmissionAttempts()) {
+    assert(["failed", "pending", "succeeded"].includes(row.outcome));
+  }
+
+  const notStartedSeq = rowA.witness === "not_started"
+    ? rowA.attemptSequence
+    : rowB.attemptSequence;
+  const startedSeq = rowA.witness === "started"
+    ? rowA.attemptSequence
+    : rowB.attemptSequence;
+
+  // Admission stays blocked: the not_started row auto-resolves as
+  // never-began, but the started row has no receipt and stays
+  // indeterminate, and ANY unresolved row blocks admission regardless of
+  // capacity (V5).
+  let raised: unknown = null;
+  try {
+    reloaded.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: "controller_mixed",
+      requestId: "rq_mixed",
+      surfaceId: "sf_other0aaaaa",
+    });
+  } catch (error) {
+    raised = error;
+  }
+  assert(raised instanceof LocklessAuthorityError);
+  assert.equal(raised.code, "admission_recovery_pending");
+
+  const afterFirstAttempt = reloaded.listSurfaceAdmissionAttempts();
+  const notStartedRow = afterFirstAttempt.find(
+    (row) => row.attemptSequence === notStartedSeq,
+  );
+  const startedRow = afterFirstAttempt.find(
+    (row) => row.attemptSequence === startedSeq,
+  );
+  // The not_started row DID resolve, in the same recovery pass, even though
+  // the started row blocked the candidate.
+  assert.equal(notStartedRow?.outcome, "failed");
+  assert.equal(startedRow?.outcome, "pending");
+  assert.deepEqual(reloaded.listUnresolvedSurfaceAdmissionAttempts(), [startedSeq]);
+
+  // Supply real evidence for the started row (a durable receipt), reload
+  // fresh again, and confirm admission now resumes. Capture the state ONCE:
+  // getPersistentState() clones on every call, so mutating a second,
+  // separately-fetched clone would silently go nowhere.
+  const stateWithEvidence = reloaded.getPersistentState();
+  const lockless = stateWithEvidence.lockless;
+  (lockless as any).controllers["ctl_mixed_evidence"] = {
+    controllerInstanceId: "ctl_mixed_evidence",
+    controllerProductName: null,
+    disconnectedAt: null,
+    dormantSequence: null,
+    pendingOperationReceipts: {
+      [startedRow!.requestId]: (() => {
+        // `bytes` is validated against the serialized receipt that CONTAINS
+        // it, so solve the self-reference by iterating to a fixed point.
+        const shape = (bytes: number) => ({
+          bytes,
+          operation: "pair.request",
+          operationReceipt: { commitSequence: 1, requestId: startedRow!.requestId },
+          outcome: "resolved_success" as const,
+          requestId: startedRow!.requestId,
+          status: "terminal" as const,
+          terminalResponse: null,
+        });
+        let bytes = 0;
+        for (let pass = 0; pass < 6; pass++) {
+          bytes = Buffer.byteLength(
+            JSON.stringify({ version: 1, ...shape(bytes) }),
+            "utf8",
+          );
+        }
+        return shape(bytes);
+      })(),
+    },
+    projectionCapacityBytes: 1024,
+    status: "dormant",
+  };
+  const withEvidence = new SurfaceCore({
+    persistentState: stateWithEvidence,
+  });
+  const admitted = withEvidence.beginSurfaceAdmissionAttempt({
+    controllerInstanceId: "controller_after_evidence",
+    requestId: "rq_after_evidence",
+    surfaceId: "sf_other0aaaaa",
+  });
+  assert(admitted.attemptSequence > 0);
+  // Only the new candidate itself remains pending, in-flight from this call.
+  assert.deepEqual(
+    withEvidence.listUnresolvedSurfaceAdmissionAttempts(),
+    [admitted.attemptSequence],
+  );
+}
+
+test("real socket-path, two owners, ordering A (not_started first): mixed recovery resolves one, blocks on the other, then resumes with evidence", async () => {
+  await twoOwnerMixedOrdering("not_started");
+});
+
+test("real socket-path, two owners, ordering B (started first): mixed recovery resolves one, blocks on the other, then resumes with evidence", async () => {
+  await twoOwnerMixedOrdering("started");
 });
