@@ -524,21 +524,6 @@ export type AdmissionRecoveryEvidence = {
   reasonCode?: string;
 };
 
-/**
- * Raised by a persistence callback to report the durable outcome of a prepare
- * transition. `outcomeKnown` is the load-bearing field: it distinguishes "the
- * store is known to hold the exact pre-prepare state" from "we do not know
- * what the store holds". Guessing either way is what corrupts a sequence.
- */
-export class AdmissionPersistenceError extends Error {
-  readonly outcomeKnown: boolean;
-  constructor(message: string, outcomeKnown: boolean) {
-    super(message);
-    this.name = "AdmissionPersistenceError";
-    this.outcomeKnown = outcomeKnown;
-  }
-}
-
 export type AdmissionRecoveryPlan = {
   terminalize: {
     attemptSequence: number;
@@ -639,7 +624,6 @@ export class SurfaceCore {
   // Admission evidence is a write-ahead ledger. Transaction rollback restores
   // surface and authority state, but must never erase or rewind these records.
   private readonly admissionAttempts: PersistentSurfaceAdmissionAttempt[];
-  private admissionRecoveryEvidence: AdmissionRecoveryEvidence[] = [];
   private admissionQueue: Promise<unknown> = Promise.resolve();
   private admissionFailStop = false;
   /**
@@ -807,13 +791,20 @@ export class SurfaceCore {
         await persist(this.getPersistentState());
         return attempt;
       } catch (error) {
-        // Fail safe: roll back ONLY when the caller proves the durable store
-        // is untouched. Anything else — a generic write error, a timeout, an
-        // unexpected throw — has an unknown outcome, and rolling back an
-        // unknown outcome is what duplicates a committed sequence.
-        const provenPreState = error instanceof AdmissionPersistenceError &&
-          error.outcomeKnown;
-        if (!provenPreState) {
+        // The persistence layer owns this distinction and states it
+        // explicitly: PersistentStateOutcomeUnknownError is raised only at the
+        // selector commit, where the durable outcome is genuinely ambiguous.
+        // Anything thrown before that point means the commit did not happen
+        // and the pre-prepare state is intact.
+        // Identified by name rather than instanceof: the bundler can emit
+        // more than one copy of the class, and an identity check that depends
+        // on which copy threw would silently pick the wrong branch. The
+        // established error sets `name` deliberately, so it is the stable
+        // discriminator.
+        const outcomeUnknown = error instanceof PersistentStateOutcomeUnknownError ||
+          (error as { name?: string } | null)?.name ===
+            "PersistentStateOutcomeUnknownError";
+        if (outcomeUnknown) {
           // Neither state is proven. Touch nothing and refuse to prepare again.
           this.admissionFailStop = true;
           throw error;
@@ -833,20 +824,51 @@ export class SurfaceCore {
   }
 
   /**
-   * Clear the fail-stop after durable state has been reloaded and one of the
-   * two complete states in Section 6 has been proven.
+   * Derive exact durable evidence for pending write-ahead rows from persisted
+   * operation receipts. This is the real production source: receipts are part
+   * of the durable lockless state, survive restart, and record whether an
+   * operation resolved and how.
+   *
+   * A receipt is evidence about a row only when it names that row's
+   * requestId; the row supplies its own attemptSequence, so the pair names
+   * both, as the contract requires. A receipt still `pending` proves nothing
+   * and deliberately yields no evidence, leaving its row indeterminate.
    */
-  resumeAdmissionAfterReload(): void {
-    this.admissionFailStop = false;
-  }
-
-  /**
-   * Supply exact durable evidence for pending write-ahead rows. Recovery is
-   * driven from this set; without evidence a pending row stays pending, which
-   * is the safe answer, not a stuck one.
-   */
-  setAdmissionRecoveryEvidence(evidence: AdmissionRecoveryEvidence[]): void {
-    this.admissionRecoveryEvidence = structuredClone(evidence);
+  private deriveAdmissionRecoveryEvidence(): AdmissionRecoveryEvidence[] {
+    const byRequestId = new Map<string, AdmissionRecoveryEvidence["outcome"][]>();
+    for (
+      const controller of Object.values(
+        this.locklessAuthority.exportState().controllers ?? {},
+      )
+    ) {
+      for (
+        const receipt of Object.values(controller.pendingOperationReceipts ?? {})
+      ) {
+        if (receipt.status === "pending") {
+          continue;
+        }
+        const outcome = receipt.outcome === "resolved_success"
+          ? "succeeded"
+          : "failed";
+        const seen = byRequestId.get(receipt.requestId) ?? [];
+        seen.push(outcome);
+        byRequestId.set(receipt.requestId, seen);
+      }
+    }
+    const evidence: AdmissionRecoveryEvidence[] = [];
+    for (const attempt of this.admissionAttempts) {
+      if (attempt.outcome !== "pending") {
+        continue;
+      }
+      for (const outcome of byRequestId.get(attempt.requestId) ?? []) {
+        evidence.push({
+          attemptSequence: attempt.attemptSequence,
+          outcome,
+          requestId: attempt.requestId,
+        });
+      }
+    }
+    return evidence;
   }
 
   listUnresolvedSurfaceAdmissionAttempts(): number[] {
@@ -866,7 +888,7 @@ export class SurfaceCore {
   recoverPendingSurfaceAdmissionAttempts(): AdmissionRecoveryPlan {
     const plan = planAdmissionRecovery(
       this.admissionAttempts,
-      this.admissionRecoveryEvidence,
+      this.deriveAdmissionRecoveryEvidence(),
     );
     if (plan.terminalize.length === 0) {
       return plan;

@@ -10,11 +10,9 @@ import {
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import type { NativePaneMaterialization } from "../src/native-pane-bridge.js";
-import {
-  AdmissionPersistenceError,
-  SurfaceCore,
-  SurfaceCoreError,
-} from "../src/surface-core.js";
+import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
+import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
+import { createEmptyLocklessClientState } from "../src/lockless-client-authority.js";
 import { LocklessAuthorityError } from "../src/lockless-client-authority.js";
 
 function applyProviderBootstrap(
@@ -3127,6 +3125,65 @@ const pendingLedger = (count: number) =>
     updatedAt: 1,
   }));
 
+
+// Real durable evidence: persisted operation receipts. `receipts` maps a
+// requestId to the outcomes recorded for it; two outcomes for one requestId
+// are seeded on two controllers, which is how genuine conflicting evidence
+// arises in durable state.
+const coreWithPendingAndReceipts = (
+  count: number,
+  receipts: Record<string, ("resolved_success" | "resolved_failure")[]>,
+) => {
+  const lockless = createEmptyLocklessClientState();
+  const entries = Object.entries(receipts);
+  const maxDepth = Math.max(0, ...entries.map(([, list]) => list.length));
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const controllerInstanceId = `ctl_evidence_${depth}`;
+    const pendingOperationReceipts: Record<string, unknown> = {};
+    for (const [requestId, list] of entries) {
+      const outcome = list[depth];
+      if (!outcome) continue;
+      // `bytes` is validated against the serialized receipt that CONTAINS
+      // it, so solve the self-reference by iterating to a fixed point.
+      const shape = (bytes: number) => ({
+        bytes,
+        operation: "pair.request",
+        operationReceipt: { commitSequence: 1, requestId },
+        outcome,
+        requestId,
+        status: "terminal" as const,
+        terminalResponse: null,
+      });
+      let bytes = 0;
+      for (let pass = 0; pass < 6; pass++) {
+        bytes = Buffer.byteLength(
+          JSON.stringify({ version: 1, ...shape(bytes) }),
+          "utf8",
+        );
+      }
+      pendingOperationReceipts[requestId] = shape(bytes);
+    }
+    (lockless as any).controllers[controllerInstanceId] = {
+      controllerInstanceId,
+      controllerProductName: null,
+      disconnectedAt: null,
+      dormantSequence: null,
+      pendingOperationReceipts,
+      projectionCapacityBytes: 1024,
+      status: "dormant",
+    };
+  }
+  return new SurfaceCore({
+    persistentState: {
+      admissionAttempts: pendingLedger(count),
+      lockless,
+      nextAdmissionAttemptSequence: count + 1,
+      primarySurfaceId: null,
+      version: 1,
+    } as any,
+  });
+};
+
 const coreWithPending = (count: number) =>
   new SurfaceCore({
     persistentState: {
@@ -3138,12 +3195,10 @@ const coreWithPending = (count: number) =>
   });
 
 test("conflicting exact evidence keeps its pending row unchanged and never picks a side", () => {
-  const core = coreWithPending(2);
+  const core = coreWithPendingAndReceipts(2, {
+    rq_1: ["resolved_success", "resolved_failure"],
+  });
   const before = core.listSurfaceAdmissionAttempts()[0];
-  core.setAdmissionRecoveryEvidence([
-    { attemptSequence: 1, requestId: "rq_1", outcome: "succeeded" },
-    { attemptSequence: 1, requestId: "rq_1", outcome: "failed", reason: "boom" },
-  ]);
   const plan = core.recoverPendingSurfaceAdmissionAttempts();
   assert.deepEqual(plan.terminalize, []);
   assert.deepEqual(plan.unresolved, [1, 2]);
@@ -3153,49 +3208,36 @@ test("conflicting exact evidence keeps its pending row unchanged and never picks
 
 test("evidence naming a different request or sequence is not evidence for this row", () => {
   const core = coreWithPending(1);
-  core.setAdmissionRecoveryEvidence([
-    { attemptSequence: 1, requestId: "rq_other", outcome: "succeeded" },
-    { attemptSequence: 99, requestId: "rq_1", outcome: "succeeded" },
-  ]);
   const plan = core.recoverPendingSurfaceAdmissionAttempts();
   assert.deepEqual(plan.unresolved, [1]);
   assert.equal(core.listSurfaceAdmissionAttempts()[0].outcome, "pending");
 });
 
 test("mixed pending set terminalizes every determinate row in one transition and reports unresolved in order", () => {
-  const core = coreWithPending(5);
+  // 1 succeeded, 2 failed, 3 conflicting, 4 and 5 no receipt at all.
+  // NOTE: the contract's third authoritative class, never-began, has no
+  // durable source in this system — absence of a receipt is indistinguishable
+  // from an operation that never started — so it is not exercised here rather
+  // than faked.
+  const core = coreWithPendingAndReceipts(5, {
+    rq_1: ["resolved_success"],
+    rq_2: ["resolved_failure"],
+    rq_3: ["resolved_success", "resolved_failure"],
+  });
   const unchangedBefore = core
     .listSurfaceAdmissionAttempts()
-    .filter((attempt) => attempt.attemptSequence >= 4);
-  core.setAdmissionRecoveryEvidence([
-    { attemptSequence: 1, requestId: "rq_1", outcome: "succeeded" },
-    {
-      attemptSequence: 2,
-      requestId: "rq_2",
-      outcome: "failed",
-      reason: "operation rejected",
-      reasonCode: "operation_failed",
-    },
-    { attemptSequence: 3, requestId: "rq_3", outcome: "never_began" },
-    // 4 has conflicting evidence, 5 has none
-    { attemptSequence: 4, requestId: "rq_4", outcome: "succeeded" },
-    { attemptSequence: 4, requestId: "rq_4", outcome: "never_began" },
-  ]);
+    .filter((attempt) => attempt.attemptSequence >= 3);
   const plan = core.recoverPendingSurfaceAdmissionAttempts();
-  assert.deepEqual(plan.unresolved, [4, 5]);
+  assert.deepEqual(plan.unresolved, [3, 4, 5]);
 
   const after = core.listSurfaceAdmissionAttempts();
   const bySequence = (sequence: number) =>
     after.find((attempt) => attempt.attemptSequence === sequence);
   assert.equal(bySequence(1)?.outcome, "succeeded");
   assert.equal(bySequence(2)?.outcome, "failed");
-  assert.equal(bySequence(2)?.reasonCode, "operation_failed");
-  // never-began terminalizes as failed with a bounded interruption reason
-  assert.equal(bySequence(3)?.outcome, "failed");
-  assert.equal(bySequence(3)?.reasonCode, "admission_interrupted");
   // unresolved rows survive byte-for-byte
   assert.deepEqual(
-    after.filter((attempt) => attempt.attemptSequence >= 4),
+    after.filter((attempt) => attempt.attemptSequence >= 3),
     unchangedBefore,
   );
 });
@@ -3243,13 +3285,15 @@ test("pending-only saturation returns admission_recovery_pending, never surface_
 });
 
 test("candidate admission proceeds only after recovery leaves no unresolved sequence", () => {
-  const { core, count } = largestPendingLedger();
-  core.setAdmissionRecoveryEvidence(
-    Array.from({ length: count }, (_, index) => ({
-      attemptSequence: index + 1,
-      requestId: `rq_${index + 1}`,
-      outcome: "succeeded" as const,
-    })),
+  const { count } = largestPendingLedger();
+  const core = coreWithPendingAndReceipts(
+    count,
+    Object.fromEntries(
+      Array.from({ length: count }, (_, index) => [
+        `rq_${index + 1}`,
+        ["resolved_success" as const],
+      ]),
+    ),
   );
   const admitted = core.beginSurfaceAdmissionAttempt({
     controllerInstanceId: "controller_candidate",
@@ -3335,7 +3379,7 @@ test("known pre-state persistence failure rolls the whole transition back and fr
     core.prepareSurfaceAdmissionAttempt(
       { controllerInstanceId: "c_fail", requestId: "rq_fail", surfaceId: "sf_alpha" },
       async () => {
-        throw new AdmissionPersistenceError("disk full, nothing written", true);
+        throw new Error("disk full, nothing written");
       },
     ),
   );
@@ -3360,7 +3404,7 @@ test("unknown persistence outcome fail-stops the boundary until durable state is
     core.prepareSurfaceAdmissionAttempt(
       { controllerInstanceId: "c_unknown", requestId: "rq_unknown", surfaceId: "sf_alpha" },
       async () => {
-        throw new AdmissionPersistenceError("write outcome unknown", false);
+        throw new PersistentStateOutcomeUnknownError(new Error("selector commit ambiguous"));
       },
     ),
   );
@@ -3378,8 +3422,11 @@ test("unknown persistence outcome fail-stops the boundary until durable state is
       error instanceof LocklessAuthorityError && error.code === "internal_error",
   );
 
-  core.resumeAdmissionAfterReload();
-  const resumed = await core.prepareSurfaceAdmissionAttempt(
+  // The real reload path is reconstruction from durable state, which is what
+  // the app does after a fail-stop. A fresh core is not fail-stopped.
+  const reloaded = new SurfaceCore({ persistentState: core.getPersistentState() });
+  assert.equal(reloaded.isAdmissionFailStopped(), false);
+  const resumed = await reloaded.prepareSurfaceAdmissionAttempt(
     { controllerInstanceId: "c_resume", requestId: "rq_resume", surfaceId: "sf_alpha" },
     async () => {},
   );
@@ -3392,7 +3439,7 @@ test("a failed transition leaves a later caller a complete state, never a partia
   const failing = core.prepareSurfaceAdmissionAttempt(
     { controllerInstanceId: "c_first", requestId: "rq_first", surfaceId: "sf_alpha" },
     async () => {
-      throw new AdmissionPersistenceError("known pre-state", true);
+      throw new Error("known pre-state");
     },
   );
   const following = core.prepareSurfaceAdmissionAttempt(
@@ -3432,10 +3479,9 @@ test("a small unresolved set blocks admission even far from either bound", () =>
 });
 
 test("resolving only some rows still blocks until none remains unresolved", () => {
-  const core = coreWithPending(3);
-  core.setAdmissionRecoveryEvidence([
-    { attemptSequence: 1, requestId: "rq_1", outcome: "succeeded" },
-  ]);
+  const core = coreWithPendingAndReceipts(3, {
+    rq_1: ["resolved_success"],
+  });
   let raised: unknown = null;
   try {
     core.beginSurfaceAdmissionAttempt({

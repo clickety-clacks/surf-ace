@@ -13,10 +13,7 @@ import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
   locklessPaneScopeId,
 } from "../../protocol/src/lockless.js";
-import {
-  AdmissionPersistenceError,
-  SurfaceCore,
-} from "../src/surface-core.js";
+import { SurfaceCore } from "../src/surface-core.js";
 import {
   DEFAULT_LOCKLESS_LIMITS,
   createEmptyLocklessClientState,
@@ -2815,7 +2812,7 @@ test("socket-path known pre-state persistence failure rolls back and reuses the 
     persistLocklessState: async () => {
       if (failNext) {
         failNext = false;
-        throw new AdmissionPersistenceError("nothing written", true);
+        throw new Error("nothing written");
       }
     },
     port,
