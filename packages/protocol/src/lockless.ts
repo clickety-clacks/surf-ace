@@ -548,6 +548,16 @@ export type LocklessSurfaceAdmissionAttempt = {
   startedAt: number;
   surfaceId: string;
   updatedAt: number;
+  /**
+   * Durable witness of whether the paired operation was ever attempted.
+   * Optional so that state persisted before this field existed, or any other
+   * absent/legacy record, is still valid and reads as indeterminate — never
+   * inferred as never-began. A candidate is stamped "not_started" at
+   * creation and transitioned to "started" durably, through the same
+   * serialized admission boundary, immediately before the operation itself
+   * executes.
+   */
+  witness?: "not_started" | "started";
 };
 
 export type LocklessErrorCode =
@@ -1479,18 +1489,22 @@ function validateLocklessRequestPayload(
 export function validLocklessSurfaceAdmissionAttempt(value: unknown): boolean {
   if (
     !plainRecord(value) ||
-    !hasExactKeys(value, [
-      "attemptSequence",
-      "controllerInstanceId",
-      "outcome",
-      "reason",
-      "reasonCode",
-      "requestId",
-      "stage",
-      "startedAt",
-      "surfaceId",
-      "updatedAt",
-    ])
+    !hasExactKeys(
+      value,
+      [
+        "attemptSequence",
+        "controllerInstanceId",
+        "outcome",
+        "reason",
+        "reasonCode",
+        "requestId",
+        "stage",
+        "startedAt",
+        "surfaceId",
+        "updatedAt",
+      ],
+      ["witness"],
+    )
   ) {
     return false;
   }
@@ -1514,7 +1528,9 @@ export function validLocklessSurfaceAdmissionAttempt(value: unknown): boolean {
     ].includes(String(value.stage)) &&
     revision(value.startedAt) &&
     validLocklessSurfaceId(value.surfaceId) &&
-    revision(value.updatedAt)
+    revision(value.updatedAt) &&
+    (value.witness === undefined ||
+      ["not_started", "started"].includes(String(value.witness)))
   );
 }
 

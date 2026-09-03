@@ -73,6 +73,11 @@ function reservedAdmissionLedgerBytes(
             ),
             stage: "controller_admission",
             updatedAt: Number.MAX_SAFE_INTEGER,
+            // Mirrors production's own worst-case reservation (B2):
+            // "not_started" is the longer of the two witness values.
+            ...(attempt.witness !== undefined
+              ? { witness: "not_started" as const }
+              : {}),
           }
         : attempt
     ),
@@ -266,6 +271,11 @@ test("surface admission reservation at exact byte bound survives terminalization
     startedAt: now,
     surfaceId: "sf_test",
     updatedAt: now,
+    // beginSurfaceAdmissionAttempt (B2) always stamps a real candidate with
+    // this witness, so the calibration template must carry it too, or this
+    // fixture pads to a total that falls short the moment the real candidate
+    // is created and compaction correctly evicts a row to make room.
+    witness: "not_started" as const,
   });
   let attempts: LocklessSurfaceAdmissionAttempt[] | null = null;
   for (
@@ -3543,3 +3553,4 @@ test("a single unresolved row blocks a candidate that would otherwise fit easily
   assert.deepEqual(raised.details?.unresolvedSequences, [1]);
   assert.equal(core.listSurfaceAdmissionAttempts().length, 1);
 });
+

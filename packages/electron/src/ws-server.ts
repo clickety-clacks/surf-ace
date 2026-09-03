@@ -1651,6 +1651,16 @@ export class SurfaceWsServer {
       >;
       try {
         if (surfaceId && admissionAttempt) {
+          // Durable witness (B2): stamped "started" through the same
+          // serialized boundary, immediately before the paired operation
+          // itself executes. Until this commits, a crash proves the
+          // operation never began.
+          await this.core.markSurfaceAdmissionAttemptStarted(
+            admissionAttempt.attemptSequence,
+            async () => {
+              await this.persistLocklessState();
+            },
+          );
           this.core.advanceSurfaceAdmissionAttempt(
             admissionAttempt.attemptSequence,
             "surface_lookup",
@@ -4691,6 +4701,14 @@ export class SurfaceWsServer {
       },
     );
     try {
+      // Durable witness (B2): stamped "started" through the same serialized
+      // boundary, immediately before the paired operation executes.
+      await this.core.markSurfaceAdmissionAttemptStarted(
+        attempt.attemptSequence,
+        async () => {
+          await this.persistLocklessState();
+        },
+      );
       this.core.advanceSurfaceAdmissionAttempt(
         attempt.attemptSequence,
         "surface_lookup",
@@ -4711,6 +4729,13 @@ export class SurfaceWsServer {
         },
       );
     } catch (error) {
+      if ((error as { name?: string } | null)?.name ===
+        "PersistentStateOutcomeUnknownError") {
+        // Neither the witness nor a terminal outcome is proven durable.
+        // Fail-stop is already set by whichever call threw; do not attempt a
+        // second durable write on top of an unproven one.
+        throw error;
+      }
       const reasonCode = error instanceof LocklessAuthorityError ||
           error instanceof SurfaceCoreError
         ? error.code

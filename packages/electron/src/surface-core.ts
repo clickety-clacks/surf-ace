@@ -448,6 +448,11 @@ function admissionAttemptLedgerReservedBytes(
           ),
           stage: ADMISSION_ATTEMPT_MAX_RESERVED_STAGE,
           updatedAt: Number.MAX_SAFE_INTEGER,
+          // "not_started" is the longer of the two witness values; reserve
+          // for it so the worst case is never underestimated.
+          ...(attempt.witness !== undefined
+            ? { witness: "not_started" as const }
+            : {}),
         }
         : attempt
     ),
@@ -828,6 +833,51 @@ export class SurfaceCore {
    * That is the whole failure this repair exists to remove, so the terminal
    * write is not optional and is not a caller's responsibility to remember.
    */
+  /**
+   * Durably transition a candidate's witness from "not_started" to "started",
+   * immediately before the paired operation executes, through the SAME
+   * serialized admission boundary that created the row. Until this commits,
+   * a crash proves the operation never began; after it commits, a crash
+   * proves only that the outcome is unknown, never that it did not happen.
+   */
+  async markSurfaceAdmissionAttemptStarted(
+    attemptSequence: number,
+    persist: (state: PersistentSurfaceState) => Promise<void>,
+  ): Promise<void> {
+    return this.runExclusiveAdmission(async () => {
+      if (this.admissionFailStop) {
+        throw new LocklessAuthorityError(
+          "internal_error",
+          "Admission boundary is fail-stopped until durable state is reloaded",
+        );
+      }
+      const attempt = this.admissionAttempts.find(
+        (candidate) => candidate.attemptSequence === attemptSequence,
+      );
+      if (!attempt || attempt.outcome !== "pending") {
+        throw new LocklessAuthorityError(
+          "internal_error",
+          "Cannot mark a non-pending admission attempt as started",
+        );
+      }
+      const previousWitness = attempt.witness;
+      attempt.witness = "started";
+      try {
+        await persist(this.getPersistentState());
+      } catch (error) {
+        const outcomeUnknown = (error as { name?: string } | null)?.name ===
+          "PersistentStateOutcomeUnknownError";
+        if (outcomeUnknown) {
+          this.admissionFailStop = true;
+          throw error;
+        }
+        // Known pre-state: the witness write never reached disk.
+        attempt.witness = previousWitness;
+        throw error;
+      }
+    });
+  }
+
   async finalizeSurfaceAdmissionAttempt(
     attemptSequence: number,
     outcome:
@@ -836,6 +886,12 @@ export class SurfaceCore {
     persist: (state: PersistentSurfaceState) => Promise<void>,
   ): Promise<void> {
     return this.runExclusiveAdmission(async () => {
+      if (this.admissionFailStop) {
+        throw new LocklessAuthorityError(
+          "internal_error",
+          "Admission boundary is fail-stopped until durable state is reloaded",
+        );
+      }
       const preAttempts = structuredClone(this.admissionAttempts);
       const wasInFlight = this.inFlightAdmissionSequences.has(attemptSequence);
       if (outcome.kind === "succeeded") {
@@ -909,10 +965,26 @@ export class SurfaceCore {
       if (attempt.outcome !== "pending") {
         continue;
       }
-      for (const outcome of byRequestId.get(attempt.requestId) ?? []) {
+      const receipts = byRequestId.get(attempt.requestId) ?? [];
+      for (const outcome of receipts) {
         evidence.push({
           attemptSequence: attempt.attemptSequence,
           outcome,
+          requestId: attempt.requestId,
+        });
+      }
+      if (receipts.length > 0) {
+        continue;
+      }
+      // Never-began evidence (B2): authoritative ONLY for an explicit
+      // "not_started" witness. A row with no witness (legacy/absent state,
+      // predating this field) or witness "started" stays indeterminate here,
+      // exactly as it did before this field existed — absence of a record is
+      // never treated as a record.
+      if (attempt.witness === "not_started") {
+        evidence.push({
+          attemptSequence: attempt.attemptSequence,
+          outcome: "never_began",
           requestId: attempt.requestId,
         });
       }
@@ -990,6 +1062,10 @@ export class SurfaceCore {
       startedAt: now,
       surfaceId: input.surfaceId,
       updatedAt: now,
+      // Durable witness (B2): stamped at creation so a row that never gets
+      // marked started durably proves, on reload, that the paired operation
+      // never began.
+      witness: "not_started",
     };
     // Durable-evidence recovery runs before capacity is considered at all.
     // A ledger held full by pending write-ahead rows is a recovery problem,

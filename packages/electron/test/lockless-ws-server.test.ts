@@ -1499,7 +1499,10 @@ test("terminal mutation response waits for durable receipt persistence and repla
     hostName: "localhost",
     persistLocklessState: async () => {
       persistenceCalls += 1;
-      if (persistenceCalls === 3) {
+      // Pairing now makes THREE durable writes, not two: prepare, the
+      // durable witness transition to "started" (B2), and the terminal
+      // outcome. So the mutation's own first write is call #4, not #3.
+      if (persistenceCalls === 4) {
         await new Promise<void>((resolve) => {
           releasePersistence = resolve;
         });
@@ -1528,7 +1531,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
       new Promise<string>((resolve) => setTimeout(() => resolve("withheld"), 25)),
     ]);
     assert.equal(early, "withheld");
-    assert.equal(persistenceCalls, 3);
+    assert.equal(persistenceCalls, 4);
     assert.ok(releasePersistence);
     releasePersistence();
     const terminal = await mutation;
@@ -1553,7 +1556,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
       requestId,
     });
     assert.equal(acknowledged.payload.accepted, true);
-    assert.equal(persistenceCalls, 4);
+    assert.equal(persistenceCalls, 5);
     const afterAck = await request(socket, "operation.receipt.sync", {
       requestIds: [requestId],
     });
@@ -1564,7 +1567,7 @@ test("terminal mutation response waits for durable receipt persistence and repla
     });
     assert.equal(released.payload.accepted, true);
     assert.equal(released.payload.release, true);
-    assert.equal(persistenceCalls, 5);
+    assert.equal(persistenceCalls, 6);
     const afterRelease = await request(socket, "operation.receipt.sync", {
       requestIds: [requestId],
     });
