@@ -111,37 +111,66 @@ test("surface admission ledger refuses count bound plus one and preserves equali
     atEquality.admissionAttempts?.length,
     LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
   );
-  assert.throws(
-    () =>
-      core.beginSurfaceAdmissionAttempt({
-        controllerInstanceId: "controller_over_count",
-        requestId: "rq_over_count",
-        surfaceId: "sf_test",
-      }),
-    (error) =>
-      error instanceof LocklessAuthorityError &&
-      error.code === "surface_state_capacity",
+  const newestBefore = atEquality.admissionAttempts?.find(
+    (attempt) =>
+      attempt.attemptSequence === LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
   );
+  assert(newestBefore);
+
+  // Terminal history alone must never brick the next request. The ledger is
+  // global, so a request from a different surface is what proves it.
+  const admitted = core.beginSurfaceAdmissionAttempt({
+    controllerInstanceId: "controller_over_count",
+    requestId: "rq_over_count",
+    surfaceId: "sf_other",
+  });
   assert.equal(
-    core.getPersistentState().nextAdmissionAttemptSequence,
+    admitted.attemptSequence,
     LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS + 1,
   );
 
+  const compacted = core.listSurfaceAdmissionAttempts();
+  assert(compacted.length <= LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS);
+  // oldest committed terminal sequence evicted first
+  assert.equal(compacted.some((attempt) => attempt.attemptSequence === 1), false);
+  // newest terminal suffix retained, byte-for-byte identical
+  assert.deepEqual(
+    compacted.find(
+      (attempt) =>
+        attempt.attemptSequence === LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+    ),
+    newestBefore,
+  );
+  assert(
+    compacted.some(
+      (attempt) =>
+        attempt.attemptSequence === LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS + 1,
+    ),
+  );
+  assert.equal(
+    core.getPersistentState().nextAdmissionAttemptSequence,
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS + 2,
+  );
+
+  // The saturated persisted form must also self-unbrick after a restart,
+  // which is what the incident proved the baseline could not do.
   const restarted = new SurfaceCore({ persistentState: atEquality });
   assert.equal(
     restarted.listSurfaceAdmissionAttempts().length,
     LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
   );
-  assert.throws(
-    () =>
-      restarted.beginSurfaceAdmissionAttempt({
-        controllerInstanceId: "controller_restart_over_count",
-        requestId: "rq_restart_over_count",
-        surfaceId: "sf_test",
-      }),
-    (error) =>
-      error instanceof LocklessAuthorityError &&
-      error.code === "surface_state_capacity",
+  const admittedAfterRestart = restarted.beginSurfaceAdmissionAttempt({
+    controllerInstanceId: "controller_restart_over_count",
+    requestId: "rq_restart_over_count",
+    surfaceId: "sf_test",
+  });
+  assert.equal(
+    admittedAfterRestart.attemptSequence,
+    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS + 1,
+  );
+  assert(
+    restarted.listSurfaceAdmissionAttempts().length <=
+      LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
   );
 });
 
@@ -196,20 +225,26 @@ test("surface admission ledger accepts exact byte bound and refuses one more rec
       version: 1,
     },
   });
-  assert.throws(
-    () =>
-      core.beginSurfaceAdmissionAttempt({
-        controllerInstanceId: "controller_over_bytes",
-        requestId: "rq_over_bytes",
-        surfaceId: "sf_test",
-      }),
-    (error) =>
-      error instanceof LocklessAuthorityError &&
-      error.code === "surface_state_capacity",
+  // At the exact byte bound the ledger must still admit, by compacting oldest
+  // terminal rows rather than refusing forever.
+  const admitted = core.beginSurfaceAdmissionAttempt({
+    controllerInstanceId: "controller_over_bytes",
+    requestId: "rq_over_bytes",
+    surfaceId: "sf_test",
+  });
+  assert.equal(admitted.attemptSequence, attempts.length + 1);
+
+  const compacted = core.listSurfaceAdmissionAttempts();
+  assert(
+    admissionLedgerBytes(compacted) <=
+      LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
   );
-  assert.equal(
-    admissionLedgerBytes(core.listSurfaceAdmissionAttempts()),
-    LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
+  assert(compacted.length <= LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS);
+  assert.equal(compacted.some((attempt) => attempt.attemptSequence === 1), false);
+  assert(
+    compacted.some(
+      (attempt) => attempt.attemptSequence === attempts.length + 1,
+    ),
   );
 });
 

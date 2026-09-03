@@ -457,14 +457,67 @@ function admissionAttemptLedgerReservedBytes(
   );
 }
 
+function admissionAttemptLedgerFitsWithinCapacity(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+): boolean {
+  return attempts.length <= LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS &&
+    admissionAttemptLedgerReservedBytes(attempts) <=
+      LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES;
+}
+
+/**
+ * Terminal admission history must never brick a surface. The ledger is global:
+ * a request for surface B is accounted against rows created by surface A, so
+ * compaction is a global decision made once, at the admission boundary.
+ *
+ * Retention order is fixed and deterministic, never "whatever fits":
+ *   - every pending write-ahead row is mandatory and is never evicted here.
+ *     A pending row's operation outcome is unknown, so discarding it would
+ *     destroy the only evidence that the operation may have happened. It may
+ *     leave `pending` only through durable-evidence recovery.
+ *   - the candidate row is mandatory; the caller cannot proceed without it.
+ *   - terminal rows are evicted smallest-committed-sequence first, retaining
+ *     the newest suffix that still fits after the mandatory rows.
+ *
+ * Retained rows are returned by reference and never rewritten, so every
+ * retained diagnostic field stays byte-for-byte identical.
+ */
+function compactedAdmissionAttemptLedgerForCandidate(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+  candidate: PersistentSurfaceAdmissionAttempt,
+): PersistentSurfaceAdmissionAttempt[] {
+  const mandatory = [
+    ...attempts.filter((attempt) => attempt.outcome === "pending"),
+    candidate,
+  ];
+  const terminal = attempts
+    .filter((attempt) => attempt.outcome !== "pending")
+    .sort((left, right) => left.attemptSequence - right.attemptSequence);
+
+  let retainedTerminal: PersistentSurfaceAdmissionAttempt[] = [];
+  for (let index = terminal.length - 1; index >= 0; index--) {
+    const candidateSuffix = [terminal[index], ...retainedTerminal];
+    if (
+      !admissionAttemptLedgerFitsWithinCapacity([
+        ...candidateSuffix,
+        ...mandatory,
+      ])
+    ) {
+      break;
+    }
+    retainedTerminal = candidateSuffix;
+  }
+
+  return [...retainedTerminal, ...mandatory].sort(
+    (left, right) => left.attemptSequence - right.attemptSequence,
+  );
+}
+
 function assertAdmissionAttemptLedgerWithinCapacity(
   attempts: PersistentSurfaceAdmissionAttempt[],
 ): void {
   const reservedBytes = admissionAttemptLedgerReservedBytes(attempts);
-  if (
-    attempts.length > LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS ||
-    reservedBytes > LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES
-  ) {
+  if (!admissionAttemptLedgerFitsWithinCapacity(attempts)) {
     throw new LocklessAuthorityError(
       "surface_state_capacity",
       "Surface admission attempt ledger is at bounded retention capacity",
@@ -619,12 +672,20 @@ export class SurfaceCore {
       surfaceId: input.surfaceId,
       updatedAt: now,
     };
-    assertAdmissionAttemptLedgerWithinCapacity([
-      ...this.admissionAttempts,
+    // Compact terminal history before the capacity assert. Without this, a
+    // ledger that has reached either bound rejects every subsequent
+    // pair.request forever, and because pairing precedes push, capture, close
+    // and cleanup alike, the surface is bricked with no in-band way out.
+    const compacted = compactedAdmissionAttemptLedgerForCandidate(
+      this.admissionAttempts,
       attempt,
-    ]);
+    );
+    // Still asserted: compaction is best-effort, and a ledger saturated by
+    // mandatory pending rows alone cannot be relieved by evicting terminals.
+    assertAdmissionAttemptLedgerWithinCapacity(compacted);
     this.nextAdmissionAttemptSequence++;
-    this.admissionAttempts.push(attempt);
+    this.admissionAttempts.length = 0;
+    this.admissionAttempts.push(...compacted);
     return structuredClone(attempt);
   }
 
