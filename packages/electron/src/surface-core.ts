@@ -801,9 +801,8 @@ export class SurfaceCore {
         // on which copy threw would silently pick the wrong branch. The
         // established error sets `name` deliberately, so it is the stable
         // discriminator.
-        const outcomeUnknown = error instanceof PersistentStateOutcomeUnknownError ||
-          (error as { name?: string } | null)?.name ===
-            "PersistentStateOutcomeUnknownError";
+        const outcomeUnknown = (error as { name?: string } | null)?.name ===
+          "PersistentStateOutcomeUnknownError";
         if (outcomeUnknown) {
           // Neither state is proven. Touch nothing and refuse to prepare again.
           this.admissionFailStop = true;
