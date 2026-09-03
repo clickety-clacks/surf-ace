@@ -3016,3 +3016,10 @@ test("a successful saturated pair survives a FRESH-CORE reload with no unresolve
     await server.stop();
   }
 });
+
+// NOT YET WRITTEN, blocker recorded on asg_2107e9db: the real discovery
+// regression needs a persisted surface holding a pane id below 1, which is the
+// only trigger for admitSurfaceForDiscovery. Seeding it by rewriting
+// panes[0].paneId and layout.paneId in the serialized record makes the surface
+// fail to deserialize ("Unknown surface"), so the record shape needs to be
+// established first. Not left armed and failing in the suite.
