@@ -818,6 +818,56 @@ export class SurfaceCore {
     });
   }
 
+  /**
+   * Terminalize an admission row and make that terminal outcome DURABLE, under
+   * the same serialized boundary that created it.
+   *
+   * A caller that terminalizes only in memory leaves durable state holding the
+   * row as pending. On reload nobody owns it, so it reads as stale and blocks
+   * admission — which means a SUCCESSFUL operation bricks the next incarnation.
+   * That is the whole failure this repair exists to remove, so the terminal
+   * write is not optional and is not a caller's responsibility to remember.
+   */
+  async finalizeSurfaceAdmissionAttempt(
+    attemptSequence: number,
+    outcome:
+      | { kind: "succeeded" }
+      | { kind: "failed"; reason: string; reasonCode: string },
+    persist: (state: PersistentSurfaceState) => Promise<void>,
+  ): Promise<void> {
+    return this.runExclusiveAdmission(async () => {
+      const preAttempts = structuredClone(this.admissionAttempts);
+      const wasInFlight = this.inFlightAdmissionSequences.has(attemptSequence);
+      if (outcome.kind === "succeeded") {
+        this.succeedSurfaceAdmissionAttempt(attemptSequence);
+      } else {
+        this.failSurfaceAdmissionAttempt(
+          attemptSequence,
+          outcome.reasonCode,
+          outcome.reason,
+        );
+      }
+      try {
+        await persist(this.getPersistentState());
+      } catch (error) {
+        const outcomeUnknown = (error as { name?: string } | null)?.name ===
+          "PersistentStateOutcomeUnknownError";
+        if (outcomeUnknown) {
+          this.admissionFailStop = true;
+          throw error;
+        }
+        // Known pre-state: durable state still holds the row pending, so put
+        // memory back in step with it rather than drifting ahead of the disk.
+        this.admissionAttempts.length = 0;
+        this.admissionAttempts.push(...preAttempts);
+        if (wasInFlight) {
+          this.inFlightAdmissionSequences.add(attemptSequence);
+        }
+        throw error;
+      }
+    });
+  }
+
   isAdmissionFailStopped(): boolean {
     return this.admissionFailStop;
   }

@@ -4701,7 +4701,15 @@ export class SurfaceWsServer {
         attempt.attemptSequence,
       );
       this.core.markLocklessAuthorityChanged(surfaceId);
-      this.core.succeedSurfaceAdmissionAttempt(attempt.attemptSequence);
+      // Durable, not just in-memory: a success left pending on disk reloads
+      // as an unresolved stale row and blocks the next incarnation.
+      await this.core.finalizeSurfaceAdmissionAttempt(
+        attempt.attemptSequence,
+        { kind: "succeeded" },
+        async () => {
+          await this.persistLocklessState();
+        },
+      );
     } catch (error) {
       const reasonCode = error instanceof LocklessAuthorityError ||
           error instanceof SurfaceCoreError
@@ -4710,10 +4718,12 @@ export class SurfaceWsServer {
       const reason = error instanceof Error
         ? error.message
         : "Unknown surface admission failure";
-      this.core.failSurfaceAdmissionAttempt(
+      await this.core.finalizeSurfaceAdmissionAttempt(
         attempt.attemptSequence,
-        reasonCode,
-        reason,
+        { kind: "failed", reason, reasonCode },
+        async () => {
+          await this.persistLocklessState();
+        },
       );
       throw error;
     }

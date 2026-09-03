@@ -2963,3 +2963,56 @@ test("a second pair.request while fail-stopped is answered, not left hanging", a
     await server.stop();
   }
 });
+
+test("a successful saturated pair survives a FRESH-CORE reload with no unresolved row", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  seedFullTerminalLedger(core);
+  // Capture what actually reaches disk, not what the live core believes.
+  let persisted: string | null = null;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      persisted = JSON.stringify(core.getPersistentState());
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const paired = await pair(socket, "openclaw", surface.surfaceId);
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+    assert(persisted !== null, "nothing was ever persisted");
+
+    // THE CHECK THAT WAS MISSING: reload a fresh core from the persisted bytes.
+    // Reading the live core hides the defect, because it reflects in-memory
+    // terminalization that may never have reached disk.
+    const reloaded = new SurfaceCore({
+      persistentState: JSON.parse(persisted as string),
+    });
+    assert.deepEqual(
+      reloaded.listUnresolvedSurfaceAdmissionAttempts(),
+      [],
+      "a successful pair left an unresolved row in durable state",
+    );
+
+    // and the reloaded core must still admit, i.e. it is not bricked
+    const admitted = reloaded.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: "controller_after_reload",
+      requestId: "rq_after_reload",
+      surfaceId: "sf_other0aaaaa",
+    });
+    assert(admitted.attemptSequence > 0);
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
