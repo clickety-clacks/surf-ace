@@ -3407,3 +3407,52 @@ test("a failed transition leaves a later caller a complete state, never a partia
     before.nextAdmissionAttemptSequence,
   );
 });
+
+test("a small unresolved set blocks admission even far from either bound", () => {
+  // Two stale pending rows out of a 256-row budget: nowhere near capacity, so
+  // this proves blocking is driven by unresolved recovery state and not by a
+  // capacity shortfall.
+  const core = coreWithPending(2);
+  let raised: unknown = null;
+  try {
+    core.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: "controller_candidate",
+      requestId: "rq_candidate",
+      surfaceId: "sf_other",
+    });
+  } catch (error) {
+    raised = error;
+  }
+  assert(raised instanceof LocklessAuthorityError);
+  assert.equal(raised.code, "admission_recovery_pending");
+  assert.deepEqual(raised.details?.unresolvedSequences, [1, 2]);
+  // unchanged, and nothing evicted
+  assert.equal(core.listSurfaceAdmissionAttempts().length, 2);
+  assert.deepEqual(core.listUnresolvedSurfaceAdmissionAttempts(), [1, 2]);
+});
+
+test("resolving only some rows still blocks until none remains unresolved", () => {
+  const core = coreWithPending(3);
+  core.setAdmissionRecoveryEvidence([
+    { attemptSequence: 1, requestId: "rq_1", outcome: "succeeded" },
+  ]);
+  let raised: unknown = null;
+  try {
+    core.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: "controller_candidate",
+      requestId: "rq_candidate",
+      surfaceId: "sf_other",
+    });
+  } catch (error) {
+    raised = error;
+  }
+  assert(raised instanceof LocklessAuthorityError);
+  assert.equal(raised.code, "admission_recovery_pending");
+  // row 1 terminalized in the same recovery commit; 2 and 3 still block
+  assert.deepEqual(raised.details?.unresolvedSequences, [2, 3]);
+  assert.equal(
+    core.listSurfaceAdmissionAttempts().find((a) => a.attemptSequence === 1)
+      ?.outcome,
+    "succeeded",
+  );
+});

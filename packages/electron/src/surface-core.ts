@@ -642,6 +642,14 @@ export class SurfaceCore {
   private admissionRecoveryEvidence: AdmissionRecoveryEvidence[] = [];
   private admissionQueue: Promise<unknown> = Promise.resolve();
   private admissionFailStop = false;
+  /**
+   * Sequences this incarnation created and has not yet terminalized. Such a
+   * row is pending because its operation is still running, not because it is
+   * awaiting durable-evidence recovery. Rows reloaded from durable state are
+   * deliberately absent here: nobody is driving them, so they are exactly the
+   * stale pending rows that must block a new candidate.
+   */
+  private readonly inFlightAdmissionSequences = new Set<number>();
   private readonly surfaces = new Map<string, SurfaceState>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
@@ -919,21 +927,15 @@ export class SurfaceCore {
     // unrecoverable.
     this.recoverPendingSurfaceAdmissionAttempts();
     const unresolved = this.admissionAttempts
-      .filter((candidate) => candidate.outcome === "pending")
+      .filter((candidate) =>
+        candidate.outcome === "pending" &&
+        !this.inFlightAdmissionSequences.has(candidate.attemptSequence)
+      )
       .map((candidate) => candidate.attemptSequence)
       .sort((left, right) => left - right);
-    if (
-      unresolved.length > 0 &&
-      !admissionAttemptLedgerFitsWithinCapacity([
-        ...this.admissionAttempts,
-        attempt,
-      ]) &&
-      !admissionAttemptLedgerFitsWithinCapacity([
-        ...this.admissionAttempts.filter((row) => row.outcome === "pending"),
-        attempt,
-      ])
-    ) {
-      // Mandatory pending rows alone do not fit. No candidate may prepare.
+    if (unresolved.length > 0) {
+      // No candidate may prepare or run while any unresolved sequence remains,
+      // whether or not the ledger is anywhere near either bound.
       throw new LocklessAuthorityError(
         "admission_recovery_pending",
         "Admission ledger holds unresolved pending attempts awaiting durable-evidence recovery",
@@ -961,6 +963,7 @@ export class SurfaceCore {
     this.nextAdmissionAttemptSequence++;
     this.admissionAttempts.length = 0;
     this.admissionAttempts.push(...compacted);
+    this.inFlightAdmissionSequences.add(attempt.attemptSequence);
     return structuredClone(attempt);
   }
 
@@ -984,6 +987,7 @@ export class SurfaceCore {
     attempt.reason = boundedAdmissionReason(reason);
     attempt.reasonCode = boundedAdmissionReasonCode(reasonCode);
     attempt.updatedAt = this.now();
+    this.inFlightAdmissionSequences.delete(attemptSequence);
     return structuredClone(attempt);
   }
 
@@ -995,6 +999,7 @@ export class SurfaceCore {
     attempt.reason = null;
     attempt.reasonCode = null;
     attempt.updatedAt = this.now();
+    this.inFlightAdmissionSequences.delete(attemptSequence);
     return structuredClone(attempt);
   }
 
