@@ -96,7 +96,7 @@ function failedAdmissionAttempt(
   };
 }
 
-test("surface admission ledger refuses count bound plus one and preserves equality across restart", () => {
+test("surface admission ledger self-unbricks at the count bound and preserves retained rows across restart", () => {
   const core = new SurfaceCore();
   for (
     let attemptSequence = 1;
@@ -178,7 +178,7 @@ test("surface admission ledger refuses count bound plus one and preserves equali
   );
 });
 
-test("surface admission ledger accepts exact byte bound and refuses one more record", () => {
+test("surface admission ledger self-unbricks at the exact byte bound and stays within it", () => {
   let attempts: LocklessSurfaceAdmissionAttempt[] | null = null;
   for (
     let count = 1;
