@@ -2916,3 +2916,50 @@ test("unknown-outcome persistence still answers pair.request with exactly one bo
     await server.stop();
   }
 });
+
+test("a second pair.request while fail-stopped is answered, not left hanging", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  seedFullTerminalLedger(core);
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      const unknown = new Error("Persistent state commit outcome is unknown");
+      unknown.name = "PersistentStateOutcomeUnknownError";
+      throw unknown;
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const first = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const one = await Promise.race([
+      pair(first, "openclaw", surface.surfaceId),
+      new Promise<null>((r) => setTimeout(() => r(null), 4000)),
+    ]);
+    assert(one !== null, "first pair.request never answered");
+    assert.equal(core.isAdmissionFailStopped(), true);
+
+    // This is the case the original harness awaited without a timeout.
+    const two = await Promise.race([
+      pair(second, "tight-beam", surface.surfaceId),
+      new Promise<null>((r) => setTimeout(() => r(null), 4000)),
+    ]);
+    assert(two !== null, "second pair.request while fail-stopped never answered");
+    assert.equal(two.ok, false, JSON.stringify(two));
+    assert.equal(typeof two.error?.code, "string");
+  } finally {
+    first.close();
+    second.close();
+    await server.stop();
+  }
+});
