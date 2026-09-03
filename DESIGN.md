@@ -202,11 +202,16 @@ Naming system:
 >   more error-prone than a single letter.
 > - Per-client uniqueness does NOT satisfy this requirement.
 >
-> Historical note: the OpenClaw provider satisfied this invariant implicitly,
-> because exactly one provider process held the surface map and the label
-> counter for every client it managed. The CLI rewrite removed that process
-> without replacing the allocator, which silently reduced the guarantee to
-> per-client. That reduction was never authorized.
+> Historical note. This requirement has been EXPLICIT in the specification since
+> `236a999`. It was never implicit and was never merely spoken. The OpenClaw
+> provider satisfied it because exactly one provider process held the surface map
+> and the label counter for every client it managed. The CLI rewrite removed that
+> process without replacing the allocator, and this document was then amended to
+> say labels are "not globally unique" - a clause that directly contradicted
+> section 15.1 while section 15.1 was still in the repository saying the opposite.
+> Later reviews validated the code against the newer contradicting clause instead
+> of against the original requirement, and no test asserted it, so every soak
+> passed. The reduction was never authorized by anyone entitled to authorize it.
 
 1. **Window labels** (a, b, c … z, aa, ab …) are allocated and persisted by the
    single fleet-wide label allocator, then validated and projected by the client.
