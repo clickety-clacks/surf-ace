@@ -3390,3 +3390,106 @@ test("real socket-path, two owners, ordering A (not_started first): mixed recove
 test("real socket-path, two owners, ordering B (started first): mixed recovery resolves one, blocks on the other, then resumes with evidence", async () => {
   await twoOwnerMixedOrdering("started");
 });
+
+// --- Real-import unknown-outcome socket regression (forensic att_04cb7234) ---
+//
+// The earlier hang-lane tests (8408f0e, 5692243) threw a name-tagged plain
+// Error, which satisfies SurfaceCore's own name-string check but is NOT an
+// instanceof match against the REAL PersistentStateOutcomeUnknownError class.
+// SurfaceWsServer's own constructor wraps persistLocklessState with a real
+// instanceof check that, on match, calls failStopPersistence, which used to
+// close every connected socket SYNCHRONOUSLY — before dispatch ever reached
+// the point of sending a response. Those earlier tests never exercised that
+// path at all. This one imports the real class.
+
+test("real-import unknown-outcome: pair.request gets exactly one bounded envelope, not a silent socket close", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      // The REAL class, not a duck-typed stand-in.
+      throw new PersistentStateOutcomeUnknownError(new Error("selector commit ambiguous"));
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  // The server force-closes this socket once fail-stop's deferred sweep
+  // runs. That is an expected, not exceptional, part of this scenario, so a
+  // late 'error' event on the underlying transport must not crash the test
+  // as an unhandled EventEmitter error; the 'close' handler below is what
+  // actually records the outcome.
+  socket.on("error", () => {});
+  const envelopes: Record<string, any>[] = [];
+  let closeCode: number | null = null;
+  let closeReason = "";
+  socket.on("message", (raw: WebSocket.RawData) => {
+    const message = JSON.parse(String(raw)) as Record<string, any>;
+    if (message.type === "response") envelopes.push(message);
+  });
+  socket.on("close", (code: number, reason: Buffer) => {
+    closeCode = code;
+    closeReason = reason.toString();
+  });
+  try {
+    // Bounded on purpose: before the fix this never resolves and the test
+    // must fail cleanly rather than hang the suite.
+    const answered = await Promise.race([
+      pair(socket, "openclaw", surface.surfaceId),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
+    ]);
+    assert(
+      answered !== null,
+      "pair.request never received a response envelope " +
+        `(socket closed: ${JSON.stringify({ closeCode, closeReason })})`,
+    );
+    assert.equal(answered.ok, false, JSON.stringify(answered));
+    assert.equal(typeof answered.error?.code, "string");
+    // Stable, specific detail, not an opaque catch-all.
+    assert.match(
+      String(answered.error?.message ?? ""),
+      /commit outcome is unknown/i,
+    );
+
+    // Fail-stopped, and stays fail-stopped.
+    assert.equal(core.isAdmissionFailStopped(), true);
+
+    // A NEW connection attempt while fail-stopped is refused outright at
+    // the transport layer (see the upgrade handler's own
+    // `if (this.persistenceOutcomeUnknown) { socket.destroy(); return; }`),
+    // which is a stronger and pre-existing "no candidate admission"
+    // guarantee than an application-level envelope would be. Confirming it
+    // here documents that behavior rather than fighting it: a bounded
+    // rejection at connect time is not the hang this card is about.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await assert.rejects(
+      connect(`ws://127.0.0.1:${port}${server.wsPath}`),
+      /socket hang up|ECONNRESET/,
+    );
+
+    // Exactly one envelope for the original request id.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const forFirstRequest = envelopes.filter((e) => e.id === answered.id);
+    assert.equal(forFirstRequest.length, 1, JSON.stringify(forFirstRequest));
+
+    // Reload is the only escape: a fresh core is not fail-stopped.
+    const reloaded = new SurfaceCore({
+      persistentState: core.getPersistentState(),
+    });
+    assert.equal(reloaded.isAdmissionFailStopped(), false);
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});

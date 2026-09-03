@@ -454,13 +454,26 @@ export class SurfaceWsServer {
 
   failStopPersistence(error: PersistentStateOutcomeUnknownError): void {
     if (this.persistenceOutcomeUnknown) return;
+    // Set synchronously: this is what actually blocks every future admission
+    // and mutation attempt (checked at the top of the wrapped
+    // persistLocklessState, and independently by SurfaceCore's own
+    // admissionFailStop), so no candidate can proceed and no sequence can be
+    // reused regardless of when the sockets below actually close.
     this.persistenceOutcomeUnknown = error;
     persistentServerDiagnostic("error", "persistence_outcome_unknown_fail_stop", {
       ...errorDiagnosticFields(error.cause),
     });
-    for (const socket of this.wss.clients) {
-      socket.close(1011, "persistence_outcome_unknown");
-    }
+    // Deferred to a macrotask so the request that TRIGGERED this fail-stop
+    // gets its bounded error response sent first. Closing synchronously here
+    // (the previous behavior) marks every socket, including the caller's own,
+    // as no longer OPEN before dispatch ever reaches the point of sending a
+    // reply, so `this.send` silently drops it and the caller times out
+    // instead of receiving an answer.
+    setImmediate(() => {
+      for (const socket of this.wss.clients) {
+        socket.close(1011, "persistence_outcome_unknown");
+      }
+    });
   }
 
   advertisedTxt(fingerprintPrefix: string): Record<string, string> {
@@ -1141,6 +1154,21 @@ export class SurfaceWsServer {
             ...errorDiagnosticFields(error),
           },
         );
+        if (error instanceof PersistentStateOutcomeUnknownError) {
+          // Stable, specific detail rather than the generic fallback: the
+          // caller that TRIGGERED the fail-stop is owed an answer that says
+          // what happened, not an opaque "unhandled" error indistinguishable
+          // from any other internal fault.
+          return {
+            rejectionCode: "internal_error",
+            response: errorResponse(
+              request.op,
+              request.id as never,
+              "internal_error",
+              "Persistent state commit outcome is unknown; registry requires restart",
+            ),
+          };
+        }
         return {
           rejectionCode: "internal_error",
           response: errorResponse(
