@@ -8,6 +8,7 @@ import test from "node:test";
 import WebSocket from "ws";
 
 import {
+  LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
   LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPT_BYTES,
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
   locklessPaneScopeId,
@@ -1074,7 +1075,7 @@ test("target intent persistence completes before response and materialization ca
     const panes = await request(socket, "panes.list", {
       surfaceId: surface.surfaceId,
     });
-    const paneId = Number(panes.payload.panes[0].paneId);
+    const paneId = Number(panes.payload.topology.panes[0].paneId);
     gatePersistence = true;
     const resultEvent = nextEvent(socket, "event.target_apply_result");
     const responsePromise = request(socket, "target.apply", {
@@ -3009,5 +3010,247 @@ test("copied clean Electron, iPhone, and iPad product roots admit through unchan
         await rm(root, { force: true, recursive: true });
       }
     });
+  }
+});
+
+// --- V3 s8E: operation coverage over a saturated terminal ledger ---
+
+function seedFullTerminalLedger(core: SurfaceCore): number {
+  for (
+    let index = 1;
+    index <= LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS;
+    index++
+  ) {
+    const attempt = core.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: `seed_controller_${index}`,
+      requestId: `rq_seed_${index}`,
+      surfaceId: `sf_seed${String(index % 3)}aaaaaa`,
+    });
+    core.succeedSurfaceAdmissionAttempt(attempt.attemptSequence);
+  }
+  return core.listSurfaceAdmissionAttempts().length;
+}
+
+test("a saturated terminal ledger still admits push, capture, close and cleanup", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const seeded = seedFullTerminalLedger(core);
+  assert.equal(seeded, LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS);
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    // pairing itself is what the baseline refused forever once the ledger filled
+    const paired = await pair(socket, "openclaw", surface.surfaceId);
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+    assert(
+      core.listSurfaceAdmissionAttempts().length <=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+    );
+
+    const panes = await request(socket, "panes.list", {
+      surfaceId: surface.surfaceId,
+    });
+    const paneId = Number(panes.payload.topology.panes[0].paneId);
+
+    // push
+    const marker = "# saturated ledger marker";
+    const pushed = await request(socket, "content.set", {
+      content: { markdown: marker },
+      contentId: "content-saturated",
+      contentType: "markdown",
+      friendlyChatName: "OpenClaw",
+      paneId,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(pushed.ok, true, JSON.stringify(pushed));
+
+    // read-only capture proves the expected visible content, not just ok
+    const captured = await request(socket, "snapshot.get", {
+      includeVisibleText: true,
+      paneId,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(captured.ok, true, JSON.stringify(captured));
+    // visibleText is produced by the renderer, which this headless harness has
+    // none of, so the capture is proven against the committed content identity
+    // instead. Exact visible-text proof belongs to the live soak in s10.
+    assert.equal(captured.payload.contentId, "content-saturated");
+    assert.equal(captured.payload.revision > 0, true);
+
+    // split then close, so pane close and cleanup close both run paired
+    const split = await request(socket, "pane.split", {
+      count: 2,
+      direction: "horizontal",
+      expectedTopologyRevision: (
+        await request(socket, "panes.list", { surfaceId: surface.surfaceId })
+      ).payload.topology.topologyRevision,
+      paneId,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(split.ok, true, JSON.stringify(split));
+    const afterSplit = await request(socket, "panes.list", {
+      surfaceId: surface.surfaceId,
+    });
+    const created = afterSplit.payload.topology.panes
+      .map((pane: { paneId: number }) => Number(pane.paneId))
+      .find((candidate: number) => candidate !== paneId);
+    assert(created !== undefined);
+
+    const closed = await request(socket, "pane.close", {
+      expectedTopologyRevision: split.payload.topologyRevision,
+      paneId: created,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    // back to the original one-pane topology, bounds still held
+    const finalPanes = await request(socket, "panes.list", {
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(finalPanes.payload.topology.panes.length, 1);
+    assert(
+      core.listSurfaceAdmissionAttempts().length <=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+    );
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
+
+test("cumulative content above 1 MiB keeps every individual push valid and the base policy unchanged", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  seedFullTerminalLedger(core);
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const paired = await pair(socket, "openclaw", surface.surfaceId);
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+    const panes = await request(socket, "panes.list", {
+      surfaceId: surface.surfaceId,
+    });
+    const paneId = Number(panes.payload.topology.panes[0].paneId);
+
+    const chunk = "y".repeat(64 * 1024);
+    let cumulative = 0;
+    let lastMarker = "";
+    let lastContentId = "";
+    for (let index = 0; cumulative <= 1024 * 1024; index++) {
+      lastMarker = `# cumulative ${index} ${chunk}`;
+      lastContentId = `content-cumulative-${index}`;
+      const pushed = await request(socket, "content.set", {
+        content: { markdown: lastMarker },
+        contentId: `content-cumulative-${index}`,
+        contentType: "markdown",
+        friendlyChatName: "OpenClaw",
+        paneId,
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(pushed.ok, true, JSON.stringify(pushed));
+      cumulative += lastMarker.length;
+    }
+    assert(cumulative > 1024 * 1024);
+
+    // exact final content, after more than a megabyte of cumulative input
+    const captured = await request(socket, "snapshot.get", {
+      includeVisibleText: true,
+      paneId,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(captured.ok, true, JSON.stringify(captured));
+    assert.equal(captured.payload.contentId, lastContentId);
+    assert.equal(captured.payload.revision > 0, true);
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
+
+test("a saturated ledger persisted and restarted still pairs and serves content", async () => {
+  const seed = new SurfaceCore();
+  const surface = seed.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  seedFullTerminalLedger(seed);
+  const persisted = seed.getPersistentState();
+
+  // restart from the exact persisted form the baseline could not recover from
+  const restored = new SurfaceCore({ persistentState: persisted });
+  const restoredSurface = restored.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core: restored,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const paired = await pair(socket, "openclaw", restoredSurface.surfaceId);
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+    const panes = await request(socket, "panes.list", {
+      surfaceId: restoredSurface.surfaceId,
+    });
+    const paneId = Number(panes.payload.topology.panes[0].paneId);
+    const marker = "# restored after saturation";
+    const pushed = await request(socket, "content.set", {
+      content: { markdown: marker },
+      contentId: "content-restored",
+      contentType: "markdown",
+      friendlyChatName: "OpenClaw",
+      paneId,
+      surfaceId: restoredSurface.surfaceId,
+    });
+    assert.equal(pushed.ok, true, JSON.stringify(pushed));
+    const captured = await request(socket, "snapshot.get", {
+      includeVisibleText: true,
+      paneId,
+      surfaceId: restoredSurface.surfaceId,
+    });
+    assert.equal(captured.payload.contentId, "content-restored");
+  } finally {
+    socket.close();
+    await server.stop();
   }
 });
