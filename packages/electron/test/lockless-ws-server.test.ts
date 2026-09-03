@@ -3017,9 +3017,14 @@ test("a successful saturated pair survives a FRESH-CORE reload with no unresolve
   }
 });
 
-// NOT YET WRITTEN, blocker recorded on asg_2107e9db: the real discovery
-// regression needs a persisted surface holding a pane id below 1, which is the
-// only trigger for admitSurfaceForDiscovery. Seeding it by rewriting
-// panes[0].paneId and layout.paneId in the serialized record makes the surface
-// fail to deserialize ("Unknown surface"), so the record shape needs to be
-// established first. Not left armed and failing in the suite.
+// DISCOVERY REGRESSION STILL NOT PROVEN, blocker recorded on asg_2107e9db.
+// Second attempt built the trigger through supported APIs only: a fresh
+// surface already holds BOOTSTRAP_PANE_ID (0), the pane-id-below-1 condition
+// that makes surfaces.list call admitSurfaceForDiscovery. But the test PASSED
+// at pre-fix 5692243 as well as after 968d811, so it does NOT discriminate and
+// proves nothing about B1. Most likely pair.request materialises the bootstrap
+// pane before surfaces.list runs, so admitSurfaceForDiscovery never executes.
+// A real discovery regression must first prove that path actually ran, for
+// example by observing the ledger grow by a discovery-created row.
+// Not left armed: a non-discriminating regression is worse than none, because
+// it reads as coverage it does not provide.
