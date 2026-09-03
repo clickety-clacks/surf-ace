@@ -10,7 +10,11 @@ import {
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import type { NativePaneMaterialization } from "../src/native-pane-bridge.js";
-import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
+import {
+  AdmissionPersistenceError,
+  SurfaceCore,
+  SurfaceCoreError,
+} from "../src/surface-core.js";
 import { LocklessAuthorityError } from "../src/lockless-client-authority.js";
 
 function applyProviderBootstrap(
@@ -3290,4 +3294,146 @@ test("candidate admission proceeds only after recovery leaves no unresolved sequ
   // every previously unresolved row terminalized; the only pending row left is
   // the candidate this call just admitted, which is pending by definition.
   assert.deepEqual(core.listUnresolvedSurfaceAdmissionAttempts(), [count + 1]);
+});
+
+// --- V3 s3.3 / s5 / s6: queued prepare, provisional sequences, atomicity ---
+
+const seededTerminalCore = (count: number) => {
+  const core = new SurfaceCore();
+  for (let index = 1; index <= count; index++) {
+    const attempt = core.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: `controller_${index}`,
+      requestId: `rq_${index}`,
+      surfaceId: index % 2 === 0 ? "sf_alpha" : "sf_beta",
+    });
+    core.succeedSurfaceAdmissionAttempt(attempt.attemptSequence);
+  }
+  return core;
+};
+
+test("second caller cannot enter the global boundary until the first transition settles", async () => {
+  const core = seededTerminalCore(4);
+  const order: string[] = [];
+  let releaseFirst: (() => void) | null = null;
+  const firstPersisting = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+
+  const first = core.prepareSurfaceAdmissionAttempt(
+    { controllerInstanceId: "c_one", requestId: "rq_one", surfaceId: "sf_alpha" },
+    async () => {
+      order.push("first:persist_begin");
+      await firstPersisting;
+      order.push("first:persist_end");
+    },
+  );
+  // give caller one a chance to reach its persist boundary
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const second = core.prepareSurfaceAdmissionAttempt(
+    { controllerInstanceId: "c_two", requestId: "rq_two", surfaceId: "sf_beta" },
+    async () => {
+      order.push("second:persist_begin");
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  // caller two must not have entered prepare at all while one is in flight
+  assert.deepEqual(order, ["first:persist_begin"]);
+
+  releaseFirst?.();
+  const [firstAttempt, secondAttempt] = await Promise.all([first, second]);
+  assert.deepEqual(order, [
+    "first:persist_begin",
+    "first:persist_end",
+    "second:persist_begin",
+  ]);
+  // distinct committed sequences, strictly increasing, nothing lost
+  assert.notEqual(firstAttempt.attemptSequence, secondAttempt.attemptSequence);
+  assert(secondAttempt.attemptSequence > firstAttempt.attemptSequence);
+  assert(
+    core.listSurfaceAdmissionAttempts().length <=
+      LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+  );
+});
+
+test("known pre-state persistence failure rolls the whole transition back and frees the provisional sequence for reuse", async () => {
+  const core = seededTerminalCore(3);
+  const before = core.getPersistentState();
+  const provisional = before.nextAdmissionAttemptSequence;
+
+  await assert.rejects(
+    core.prepareSurfaceAdmissionAttempt(
+      { controllerInstanceId: "c_fail", requestId: "rq_fail", surfaceId: "sf_alpha" },
+      async () => {
+        throw new AdmissionPersistenceError("disk full, nothing written", true);
+      },
+    ),
+  );
+
+  const after = core.getPersistentState();
+  // exact pre-state: no candidate row, no high-water advance
+  assert.deepEqual(after.admissionAttempts, before.admissionAttempts);
+  assert.equal(after.nextAdmissionAttemptSequence, provisional);
+  assert.equal(core.isAdmissionFailStopped(), false);
+
+  // the never-committed provisional value is reused, not skipped
+  const retried = await core.prepareSurfaceAdmissionAttempt(
+    { controllerInstanceId: "c_retry", requestId: "rq_retry", surfaceId: "sf_alpha" },
+    async () => {},
+  );
+  assert.equal(retried.attemptSequence, provisional);
+});
+
+test("unknown persistence outcome fail-stops the boundary until durable state is reloaded", async () => {
+  const core = seededTerminalCore(3);
+  await assert.rejects(
+    core.prepareSurfaceAdmissionAttempt(
+      { controllerInstanceId: "c_unknown", requestId: "rq_unknown", surfaceId: "sf_alpha" },
+      async () => {
+        throw new AdmissionPersistenceError("write outcome unknown", false);
+      },
+    ),
+  );
+  assert.equal(core.isAdmissionFailStopped(), true);
+
+  // no new prepare may start while the outcome is unproven
+  await assert.rejects(
+    core.prepareSurfaceAdmissionAttempt(
+      { controllerInstanceId: "c_after", requestId: "rq_after", surfaceId: "sf_alpha" },
+      async () => {
+        throw new Error("persist must not be reached while fail-stopped");
+      },
+    ),
+    (error) =>
+      error instanceof LocklessAuthorityError && error.code === "internal_error",
+  );
+
+  core.resumeAdmissionAfterReload();
+  const resumed = await core.prepareSurfaceAdmissionAttempt(
+    { controllerInstanceId: "c_resume", requestId: "rq_resume", surfaceId: "sf_alpha" },
+    async () => {},
+  );
+  assert(resumed.attemptSequence > 0);
+});
+
+test("a failed transition leaves a later caller a complete state, never a partial one", async () => {
+  const core = seededTerminalCore(4);
+  const before = core.getPersistentState();
+  const failing = core.prepareSurfaceAdmissionAttempt(
+    { controllerInstanceId: "c_first", requestId: "rq_first", surfaceId: "sf_alpha" },
+    async () => {
+      throw new AdmissionPersistenceError("known pre-state", true);
+    },
+  );
+  const following = core.prepareSurfaceAdmissionAttempt(
+    { controllerInstanceId: "c_second", requestId: "rq_second", surfaceId: "sf_beta" },
+    async () => {},
+  );
+  await assert.rejects(failing);
+  const secondAttempt = await following;
+  // caller two observed the exact pre-state, so it took the provisional value
+  assert.equal(
+    secondAttempt.attemptSequence,
+    before.nextAdmissionAttemptSequence,
+  );
 });

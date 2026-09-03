@@ -527,6 +527,21 @@ export type AdmissionRecoveryEvidence = {
   reasonCode?: string;
 };
 
+/**
+ * Raised by a persistence callback to report the durable outcome of a prepare
+ * transition. `outcomeKnown` is the load-bearing field: it distinguishes "the
+ * store is known to hold the exact pre-prepare state" from "we do not know
+ * what the store holds". Guessing either way is what corrupts a sequence.
+ */
+export class AdmissionPersistenceError extends Error {
+  readonly outcomeKnown: boolean;
+  constructor(message: string, outcomeKnown: boolean) {
+    super(message);
+    this.name = "AdmissionPersistenceError";
+    this.outcomeKnown = outcomeKnown;
+  }
+}
+
 export type AdmissionRecoveryPlan = {
   terminalize: {
     attemptSequence: number;
@@ -628,6 +643,8 @@ export class SurfaceCore {
   // surface and authority state, but must never erase or rewind these records.
   private readonly admissionAttempts: PersistentSurfaceAdmissionAttempt[];
   private admissionRecoveryEvidence: AdmissionRecoveryEvidence[] = [];
+  private admissionQueue: Promise<unknown> = Promise.resolve();
+  private admissionFailStop = false;
   private readonly surfaces = new Map<string, SurfaceState>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
@@ -734,6 +751,84 @@ export class SurfaceCore {
       nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,
       surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
     };
+  }
+
+  /**
+   * Serialize the whole admission boundary. Recovery planning, terminal
+   * compaction, provisional-sequence selection, candidate creation and the
+   * durable prepare commit are one linear order for all callers, across
+   * surfaces. The ledger is global, so two surfaces preparing concurrently
+   * would otherwise both read the same high-water value and both believe they
+   * own it.
+   *
+   * The queue advances on rejection as well as resolution: a caller whose
+   * transition fails must not wedge every later caller.
+   */
+  private runExclusiveAdmission<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.admissionQueue.then(work, work);
+    this.admissionQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /**
+   * Prepare one admission under the global boundary and commit it durably.
+   *
+   * `persist` reports the durable outcome. Resolving means committed. Throwing
+   * an AdmissionPersistenceError with `outcomeKnown: true` means the durable
+   * store is known to hold the exact pre-prepare state, so the provisional
+   * sequence was never assigned and the next serialized prepare may reuse it.
+   * Throwing with `outcomeKnown: false` means the outcome is unknown: the
+   * boundary fail-stops and starts no new prepare until a reload proves which
+   * of the two complete states is durable.
+   */
+  async prepareSurfaceAdmissionAttempt(
+    input: { controllerInstanceId: string; requestId: string; surfaceId: string },
+    persist: (state: PersistentSurfaceState) => Promise<void>,
+  ): Promise<PersistentSurfaceAdmissionAttempt> {
+    return this.runExclusiveAdmission(async () => {
+      if (this.admissionFailStop) {
+        throw new LocklessAuthorityError(
+          "internal_error",
+          "Admission boundary is fail-stopped until durable state is reloaded",
+        );
+      }
+      const preAttempts = structuredClone(this.admissionAttempts);
+      const preNextSequence = this.nextAdmissionAttemptSequence;
+      const attempt = this.beginSurfaceAdmissionAttempt(input);
+      try {
+        await persist(this.getPersistentState());
+        return attempt;
+      } catch (error) {
+        if (
+          error instanceof AdmissionPersistenceError && !error.outcomeKnown
+        ) {
+          // Neither state is proven. Touch nothing and refuse to prepare again.
+          this.admissionFailStop = true;
+          throw error;
+        }
+        // Known pre-state: roll the whole transition back together, so the
+        // provisional sequence is genuinely unconsumed rather than skipped.
+        this.admissionAttempts.length = 0;
+        this.admissionAttempts.push(...preAttempts);
+        this.nextAdmissionAttemptSequence = preNextSequence;
+        throw error;
+      }
+    });
+  }
+
+  isAdmissionFailStopped(): boolean {
+    return this.admissionFailStop;
+  }
+
+  /**
+   * Clear the fail-stop after durable state has been reloaded and one of the
+   * two complete states in Section 6 has been proven.
+   */
+  resumeAdmissionAfterReload(): void {
+    this.admissionFailStop = false;
   }
 
   /**
