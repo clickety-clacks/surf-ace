@@ -799,9 +799,13 @@ export class SurfaceCore {
         await persist(this.getPersistentState());
         return attempt;
       } catch (error) {
-        if (
-          error instanceof AdmissionPersistenceError && !error.outcomeKnown
-        ) {
+        // Fail safe: roll back ONLY when the caller proves the durable store
+        // is untouched. Anything else — a generic write error, a timeout, an
+        // unexpected throw — has an unknown outcome, and rolling back an
+        // unknown outcome is what duplicates a committed sequence.
+        const provenPreState = error instanceof AdmissionPersistenceError &&
+          error.outcomeKnown;
+        if (!provenPreState) {
           // Neither state is proven. Touch nothing and refuse to prepare again.
           this.admissionFailStop = true;
           throw error;

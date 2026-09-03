@@ -2741,3 +2741,55 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
     await server.stop();
   }
 });
+
+test("concurrent pair.requests are serialized through the global durable boundary", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  seedFullTerminalLedger(core);
+  const before = core.getPersistentState().nextAdmissionAttemptSequence;
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const first = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    // fire both without awaiting the first, so they contend for the boundary
+    const [a, b] = await Promise.all([
+      pair(first, "openclaw", surface.surfaceId),
+      pair(second, "tight-beam", surface.surfaceId),
+    ]);
+    assert.equal(a.ok, true, JSON.stringify(a));
+    assert.equal(b.ok, true, JSON.stringify(b));
+
+    // two attempts were committed, with distinct strictly increasing
+    // sequences, and no attempt was lost to the race
+    const after = core.getPersistentState().nextAdmissionAttemptSequence;
+    assert.equal(after, before + 2);
+    const sequences = core
+      .listSurfaceAdmissionAttempts()
+      .map((attempt) => attempt.attemptSequence);
+    assert.equal(new Set(sequences).size, sequences.length);
+    assert.deepEqual([...sequences].sort((x, y) => x - y), sequences);
+    assert(
+      core.listSurfaceAdmissionAttempts().length <=
+        LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+    );
+  } finally {
+    first.close();
+    second.close();
+    await server.stop();
+  }
+});

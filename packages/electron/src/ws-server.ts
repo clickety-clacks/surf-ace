@@ -1620,16 +1620,22 @@ export class SurfaceWsServer {
         );
       }
       const surfaceId = request.payload.surfaceId ?? null;
+      // The ledger is global, so the candidate row and its durable write must
+      // be one serialized transition. Calling begin here and persisting after
+      // leaves a window in which a second pair.request for another surface
+      // reads the same high-water value and believes it owns it.
       const admissionAttempt = surfaceId
-        ? this.core.beginSurfaceAdmissionAttempt({
-            controllerInstanceId: request.payload.controllerInstanceId,
-            requestId: request.id,
-            surfaceId,
-          })
+        ? await this.core.prepareSurfaceAdmissionAttempt(
+            {
+              controllerInstanceId: request.payload.controllerInstanceId,
+              requestId: request.id,
+              surfaceId,
+            },
+            async () => {
+              await this.persistLocklessState();
+            },
+          )
         : null;
-      if (admissionAttempt) {
-        await this.persistLocklessState();
-      }
       const connectionToken = metaConnectionToken(
         this.socketMeta.get(socket),
       );
@@ -1847,7 +1853,7 @@ export class SurfaceWsServer {
             .activePaneIds(surface.surfaceId)
             .some((paneId) => paneId < 1)
         ) {
-          this.admitSurfaceForDiscovery(
+          await this.admitSurfaceForDiscovery(
             session.controllerInstanceId,
             request.id,
             surface.surfaceId,
@@ -4666,16 +4672,24 @@ export class SurfaceWsServer {
     this.core.admitSurfaceToLockless(surfaceId);
   }
 
-  private admitSurfaceForDiscovery(
+  private async admitSurfaceForDiscovery(
     controllerInstanceId: string,
     requestId: string,
     surfaceId: string,
-  ): void {
-    const attempt = this.core.beginSurfaceAdmissionAttempt({
-      controllerInstanceId,
-      requestId,
-      surfaceId,
-    });
+  ): Promise<void> {
+    // Discovery admission writes to the same global ledger as pair.request,
+    // so it takes the same serialized durable prepare. Left outside the queue
+    // it would race pairing and consume a sequence nobody committed.
+    const attempt = await this.core.prepareSurfaceAdmissionAttempt(
+      {
+        controllerInstanceId,
+        requestId,
+        surfaceId,
+      },
+      async () => {
+        await this.persistLocklessState();
+      },
+    );
     try {
       this.core.advanceSurfaceAdmissionAttempt(
         attempt.attemptSequence,
