@@ -3456,3 +3456,21 @@ test("resolving only some rows still blocks until none remains unresolved", () =
     "succeeded",
   );
 });
+
+test("a single unresolved row blocks a candidate that would otherwise fit easily", () => {
+  const core = coreWithPending(1);
+  let raised: unknown = null;
+  try {
+    core.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: "controller_candidate",
+      requestId: "rq_candidate",
+      surfaceId: "sf_other",
+    });
+  } catch (error) {
+    raised = error;
+  }
+  assert(raised instanceof LocklessAuthorityError);
+  assert.equal(raised.code, "admission_recovery_pending");
+  assert.deepEqual(raised.details?.unresolvedSequences, [1]);
+  assert.equal(core.listSurfaceAdmissionAttempts().length, 1);
+});
