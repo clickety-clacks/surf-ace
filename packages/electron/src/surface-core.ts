@@ -513,6 +513,97 @@ function compactedAdmissionAttemptLedgerForCandidate(
   );
 }
 
+/**
+ * Exact durable evidence about one pending write-ahead admission row. To be
+ * exact it must name both the row's `attemptSequence` and its `requestId`;
+ * evidence that names one but not the other belongs to a different attempt and
+ * is not evidence about this one.
+ */
+export type AdmissionRecoveryEvidence = {
+  attemptSequence: number;
+  requestId: string;
+  outcome: "succeeded" | "failed" | "never_began";
+  reason?: string;
+  reasonCode?: string;
+};
+
+export type AdmissionRecoveryPlan = {
+  terminalize: {
+    attemptSequence: number;
+    outcome: "succeeded" | "failed";
+    reason: string | null;
+    reasonCode: string | null;
+  }[];
+  unresolved: number[];
+};
+
+const ADMISSION_RECOVERY_INTERRUPTED_REASON_CODE = "admission_interrupted";
+const ADMISSION_RECOVERY_INTERRUPTED_REASON =
+  "Paired operation never began before the admission attempt was interrupted";
+
+/**
+ * Decide, for every pending row, whether durable evidence determines its
+ * outcome. This is a pure function of the pending set and the evidence set so
+ * that the whole plan can be computed before anything is mutated.
+ *
+ * Conflict is never broken by precedence. Two authoritative classes for one
+ * row stay indeterminate: choosing by record order, timestamp, or arrival
+ * would invent an outcome the evidence does not support, and a pending
+ * admission row is the only trace that an operation may already have happened.
+ */
+export function planAdmissionRecovery(
+  attempts: PersistentSurfaceAdmissionAttempt[],
+  evidence: AdmissionRecoveryEvidence[],
+): AdmissionRecoveryPlan {
+  const plan: AdmissionRecoveryPlan = { terminalize: [], unresolved: [] };
+  const pending = attempts
+    .filter((attempt) => attempt.outcome === "pending")
+    .sort((left, right) => left.attemptSequence - right.attemptSequence);
+
+  for (const row of pending) {
+    // Exact match on BOTH identifiers, per Section 2's definition.
+    const exact = evidence.filter((record) =>
+      record.attemptSequence === row.attemptSequence &&
+      record.requestId === row.requestId
+    );
+    const classes = new Set(exact.map((record) => record.outcome));
+    if (classes.size !== 1) {
+      // none, malformed, or two or more authoritative classes
+      plan.unresolved.push(row.attemptSequence);
+      continue;
+    }
+    const [only] = [...classes];
+    if (only === "succeeded") {
+      plan.terminalize.push({
+        attemptSequence: row.attemptSequence,
+        outcome: "succeeded",
+        reason: null,
+        reasonCode: null,
+      });
+      continue;
+    }
+    if (only === "failed") {
+      const record = exact.find((candidate) => candidate.reason !== undefined);
+      plan.terminalize.push({
+        attemptSequence: row.attemptSequence,
+        outcome: "failed",
+        reason: boundedAdmissionReason(record?.reason ?? "operation failed"),
+        reasonCode: boundedAdmissionReasonCode(
+          record?.reasonCode ?? "operation_failed",
+        ),
+      });
+      continue;
+    }
+    plan.terminalize.push({
+      attemptSequence: row.attemptSequence,
+      outcome: "failed",
+      reason: ADMISSION_RECOVERY_INTERRUPTED_REASON,
+      reasonCode: ADMISSION_RECOVERY_INTERRUPTED_REASON_CODE,
+    });
+  }
+  return plan;
+}
+
 function assertAdmissionAttemptLedgerWithinCapacity(
   attempts: PersistentSurfaceAdmissionAttempt[],
 ): void {
@@ -536,6 +627,7 @@ export class SurfaceCore {
   // Admission evidence is a write-ahead ledger. Transaction rollback restores
   // surface and authority state, but must never erase or rewind these records.
   private readonly admissionAttempts: PersistentSurfaceAdmissionAttempt[];
+  private admissionRecoveryEvidence: AdmissionRecoveryEvidence[] = [];
   private readonly surfaces = new Map<string, SurfaceState>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
@@ -644,6 +736,58 @@ export class SurfaceCore {
     };
   }
 
+  /**
+   * Supply exact durable evidence for pending write-ahead rows. Recovery is
+   * driven from this set; without evidence a pending row stays pending, which
+   * is the safe answer, not a stuck one.
+   */
+  setAdmissionRecoveryEvidence(evidence: AdmissionRecoveryEvidence[]): void {
+    this.admissionRecoveryEvidence = structuredClone(evidence);
+  }
+
+  listUnresolvedSurfaceAdmissionAttempts(): number[] {
+    return this.admissionAttempts
+      .filter((attempt) => attempt.outcome === "pending")
+      .map((attempt) => attempt.attemptSequence)
+      .sort((left, right) => left - right);
+  }
+
+  /**
+   * Evaluate the entire pending set, then apply every determinate
+   * terminalization in one all-or-nothing step. The plan is computed against a
+   * copy and swapped in only once every row it names has been applied, so a
+   * mid-plan failure cannot leave a subset committed or an unresolved row
+   * modified.
+   */
+  recoverPendingSurfaceAdmissionAttempts(): AdmissionRecoveryPlan {
+    const plan = planAdmissionRecovery(
+      this.admissionAttempts,
+      this.admissionRecoveryEvidence,
+    );
+    if (plan.terminalize.length === 0) {
+      return plan;
+    }
+    const draft = structuredClone(this.admissionAttempts);
+    for (const decision of plan.terminalize) {
+      const row = draft.find(
+        (candidate) => candidate.attemptSequence === decision.attemptSequence,
+      );
+      if (!row || row.outcome !== "pending") {
+        throw new LocklessAuthorityError(
+          "internal_error",
+          "Admission recovery plan named a row that is not pending",
+        );
+      }
+      row.outcome = decision.outcome;
+      row.reason = decision.reason;
+      row.reasonCode = decision.reasonCode;
+      row.updatedAt = this.now();
+    }
+    this.admissionAttempts.length = 0;
+    this.admissionAttempts.push(...draft);
+    return plan;
+  }
+
   beginSurfaceAdmissionAttempt(input: {
     controllerInstanceId: string;
     requestId: string;
@@ -672,6 +816,41 @@ export class SurfaceCore {
       surfaceId: input.surfaceId,
       updatedAt: now,
     };
+    // Durable-evidence recovery runs before capacity is considered at all.
+    // A ledger held full by pending write-ahead rows is a recovery problem,
+    // never a capacity problem: compaction may not evict a pending row, so
+    // answering surface_state_capacity here would be both wrong and
+    // unrecoverable.
+    this.recoverPendingSurfaceAdmissionAttempts();
+    const unresolved = this.admissionAttempts
+      .filter((candidate) => candidate.outcome === "pending")
+      .map((candidate) => candidate.attemptSequence)
+      .sort((left, right) => left - right);
+    if (
+      unresolved.length > 0 &&
+      !admissionAttemptLedgerFitsWithinCapacity([
+        ...this.admissionAttempts,
+        attempt,
+      ]) &&
+      !admissionAttemptLedgerFitsWithinCapacity([
+        ...this.admissionAttempts.filter((row) => row.outcome === "pending"),
+        attempt,
+      ])
+    ) {
+      // Mandatory pending rows alone do not fit. No candidate may prepare.
+      throw new LocklessAuthorityError(
+        "admission_recovery_pending",
+        "Admission ledger holds unresolved pending attempts awaiting durable-evidence recovery",
+        {
+          attemptCount: this.admissionAttempts.length,
+          reservedBytes: admissionAttemptLedgerReservedBytes(
+            this.admissionAttempts,
+          ),
+          unresolvedSequences: unresolved,
+        },
+      );
+    }
+
     // Compact terminal history before the capacity assert. Without this, a
     // ledger that has reached either bound rejects every subsequent
     // pair.request forever, and because pairing precedes push, capture, close

@@ -5137,6 +5137,7 @@
             "code": {
               "enum": [
                 "admission_failed",
+                "admission_recovery_pending",
                 "capability_mismatch",
                 "controller_capacity",
                 "duplicate_controller_instance",

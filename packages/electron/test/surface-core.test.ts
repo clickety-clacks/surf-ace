@@ -3136,3 +3136,158 @@ test("surface core rebroadcasts committed strokes into renderer state immediatel
     unsubscribe();
   }
 });
+
+// --- V3 section 4: durable-evidence recovery for pending write-ahead rows ---
+
+const pendingLedger = (count: number) =>
+  Array.from({ length: count }, (_, index) => ({
+    attemptSequence: index + 1,
+    controllerInstanceId: `controller_${index + 1}`,
+    outcome: "pending" as const,
+    reason: null,
+    reasonCode: null,
+    requestId: `rq_${index + 1}`,
+    stage: "requested" as const,
+    startedAt: 1,
+    surfaceId: "sf_test",
+    updatedAt: 1,
+  }));
+
+const coreWithPending = (count: number) =>
+  new SurfaceCore({
+    persistentState: {
+      admissionAttempts: pendingLedger(count),
+      nextAdmissionAttemptSequence: count + 1,
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+test("conflicting exact evidence keeps its pending row unchanged and never picks a side", () => {
+  const core = coreWithPending(2);
+  const before = core.listSurfaceAdmissionAttempts()[0];
+  core.setAdmissionRecoveryEvidence([
+    { attemptSequence: 1, requestId: "rq_1", outcome: "succeeded" },
+    { attemptSequence: 1, requestId: "rq_1", outcome: "failed", reason: "boom" },
+  ]);
+  const plan = core.recoverPendingSurfaceAdmissionAttempts();
+  assert.deepEqual(plan.terminalize, []);
+  assert.deepEqual(plan.unresolved, [1, 2]);
+  // byte-for-byte unchanged
+  assert.deepEqual(core.listSurfaceAdmissionAttempts()[0], before);
+});
+
+test("evidence naming a different request or sequence is not evidence for this row", () => {
+  const core = coreWithPending(1);
+  core.setAdmissionRecoveryEvidence([
+    { attemptSequence: 1, requestId: "rq_other", outcome: "succeeded" },
+    { attemptSequence: 99, requestId: "rq_1", outcome: "succeeded" },
+  ]);
+  const plan = core.recoverPendingSurfaceAdmissionAttempts();
+  assert.deepEqual(plan.unresolved, [1]);
+  assert.equal(core.listSurfaceAdmissionAttempts()[0].outcome, "pending");
+});
+
+test("mixed pending set terminalizes every determinate row in one transition and reports unresolved in order", () => {
+  const core = coreWithPending(5);
+  const unchangedBefore = core
+    .listSurfaceAdmissionAttempts()
+    .filter((attempt) => attempt.attemptSequence >= 4);
+  core.setAdmissionRecoveryEvidence([
+    { attemptSequence: 1, requestId: "rq_1", outcome: "succeeded" },
+    {
+      attemptSequence: 2,
+      requestId: "rq_2",
+      outcome: "failed",
+      reason: "operation rejected",
+      reasonCode: "operation_failed",
+    },
+    { attemptSequence: 3, requestId: "rq_3", outcome: "never_began" },
+    // 4 has conflicting evidence, 5 has none
+    { attemptSequence: 4, requestId: "rq_4", outcome: "succeeded" },
+    { attemptSequence: 4, requestId: "rq_4", outcome: "never_began" },
+  ]);
+  const plan = core.recoverPendingSurfaceAdmissionAttempts();
+  assert.deepEqual(plan.unresolved, [4, 5]);
+
+  const after = core.listSurfaceAdmissionAttempts();
+  const bySequence = (sequence: number) =>
+    after.find((attempt) => attempt.attemptSequence === sequence);
+  assert.equal(bySequence(1)?.outcome, "succeeded");
+  assert.equal(bySequence(2)?.outcome, "failed");
+  assert.equal(bySequence(2)?.reasonCode, "operation_failed");
+  // never-began terminalizes as failed with a bounded interruption reason
+  assert.equal(bySequence(3)?.outcome, "failed");
+  assert.equal(bySequence(3)?.reasonCode, "admission_interrupted");
+  // unresolved rows survive byte-for-byte
+  assert.deepEqual(
+    after.filter((attempt) => attempt.attemptSequence >= 4),
+    unchangedBefore,
+  );
+});
+
+const largestPendingLedger = () => {
+  for (
+    let count = LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS;
+    count >= 1;
+    count--
+  ) {
+    try {
+      return { core: coreWithPending(count), count };
+    } catch {
+      // this many pending rows exceed a bound; try one fewer
+    }
+  }
+  throw new Error("no fitting pending ledger");
+};
+
+test("pending-only saturation returns admission_recovery_pending, never surface_state_capacity", () => {
+  // Pending rows are charged at their worst-case terminal representation, so
+  // the byte bound is reached well before 256 rows. Derive the largest pending
+  // ledger that actually fits rather than assuming the count bound is
+  // reachable with pending rows.
+  const { core, count } = largestPendingLedger();
+  let raised: unknown = null;
+  try {
+    core.beginSurfaceAdmissionAttempt({
+      controllerInstanceId: "controller_candidate",
+      requestId: "rq_candidate",
+      surfaceId: "sf_other",
+    });
+  } catch (error) {
+    raised = error;
+  }
+  assert(raised instanceof LocklessAuthorityError);
+  assert.equal(raised.code, "admission_recovery_pending");
+  assert.notEqual(raised.code, "surface_state_capacity");
+  // nothing evicted, every pending sequence reported in order
+  assert.equal(core.listSurfaceAdmissionAttempts().length, count);
+  assert.deepEqual(
+    core.listUnresolvedSurfaceAdmissionAttempts(),
+    Array.from({ length: count }, (_, index) => index + 1),
+  );
+});
+
+test("candidate admission proceeds only after recovery leaves no unresolved sequence", () => {
+  const { core, count } = largestPendingLedger();
+  core.setAdmissionRecoveryEvidence(
+    Array.from({ length: count }, (_, index) => ({
+      attemptSequence: index + 1,
+      requestId: `rq_${index + 1}`,
+      outcome: "succeeded" as const,
+    })),
+  );
+  const admitted = core.beginSurfaceAdmissionAttempt({
+    controllerInstanceId: "controller_candidate",
+    requestId: "rq_candidate",
+    surfaceId: "sf_other",
+  });
+  assert.equal(admitted.attemptSequence, count + 1);
+  assert(
+    core.listSurfaceAdmissionAttempts().length <=
+      LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
+  );
+  // every previously unresolved row terminalized; the only pending row left is
+  // the candidate this call just admitted, which is pending by definition.
+  assert.deepEqual(core.listUnresolvedSurfaceAdmissionAttempts(), [count + 1]);
+});

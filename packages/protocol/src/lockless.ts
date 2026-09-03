@@ -552,6 +552,7 @@ export type LocklessSurfaceAdmissionAttempt = {
 
 export type LocklessErrorCode =
   | "admission_failed"
+  | "admission_recovery_pending"
   | "capability_mismatch"
   | "controller_capacity"
   | "duplicate_controller_instance"
@@ -792,6 +793,7 @@ const LOCKLESS_EVENT_OPS = new Set<LocklessEvent["op"]>([
 
 const LOCKLESS_ERROR_CODES = new Set<LocklessErrorCode>([
   "admission_failed",
+  "admission_recovery_pending",
   "capability_mismatch",
   "controller_capacity",
   "duplicate_controller_instance",
