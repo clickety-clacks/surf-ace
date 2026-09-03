@@ -12,7 +12,10 @@ import {
 import type { NativePaneMaterialization } from "../src/native-pane-bridge.js";
 import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
 import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
-import { createEmptyLocklessClientState } from "../src/lockless-client-authority.js";
+import {
+  createEmptyLocklessClientState,
+  DEFAULT_LOCKLESS_LIMITS,
+} from "../src/lockless-client-authority.js";
 import { LocklessAuthorityError } from "../src/lockless-client-authority.js";
 
 function applyProviderBootstrap(
@@ -3137,9 +3140,32 @@ const coreWithPendingAndReceipts = (
   const lockless = createEmptyLocklessClientState();
   const entries = Object.entries(receipts);
   const maxDepth = Math.max(0, ...entries.map(([, list]) => list.length));
+  // Receipts are capped per controller by maxPendingOperationReceiptsPerController,
+  // so a large pending set must be spread across controllers rather than piled
+  // onto one. That is also how it looks in reality: many controllers, each
+  // holding its own receipts.
+  const receiptsPerController = DEFAULT_LOCKLESS_LIMITS
+    .maxPendingOperationReceiptsPerController;
   for (let depth = 0; depth < maxDepth; depth++) {
-    const controllerInstanceId = `ctl_evidence_${depth}`;
-    const pendingOperationReceipts: Record<string, unknown> = {};
+    let chunk = 0;
+    let pendingOperationReceipts: Record<string, unknown> = {};
+    const flushController = () => {
+      if (Object.keys(pendingOperationReceipts).length === 0) {
+        return;
+      }
+      const controllerInstanceId = `ctl_evidence_${depth}_${chunk}`;
+      (lockless as any).controllers[controllerInstanceId] = {
+        controllerInstanceId,
+        controllerProductName: null,
+        disconnectedAt: null,
+        dormantSequence: null,
+        pendingOperationReceipts,
+        projectionCapacityBytes: 1024,
+        status: "dormant",
+      };
+      chunk += 1;
+      pendingOperationReceipts = {};
+    };
     for (const [requestId, list] of entries) {
       const outcome = list[depth];
       if (!outcome) continue;
@@ -3162,16 +3188,13 @@ const coreWithPendingAndReceipts = (
         );
       }
       pendingOperationReceipts[requestId] = shape(bytes);
+      if (
+        Object.keys(pendingOperationReceipts).length >= receiptsPerController
+      ) {
+        flushController();
+      }
     }
-    (lockless as any).controllers[controllerInstanceId] = {
-      controllerInstanceId,
-      controllerProductName: null,
-      disconnectedAt: null,
-      dormantSequence: null,
-      pendingOperationReceipts,
-      projectionCapacityBytes: 1024,
-      status: "dormant",
-    };
+    flushController();
   }
   return new SurfaceCore({
     persistentState: {
