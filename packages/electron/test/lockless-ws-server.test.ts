@@ -2851,3 +2851,68 @@ test("socket-path known pre-state persistence failure rolls back and reuses the 
 // armed here. Reproduction: supply persistLocklessState that throws a plain
 // Error, pair, and observe no response. The known-pre-state case above is
 // mapped correctly and passes.
+
+test("unknown-outcome persistence still answers pair.request with exactly one bounded error envelope", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  seedFullTerminalLedger(core);
+  const before = core.getPersistentState().nextAdmissionAttemptSequence;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      const unknown = new Error("Persistent state commit outcome is unknown");
+      unknown.name = "PersistentStateOutcomeUnknownError";
+      throw unknown;
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const envelopes: Record<string, any>[] = [];
+  socket.on("message", (raw: WebSocket.RawData) => {
+    const message = JSON.parse(String(raw)) as Record<string, any>;
+    if (message.type === "response") envelopes.push(message);
+  });
+  try {
+    // Bounded on purpose: the defect is that no response ever arrives, so an
+    // unbounded await would hang the suite instead of failing it.
+    const answered = await Promise.race([
+      pair(socket, "openclaw", surface.surfaceId),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
+    ]);
+    assert(answered !== null, "pair.request never received a response envelope");
+    assert.equal(answered.ok, false, JSON.stringify(answered));
+    assert.equal(typeof answered.error?.code, "string");
+
+    // Fail-stopped, and it STAYS fail-stopped until a reload.
+    assert.equal(core.isAdmissionFailStopped(), true);
+    // The in-memory high-water is deliberately NOT rolled back on an unknown
+    // outcome: we do not know whether the durable commit happened, so we touch
+    // nothing and require a reload to decide. Asserting it reverted would be
+    // asserting a rollback the contract forbids here.
+    assert.equal(
+      core.getPersistentState().nextAdmissionAttemptSequence,
+      before + 1,
+    );
+    // reload is the escape hatch, and only reload
+    const reloaded = new SurfaceCore({
+      persistentState: core.getPersistentState(),
+    });
+    assert.equal(reloaded.isAdmissionFailStopped(), false);
+    // exactly one envelope for that request id
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const forRequest = envelopes.filter((e) => e.id === answered.id);
+    assert.equal(forRequest.length, 1, JSON.stringify(forRequest));
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
