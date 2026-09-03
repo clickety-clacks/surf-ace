@@ -2542,27 +2542,31 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     const paneId = Number(panes.payload.topology.panes[0].paneId);
 
     // push
-    const marker = "# saturated ledger marker";
+    const marker = "saturated ledger marker";
     const pushed = await request(socket, "content.set", {
-      content: { markdown: marker },
+      content: { html: `<p>${marker}</p>` },
       contentId: "content-saturated",
-      contentType: "markdown",
+      contentType: "html",
       friendlyChatName: "OpenClaw",
       paneId,
       surfaceId: surface.surfaceId,
     });
     assert.equal(pushed.ok, true, JSON.stringify(pushed));
 
-    // read-only capture proves the expected visible content, not just ok
+    // Stand in for the renderer through the existing updatePaneSnapshot seam,
+    // which is exactly what the real renderer drives, so the capture proves
+    // expected VISIBLE CONTENT rather than only content identity.
+    core.updatePaneSnapshot(surface.surfaceId, paneId, { visibleText: marker });
     const captured = await request(socket, "snapshot.get", {
       includeVisibleText: true,
       paneId,
       surfaceId: surface.surfaceId,
     });
     assert.equal(captured.ok, true, JSON.stringify(captured));
-    // visibleText is produced by the renderer, which this headless harness has
-    // none of, so the capture is proven against the committed content identity
-    // instead. Exact visible-text proof belongs to the live soak in s10.
+    // html content yields visible text deterministically from the pushed
+    // bytes, so the capture proves the expected VISIBLE CONTENT, not merely
+    // that some snapshot came back.
+    assert.equal(captured.payload.visibleText, marker);
     assert.equal(captured.payload.contentId, "content-saturated");
     assert.equal(captured.payload.revision > 0, true);
 
@@ -2641,12 +2645,12 @@ test("cumulative content above 1 MiB keeps every individual push valid and the b
     let lastMarker = "";
     let lastContentId = "";
     for (let index = 0; cumulative <= 1024 * 1024; index++) {
-      lastMarker = `# cumulative ${index} ${chunk}`;
+      lastMarker = `cumulative ${index} ${chunk}`;
       lastContentId = `content-cumulative-${index}`;
       const pushed = await request(socket, "content.set", {
-        content: { markdown: lastMarker },
+        content: { html: `<p>${lastMarker}</p>` },
         contentId: `content-cumulative-${index}`,
-        contentType: "markdown",
+        contentType: "html",
         friendlyChatName: "OpenClaw",
         paneId,
         surfaceId: surface.surfaceId,
@@ -2657,12 +2661,17 @@ test("cumulative content above 1 MiB keeps every individual push valid and the b
     assert(cumulative > 1024 * 1024);
 
     // exact final content, after more than a megabyte of cumulative input
+    core.updatePaneSnapshot(surface.surfaceId, paneId, {
+      visibleText: lastMarker,
+    });
     const captured = await request(socket, "snapshot.get", {
       includeVisibleText: true,
       paneId,
       surfaceId: surface.surfaceId,
     });
     assert.equal(captured.ok, true, JSON.stringify(captured));
+    // exact final visible content after more than a megabyte of cumulative input
+    assert.equal(captured.payload.visibleText, lastMarker);
     assert.equal(captured.payload.contentId, lastContentId);
     assert.equal(captured.payload.revision > 0, true);
   } finally {
@@ -2707,21 +2716,25 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
       surfaceId: restoredSurface.surfaceId,
     });
     const paneId = Number(panes.payload.topology.panes[0].paneId);
-    const marker = "# restored after saturation";
+    const marker = "restored after saturation";
     const pushed = await request(socket, "content.set", {
-      content: { markdown: marker },
+      content: { html: `<p>${marker}</p>` },
       contentId: "content-restored",
-      contentType: "markdown",
+      contentType: "html",
       friendlyChatName: "OpenClaw",
       paneId,
       surfaceId: restoredSurface.surfaceId,
     });
     assert.equal(pushed.ok, true, JSON.stringify(pushed));
+    restored.updatePaneSnapshot(restoredSurface.surfaceId, paneId, {
+      visibleText: marker,
+    });
     const captured = await request(socket, "snapshot.get", {
       includeVisibleText: true,
       paneId,
       surfaceId: restoredSurface.surfaceId,
     });
+    assert.equal(captured.payload.visibleText, marker);
     assert.equal(captured.payload.contentId, "content-restored");
   } finally {
     socket.close();
