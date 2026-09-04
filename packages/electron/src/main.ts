@@ -1303,7 +1303,7 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
     return null;
   }
   const compositorSocketPath = resolveCompositorControlSocketPath();
-  if (compositorSocketPath) {
+  if (compositorSocketPath && core.nativeHostedPaneIdForPaneId(surfaceId, paneId) !== null) {
     const capturePath = path.join(
       os.tmpdir(),
       `surf-ace-pane-capture-${surfaceId}-${paneId}-${Date.now()}-${Math.random().toString(16).slice(2)}.png`,
