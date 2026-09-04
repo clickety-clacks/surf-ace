@@ -10,7 +10,8 @@
     "launchd:uninstall": "node ./scripts/install-launch-agent.mjs --uninstall",
     "package": "pnpm run build && electron-builder --mac dir --arm64",
     "start": "pnpm run build && electron .",
-    "test": "node --test ./dist/test/*.test.js"
+    "test": "node --test ./dist/test/*.test.js",
+    "test:capture-response": "node ./scripts/verify-capture-response.mjs"
   },
   "dependencies": {
     "@surf-ace/protocol": "workspace:*",
