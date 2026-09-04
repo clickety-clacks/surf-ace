@@ -59,6 +59,15 @@ test("Linux GPU fallback keeps a non-compositor window offscreen for capture", (
   });
 
   assert.deepEqual(surfaceWindowCaptureMode({
+    compositorSocketPath: null,
+    gpuDisabled: false,
+    platform: "linux",
+  }), {
+    offscreen: false,
+    showAfterReady: true,
+  });
+
+  assert.deepEqual(surfaceWindowCaptureMode({
     compositorSocketPath: "/tmp/surf-ace-compositor.sock",
     gpuDisabled: true,
     platform: "linux",
