@@ -12,6 +12,27 @@ export type SurfaceWindowOptions = {
   width: number;
 };
 
+export type SurfaceWindowCaptureMode = {
+  offscreen: false | { useSharedTexture: false };
+  showAfterReady: boolean;
+};
+
+export function surfaceWindowCaptureMode(params: {
+  compositorSocketPath: string | null;
+  gpuDisabled: boolean;
+  platform: NodeJS.Platform;
+}): SurfaceWindowCaptureMode {
+  const useOffscreenCapture = params.platform === "linux"
+    && params.gpuDisabled
+    && params.compositorSocketPath === null;
+  return {
+    offscreen: useOffscreenCapture
+      ? { useSharedTexture: false }
+      : false,
+    showAfterReady: !useOffscreenCapture,
+  };
+}
+
 export function surfaceWindowOptions(params: {
   compositorSocketPath: string | null;
   endpointName: string;

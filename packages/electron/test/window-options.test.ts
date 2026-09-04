@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
 
-import { surfaceWindowLoadQuery, surfaceWindowOptions } from "../src/window-options.js";
+import {
+  surfaceWindowCaptureMode,
+  surfaceWindowLoadQuery,
+  surfaceWindowOptions,
+} from "../src/window-options.js";
 
 async function mainSource(): Promise<string> {
   return fs.readFile(new URL("../../src/main.ts", import.meta.url), "utf8");
@@ -42,6 +46,35 @@ test("surface window keeps the platform frame outside compositor hosting", () =>
   assert.equal(options.height, 812);
   assert.equal(options.width, 960);
   assert.equal(options.title, "workstation-a Surf Ace");
+});
+
+test("Linux GPU fallback keeps a non-compositor window offscreen for capture", () => {
+  assert.deepEqual(surfaceWindowCaptureMode({
+    compositorSocketPath: null,
+    gpuDisabled: true,
+    platform: "linux",
+  }), {
+    offscreen: { useSharedTexture: false },
+    showAfterReady: false,
+  });
+
+  assert.deepEqual(surfaceWindowCaptureMode({
+    compositorSocketPath: "/tmp/surf-ace-compositor.sock",
+    gpuDisabled: true,
+    platform: "linux",
+  }), {
+    offscreen: false,
+    showAfterReady: true,
+  });
+
+  assert.deepEqual(surfaceWindowCaptureMode({
+    compositorSocketPath: null,
+    gpuDisabled: true,
+    platform: "darwin",
+  }), {
+    offscreen: false,
+    showAfterReady: true,
+  });
 });
 
 test("surface window load query flags compositor hosting before first paint", () => {
