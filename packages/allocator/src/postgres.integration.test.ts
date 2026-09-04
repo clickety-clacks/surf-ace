@@ -211,7 +211,6 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       let bindCut = false;
       let reserveCut = false;
       let mappingCut = false;
-      let mappingCutEnabled = false;
       server = await AllocatorServer.start(serverConfig(cluster), {
         afterCommitBeforeWitness(operation) {
           if (operation === "bind_authority" && !bindCut) {
@@ -222,7 +221,7 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
             reserveCut = true;
             throw new Error("cut-after-reserve-commit");
           }
-          if (operation === "commit_mapping" && mappingCutEnabled && !mappingCut) {
+          if (operation === "commit_mapping" && !mappingCut) {
             mappingCut = true;
             throw new Error("cut-after-mapping-commit");
           }
@@ -238,29 +237,74 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         );
         assert.equal(bound.ok, true, JSON.stringify(bound));
         assert.equal(bindCut, true);
-        const reserveResolved = await client.request(
-          "label.claim",
-          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_unknown_reserve"),
-          "rq_unknown_reserve",
-        );
-        assert.equal(reserveResolved.ok, true, JSON.stringify(reserveResolved));
-        assert.equal(reserveCut, true);
-        mappingCutEnabled = true;
         const claimed = await client.request(
           "label.claim",
-          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_unknown_mapping"),
-          "rq_unknown_mapping",
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_reserved_unknown_mapping"),
+          "rq_reserved_unknown_mapping",
         );
         const ordinal = successOrdinal(claimed);
+        assert.equal(reserveCut, true);
         assert.equal(mappingCut, true);
         const repeated = await client.request(
           "label.claim",
-          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_unknown_mapping"),
-          "rq_unknown_mapping_repeat",
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_reserved_unknown_mapping"),
+          "rq_reserved_unknown_mapping_repeat",
         );
         assert.equal(successOrdinal(repeated), ordinal);
         const diagnostics = await server.diagnostics();
         assert.equal(diagnostics.serveStatus, "serving");
+      } finally {
+        await client.close();
+      }
+    });
+
+    await t.test("live WebSocket burns a reserved recovery after clear mapping failure", async () => {
+      assert.ok(server);
+      await server.close();
+      server = null;
+      let reserveCut = false;
+      let mappingFailed = false;
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "reserve_ordinal" && !reserveCut) {
+            reserveCut = true;
+            throw new Error("cut-after-reserve-commit");
+          }
+        },
+        beforeMutation(operation) {
+          if (operation === "commit_mapping" && !mappingFailed) {
+            mappingFailed = true;
+            throw new Error("clear-before-recovery-mapping");
+          }
+        },
+      });
+      const client = await WireClient.connect(server.address.url);
+      const owner = identity("c");
+      try {
+        const before = await server.diagnostics();
+        const failed = await client.request(
+          "label.claim",
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_recovery_burn"),
+          "rq_recovery_burn",
+        );
+        assert.equal(errorCode(failed), "persistence_failed");
+        assert.equal(reserveCut, true);
+        assert.equal(mappingFailed, true);
+        const after = await server.diagnostics();
+        assert.equal(after.burnedOrdinalCount, before.burnedOrdinalCount + 1);
+        assert.equal(after.nextOrdinalFence, before.nextOrdinalFence + 1);
+        assert.equal(after.serveStatus, "serving");
+        assert.equal(
+          await scalar(cluster.adminUrl,
+            "SELECT status FROM surf_ace_allocator.allocation_transactions WHERE surface_id = 'sf_ws_recovery_burn' ORDER BY ordinal DESC LIMIT 1"),
+          "burned",
+        );
+        const next = await client.request(
+          "label.claim",
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_after_recovery_burn"),
+          "rq_after_recovery_burn",
+        );
+        assert.ok(successOrdinal(next) >= after.nextOrdinalFence);
       } finally {
         await client.close();
       }
@@ -453,6 +497,21 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         );
         await assert.rejects(recovery.markRestoreReady(tamperedGeneration));
         await recovery.discardRestore(tamperedGeneration);
+
+        const revisionGeneration = "restore_revision_tampered_" + Date.now();
+        const revisionTampered = {
+          ...snapshot,
+          custodyRevision: snapshot.custodyRevision + 1,
+        };
+        witness = await recovery.readWitness();
+        await recovery.stageRestore(
+          revisionGeneration,
+          "restore_revision_tampered_idem_" + Date.now(),
+          revisionTampered,
+          witness,
+        );
+        await assert.rejects(recovery.markRestoreReady(revisionGeneration));
+        await recovery.discardRestore(revisionGeneration);
 
         witness = await recovery.readWitness();
         const generationId = "restore_" + Date.now();

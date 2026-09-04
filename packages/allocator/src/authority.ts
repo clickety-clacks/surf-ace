@@ -169,37 +169,54 @@ export class WindowLabelAuthority {
   }
 
   async resolveUnknownClaim(transactionId: string): Promise<Assignment> {
-    let transaction;
-    try {
-      transaction = await this.custody.queryTransaction(transactionId);
-      await this.custody.validateLease();
-    } catch (error) {
-      const unknown = error instanceof PersistenceOutcomeUnknownError
-        ? error
-        : new PersistenceOutcomeUnknownError("query_transaction", error);
-      this.observeFailure(unknown);
-      throw unknown;
-    }
-    if (!transaction || transaction.status === "burned") {
-      this.failClosedReason = null;
-      throw new AllocatorError("persistence_failed", "allocation transaction did not commit");
-    }
-    if (transaction.status === "reserved") {
+    while (true) {
+      let transaction;
       try {
-        await this.custody.commitMapping(transactionId);
+        transaction = await this.custody.queryTransaction(transactionId);
+        await this.custody.validateLease();
       } catch (error) {
-        this.observeFailure(error);
-        throw error;
+        const unknown = error instanceof PersistenceOutcomeUnknownError
+          ? error
+          : new PersistenceOutcomeUnknownError("query_transaction", error);
+        this.observeFailure(unknown);
+        throw unknown;
       }
+      if (!transaction || transaction.status === "burned") {
+        this.failClosedReason = null;
+        throw new AllocatorError("persistence_failed", "allocation transaction did not commit");
+      }
+      if (transaction.status === "reserved") {
+        try {
+          await this.custody.commitMapping(transactionId);
+        } catch (error) {
+          this.observeFailure(error);
+          if (error instanceof PersistenceOutcomeUnknownError) {
+            continue;
+          }
+          if (error instanceof AllocatorError && error.code === "persistence_failed") {
+            try {
+              await this.custody.burn(transactionId);
+              this.failClosedReason = null;
+            } catch (burnError) {
+              const unknown = burnError instanceof PersistenceOutcomeUnknownError
+                ? burnError
+                : new PersistenceOutcomeUnknownError("burn_reservation", burnError);
+              this.observeFailure(unknown);
+              continue;
+            }
+          }
+          throw error;
+        }
+      }
+      const state = await this.custody.readAcceptedState();
+      const mapping = findMapping(state, transaction.authorityId, transaction.surfaceId);
+      if (!mapping || mapping.ordinal !== transaction.ordinal) {
+        this.failClosedReason = "transaction resolution contradicted the immutable assignment";
+        throw new AllocatorError("assignment_conflict", this.failClosedReason, state.allocatorId);
+      }
+      this.failClosedReason = null;
+      return assignmentFrom(state, mapping);
     }
-    const state = await this.custody.readAcceptedState();
-    const mapping = findMapping(state, transaction.authorityId, transaction.surfaceId);
-    if (!mapping || mapping.ordinal !== transaction.ordinal) {
-      this.failClosedReason = "transaction resolution contradicted the immutable assignment";
-      throw new AllocatorError("assignment_conflict", this.failClosedReason, state.allocatorId);
-    }
-    this.failClosedReason = null;
-    return assignmentFrom(state, mapping);
   }
 
   async reconfirm(payload: LabelReconfirmPayload): Promise<Assignment & { confirmation: "confirmed" | "recovered" }> {

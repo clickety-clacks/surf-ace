@@ -128,6 +128,14 @@ CREATE TABLE surf_ace_allocator.custody_journal (
   UNIQUE (fleet_id, head_hash)
 );
 
+CREATE TABLE surf_ace_allocator.custody_revision_heads (
+  fleet_id text NOT NULL REFERENCES surf_ace_allocator.fleets(fleet_id),
+  custody_revision bigint NOT NULL CHECK (custody_revision >= 0),
+  head_seq bigint NOT NULL CHECK (head_seq >= 0),
+  head_hash bytea NOT NULL CHECK (octet_length(head_hash) = 32),
+  PRIMARY KEY (fleet_id, custody_revision)
+);
+
 CREATE TABLE surf_ace_allocator.restore_generations (
   generation_id text PRIMARY KEY,
   fleet_id text NOT NULL REFERENCES surf_ace_allocator.fleets(fleet_id),
@@ -305,6 +313,11 @@ BEGIN
       custody_revision = fleet.custody_revision + 1,
       last_commit_at = clock_timestamp()
   WHERE fleet_id = p_fleet_id;
+  INSERT INTO surf_ace_allocator.custody_revision_heads(
+    fleet_id, custody_revision, head_seq, head_hash
+  ) VALUES (
+    fleet.fleet_id, fleet.custody_revision + 1, fleet.head_seq + 1, next_hash
+  );
   RETURN QUERY SELECT fleet.head_seq + 1, next_hash, fleet.custody_revision + 1;
 END
 $function$;
@@ -375,6 +388,10 @@ BEGIN
     custody_revision = custody_revision + 1,
     last_commit_at = clock_timestamp()
   WHERE fleet_id = p_fleet_id;
+  INSERT INTO surf_ace_allocator.custody_revision_heads(
+    fleet_id, custody_revision, head_seq, head_hash
+  ) SELECT fleet_id, custody_revision, head_seq, head_hash
+    FROM surf_ace_allocator.fleets WHERE fleet_id = p_fleet_id;
   RETURN QUERY SELECT next_generation, p_lease_id, p_mode;
 END
 $function$;
@@ -397,6 +414,10 @@ BEGIN
     custody_revision = custody_revision + 1,
     last_commit_at = clock_timestamp()
   WHERE fleet_id = p_fleet_id;
+  INSERT INTO surf_ace_allocator.custody_revision_heads(
+    fleet_id, custody_revision, head_seq, head_hash
+  ) SELECT fleet_id, custody_revision, head_seq, head_hash
+    FROM surf_ace_allocator.fleets WHERE fleet_id = p_fleet_id;
 END
 $function$;
 
@@ -904,6 +925,15 @@ BEGIN
   snapshot_seq := (restore.source_snapshot->>'headSeq')::bigint;
   IF snapshot_seq < 0 OR snapshot_seq > restore.base_head_seq THEN
     RAISE EXCEPTION 'restore snapshot head is not a prefix of the source journal' USING ERRCODE = '55000';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM surf_ace_allocator.custody_revision_heads h
+    WHERE h.fleet_id = p_fleet_id
+      AND h.custody_revision = restore.snapshot_revision
+      AND h.head_seq = snapshot_seq
+      AND h.head_hash = decode(restore.source_snapshot->>'headHash', 'hex')
+  ) THEN
+    RAISE EXCEPTION 'restore snapshot revision is not bound to its journal head' USING ERRCODE = '55000';
   END IF;
   snapshot_projection := surf_ace_allocator.journal_projection(p_fleet_id, snapshot_seq);
   SELECT coalesce(jsonb_agg(value - 'recoveredAtCustodyRevision'
