@@ -43,7 +43,11 @@ export class WindowLabelAuthority {
       await this.custody.bindAuthority(payload.authorityId, payload.ownerAnchorId);
     } catch (error) {
       this.observeFailure(error);
-      throw error;
+      if (error instanceof PersistenceOutcomeUnknownError) {
+        await this.resolveUnknownBind(payload);
+      } else {
+        throw error;
+      }
     }
     return {
       allocatorId: state.allocatorId,
@@ -53,6 +57,34 @@ export class WindowLabelAuthority {
       ownerAnchorId: payload.ownerAnchorId,
       stateVersion: STATE_VERSION,
     };
+  }
+
+  private async resolveUnknownBind(payload: AuthorityBindPayload): Promise<void> {
+    let state: AcceptedState;
+    try {
+      await this.custody.validateLease();
+      state = await this.custody.readAcceptedState();
+    } catch (error) {
+      const unknown = error instanceof PersistenceOutcomeUnknownError
+        ? error
+        : new PersistenceOutcomeUnknownError("query_binding", error);
+      this.observeFailure(unknown);
+      throw unknown;
+    }
+    const owner = state.authorityOwners.find((entry) => entry.authorityId === payload.authorityId);
+    if (!owner) {
+      this.failClosedReason = null;
+      throw new AllocatorError("persistence_failed", "authority binding did not commit", state.allocatorId);
+    }
+    if (owner.ownerAnchorId !== payload.ownerAnchorId) {
+      this.failClosedReason = null;
+      throw new AllocatorError(
+        "authority_ownership_conflict",
+        "authority is durably bound to another owner anchor",
+        state.allocatorId,
+      );
+    }
+    this.failClosedReason = null;
   }
 
   async claim(payload: LabelClaimPayload): Promise<Assignment> {
@@ -89,6 +121,9 @@ export class WindowLabelAuthority {
       );
     } catch (error) {
       this.observeFailure(error);
+      if (error instanceof PersistenceOutcomeUnknownError) {
+        return await this.resolveUnknownClaim(transactionId);
+      }
       throw error;
     }
     if (reserved.status === "burned") {
@@ -116,7 +151,7 @@ export class WindowLabelAuthority {
     } catch (error) {
       this.observeFailure(error);
       if (error instanceof PersistenceOutcomeUnknownError) {
-        throw error;
+        return await this.resolveUnknownClaim(transactionId);
       }
       if (error instanceof AllocatorError && error.code === "persistence_failed") {
         try {
@@ -126,7 +161,7 @@ export class WindowLabelAuthority {
             ? burnError
             : new PersistenceOutcomeUnknownError("burn_reservation", burnError);
           this.observeFailure(unknown);
-          throw unknown;
+          return await this.resolveUnknownClaim(transactionId);
         }
       }
       throw error;
@@ -134,8 +169,17 @@ export class WindowLabelAuthority {
   }
 
   async resolveUnknownClaim(transactionId: string): Promise<Assignment> {
-    const transaction = await this.custody.queryTransaction(transactionId);
-    await this.custody.validateLease();
+    let transaction;
+    try {
+      transaction = await this.custody.queryTransaction(transactionId);
+      await this.custody.validateLease();
+    } catch (error) {
+      const unknown = error instanceof PersistenceOutcomeUnknownError
+        ? error
+        : new PersistenceOutcomeUnknownError("query_transaction", error);
+      this.observeFailure(unknown);
+      throw unknown;
+    }
     if (!transaction || transaction.status === "burned") {
       this.failClosedReason = null;
       throw new AllocatorError("persistence_failed", "allocation transaction did not commit");

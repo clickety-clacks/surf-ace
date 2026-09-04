@@ -15,7 +15,7 @@ import {
   type LabelClaimPayload,
   type LabelReconfirmPayload,
 } from "./domain.js";
-import { PostgresCustodyAdapter, type PostgresCustodyConfig } from "./custody.js";
+import { PostgresCustodyAdapter, type AdapterTestHooks, type PostgresCustodyConfig } from "./custody.js";
 import { parseAllocatorRequest } from "./validation.js";
 
 export type AllocatorServerConfig = {
@@ -59,11 +59,11 @@ export class AllocatorServer {
     private readonly webSocketServer: WebSocketServer,
   ) {}
 
-  static async start(config: AllocatorServerConfig): Promise<AllocatorServer> {
+  static async start(config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}): Promise<AllocatorServer> {
     validateServerConfig(config);
     const hostLock = HostLock.acquire(config.hostLockPath);
     try {
-      const custody = await PostgresCustodyAdapter.acquireWriter(config.custody);
+      const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks);
       try {
         const authority = new WindowLabelAuthority(custody);
         await authority.recoverPreparedTransactions();

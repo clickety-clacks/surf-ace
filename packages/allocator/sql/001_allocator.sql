@@ -18,7 +18,7 @@ END
 $roles$;
 
 GRANT pg_signal_backend TO surf_ace_allocator_owner;
-GRANT pg_read_all_stats TO surf_ace_allocator_owner, surf_ace_allocator_writer, surf_ace_allocator_recovery;
+GRANT pg_read_all_stats TO surf_ace_allocator_owner;
 
 DO $grant_connect$
 BEGIN
@@ -135,6 +135,7 @@ CREATE TABLE surf_ace_allocator.restore_generations (
   idempotency_id text NOT NULL UNIQUE,
   state text NOT NULL CHECK (state IN ('preparing', 'ready', 'activated', 'discarded')),
   source_snapshot jsonb NOT NULL,
+  snapshot_revision bigint NOT NULL CHECK (snapshot_revision >= 0),
   base_head_seq bigint NOT NULL,
   base_head_hash bytea NOT NULL CHECK (octet_length(base_head_hash) = 32),
   ready_head_seq bigint,
@@ -691,6 +692,41 @@ AS $function$
   FROM surf_ace_allocator.fleets f WHERE f.fleet_id = p_fleet_id
 $function$;
 
+CREATE FUNCTION surf_ace_allocator.read_primary_topology()
+RETURNS TABLE (
+  server_version_num integer, in_recovery boolean, cluster_system_id text,
+  fsync text, synchronous_commit text, synchronous_standby_names text
+)
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, surf_ace_allocator
+AS $function$
+  SELECT current_setting('server_version_num')::integer,
+    pg_is_in_recovery(),
+    (pg_control_system()).system_identifier::text,
+    current_setting('fsync'),
+    current_setting('synchronous_commit'),
+    current_setting('synchronous_standby_names')
+$function$;
+
+CREATE FUNCTION surf_ace_allocator.read_wal_senders()
+RETURNS TABLE (
+  pid integer, application_name text, client_addr text, state text,
+  sync_state text, replay_lsn text, slot_name text, slot_type text,
+  active_pid integer
+)
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, surf_ace_allocator
+AS $function$
+  SELECT r.pid, r.application_name, r.client_addr::text,
+    r.state, r.sync_state, r.replay_lsn::text,
+    s.slot_name, s.slot_type, s.active_pid
+  FROM pg_stat_replication r
+  LEFT JOIN pg_replication_slots s ON s.active_pid = r.pid
+  WHERE r.application_name = 'surf_ace_witness'
+$function$;
+
 CREATE FUNCTION surf_ace_allocator.read_head_witness(p_fleet_id text)
 RETURNS TABLE (
   cluster_system_id text, timeline_id integer, witness_server_id text,
@@ -719,6 +755,64 @@ AS $function$
   CROSS JOIN surf_ace_allocator.fleets f
   LEFT JOIN pg_stat_wal_receiver r ON true
   WHERE f.fleet_id = p_fleet_id
+$function$;
+
+CREATE FUNCTION surf_ace_allocator.journal_projection(p_fleet_id text, p_head_seq bigint)
+RETURNS jsonb
+LANGUAGE sql STABLE
+SET search_path = pg_catalog, surf_ace_allocator
+AS $function$
+  WITH reserved AS (
+    SELECT j.event, j.head_seq
+    FROM surf_ace_allocator.custody_journal j
+    WHERE j.fleet_id = p_fleet_id AND j.head_seq <= p_head_seq
+      AND j.event->>'type' = 'reserved'
+  ), latest AS (
+    SELECT DISTINCT ON (j.event->>'transactionId')
+      j.event->>'transactionId' AS transaction_id,
+      j.event->>'type' AS status
+    FROM surf_ace_allocator.custody_journal j
+    WHERE j.fleet_id = p_fleet_id AND j.head_seq <= p_head_seq
+      AND j.event->>'type' IN ('reserved', 'committed', 'burned')
+    ORDER BY j.event->>'transactionId', j.head_seq DESC
+  ), transactions AS (
+    SELECT r.event->>'transactionId' AS transaction_id,
+      r.event->>'authorityId' AS authority_id,
+      r.event->>'ownerAnchorId' AS owner_anchor_id,
+      r.event->>'surfaceId' AS surface_id,
+      (r.event->>'ordinal')::bigint AS ordinal,
+      l.status
+    FROM reserved r
+    JOIN latest l ON l.transaction_id = r.event->>'transactionId'
+  ), owners AS (
+    SELECT DISTINCT ON (j.event->>'authorityId')
+      j.event->>'authorityId' AS authority_id,
+      j.event->>'ownerAnchorId' AS owner_anchor_id
+    FROM surf_ace_allocator.custody_journal j
+    WHERE j.fleet_id = p_fleet_id AND j.head_seq <= p_head_seq
+      AND j.event->>'type' = 'authority-bound'
+    ORDER BY j.event->>'authorityId', j.head_seq DESC
+  )
+  SELECT jsonb_build_object(
+    'headSeq', p_head_seq,
+    'headHash', CASE WHEN p_head_seq = 0 THEN repeat('00', 32)
+      ELSE (SELECT encode(j.head_hash, 'hex') FROM surf_ace_allocator.custody_journal j
+        WHERE j.fleet_id = p_fleet_id AND j.head_seq = p_head_seq) END,
+    'nextOrdinalFence', coalesce((SELECT max(t.ordinal) + 1 FROM transactions t), 0),
+    'authorityOwners', coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'authorityId', o.authority_id, 'ownerAnchorId', o.owner_anchor_id
+    ) ORDER BY o.authority_id) FROM owners o), '[]'::jsonb),
+    'transactions', coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'transactionId', t.transaction_id, 'status', t.status,
+      'authorityId', t.authority_id, 'ownerAnchorId', t.owner_anchor_id,
+      'surfaceId', t.surface_id, 'ordinal', t.ordinal
+    ) ORDER BY t.ordinal) FROM transactions t), '[]'::jsonb),
+    'mappings', coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'authorityId', t.authority_id, 'ownerAnchorId', t.owner_anchor_id,
+      'surfaceId', t.surface_id, 'ordinal', t.ordinal,
+      'windowLabel', surf_ace_allocator.base26(t.ordinal)
+    ) ORDER BY t.ordinal) FROM transactions t WHERE t.status = 'committed'), '[]'::jsonb)
+  )
 $function$;
 
 CREATE FUNCTION surf_ace_allocator.stage_restore(
@@ -750,10 +844,10 @@ BEGIN
   END IF;
   INSERT INTO surf_ace_allocator.restore_generations(
     generation_id, fleet_id, allocator_id, idempotency_id, state,
-    source_snapshot, base_head_seq, base_head_hash, prior_generation_id
+    source_snapshot, snapshot_revision, base_head_seq, base_head_hash, prior_generation_id
   ) VALUES (
     p_restore_generation_id, p_fleet_id, fleet.allocator_id, p_idempotency_id, 'preparing',
-    p_snapshot, p_base_head_seq, p_base_head_hash, fleet.accepted_generation_id
+    p_snapshot, (p_snapshot->>'custodyRevision')::bigint, p_base_head_seq, p_base_head_hash, fleet.accepted_generation_id
   );
   PERFORM * FROM surf_ace_allocator.append_event(p_fleet_id, jsonb_build_object(
     'allocatorId', fleet.allocator_id, 'fleetId', p_fleet_id,
@@ -774,7 +868,11 @@ AS $function$
 DECLARE
   fleet surf_ace_allocator.fleets%ROWTYPE;
   restore surf_ace_allocator.restore_generations%ROWTYPE;
-  max_ordinal bigint;
+  snapshot_projection jsonb;
+  replay_projection jsonb;
+  snapshot_mappings jsonb;
+  snapshot_seq bigint;
+  replayed_fence bigint;
   appended record;
 BEGIN
   PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_recovery');
@@ -789,44 +887,83 @@ BEGIN
   IF restore.state <> 'preparing' OR restore.allocator_id <> fleet.allocator_id THEN
     RAISE EXCEPTION 'restore is not preparing for accepted allocator' USING ERRCODE = '55000';
   END IF;
-  IF restore.source_snapshot->>'fleetId' <> fleet.fleet_id
-     OR restore.source_snapshot->>'allocatorId' <> fleet.allocator_id
-     OR (restore.source_snapshot->>'stateVersion')::integer <> fleet.state_version THEN
-    RAISE EXCEPTION 'restore identity mismatch' USING ERRCODE = '55000';
+  IF jsonb_typeof(restore.source_snapshot) IS DISTINCT FROM 'object'
+     OR restore.source_snapshot - ARRAY[
+       'allocatorId', 'authorityOwners', 'custodyRevision', 'fleetId', 'headHash', 'headSeq',
+       'mappings', 'nextOrdinalFence', 'stateVersion', 'transactions'
+     ]::text[] <> '{}'::jsonb
+     OR restore.source_snapshot->>'fleetId' IS DISTINCT FROM fleet.fleet_id
+     OR restore.source_snapshot->>'allocatorId' IS DISTINCT FROM fleet.allocator_id
+     OR (restore.source_snapshot->>'stateVersion')::integer IS DISTINCT FROM fleet.state_version
+     OR (restore.source_snapshot->>'custodyRevision')::bigint IS DISTINCT FROM restore.snapshot_revision
+     OR jsonb_typeof(restore.source_snapshot->'authorityOwners') IS DISTINCT FROM 'array'
+     OR jsonb_typeof(restore.source_snapshot->'mappings') IS DISTINCT FROM 'array'
+     OR jsonb_typeof(restore.source_snapshot->'transactions') IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION 'restore snapshot shape or identity mismatch' USING ERRCODE = '55000';
+  END IF;
+  snapshot_seq := (restore.source_snapshot->>'headSeq')::bigint;
+  IF snapshot_seq < 0 OR snapshot_seq > restore.base_head_seq THEN
+    RAISE EXCEPTION 'restore snapshot head is not a prefix of the source journal' USING ERRCODE = '55000';
+  END IF;
+  snapshot_projection := surf_ace_allocator.journal_projection(p_fleet_id, snapshot_seq);
+  SELECT coalesce(jsonb_agg(value - 'recoveredAtCustodyRevision'
+    ORDER BY (value->>'ordinal')::bigint), '[]'::jsonb)
+    INTO snapshot_mappings
+    FROM jsonb_array_elements(restore.source_snapshot->'mappings');
+  IF restore.source_snapshot->>'headHash' IS DISTINCT FROM snapshot_projection->>'headHash'
+     OR (restore.source_snapshot->>'nextOrdinalFence')::bigint
+       IS DISTINCT FROM (snapshot_projection->>'nextOrdinalFence')::bigint
+     OR restore.source_snapshot->'authorityOwners' IS DISTINCT FROM snapshot_projection->'authorityOwners'
+     OR restore.source_snapshot->'transactions' IS DISTINCT FROM snapshot_projection->'transactions'
+     OR snapshot_mappings IS DISTINCT FROM snapshot_projection->'mappings' THEN
+    RAISE EXCEPTION 'restore snapshot does not match its journal prefix' USING ERRCODE = '55000';
+  END IF;
+  replay_projection := surf_ace_allocator.journal_projection(p_fleet_id, restore.base_head_seq);
+  IF replay_projection->>'headHash' IS DISTINCT FROM encode(restore.base_head_hash, 'hex') THEN
+    RAISE EXCEPTION 'restore source journal does not end at its witnessed head' USING ERRCODE = '55000';
   END IF;
   INSERT INTO surf_ace_allocator.authority_owners(
-    fleet_id, allocator_id, generation_id, authority_id, owner_anchor_id, bound_at
-  ) SELECT fleet_id, allocator_id, restore.generation_id, authority_id, owner_anchor_id, bound_at
-    FROM surf_ace_allocator.authority_owners
-    WHERE fleet_id = fleet.fleet_id AND allocator_id = fleet.allocator_id
-      AND generation_id = fleet.accepted_generation_id;
+    fleet_id, allocator_id, generation_id, authority_id, owner_anchor_id
+  ) SELECT fleet.fleet_id, fleet.allocator_id, restore.generation_id,
+      owner."authorityId", owner."ownerAnchorId"
+    FROM jsonb_to_recordset(replay_projection->'authorityOwners')
+      AS owner("authorityId" text, "ownerAnchorId" text);
   INSERT INTO surf_ace_allocator.allocation_transactions(
     transaction_id, fleet_id, allocator_id, generation_id, authority_id, owner_anchor_id,
-    surface_id, ordinal, status, created_at, updated_at
-  ) SELECT transaction_id, fleet_id, allocator_id, restore.generation_id, authority_id, owner_anchor_id,
-      surface_id, ordinal, status, created_at, updated_at
-    FROM surf_ace_allocator.allocation_transactions
-    WHERE fleet_id = fleet.fleet_id AND allocator_id = fleet.allocator_id
-      AND generation_id = fleet.accepted_generation_id;
+    surface_id, ordinal, status
+  ) SELECT tx."transactionId", fleet.fleet_id, fleet.allocator_id, restore.generation_id,
+      tx."authorityId", tx."ownerAnchorId", tx."surfaceId", tx.ordinal, tx.status
+    FROM jsonb_to_recordset(replay_projection->'transactions') AS tx(
+      "transactionId" text, status text, "authorityId" text,
+      "ownerAnchorId" text, "surfaceId" text, ordinal bigint
+    );
   INSERT INTO surf_ace_allocator.assignments(
     fleet_id, allocator_id, generation_id, authority_id, owner_anchor_id, surface_id,
-    transaction_id, ordinal, window_label, recovered_at_custody_revision, committed_at
-  ) SELECT fleet_id, allocator_id, restore.generation_id, authority_id, owner_anchor_id, surface_id,
-      transaction_id, ordinal, window_label, fleet.custody_revision + 1, committed_at
-    FROM surf_ace_allocator.assignments
-    WHERE fleet_id = fleet.fleet_id AND allocator_id = fleet.allocator_id
-      AND generation_id = fleet.accepted_generation_id;
-  max_ordinal := fleet.next_ordinal_fence - 1;
+    transaction_id, ordinal, window_label, recovered_at_custody_revision
+  ) SELECT fleet.fleet_id, fleet.allocator_id, restore.generation_id,
+      mapping."authorityId", mapping."ownerAnchorId", mapping."surfaceId",
+      tx.transaction_id, mapping.ordinal, mapping."windowLabel", fleet.custody_revision + 1
+    FROM jsonb_to_recordset(replay_projection->'mappings') AS mapping(
+      "authorityId" text, "ownerAnchorId" text, "surfaceId" text,
+      ordinal bigint, "windowLabel" text
+    )
+    JOIN surf_ace_allocator.allocation_transactions tx
+      ON tx.generation_id = restore.generation_id
+      AND tx.authority_id = mapping."authorityId"
+      AND tx.surface_id = mapping."surfaceId"
+      AND tx.ordinal = mapping.ordinal
+      AND tx.status = 'committed';
+  replayed_fence := (replay_projection->>'nextOrdinalFence')::bigint;
   SELECT * INTO appended FROM surf_ace_allocator.append_event(p_fleet_id, jsonb_build_object(
-    'allocatorId', fleet.allocator_id, 'computedFence', max_ordinal + 1,
+    'allocatorId', fleet.allocator_id, 'computedFence', replayed_fence,
     'fleetId', p_fleet_id, 'generationId', restore.generation_id,
     'type', 'restore-ready'
   ));
   UPDATE surf_ace_allocator.restore_generations SET
     state = 'ready', ready_head_seq = appended.head_seq,
-    ready_head_hash = appended.head_hash, computed_fence = max_ordinal + 1
+    ready_head_hash = appended.head_hash, computed_fence = replayed_fence
   WHERE generation_id = restore.generation_id;
-  RETURN QUERY SELECT appended.head_seq, encode(appended.head_hash, 'hex'), max_ordinal + 1;
+  RETURN QUERY SELECT appended.head_seq, encode(appended.head_hash, 'hex'), replayed_fence;
 END
 $function$;
 
@@ -925,10 +1062,12 @@ GRANT EXECUTE ON FUNCTION surf_ace_allocator.stage_restore(text, bigint, text, t
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.mark_restore_ready(text, bigint, text, text) TO surf_ace_allocator_recovery;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.activate_restore(text, bigint, text, text, bigint, bytea) TO surf_ace_allocator_recovery;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.discard_restore(text, bigint, text, text) TO surf_ace_allocator_recovery;
+GRANT EXECUTE ON FUNCTION surf_ace_allocator.read_primary_topology() TO surf_ace_allocator_writer, surf_ace_allocator_recovery;
+GRANT EXECUTE ON FUNCTION surf_ace_allocator.read_wal_senders() TO surf_ace_allocator_writer, surf_ace_allocator_recovery;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.read_head_witness(text) TO surf_ace_allocator_witness;
 REVOKE EXECUTE ON FUNCTION pg_control_system(), pg_control_checkpoint() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_control_system(), pg_control_checkpoint() TO
-  surf_ace_allocator_owner, surf_ace_allocator_writer, surf_ace_allocator_recovery;
+  surf_ace_allocator_owner;
 
 SET ROLE surf_ace_allocator_owner;
 CREATE FUNCTION surf_ace_allocator.validate_journal(p_fleet_id text)

@@ -18,8 +18,11 @@ import {
   PostgresCustodyAdapter,
   WindowLabelAuthority,
   revokeWriter,
+  type AcceptedState,
   type AllocatorServerConfig,
+  type Assignment,
   type PostgresCustodyConfig,
+  type RestoreSnapshot,
 } from "./index.js";
 
 const execFile = promisify(execFileCallback);
@@ -80,6 +83,16 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
           "SELECT fleet_id FROM surf_ace_allocator.read_head_witness(null)",
         );
         assert.equal(allowed.rowCount, 0);
+        const memberships = await Promise.all([
+          writer.query<{ allowed: boolean }>(
+            "SELECT pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER') AS allowed",
+          ),
+          recovery.query<{ allowed: boolean }>(
+            "SELECT pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER') AS allowed",
+          ),
+        ]);
+        assert.equal(memberships[0].rows[0]?.allowed, false);
+        assert.equal(memberships[1].rows[0]?.allowed, false);
       } finally {
         await Promise.all([writer.end(), recovery.end(), witness.end()]);
       }
@@ -191,6 +204,68 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       }
     });
 
+    await t.test("live WebSocket bind and claim resolve post-commit unknown outcomes", async () => {
+      assert.ok(server);
+      await server.close();
+      server = null;
+      let bindCut = false;
+      let reserveCut = false;
+      let mappingCut = false;
+      let mappingCutEnabled = false;
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "bind_authority" && !bindCut) {
+            bindCut = true;
+            throw new Error("cut-after-bind-commit");
+          }
+          if (operation === "reserve_ordinal" && !reserveCut) {
+            reserveCut = true;
+            throw new Error("cut-after-reserve-commit");
+          }
+          if (operation === "commit_mapping" && mappingCutEnabled && !mappingCut) {
+            mappingCut = true;
+            throw new Error("cut-after-mapping-commit");
+          }
+        },
+      });
+      const client = await WireClient.connect(server.address.url);
+      const owner = identity("c");
+      try {
+        const bound = await client.request(
+          "authority.bind",
+          bindPayload(cluster.config.fleetId, owner),
+          "rq_unknown_bind",
+        );
+        assert.equal(bound.ok, true, JSON.stringify(bound));
+        assert.equal(bindCut, true);
+        const reserveResolved = await client.request(
+          "label.claim",
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_unknown_reserve"),
+          "rq_unknown_reserve",
+        );
+        assert.equal(reserveResolved.ok, true, JSON.stringify(reserveResolved));
+        assert.equal(reserveCut, true);
+        mappingCutEnabled = true;
+        const claimed = await client.request(
+          "label.claim",
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_unknown_mapping"),
+          "rq_unknown_mapping",
+        );
+        const ordinal = successOrdinal(claimed);
+        assert.equal(mappingCut, true);
+        const repeated = await client.request(
+          "label.claim",
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_ws_unknown_mapping"),
+          "rq_unknown_mapping_repeat",
+        );
+        assert.equal(successOrdinal(repeated), ordinal);
+        const diagnostics = await server.diagnostics();
+        assert.equal(diagnostics.serveStatus, "serving");
+      } finally {
+        await client.close();
+      }
+    });
+
     await t.test("clear reserve failure changes neither ledger nor fence", async () => {
       assert.ok(server);
       await server.close();
@@ -264,16 +339,14 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       });
       const owner = identity("a");
       const authority = new WindowLabelAuthority(writer);
-      await assert.rejects(
-        authority.claim(claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_unknown-mapping")),
-        (error) => error instanceof PersistenceOutcomeUnknownError,
+      const resolved = await authority.claim(
+        claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_unknown-mapping"),
       );
       try {
         const unknownState = await writer.readAcceptedState();
         const transaction = unknownState.transactions.find((entry) => entry.surfaceId === "sf_unknown-mapping");
         assert.equal(transaction?.status, "committed");
         assert.ok(transaction);
-        const resolved = await authority.resolveUnknownClaim(transaction.transactionId);
         assert.equal(resolved.ordinal, transaction.ordinal);
         assert.equal(authority.serveStatus, "serving");
         const repeated = await authority.claim(
@@ -343,51 +416,93 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       await writer.terminate();
     });
 
-    await t.test("restore stays inactive until one atomic recovery activation", async () => {
+    await t.test("older snapshot is validated, replayed, and activated atomically", async () => {
+      const owner = identity("a");
+      const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+      let snapshotState: AcceptedState;
+      let laterState: AcceptedState;
+      let replayedMapping: Assignment;
+      try {
+        snapshotState = await writer.readAcceptedState();
+        replayedMapping = await new WindowLabelAuthority(writer).claim(
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_after_snapshot"),
+        );
+        laterState = await writer.readAcceptedState();
+        assert.ok(laterState.headSeq > snapshotState.headSeq);
+        assert.ok(laterState.nextOrdinalFence > snapshotState.nextOrdinalFence);
+      } finally {
+        await writer.release();
+      }
+
       const recovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
       try {
-        const state = await recovery.readAcceptedState();
-        const witness = await recovery.readWitness();
-        const generationId = `restore_${Date.now()}`;
+        const snapshot = restoreSnapshot(snapshotState);
+        const tamperedGeneration = "restore_tampered_" + Date.now();
+        const tampered = {
+          ...snapshot,
+          mappings: snapshot.mappings.map((mapping, index) => index === 0
+            ? { ...mapping, windowLabel: mapping.windowLabel + "z" }
+            : mapping),
+        };
+        let witness = await recovery.readWitness();
+        await recovery.stageRestore(
+          tamperedGeneration,
+          "restore_tampered_idem_" + Date.now(),
+          tampered,
+          witness,
+        );
+        await assert.rejects(recovery.markRestoreReady(tamperedGeneration));
+        await recovery.discardRestore(tamperedGeneration);
+
+        witness = await recovery.readWitness();
+        const generationId = "restore_" + Date.now();
         await recovery.stageRestore(
           generationId,
-          `restore_idem_${Date.now()}`,
-          {
-            allocatorId: state.allocatorId,
-            authorityOwners: [],
-            fleetId: state.fleetId,
-            mappings: [],
-            stateVersion: state.stateVersion,
-            transactions: [],
-          },
+          "restore_idem_" + Date.now(),
+          snapshot,
           witness,
         );
         const preparing = await recovery.readAcceptedState();
-        assert.equal(preparing.acceptedGenerationId, state.acceptedGenerationId);
+        assert.equal(preparing.acceptedGenerationId, snapshotState.acceptedGenerationId);
         const ready = await recovery.markRestoreReady(generationId);
-        assert.equal(ready.computedFence, state.nextOrdinalFence);
+        assert.equal(ready.computedFence, laterState.nextOrdinalFence);
         const stillPrior = await recovery.readAcceptedState();
-        assert.equal(stillPrior.acceptedGenerationId, state.acceptedGenerationId);
+        assert.equal(stillPrior.acceptedGenerationId, snapshotState.acceptedGenerationId);
         await recovery.activateRestore(generationId, ready);
         const activated = await recovery.readAcceptedState();
         assert.equal(activated.acceptedGenerationId, generationId);
-        assert.equal(activated.nextOrdinalFence, state.nextOrdinalFence);
+        assert.equal(activated.nextOrdinalFence, laterState.nextOrdinalFence);
+        const restored = activated.mappings.find(
+          (mapping) => mapping.surfaceId === replayedMapping.surfaceId,
+        );
+        assert.equal(restored?.ordinal, replayedMapping.ordinal);
+        assert.equal(restored?.windowLabel, replayedMapping.windowLabel);
+        assert.ok(restored?.recoveredAtCustodyRevision !== null);
         assert.deepEqual(
           activated.mappings.map(({ authorityId, ordinal, surfaceId, windowLabel }) => ({ authorityId, ordinal, surfaceId, windowLabel })),
-          state.mappings.map(({ authorityId, ordinal, surfaceId, windowLabel }) => ({ authorityId, ordinal, surfaceId, windowLabel })),
+          laterState.mappings.map(({ authorityId, ordinal, surfaceId, windowLabel }) => ({ authorityId, ordinal, surfaceId, windowLabel })),
         );
       } finally {
         await recovery.release();
       }
-      const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+      const resumed = await PostgresCustodyAdapter.acquireWriter(cluster.config);
       try {
-        const beforeClaim = await writer.readAcceptedState();
-        const next = await new WindowLabelAuthority(writer).claim(
-          claimPayload(cluster.config.fleetId, allocatorId, identity("a"), "sf_after-restore"),
+        const authority = new WindowLabelAuthority(resumed);
+        const confirmation = await authority.reconfirm({
+          ...claimPayload(cluster.config.fleetId, allocatorId, owner, replayedMapping.surfaceId),
+          expectedAssignment: {
+            committed: true,
+            ordinal: replayedMapping.ordinal,
+            windowLabel: replayedMapping.windowLabel,
+          },
+        });
+        assert.equal(confirmation.confirmation, "recovered");
+        const next = await authority.claim(
+          claimPayload(cluster.config.fleetId, allocatorId, owner, "sf_after_restore"),
         );
-        assert.ok(next.ordinal >= beforeClaim.nextOrdinalFence);
+        assert.ok(next.ordinal >= laterState.nextOrdinalFence);
       } finally {
-        await writer.release();
+        await resumed.release();
       }
     });
 
@@ -607,6 +722,21 @@ class WireClient {
       this.socket.close();
     });
   }
+}
+
+function restoreSnapshot(state: AcceptedState): RestoreSnapshot {
+  return {
+    allocatorId: state.allocatorId,
+    authorityOwners: state.authorityOwners.map((owner) => ({ ...owner })),
+    custodyRevision: state.custodyRevision,
+    fleetId: state.fleetId,
+    headHash: state.headHash,
+    headSeq: state.headSeq,
+    mappings: state.mappings.map((mapping) => ({ ...mapping })),
+    nextOrdinalFence: state.nextOrdinalFence,
+    stateVersion: state.stateVersion,
+    transactions: state.transactions.map((transaction) => ({ ...transaction })),
+  };
 }
 
 function identity(character: string) {

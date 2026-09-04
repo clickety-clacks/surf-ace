@@ -94,7 +94,7 @@ export type ReserveResult = {
 
 export type RestoreSnapshot = Pick<
   AcceptedState,
-  "allocatorId" | "authorityOwners" | "fleetId" | "mappings" | "stateVersion" | "transactions"
+  "allocatorId" | "authorityOwners" | "custodyRevision" | "fleetId" | "headHash" | "headSeq" | "mappings" | "nextOrdinalFence" | "stateVersion" | "transactions"
 >;
 
 export type RestoreReady = {
@@ -598,14 +598,9 @@ async function validateStaticTopology(config: PostgresCustodyConfig, primary: Pg
   if (config.witnessApplicationName !== "surf_ace_witness") {
     throw new AllocatorError("allocator_state_corrupt", "witness application name must be surf_ace_witness");
   }
-  const result = await primary.query<StaticPrimaryRow>(`
-    SELECT current_setting('server_version_num')::integer AS server_version_num,
-      pg_is_in_recovery() AS in_recovery,
-      (pg_control_system()).system_identifier::text AS cluster_system_id,
-      current_setting('fsync') AS fsync,
-      current_setting('synchronous_commit') AS synchronous_commit,
-      current_setting('synchronous_standby_names') AS synchronous_standby_names
-  `);
+  const result = await primary.query<StaticPrimaryRow>(
+    "SELECT * FROM surf_ace_allocator.read_primary_topology()",
+  );
   const row = requiredRow(result.rows[0], "primary validation");
   if (row.server_version_num < 160000 || row.server_version_num > 169999) {
     topologyError("primary must run PostgreSQL 16.x");
@@ -627,14 +622,9 @@ async function readAndValidateWitness(
   requiredReplayLsn?: string,
 ): Promise<HeadWitness> {
   await validateStaticTopology(config, primary);
-  const senders = await primary.query<SenderRow>(`
-    SELECT r.pid, r.application_name, r.client_addr::text AS client_addr,
-      r.state, r.sync_state, r.replay_lsn::text AS replay_lsn,
-      s.slot_name, s.slot_type, s.active_pid
-    FROM pg_stat_replication r
-    LEFT JOIN pg_replication_slots s ON s.active_pid = r.pid
-    WHERE r.application_name = $1
-  `, [config.witnessApplicationName]);
+  const senders = await primary.query<SenderRow>(
+    "SELECT * FROM surf_ace_allocator.read_wal_senders()",
+  );
   if (senders.rowCount !== 1) {
     topologyError("exactly one WAL sender may use the witness application name");
   }
