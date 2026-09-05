@@ -117,6 +117,24 @@ test("main preserves omitted browser-hosted snapshot fields", async () => {
   assert.doesNotMatch(handlerSource, /visibleText:\s*String\(payload\.visibleText \?\? ""\)/);
 });
 
+test("pane capture reserves compositor pixels for native-hosted panes", async () => {
+  const source = await mainSource();
+  const captureIndex = source.indexOf("async function capturePaneImage");
+  const reloadIndex = source.indexOf("async function reloadPaneFromSource", captureIndex);
+  const captureSource = source.slice(captureIndex, reloadIndex);
+  const compositorIndex = captureSource.indexOf("type: \"capture_screen\"");
+  const rendererIndex = captureSource.indexOf("window.capturePage");
+
+  assert.ok(captureIndex > -1);
+  assert.ok(reloadIndex > captureIndex);
+  assert.match(
+    captureSource,
+    /if \(compositorSocketPath && core\.nativeHostedPaneIdForPaneId\(surfaceId, paneId\) !== null\)/,
+  );
+  assert.ok(compositorIndex > -1);
+  assert.ok(rendererIndex > compositorIndex);
+});
+
 test("changed content replacement resets the pane scroll origin before browser_url mounts", async () => {
   const source = await rendererSource();
   const resetIndex = source.indexOf("function resetDynamicContent");

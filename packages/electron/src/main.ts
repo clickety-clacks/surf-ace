@@ -67,7 +67,7 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
-import { surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
+import { surfaceWindowCaptureMode, surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
 
 const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
@@ -1173,6 +1173,11 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     surface_id: surfaceId,
     window_label: surface.windowLabel,
   });
+  const captureMode = surfaceWindowCaptureMode({
+    compositorSocketPath,
+    gpuDisabled: gpuDisableRequested(),
+    platform: process.platform,
+  });
   const window = new BrowserWindow({
     ...surfaceWindowOptions({
       compositorSocketPath,
@@ -1182,6 +1187,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     }),
     webPreferences: {
       contextIsolation: true,
+      offscreen: captureMode.offscreen,
       preload: path.join(distDir, "preload.cjs"),
       webviewTag: true,
     },
@@ -1203,7 +1209,9 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   window.once("ready-to-show", () => {
     syncWindowViewport(surfaceId, window);
     syncWindowPlacement(surfaceId, window);
-    window.show();
+    if (captureMode.showAfterReady) {
+      window.show();
+    }
     if (restoredPlacement?.fullscreen) {
       window.setFullScreen(true);
     }
@@ -1303,7 +1311,7 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
     return null;
   }
   const compositorSocketPath = resolveCompositorControlSocketPath();
-  if (compositorSocketPath) {
+  if (compositorSocketPath && core.nativeHostedPaneIdForPaneId(surfaceId, paneId) !== null) {
     const capturePath = path.join(
       os.tmpdir(),
       `surf-ace-pane-capture-${surfaceId}-${paneId}-${Date.now()}-${Math.random().toString(16).slice(2)}.png`,
