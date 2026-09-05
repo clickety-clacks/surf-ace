@@ -10,6 +10,8 @@ import test from "node:test";
 import pg from "pg";
 import WebSocket from "ws";
 
+import { PublicControllerWireClient } from "../../controller/src/wire.js";
+
 import {
   AllocatorError,
   canonicalJson,
@@ -26,7 +28,9 @@ import {
 } from "./index.js";
 
 const execFile = promisify(execFileCallback);
-const postgresBin = "/usr/lib/postgresql/16/bin";
+const postgresBin = process.platform === "darwin"
+  ? "/opt/homebrew/opt/postgresql@16/bin"
+  : "/usr/lib/postgresql/16/bin";
 const { Client } = pg;
 
 type TestCluster = {
@@ -124,6 +128,59 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         assert.equal(diagnostics.nextOrdinalFence, 40);
       } finally {
         await Promise.all([clientA.close(), clientB.close()]);
+      }
+    });
+
+    await t.test("controller connection claims two labels and preserves identity on reconnect", async () => {
+      assert.ok(server);
+      const clientA = new PublicControllerWireClient(server.address.url);
+      const clientB = new PublicControllerWireClient(server.address.url);
+      const a = {
+        ...claimPayload(cluster.config.fleetId, allocatorId, identity("c"), "sf_client-shared"),
+      };
+      const b = {
+        ...claimPayload(cluster.config.fleetId, allocatorId, identity("d"), "sf_client-shared"),
+      };
+      try {
+        const [first, second] = await Promise.all([
+          clientA.connectAllocatorSurface(a),
+          clientB.connectAllocatorSurface(b),
+        ]);
+        assert.notEqual(first.windowLabel, second.windowLabel);
+        assert.equal(first.authorityId, a.authorityId);
+        assert.equal(second.authorityId, b.authorityId);
+        assert.equal(first.surfaceId, second.surfaceId);
+        const before = await server.diagnostics();
+        await clientA.close();
+        const resumed = await clientA.connectAllocatorSurface(a, first);
+        for (const key of Object.keys(first) as (keyof typeof first)[]) {
+          assert.equal(resumed[key], first[key]);
+        }
+        assert.equal((await server.diagnostics()).assignmentCount, before.assignmentCount);
+        assert.equal((await server.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
+        await assert.rejects(
+          clientA.connectAllocatorSurface({ ...a, expectedAllocatorId: "alloc_wrong" }),
+          /allocator_request_rejected:authority.bind:allocator_identity_mismatch/,
+        );
+        await assert.rejects(
+          clientA.connectAllocatorSurface({ ...a, ownerAnchorId: b.ownerAnchorId }),
+          /allocator_request_rejected:authority.bind:authority_ownership_conflict/,
+        );
+        await assert.rejects(
+          clientA.connectAllocatorSurface(a, {
+            committed: true,
+            ordinal: second.ordinal,
+            windowLabel: second.windowLabel,
+          }),
+          /allocator_request_rejected:label.reconfirm:assignment_conflict/,
+        );
+        t.diagnostic(JSON.stringify({ first, second, resumed }));
+      } finally {
+        await Promise.all([clientA.close(), clientB.close()]);
+        // A contradictory reconfirm deliberately closes the authority to claims.
+        // Restart the fixture before the next independent allocator scenario.
+        await server.close();
+        server = await AllocatorServer.start(serverConfig(cluster));
       }
     });
 

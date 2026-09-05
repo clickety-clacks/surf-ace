@@ -17,6 +17,26 @@ export type ControllerWireEnvelope = {
   v?: number;
 };
 
+export type AllocatorSurfaceIdentity = {
+  authorityId: string;
+  expectedAllocatorId: string;
+  fleetId: string;
+  ownerAnchorId: string;
+  surfaceId: string;
+};
+
+export type AllocatorWindowLabel = {
+  allocatorId: string;
+  authorityId: string;
+  committed: true;
+  fleetId: string;
+  ordinal: number;
+  ownerAnchorId: string;
+  stateVersion: number;
+  surfaceId: string;
+  windowLabel: string;
+};
+
 type PendingRequest = {
   reject: (error: Error) => void;
   resolve: (response: ControllerWireEnvelope) => void;
@@ -59,6 +79,51 @@ export class PublicControllerWireClient {
       socket.once("open", () => resolve());
       socket.once("error", reject);
     });
+  }
+
+  // Identity comes from the caller's existing authority. This connection never
+  // mints an identity or a label; reconnect confirms the prior committed label.
+  async connectAllocatorSurface(
+    identity: AllocatorSurfaceIdentity,
+    previous?: Pick<AllocatorWindowLabel, "committed" | "ordinal" | "windowLabel">,
+  ): Promise<AllocatorWindowLabel> {
+    await this.connect();
+    const { surfaceId, ...owner } = identity;
+    const binding = await this.request("authority.bind", {
+      ...owner,
+      protocolVersion: 1,
+    });
+    if (binding.ok !== true) {
+      throw new Error(`allocator_request_rejected:authority.bind:${binding.error?.code}`);
+    }
+    const op = previous ? "label.reconfirm" : "label.claim";
+    const response = await this.request(op, {
+      ...owner,
+      protocolVersion: 1,
+      surfaceId,
+      ...(previous ? {
+        expectedAssignment: {
+          committed: previous.committed,
+          ordinal: previous.ordinal,
+          windowLabel: previous.windowLabel,
+        },
+      } : {}),
+    });
+    if (response.ok !== true) {
+      throw new Error(`allocator_request_rejected:${op}:${response.error?.code}`);
+    }
+    const assignment = response.payload as AllocatorWindowLabel | undefined;
+    if (
+      !assignment || assignment.committed !== true ||
+      assignment.allocatorId !== identity.expectedAllocatorId ||
+      assignment.fleetId !== identity.fleetId ||
+      assignment.authorityId !== identity.authorityId ||
+      assignment.ownerAnchorId !== identity.ownerAnchorId ||
+      assignment.surfaceId !== surfaceId
+    ) {
+      throw new Error("allocator_assignment_identity_mismatch");
+    }
+    return assignment;
   }
 
   isOpen(): boolean {
