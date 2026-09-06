@@ -1918,6 +1918,15 @@ export class SurfaceWsServer {
         })),
       });
     }
+    if (request.op === "surface.window.label.apply") {
+      const { surfaceId, windowLabel } = request.payload;
+      if (session.surfaceId !== surfaceId) {
+        throw new SurfaceCoreError("not_paired", "Label application requires the target surface connection");
+      }
+      this.requireLocklessSurface(surfaceId);
+      this.core.applyWindowLabelOnly(surfaceId, windowLabel);
+      return locklessSuccess(request, { surfaceId, windowLabel });
+    }
     if (request.op === "panes.list") {
       const targetSurfaceId =
         request.payload.surfaceId ?? session.surfaceId;

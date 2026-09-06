@@ -458,6 +458,7 @@ export type LocklessRequest =
       "pane.restore",
       LocklessPaneRestoreIntent & { surfaceId: string }
     >
+  | LocklessWireRequest<"surface.window.label.apply", { surfaceId: string; windowLabel: string }>
   | LocklessWireRequest<"surface.window.open", LocklessSurfaceOpenIntent>
   | LocklessWireRequest<"surface.window.close", LocklessSurfaceCloseIntent>
   | LocklessWireRequest<
@@ -728,6 +729,7 @@ const LOCKLESS_REQUEST_FIELDS: Record<
       "tombstoneId",
     ],
   },
+  "surface.window.label.apply": { required: ["surfaceId", "windowLabel"] },
   "surface.window.open": {
     optional: ["placement"],
     required: ["expectedSurfaceSetRevision"],
@@ -1425,6 +1427,10 @@ function validateLocklessRequestPayload(
           plainRecord(payload.placement))
         ? null
         : "invalid_surface_restore";
+    case "surface.window.label.apply":
+      return nonemptyString(payload.surfaceId) &&
+        typeof payload.windowLabel === "string" && /^[a-z]+$/.test(payload.windowLabel)
+        ? null : "invalid_window_label";
     case "topology.apply":
       return nonemptyString(payload.surfaceId) &&
         revision(payload.expectedTopologyRevision) &&

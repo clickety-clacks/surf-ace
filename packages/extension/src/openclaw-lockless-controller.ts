@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 
 import {
+  type AllocatorWindowLabel,
   BoundedControllerProjection,
   type ControllerStateStore,
   type ControllerWire,
@@ -123,9 +124,13 @@ export class OpenClawLocklessController {
   private readonly identity: ControllerIdentity;
   private reconcileWork: Promise<void> = Promise.resolve();
   private started = false;
+  private allocatorWire: PublicControllerWireClient | null = null;
+  private readonly assignments = new Map<string, AllocatorWindowLabel>();
+  private labelWork: Promise<unknown> = Promise.resolve();
   private unsubscribeDiscovery: (() => void) | null = null;
 
   constructor(private readonly options: {
+    allocator?: { url: string; fleetId: string; expectedAllocatorId: string };
     discovery?: SurfAceDiscoveryService;
     logger?: SurfAceLogger;
     projectionCapacityBytes?: number;
@@ -148,6 +153,9 @@ export class OpenClawLocklessController {
   async start(): Promise<void> {
     if (this.started) {
       return;
+    }
+    if (this.options.allocator) {
+      this.allocatorWire = new PublicControllerWireClient(this.options.allocator.url);
     }
     this.started = true;
     this.unsubscribeDiscovery = this.discovery.subscribe((endpoints) => {
@@ -172,6 +180,10 @@ export class OpenClawLocklessController {
       }),
     );
     this.endpoints.clear();
+    this.endpointModes.clear();
+    await this.labelWork;
+    await this.allocatorWire?.close();
+    this.allocatorWire = null;
     await this.discovery.stop();
     this.started = false;
   }
@@ -902,13 +914,14 @@ export class OpenClawLocklessController {
         continue;
       }
       this.endpointModes.set(endpoint.endpointId, "probing");
+      let controller: MultiSurfaceController | null = null;
       try {
         const stateRoot = path.join(
           this.options.stateDir,
           "lockless-endpoints",
           endpointStateKey(endpoint),
         );
-        const controller = new MultiSurfaceController({
+        controller = new MultiSurfaceController({
           controllerProductName: "Clawline",
           createProjection: (scopeKey) => {
             const projectionPath = path.join(
@@ -946,6 +959,7 @@ export class OpenClawLocklessController {
         this.endpoints.set(endpoint.endpointId, active);
         this.endpointModes.set(endpoint.endpointId, "lockless");
       } catch (error) {
+        await controller?.stop();
         const reason = String(error);
         this.options.logger?.info?.(
           `[surf-ace:lockless] endpoint ${endpoint.endpointId} admission failed: ${reason}`,
@@ -953,6 +967,35 @@ export class OpenClawLocklessController {
         this.endpointModes.delete(endpoint.endpointId);
       }
     }
+  }
+
+  private async applyAllocatorLabel(endpoint: LocklessEndpoint, surfaceId: string): Promise<void> {
+    const config = this.options.allocator;
+    if (!config || !this.allocatorWire) return;
+    const run = this.labelWork.then(async () => {
+      // Prefix/encoding adapts the existing stable identities to allocator wire
+      // syntax; it creates no additional identity or persistent store.
+      const installationId = await this.identity.loadOrCreate();
+      const identity = {
+        authorityId: `auth_${installationId}`,
+        ownerAnchorId: `owner_${createHash("sha256").update(config.fleetId).digest("hex")}`,
+        fleetId: config.fleetId,
+        expectedAllocatorId: config.expectedAllocatorId,
+        surfaceId,
+      };
+      const assignment = await this.allocatorWire!.connectAllocatorSurface(
+        identity, this.assignments.get(surfaceId),
+      );
+      this.assignments.set(surfaceId, assignment);
+      const applied = asRecord(await endpoint.controller.surfaceSession(surfaceId).requestPublic(
+        "surface.window.label.apply", { surfaceId, windowLabel: assignment.windowLabel },
+      ));
+      if (applied.surfaceId !== surfaceId || applied.windowLabel !== assignment.windowLabel) {
+        throw new Error("surface_label_application_mismatch");
+      }
+    });
+    this.labelWork = run.catch(() => undefined);
+    await run;
   }
 
   private async loadScreens(
@@ -964,6 +1007,7 @@ export class OpenClawLocklessController {
     for (const value of surfaces) {
       const surface = asRecord(value);
       const surfaceId = stringValue(surface.surfaceId);
+      await this.applyAllocatorLabel(endpoint, surfaceId);
       const panePayload = asRecord(
         await endpoint.controller.surfaceSession(surfaceId).requestPublic(
           "panes.list",

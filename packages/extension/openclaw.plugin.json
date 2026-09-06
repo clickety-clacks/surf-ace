@@ -53,6 +53,30 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "required": [
+      "allocator"
+    ],
+    "properties": {
+      "allocator": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "url",
+          "fleetId",
+          "expectedAllocatorId"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "fleetId": {
+            "type": "string"
+          },
+          "expectedAllocatorId": {
+            "type": "string"
+          }
+        }
+      }
+    }
   }
 }

@@ -1,5 +1,4 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 import {
   resolveSurfAceToolContextFromOpenClawContext,
@@ -22,15 +21,46 @@ const plugin = {
   id: "surf-ace",
   name: "Surf Ace",
   description: "Surf Ace lockless discovery, persistent controller connections, and pane tools for OpenClaw.",
-  configSchema: emptyPluginConfigSchema(),
+  configSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["allocator"],
+    properties: {
+      allocator: {
+        type: "object", additionalProperties: false,
+        required: ["url", "fleetId", "expectedAllocatorId"],
+        properties: {
+          url: { type: "string" },
+          fleetId: { type: "string" },
+          expectedAllocatorId: { type: "string" },
+        },
+      },
+    },
+  },
   register(api: OpenClawPluginApi) {
+    const allocator = api.pluginConfig?.allocator as {
+      url?: unknown; fleetId?: unknown; expectedAllocatorId?: unknown;
+    } | undefined;
+    if (!allocator || typeof allocator.url !== "string" ||
+      typeof allocator.fleetId !== "string" || !allocator.fleetId ||
+      typeof allocator.expectedAllocatorId !== "string" || !allocator.expectedAllocatorId) {
+      throw new Error("Surf Ace central provider requires its allocator binding");
+    }
+    const allocatorUrl = new URL(allocator.url);
+    if (!["ws:", "wss:"].includes(allocatorUrl.protocol)) {
+      throw new Error("Surf Ace allocator binding requires a WebSocket URL");
+    }
+    const binding = {
+      url: allocator.url, fleetId: allocator.fleetId,
+      expectedAllocatorId: allocator.expectedAllocatorId,
+    };
     const logger = (api.logger ?? console) as Console;
     assertProviderHostAllowed(logger);
     const openClawStateDir = api.runtime.state?.resolveStateDir?.();
     const stateDir = resolveDefaultSurfAceStateDir(openClawStateDir);
     const shared = acquireSharedRuntime(
       stateDir,
-      () => new OpenClawLocklessController({ logger, stateDir }) as SurfAceRuntime,
+      () => new OpenClawLocklessController({ allocator: binding, logger, stateDir }) as SurfAceRuntime,
     );
     const runtime = shared.runtime;
 

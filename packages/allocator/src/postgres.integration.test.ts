@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +11,8 @@ import pg from "pg";
 import WebSocket from "ws";
 
 import { PublicControllerWireClient } from "../../controller/src/wire.js";
+import { writePersistentStateFile } from "../../electron/src/persistent-state-file.js";
+import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import { SurfaceCore } from "../../electron/src/surface-core.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
 import { BonjourAdvertiser } from "../../electron/src/bonjour-advertiser.js";
@@ -660,14 +662,14 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
   }
 });
 
-test("Bonjour discovers two allocator-labelled clients and reads whole-fleet topology", { timeout: 90_000 }, async (t) => {
+test("central provider assigns discovered clients, persists labels and reconnects", { timeout: 90_000 }, async (t) => {
   const cluster = await startCluster();
   const prefix = `surf-ace-fixture-${randomUUID()}`;
   const allocatorId = "alloc_discovery-test";
   const servers: SurfaceWsServer[] = [];
   const publishers: BonjourAdvertiser[] = [];
   const wires: PublicControllerWireClient[] = [];
-  const expected = new Map<string, string>();
+  const fixtures: Array<{ core: SurfaceCore; stateDir: string; port: number; surfaceId: string }> = [];
   const discovery = createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
   // Only admit this test's advertisements. Endpoint host/port/path still come
   // exclusively from the production Bonjour browser, never from the fixture.
@@ -680,15 +682,21 @@ test("Bonjour discovers two allocator-labelled clients and reads whole-fleet top
     stop: () => discovery.stop(),
     subscribe: (listener) => discovery.subscribe(() => listener(select())),
   };
-  const controller = new OpenClawLocklessController({
-    discovery: isolatedDiscovery,
-    stateDir: join(cluster.root, "controller"),
-  });
+  let controller: OpenClawLocklessController | null = null;
   let allocator: AllocatorServer | null = null;
   try {
     const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, allocatorId);
     await recovery.release();
     allocator = await AllocatorServer.start(serverConfig(cluster));
+    const binding = {
+      url: allocator.address.url,
+      fleetId: (await allocator.diagnostics()).fleetId,
+      expectedAllocatorId: (await allocator.diagnostics()).allocatorId,
+    };
+    controller = new OpenClawLocklessController({
+      allocator: binding, discovery: isolatedDiscovery,
+      stateDir: join(cluster.root, "controller"),
+    });
     await controller.start();
     assert.deepEqual(await controller.listScreens(), []);
 
@@ -697,20 +705,11 @@ test("Bonjour discovers two allocator-labelled clients and reads whole-fleet top
       const name = `${prefix}-${character}`;
       const viewport = { height: 800, scale: 1, width: 1200 };
       const surface = core.ensurePrimarySurface(name, viewport);
-      const wire = new PublicControllerWireClient(allocator.address.url);
-      wires.push(wire);
-      const assignment = await wire.connectAllocatorSurface({
-        ...identity(character),
-        expectedAllocatorId: allocatorId,
-        fleetId: cluster.config.fleetId,
-        surfaceId: surface.surfaceId,
-      });
-      // This increment consumes the connection helper through the existing
-      // client projection seam. Automatic app binding is a separate increment.
-      core.applyWindowLabelOnly(surface.surfaceId, assignment.windowLabel);
-      expected.set(surface.surfaceId, assignment.windowLabel);
       const port = await freePort();
+      const stateDir = join(cluster.root, `surface-${character}`);
+      fixtures.push({ core, stateDir, port, surfaceId: surface.surfaceId });
       const server = new SurfaceWsServer({
+        persistLocklessState: () => writePersistentStateFile(stateDir, "state.json", core.getPersistentState()),
         bindAddress: "0.0.0.0",
         capturePaneImage: async () => null,
         compositorSocketPath: null,
@@ -744,7 +743,10 @@ test("Bonjour discovers two allocator-labelled clients and reads whole-fleet top
     assert.equal(new Set(screens.map((screen) => screen.windowLabel)).size, 2);
     const addresses: string[] = [];
     for (const screen of screens) {
-      assert.equal(screen.windowLabel, expected.get(screen.fingerprint));
+      const fixture = fixtures.find((entry) => entry.surfaceId === screen.fingerprint)!;
+      const persisted = JSON.parse(await readFile(join(fixture.stateDir, "state.json"), "utf8"));
+      assert.equal(persisted.surfaces.find((entry: any) => entry.surfaceId === screen.fingerprint).windowLabel, screen.windowLabel);
+      assert.equal(fixture.core.getRendererWindowState(screen.fingerprint).windowLabel, screen.windowLabel);
       assert.ok(screen.topology);
       assert.ok(screen.panes.length > 0);
       for (const pane of screen.panes) {
@@ -754,16 +756,70 @@ test("Bonjour discovers two allocator-labelled clients and reads whole-fleet top
       }
     }
     assert.equal(new Set(addresses).size, addresses.length);
+    const before = await allocator.diagnostics();
+    // Same provider reconnect retains committed receipts and reconfirms them.
+    await controller.stop();
+    await controller.start();
+    assert.deepEqual((await controller.listScreens()).map((screen) => screen.windowLabel).sort(),
+      screens.map((screen) => screen.windowLabel).sort());
+    assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
+    const identityBefore = await readFile(join(cluster.root, "controller", "lockless-controller-identity.json"), "utf8");
+    // Restart the allocator transport and provider using their existing durable
+    // stores. Claim replay must recover the same assignments without new labels.
+    await controller.stop();
+    await allocator.close();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    controller = new OpenClawLocklessController({
+      allocator: { ...binding, url: allocator.address.url },
+      discovery: isolatedDiscovery, stateDir: join(cluster.root, "controller"),
+    });
+    await controller.start();
+    const resumed = await controller.listScreens();
+    assert.deepEqual(resumed.map(({ fingerprint, windowLabel }) => ({ fingerprint, windowLabel })).sort((a,b) => a.fingerprint.localeCompare(b.fingerprint)),
+      screens.map(({ fingerprint, windowLabel }) => ({ fingerprint, windowLabel })).sort((a,b) => a.fingerprint.localeCompare(b.fingerprint)));
+    assert.equal(await readFile(join(cluster.root, "controller", "lockless-controller-identity.json"), "utf8"), identityBefore);
+    assert.equal((await allocator.diagnostics()).assignmentCount, before.assignmentCount);
+    assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
+
+    const fixture = fixtures[0]!;
+    const wire = new PublicControllerWireClient(`ws://127.0.0.1:${fixture.port}/ws`);
+    wires.push(wire);
+    await wire.connect();
+    assert.equal((await wire.request("pair.request", {
+      controllerInstanceId: "ci_fixture-rejection", controllerProductName: "Clawline",
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY], protocolVersion: 1,
+      projectionCapacityBytes: 5 * 1024 * 1024, surfaceId: fixture.surfaceId,
+    })).ok, true);
+    const priorLabel = fixture.core.getRendererWindowState(fixture.surfaceId).windowLabel;
+    assert.equal((await wire.request("surface.window.label.apply", {
+      surfaceId: fixture.surfaceId, windowLabel: "BAD",
+    })).ok, false);
+    const wrongSurface = await wire.request("surface.window.label.apply", {
+      surfaceId: fixtures[1]!.surfaceId, windowLabel: "z",
+    });
+    assert.equal(wrongSurface.ok, false);
+    assert.equal(fixture.core.getRendererWindowState(fixture.surfaceId).windowLabel, priorLabel);
+    const persistedAfter = JSON.parse(await readFile(join(fixture.stateDir, "state.json"), "utf8"));
+    assert.equal(persistedAfter.surfaces.find((entry: any) => entry.surfaceId === fixture.surfaceId).windowLabel, priorLabel);
+    await controller.stop();
+    controller = new OpenClawLocklessController({
+      allocator: { ...binding, url: allocator.address.url, expectedAllocatorId: "alloc_wrong" },
+      discovery: isolatedDiscovery, stateDir: join(cluster.root, "controller"),
+    });
+    await controller.start();
+    assert.deepEqual(await controller.listScreens(), [], "mismatched allocator cannot expose admitted fleet topology");
+    assert.equal((await allocator.diagnostics()).assignmentCount, before.assignmentCount);
+    t.diagnostic(JSON.stringify({ assignments: before.assignmentCount, fence: before.nextOrdinalFence, reconnect: "same provider identity, labels and fence" }));
     t.diagnostic(JSON.stringify({ discovered: select().map(({ endpointId }) => endpointId),
       topology: screens.map(({ fingerprint, windowLabel, topology, panes }) => ({
         fingerprint, windowLabel, topology,
         panes: panes.map(({ paneId, paneAddress }) => ({ paneId, paneAddress })),
       })) }));
   } finally {
-    await controller.stop();
+    await controller?.stop();
     await Promise.all(publishers.map((publisher) => publisher.stop()));
-    await Promise.all(servers.map((server) => server.stop()));
     await Promise.all(wires.map((wire) => wire.close()));
+    await Promise.all(servers.map((server) => server.stop()));
     if (allocator) await allocator.close();
     await cluster.stop();
   }

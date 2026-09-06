@@ -58,33 +58,44 @@ Direct compositor calls, `native_pane.host`, disabled demo fixtures, fake WS ser
 
 When `surf_ace_push` receives `sourcePath`, the provider reads that file before sending the pane mutation and stores/sends those bytes as the pane content. Placeholder `content` is not proof of rendered bytes; `surf_ace_read` and `surf_ace_capture_pane` should reflect the materialized source content for the same fingerprint and pane id.
 
-## Discovery and fleet topology increment
+## Provider-owned labels and discovery
 
-The controller discovers advertised surface clients through the existing
-`_surf-ace._tcp` browser. After `start()`, `listScreens()` waits for queued
-discovery reconciliation and returns the combined window/pane topology.
-Window labels come from the existing topology response; pane addresses combine
-that label with the client-local pane label, such as `a1` and `b1`.
-An unfiltered `surf_ace_list` with no surfaces returns the empty array and the
-text “No surfaces discovered.” Connection errors retain their existing behavior.
+The sole central provider discovers surface clients through `_surf-ace._tcp`.
+Configure its existing plugin configuration with an `allocator` object containing
+`url`, `fleetId`, and `expectedAllocatorId`. The serving composition obtains
+these from `AllocatorServer.address.url` and `AllocatorServer.diagnostics()`.
+No surface client receives allocator configuration. PostgreSQL remains allocator
+custody; this change does not provision or deploy the allocator service.
 
-Run the focused executable proof from the repository root after building the
-protocol and controller packages:
+The provider uses its existing persisted `ControllerIdentity` as the authority.
+The allocator wire representation is `auth_` followed by that installation ID.
+The owner anchor is the stable fleet identity, represented as `owner_` followed
+by the SHA-256 hex encoding of the UTF-8 fleet ID to fit the existing wire format.
+Neither representation creates a new identity or store.
+
+For each discovered surface the provider binds/claims through
+`connectAllocatorSurface`, then sends active `surface.window.label.apply`.
+The paired surface validates and persists the label before acknowledging it.
+Topology exposes the window label plus pane label, such as `a1` and `b1`.
+Same-provider reconnect reconfirms committed receipts; provider restart uses
+the same persisted installation identity and idempotently claims its existing
+assignments. An unfiltered empty `surf_ace_list` retains `[]` plus the text
+“No surfaces discovered.”
+
+Run the focused proof from the repository root after building protocol/controller:
 
 ```sh
-pnpm --filter @surf-ace/allocator exec node --import tsx --test --test-name-pattern="Bonjour discovers" src/postgres.integration.test.ts
+pnpm --filter @surf-ace/allocator exec node --import tsx --test --test-name-pattern="central provider assigns" src/postgres.integration.test.ts
 ```
 
-This requires the existing PostgreSQL 16 binaries used by the allocator tests
-and working local Bonjour discovery. The test creates a disposable PostgreSQL
-primary/witness, obtains labels through `connectAllocatorSurface`, projects
-them through `applyWindowLabelOnly`, and advertises two real surface WebSocket
-servers. Only advertisements with the fixture's unique name prefix are admitted;
-the controller receives no manually supplied surface endpoint. It verifies an
-empty initial topology, two discovered clients, distinct window labels and pane
-addresses, and nonempty topology, then stops its servers/publishers and removes
-its temporary bases.
+This uses existing PostgreSQL 16 binaries, temporary primary/witness and surface
+state directories, the production Bonjour browser/advertiser, and real surface
+WebSocket servers. Only the uniquely named fixture advertisements are admitted.
+The provider obtains and applies labels; the fixture does not inject them with
+`applyWindowLabelOnly`. Assertions cover two clients, persisted readback,
+same-instance reconnect, provider/allocator restart continuity, invalid-label
+and wrong-surface rejection, and fixture cleanup.
 
-This is focused connection/discovery proof. Automatic app allocator binding,
-installed OpenClaw tool admission, rendered GUI topology, and soak readiness are
-separate increments; this fixture does not establish them.
+This is executable provider-runtime proof. It does not establish installed
+OpenClaw admission, rendered GUI/E2E behavior, or soak readiness. Central service
+provisioning remains separate from automatic surface discovery.
