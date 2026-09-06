@@ -10,6 +10,9 @@ import test from "node:test";
 import pg from "pg";
 import WebSocket from "ws";
 
+import { ConfiguredServerRegistration, registrationClientId } from "../../electron/src/configured-server.js";
+import { loadOrCreateIdentity } from "../../electron/src/identity.js";
+import { mkdir } from "node:fs/promises";
 import { PublicControllerWireClient } from "../../controller/src/wire.js";
 import { writePersistentStateFile } from "../../electron/src/persistent-state-file.js";
 import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
@@ -821,6 +824,69 @@ test("central provider assigns discovered clients, persists labels and reconnect
     await Promise.all(wires.map((wire) => wire.close()));
     await Promise.all(servers.map((server) => server.stop()));
     if (allocator) await allocator.close();
+    await cluster.stop();
+  }
+});
+
+test("configured server registers two stable clients and deduplicates reconnect", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  const clients: ConfiguredServerRegistration[] = [];
+  let reader: PublicControllerWireClient | null = null;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_registration-test");
+    await recovery.release();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    const fixtures = [];
+    for (const name of ["one", "two"]) {
+      const stateDir = join(cluster.root, name);
+      await mkdir(stateDir);
+      const identity = await loadOrCreateIdentity(stateDir);
+      const clientId = registrationClientId(identity.publicKeyPem);
+      const core = new SurfaceCore();
+      const surface = core.ensurePrimarySurface(name, { width: 800, height: 600 });
+      const persist = () => writePersistentStateFile(stateDir, "state.json", core.getPersistentState());
+      const client = new ConfiguredServerRegistration(allocator.address.url, clientId, core, persist);
+      clients.push(client);
+      await client.synchronize();
+      fixtures.push({ stateDir, clientId, core, surface, persist });
+    }
+    reader = new PublicControllerWireClient(allocator.address.url);
+    await reader.connect();
+    const topology = async () => {
+      const response = await reader!.request("fleet.topology");
+      assert.equal(response.ok, true);
+      return response.payload as { clients: Array<{ clientId: string; surfaces: Array<{ windowLabel: string; panes: Array<{ paneAddress: string }> }> }> };
+    };
+    const first = await topology();
+    assert.equal(first.clients.length, 2);
+    assert.deepEqual(first.clients.map((client) => client.surfaces[0].panes[0].paneAddress).sort(), ["a1", "b1"]);
+    for (const fixture of fixtures) {
+      const stored = JSON.parse(await readFile(join(fixture.stateDir, "state.json"), "utf8"));
+      assert.equal(stored.surfaces[0].windowLabel, fixture.core.getSurface(fixture.surface.surfaceId).windowLabel);
+    }
+    const before = await allocator.diagnostics();
+    await clients[0].stop();
+    const restoredIdentity = await loadOrCreateIdentity(fixtures[0].stateDir);
+    assert.equal(registrationClientId(restoredIdentity.publicKeyPem), fixtures[0].clientId);
+    const reconnect = new ConfiguredServerRegistration(
+      allocator.address.url, fixtures[0].clientId, fixtures[0].core, fixtures[0].persist,
+    );
+    clients.push(reconnect);
+    await reconnect.synchronize();
+    await reconnect.synchronize();
+    assert.deepEqual(await topology(), first);
+    assert.equal((await allocator.diagnostics()).assignmentCount, before.assignmentCount);
+    assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
+    await Promise.all([reconnect.synchronize(), clients[1].synchronize()]);
+    assert.deepEqual(await topology(), first);
+    const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
+    assert.equal(rejected.ok, false);
+    assert.deepEqual(await topology(), first);
+  } finally {
+    for (const client of clients) await client.stop();
+    await reader?.close();
+    await allocator?.close();
     await cluster.stop();
   }
 });

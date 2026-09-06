@@ -17,6 +17,7 @@ import {
 } from "electron";
 
 import type { ContentSetRequest, RuntimeAppBindingDiagnostics, Stroke } from "../../protocol/src/index.js";
+import { ConfiguredServerRegistration, registrationClientId } from "./configured-server.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import {
   CLIENT_FLIGHT_RECORDER_LOG_PATH,
@@ -171,6 +172,7 @@ const nativeOverlaySnapshots = new Map<string, {
 }>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
+let configuredRegistration: ConfiguredServerRegistration | null = null;
 let advertiserTxtRefreshTimer: NodeJS.Timeout | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -1802,7 +1804,17 @@ async function boot(): Promise<void> {
   installWebAuthnAccountSelection();
   await acknowledgeCompositorMainAppBinding();
 
-  if (!advertisingDisabled()) {
+  const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
+  if (configuredAddress) {
+    configuredRegistration = new ConfiguredServerRegistration(
+      configuredAddress, registrationClientId(identity.publicKeyPem), core,
+      persistState,
+      (error) => clientWarn("configured_server_registration_failed", errorDiagnosticFields(error)),
+    );
+    configuredRegistration.start();
+  }
+
+  if (!configuredAddress && !advertisingDisabled()) {
     advertiser = new BonjourAdvertiser({
       name: `${endpointName()} (${shortHostName()})`,
       port: serverStart.port,
@@ -1865,6 +1877,7 @@ if (!singleInstanceLock) {
     await Promise.allSettled(
       [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
     );
+    await configuredRegistration?.stop();
     await advertiser?.stop();
     await server.stop();
   });

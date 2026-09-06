@@ -1,5 +1,5 @@
 import { closeSync, fsyncSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 
@@ -51,6 +51,58 @@ export type AllocatorDiagnostics = {
 
 export class AllocatorServer {
   private readonly startedAt = Date.now();
+  private readonly registeredClients = new Map<string, unknown>();
+  private registrationTail: Promise<unknown> = Promise.resolve();
+
+  private async registerClient(payload: unknown): Promise<unknown> {
+    const value = payload as { clientId?: unknown; surfaces?: unknown };
+    if (!value || typeof value.clientId !== "string" || !/^[a-f0-9]{64}$/.test(value.clientId) ||
+        !Array.isArray(value.surfaces)) throw new Error("invalid_registration");
+    const clientId = value.clientId;
+    const surfaces = value.surfaces as Array<{ surfaceId: string; panes: Array<{ paneId: string; paneLabel: number }> }>;
+    const ids = new Set<string>();
+    for (const surface of surfaces) {
+      if (!surface || typeof surface.surfaceId !== "string" || !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(surface.surfaceId) ||
+          ids.has(surface.surfaceId) || !Array.isArray(surface.panes)) throw new Error("invalid_surface");
+      ids.add(surface.surfaceId);
+      const paneIds = new Set<string>();
+      const labels = new Set<number>();
+      for (const pane of surface.panes) {
+        if (!pane || typeof pane.paneId !== "string" || !pane.paneId || paneIds.has(pane.paneId) ||
+            !Number.isInteger(pane.paneLabel) || pane.paneLabel < 1 || labels.has(pane.paneLabel)) throw new Error("invalid_pane");
+        paneIds.add(pane.paneId);
+        labels.add(pane.paneLabel);
+      }
+    }
+    const state = await this.custody.readAcceptedState();
+    const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+    const identity = {
+      authorityId: "auth_" + hash(state.allocatorId),
+      ownerAnchorId: "owner_" + hash(state.fleetId),
+      fleetId: state.fleetId,
+      expectedAllocatorId: state.allocatorId,
+      protocolVersion: 1 as const,
+    };
+    await this.authority.bind(identity);
+    const registered = [];
+    for (const surface of surfaces) {
+      const assignment = await this.authority.claim({
+        ...identity, surfaceId: "sf_" + hash(JSON.stringify([clientId, surface.surfaceId])),
+      });
+      registered.push({
+        surfaceId: surface.surfaceId,
+        windowLabel: assignment.windowLabel,
+        panes: surface.panes.map((pane) => ({
+          paneId: pane.paneId, paneLabel: pane.paneLabel,
+          paneAddress: assignment.windowLabel + pane.paneLabel,
+        })),
+      });
+    }
+    const result = { clientId, surfaces: registered };
+    this.registeredClients.set(clientId, result);
+    return result;
+  }
+
   private constructor(
     private readonly config: AllocatorServerConfig,
     private readonly hostLock: HostLock,
@@ -136,6 +188,7 @@ export class AllocatorServer {
     await new Promise<void>((resolve, reject) => {
       this.webSocketServer.close((error) => error ? reject(error) : resolve());
     });
+    await this.registrationTail;
     try {
       await this.custody.release();
     } finally {
@@ -160,6 +213,32 @@ export class AllocatorServer {
       raw = JSON.parse(toText(data));
     } catch {
       socket.close(1008, "invalid_json");
+      return;
+    }
+    const registration = raw as { v?: unknown; type?: unknown; id?: unknown; op?: unknown; payload?: unknown };
+    if (registration && (registration.op === "client.register" || registration.op === "fleet.topology")) {
+      const run = this.registrationTail.then(async () => {
+        if (registration.v !== 1 || registration.type !== "request" || typeof registration.id !== "string" || !registration.id) {
+          socket.close(1008, "invalid_envelope");
+          return;
+        }
+        try {
+          const payload = registration.op === "client.register"
+            ? await this.registerClient(registration.payload)
+            : { clients: [...this.registeredClients.values()] };
+          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
+            v: 1, type: "response", id: registration.id, op: registration.op, ok: true, payload, sentAt: Date.now(),
+          }));
+        } catch (error) {
+          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
+            v: 1, type: "response", id: registration.id, op: registration.op, ok: false,
+            error: { code: "registration_failed", message: error instanceof Error ? error.message : "registration_failed" },
+            sentAt: Date.now(),
+          }));
+        }
+      });
+      this.registrationTail = run.catch(() => undefined);
+      await run;
       return;
     }
     let request: AllocatorRequest;
