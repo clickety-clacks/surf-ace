@@ -845,6 +845,7 @@ test("configured server registers two stable clients and deduplicates reconnect"
       const clientId = registrationClientId(identity.publicKeyPem);
       const core = new SurfaceCore();
       const surface = core.ensurePrimarySurface(name, { width: 800, height: 600 });
+      if (name === "two") core.createAdditionalSurface("second window", { width: 800, height: 600 });
       const persist = () => writePersistentStateFile(stateDir, "state.json", core.getPersistentState());
       const client = new ConfiguredServerRegistration(allocator.address.url, clientId, core, persist);
       clients.push(client);
@@ -860,10 +861,10 @@ test("configured server registers two stable clients and deduplicates reconnect"
     };
     const first = await topology();
     assert.equal(first.clients.length, 2);
-    assert.deepEqual(first.clients.map((client) => client.surfaces[0].panes[0].paneAddress).sort(), ["a1", "b1"]);
+    assert.deepEqual(first.clients.flatMap((client) => client.surfaces.map((surface) => surface.panes[0].paneAddress)).sort(), ["a1", "b1", "c1"]);
     for (const fixture of fixtures) {
       const stored = JSON.parse(await readFile(join(fixture.stateDir, "state.json"), "utf8"));
-      assert.equal(stored.surfaces[0].windowLabel, fixture.core.getSurface(fixture.surface.surfaceId).windowLabel);
+      for (const surface of stored.surfaces) assert.equal(surface.windowLabel, fixture.core.getSurface(surface.surfaceId).windowLabel);
     }
     const before = await allocator.diagnostics();
     await clients[0].stop();

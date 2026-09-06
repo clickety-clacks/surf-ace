@@ -3554,3 +3554,32 @@ test("a single unresolved row blocks a candidate that would otherwise fit easily
   assert.equal(core.listSurfaceAdmissionAttempts().length, 1);
 });
 
+
+test("window label sets validate before mutation and publish only final labels", () => {
+  const core = new SurfaceCore();
+  const viewport = { width: 800, height: 600, scale: 1 };
+  const first = core.ensurePrimarySurface("one", viewport);
+  const second = core.createAdditionalSurface("two", viewport);
+  core.admitSurfaceToLockless(first.surfaceId);
+  core.admitSurfaceToLockless(second.surfaceId);
+  core.applyWindowLabels([
+    { surfaceId: first.surfaceId, windowLabel: "a" },
+    { surfaceId: second.surfaceId, windowLabel: "b" },
+  ]);
+  const seen: string[][] = [];
+  core.subscribe((event) => {
+    if (event.type === "surface-changed") seen.push([core.getSurface(first.surfaceId).windowLabel, core.getSurface(second.surfaceId).windowLabel]);
+  });
+  core.applyWindowLabels([
+    { surfaceId: first.surfaceId, windowLabel: "b" },
+    { surfaceId: second.surfaceId, windowLabel: "a" },
+  ]);
+  assert.equal(seen.length, 2);
+  for (const labels of seen) assert.deepEqual(labels, ["b", "a"]);
+  assert.throws(() => core.applyWindowLabels([
+    { surfaceId: first.surfaceId, windowLabel: "c" },
+    { surfaceId: second.surfaceId, windowLabel: "c" },
+  ]), /Duplicate windowLabel/);
+  assert.deepEqual([core.getSurface(first.surfaceId).windowLabel, core.getSurface(second.surfaceId).windowLabel], ["b", "a"]);
+  assert.equal(seen.length, 2);
+});

@@ -43,12 +43,7 @@ export class ConfiguredServerRegistration {
       if (!response.ok) throw new Error(response.error?.message ?? "registration_failed");
       const payload = response.payload as { clientId: string; surfaces: Array<{ surfaceId: string; windowLabel: string }> };
       if (payload.clientId !== this.clientId || !Array.isArray(payload.surfaces)) throw new Error("invalid_registration_response");
-      for (const surface of payload.surfaces) {
-        if (!/^[a-z]+$/.test(surface.windowLabel)) throw new Error("invalid_window_label");
-        if (this.core.getSurface(surface.surfaceId).windowLabel !== surface.windowLabel) {
-          this.core.applyWindowLabelOnly(surface.surfaceId, surface.windowLabel);
-        }
-      }
+      this.core.applyWindowLabels(payload.surfaces);
       await this.persist();
     });
     this.pending = run.catch(() => undefined);

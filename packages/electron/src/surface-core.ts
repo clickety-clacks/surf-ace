@@ -2217,16 +2217,36 @@ export class SurfaceCore {
   }
 
   applyWindowLabelOnly(surfaceId: string, windowLabel: string): void {
-    assertValidWindowLabel(windowLabel);
-    this.assertWindowLabelAvailable(surfaceId, windowLabel);
-    const surface = this.getSurface(surfaceId);
-    if (surface.windowLabel !== windowLabel) {
-      if ([...surface.panes.values()].some((pane) => pane.externalNative)) {
-        bumpGeometryRevision(surface);
-      }
-      surface.windowLabel = windowLabel;
-      this.emit({ surfaceId, type: "surface-changed" });
+    this.applyWindowLabels([{ surfaceId, windowLabel }]);
+  }
+
+  applyWindowLabels(assignments: Array<{ surfaceId: string; windowLabel: string }>): void {
+    const labels = new Map<string, string>();
+    for (const { surfaceId, windowLabel } of assignments) {
+      assertValidWindowLabel(windowLabel);
+      this.getSurface(surfaceId);
+      if (labels.has(surfaceId)) throw new SurfaceCoreError("invalid_payload", "Duplicate surface assignment");
+      labels.set(surfaceId, windowLabel);
     }
+    const used = new Set<string>();
+    for (const surface of this.surfaces.values()) {
+      const label = labels.get(surface.surfaceId) ?? surface.windowLabel;
+      if (label && used.has(label)) {
+        throw new SurfaceCoreError("invalid_payload", `Duplicate windowLabel in live surface set: ${label}`);
+      }
+      if (label) used.add(label);
+    }
+    // Validate the resulting set before any mutation. Publish events only after
+    // every label is installed, so observers never see temporary collisions.
+    this.transaction(() => {
+      for (const { surfaceId, windowLabel } of assignments) {
+        const surface = this.getSurface(surfaceId);
+        if (surface.windowLabel === windowLabel) continue;
+        if ([...surface.panes.values()].some((pane) => pane.externalNative)) bumpGeometryRevision(surface);
+        surface.windowLabel = windowLabel;
+        this.emit({ surfaceId, type: "surface-changed" });
+      }
+    });
   }
 
   assertProviderWindowLabelAvailable(surfaceId: string, windowLabel: string): void {
