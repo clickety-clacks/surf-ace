@@ -21,6 +21,7 @@ export type SurfAceLogger = {
 };
 
 export type SurfAceDiscoveryEndpoint = {
+  role?: string;
   busy: boolean;
   capabilitiesBitmask: number;
   endpointId: string;
@@ -135,6 +136,7 @@ function endpointFromResolvedService(params: {
   const endpointId = `${host}:${params.port}${wsPath}#${serviceDiscriminator}`;
 
   return {
+    ...(params.txt.role ? { role: params.txt.role } : {}),
     busy: params.txt.busy === "1",
     capabilitiesBitmask: parseIntSafe(params.txt.cap, 0),
     endpointId,
@@ -281,6 +283,7 @@ function serviceToEndpoint(
     now,
     port: service.port,
     txt: {
+      role: txtStr(txt, "role") ?? "",
       busy: txtStr(txt, "busy") ?? "",
       cap: txtStr(txt, "cap") ?? "",
       h: txtStr(txt, "h") ?? "",
@@ -644,6 +647,7 @@ function sameEndpoint(
   return (
     left.endpointId === right.endpointId &&
     left.busy === right.busy &&
+    left.role === right.role &&
     left.capabilitiesBitmask === right.capabilitiesBitmask &&
     left.fingerprintPrefix === right.fingerprintPrefix &&
     left.host === right.host &&

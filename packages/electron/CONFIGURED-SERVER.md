@@ -6,9 +6,9 @@ The existing allocator server accepts `client.register` and `fleet.topology` usi
 
 The server derives its stable authority key from its existing allocator identity and its owner anchor from its existing fleet identity. A composite client/surface key prevents different clients from sharing an allocation accidentally. Re-registering replaces that client's topology snapshot and reuses committed label assignments. Registration snapshots are in memory and rebuilt by periodic client registration after restart; label custody remains in PostgreSQL.
 
-The Electron lifecycle registers every two seconds, applies returned window labels as a validated atomic set through SurfaceCore projection, and uses the existing guarded persistence path. A configured client suppresses the previous surface Bonjour advertisement. Without configuration the previously landed behavior remains available during this migration.
+The Electron lifecycle registers every two seconds, applies returned window labels as a validated atomic set through SurfaceCore projection, and uses the existing guarded persistence path. A configured client suppresses the previous surface Bonjour advertisement. The following fallback increment now browses central-server advertisements without configuration; see SERVER-FALLBACK.md.
 
-This increment covers configured routing only. Server Bonjour advertisement/discovery, fallback when configured routing fails, and recovery preference are subsequent increments. The old provider-browses-surfaces path is not claimed as the new architecture. No GUI launch, installed runtime, deployment, live LAN/MagicDNS/Tailscale or soak readiness is asserted by isolated network tests.
+This document records the configured registration increment. SERVER-FALLBACK.md describes the subsequent server advertisement/discovery and failure fallback implementation; recovery preference remains a subsequent increment. The old provider-browses-surfaces path is not claimed as the new architecture. No GUI launch, installed runtime, deployment, live LAN/MagicDNS/Tailscale or soak readiness is asserted by isolated network tests.
 
 Run focused real TCP registration evidence from the repository root:
 

@@ -59,7 +59,7 @@ export class PublicControllerWireClient {
     if (this.socket?.readyState === WebSocket.OPEN) {
       return;
     }
-    const socket = new WebSocket(this.url);
+    const socket = new WebSocket(this.url, { handshakeTimeout: this.requestTimeoutMs });
     this.socket = socket;
     socket.on("message", (data) => this.handleMessage(data));
     socket.on("close", () => {

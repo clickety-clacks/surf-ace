@@ -204,3 +204,9 @@ test("refreshNow removes endpoints missing from the refreshed snapshot", async (
 
   assert.deepEqual(discovery.getSnapshot(), [retained]);
 });
+
+test("server role survives Bonjour normalization and distinguishes legacy surfaces", () => {
+  const service = { host: "server.local.", name: "central", port: 19001, txt: { role: "server", ws: "/" } };
+  assert.equal(__test.serviceToEndpoint(service as any, () => 1)?.role, "server");
+  assert.equal(__test.serviceToEndpoint({ ...service, txt: { ws: "/ws" } } as any, () => 1)?.role, undefined);
+});

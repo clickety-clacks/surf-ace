@@ -29,6 +29,7 @@ const shared = {
 await build({
   ...shared,
   entryPoints: [
+    path.join(srcDir, "central-server.ts"),
     path.join(srcDir, "guest-preload.ts"),
     path.join(srcDir, "main.ts"),
     path.join(srcDir, "preload.ts"),

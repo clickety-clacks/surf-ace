@@ -1,3 +1,5 @@
+import { ServerConnection } from "../../electron/src/server-connection.js";
+import { startCentralServer } from "../../electron/src/central-server.js";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
@@ -888,6 +890,106 @@ test("configured server registers two stable clients and deduplicates reconnect"
     for (const client of clients) await client.stop();
     await reader?.close();
     await allocator?.close();
+    await cluster.stop();
+  }
+});
+
+test("configured-first server Bonjour fallback registers and persists clients", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  const clients: ServerConnection[] = [];
+  let central: Awaited<ReturnType<typeof startCentralServer>> | null = null;
+  const prefix = "surf-ace-server-fixture-" + randomUUID();
+  const browsers: SurfAceDiscoveryService[] = [];
+  let discoveryStarts = 0;
+  const discover = (): SurfAceDiscoveryService => {
+    const service = createBonjourSurfAceDiscoveryService({ timeoutMs: 2000 });
+    browsers.push(service);
+    return {
+      getSnapshot: () => service.getSnapshot().filter((endpoint) => endpoint.instanceName === prefix),
+      start: async () => { discoveryStarts++; await service.start(); },
+      stop: () => service.stop(),
+      refreshNow: () => service.refreshNow(),
+      subscribe: (listener) => service.subscribe(() => listener(service.getSnapshot().filter((endpoint) => endpoint.instanceName === prefix))),
+    };
+  };
+  let reader: PublicControllerWireClient | null = null;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_registration-test");
+    await recovery.release();
+    const missing = new ServerConnection({
+      clientId: "a".repeat(64), core: new SurfaceCore(), persist: async () => {},
+      discovery: discover(), requestTimeoutMs: 500,
+    });
+    clients.push(missing);
+    await assert.rejects(missing.synchronize(), /no_surf_ace_server/);
+    await missing.stop();
+    central = await startCentralServer({ ...serverConfig(cluster), listenHost: "0.0.0.0" }, prefix);
+    allocator = central.server;
+    const fixtures = [];
+    for (const name of ["one", "two"]) {
+      const stateDir = join(cluster.root, name);
+      await mkdir(stateDir);
+      const identity = await loadOrCreateIdentity(stateDir);
+      const clientId = registrationClientId(identity.publicKeyPem);
+      const core = new SurfaceCore();
+      const surface = core.ensurePrimarySurface(name, { width: 800, height: 600 });
+      if (name === "two") core.createAdditionalSurface("second window", { width: 800, height: 600 });
+      const persist = () => writePersistentStateFile(stateDir, "state.json", core.getPersistentState());
+      const beforeDiscovery = discoveryStarts;
+      const client = new ServerConnection({
+        configuredAddress: name === "one" ? allocator.address.url : undefined,
+        clientId, core, persist, discovery: discover(),
+      });
+      clients.push(client);
+      // Publisher and DNS-SD may settle over more than one bounded refresh.
+      for (let attempt = 0; ; attempt++) {
+        try { await client.synchronize(); break; }
+        catch (error) { if (attempt >= 5) throw error; }
+      }
+      if (name === "one") assert.equal(discoveryStarts, beforeDiscovery);
+      else assert.ok(discoveryStarts > beforeDiscovery);
+      fixtures.push({ stateDir, clientId, core, surface, persist });
+    }
+    reader = new PublicControllerWireClient(allocator.address.url);
+    await reader.connect();
+    const topology = async () => {
+      const response = await reader!.request("fleet.topology");
+      assert.equal(response.ok, true);
+      return response.payload as { clients: Array<{ clientId: string; surfaces: Array<{ windowLabel: string; panes: Array<{ paneAddress: string }> }> }> };
+    };
+    const first = await topology();
+    assert.equal(first.clients.length, 2);
+    assert.deepEqual(first.clients.flatMap((client) => client.surfaces.map((surface) => surface.panes[0].paneAddress)).sort(), ["a1", "b1", "c1"]);
+    for (const fixture of fixtures) {
+      const stored = JSON.parse(await readFile(join(fixture.stateDir, "state.json"), "utf8"));
+      for (const surface of stored.surfaces) assert.equal(surface.windowLabel, fixture.core.getSurface(surface.surfaceId).windowLabel);
+    }
+    const before = await allocator.diagnostics();
+    await clients[1].stop();
+    const restoredIdentity = await loadOrCreateIdentity(fixtures[0].stateDir);
+    assert.equal(registrationClientId(restoredIdentity.publicKeyPem), fixtures[0].clientId);
+    const reconnect = new ServerConnection({
+      configuredAddress: "ws://127.0.0.1:1",
+      clientId: fixtures[0].clientId, core: fixtures[0].core, persist: fixtures[0].persist,
+      discovery: discover(), requestTimeoutMs: 500,
+    });
+    clients.push(reconnect);
+    await reconnect.synchronize();
+    await reconnect.synchronize();
+    assert.deepEqual(await topology(), first);
+    assert.equal((await allocator.diagnostics()).assignmentCount, before.assignmentCount);
+    assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
+    await Promise.all([reconnect.synchronize(), clients[2].synchronize()]);
+    assert.deepEqual(await topology(), first);
+    const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
+    assert.equal(rejected.ok, false);
+    assert.deepEqual(await topology(), first);
+  } finally {
+    for (const client of clients) await client.stop();
+    await reader?.close();
+    for (const browser of browsers) await browser.stop();
+    await central?.close();
     await cluster.stop();
   }
 });

@@ -20,10 +20,11 @@ export class ConfiguredServerRegistration {
     private readonly core: SurfaceCore,
     private readonly persist: () => Promise<void>,
     private readonly onError: (error: unknown) => void = () => undefined,
+    requestTimeoutMs = 10_000,
   ) {
     const url = new URL(address);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("server address must use ws or wss");
-    this.wire = new PublicControllerWireClient(url.toString());
+    this.wire = new PublicControllerWireClient(url.toString(), requestTimeoutMs);
   }
 
   async synchronize(): Promise<void> {

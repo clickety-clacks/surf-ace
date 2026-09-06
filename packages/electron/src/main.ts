@@ -1,3 +1,4 @@
+import { ServerConnection } from "./server-connection.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -17,7 +18,7 @@ import {
 } from "electron";
 
 import type { ContentSetRequest, RuntimeAppBindingDiagnostics, Stroke } from "../../protocol/src/index.js";
-import { ConfiguredServerRegistration, registrationClientId } from "./configured-server.js";
+import { registrationClientId } from "./configured-server.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
 import {
   CLIENT_FLIGHT_RECORDER_LOG_PATH,
@@ -172,7 +173,7 @@ const nativeOverlaySnapshots = new Map<string, {
 }>();
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
-let configuredRegistration: ConfiguredServerRegistration | null = null;
+let configuredRegistration: ServerConnection | null = null;
 let advertiserTxtRefreshTimer: NodeJS.Timeout | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -1805,29 +1806,14 @@ async function boot(): Promise<void> {
   await acknowledgeCompositorMainAppBinding();
 
   const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
-  if (configuredAddress) {
-    configuredRegistration = new ConfiguredServerRegistration(
-      configuredAddress, registrationClientId(identity.publicKeyPem), core,
-      persistState,
-      (error) => clientWarn("configured_server_registration_failed", errorDiagnosticFields(error)),
-    );
-    configuredRegistration.start();
-  }
-
-  if (!configuredAddress && !advertisingDisabled()) {
-    advertiser = new BonjourAdvertiser({
-      name: `${endpointName()} (${shortHostName()})`,
-      port: serverStart.port,
-      txtProvider: () => server.advertisedTxt(identityFingerprint),
-    });
-    advertiser.start();
-    clientInfo("bonjour_advertising_start", {
-      endpoint_name: endpointName(),
-      port: serverStart.port,
-    });
-  } else {
-    clientInfo("bonjour_advertising_disabled");
-  }
+  configuredRegistration = new ServerConnection({
+    configuredAddress,
+    clientId: registrationClientId(identity.publicKeyPem),
+    core,
+    persist: persistState,
+    onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
+  });
+  configuredRegistration.start();
 
   const surfacesToOpen = core.listSurfaces();
   for (const surface of surfacesToOpen) {
