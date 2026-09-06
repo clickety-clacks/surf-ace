@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -11,6 +11,15 @@ import pg from "pg";
 import WebSocket from "ws";
 
 import { PublicControllerWireClient } from "../../controller/src/wire.js";
+import { SurfaceCore } from "../../electron/src/surface-core.js";
+import { SurfaceWsServer } from "../../electron/src/ws-server.js";
+import { BonjourAdvertiser } from "../../electron/src/bonjour-advertiser.js";
+import { OpenClawLocklessController } from "../../extension/src/openclaw-lockless-controller.js";
+import {
+  createBonjourSurfAceDiscoveryService,
+  type SurfAceDiscoveryService,
+} from "../../extension/src/surf-ace-discovery.js";
+
 
 import {
   AllocatorError,
@@ -647,6 +656,115 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
     });
   } finally {
     if (server) await server.close().catch(() => undefined);
+    await cluster.stop();
+  }
+});
+
+test("Bonjour discovers two allocator-labelled clients and reads whole-fleet topology", { timeout: 90_000 }, async (t) => {
+  const cluster = await startCluster();
+  const prefix = `surf-ace-fixture-${randomUUID()}`;
+  const allocatorId = "alloc_discovery-test";
+  const servers: SurfaceWsServer[] = [];
+  const publishers: BonjourAdvertiser[] = [];
+  const wires: PublicControllerWireClient[] = [];
+  const expected = new Map<string, string>();
+  const discovery = createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
+  // Only admit this test's advertisements. Endpoint host/port/path still come
+  // exclusively from the production Bonjour browser, never from the fixture.
+  const select = () => discovery.getSnapshot().filter((endpoint) =>
+    endpoint.instanceName.startsWith(prefix));
+  const isolatedDiscovery: SurfAceDiscoveryService = {
+    getSnapshot: select,
+    refreshNow: () => discovery.refreshNow(),
+    start: () => discovery.start(),
+    stop: () => discovery.stop(),
+    subscribe: (listener) => discovery.subscribe(() => listener(select())),
+  };
+  const controller = new OpenClawLocklessController({
+    discovery: isolatedDiscovery,
+    stateDir: join(cluster.root, "controller"),
+  });
+  let allocator: AllocatorServer | null = null;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, allocatorId);
+    await recovery.release();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    await controller.start();
+    assert.deepEqual(await controller.listScreens(), []);
+
+    for (const character of ["e", "f"]) {
+      const core = new SurfaceCore();
+      const name = `${prefix}-${character}`;
+      const viewport = { height: 800, scale: 1, width: 1200 };
+      const surface = core.ensurePrimarySurface(name, viewport);
+      const wire = new PublicControllerWireClient(allocator.address.url);
+      wires.push(wire);
+      const assignment = await wire.connectAllocatorSurface({
+        ...identity(character),
+        expectedAllocatorId: allocatorId,
+        fleetId: cluster.config.fleetId,
+        surfaceId: surface.surfaceId,
+      });
+      // This increment consumes the connection helper through the existing
+      // client projection seam. Automatic app binding is a separate increment.
+      core.applyWindowLabelOnly(surface.surfaceId, assignment.windowLabel);
+      expected.set(surface.surfaceId, assignment.windowLabel);
+      const port = await freePort();
+      const server = new SurfaceWsServer({
+        bindAddress: "0.0.0.0",
+        capturePaneImage: async () => null,
+        compositorSocketPath: null,
+        core,
+        endpointName: name,
+        hostName: "localhost",
+        port,
+        viewport: () => viewport,
+      });
+      servers.push(server);
+      await server.start();
+      const publisher = new BonjourAdvertiser({
+        name,
+        port,
+        txtProvider: () => ({
+          v: "1", cap: "31", name, pk: character.repeat(16),
+          ws: server.wsPath, w: "1200", h: "800", s: "1", busy: "0",
+        }),
+      });
+      publishers.push(publisher);
+      publisher.start();
+    }
+    const deadline = Date.now() + 25_000;
+    while (select().length !== 2 && Date.now() < deadline) {
+      await discovery.refreshNow();
+    }
+    assert.equal(select().length, 2, "both real Bonjour advertisements must resolve");
+    const screens = await controller.listScreens();
+    assert.equal(screens.length, 2);
+    assert.equal(new Set(screens.map((screen) => screen.endpointId)).size, 2);
+    assert.equal(new Set(screens.map((screen) => screen.windowLabel)).size, 2);
+    const addresses: string[] = [];
+    for (const screen of screens) {
+      assert.equal(screen.windowLabel, expected.get(screen.fingerprint));
+      assert.ok(screen.topology);
+      assert.ok(screen.panes.length > 0);
+      for (const pane of screen.panes) {
+        assert.equal(pane.paneAddress, `${screen.windowLabel}${pane.paneLabel}`);
+        assert.equal(pane.displayId, pane.paneAddress);
+        addresses.push(pane.paneAddress);
+      }
+    }
+    assert.equal(new Set(addresses).size, addresses.length);
+    t.diagnostic(JSON.stringify({ discovered: select().map(({ endpointId }) => endpointId),
+      topology: screens.map(({ fingerprint, windowLabel, topology, panes }) => ({
+        fingerprint, windowLabel, topology,
+        panes: panes.map(({ paneId, paneAddress }) => ({ paneId, paneAddress })),
+      })) }));
+  } finally {
+    await controller.stop();
+    await Promise.all(publishers.map((publisher) => publisher.stop()));
+    await Promise.all(servers.map((server) => server.stop()));
+    await Promise.all(wires.map((wire) => wire.close()));
+    if (allocator) await allocator.close();
     await cluster.stop();
   }
 });

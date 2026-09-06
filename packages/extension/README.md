@@ -57,3 +57,34 @@ Direct compositor calls, `native_pane.host`, disabled demo fixtures, fake WS ser
 ## File-Backed Content Pushes
 
 When `surf_ace_push` receives `sourcePath`, the provider reads that file before sending the pane mutation and stores/sends those bytes as the pane content. Placeholder `content` is not proof of rendered bytes; `surf_ace_read` and `surf_ace_capture_pane` should reflect the materialized source content for the same fingerprint and pane id.
+
+## Discovery and fleet topology increment
+
+The controller discovers advertised surface clients through the existing
+`_surf-ace._tcp` browser. After `start()`, `listScreens()` waits for queued
+discovery reconciliation and returns the combined window/pane topology.
+Window labels come from the existing topology response; pane addresses combine
+that label with the client-local pane label, such as `a1` and `b1`.
+An unfiltered `surf_ace_list` with no surfaces returns the empty array and the
+text “No surfaces discovered.” Connection errors retain their existing behavior.
+
+Run the focused executable proof from the repository root after building the
+protocol and controller packages:
+
+```sh
+pnpm --filter @surf-ace/allocator exec node --import tsx --test --test-name-pattern="Bonjour discovers" src/postgres.integration.test.ts
+```
+
+This requires the existing PostgreSQL 16 binaries used by the allocator tests
+and working local Bonjour discovery. The test creates a disposable PostgreSQL
+primary/witness, obtains labels through `connectAllocatorSurface`, projects
+them through `applyWindowLabelOnly`, and advertises two real surface WebSocket
+servers. Only advertisements with the fixture's unique name prefix are admitted;
+the controller receives no manually supplied surface endpoint. It verifies an
+empty initial topology, two discovered clients, distinct window labels and pane
+addresses, and nonempty topology, then stops its servers/publishers and removes
+its temporary bases.
+
+This is focused connection/discovery proof. Automatic app allocator binding,
+installed OpenClaw tool admission, rendered GUI topology, and soak readiness are
+separate increments; this fixture does not establish them.

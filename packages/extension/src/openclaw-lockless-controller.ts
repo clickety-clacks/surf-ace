@@ -185,6 +185,7 @@ export class OpenClawLocklessController {
   }
 
   async listScreens(): Promise<SurfAceScreenSummary[]> {
+    await this.reconcileWork;
     await Promise.all(
       [...this.endpoints.values()].map(async (endpoint) => {
         endpoint.screens = await this.loadScreens(endpoint);
@@ -969,6 +970,10 @@ export class OpenClawLocklessController {
           { surfaceId },
         ),
       );
+      const windowLabel = stringValue(
+        asRecord(panePayload.topology).windowLabel,
+        stringValue(surface.windowLabel),
+      );
       const panes = Array.isArray(panePayload.panes)
         ? panePayload.panes.map((paneValue) => {
           const pane = asRecord(paneValue);
@@ -984,7 +989,7 @@ export class OpenClawLocklessController {
               : null,
             displayId: stringValue(
               pane.displayId,
-              `${surfaceId}:${paneId}`,
+              windowLabel && paneLabel > 0 ? `${windowLabel}${paneLabel}` : "",
             ),
             historySummary: {
               backCount: numberValue(pane.backCount),
@@ -996,7 +1001,7 @@ export class OpenClawLocklessController {
             name: typeof pane.name === "string" ? pane.name : null,
             paneAddress: stringValue(
               pane.paneAddress,
-              `${surfaceId}:${paneId}`,
+              windowLabel && paneLabel > 0 ? `${windowLabel}${paneLabel}` : "",
             ),
             paneId,
             paneLabel,
@@ -1033,7 +1038,7 @@ export class OpenClawLocklessController {
           asRecord(panePayload.topology).topologyRevision,
         ),
         viewport: asRecord(surface.viewport) as never,
-        windowLabel: stringValue(surface.windowLabel),
+        windowLabel,
       });
     }
     return screens;

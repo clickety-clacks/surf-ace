@@ -922,18 +922,18 @@ test("surface core renders the visible pane label separately from paneId", () =>
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.panes[0]?.paneId, 7);
   assert.equal(windowState.panes[0]?.label, "41");
-  assert.equal(windowState.panes[0]?.displayId, "41");
-  assert.equal(windowState.panes[0]?.visibleAddress, "41");
+  assert.equal(windowState.panes[0]?.displayId, "a41");
+  assert.equal(windowState.panes[0]?.visibleAddress, "a41");
 
   core.paneRename(surface.surfaceId, 7, "Notes");
   const renamedState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(renamedState.panes[0]?.name, "Notes");
   assert.equal(renamedState.panes[0]?.label, "41");
-  assert.equal(renamedState.panes[0]?.displayId, "41");
-  assert.equal(renamedState.panes[0]?.visibleAddress, "41");
+  assert.equal(renamedState.panes[0]?.displayId, "a41");
+  assert.equal(renamedState.panes[0]?.visibleAddress, "a41");
 });
 
-test("surface core never projects window-letter composites as pane display ids", () => {
+test("surface core projects window and pane labels as the visible pane address", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -950,12 +950,12 @@ test("surface core never projects window-letter composites as pane display ids",
 
   const pane = core.getRendererWindowState(surface.surfaceId).panes[0];
   assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "e");
-  assert.equal(pane?.displayId, "16");
-  assert.equal(pane?.visibleAddress, "16");
-  assert.notEqual(pane?.displayId, "e16");
+  assert.equal(pane?.displayId, "e16");
+  assert.equal(pane?.visibleAddress, "e16");
+  assert.notEqual(pane?.displayId, "16");
   assert.notEqual(pane?.displayId, "e1");
   assert.notEqual(pane?.displayId, "b13");
-  assert.doesNotMatch(pane?.displayId ?? "", /^[a-z]+\d+$/i);
+  assert.match(pane?.displayId ?? "", /^[a-z]+\d+$/i);
 });
 
 test("same pane id, different initial pane label - Electron bootstrap enforces provider label", () => {

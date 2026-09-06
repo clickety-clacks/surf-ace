@@ -66,16 +66,23 @@ const plugin = {
                   clawlineChatNames: { openClawStateDir },
                 },
               );
+              const result = await tool.execute(params as never, resolvedToolContext);
+              const noSurfaces = tool.name === "surf_ace_list" &&
+                Array.isArray(result) && result.length === 0 &&
+                Object.keys((params ?? {}) as object).length === 0;
               return {
                 content: [
                   {
                     type: "text" as const,
                     text: JSON.stringify(
-                      await tool.execute(params as never, resolvedToolContext),
+                      result,
                       null,
                       2,
                     ),
                   },
+                  ...(noSurfaces
+                    ? [{ type: "text" as const, text: "No surfaces discovered." }]
+                    : []),
                 ],
               };
             },

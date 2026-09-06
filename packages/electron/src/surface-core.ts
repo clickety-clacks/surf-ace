@@ -350,8 +350,7 @@ export function assertValidWindowLabel(windowLabel: unknown): asserts windowLabe
 }
 
 function visiblePaneAddress(windowLabel: string, paneLabel: number): string {
-  void windowLabel;
-  return paneLabel > 0 ? String(paneLabel) : "";
+  return windowLabel && paneLabel > 0 ? `${windowLabel}${paneLabel}` : "";
 }
 
 function alphabeticLabel(ordinal: number): string {
