@@ -8,7 +8,7 @@ The server derives its stable authority key from its existing allocator identity
 
 The Electron lifecycle registers every two seconds, applies returned window labels as a validated atomic set through SurfaceCore projection, and uses the existing guarded persistence path. A configured client suppresses the previous surface Bonjour advertisement. The following fallback increment now browses central-server advertisements without configuration; see SERVER-FALLBACK.md.
 
-This document records the configured registration increment. SERVER-FALLBACK.md describes the subsequent server advertisement/discovery and failure fallback implementation; recovery preference remains a subsequent increment. The old provider-browses-surfaces path is not claimed as the new architecture. No GUI launch, installed runtime, deployment, live LAN/MagicDNS/Tailscale or soak readiness is asserted by isolated network tests.
+This document records the configured registration increment. SERVER-FALLBACK.md describes the subsequent server advertisement/discovery and failure fallback implementation; configured-route recovery is now covered there as well. The old provider-browses-surfaces path is not claimed as the new architecture. No GUI launch, installed runtime, deployment, live LAN/MagicDNS/Tailscale or soak readiness is asserted by isolated network tests.
 
 Run focused real TCP registration evidence from the repository root:
 

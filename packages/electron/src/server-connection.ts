@@ -7,6 +7,7 @@ import type { SurfaceCore } from "./surface-core.js";
 
 export class ServerConnection {
   private selected: ConfiguredServerRegistration | null = null;
+  private selectedConfigured = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private browsing = false;
@@ -28,11 +29,7 @@ export class ServerConnection {
   synchronize(): Promise<void> {
     const run = this.pending.then(async () => {
       if (this.stopped) return;
-      if (this.selected) {
-        try { await this.selected.synchronize(); return; }
-        catch { await this.selected.stop(); this.selected = null; }
-      }
-      const tryAddress = async (address: string): Promise<boolean> => {
+      const tryAddress = async (address: string, configured = false): Promise<boolean> => {
         let candidate: ConfiguredServerRegistration | null = null;
         try {
           candidate = new ConfiguredServerRegistration(
@@ -41,14 +38,31 @@ export class ServerConnection {
           );
           await candidate.synchronize();
           if (this.stopped) { await candidate.stop(); return false; }
+          const previous = this.selected;
           this.selected = candidate;
+          this.selectedConfigured = configured;
+          await previous?.stop();
           return true;
         } catch {
           await candidate?.stop();
           return false;
         }
       };
-      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress)) {
+      if (this.selected) {
+        try {
+          await this.selected.synchronize();
+        } catch {
+          await this.selected.stop();
+          this.selected = null;
+        }
+        if (this.selected) {
+          if (!this.selectedConfigured && this.options.configuredAddress) {
+            await tryAddress(this.options.configuredAddress, true);
+          }
+          return;
+        }
+      }
+      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress, true)) {
         if (this.browsing) {
           await this.discovery.stop();
           this.browsing = false;

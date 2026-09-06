@@ -3,7 +3,7 @@ import { startCentralServer } from "../../electron/src/central-server.js";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer, createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { execFile as execFileCallback } from "node:child_process";
@@ -902,6 +902,21 @@ test("configured-first server Bonjour fallback registers and persists clients", 
   const prefix = "surf-ace-server-fixture-" + randomUUID();
   const browsers: SurfAceDiscoveryService[] = [];
   let discoveryStarts = 0;
+  let allowConfigured = true;
+  let configuredAccepts = 0;
+  const routeSockets = new Set<Socket>();
+  const route = createServer((socket) => {
+    if (!allowConfigured || !allocator) { socket.destroy(); return; }
+    configuredAccepts++;
+    const upstream = createConnection({ host: "127.0.0.1", port: allocator.address.port });
+    routeSockets.add(socket);
+    routeSockets.add(upstream);
+    socket.on("error", () => upstream.destroy());
+    upstream.on("error", () => socket.destroy());
+    socket.on("close", () => { routeSockets.delete(socket); upstream.destroy(); });
+    upstream.on("close", () => { routeSockets.delete(upstream); socket.destroy(); });
+    socket.pipe(upstream).pipe(socket);
+  });
   const discover = (): SurfAceDiscoveryService => {
     const service = createBonjourSurfAceDiscoveryService({ timeoutMs: 2000 });
     browsers.push(service);
@@ -926,6 +941,10 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     await missing.stop();
     central = await startCentralServer({ ...serverConfig(cluster), listenHost: "0.0.0.0" }, prefix);
     allocator = central.server;
+    await new Promise<void>((resolve) => route.listen(0, "127.0.0.1", resolve));
+    const routeAddress = route.address();
+    assert.ok(routeAddress && typeof routeAddress !== "string");
+    const configuredUrl = `ws://127.0.0.1:${routeAddress.port}`;
     const fixtures = [];
     for (const name of ["one", "two"]) {
       const stateDir = join(cluster.root, name);
@@ -938,7 +957,7 @@ test("configured-first server Bonjour fallback registers and persists clients", 
       const persist = () => writePersistentStateFile(stateDir, "state.json", core.getPersistentState());
       const beforeDiscovery = discoveryStarts;
       const client = new ServerConnection({
-        configuredAddress: name === "one" ? allocator.address.url : undefined,
+        configuredAddress: name === "one" ? configuredUrl : undefined,
         clientId, core, persist, discovery: discover(),
       });
       clients.push(client);
@@ -969,9 +988,16 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     await clients[1].stop();
     const restoredIdentity = await loadOrCreateIdentity(fixtures[0].stateDir);
     assert.equal(registrationClientId(restoredIdentity.publicKeyPem), fixtures[0].clientId);
+    allowConfigured = false;
+    let rejectRecoveryPersistence = false;
+    let recoveryWrites = 0;
     const reconnect = new ServerConnection({
-      configuredAddress: "ws://127.0.0.1:1",
-      clientId: fixtures[0].clientId, core: fixtures[0].core, persist: fixtures[0].persist,
+      configuredAddress: configuredUrl,
+      clientId: fixtures[0].clientId, core: fixtures[0].core,
+      persist: async () => {
+        if (rejectRecoveryPersistence && ++recoveryWrites === 2) throw new Error("recovery_persist_failed");
+        await fixtures[0].persist();
+      },
       discovery: discover(), requestTimeoutMs: 500,
     });
     clients.push(reconnect);
@@ -982,12 +1008,50 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
     await Promise.all([reconnect.synchronize(), clients[2].synchronize()]);
     assert.deepEqual(await topology(), first);
+    const initialAccepts = configuredAccepts;
+    // Failed probes leave healthy fallback usable and do not consume labels.
+    await reconnect.synchronize();
+    assert.equal(configuredAccepts, initialAccepts);
+    assert.deepEqual(await topology(), first);
+    allowConfigured = true;
+    rejectRecoveryPersistence = true;
+    recoveryWrites = 0;
+    await reconnect.synchronize();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(routeSockets.size, 0, "failed persistence does not promote the configured route");
+    assert.deepEqual(await topology(), first);
+    rejectRecoveryPersistence = false;
+    allowConfigured = false;
+    await reconnect.synchronize();
+    assert.deepEqual(await topology(), first);
+    for (let cycle = 0; cycle < 2; cycle++) {
+      allowConfigured = true;
+      await reconnect.synchronize();
+      assert.ok(configuredAccepts > initialAccepts);
+      const promotedAccepts = configuredAccepts;
+      await reconnect.synchronize();
+      assert.equal(configuredAccepts, promotedAccepts, "healthy configured socket is reused");
+      assert.deepEqual(await topology(), first);
+      assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
+      allowConfigured = false;
+      for (const socket of routeSockets) socket.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await reconnect.synchronize();
+      assert.deepEqual(await topology(), first);
+    }
+    allowConfigured = true;
+    await reconnect.synchronize();
+    await reconnect.stop();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(routeSockets.size, 0, "shutdown closes configured route sockets");
     const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
     assert.equal(rejected.ok, false);
     assert.deepEqual(await topology(), first);
   } finally {
     for (const client of clients) await client.stop();
     await reader?.close();
+    for (const socket of routeSockets) socket.destroy();
+    await new Promise<void>((resolve) => route.close(() => resolve()));
     for (const browser of browsers) await browser.stop();
     await central?.close();
     await cluster.stop();
