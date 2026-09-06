@@ -44,10 +44,12 @@ export class ConfiguredServerRegistration {
       if (!response.ok) throw new Error(response.error?.message ?? "registration_failed");
       const payload = response.payload as { clientId: string; surfaces: Array<{ surfaceId: string; windowLabel: string }> };
       if (payload.clientId !== this.clientId || !Array.isArray(payload.surfaces)) throw new Error("invalid_registration_response");
-      await this.core.transactionAsync(async () => {
-        this.core.applyWindowLabels(payload.surfaces);
-        await this.persist();
-      });
+      await this.core.locklessAuthority.transactionAsync(() =>
+        this.core.transactionAsync(async () => {
+          this.core.applyWindowLabels(payload.surfaces);
+          await this.persist();
+        }),
+      );
     });
     this.pending = run.catch(() => undefined);
     return run;

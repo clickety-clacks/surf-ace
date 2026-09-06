@@ -991,11 +991,18 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     allowConfigured = false;
     let rejectRecoveryPersistence = false;
     let recoveryWrites = 0;
+    let recoveryPersistenceEntered = () => {};
+    let releaseRecoveryPersistence = () => {};
+    let heldRecoveryPersistence: Promise<void> = Promise.resolve();
     const reconnect = new ServerConnection({
       configuredAddress: configuredUrl,
       clientId: fixtures[0].clientId, core: fixtures[0].core,
       persist: async () => {
-        if (rejectRecoveryPersistence && ++recoveryWrites === 2) throw new Error("recovery_persist_failed");
+        if (rejectRecoveryPersistence && ++recoveryWrites === 2) {
+          recoveryPersistenceEntered();
+          await heldRecoveryPersistence;
+          throw new Error("recovery_persist_failed");
+        }
         await fixtures[0].persist();
       },
       discovery: discover(), requestTimeoutMs: 500,
@@ -1016,7 +1023,29 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     allowConfigured = true;
     rejectRecoveryPersistence = true;
     recoveryWrites = 0;
-    await reconnect.synchronize();
+    const persistenceEntered = new Promise<void>((resolve) => { recoveryPersistenceEntered = resolve; });
+    heldRecoveryPersistence = new Promise<void>((resolve) => { releaseRecoveryPersistence = resolve; });
+    const recovering = reconnect.synchronize();
+    await persistenceEntered;
+    const mutationCore = fixtures[0].core;
+    const mutationSurfaceId = fixtures[0].surface.surfaceId;
+    const mutationPaneId = [...mutationCore.getSurface(mutationSurfaceId).panes.keys()][0];
+    let mutationEntered = false;
+    const concurrentMutation = mutationCore.locklessAuthority.transactionAsync(() =>
+      mutationCore.transactionAsync(async () => {
+        mutationEntered = true;
+        mutationCore.paneRename(mutationSurfaceId, mutationPaneId, "concurrent-accepted-name");
+        await fixtures[0].persist();
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const enteredBeforeRollback = mutationEntered;
+    releaseRecoveryPersistence();
+    await Promise.all([recovering, concurrentMutation]);
+    assert.equal(enteredBeforeRollback, false, "accepted mutation serializes after recovery rollback");
+    assert.equal(mutationCore.getSurface(mutationSurfaceId).panes.get(mutationPaneId)!.name, "concurrent-accepted-name");
+    const acceptedDisk = JSON.parse(await readFile(join(fixtures[0].stateDir, "state.json"), "utf8"));
+    assert.match(JSON.stringify(acceptedDisk), /concurrent-accepted-name/);
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(routeSockets.size, 0, "failed persistence does not promote the configured route");
     assert.deepEqual(await topology(), first);
