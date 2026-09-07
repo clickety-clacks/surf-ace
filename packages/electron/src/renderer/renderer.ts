@@ -2614,7 +2614,7 @@ function renderBrowserContent(
         webContentsId: browserUrlWebContentsId(browserView),
       });
       reportBrowserUrlDiagnostics(view, browserView, "did-attach");
-      applyBrowserContentScale(view, browserView);
+      // Guest scale initialization runs from dom-ready, when guest methods are available.
     },
   );
   browserView.addEventListener(

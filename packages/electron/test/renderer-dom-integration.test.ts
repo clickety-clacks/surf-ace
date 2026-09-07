@@ -476,4 +476,43 @@ test("renderer DOM integrates authoritative connection states and live scale con
       ?.getAttribute("aria-label"),
     "Forward",
   );
+  await test("webview scaling waits for dom-ready across attach and navigation", async () => {
+    for (const revision of [20, 21]) {
+      const next = state("connected");
+      Object.assign(next.panes[0]!.content, {
+        content: { html: "<html><body>ready</body></html>" },
+        contentType: "html",
+        contentId: "webview-" + revision,
+        renderVersion: revision,
+        revision,
+      });
+      stateListener!(next);
+      const webview = document.querySelector("webview") as HTMLElement & {
+        executeJavaScript: (script: string) => Promise<unknown>;
+      };
+      assert.ok(webview);
+      let ready = false;
+      const scripts: string[] = [];
+      webview.executeJavaScript = (script) => {
+        if (!ready) throw new Error("guest called before dom-ready");
+        scripts.push(script);
+        return Promise.resolve(null);
+      };
+      assert.doesNotThrow(() => webview.dispatchEvent(new window.Event("did-attach")));
+      assert.doesNotThrow(() => webview.dispatchEvent(new window.Event("did-attach")));
+      assert.equal(scripts.length, 0);
+      ready = true;
+      webview.dispatchEvent(new window.Event("dom-ready"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.ok(scripts.some((script) => script.includes("document.documentElement.style.zoom")),
+        "scale initialization still runs after dom-ready");
+      const firstScales = scripts.filter((script) => script.includes("document.documentElement.style.zoom")).length;
+      webview.dispatchEvent(new window.Event("did-start-loading"));
+      webview.dispatchEvent(new window.Event("dom-ready"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.ok(scripts.filter((script) => script.includes("document.documentElement.style.zoom")).length > firstScales,
+        "navigation reapplies scale after the next dom-ready");
+    }
+  });
+
 });

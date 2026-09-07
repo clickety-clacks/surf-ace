@@ -435,7 +435,6 @@ test("html and browser_url content scale through guest document zoom", async () 
   assert.match(source.slice(scaleIndex, renderBrowserIndex), /WEB_CONTENT_BASE_SCALE \* view\.scale/);
   assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.documentElement\.style\.zoom = scale === 1 \? "" : String\(scale\)/);
   assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.body\?\.style\.setProperty\("--surf-ace-content-scale", String\(scale\)\)/);
-  assert.match(source.slice(renderBrowserIndex, renderPaneIndex), /reportBrowserUrlDiagnostics\(view, browserView, "did-attach"\);[\s\S]*applyBrowserContentScale\(view, browserView\)/);
   assert.match(source.slice(renderBrowserIndex, renderPaneIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\);[\s\S]*applyBrowserContentScale\(view, browserView\)/);
 });
 
