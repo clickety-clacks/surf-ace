@@ -1787,7 +1787,6 @@ export class SurfaceWsServer {
       if (surfaceId) {
         const socketMeta = this.socketMeta.get(socket);
         if (socketMeta) socketMeta.pairedSurfaceId = surfaceId;
-        this.core.setConnectionBar(surfaceId, "connected");
       }
       const admittedScopeIds = surfaceId
         ? [
@@ -5034,21 +5033,6 @@ export class SurfaceWsServer {
         );
         await this.persistLocklessState();
       }).catch(() => {});
-      if (
-        locklessSession.surfaceId &&
-        this.core.listSurfaces().some(
-          (surface) => surface.surfaceId === locklessSession.surfaceId,
-        )
-      ) {
-        this.core.setConnectionBar(
-          locklessSession.surfaceId,
-          [...this.locklessSessions.values()].some(
-            (session) => session.surfaceId === locklessSession.surfaceId,
-          )
-            ? "connected"
-            : "disconnected",
-        );
-      }
       return;
     }
   }

@@ -3493,3 +3493,33 @@ test("real-import unknown-outcome: pair.request gets exactly one bounded envelop
     await server.stop();
   }
 });
+
+test("direct controller admission and closure never determine central connection status", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Direct", { width: 800, height: 600, scale: 1 });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null, compositorSocketPath: null, core,
+    endpointName: "Direct", hostName: "localhost", port,
+    viewport: () => ({ width: 800, height: 600, scale: 1 }),
+  });
+  await server.start();
+  try {
+    for (const status of ["disconnected", "connecting", "connected"] as const) {
+      core.setConnectionBar(surface.surfaceId, status);
+      const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+      try {
+        assert.equal((await pair(socket, `direct-${status}`, surface.surfaceId)).ok, true);
+        assert.equal(core.getRendererWindowState(surface.surfaceId).connectionBar, status);
+      } finally {
+        const closed = new Promise<void>((resolve) => socket.once("close", resolve));
+        socket.close();
+        await closed;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(core.getRendererWindowState(surface.surfaceId).connectionBar, status);
+    }
+  } finally {
+    await server.stop();
+  }
+});

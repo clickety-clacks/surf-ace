@@ -8,6 +8,7 @@ import type { SurfaceCore } from "./surface-core.js";
 export class ServerConnection {
   private selected: ConfiguredServerRegistration | null = null;
   private selectedConfigured = false;
+  private status: "connected" | "connecting" | "disconnected" = "disconnected";
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private browsing = false;
@@ -26,9 +27,17 @@ export class ServerConnection {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
   }
 
+  private setStatus(status: "connected" | "connecting" | "disconnected"): void {
+    this.status = status;
+    for (const surface of this.options.core.listSurfaces()) {
+      this.options.core.setConnectionBar(surface.surfaceId, status);
+    }
+  }
+
   synchronize(): Promise<void> {
     const run = this.pending.then(async () => {
       if (this.stopped) return;
+      if (!this.selected || this.status !== "connected") this.setStatus("connecting");
       let resolutionFailed = false;
       const tryAddress = async (address: string, configured = false): Promise<boolean> => {
         resolutionFailed = false;
@@ -38,11 +47,15 @@ export class ServerConnection {
             address, this.options.clientId, this.options.core, this.options.persist,
             this.options.onError, this.options.requestTimeoutMs ?? 2000,
           );
+          candidate.onClose(() => {
+            if (this.selected === candidate) this.setStatus("disconnected");
+          });
           await candidate.synchronize();
           if (this.stopped) { await candidate.stop(); return false; }
           const previous = this.selected;
           this.selected = candidate;
           this.selectedConfigured = configured;
+          this.setStatus("connected");
           await previous?.stop();
           return true;
         } catch (error) {
@@ -55,9 +68,12 @@ export class ServerConnection {
       if (this.selected) {
         try {
           await this.selected.synchronize();
+          if (this.stopped) return;
+          this.setStatus("connected");
         } catch {
           await this.selected.stop();
           this.selected = null;
+          this.setStatus("connecting");
         }
         if (this.selected) {
           if (!this.selectedConfigured && this.options.configuredAddress) {
@@ -99,9 +115,10 @@ export class ServerConnection {
           return;
         }
       }
+      this.setStatus("disconnected");
       throw new Error("no_surf_ace_server");
     });
-    this.pending = run.catch(() => undefined);
+    this.pending = run.catch(() => { if (!this.selected) this.setStatus("disconnected"); });
     return run;
   }
 
@@ -119,5 +136,6 @@ export class ServerConnection {
     await this.pending;
     await this.selected?.stop();
     await this.discovery.stop();
+    this.setStatus("disconnected");
   }
 }

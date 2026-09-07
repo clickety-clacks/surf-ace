@@ -27,6 +27,10 @@ export class ConfiguredServerRegistration {
     this.wire = new PublicControllerWireClient(url.toString(), requestTimeoutMs);
   }
 
+  onClose(listener: () => void): () => void {
+    return this.wire.onClose(listener);
+  }
+
   async synchronize(): Promise<void> {
     const run = this.pending.then(async () => {
       if (this.stopped) return;
@@ -50,6 +54,7 @@ export class ConfiguredServerRegistration {
           await this.persist();
         }),
       );
+      if (!this.wire.isOpen()) throw new Error("controller_wire_closed");
     });
     this.pending = run.catch(() => undefined);
     return run;
