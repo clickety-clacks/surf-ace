@@ -1,4 +1,5 @@
 import bonjourServiceModule, { type Browser, type Service } from "bonjour-service";
+import { isIP } from "node:net";
 import { spawn } from "node:child_process";
 import type { SurfaceViewport } from "../../protocol/src/index.js";
 
@@ -34,6 +35,7 @@ export type SurfAceDiscoveryEndpoint = {
   protocolVersion: number;
   viewport: SurfaceViewport;
   wsPath: string;
+  transportAddresses?: string[];
 };
 
 export interface SurfAceDiscoveryService {
@@ -277,7 +279,7 @@ function serviceToEndpoint(
   if (!host) {
     return null;
   }
-  return endpointFromResolvedService({
+  const endpoint = endpointFromResolvedService({
     host,
     instanceName: service.name,
     now,
@@ -295,6 +297,8 @@ function serviceToEndpoint(
       ws: txtStr(txt, "ws") ?? "",
     },
   });
+  endpoint.transportAddresses = [...new Set((service.addresses ?? []).filter(address => isIP(address) !== 0 && !isLinkLocalIpv6Address(address)))];
+  return endpoint;
 }
 
 class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
@@ -658,7 +662,8 @@ function sameEndpoint(
     left.viewport.width === right.viewport.width &&
     left.viewport.height === right.viewport.height &&
     left.viewport.scale === right.viewport.scale &&
-    left.wsPath === right.wsPath
+    left.wsPath === right.wsPath &&
+    JSON.stringify(left.transportAddresses ?? []) === JSON.stringify(right.transportAddresses ?? [])
   );
 }
 

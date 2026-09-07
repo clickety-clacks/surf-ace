@@ -135,6 +135,7 @@ test("serviceToEndpoint prefers stable service hostname over stale numeric addre
   );
 
   assert.equal(endpoint?.host, "workstation-a.local");
+  assert.deepEqual(endpoint?.transportAddresses, ["192.168.50.183"]);
   assert.equal(endpoint?.endpointId, "workstation-a.local:19001/ws#b0ddd36d");
 });
 

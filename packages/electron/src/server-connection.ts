@@ -29,7 +29,9 @@ export class ServerConnection {
   synchronize(): Promise<void> {
     const run = this.pending.then(async () => {
       if (this.stopped) return;
+      let resolutionFailed = false;
       const tryAddress = async (address: string, configured = false): Promise<boolean> => {
+        resolutionFailed = false;
         let candidate: ConfiguredServerRegistration | null = null;
         try {
           candidate = new ConfiguredServerRegistration(
@@ -43,7 +45,9 @@ export class ServerConnection {
           this.selectedConfigured = configured;
           await previous?.stop();
           return true;
-        } catch {
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code;
+          resolutionFailed = code === "ENOTFOUND" || code === "EAI_AGAIN";
           await candidate?.stop();
           return false;
         }
@@ -79,7 +83,17 @@ export class ServerConnection {
       for (const endpoint of this.discovery.getSnapshot()) {
         if (endpoint.role !== "server") continue;
         const host = endpoint.host.includes(":") ? `[${endpoint.host}]` : endpoint.host;
-        if (await tryAddress(`ws://${host}:${endpoint.port}${endpoint.wsPath}`)) {
+        let connected = await tryAddress(`ws://${host}:${endpoint.port}${endpoint.wsPath}`);
+        if (!connected && resolutionFailed) {
+          for (const address of endpoint.transportAddresses ?? []) {
+            const transportHost = address.includes(":") ? `[${address}]` : address;
+            if (await tryAddress(`ws://${transportHost}:${endpoint.port}${endpoint.wsPath}`)) {
+              connected = true;
+              break;
+            }
+          }
+        }
+        if (connected) {
           await this.discovery.stop();
           this.browsing = false;
           return;
