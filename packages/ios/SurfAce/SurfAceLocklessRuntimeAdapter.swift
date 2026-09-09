@@ -13,14 +13,14 @@ enum SurfAceLocklessTargetAdmission {
         "surfaces.list", "panes.list", "content.set", "content.append", "content.patch",
         "content.clear", "annotations.remove", "snapshot.get", "pane.split", "pane.rename",
         "pane.close", "pane.restore", "topology.apply", "surface.window.open",
-        "surface.window.close", "surface.window.restore", "target.apply",
+        "surface.window.close", "surface.window.restore", "surface.window.label.apply", "target.apply",
         "operation.receipt.sync", "operation.receipt.ack", "consumable.sync", "consumable.ack", "heartbeat.ping",
     ]
     static let routedNetworkOperations: Set<String> = [
         "surfaces.list", "panes.list", "operation.receipt.sync", "operation.receipt.ack",
         "consumable.sync", "consumable.ack", "heartbeat.ping", "annotations.remove",
         "pane.split", "pane.rename", "pane.close", "pane.restore", "topology.apply",
-        "surface.window.open", "surface.window.close", "surface.window.restore",
+        "surface.window.open", "surface.window.close", "surface.window.restore", "surface.window.label.apply",
         "snapshot.get", "target.apply",
         "content.set", "content.append", "content.patch", "content.clear",
     ]
@@ -371,6 +371,23 @@ actor SurfAceLocklessRuntimeAdapter {
                 terminalResponse: terminalResponse,
                 targetOperationIdentity: nil
             )
+        }
+    }
+
+    func applyRegistrationLabels(
+        _ assignments: [SurfAceRegistrationAssignment],
+        expectedSurfaces: [SurfAceRegistrationSurface]
+    ) async throws -> SurfAceLocklessAuthorityState {
+        try await coordinator.transact(trigger: "central_registration") { state in
+            guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
+                  assignments.count == expectedSurfaces.count,
+                  Set(assignments.map(\.surfaceId)) == Set(expectedSurfaces.map(\.surfaceId)) else {
+                throw SurfAceRegistrationError.topologyChanged
+            }
+            try SurfAceLocklessTopologyOperations.applyWindowLabels(
+                state: &state, assignments: assignments.map { ($0.surfaceId, $0.windowLabel) }
+            )
+            return state
         }
     }
 

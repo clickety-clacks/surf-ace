@@ -2,6 +2,38 @@ import XCTest
 @testable import SurfAce
 
 final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
+    func testGlobalLabelsValidateWholeSetAndPreservePaneHistory() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        let second = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 1
+        ).surface.surfaceId
+        let original = state
+        for assignments in [
+            [(surfaceId: first, windowLabel: "A")],
+            [(surfaceId: "sf_missing", windowLabel: "z")],
+            [(surfaceId: first, windowLabel: "z"), (surfaceId: second, windowLabel: "z")]
+        ] {
+            XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.applyWindowLabels(
+                state: &state, assignments: assignments
+            ))
+            XCTAssertEqual(state, original)
+        }
+        try SurfAceLocklessTopologyOperations.applyWindowLabels(
+            state: &state,
+            assignments: [(surfaceId: first, windowLabel: "z"), (surfaceId: second, windowLabel: "aa")]
+        )
+        XCTAssertEqual(state.liveSurfaces[first]?.windowLabel, "z")
+        XCTAssertEqual(state.liveSurfaces[second]?.windowLabel, "aa")
+        XCTAssertEqual(state.liveSurfaces[first]?.panes, original.liveSurfaces[first]?.panes)
+        XCTAssertEqual(state.liveSurfaces[second]?.panes, original.liveSurfaces[second]?.panes)
+        let restored = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self,
+            from: JSONEncoder().encode(state))
+        XCTAssertEqual(restored, state)
+    }
+
     func testSameRevisionCommitsExactlyOneMutationAndReturnsCurrentTreeToLoser() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(

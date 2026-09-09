@@ -7,6 +7,12 @@ The visionOS target uses the same current lockless client model as iOS. It
 reuses the local HTTP/WebSocket runtime, Bonjour discovery, surface
 registration, topology handling, and pane geometry snapshot reporting.
 
+The client uses `SURF_ACE_SERVER` (a `ws://` or `wss://` URL) first for
+central registration, then discovers `_surf-ace._tcp` advertisements with
+`role=server`. Registration uses the persisted signing identity and stores
+allocated window labels in the lockless authority generation. Direct controller
+pairing remains on the client WebSocket endpoint.
+
 Build gates:
 
 ```bash

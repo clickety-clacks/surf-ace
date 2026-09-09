@@ -339,6 +339,7 @@ final class SurfAceRuntime {
     ) async -> Void)?
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
+    @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
@@ -350,6 +351,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var locklessAdapter: SurfAceLocklessRuntimeAdapter?
     @ObservationIgnored private var locklessConnectionsByConnectionUUID: [String: (
         controllerInstanceId: String,
+        surfaceId: String?,
         sender: SurfAceOutboundSender,
         socket: SurfAceWebSocket
     )] = [:]
@@ -467,6 +469,7 @@ final class SurfAceRuntime {
                 "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "0.0.0.0:\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
             )
             publishBonjour()
+            startCentralRegistration()
         } catch {
             let details = startupFailureMessage(for: error)
             surfAceServerRuntimeLog(
@@ -476,7 +479,37 @@ final class SurfAceRuntime {
         }
     }
 
+    private func startCentralRegistration() {
+        guard centralRegistration == nil, let identity else { return }
+        let discovery = SurfAceCentralDiscovery()
+        let address = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let registration = SurfAceCentralRegistration(
+            clientId: identity.clientId, configured: address.flatMap(URL.init(string:)),
+            discover: { await discovery.discover() },
+            transportFallbacks: { discovery.transportURLs(for: $0) },
+            snapshot: { [weak self] in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                let adapter = try self.ensureLocklessAdapter()
+                return SurfAceRegistrationSurface.snapshot(await adapter.snapshot())
+            },
+            apply: { [weak self] assignments, expected in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                let adapter = try self.ensureLocklessAdapter()
+                let state = try await adapter.applyRegistrationLabels(assignments, expectedSurfaces: expected)
+                try self.projectLocklessAuthorityState(state)
+            },
+            onError: { error in
+                surfAceServerRuntimeLog("event=central_registration_failed error=\(String(describing: error))")
+            }
+        )
+        centralRegistration = registration
+        registration.start()
+    }
+
     func stop() async {
+        centralRegistration?.stop()
+        centralRegistration = nil
         surfAceLifecycleLog(
             "event=app_stop \(surfAceDiagnosticFields([("controller_connections", locklessConnectionsByConnectionUUID.count), ("surface_count", surfaces.count)]))"
         )
@@ -1662,6 +1695,7 @@ final class SurfAceRuntime {
                             "target.apply",
                             "topology.apply",
                             "heartbeat.ping",
+                            "surface.window.label.apply",
                             "surface.window.open",
                             "surface.window.close",
                             "surface.window.restore",
@@ -1926,7 +1960,7 @@ final class SurfAceRuntime {
                 pendingAcks: resume.pendingAcks,
                 unresolvedRequestIds: resume.unresolvedRequestIds
             )
-            locklessConnectionsByConnectionUUID[connectionUUID] = (controllerInstanceId, sender, socket)
+            locklessConnectionsByConnectionUUID[connectionUUID] = (controllerInstanceId, surfaceId, sender, socket)
             let admittedState = await adapter.snapshot()
             let state = try Self.jsonObject(admittedState)
             let limits = try Self.jsonObject(admission.limits)
@@ -2024,8 +2058,15 @@ final class SurfAceRuntime {
                     throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
                 }
                 responsePayload = [
-                    "panes": try surface.panes.values.sorted { $0.paneId < $1.paneId }.map(Self.jsonObject),
+                    "panes": try surface.panes.values.sorted { $0.paneId < $1.paneId }.map { pane in
+                        guard var value = try Self.jsonObject(pane) as? [String: Any] else {
+                            throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+                        }
+                        value["paneAddress"] = "\(surface.windowLabel)\(pane.paneLabel)"
+                        return value
+                    },
                     "surfaceId": surfaceId,
+                    "windowLabel": surface.windowLabel,
                     "topologyRevision": surface.topologyRevision,
                 ]
             case "operation.receipt.sync":
@@ -2084,7 +2125,7 @@ final class SurfAceRuntime {
                     connectionUUID: connectionUUID, adapter: adapter
                 )
             case "pane.split", "pane.rename", "pane.close", "pane.restore", "topology.apply",
-                 "surface.window.open", "surface.window.close", "surface.window.restore":
+                 "surface.window.open", "surface.window.close", "surface.window.restore", "surface.window.label.apply":
                 return await handleLocklessTopologyMutation(
                     op: op,
                     id: id,
@@ -2769,6 +2810,24 @@ final class SurfAceRuntime {
                         "topology": result.topology,
                         "topologyRevision": .integer(result.topologyRevision),
                     ])
+                }
+            case "surface.window.label.apply":
+                guard let surfaceId = payload["surfaceId"] as? String,
+                      let windowLabel = payload["windowLabel"] as? String else {
+                    throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+                }
+                guard locklessConnectionsByConnectionUUID[connectionUUID]?.surfaceId == surfaceId else {
+                    throw SurfAceLocklessRuntimeAdapterError.notPaired
+                }
+                committed = try await adapter.commitMutation(
+                    connectionToken: connectionUUID, requestId: id, operation: op,
+                    consumableScopeId: Self.locklessSurfaceScopeId(surfaceId),
+                    consumableScopeKind: "surface", consumableRecordClass: .topology
+                ) { state, _ in
+                    try SurfAceLocklessTopologyOperations.applyWindowLabels(
+                        state: &state, assignments: [(surfaceId: surfaceId, windowLabel: windowLabel)]
+                    )
+                    return .object(["surfaceId": .string(surfaceId), "windowLabel": .string(windowLabel)])
                 }
             case "surface.window.open":
                 guard let expected = Self.int64(payload["expectedSurfaceSetRevision"]) else {

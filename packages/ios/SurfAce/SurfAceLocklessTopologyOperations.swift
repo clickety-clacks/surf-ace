@@ -105,6 +105,35 @@ struct SurfAceLocklessSurfaceRestoreResult: Equatable, Sendable {
 }
 
 enum SurfAceLocklessTopologyOperations {
+    // Validate the complete assignment before publishing any changed label.
+    static func applyWindowLabels(
+        state: inout SurfAceLocklessAuthorityState,
+        assignments: [(surfaceId: String, windowLabel: String)]
+    ) throws {
+        try atomically(&state) { candidate in
+            var labels: [String: String] = [:]
+            for assignment in assignments {
+                guard !assignment.windowLabel.isEmpty,
+                      assignment.windowLabel.utf8.allSatisfy({ $0 >= 97 && $0 <= 122 }),
+                      labels[assignment.surfaceId] == nil else {
+                    throw Error.invalidTopology("window_label")
+                }
+                _ = try liveSurface(candidate, assignment.surfaceId)
+                labels[assignment.surfaceId] = assignment.windowLabel
+            }
+            var used = Set<String>()
+            for surface in candidate.liveSurfaces.values {
+                let label = labels[surface.surfaceId] ?? surface.windowLabel
+                guard used.insert(label).inserted else {
+                    throw Error.invalidTopology("duplicate_window_label")
+                }
+            }
+            for (surfaceId, label) in labels {
+                candidate.liveSurfaces[surfaceId]?.windowLabel = label
+            }
+        }
+    }
+
     static func paneSplit(
         state: inout SurfAceLocklessAuthorityState,
         surfaceId: String,
