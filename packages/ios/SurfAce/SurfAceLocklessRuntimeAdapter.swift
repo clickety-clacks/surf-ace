@@ -525,23 +525,53 @@ actor SurfAceLocklessRuntimeAdapter {
         }
     }
 
-    func acknowledgeReceipts(connectionToken: String, requestIds: [String]) async throws {
+    nonisolated static func receiptAcknowledgement(_ payload: [String: Any]) throws -> (requestId: String, release: Bool) {
+        guard let requestId = payload["requestId"] as? String else {
+            throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+        }
+        var release = false
+        if let value = payload["release"] {
+            guard let number = value as? NSNumber,
+                  CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            release = number.boolValue
+        }
+        return (requestId, release)
+    }
+
+    @discardableResult
+    func acknowledgeReceipts(connectionToken: String, requestIds: [String], release: Bool = false) async throws -> Bool {
         guard let controllerId = controllerByConnection[connectionToken] else {
             throw SurfAceLocklessRuntimeAdapterError.notPaired
         }
-        try await coordinator.transact(trigger: "operation_receipt_ack") { state in
+        return try await coordinator.transact(trigger: "operation_receipt_ack") { state in
             guard var bundle = state.controllers[controllerId] else {
                 throw SurfAceLocklessRuntimeAdapterError.receiptUnavailable
             }
+            // Match the controller's two-phase acknowledgement/release protocol.
             for requestId in requestIds {
-                guard bundle.pendingOperationReceipts[requestId]?.status == .terminal else {
-                    throw SurfAceLocklessRuntimeAdapterError.stillPending
+                let receipt = bundle.pendingOperationReceipts[requestId]
+                if release {
+                    if receipt?.status == .terminal { return false }
+                } else if receipt == nil || receipt?.status == .pending {
+                    return false
                 }
             }
             for requestId in requestIds {
-                bundle.pendingOperationReceipts.removeValue(forKey: requestId)
+                guard var receipt = bundle.pendingOperationReceipts[requestId] else { continue }
+                if release {
+                    if receipt.status == .acknowledged {
+                        bundle.pendingOperationReceipts.removeValue(forKey: requestId)
+                    }
+                } else if receipt.status == .terminal {
+                    receipt.status = .acknowledged
+                    receipt.bytes = try SurfAceLocklessExactDurableAccounting.receiptBytes(receipt)
+                    bundle.pendingOperationReceipts[requestId] = receipt
+                }
             }
             state.controllers[controllerId] = bundle
+            return true
         }
     }
 

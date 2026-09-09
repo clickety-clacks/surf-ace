@@ -357,7 +357,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         )
     }
 
-    func testMutationPersistsExactReceiptBeforeFanoutAndAckRemovesIt() async throws {
+    func testMutationPersistsExactReceiptBeforeFanoutAndReleaseRemovesIt() async throws {
         let fixture = try makeFixture()
         let adapter = fixture.adapter
         _ = try await adapter.admit(
@@ -408,6 +408,8 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             connectionToken: "connection-a",
             requestIds: ["request-1"]
         )
+        XCTAssertEqual(try fixture.store.load()?.controllers["controller-a"]?.pendingOperationReceipts["request-1"]?.status, .acknowledged)
+        try await adapter.acknowledgeReceipts(connectionToken: "connection-a", requestIds: ["request-1"], release: true)
         XCTAssertNil(try fixture.store.load()?.controllers["controller-a"]?.pendingOperationReceipts["request-1"])
     }
 
@@ -1314,7 +1316,7 @@ extension SurfAceLocklessRuntimeAdapterTests {
     }
 
     func testACOPS02MutationsOverflowAndReclamationHaveStableCommitCorrelation() async throws {
-        try await testMutationPersistsExactReceiptBeforeFanoutAndAckRemovesIt()
+        try await testMutationPersistsExactReceiptBeforeFanoutAndReleaseRemovesIt()
         try await testReclamationOccurrencePersistsAcrossRestartUntilAcknowledged()
         testRuntimeMapsCapacityErrorsToCanonicalCodesAndDetails()
     }

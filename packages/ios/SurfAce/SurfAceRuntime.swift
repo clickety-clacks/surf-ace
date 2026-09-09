@@ -2080,11 +2080,13 @@ final class SurfAceRuntime {
                     ).map(Self.foundationJSON),
                 ]
             case "operation.receipt.ack":
-                guard let requestId = payload["requestId"] as? String else {
-                    throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
-                }
-                try await adapter.acknowledgeReceipts(connectionToken: connectionUUID, requestIds: [requestId])
-                responsePayload = ["accepted": true, "requestId": requestId]
+                let acknowledgement = try SurfAceLocklessRuntimeAdapter.receiptAcknowledgement(payload)
+                let accepted = try await adapter.acknowledgeReceipts(
+                    connectionToken: connectionUUID,
+                    requestIds: [acknowledgement.requestId],
+                    release: acknowledgement.release
+                )
+                responsePayload = ["accepted": accepted, "requestId": acknowledgement.requestId]
             case "consumable.sync":
                 guard let scopeIds = payload["scopeIds"] as? [String] else {
                     throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
