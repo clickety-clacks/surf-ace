@@ -416,7 +416,9 @@ final class SurfAceRuntime {
             self.identity = identity
             self.fingerprint = identity.fingerprint
         } catch {
-            self.endpointError = "Identity init failed: \(error.localizedDescription)"
+            let diagnostic = SurfAceIdentityStore.failureDiagnostic(error)
+            self.endpointError = "Identity init failed: \(diagnostic)"
+            surfAceServerRuntimeLog("event=identity_init_failed \(diagnostic)")
         }
 
         loadIdentityMapping()

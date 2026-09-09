@@ -16,12 +16,28 @@ struct SurfAceIdentity {
 }
 
 enum SurfAceIdentityStoreError: Error {
-    case keychain(OSStatus)
+    case keychain(operation: String, status: OSStatus)
     case invalidStoredKey
     case persistenceReadback
 }
 
 struct SurfAceIdentityStore {
+    // Emit only a fixed operation name and numeric Security status, never query or key data.
+    static func failureDiagnostic(_ error: Error) -> String {
+        switch error {
+        case SurfAceIdentityStoreError.keychain(let operation, let status):
+            let allowed = ["SecItemCopyMatching.initial", "SecItemCopyMatching.readback", "SecItemAdd.create"]
+            let safeOperation = allowed.contains(operation) ? operation : "unknown"
+            return "operation=\(safeOperation) os_status=\(status)"
+        case SurfAceIdentityStoreError.invalidStoredKey:
+            return "operation=decode_stored_key result=invalid_data"
+        case SurfAceIdentityStoreError.persistenceReadback:
+            return "operation=SecItemCopyMatching.readback result=item_missing"
+        default:
+            return "operation=identity_initialization result=non_security_error"
+        }
+    }
+
     private let service = "co.clicketyclacks.SurfAce"
     private let account = "ed25519-private-key"
 
@@ -33,7 +49,7 @@ struct SurfAceIdentityStore {
 
         let privateKey = Curve25519.Signing.PrivateKey()
         try saveKeyData(privateKey.rawRepresentation)
-        guard let stored = try loadKeyData() else {
+        guard let stored = try loadKeyData(operation: "SecItemCopyMatching.readback") else {
             throw SurfAceIdentityStoreError.persistenceReadback
         }
         return makeIdentity(from: try Curve25519.Signing.PrivateKey(rawRepresentation: stored))
@@ -50,7 +66,7 @@ struct SurfAceIdentityStore {
         )
     }
 
-    private func loadKeyData() throws -> Data? {
+    private func loadKeyData(operation: String = "SecItemCopyMatching.initial") throws -> Data? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -61,7 +77,7 @@ struct SurfAceIdentityStore {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw SurfAceIdentityStoreError.keychain(status) }
+        guard status == errSecSuccess else { throw SurfAceIdentityStoreError.keychain(operation: operation, status: status) }
         guard let data = item as? Data else { throw SurfAceIdentityStoreError.invalidStoredKey }
         return data
     }
@@ -76,7 +92,7 @@ struct SurfAceIdentityStore {
         // Never overwrite an identity created by another concurrent startup.
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess || status == errSecDuplicateItem else {
-            throw SurfAceIdentityStoreError.keychain(status)
+            throw SurfAceIdentityStoreError.keychain(operation: "SecItemAdd.create", status: status)
         }
     }
 }

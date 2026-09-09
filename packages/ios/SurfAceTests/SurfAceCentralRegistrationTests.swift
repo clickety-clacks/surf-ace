@@ -150,6 +150,19 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         print("PRODUCTION_REGISTRATION clients=\(identities.map(\.clientId)) labels=\(labels) reconnect=PASS")
     }
 
+    func testIdentityDiagnosticIdentifiesSecurityOperationWithoutErrorContents() {
+        for operation in ["SecItemCopyMatching.initial", "SecItemCopyMatching.readback", "SecItemAdd.create"] {
+            XCTAssertEqual(SurfAceIdentityStore.failureDiagnostic(
+                SurfAceIdentityStoreError.keychain(operation: operation, status: -34018)),
+                "operation=\(operation) os_status=-34018")
+        }
+        XCTAssertEqual(SurfAceIdentityStore.failureDiagnostic(
+            SurfAceIdentityStoreError.keychain(operation: "secret-key-material", status: -1)),
+            "operation=unknown os_status=-1")
+        XCTAssertEqual(SurfAceIdentityStore.failureDiagnostic(NSError(domain: "secret-key-material", code: 99)),
+            "operation=identity_initialization result=non_security_error")
+    }
+
     func testIdentityUsesFullSPKIAndSurvivesPrivateKeyReload() throws {
         let bytes = Data(repeating: 7, count: 32)
         let first = try Curve25519.Signing.PrivateKey(rawRepresentation: bytes)
