@@ -526,7 +526,7 @@ actor SurfAceLocklessRuntimeAdapter {
     }
 
     nonisolated static func receiptAcknowledgement(_ payload: [String: Any]) throws -> (requestId: String, release: Bool) {
-        guard let requestId = payload["requestId"] as? String else {
+        guard let requestId = payload["requestId"] as? String, !requestId.isEmpty else {
             throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
         }
         var release = false
@@ -545,7 +545,7 @@ actor SurfAceLocklessRuntimeAdapter {
         guard let controllerId = controllerByConnection[connectionToken] else {
             throw SurfAceLocklessRuntimeAdapterError.notPaired
         }
-        return try await coordinator.transact(trigger: "operation_receipt_ack") { state in
+        return try await coordinator.transact(trigger: "operation_receipt_ack", skipUnchanged: true) { state in
             guard var bundle = state.controllers[controllerId] else {
                 throw SurfAceLocklessRuntimeAdapterError.receiptUnavailable
             }

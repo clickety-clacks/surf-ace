@@ -1049,6 +1049,7 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
 
     func transact<Result: Sendable>(
         trigger: String = "transaction_enforcement",
+        skipUnchanged: Bool = false,
         _ operation: @escaping @Sendable (inout SurfAceLocklessAuthorityState) throws -> Result
     ) async throws -> Result {
         try await withCheckedThrowingContinuation { continuation in
@@ -1056,6 +1057,12 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                 var candidate = self.state
                 do {
                     let result = try operation(&candidate)
+                    // Decide under the same serial queue as the read and prospective mutation.
+                    // No-op receipt requests must not enforce retention or write a generation.
+                    if skipUnchanged && candidate == self.state {
+                        continuation.resume(returning: result)
+                        return
+                    }
                     try SurfAceLocklessDormantRetention.enforceBounds(
                         in: &candidate,
                         trigger: trigger
