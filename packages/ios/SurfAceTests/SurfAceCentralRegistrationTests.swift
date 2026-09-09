@@ -20,6 +20,103 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         func close() { closed = true }
     }
 
+
+    func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop() async throws {
+        let transport = Transport()
+        let url = URL(string: "ws://configured.invalid:9001/")!
+        var statuses: [SurfAceCentralRegistrationStatus] = []
+        var persisted = false
+        let registration = SurfAceCentralRegistration(clientId: "real-test-identity", configured: url,
+            discover: { [] }, makeTransport: { _ in transport },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLabel: 1)])] },
+            apply: { _, _ in
+                XCTAssertNotEqual(statuses.last, .connected)
+                persisted = true
+            }, onStatusChange: { state in
+                if state == .connected { XCTAssertTrue(persisted) }
+                statuses.append(state)
+            })
+        XCTAssertEqual(registration.status, .disconnected)
+        try await registration.synchronize()
+        XCTAssertEqual(statuses, [.connecting, .connected])
+        transport.fails = true
+        do { try await registration.synchronize(); XCTFail("loss succeeded") } catch { }
+        XCTAssertEqual(registration.status, .disconnected)
+        transport.fails = false
+        persisted = false
+        try await registration.synchronize()
+        XCTAssertEqual(Array(statuses.suffix(2)), [.connecting, .connected])
+        registration.stop()
+        XCTAssertEqual(registration.status, .disconnected)
+        let count = statuses.count
+        do { try await registration.synchronize(); XCTFail("stopped registration succeeded") } catch { }
+        XCTAssertEqual(statuses.count, count)
+    }
+
+    func testCentralStatusDoesNotConnectOnPersistenceFailureOrAfterStopDuringApply() async throws {
+        for stopDuringApply in [false, true] {
+            let transport = Transport()
+            var statuses: [SurfAceCentralRegistrationStatus] = []
+            var registration: SurfAceCentralRegistration!
+            registration = SurfAceCentralRegistration(clientId: "test", configured: URL(string: "ws://configured.invalid/")!,
+                discover: { [] }, makeTransport: { _ in transport },
+                snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
+                apply: { _, _ in
+                    if stopDuringApply { registration.stop() }
+                    else { throw SurfAceRegistrationError.topologyChanged }
+                }, onStatusChange: { statuses.append($0) })
+            do { try await registration.synchronize(); XCTFail("uncommitted registration succeeded") } catch { }
+            XCTAssertFalse(statuses.contains(.connected))
+            XCTAssertEqual(registration.status, .disconnected)
+            registration.stop()
+        }
+    }
+
+    func testHealthyDiscoveryConnectionStaysConnectedWhilePreferredServerIsUnavailable() async throws {
+        let fallback = Transport()
+        let primary = Transport(); primary.fails = true
+        let configured = URL(string: "ws://configured.invalid/")!
+        let discovered = URL(string: "ws://discovered.invalid/")!
+        var statuses: [SurfAceCentralRegistrationStatus] = []
+        let registration = SurfAceCentralRegistration(clientId: "test", configured: configured,
+            discover: { [discovered] }, makeTransport: { $0 == configured ? primary : fallback },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            onStatusChange: { statuses.append($0) })
+        try await registration.synchronize()
+        XCTAssertEqual(registration.status, .connected)
+        let count = statuses.count
+        try await registration.synchronize()
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertEqual(statuses.count, count)
+        registration.stop()
+    }
+
+    func testStopDuringSnapshotDoesNotRestartDiscoveryOrStatus() async throws {
+        var statuses: [SurfAceCentralRegistrationStatus] = []
+        var registration: SurfAceCentralRegistration!
+        registration = SurfAceCentralRegistration(clientId: "test", configured: nil,
+            discover: { XCTFail("discovery after stop"); return [] },
+            snapshot: {
+                registration.stop()
+                return [.init(surfaceId: "sf_one", panes: [])]
+            }, apply: { _, _ in XCTFail("apply after stop") },
+            onStatusChange: { statuses.append($0) })
+        do { try await registration.synchronize(); XCTFail("stopped snapshot succeeded") } catch { }
+        XCTAssertEqual(statuses, [.connecting, .disconnected])
+    }
+
+    func testEmptyStartupNeverPublishesConnected() async throws {
+        var statuses: [SurfAceCentralRegistrationStatus] = []
+        let registration = SurfAceCentralRegistration(clientId: "test", configured: nil,
+            discover: { XCTFail("empty surface discovery"); return [] },
+            snapshot: { [] }, apply: { _, _ in XCTFail("empty registration") },
+            onStatusChange: { statuses.append($0) })
+        try await registration.synchronize()
+        XCTAssertEqual(registration.status, .disconnected)
+        XCTAssertFalse(statuses.contains(.connected))
+        registration.stop()
+    }
+
     func testConfiguredFailureDiscoveryReconnectAndConfiguredRecovery() async throws {
         let configured = URL(string: "ws://configured.invalid:9001/")!
         let discovered = URL(string: "ws://discovered.local:9002/")!

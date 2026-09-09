@@ -340,6 +340,18 @@ final class SurfAceRuntime {
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
+    private var centralConnectionState: SurfAceConnectionBarState = .disconnected
+
+    func updateCentralRegistrationStatus(_ status: SurfAceCentralRegistrationStatus) {
+        switch status {
+        case .connected: centralConnectionState = .connected
+        case .connecting: centralConnectionState = .connecting
+        case .disconnected: centralConnectionState = .disconnected
+        }
+        for surface in surfaces {
+            surface.connectionBarState = centralConnectionState
+        }
+    }
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
@@ -501,6 +513,9 @@ final class SurfAceRuntime {
             },
             onError: { error in
                 surfAceServerRuntimeLog("event=central_registration_failed error=\(String(describing: error))")
+            },
+            onStatusChange: { [weak self] status in
+                self?.updateCentralRegistrationStatus(status)
             }
         )
         centralRegistration = registration
@@ -510,6 +525,7 @@ final class SurfAceRuntime {
     func stop() async {
         centralRegistration?.stop()
         centralRegistration = nil
+        updateCentralRegistrationStatus(.disconnected)
         surfAceLifecycleLog(
             "event=app_stop \(surfAceDiagnosticFields([("controller_connections", locklessConnectionsByConnectionUUID.count), ("surface_count", surfaces.count)]))"
         )
@@ -564,6 +580,7 @@ final class SurfAceRuntime {
         let persistedPaneCount = persistedSurfaceTopologies[surfaceId]?.panes.count ?? 0
         let persistedContentCount = persistedSurfaceTopologies[surfaceId]?.panes.filter { $0.currentEntry?.contentId != nil }.count ?? 0
         ensureActiveKeyboardPane(surface: surface)
+        surface.connectionBarState = centralConnectionState
         surfaceById[surfaceId] = surface
         surfaceIdBySceneKey[sceneKey] = surfaceId
         surfaces.append(surface)
@@ -901,6 +918,7 @@ final class SurfAceRuntime {
                 name: topology.name
             )
             topology.apply(to: surface)
+            surface.connectionBarState = centralConnectionState
             ensureActiveKeyboardPane(surface: surface)
             surfaceById[surfaceId] = surface
             surfaceIdBySceneKey[connectedSceneKey] = surfaceId

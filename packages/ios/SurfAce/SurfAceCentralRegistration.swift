@@ -101,6 +101,12 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
     }
 }
 
+enum SurfAceCentralRegistrationStatus: Equatable {
+    case disconnected
+    case connecting
+    case connected
+}
+
 @MainActor
 final class SurfAceCentralRegistration {
     typealias Snapshot = @MainActor () async throws -> [SurfAceRegistrationSurface]
@@ -117,13 +123,22 @@ final class SurfAceCentralRegistration {
     private var selected: (url: URL, transport: any SurfAceRegistrationTransport)?
     private var loop: Task<Void, Never>?
     private var stopped = false
+    private let onStatusChange: @MainActor (SurfAceCentralRegistrationStatus) -> Void
+    private(set) var status: SurfAceCentralRegistrationStatus = .disconnected
+
+    private func setStatus(_ next: SurfAceCentralRegistrationStatus) {
+        guard status != next else { return }
+        status = next
+        onStatusChange(next)
+    }
 
     init(clientId: String, configured: URL?,
          discover: @escaping @MainActor () async -> [URL],
          makeTransport: @escaping @MainActor (URL) -> any SurfAceRegistrationTransport = { SurfAceRegistrationWebSocket(url: $0) },
          transportFallbacks: @escaping @MainActor (URL) -> [URL] = { _ in [] },
          snapshot: @escaping Snapshot, apply: @escaping Apply,
-         onError: @escaping @MainActor (Error) -> Void = { _ in }) {
+         onError: @escaping @MainActor (Error) -> Void = { _ in },
+         onStatusChange: @escaping @MainActor (SurfAceCentralRegistrationStatus) -> Void = { _ in }) {
         self.clientId = clientId
         self.configured = configured
         self.discover = discover
@@ -132,11 +147,15 @@ final class SurfAceCentralRegistration {
         self.snapshot = snapshot
         self.apply = apply
         self.onError = onError
+        self.onStatusChange = onStatusChange
     }
 
     func synchronize() async throws {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
+        if selected == nil { setStatus(.connecting) }
+        defer { if status == .connecting { setStatus(.disconnected) } }
         let surfaces = try await snapshot()
+        guard !stopped else { throw SurfAceRegistrationError.stopped }
         // Empty startup is not a registration of an invented display identity.
         guard !surfaces.isEmpty else { return }
         if let selected {
@@ -144,6 +163,8 @@ final class SurfAceCentralRegistration {
                 let assignments = try await selected.transport.register(clientId: clientId, surfaces: surfaces)
                 guard !stopped else { throw SurfAceRegistrationError.stopped }
                 try await apply(assignments, surfaces)
+                guard !stopped else { throw SurfAceRegistrationError.stopped }
+                setStatus(.connected)
                 if let configured, selected.url != configured {
                     _ = try await attempt(configured, surfaces: surfaces)
                 }
@@ -151,10 +172,12 @@ final class SurfAceCentralRegistration {
             } catch {
                 selected.transport.close()
                 self.selected = nil
+                setStatus(.disconnected)
                 if stopped { throw SurfAceRegistrationError.stopped }
             }
         }
         if let configured, try await attempt(configured, surfaces: surfaces) { return }
+        if selected == nil { setStatus(.connecting) }
         for url in await discover() {
             if try await attempt(url, surfaces: surfaces) { return }
             if resolutionFailed {
@@ -170,18 +193,22 @@ final class SurfAceCentralRegistration {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
         guard url.scheme == "ws" || url.scheme == "wss" else { return false }
         resolutionFailed = false
+        if selected == nil { setStatus(.connecting) }
         let candidate = makeTransport(url)
         do {
             let assignments = try await candidate.register(clientId: clientId, surfaces: surfaces)
             guard !stopped else { throw SurfAceRegistrationError.stopped }
             try await apply(assignments, surfaces)
+            guard !stopped else { throw SurfAceRegistrationError.stopped }
             selected?.transport.close()
             selected = (url, candidate)
+            setStatus(.connected)
             return true
         } catch {
             let transportError = error as? URLError
             resolutionFailed = transportError?.code == .cannotFindHost || transportError?.code == .dnsLookupFailed
             candidate.close()
+            if selected == nil { setStatus(.disconnected) }
             onError(error)
             if stopped { throw SurfAceRegistrationError.stopped }
             return false
@@ -204,6 +231,7 @@ final class SurfAceCentralRegistration {
         loop = nil
         selected?.transport.close()
         selected = nil
+        setStatus(.disconnected)
     }
 }
 

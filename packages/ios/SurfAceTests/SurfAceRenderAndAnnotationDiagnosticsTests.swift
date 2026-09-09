@@ -146,6 +146,32 @@ private func annotationStrokesById(_ strokeIds: [String]) -> [String: SurfAceStr
 @MainActor
 final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
 
+    func testCentralStatusBindsIdentityChromeWithoutChangingLabelsOrProvenance() throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "central-status-existing")
+        let pane = try XCTUnwrap(surface.panes.first)
+        surface.windowLabel = "a"
+        pane.paneLabel = 1
+        let provenance = pane.currentCompositeProvenance().plainLabel
+        runtime.updateCentralRegistrationStatus(.connecting)
+        XCTAssertEqual(surface.connectionBarState, .connecting)
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
+        runtime.updateCentralRegistrationStatus(.connected)
+        XCTAssertEqual(surface.connectionBarState, .connected)
+        XCTAssertEqual(surfAcePaneChromeIdentityParts(surface: surface, pane: pane).windowLabel, "a")
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
+        let later = runtime.registerSurface(sceneKey: "central-status-new")
+        XCTAssertEqual(later.connectionBarState, .connected)
+        runtime.updateCentralRegistrationStatus(.disconnected)
+        XCTAssertEqual(surface.connectionBarState, .disconnected)
+        XCTAssertEqual(later.connectionBarState, .disconnected)
+        XCTAssertFalse(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
+        XCTAssertEqual(surface.windowLabel, "a")
+        XCTAssertEqual(pane.paneLabel, 1)
+        XCTAssertEqual(pane.currentCompositeProvenance().plainLabel, provenance)
+    }
+
+
     func testAuthorityProjectionPublishesChangedVisibleEntryWithoutReloadingUnchangedHistory() throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = SurfAceSurfaceModel(sceneKey: "projection-test", surfaceId: "sf_projection", windowLabel: "a", name: "Test")
