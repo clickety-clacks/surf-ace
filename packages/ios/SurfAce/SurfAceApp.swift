@@ -119,10 +119,31 @@ private struct SurfAceWindowCommands: Commands {
 
 @main
 struct SurfAceApp: App {
-    @State private var runtime = SurfAceRuntime()
+    @State private var runtime: SurfAceRuntime? = {
+        #if DEBUG
+        return SurfAceIdentityDiagnosticStartup.makeRuntime(
+            enabled: SurfAceIdentityStore.diagnosticOnly(environment: ProcessInfo.processInfo.environment),
+            diagnostic: {
+                let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                    .appendingPathComponent("SurfAce/identity-diagnostic.log")
+                do {
+                    try SurfAceIdentityDiagnosticStartup.capture(to: url) {
+                        _ = try SurfAceIdentityStore().loadOrCreateIdentity()
+                    }
+                } catch {
+                    FileHandle.standardError.write(Data("event=identity_diagnostic_output_failed\n".utf8))
+                }
+            },
+            runtime: { SurfAceRuntime() }
+        )
+        #else
+        return SurfAceRuntime()
+        #endif
+    }()
 
     var body: some Scene {
         WindowGroup(id: SurfAceSceneID.mainWindow) {
+            if let runtime {
             SurfAceRootView(runtime: runtime)
                 .surfAceSpatialWindowContentSizing()
                 .surfAceSpatialWindowTransparency()
@@ -130,10 +151,13 @@ struct SurfAceApp: App {
                 .task {
                     await runtime.start()
                 }
+            } else {
+                Text("Identity diagnostic only")
+            }
         }
         .surfAceSpatialWindowSizing()
         .commands {
-            SurfAceWindowCommands(runtime: runtime)
+            if let runtime { SurfAceWindowCommands(runtime: runtime) }
         }
     }
 }

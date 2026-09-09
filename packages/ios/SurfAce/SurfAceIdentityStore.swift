@@ -105,3 +105,26 @@ struct SurfAceIdentityStore {
         }
     }
 }
+
+// The app entry point uses this before constructing any runtime or network component.
+enum SurfAceIdentityDiagnosticStartup {
+    static func makeRuntime<T>(enabled: Bool, diagnostic: () -> Void, runtime: () -> T) -> T? {
+        if enabled { diagnostic(); return nil }
+        return runtime()
+    }
+
+    static func capture(to url: URL, loadIdentity: () throws -> Void) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: url, options: .atomic)
+        let file = try FileHandle(forWritingTo: url)
+        defer { try? file.close() }
+        try file.write(contentsOf: Data("event=identity_diagnostic_begin networking=disabled\n".utf8))
+        try file.synchronize()
+        var failure: Error?
+        do { try loadIdentity() } catch { failure = error }
+        let terminal = SurfAceIdentityStore.terminalDiagnostic(error: failure)
+        try file.write(contentsOf: Data(terminal.utf8))
+        try file.synchronize()
+        FileHandle.standardError.write(Data(terminal.utf8))
+    }
+}

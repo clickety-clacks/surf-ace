@@ -150,6 +150,33 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         print("PRODUCTION_REGISTRATION clients=\(identities.map(\.clientId)) labels=\(labels) reconnect=PASS")
     }
 
+    func testIdentityDiagnosticBypassesRuntimeAndFlushesRedactedFile() throws {
+        var constructed = 0
+        var diagnosed = 0
+        let isolated: Int? = SurfAceIdentityDiagnosticStartup.makeRuntime(enabled: true,
+            diagnostic: { diagnosed += 1 }, runtime: { constructed += 1; return 7 })
+        XCTAssertNil(isolated)
+        XCTAssertEqual(constructed, 0)
+        XCTAssertEqual(diagnosed, 1)
+        let normal = SurfAceIdentityDiagnosticStartup.makeRuntime(enabled: false,
+            diagnostic: { diagnosed += 1 }, runtime: { constructed += 1; return 7 })
+        XCTAssertEqual(normal, 7)
+        XCTAssertEqual(constructed, 1)
+        XCTAssertEqual(diagnosed, 1)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("identity-diagnostic.log")
+        try SurfAceIdentityDiagnosticStartup.capture(to: url) {
+            XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "event=identity_diagnostic_begin networking=disabled\n")
+            throw NSError(domain: "secret-material", code: 17)
+        }
+        let output = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(output.contains("event=identity_diagnostic_terminal result=failure"))
+        XCTAssertFalse(output.contains("secret-material"))
+        try SurfAceIdentityDiagnosticStartup.capture(to: url) {}
+        XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("result=success"))
+    }
+
     func testIdentityDiagnosticOptInAndTerminalResult() {
         XCTAssertFalse(SurfAceIdentityStore.diagnosticOnly(environment: [:]))
         XCTAssertFalse(SurfAceIdentityStore.diagnosticOnly(environment: ["SURF_ACE_IDENTITY_DIAGNOSTIC_ONLY": "true"]))
