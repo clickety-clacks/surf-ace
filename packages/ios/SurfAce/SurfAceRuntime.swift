@@ -1202,7 +1202,7 @@ final class SurfAceRuntime {
             let state = await adapter.snapshot()
             try projectLocklessAuthorityState(state)
             guard let projectedPane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
-            projectedPane.bridge?.render(entry: renderableEntry(projectedPane.currentEntry), restoreViewport: nil)
+            // Projection publishes changed visible entries; do not reload them twice.
             restorePaneDrawing(surfaceId: surfaceId, pane: projectedPane)
             projectedPane.lastNavigationURL = projectedPane.currentEntry.url
             UIAccessibility.post(
