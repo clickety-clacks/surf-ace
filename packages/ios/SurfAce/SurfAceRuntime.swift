@@ -917,7 +917,7 @@ final class SurfAceRuntime {
         }
     }
 
-    private func project(
+    func project(
         topology: SurfAcePersistedSurfaceTopology,
         onto surface: SurfAceSurfaceModel
     ) {
@@ -931,10 +931,18 @@ final class SurfAceRuntime {
             pane.name = persistedPane.name
             pane.annotationMode = persistedPane.annotationMode ?? false
             pane.backStack = persistedPane.backStack ?? []
-            pane.currentEntry = persistedPane.currentEntry ?? .empty()
+            let nextEntry = persistedPane.currentEntry ?? .empty()
+            let visibleEntryChanged = pane.currentEntry.contentId != nextEntry.contentId
+                || pane.currentEntry.revision != nextEntry.revision
+            pane.currentEntry = nextEntry
             pane.forwardStack = persistedPane.forwardStack ?? []
             pane.currentTarget = persistedPane.currentTarget
             surface.panesById[persistedPane.paneId] = pane
+            // Existing representables keep their bridge when authority state changes.
+            // Publish a new visible revision, but never reload for receipt/label updates.
+            if visibleEntryChanged {
+                pane.bridge?.render(entry: renderableEntry(nextEntry), restoreViewport: nil)
+            }
         }
         surface.panesById = surface.panesById.filter { projectedPaneIds.contains($0.key) }
         surface.paneLayout = topology.paneLayout.runtimeNode

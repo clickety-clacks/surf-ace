@@ -145,6 +145,70 @@ private func annotationStrokesById(_ strokeIds: [String]) -> [String: SurfAceStr
 
 @MainActor
 final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
+
+    func testAuthorityProjectionPublishesChangedVisibleEntryWithoutReloadingUnchangedHistory() throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = SurfAceSurfaceModel(sceneKey: "projection-test", surfaceId: "sf_projection", windowLabel: "a", name: "Test")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let bridge = RecordingPaneBridge()
+        var purple = SurfAcePaneEntry.empty(revision: 1)
+        purple.contentId = "old-purple"
+        purple.contentType = .html
+        purple.payload = .html(html: "<body>purple</body>", baseURL: nil)
+        var green = purple
+        green.contentId = "new-green"
+        green.revision = 2
+        green.payload = .html(html: "<body>green</body>", baseURL: nil)
+        pane.currentEntry = purple
+        pane.bridge = bridge
+        let originalViewport = pane.lastViewport
+        var topology = SurfAcePersistedSurfaceTopology(surface: surface)
+        topology.panes[0].currentEntry = green
+        topology.panes[0].backStack = [purple]
+        runtime.project(topology: topology, onto: surface)
+        XCTAssertTrue(surface.panes.first === pane)
+        XCTAssertTrue(pane.bridge === bridge)
+        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["new-green"])
+        XCTAssertEqual(pane.backStack.map(\.contentId), ["old-purple"])
+        XCTAssertEqual(pane.lastViewport, originalViewport)
+
+        runtime.project(topology: topology, onto: surface)
+        topology.windowLabel = "b"
+        topology.panes[0].paneLabel = 2
+        topology.panes[0].name = "Renamed"
+        runtime.project(topology: topology, onto: surface)
+        XCTAssertEqual(bridge.renderCallEntries.count, 1)
+        XCTAssertEqual(surface.windowLabel, "b")
+        XCTAssertEqual(pane.paneLabel, 2)
+
+        topology.panes[0].currentEntry = purple
+        topology.panes[0].backStack = []
+        topology.panes[0].forwardStack = [green]
+        runtime.project(topology: topology, onto: surface)
+        XCTAssertEqual(pane.forwardStack.map(\.contentId), ["new-green"])
+        topology.panes[0].currentEntry = green
+        topology.panes[0].backStack = [purple]
+        topology.panes[0].forwardStack = []
+        runtime.project(topology: topology, onto: surface)
+        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["new-green", "old-purple", "new-green"])
+        green.revision = 3
+        topology.panes[0].currentEntry = green
+        runtime.project(topology: topology, onto: surface)
+        XCTAssertEqual(bridge.renderedEntries.last?.revision, 3)
+        XCTAssertEqual(bridge.renderCallEntries.count, 4)
+
+        topology.panes[0].currentEntry = nil
+        runtime.project(topology: topology, onto: surface)
+        XCTAssertNil(bridge.renderCallEntries.last!)
+        runtime.project(topology: topology, onto: surface)
+        XCTAssertEqual(bridge.renderCallEntries.count, 5)
+        pane.bridge = nil
+        topology.panes[0].currentEntry = green
+        runtime.project(topology: topology, onto: surface)
+        XCTAssertEqual(pane.currentEntry.contentId, "new-green")
+        XCTAssertEqual(bridge.renderCallEntries.count, 5)
+    }
+
     func testAnnotationRemovalRoundTripPreservesOpaqueDrawingWhenNothingIsRemoved() throws {
         let drawingData = annotationDrawingData(strokeCount: 2)
         let strokes = annotationStrokesById(["stroke-a", "stroke-b"])
