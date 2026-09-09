@@ -22,6 +22,15 @@ enum SurfAceIdentityStoreError: Error {
 }
 
 struct SurfAceIdentityStore {
+    static func diagnosticOnly(environment: [String: String]) -> Bool {
+        environment["SURF_ACE_IDENTITY_DIAGNOSTIC_ONLY"] == "1"
+    }
+
+    static func terminalDiagnostic(error: Error?) -> String {
+        let result = error.map { "result=failure \(failureDiagnostic($0))" } ?? "result=success"
+        return "event=identity_diagnostic_terminal \(result) networking=disabled\n"
+    }
+
     // Emit only a fixed operation name and numeric Security status, never query or key data.
     static func failureDiagnostic(_ error: Error) -> String {
         switch error {

@@ -330,6 +330,9 @@ final class SurfAceRuntime {
     @ObservationIgnored private let server = SurfAceHTTPServer()
     @ObservationIgnored private let bonjourPublisher = SurfAceBonjourPublisher()
     @ObservationIgnored private let identityStore = SurfAceIdentityStore()
+    @ObservationIgnored private let identityDiagnosticOnly = SurfAceIdentityStore.diagnosticOnly(
+        environment: ProcessInfo.processInfo.environment
+    )
     @ObservationIgnored private let mappingStoreKey = "SurfAce.SurfaceIdentityMapping"
     @ObservationIgnored private let surfaceTopologyStoreKey = "SurfAce.SurfaceTopologyMapping"
     @ObservationIgnored private let userDefaults: UserDefaults
@@ -411,14 +414,23 @@ final class SurfAceRuntime {
             .lowercased() ?? "0000"
         self.instanceDisambiguator = String(vendorID.prefix(6))
 
+        var identityInitializationError: Error?
         do {
             let identity = try identityStore.loadOrCreateIdentity()
             self.identity = identity
             self.fingerprint = identity.fingerprint
         } catch {
+            identityInitializationError = error
             let diagnostic = SurfAceIdentityStore.failureDiagnostic(error)
             self.endpointError = "Identity init failed: \(diagnostic)"
             surfAceServerRuntimeLog("event=identity_init_failed \(diagnostic)")
+        }
+
+        if identityDiagnosticOnly {
+            // Synchronous terminal output precedes all runtime networking and state restoration.
+            let line = SurfAceIdentityStore.terminalDiagnostic(error: identityInitializationError)
+            FileHandle.standardError.write(Data(line.utf8))
+            return
         }
 
         loadIdentityMapping()
@@ -434,6 +446,7 @@ final class SurfAceRuntime {
     }
 
     func start() async {
+        guard !identityDiagnosticOnly else { return }
         guard !isStarted, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }

@@ -150,6 +150,17 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         print("PRODUCTION_REGISTRATION clients=\(identities.map(\.clientId)) labels=\(labels) reconnect=PASS")
     }
 
+    func testIdentityDiagnosticOptInAndTerminalResult() {
+        XCTAssertFalse(SurfAceIdentityStore.diagnosticOnly(environment: [:]))
+        XCTAssertFalse(SurfAceIdentityStore.diagnosticOnly(environment: ["SURF_ACE_IDENTITY_DIAGNOSTIC_ONLY": "true"]))
+        XCTAssertTrue(SurfAceIdentityStore.diagnosticOnly(environment: ["SURF_ACE_IDENTITY_DIAGNOSTIC_ONLY": "1"]))
+        XCTAssertEqual(SurfAceIdentityStore.terminalDiagnostic(error: nil),
+            "event=identity_diagnostic_terminal result=success networking=disabled\n")
+        XCTAssertEqual(SurfAceIdentityStore.terminalDiagnostic(error:
+            SurfAceIdentityStoreError.keychain(operation: "SecItemAdd.create", status: -1)),
+            "event=identity_diagnostic_terminal result=failure operation=SecItemAdd.create os_status=-1 networking=disabled\n")
+    }
+
     func testIdentityDiagnosticIdentifiesSecurityOperationWithoutErrorContents() {
         for operation in ["SecItemCopyMatching.initial", "SecItemCopyMatching.readback", "SecItemAdd.create"] {
             XCTAssertEqual(SurfAceIdentityStore.failureDiagnostic(
