@@ -172,6 +172,45 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
     }
 
 
+    func testLocalHistoryCallerRendersOncePerChangedSelectionAndNeverForNoop() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL())
+        await runtime.restoreLocklessAuthority(reason: "caller-regression")
+        let registered = await runtime.registerSurfaceForScene(sceneKey: "caller-regression")
+        let surface = try XCTUnwrap(registered)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let surfaceId = surface.surfaceId
+        let paneId = pane.paneId
+        for contentId in ["purple", "green"] {
+            _ = try await adapter.commitLocalMutation(operation: "test.seed") { state, _ in
+                _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+                    content: .object(["html": .string("<p>\(contentId)</p>")]),
+                    contentId: contentId, contentType: "html", controllerProductName: "test",
+                    friendlyChatName: "test", paneId: Int64(paneId), surfaceId: surfaceId))
+                return .object([:])
+            }
+        }
+        _ = try await adapter.commitLocalMutation(operation: "test.trim-initial-empty") { state, _ in
+            state.liveSurfaces[surfaceId]?.panes[String(paneId)]?.history.back.removeFirst()
+            return .object([:])
+        }
+        let bridge = RecordingPaneBridge()
+        pane.bridge = bridge
+        await runtime.commitLocalHistoryNavigation(adapter: adapter, surfaceId: surfaceId, paneId: paneId, direction: .back)
+        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["purple"])
+        XCTAssertNil(runtime.endpointError)
+        let afterBack = bridge.renderCallEntries.count
+        await runtime.commitLocalHistoryNavigation(adapter: adapter, surfaceId: surfaceId, paneId: paneId, direction: .back)
+        XCTAssertEqual(bridge.renderCallEntries.count, afterBack)
+        await runtime.commitLocalHistoryNavigation(adapter: adapter, surfaceId: surfaceId, paneId: paneId, direction: .forward)
+        XCTAssertEqual(bridge.renderedEntries.map(\.contentId), ["purple", "green"])
+        let afterForward = bridge.renderCallEntries.count
+        await runtime.commitLocalHistoryNavigation(adapter: adapter, surfaceId: surfaceId, paneId: paneId, direction: .forward)
+        XCTAssertEqual(bridge.renderCallEntries.count, afterForward)
+        XCTAssertEqual(pane.currentEntry.contentId, "green")
+        XCTAssertNil(runtime.endpointError)
+    }
+
     func testAuthorityProjectionPublishesChangedVisibleEntryWithoutReloadingUnchangedHistory() throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = SurfAceSurfaceModel(sceneKey: "projection-test", surfaceId: "sf_projection", windowLabel: "a", name: "Test")

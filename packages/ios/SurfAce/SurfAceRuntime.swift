@@ -1166,7 +1166,7 @@ final class SurfAceRuntime {
         }
     }
 
-    private func commitLocalHistoryNavigation(
+    func commitLocalHistoryNavigation(
         adapter: SurfAceLocklessRuntimeAdapter,
         surfaceId: String,
         paneId: Int,
