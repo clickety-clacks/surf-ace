@@ -1866,3 +1866,73 @@ fn pair_payload(controller_instance_id: Value) -> Value {
         "surfaceSetRevision": 1
     })
 }
+
+#[test]
+fn cross_endpoint_read_acknowledgements_wait_for_owning_client() {
+    let temp = TempDir::new().unwrap();
+    let scopes = ["pane:sf_client_a:1", "pane:sf_client_a:2"];
+    let snapshot = |scope_id: &str| {
+        json!({
+            "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+            "firstRetainedSequence": 1,
+            "lastRetainedSequence": 1,
+            "records": [{ "bytes": 32, "payload": { "contentId": scope_id },
+                "recordClass": "content", "recordId": scope_id, "sequence": 1 }],
+            "scopeId": scope_id, "version": 1
+        })
+    };
+    let mut a = FakeWire::ordinary();
+    a.scopes = scopes.iter().map(|scope| snapshot(scope)).collect();
+    let mut list_a = invocation(&temp, Command::List, json!({}));
+    list_a.endpoint = Some("ws://client-a:43801/ws".into());
+    let initial = execute_with_wire(list_a.clone(), &mut a).unwrap();
+    for scope in scopes {
+        let mut read = invocation(&temp, Command::Read, json!({ "scopeId": scope }));
+        read.endpoint = None;
+        read.product_label = None;
+        let output = execute(read).unwrap();
+        assert_eq!(
+            output.controller_instance_id,
+            initial.controller_instance_id
+        );
+        assert_eq!(output.result["acknowledgement"]["cursor"], 2);
+    }
+    let state = || -> Value {
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap()
+    };
+    let queued = state()["acknowledgementOutbox"].clone();
+    assert_eq!(queued.as_array().unwrap().len(), 2);
+    let mut b = FakeWire::ordinary();
+    b.scopes = vec![snapshot("pane:sf_client_b:1")];
+    let mut list_b = invocation(&temp, Command::List, json!({}));
+    list_b.endpoint = Some("ws://client-b:34329/ws".into());
+    let switched = execute_with_wire(list_b, &mut b).unwrap();
+    assert_eq!(
+        switched.controller_instance_id,
+        initial.controller_instance_id
+    );
+    assert!(
+        !b.operations.iter().any(|op| op == "consumable.ack"),
+        "B must not receive explicit acknowledgements for A: {:?}",
+        b.payloads
+    );
+    assert_eq!(state()["acknowledgementOutbox"], queued);
+    let mut resumed_a = FakeWire::ordinary();
+    resumed_a.scopes = a.scopes;
+    execute_with_wire(list_a, &mut resumed_a).unwrap();
+    let sent: Vec<_> = resumed_a
+        .payloads
+        .iter()
+        .filter(|(op, _)| op == "consumable.ack")
+        .map(|(_, payload)| payload.clone())
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            json!({"scopeId": scopes[0], "cursor": 2}),
+            json!({"scopeId": scopes[1], "cursor": 2})
+        ]
+    );
+    assert_eq!(state()["acknowledgementOutbox"], json!([]));
+}

@@ -119,7 +119,15 @@ fn execute_locked(
     if let Err(error) = (|| {
         apply_synchronization(root, pair_payload, &pair.events)?;
         finalize_acknowledged_receipts(root, wire)?;
-        flush_acknowledgements(root, wire)
+        flush_acknowledgements(
+            root,
+            wire,
+            pair_payload
+                .get("scopes")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )
     })() {
         let _ = mark_all_unsynchronized(root);
         let _ = wire.close();
@@ -568,8 +576,16 @@ fn acknowledge_receipt(
 fn flush_acknowledgements(
     root: &mut LockedStateRoot,
     wire: &mut dyn DirectWire,
+    synchronized_scopes: &[Value],
 ) -> Result<(), CliError> {
     for intent in root.state().acknowledgement_outbox.clone() {
+        // One controller state can visit multiple clients. Keep other clients
+        // pending until a connection synchronizes their scopes.
+        if !synchronized_scopes.iter().any(|scope| {
+            scope.get("scopeId").and_then(Value::as_str) == Some(intent.scope_id.as_str())
+        }) {
+            continue;
+        }
         let response = request_without_correlation(
             wire,
             "consumable.ack",
