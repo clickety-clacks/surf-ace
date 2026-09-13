@@ -902,9 +902,9 @@ fn apply_gap(root: &mut LockedStateRoot, payload: &Value) -> Result<(), CliError
 
 fn resume_payload(state: &crate::state::DurableState, include_unresolved: bool) -> Value {
     json!({
-        "pendingAcks": state.acknowledgement_outbox.iter()
-            .map(acknowledgement_wire_payload)
-            .collect::<Vec<_>>(),
+        // Pairing has not established the current client’s owned scopes yet.
+        // Flush durable intents explicitly after scoped synchronization or list.
+        "pendingAcks": [],
         "unresolvedRequestIds": if include_unresolved {
             state.unresolved.iter()
                 .filter(|(_, correlation)| correlation.phase != CorrelationPhase::ReceiptAcknowledged)

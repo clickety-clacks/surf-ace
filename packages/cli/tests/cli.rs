@@ -931,13 +931,7 @@ fn discovery_and_consumable_ack_events_commit_before_sync_and_outbox_clear() {
         .find(|(operation, _)| operation == "pair.request")
         .map(|(_, payload)| payload)
         .unwrap();
-    assert_eq!(
-        pair_payload["resume"]["pendingAcks"],
-        json!([{
-            "cursor": 2,
-            "scopeId": "surface:sf_1"
-        }])
-    );
+    assert_eq!(pair_payload["resume"]["pendingAcks"], json!([]));
     let acknowledgement_payload = second
         .payloads
         .iter()
@@ -1642,13 +1636,7 @@ fn production_lifecycle_connection_flushes_multi_surface_read_acknowledgements()
         let pair = read_request(&mut ack);
         assert_eq!(pair["op"], "pair.request");
         assert!(pair["payload"].get("surfaceId").is_none());
-        assert_eq!(
-            pair["payload"]["resume"]["pendingAcks"],
-            json!([
-                { "cursor": 2, "scopeId": "surface:sf_1" },
-                { "cursor": 2, "scopeId": "surface:sf_2" }
-            ])
-        );
+        assert_eq!(pair["payload"]["resume"]["pendingAcks"], json!([]));
         let mut resumed_pair = pair_payload(pair["payload"]["controllerInstanceId"].clone());
         resumed_pair["resumed"] = json!(true);
         resumed_pair["scopes"] = json!(scopes);
@@ -2022,6 +2010,11 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
             .unwrap();
         let mut socket = accept(stream).unwrap();
         let pair = read_request(&mut socket);
+        assert_eq!(
+            pair["payload"]["resume"]["pendingAcks"],
+            json!([]),
+            "Lifecycle B must not receive A acknowledgements in pair.resume"
+        );
         let response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
         assert_eq!(response["scopes"], json!([]));
         send_response(
