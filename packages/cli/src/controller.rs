@@ -163,6 +163,16 @@ fn execute_locked(
     } else {
         let response = request_without_correlation(wire, op, payload)?;
         apply_wire_events(root, &response)?;
+        if invocation.command == crate::command::Command::List && response.response.ok == Some(true)
+        {
+            // Lifecycle pairs have no scopes. The successful listing identifies
+            // this client’s active scopes without trusting another endpoint’s cache.
+            let scopes = listed_acknowledgement_scopes(successful_payload(
+                &response.response,
+                "surfaces.list",
+            )?);
+            flush_acknowledgements(root, wire, &scopes)?;
+        }
         terminal_envelope(&response.response)
     };
     mark_all_synchronized(root, pair_payload.get("synchronizationCutoff"))?;
@@ -571,6 +581,43 @@ fn acknowledge_receipt(
     })?;
     apply_wire_events(root, &response)?;
     release_receipt(root, wire, request_id)
+}
+
+fn listed_acknowledgement_scopes(payload: &Map<String, Value>) -> Vec<Value> {
+    let mut scopes = Vec::new();
+    for surface in payload
+        .get("surfaces")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(surface_id) = surface.get("surfaceId").and_then(Value::as_str) else {
+            continue;
+        };
+        // Match the protocol’s encodeURIComponent scope component.
+        let encoded: String = surface_id
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || b"-_.!~*()\x27".contains(&byte) {
+                    char::from(byte).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect();
+        scopes.push(json!({"scopeId": format!("surface:{encoded}")}));
+        for pane in surface
+            .pointer("/topology/panes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(pane_id) = pane.get("paneId").and_then(Value::as_u64) {
+                scopes.push(json!({"scopeId": format!("pane:{encoded}:{pane_id}")}));
+            }
+        }
+    }
+    scopes
 }
 
 fn flush_acknowledgements(

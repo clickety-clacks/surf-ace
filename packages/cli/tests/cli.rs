@@ -1936,3 +1936,151 @@ fn cross_endpoint_read_acknowledgements_wait_for_owning_client() {
     );
     assert_eq!(state()["acknowledgementOutbox"], json!([]));
 }
+
+#[test]
+fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
+    let a_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let b_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let a_endpoint = format!("ws://{}", a_listener.local_addr().unwrap());
+    let b_endpoint = format!("ws://{}", b_listener.local_addr().unwrap());
+    let listed = |surface: &str| {
+        json!({"surfaces":[{"surfaceId":surface,
+        "topology":{"panes":[{"paneId":1},{"paneId":2}]}}]})
+    };
+    let a_server = thread::spawn(move || {
+        // Actual execute path: lifecycle discovery, scoped operation, lifecycle revisit.
+        for stage in 0..3 {
+            let (stream, _) = a_listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut socket = accept(stream).unwrap();
+            let pair = read_request(&mut socket);
+            assert_eq!(pair["op"], "pair.request");
+            let mut response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+            if stage == 1 {
+                assert_eq!(pair["payload"]["surfaceId"], "sf_a");
+                response["surfaceId"] = json!("sf_a");
+                response["scopes"] = json!([1, 2].map(|pane| json!({
+                    "scopeId":format!("pane:sf_a:{pane}"),"version":1,
+                    "cursor":{"cursor":1,"gap":null,"gapGeneration":0},
+                    "firstRetainedSequence":1,"lastRetainedSequence":1,
+                    "records":[{"bytes":32,"payload":{"contentId":format!("a-{pane}")},
+                        "recordClass":"content","recordId":format!("a-{pane}"),"sequence":1}]
+                })));
+            } else {
+                assert!(pair["payload"].get("surfaceId").is_none());
+                assert_eq!(response["scopes"], json!([]));
+            }
+            send_response(
+                &mut socket,
+                pair["id"].as_str().unwrap(),
+                "pair.response",
+                response,
+            );
+            let operation = read_request(&mut socket);
+            if stage == 1 {
+                assert_eq!(operation["op"], "snapshot.get");
+                send_response(
+                    &mut socket,
+                    operation["id"].as_str().unwrap(),
+                    "snapshot.result",
+                    json!({"snapshotId":"sn_a"}),
+                );
+            } else {
+                assert_eq!(operation["op"], "surfaces.list");
+                send_response(
+                    &mut socket,
+                    operation["id"].as_str().unwrap(),
+                    "surfaces.list.result",
+                    listed("sf_a"),
+                );
+            }
+            if stage == 2 {
+                for pane in [1, 2] {
+                    let ack = read_request(&mut socket);
+                    assert_eq!(ack["op"], "consumable.ack");
+                    assert_eq!(
+                        ack["payload"],
+                        json!({"scopeId":format!("pane:sf_a:{pane}"),"cursor":2})
+                    );
+                    send_response(
+                        &mut socket,
+                        ack["id"].as_str().unwrap(),
+                        "consumable.ack.result",
+                        json!({"accepted":true}),
+                    );
+                }
+            }
+            expect_orderly_close(&mut socket);
+        }
+    });
+    let b_server = thread::spawn(move || {
+        let (stream, _) = b_listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        let pair = read_request(&mut socket);
+        let response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        assert_eq!(response["scopes"], json!([]));
+        send_response(
+            &mut socket,
+            pair["id"].as_str().unwrap(),
+            "pair.response",
+            response,
+        );
+        let list = read_request(&mut socket);
+        assert_eq!(list["op"], "surfaces.list");
+        send_response(
+            &mut socket,
+            list["id"].as_str().unwrap(),
+            "surfaces.list.result",
+            listed("sf_b"),
+        );
+        // Any acknowledgement here belongs to A and is a test failure.
+        assert!(matches!(socket.read().unwrap(), Message::Close(_)));
+    });
+    let temp = TempDir::new().unwrap();
+    let mut capture = invocation(
+        &temp,
+        Command::CapturePane,
+        json!({"surfaceId":"sf_a","paneId":1}),
+    );
+    capture.endpoint = Some(a_endpoint.clone());
+    let initial = execute(capture).unwrap();
+    for pane in [1, 2] {
+        let mut read = invocation(
+            &temp,
+            Command::Read,
+            json!({"scopeId":format!("pane:sf_a:{pane}")}),
+        );
+        read.endpoint = None;
+        read.product_label = None;
+        assert_eq!(
+            execute(read).unwrap().result["acknowledgement"]["cursor"],
+            2
+        );
+    }
+    let state = || -> Value {
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap()
+    };
+    let queued = state()["acknowledgementOutbox"].clone();
+    let mut b = invocation(&temp, Command::List, json!({}));
+    b.endpoint = Some(b_endpoint);
+    assert_eq!(
+        execute(b).unwrap().controller_instance_id,
+        initial.controller_instance_id
+    );
+    b_server.join().unwrap();
+    assert_eq!(state()["acknowledgementOutbox"], queued);
+    let mut a = invocation(&temp, Command::List, json!({}));
+    a.endpoint = Some(a_endpoint);
+    assert_eq!(
+        execute(a).unwrap().controller_instance_id,
+        initial.controller_instance_id
+    );
+    a_server.join().unwrap();
+    assert_eq!(state()["acknowledgementOutbox"], json!([]));
+}
