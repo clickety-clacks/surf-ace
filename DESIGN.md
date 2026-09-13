@@ -5,7 +5,7 @@ Depends on: `<spec-root>/clawline/specs/clawline-invariants.md`
 
 ## 1. Purpose and Goals
 
-Surf Ace is a standalone display and annotation system that turns any screen running the Surf Ace app into an OpenClaw-managed surface. It is a purpose-built binary application — not embedded in another app — available on iOS/iPadOS and as an Electron app on macOS, Windows, and Linux.
+Surf Ace is a standalone display and annotation system that turns any screen running the Surf Ace app into an OpenClaw-managed surface. It is a purpose-built binary application — not embedded in another app — available on iOS/iPadOS and as an Electron app on Linux and macOS. Supported clients are Linux, macOS, iOS, and iPadOS only. Windows and visionOS are not supported and are not delivery or soak gates. Linux and macOS controller/server requirements remain in scope.
 
 ### Actors
 

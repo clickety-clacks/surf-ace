@@ -2,6 +2,8 @@
 
 Turn any screen into an OpenClaw-managed surface. Push content, read annotations, orchestrate displays across devices.
 
+Supported clients are Linux, macOS, iOS, and iPadOS only. Windows and visionOS are not supported and are not delivery or soak gates. Linux and macOS controller/server requirements remain in scope.
+
 ## Packages
 
 | Package | Description |
@@ -9,7 +11,7 @@ Turn any screen into an OpenClaw-managed surface. Push content, read annotations
 | `packages/protocol` | Shared TypeScript types and JSON Schema for the wire protocol |
 | `packages/extension` | OpenClaw extension — provider-side WS client, OpenClaw tools, Bonjour discovery |
 | `packages/ios` | iOS/iPadOS surface app (Swift) |
-| `packages/electron` | Electron surface app (macOS/Windows/Linux) |
+| `packages/electron` | Electron surface app (Linux/macOS) |
 
 ## Spec
 
