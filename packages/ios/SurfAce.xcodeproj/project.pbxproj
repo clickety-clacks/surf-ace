@@ -67,6 +67,7 @@
 		EA2E76A17200000000000002 /* SurfAceCentralRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E76A17200000000000001 /* SurfAceCentralRegistration.swift */; };
 		EA2E76A17200000000000003 /* SurfAceCentralRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E76A17200000000000001 /* SurfAceCentralRegistration.swift */; };
 		EA2E76A17200000000000005 /* SurfAceCentralRegistrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E76A17200000000000004 /* SurfAceCentralRegistrationTests.swift */; };
+		FE8EFD230000000000000005 /* SurfAceCentralDiscoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE8EFD230000000000000004 /* SurfAceCentralDiscoveryTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -122,6 +123,7 @@
 		F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceApp.swift; sourceTree = "<group>"; };
 		EA2E76A17200000000000001 /* SurfAceCentralRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceCentralRegistration.swift; sourceTree = "<group>"; };
 		EA2E76A17200000000000004 /* SurfAceCentralRegistrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceCentralRegistrationTests.swift; sourceTree = "<group>"; };
+		FE8EFD230000000000000004 /* SurfAceCentralDiscoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceCentralDiscoveryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -190,6 +192,7 @@
 				C8E71C758987FB7BBCD96EAC /* SurfAceLocklessContentOperationsTests.swift */,
 				4B26D67F1579A50644D8413D /* SurfAceLocklessRuntimeAdapterTests.swift */,
 				EA2E76A17200000000000004 /* SurfAceCentralRegistrationTests.swift */,
+				FE8EFD230000000000000004 /* SurfAceCentralDiscoveryTests.swift */,
 				EA7AE8370000000000000001 /* SurfAceReceiptReleaseTests.swift */,
 				983A8752C94CB2B5C0201A1C /* SurfAceLocklessTopologyOperationsTests.swift */,
 				9C9CB3316457E4F266DD2A8D /* SurfAceLocklessWebSocketIntegrationTests.swift */,
@@ -380,6 +383,7 @@
 				BF6C8A7C9C1DDD55979F661C /* SurfAceLocklessContentOperationsTests.swift in Sources */,
 				0C3835F9F1C968FB6F328F10 /* SurfAceLocklessRuntimeAdapterTests.swift in Sources */,
 				EA2E76A17200000000000005 /* SurfAceCentralRegistrationTests.swift in Sources */,
+				FE8EFD230000000000000005 /* SurfAceCentralDiscoveryTests.swift in Sources */,
 				EA7AE8370000000000000002 /* SurfAceReceiptReleaseTests.swift in Sources */,
 				B5375E4E54338700C609BA3A /* SurfAceLocklessTopologyOperationsTests.swift in Sources */,
 				8B0D46E02145506E619EEFA7 /* SurfAceLocklessWebSocketIntegrationTests.swift in Sources */,

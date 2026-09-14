@@ -237,7 +237,19 @@ final class SurfAceCentralRegistration {
 
 @MainActor
 final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowserDelegate, @preconcurrency NetServiceDelegate {
-    private let browser = NetServiceBrowser()
+    private let browser: NetServiceBrowser
+    private let sleep: @MainActor (Duration) async throws -> Void
+    private var continuation: CheckedContinuation<[URL], Never>?
+    private var deadline: Task<Void, Never>?
+    private var browsing = false
+    private var pending: Set<ObjectIdentifier> = []
+
+    init(browser: NetServiceBrowser = NetServiceBrowser(),
+         sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+        self.browser = browser
+        self.sleep = sleep
+        super.init()
+    }
     private var services: [NetService] = []
     private var urls: [String: URL] = [:]
     private var addresses: [URL: [URL]] = [:]
@@ -245,36 +257,92 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
     func transportURLs(for url: URL) -> [URL] { addresses[url] ?? [] }
 
     func discover() async -> [URL] {
-        addresses.removeAll()
-        browser.delegate = self
-        browser.searchForServices(ofType: "_surf-ace._tcp.", inDomain: "local.")
-        try? await Task.sleep(for: .milliseconds(1500))
+        guard !Task.isCancelled, continuation == nil else { return [] }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                addresses.removeAll()
+                browsing = true
+                browser.delegate = self
+                browser.searchForServices(ofType: "_surf-ace._tcp.", inDomain: "local.")
+                deadline = Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await sleep(.milliseconds(1500))
+                        browsing = false
+                        browser.stop()
+                        finishIfReady()
+                        guard self.continuation != nil else { return }
+                        // Resolve callbacks outlive the browse window. Bound services
+                        // that never deliver a terminal callback as well.
+                        try await sleep(.seconds(5))
+                        finish()
+                    } catch { }
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.finish() }
+        }
+    }
+
+    private func finishIfReady() {
+        if !browsing && (pending.isEmpty || !urls.isEmpty) { finish() }
+    }
+
+    private func finish() {
+        guard let continuation else { return }
+        self.continuation = nil
+        deadline?.cancel()
+        deadline = nil
+        browsing = false
         browser.stop()
-        services.forEach { $0.stop() }
+        services.forEach { $0.stop(); $0.delegate = nil }
         services.removeAll()
+        pending.removeAll()
         let result = urls.sorted { $0.key < $1.key }.map(\.value)
         urls.removeAll()
-        return result
+        continuation.resume(returning: result)
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
+        finish()
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        guard pending.remove(ObjectIdentifier(sender)) != nil else { return }
+        finishIfReady()
+    }
+
+    static func endpoint(host: String, port: Int, path: String) -> URL? {
+        // Bonjour returns absolute DNS names. URLSession's local-network ATS
+        // classification needs the equivalent local hostname without its root dot.
+        let hostname = host.hasSuffix(".") ? String(host.dropLast()) : host
+        guard !hostname.isEmpty, (1...65535).contains(port), path.hasPrefix("/") else { return nil }
+        var components = URLComponents()
+        components.scheme = "ws"
+        components.host = hostname
+        components.port = port
+        components.path = path
+        return components.url
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        guard browsing, continuation != nil else { return }
         services.append(service)
+        pending.insert(ObjectIdentifier(service))
         service.delegate = self
-        service.resolve(withTimeout: 1)
+        service.resolve(withTimeout: 5)
     }
 
     func netServiceDidResolveAddress(_ sender: NetService) {
+        guard pending.remove(ObjectIdentifier(sender)) != nil else { return }
+        defer { finishIfReady() }
         guard let data = sender.txtRecordData(), let host = sender.hostName, sender.port > 0 else { return }
         let txt = NetService.dictionary(fromTXTRecord: data)
         guard txt["role"].flatMap({ String(data: $0, encoding: .utf8) }) == "server" else { return }
         let path = txt["ws"].flatMap { String(data: $0, encoding: .utf8) } ?? "/"
-        guard path.hasPrefix("/") else { return }
-        var components = URLComponents()
-        components.scheme = "ws"
-        components.host = host
-        components.port = sender.port
-        components.path = path
-        if let url = components.url {
+        if let url = Self.endpoint(host: host, port: sender.port, path: path),
+           let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
             urls[sender.name] = url
             addresses[url] = (sender.addresses ?? []).compactMap { data in
                 var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
