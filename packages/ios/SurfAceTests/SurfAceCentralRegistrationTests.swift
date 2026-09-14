@@ -20,6 +20,74 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         func close() { closed = true }
     }
 
+    func testDiscoveryLifecycleWaitsForTerminalResolutionOrBoundedTimeout() {
+        let completedBeforeBrowseEnd = NSObject()
+        let lateFound = NSObject()
+        let failed = NSObject()
+        let timedOut = NSObject()
+
+        let lifecycle = SurfAceCentralDiscoveryLifecycle()
+        lifecycle.beginBrowsing()
+        lifecycle.found(completedBeforeBrowseEnd)
+        lifecycle.resolutionSucceeded(completedBeforeBrowseEnd)
+        XCTAssertFalse(lifecycle.isComplete)
+
+        lifecycle.found(lateFound)
+        lifecycle.found(failed)
+        lifecycle.found(timedOut)
+        lifecycle.endBrowsing()
+        XCTAssertFalse(lifecycle.isComplete)
+
+        lifecycle.resolutionSucceeded(lateFound)
+        lifecycle.resolutionFailed(failed)
+        XCTAssertFalse(lifecycle.isComplete)
+
+        lifecycle.resolutionTimedOut()
+        XCTAssertTrue(lifecycle.isComplete)
+        XCTAssertEqual(lifecycle.pendingCount, 0)
+    }
+
+    func testDiscoveryLifecycleWaiterResumesOnLastTerminalResolution() async {
+        let service = NSObject()
+        let lifecycle = SurfAceCentralDiscoveryLifecycle()
+        lifecycle.beginBrowsing()
+        lifecycle.found(service)
+        lifecycle.endBrowsing()
+
+        let waiter = Task { await lifecycle.waitUntilComplete() }
+        await Task.yield()
+        lifecycle.resolutionSucceeded(service)
+        await waiter.value
+
+        XCTAssertTrue(lifecycle.isComplete)
+    }
+
+    func testDiscoveredLocalHostNormalizationMatchesConfiguredRacterURL() throws {
+        let discovered = try XCTUnwrap(
+            SurfAceCentralDiscovery.localTransportURL(host: "racter.", port: 43867, path: "/")
+        )
+        XCTAssertEqual(discovered, URL(string: "ws://racter:43867/"))
+
+        let discoveredLocal = try XCTUnwrap(
+            SurfAceCentralDiscovery.localTransportURL(host: "racter.local.", port: 43867, path: "/socket")
+        )
+        XCTAssertEqual(discoveredLocal, URL(string: "ws://racter.local:43867/socket"))
+    }
+
+    func testConfiguredSecureRemoteURLIsNotNormalizedByDiscovery() async throws {
+        let configured = try XCTUnwrap(URL(string: "wss://central.example.com:9443/secure"))
+        let transport = Transport()
+        var attempted: [URL] = []
+        let registration = SurfAceCentralRegistration(clientId: "test", configured: configured,
+            discover: { XCTFail("configured success must not discover"); return [] },
+            makeTransport: { url in attempted.append(url); return transport },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in })
+
+        try await registration.synchronize()
+        XCTAssertEqual(attempted, [configured])
+        registration.stop()
+    }
+
 
     func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop() async throws {
         let transport = Transport()

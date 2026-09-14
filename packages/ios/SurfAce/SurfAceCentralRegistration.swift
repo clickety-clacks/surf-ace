@@ -238,6 +238,7 @@ final class SurfAceCentralRegistration {
 @MainActor
 final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowserDelegate, @preconcurrency NetServiceDelegate {
     private let browser = NetServiceBrowser()
+    private let lifecycle = SurfAceCentralDiscoveryLifecycle()
     private var services: [NetService] = []
     private var urls: [String: URL] = [:]
     private var addresses: [URL: [URL]] = [:]
@@ -246,10 +247,30 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
 
     func discover() async -> [URL] {
         addresses.removeAll()
+        lifecycle.beginBrowsing()
         browser.delegate = self
         browser.searchForServices(ofType: "_surf-ace._tcp.", inDomain: "local.")
-        try? await Task.sleep(for: .milliseconds(1500))
+        let browseCancelled: Bool
+        do {
+            try await Task.sleep(for: .milliseconds(1500))
+            browseCancelled = false
+        } catch {
+            browseCancelled = true
+        }
         browser.stop()
+        lifecycle.endBrowsing()
+        if browseCancelled {
+            lifecycle.resolutionTimedOut()
+        } else if !lifecycle.isComplete {
+            let timeout = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                    self?.lifecycle.resolutionTimedOut()
+                } catch { }
+            }
+            await lifecycle.waitUntilComplete()
+            timeout.cancel()
+        }
         services.forEach { $0.stop() }
         services.removeAll()
         let result = urls.sorted { $0.key < $1.key }.map(\.value)
@@ -259,22 +280,18 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
         services.append(service)
+        lifecycle.found(service)
         service.delegate = self
         service.resolve(withTimeout: 1)
     }
 
     func netServiceDidResolveAddress(_ sender: NetService) {
+        defer { lifecycle.resolutionSucceeded(sender) }
         guard let data = sender.txtRecordData(), let host = sender.hostName, sender.port > 0 else { return }
         let txt = NetService.dictionary(fromTXTRecord: data)
         guard txt["role"].flatMap({ String(data: $0, encoding: .utf8) }) == "server" else { return }
         let path = txt["ws"].flatMap { String(data: $0, encoding: .utf8) } ?? "/"
-        guard path.hasPrefix("/") else { return }
-        var components = URLComponents()
-        components.scheme = "ws"
-        components.host = host
-        components.port = sender.port
-        components.path = path
-        if let url = components.url {
+        if let url = Self.localTransportURL(host: host, port: sender.port, path: path) {
             urls[sender.name] = url
             addresses[url] = (sender.addresses ?? []).compactMap { data in
                 var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
@@ -284,10 +301,18 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
                         &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
                 }
                 guard result == 0 else { return nil }
-                var transport = components
+                guard var transport = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
                 transport.host = String(cString: host)
                 return transport.url
             }
         }
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        lifecycle.resolutionFailed(sender)
+    }
+
+    static func localTransportURL(host: String, port: Int, path: String) -> URL? {
+        SurfAceCentralDiscoveryLifecycle.localTransportURL(host: host, port: port, path: path)
     }
 }
