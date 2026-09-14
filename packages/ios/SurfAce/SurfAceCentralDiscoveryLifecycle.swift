@@ -2,48 +2,72 @@ import Foundation
 
 @MainActor
 final class SurfAceCentralDiscoveryLifecycle {
-    private var browsing = false
-    private var pending: Set<ObjectIdentifier> = []
-    private var completion: CheckedContinuation<Void, Never>?
-
-    var isComplete: Bool { !browsing && pending.isEmpty }
-    var pendingCount: Int { pending.count }
-
-    func beginBrowsing() {
-        precondition(completion == nil)
-        browsing = true
-        pending.removeAll()
+    private struct Attempt {
+        let generation: UInt64
+        var browsing = true
+        var pending: Set<ObjectIdentifier> = []
+        var completion: CheckedContinuation<Void, Never>?
     }
 
-    func found(_ service: AnyObject) {
-        pending.insert(ObjectIdentifier(service))
+    private var nextGeneration: UInt64 = 0
+    private var attempt: Attempt?
+
+    var pendingCount: Int { attempt?.pending.count ?? 0 }
+
+    func beginBrowsing() -> UInt64 {
+        precondition(attempt == nil)
+        nextGeneration &+= 1
+        attempt = Attempt(generation: nextGeneration)
+        return nextGeneration
     }
 
-    func resolutionSucceeded(_ service: AnyObject) {
-        resolutionEnded(service)
+    func found(_ service: AnyObject, generation: UInt64) -> Bool {
+        guard var current = attempt,
+              current.generation == generation,
+              current.browsing,
+              current.pending.insert(ObjectIdentifier(service)).inserted else { return false }
+        attempt = current
+        return true
     }
 
-    func resolutionFailed(_ service: AnyObject) {
-        resolutionEnded(service)
+    func resolutionSucceeded(_ service: AnyObject, generation: UInt64) -> Bool {
+        resolutionEnded(service, generation: generation)
     }
 
-    func endBrowsing() {
+    func resolutionFailed(_ service: AnyObject, generation: UInt64) -> Bool {
+        resolutionEnded(service, generation: generation)
+    }
+
+    func endBrowsing(generation: UInt64) {
+        guard var current = attempt, current.generation == generation else { return }
         // Closing the browse window stops intake; pending resolver callbacks still own completion.
-        browsing = false
-        completeIfReady()
+        current.browsing = false
+        attempt = current
+        completeIfReady(generation: generation)
     }
 
-    func resolutionTimedOut() {
-        browsing = false
-        pending.removeAll()
-        completeIfReady()
+    func resolutionTimedOut(generation: UInt64) {
+        invalidate(generation: generation)
     }
 
-    func waitUntilComplete() async {
-        if isComplete { return }
+    func cancel(generation: UInt64) {
+        invalidate(generation: generation)
+    }
+
+    func isComplete(generation: UInt64) -> Bool {
+        attempt?.generation != generation
+    }
+
+    func waitUntilComplete(generation: UInt64) async {
+        guard attempt?.generation == generation else { return }
         await withCheckedContinuation { continuation in
-            precondition(completion == nil)
-            completion = continuation
+            guard var current = attempt, current.generation == generation else {
+                continuation.resume()
+                return
+            }
+            precondition(current.completion == nil)
+            current.completion = continuation
+            attempt = current
         }
     }
 
@@ -59,14 +83,27 @@ final class SurfAceCentralDiscoveryLifecycle {
         return components.url
     }
 
-    private func resolutionEnded(_ service: AnyObject) {
-        pending.remove(ObjectIdentifier(service))
-        completeIfReady()
+    private func resolutionEnded(_ service: AnyObject, generation: UInt64) -> Bool {
+        guard var current = attempt,
+              current.generation == generation,
+              current.pending.remove(ObjectIdentifier(service)) != nil else { return false }
+        attempt = current
+        completeIfReady(generation: generation)
+        return true
     }
 
-    private func completeIfReady() {
-        guard isComplete, let completion else { return }
-        self.completion = nil
-        completion.resume()
+    private func completeIfReady(generation: UInt64) {
+        guard let current = attempt,
+              current.generation == generation,
+              !current.browsing,
+              current.pending.isEmpty else { return }
+        attempt = nil
+        current.completion?.resume()
+    }
+
+    private func invalidate(generation: UInt64) {
+        guard let current = attempt, current.generation == generation else { return }
+        attempt = nil
+        current.completion?.resume()
     }
 }
