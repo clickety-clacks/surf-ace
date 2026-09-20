@@ -2858,11 +2858,11 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const visibleWindowLabel = latestState?.windowLabel ?? "";
   const connectionBar = latestState?.connectionBar ?? "disconnected";
   windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
-  label.textContent = visibleAddress.toUpperCase();
+  label.textContent = pane.label.toUpperCase();
   projectConnectionChrome(
     { disconnectedGlyph, paneLabel: label, windowLabel },
     connectionBar,
-    Boolean(visibleAddress),
+    Boolean(pane.label),
     Boolean(visibleWindowLabel),
   );
   const showsIdentity = connectionBar === "connected";

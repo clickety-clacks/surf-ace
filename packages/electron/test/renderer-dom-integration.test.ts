@@ -20,7 +20,7 @@ function pane(paneId: number, annotationBorderVisible = false) {
       renderVersion: 1,
       revision: 1,
     },
-    displayId: String(paneId),
+    displayId: `a${paneId}`,
     drawings: [],
     externalNative: false,
     flushInFlight: false,
@@ -32,7 +32,7 @@ function pane(paneId: number, annotationBorderVisible = false) {
     provenanceName: null,
     showDone: annotationBorderVisible,
     toast: null,
-    visibleAddress: String(paneId),
+    visibleAddress: `a${paneId}`,
   };
 }
 
@@ -174,6 +174,13 @@ test("renderer DOM integrates authoritative connection states and live scale con
   assert.equal(chrome().glyph.hasAttribute("hidden"), true);
   assert.equal(chrome().pane.hasAttribute("hidden"), false);
   assert.equal(chrome().window.hasAttribute("hidden"), false);
+  assert.equal(chrome().pane.textContent, "1");
+  assert.equal(chrome().window.textContent, "A");
+  assert.equal(document.querySelector(".pane-label")?.getAttribute("title"), "window a pane a1");
+  assert.equal(
+    document.querySelector(".pane-label")?.getAttribute("aria-label"),
+    "Surf Ace window a pane a1",
+  );
   stateListener!(state("disconnected"));
   assert.equal(chrome().glyph.hasAttribute("hidden"), false);
   assert.equal(chrome().pane.hasAttribute("hidden"), true);

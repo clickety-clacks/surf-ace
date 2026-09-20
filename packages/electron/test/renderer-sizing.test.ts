@@ -647,7 +647,7 @@ test("renderer chrome keeps entry-bound composite provenance in navigation chrom
   assert.doesNotMatch(source, /windowLabel\.hidden = true/);
   assert.match(source, /createLucideIcon\("wifi-off"\)/);
   assert.match(source, /projectConnectionChrome\(/);
-  assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);
+  assert.match(source, /label\.textContent = pane\.label\.toUpperCase\(\)/);
   assert.match(source, /` window \$\{visibleWindowLabel\}`/);
   assert.match(source, /`Surf Ace\$\{visibleWindowLabel/);
   assert.match(source, /pane \$\{visibleAddress\}/);
@@ -662,13 +662,27 @@ test("renderer chrome keeps entry-bound composite provenance in navigation chrom
   assert.match(styles, /\.navigation-pill__provenance--zero-width\s*\{[\s\S]*flex:\s*0 0 0;[\s\S]*width:\s*0;/);
 });
 
+test("renderer projects the numeric pane label while preserving the combined semantic address", async () => {
+  const source = await rendererSource();
+  const updateIndex = source.indexOf("function updatePane");
+  const updateSource = source.slice(updateIndex, source.indexOf("function layoutWeight", updateIndex));
+
+  assert.ok(updateIndex > -1);
+  assert.match(updateSource, /const visibleAddress = pane\.displayId \|\| pane\.visibleAddress \|\| pane\.label/);
+  assert.match(updateSource, /label\.textContent = pane\.label\.toUpperCase\(\)/);
+  assert.doesNotMatch(updateSource, /label\.textContent = visibleAddress/);
+  assert.match(updateSource, /Boolean\(pane\.label\)/);
+  assert.match(updateSource, /`pane \$\{visibleAddress\}`/);
+  assert.match(updateSource, /`Surf Ace\$\{visibleWindowLabel[\s\S]*pane \$\{visibleAddress\}`/);
+});
+
 test("renderer fits pane identity labels inside pane bounds for native and renderer panes", async () => {
   const source = await rendererSource();
   const styles = await rendererStyles();
   const metricsIndex = source.indexOf("function setPaneChromeMetrics");
   const fitIndex = source.indexOf("function fitPaneLabelToVisibleBounds");
   const updateIndex = source.indexOf("function updatePane");
-  const textIndex = source.indexOf("label.textContent = visibleAddress.toUpperCase()", updateIndex);
+  const textIndex = source.indexOf("label.textContent = pane.label.toUpperCase()", updateIndex);
   const fitCallIndex = source.indexOf("fitPaneLabelToVisibleBounds(view)", textIndex);
   const nativeToggleIndex = source.indexOf("view.rootEl.classList.toggle(\"native-backed\"", updateIndex);
   const allMetricsIndex = source.indexOf("function setAllPaneChromeMetrics");
