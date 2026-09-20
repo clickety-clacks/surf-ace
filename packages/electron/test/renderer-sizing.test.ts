@@ -647,7 +647,8 @@ test("renderer chrome keeps entry-bound composite provenance in navigation chrom
   assert.doesNotMatch(source, /windowLabel\.hidden = true/);
   assert.match(source, /createLucideIcon\("wifi-off"\)/);
   assert.match(source, /projectConnectionChrome\(/);
-  assert.match(source, /label\.textContent = visibleAddress\.toUpperCase\(\)/);
+  assert.match(source, /const paneNumber = pane\.label \|\| visibleAddress/);
+  assert.match(source, /label\.textContent = paneNumber\.toUpperCase\(\)/);
   assert.match(source, /` window \$\{visibleWindowLabel\}`/);
   assert.match(source, /`Surf Ace\$\{visibleWindowLabel/);
   assert.match(source, /pane \$\{visibleAddress\}/);
@@ -668,7 +669,7 @@ test("renderer fits pane identity labels inside pane bounds for native and rende
   const metricsIndex = source.indexOf("function setPaneChromeMetrics");
   const fitIndex = source.indexOf("function fitPaneLabelToVisibleBounds");
   const updateIndex = source.indexOf("function updatePane");
-  const textIndex = source.indexOf("label.textContent = visibleAddress.toUpperCase()", updateIndex);
+  const textIndex = source.indexOf("label.textContent = paneNumber.toUpperCase()", updateIndex);
   const fitCallIndex = source.indexOf("fitPaneLabelToVisibleBounds(view)", textIndex);
   const nativeToggleIndex = source.indexOf("view.rootEl.classList.toggle(\"native-backed\"", updateIndex);
   const allMetricsIndex = source.indexOf("function setAllPaneChromeMetrics");

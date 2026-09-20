@@ -2855,14 +2855,15 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const disconnectedGlyph = labelWrap.querySelector(".pane-label__disconnected") as SVGSVGElement;
   const label = labelWrap.querySelector(".pane-label__number") as HTMLSpanElement;
   const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
+  const paneNumber = pane.label || visibleAddress;
   const visibleWindowLabel = latestState?.windowLabel ?? "";
   const connectionBar = latestState?.connectionBar ?? "disconnected";
   windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
-  label.textContent = visibleAddress.toUpperCase();
+  label.textContent = paneNumber.toUpperCase();
   projectConnectionChrome(
     { disconnectedGlyph, paneLabel: label, windowLabel },
     connectionBar,
-    Boolean(visibleAddress),
+    Boolean(paneNumber),
     Boolean(visibleWindowLabel),
   );
   const showsIdentity = connectionBar === "connected";
