@@ -156,7 +156,7 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
     }
 }
 
-private final class SurfAceRegistrationContinuation<Value>: @unchecked Sendable {
+private final class SurfAceRegistrationContinuation<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
 
