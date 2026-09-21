@@ -16,11 +16,13 @@ attempted first; a successful configured registration does not start browsing.
 Only absent, invalid, or failed configuration enters Bonjour discovery.
 
 Transport security is narrow by design: hostname URLs, all `wss://` URLs, and
-non-local numeric URLs continue through URLSession and ATS. A user-configured
-local-use numeric `ws://` URL uses Network.framework's WebSocket transport to
-avoid the numeric-host ATS rejection, remains pinned to that exact URL, and
-never falls through to an unrelated Bonjour controller when unavailable. No
-arbitrary-loads exception, LAN scan, or remote transport weakening is used.
+non-local numeric URLs continue through URLSession and ATS. A local-use numeric
+`ws://` endpoint uses Network.framework's WebSocket transport to avoid the
+numeric-host ATS rejection, while route selection retains the configured-first
+then Bonjour fallback contract. If a configured numeric attempt fails, the
+existing advertised-controller fallback may be selected and the configured route
+is retried while fallback remains healthy. No arbitrary-loads exception, LAN
+scan, or remote transport weakening is used.
 
 Release acceptance environments:
 

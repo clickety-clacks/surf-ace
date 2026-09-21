@@ -254,30 +254,40 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         registration.stop()
     }
 
-    func testConfiguredLocalNumericFailureDoesNotSubstituteDiscoveredController() async throws {
+    func testConfiguredLocalNumericFailureUsesBonjourFallbackAndRetriesConfigured() async throws {
         let configured = try XCTUnwrap(URL(string: "ws://100.64.12.34:43867/"))
         let discovered = try XCTUnwrap(URL(string: "ws://racter:43867/"))
-        let transport = Transport()
-        transport.fails = true
+        let primary = Transport()
+        primary.fails = true
+        primary.label = "configured"
+        let fallback = Transport()
+        fallback.label = "bonjour"
         var attempted: [URL] = []
+        var applied: [String] = []
         var discoveredCalled = false
         let registration = SurfAceCentralRegistration(
             clientId: "numeric-client",
             configured: configured,
             discover: { discoveredCalled = true; return [discovered] },
-            makeTransport: { url in attempted.append(url); return transport },
+            makeTransport: { url in
+                attempted.append(url)
+                return url == configured ? primary : fallback
+            },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
-            apply: { _, _ in }
+            apply: { assignments, _ in applied.append(assignments[0].windowLabel) }
         )
 
-        do {
-            try await registration.synchronize()
-            XCTFail("unavailable configured numeric controller must remain pinned")
-        } catch SurfAceRegistrationError.noServer {
-            // Expected: the configured endpoint is unavailable and identity-pinned.
-        }
-        XCTAssertEqual(attempted, [configured])
-        XCTAssertFalse(discoveredCalled)
+        try await registration.synchronize()
+        XCTAssertEqual(attempted, [configured, discovered])
+        XCTAssertTrue(discoveredCalled)
+        XCTAssertEqual(applied, ["bonjour"])
+        XCTAssertEqual(registration.status, .connected)
+
+        primary.fails = false
+        try await registration.synchronize()
+        XCTAssertEqual(attempted, [configured, discovered, discovered, configured])
+        XCTAssertEqual(applied, ["bonjour", "bonjour", "configured"])
+        XCTAssertEqual(registration.status, .connected)
         registration.stop()
     }
 

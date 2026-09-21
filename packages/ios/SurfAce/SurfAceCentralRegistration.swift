@@ -79,9 +79,9 @@ private enum SurfAceRegistrationWire {
 }
 
 enum SurfAceRegistrationEndpoint {
-    /// A user-configured local numeric endpoint is the only path that bypasses URLSession's
-    /// hostname-oriented ATS handling. It remains pinned to the exact configured URL; it is
-    /// never replaced with a discovered controller. Remote numeric endpoints stay on URLSession.
+    /// A local-use numeric endpoint selects the Network.framework WebSocket transport so ATS
+    /// remains narrow. Route selection still follows the configured-first/Bonjour fallback
+    /// contract; remote numeric endpoints stay on URLSession.
     static func usesLocalNumericTransport(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "ws", let host = url.host else { return false }
         return isLocalNumericAddress(host)
@@ -378,11 +378,6 @@ final class SurfAceCentralRegistration {
             }
         }
         if let configured, try await attempt(configured, surfaces: surfaces) { return }
-        // An explicitly configured local numeric endpoint is an identity pin. If it is
-        // unavailable, do not silently register this client with another discovered controller.
-        if let configured, SurfAceRegistrationEndpoint.usesLocalNumericTransport(configured) {
-            throw SurfAceRegistrationError.noServer
-        }
         if selected == nil { setStatus(.connecting) }
         for url in await discover() {
             if try await attempt(url, surfaces: surfaces) { return }
