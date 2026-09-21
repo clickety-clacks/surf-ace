@@ -670,6 +670,38 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertTrue(hostView.hasPendingWebContentRenderForTesting)
     }
 
+    func testMarkdownSnapshotReportsMeasuredViewportAndPreservesSourceText() async throws {
+        let frame = CGRect(x: 0, y: 0, width: 320, height: 240)
+        let hostView = SurfAceSurfaceHostView(frame: frame)
+        hostView.setNeedsLayout()
+        hostView.layoutIfNeeded()
+        let markdown = "# Measured pane\n\nThis markdown must retain its source text while reporting the rendered document geometry."
+
+        hostView.render(
+            entry: SurfAcePaneEntry.from(
+                frame: SurfAceFrame(
+                    contentId: "ct_viewport_markdown",
+                    revision: 1,
+                    contentType: .markdown,
+                    payload: .markdown(markdown: markdown),
+                    reloadSource: nil,
+                    title: nil,
+                    scrollable: true,
+                    interactive: true
+                ),
+                historyOwnerToken: "hot_viewport"
+            ),
+            restoreViewport: nil
+        )
+
+        let snapshot = try XCTUnwrap(await hostView.fetchSnapshot(includeImage: true))
+        XCTAssertGreaterThan(snapshot.viewport.visibleRect.width, 1)
+        XCTAssertGreaterThan(snapshot.viewport.visibleRect.height, 1)
+        XCTAssertGreaterThan(snapshot.viewport.contentSize.width, 1)
+        XCTAssertGreaterThan(snapshot.viewport.contentSize.height, 1)
+        XCTAssertEqual(snapshot.visibleText, markdown)
+    }
+
     func testPencilStrokeTransitionsAnnotationModeAndRecordsTool() {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "pencil-annotation")

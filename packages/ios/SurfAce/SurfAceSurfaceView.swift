@@ -2178,19 +2178,24 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 lastSelection = payload.selection ?? lastSelection
             }
         case .markdown(let markdown):
+            await refreshWebViewportFromDocument()
             lastVisibleText = markdown
         case .image(_, _, let alt):
+            await refreshWebViewportFromDocument()
             lastVisibleText = alt ?? ""
         case .pdf(let data):
             lastViewport = pdfViewport()
             lastVisibleText = currentPDFPageText() ?? extractPDFText(data)
             lastSelection = nil
         case .terminal(let lines, _):
+            await refreshWebViewportFromDocument()
             lastVisibleText = lines.suffix(200).map(SurfAceANSI.strip).joined(separator: "\n")
         case .browserURL(let url, _, _):
+            await refreshWebViewportFromDocument()
             lastVisibleText = url
             lastSelection = nil
         case .some(.video), .some(.canvas):
+            await refreshWebViewportFromDocument()
             lastVisibleText = ""
             lastSelection = nil
         case nil:
@@ -2825,6 +2830,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         lastVisibleText = payload.visibleText
         lastSelection = payload.selection ?? lastSelection
         onScrollSettled?(payload.viewport, payload.visibleText)
+    }
+
+    private func refreshWebViewportFromDocument() async {
+        guard let payload = await evaluateSnapshotPayload() else { return }
+        lastViewport = payload.viewport
     }
 
     private func parseViewport(_ object: [String: Any]?) -> SurfAceViewport? {
