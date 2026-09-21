@@ -69,7 +69,7 @@ enum SurfAceLocklessUIProjection {
         object["contentType"] = value.contentType.map(SurfAceLocklessJSON.string) ?? .null
         object["revision"] = .integer(value.revision)
         object["provenanceDisplayName"] = value.provenance.friendlyChatName.map(SurfAceLocklessJSON.string) ?? .null
-        object["senderDisplayName"] = value.provenance.controllerProductName.map(SurfAceLocklessJSON.string) ?? .null
+        object["provenanceControllerProductName"] = value.provenance.controllerProductName.map(SurfAceLocklessJSON.string) ?? .null
         if case .object(let annotations) = value.annotations {
             object["drawingData"] = annotations["drawingData"] ?? .string("")
             object["strokesById"] = annotations["strokesById"] ?? .object([:])

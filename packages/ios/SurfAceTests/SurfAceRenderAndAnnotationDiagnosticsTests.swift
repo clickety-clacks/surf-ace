@@ -128,6 +128,78 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         ), .hidden)
         XCTAssertEqual(provenance.accessibilityLabel, "Pushed by OpenClaw, using Clawline")
     }
+
+    func testACPROV07LocklessProjectionKeepsChatAndProviderAcrossHistoryAndPersistence() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state,
+            expectedSurfaceSetRevision: 0
+        )
+        let surfaceId = opened.surface.surfaceId
+        for (contentId, controllerProductName) in [
+            ("A1", "Controller A"),
+            ("B1", "Controller B"),
+            ("A2", "Controller A"),
+        ] {
+            _ = try SurfAceLocklessContentOperations.set(
+                state: &state,
+                intent: .init(
+                    content: .object(["markdown": .string(contentId)]),
+                    contentId: contentId,
+                    contentType: "markdown",
+                    controllerProductName: controllerProductName,
+                    friendlyChatName: contentId,
+                    paneId: 1,
+                    surfaceId: surfaceId
+                )
+            )
+        }
+
+        let topology = try XCTUnwrap(
+            try SurfAceLocklessUIProjection.topologies(from: state)[surfaceId]
+        )
+        let surface = SurfAceSurfaceModel(
+            sceneKey: "projection-provenance",
+            surfaceId: surfaceId,
+            windowLabel: topology.windowLabel,
+            name: topology.name
+        )
+        topology.apply(to: surface)
+        let pane = try XCTUnwrap(surface.panes.first)
+
+        XCTAssertEqual(pane.currentCompositeProvenance().friendlyChatName, "A2")
+        XCTAssertEqual(pane.currentCompositeProvenance().controllerProductName, "Controller A")
+
+        pane.forwardStack.append(pane.currentEntry)
+        pane.currentEntry = pane.backStack.removeLast()
+        XCTAssertEqual(pane.currentCompositeProvenance().friendlyChatName, "B1")
+        XCTAssertEqual(pane.currentCompositeProvenance().controllerProductName, "Controller B")
+
+        pane.forwardStack.append(pane.currentEntry)
+        pane.currentEntry = pane.backStack.removeLast()
+        XCTAssertEqual(pane.currentCompositeProvenance().friendlyChatName, "A1")
+        XCTAssertEqual(pane.currentCompositeProvenance().controllerProductName, "Controller A")
+
+        pane.backStack.append(pane.currentEntry)
+        pane.currentEntry = pane.forwardStack.removeLast()
+        XCTAssertEqual(pane.currentCompositeProvenance().friendlyChatName, "B1")
+        XCTAssertEqual(pane.currentCompositeProvenance().controllerProductName, "Controller B")
+
+        let persisted = try JSONDecoder().decode(
+            SurfAcePersistedSurfaceTopology.self,
+            from: JSONEncoder().encode(topology)
+        )
+        let restoredSurface = SurfAceSurfaceModel(
+            sceneKey: "projection-provenance-restored",
+            surfaceId: surfaceId,
+            windowLabel: persisted.windowLabel,
+            name: persisted.name
+        )
+        persisted.apply(to: restoredSurface)
+        let restoredPane = try XCTUnwrap(restoredSurface.panes.first)
+        XCTAssertEqual(restoredPane.currentCompositeProvenance().friendlyChatName, "A2")
+        XCTAssertEqual(restoredPane.currentCompositeProvenance().controllerProductName, "Controller A")
+    }
 }
 
 private func annotationStrokesById(_ strokeIds: [String]) -> [String: SurfAceStroke] {
