@@ -237,44 +237,93 @@ final class SurfAceCentralRegistration {
 
 @MainActor
 final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowserDelegate, @preconcurrency NetServiceDelegate {
-    private let browser = NetServiceBrowser()
-    private var services: [NetService] = []
+    private let makeBrowser: @MainActor () -> NetServiceBrowser
+    private let sleep: @MainActor (Duration) async throws -> Void
+    private let lifecycle = SurfAceCentralDiscoveryLifecycle()
+    private var activeBrowser: (browser: NetServiceBrowser, generation: UInt64)?
+    private var services: [ObjectIdentifier: (service: NetService, generation: UInt64)] = [:]
     private var urls: [String: URL] = [:]
     private var addresses: [URL: [URL]] = [:]
+    private var runningGeneration: UInt64?
+
+    init(makeBrowser: @escaping @MainActor () -> NetServiceBrowser = { NetServiceBrowser() },
+         sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+        self.makeBrowser = makeBrowser
+        self.sleep = sleep
+        super.init()
+    }
 
     func transportURLs(for url: URL) -> [URL] { addresses[url] ?? [] }
 
     func discover() async -> [URL] {
+        guard runningGeneration == nil, !Task.isCancelled else { return [] }
+        let generation = lifecycle.beginBrowsing()
+        runningGeneration = generation
         addresses.removeAll()
+        urls.removeAll()
+        let browser = makeBrowser()
+        activeBrowser = (browser, generation)
         browser.delegate = self
         browser.searchForServices(ofType: "_surf-ace._tcp.", inDomain: "local.")
-        try? await Task.sleep(for: .milliseconds(1500))
-        browser.stop()
-        services.forEach { $0.stop() }
-        services.removeAll()
+        let browseCancelled: Bool
+        do {
+            try await sleep(.milliseconds(1500))
+            browseCancelled = false
+        } catch {
+            browseCancelled = true
+        }
+        closeIntake(browser: browser, generation: generation)
+        if browseCancelled {
+            lifecycle.cancel(generation: generation)
+        } else if !lifecycle.isComplete(generation: generation) {
+            let timeout = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    try await sleep(.seconds(2))
+                    lifecycle.resolutionTimedOut(generation: generation)
+                } catch { }
+            }
+            await withTaskCancellationHandler {
+                await lifecycle.waitUntilComplete(generation: generation)
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.lifecycle.cancel(generation: generation) }
+            }
+            timeout.cancel()
+        }
+        finishServices(generation: generation)
         let result = urls.sorted { $0.key < $1.key }.map(\.value)
         urls.removeAll()
+        if runningGeneration == generation { runningGeneration = nil }
         return result
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        services.append(service)
+        guard let activeBrowser,
+              activeBrowser.browser === browser,
+              lifecycle.found(service, generation: activeBrowser.generation) else {
+            service.stop()
+            service.delegate = nil
+            return
+        }
+        services[ObjectIdentifier(service)] = (service, activeBrowser.generation)
         service.delegate = self
         service.resolve(withTimeout: 1)
     }
 
     func netServiceDidResolveAddress(_ sender: NetService) {
+        let identifier = ObjectIdentifier(sender)
+        guard let owned = services[identifier],
+              lifecycle.resolutionSucceeded(sender, generation: owned.generation) else { return }
+        services.removeValue(forKey: identifier)
+        defer {
+            sender.stop()
+            sender.delegate = nil
+        }
         guard let data = sender.txtRecordData(), let host = sender.hostName, sender.port > 0 else { return }
         let txt = NetService.dictionary(fromTXTRecord: data)
         guard txt["role"].flatMap({ String(data: $0, encoding: .utf8) }) == "server" else { return }
         let path = txt["ws"].flatMap { String(data: $0, encoding: .utf8) } ?? "/"
-        guard path.hasPrefix("/") else { return }
-        var components = URLComponents()
-        components.scheme = "ws"
-        components.host = host
-        components.port = sender.port
-        components.path = path
-        if let url = components.url {
+        if let url = Self.localTransportURL(host: host, port: sender.port, path: path) {
             urls[sender.name] = url
             addresses[url] = (sender.addresses ?? []).compactMap { data in
                 var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
@@ -284,10 +333,50 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
                         &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
                 }
                 guard result == 0 else { return nil }
-                var transport = components
+                guard var transport = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
                 transport.host = String(cString: host)
                 return transport.url
             }
+        }
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        let identifier = ObjectIdentifier(sender)
+        guard let owned = services[identifier],
+              lifecycle.resolutionFailed(sender, generation: owned.generation) else { return }
+        services.removeValue(forKey: identifier)
+        sender.stop()
+        sender.delegate = nil
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
+        guard let activeBrowser, activeBrowser.browser === browser else { return }
+        closeIntake(browser: browser, generation: activeBrowser.generation)
+        lifecycle.cancel(generation: activeBrowser.generation)
+    }
+
+    static func localTransportURL(host: String, port: Int, path: String) -> URL? {
+        SurfAceCentralDiscoveryLifecycle.localTransportURL(host: host, port: port, path: path)
+    }
+
+    private func closeIntake(browser: NetServiceBrowser, generation: UInt64) {
+        guard let activeBrowser,
+              activeBrowser.browser === browser,
+              activeBrowser.generation == generation else { return }
+        browser.stop()
+        browser.delegate = nil
+        self.activeBrowser = nil
+        lifecycle.endBrowsing(generation: generation)
+    }
+
+    private func finishServices(generation: UInt64) {
+        let identifiers = services.compactMap { identifier, owned in
+            owned.generation == generation ? identifier : nil
+        }
+        for identifier in identifiers {
+            guard let owned = services.removeValue(forKey: identifier) else { continue }
+            owned.service.stop()
+            owned.service.delegate = nil
         }
     }
 }

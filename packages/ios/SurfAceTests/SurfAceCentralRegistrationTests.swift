@@ -20,6 +20,210 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         func close() { closed = true }
     }
 
+    private final class DiscoveryBrowser: NetServiceBrowser {
+        var started = false
+        var stops = 0
+
+        override func searchForServices(ofType type: String, inDomain domain: String) { started = true }
+        override func stop() { stops += 1 }
+    }
+
+    private final class DiscoveryService: NetService {
+        var resolveTimeout: TimeInterval?
+        var stopped = false
+        var resolvedHost = "racter."
+        var resolvedPath = "/"
+
+        override var hostName: String? { resolvedHost }
+        override func txtRecordData() -> Data? {
+            NetService.data(fromTXTRecord: ["role": Data("server".utf8), "ws": Data(resolvedPath.utf8)])
+        }
+        override func resolve(withTimeout timeout: TimeInterval) { resolveTimeout = timeout }
+        override func stop() { stopped = true }
+    }
+
+    @MainActor
+    private final class DiscoveryClock {
+        var calls = 0
+        var permits = 0
+
+        func sleep(_ duration: Duration) async throws {
+            calls += 1
+            while permits == 0 {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+            permits -= 1
+        }
+    }
+
+    private func discoveryService(name: String = "owned", host: String = "racter.") -> DiscoveryService {
+        let service = DiscoveryService(domain: "local.", type: "_surf-ace._tcp.", name: name, port: 43867)
+        service.resolvedHost = host
+        return service
+    }
+
+    private func until(_ ready: () -> Bool) async {
+        for _ in 0..<10_000 {
+            if ready() { return }
+            await Task.yield()
+        }
+        XCTFail("expected discovery callback checkpoint")
+    }
+
+    func testDiscoveryLifecycleWaitsForTerminalResolutionOrBoundedTimeout() {
+        let completedBeforeBrowseEnd = NSObject()
+        let lateFound = NSObject()
+        let failed = NSObject()
+        let timedOut = NSObject()
+
+        let lifecycle = SurfAceCentralDiscoveryLifecycle()
+        let generation = lifecycle.beginBrowsing()
+        XCTAssertTrue(lifecycle.found(completedBeforeBrowseEnd, generation: generation))
+        XCTAssertTrue(lifecycle.resolutionSucceeded(completedBeforeBrowseEnd, generation: generation))
+        XCTAssertFalse(lifecycle.isComplete(generation: generation))
+
+        XCTAssertTrue(lifecycle.found(lateFound, generation: generation))
+        XCTAssertTrue(lifecycle.found(failed, generation: generation))
+        XCTAssertTrue(lifecycle.found(timedOut, generation: generation))
+        lifecycle.endBrowsing(generation: generation)
+        XCTAssertFalse(lifecycle.found(NSObject(), generation: generation))
+        XCTAssertFalse(lifecycle.isComplete(generation: generation))
+
+        XCTAssertTrue(lifecycle.resolutionSucceeded(lateFound, generation: generation))
+        XCTAssertTrue(lifecycle.resolutionFailed(failed, generation: generation))
+        XCTAssertFalse(lifecycle.isComplete(generation: generation))
+
+        lifecycle.resolutionTimedOut(generation: generation)
+        XCTAssertTrue(lifecycle.isComplete(generation: generation))
+        XCTAssertFalse(lifecycle.resolutionSucceeded(timedOut, generation: generation))
+        XCTAssertEqual(lifecycle.pendingCount, 0)
+    }
+
+    func testDiscoveryLifecycleWaiterResumesOnLastTerminalResolution() async {
+        let service = NSObject()
+        let lifecycle = SurfAceCentralDiscoveryLifecycle()
+        let generation = lifecycle.beginBrowsing()
+        XCTAssertTrue(lifecycle.found(service, generation: generation))
+        lifecycle.endBrowsing(generation: generation)
+
+        let waiter = Task { await lifecycle.waitUntilComplete(generation: generation) }
+        await Task.yield()
+        XCTAssertTrue(lifecycle.resolutionSucceeded(service, generation: generation))
+        XCTAssertFalse(lifecycle.resolutionSucceeded(service, generation: generation))
+        await waiter.value
+
+        XCTAssertTrue(lifecycle.isComplete(generation: generation))
+    }
+
+    func testDiscoveryRejectsServiceFoundAfterIntakeCloses() async {
+        let browser = DiscoveryBrowser(), clock = DiscoveryClock()
+        let discovery = SurfAceCentralDiscovery(makeBrowser: { browser }, sleep: { try await clock.sleep($0) })
+        let result = Task { await discovery.discover() }
+        await until { browser.started }
+        clock.permits += 1
+        await until { browser.stops == 1 }
+
+        let late = discoveryService()
+        discovery.netServiceBrowser(browser, didFind: late, moreComing: false)
+
+        XCTAssertNil(late.resolveTimeout)
+        XCTAssertTrue(late.stopped)
+        let urls = await result.value
+        XCTAssertTrue(urls.isEmpty)
+    }
+
+    func testDiscoveryIgnoresTerminalCallbacksAfterTimeoutAndCancellation() async {
+        let firstBrowser = DiscoveryBrowser(), secondBrowser = DiscoveryBrowser(), clock = DiscoveryClock()
+        var browsers = [firstBrowser, secondBrowser]
+        let discovery = SurfAceCentralDiscovery(makeBrowser: { browsers.removeFirst() }, sleep: { try await clock.sleep($0) })
+
+        let timedOutService = discoveryService(name: "timed-out")
+        let timedOut = Task { await discovery.discover() }
+        await until { firstBrowser.started }
+        discovery.netServiceBrowser(firstBrowser, didFind: timedOutService, moreComing: false)
+        clock.permits += 1
+        await until { clock.calls == 2 }
+        clock.permits += 1
+        let timedOutURLs = await timedOut.value
+        XCTAssertTrue(timedOutURLs.isEmpty)
+        discovery.netServiceDidResolveAddress(timedOutService)
+        discovery.netService(timedOutService, didNotResolve: [:])
+        XCTAssertTrue(discovery.transportURLs(for: URL(string: "ws://racter:43867/")!).isEmpty)
+
+        let cancelledService = discoveryService(name: "cancelled")
+        let cancelled = Task { await discovery.discover() }
+        await until { secondBrowser.started }
+        discovery.netServiceBrowser(secondBrowser, didFind: cancelledService, moreComing: false)
+        cancelled.cancel()
+        let cancelledURLs = await cancelled.value
+        XCTAssertTrue(cancelledURLs.isEmpty)
+        discovery.netServiceDidResolveAddress(cancelledService)
+        discovery.netService(cancelledService, didNotResolve: [:])
+        XCTAssertTrue(discovery.transportURLs(for: URL(string: "ws://racter:43867/")!).isEmpty)
+    }
+
+    func testDiscoveryRejectsStaleTerminalCallbackDuringNextGeneration() async {
+        let firstBrowser = DiscoveryBrowser(), secondBrowser = DiscoveryBrowser(), clock = DiscoveryClock()
+        var browsers = [firstBrowser, secondBrowser]
+        let discovery = SurfAceCentralDiscovery(makeBrowser: { browsers.removeFirst() }, sleep: { try await clock.sleep($0) })
+
+        let stale = discoveryService(name: "stale", host: "stale.local.")
+        let first = Task { await discovery.discover() }
+        await until { firstBrowser.started }
+        discovery.netServiceBrowser(firstBrowser, didFind: stale, moreComing: false)
+        clock.permits += 1
+        await until { clock.calls == 2 }
+        clock.permits += 1
+        let firstURLs = await first.value
+        XCTAssertTrue(firstURLs.isEmpty)
+
+        let current = discoveryService(name: "current")
+        let staleFound = discoveryService(name: "stale-found")
+        let second = Task { await discovery.discover() }
+        await until { secondBrowser.started }
+        discovery.netServiceDidResolveAddress(stale)
+        discovery.netService(stale, didNotResolve: [:])
+        discovery.netServiceBrowser(firstBrowser, didFind: staleFound, moreComing: false)
+        XCTAssertNil(staleFound.resolveTimeout)
+        XCTAssertTrue(staleFound.stopped)
+        discovery.netServiceBrowser(secondBrowser, didFind: current, moreComing: false)
+        clock.permits += 1
+        await until { clock.calls == 4 }
+        discovery.netServiceDidResolveAddress(current)
+
+        let secondURLs = await second.value
+        XCTAssertEqual(secondURLs, [URL(string: "ws://racter:43867/")!])
+        discovery.netServiceDidResolveAddress(current)
+        XCTAssertTrue(current.stopped)
+    }
+
+    func testDiscoveredLocalHostNormalizationMatchesConfiguredRacterURL() throws {
+        let discovered = try XCTUnwrap(
+            SurfAceCentralDiscovery.localTransportURL(host: "racter.", port: 43867, path: "/")
+        )
+        XCTAssertEqual(discovered, URL(string: "ws://racter:43867/"))
+
+        let discoveredLocal = try XCTUnwrap(
+            SurfAceCentralDiscovery.localTransportURL(host: "racter.local.", port: 43867, path: "/socket")
+        )
+        XCTAssertEqual(discoveredLocal, URL(string: "ws://racter.local:43867/socket"))
+    }
+
+    func testConfiguredSecureRemoteURLIsNotNormalizedByDiscovery() async throws {
+        let configured = try XCTUnwrap(URL(string: "wss://central.example.com:9443/secure"))
+        let transport = Transport()
+        var attempted: [URL] = []
+        let registration = SurfAceCentralRegistration(clientId: "test", configured: configured,
+            discover: { XCTFail("configured success must not discover"); return [] },
+            makeTransport: { url in attempted.append(url); return transport },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in })
+
+        try await registration.synchronize()
+        XCTAssertEqual(attempted, [configured])
+        registration.stop()
+    }
+
 
     func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop() async throws {
         let transport = Transport()
