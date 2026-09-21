@@ -263,8 +263,7 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
     private func send(_ data: Data) async throws {
         guard let connection else { throw SurfAceRegistrationError.noServer }
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
-        let context = NWConnection.ContentContext(identifier: "surf-ace-registration")
-        context.protocolMetadata = [metadata]
+        let context = NWConnection.ContentContext(identifier: "surf-ace-registration", metadata: [metadata])
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
                 if let error {
