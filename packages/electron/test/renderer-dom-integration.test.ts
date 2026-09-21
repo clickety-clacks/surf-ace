@@ -60,6 +60,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   );
   let stateListener: ((next: unknown) => void) | null = null;
   let keyboardListener: ((intent: unknown) => void) | null = null;
+  let focusStateUpdate: (() => void) | null = null;
   let provenanceWidth = 200;
   let textMetricScale = 1;
   const commands: unknown[] = [];
@@ -68,7 +69,12 @@ test("renderer DOM integrates authoritative connection states and live scale con
   const fontCallbacks: Array<() => void> = [];
   const surfAce = {
     clearToast() {},
-    command(command: unknown) { commands.push(command); },
+    command(command: unknown) {
+      commands.push(command);
+      if ((command as { type?: unknown }).type === "focus-pane") {
+        focusStateUpdate?.();
+      }
+    },
     getBootstrap: async () => ({ state: state("disconnected"), surfaceId: "surface-1" }),
     onKeyboardIntent(listener: (intent: unknown) => void) { keyboardListener = listener; },
     onState(listener: (next: unknown) => void) { stateListener = listener; },
@@ -241,6 +247,54 @@ test("renderer DOM integrates authoritative connection states and live scale con
     firstPane.provenance = provenance;
     return next;
   }
+
+  const focusBefore = provenanceState(20, {
+    controllerProductName: "Clawline",
+    friendlyChatName: "Current",
+  });
+  focusBefore.panes[0]!.activeKeyboardPane = false;
+  const focusAfter = provenanceState(20, {
+    controllerProductName: "Clawline",
+    friendlyChatName: "Current",
+  });
+  focusAfter.panes[0]!.activeKeyboardPane = true;
+  stateListener!(focusBefore);
+  const pointerBack = document.querySelector(
+    '[data-surf-ace-overlay="history-back"]',
+  ) as HTMLElement;
+  assert.ok(pointerBack);
+  const pointerCommandsStart = commands.length;
+  focusStateUpdate = () => stateListener!(focusAfter);
+  for (const type of ["pointerdown", "mousedown"] as const) {
+    pointerBack.dispatchEvent(new window.Event(type, { bubbles: true, cancelable: true }));
+  }
+  assert.equal(pointerBack.isConnected, true, "pointer focus must not replace the active Back control");
+  assert.equal(
+    document.querySelector('[data-surf-ace-overlay="history-back"]'),
+    pointerBack,
+    "pointer focus must preserve Back control identity through the state refresh",
+  );
+  for (const type of ["pointerup", "mouseup"] as const) {
+    pointerBack.dispatchEvent(new window.Event(type, { bubbles: true, cancelable: true }));
+  }
+  assert.equal(pointerBack.isConnected, true, "pointer focus must preserve Back through pointer release");
+  assert.equal(
+    document.querySelector('[data-surf-ace-overlay="history-back"]'),
+    pointerBack,
+    "pointer release must preserve the same Back control for click",
+  );
+  if (pointerBack.isConnected) {
+    pointerBack.dispatchEvent(new window.Event("click", { bubbles: true, cancelable: true }));
+  }
+  focusStateUpdate = null;
+  const pointerCommands = commands.slice(pointerCommandsStart) as Array<{ paneId?: number; type?: string; direction?: string }>;
+  const focusCommands = pointerCommands.filter((command) => command.type === "focus-pane");
+  assert.ok(focusCommands.length >= 1, "the genuine pointer sequence must remember pane focus");
+  assert.deepEqual(
+    pointerCommands.filter((command) => command.type === "history"),
+    [{ direction: "back", paneId: 1, type: "history" }],
+    "the stable Back control must produce exactly one history navigation",
+  );
 
   provenanceWidth = 200;
   stateListener!(provenanceState(2, {

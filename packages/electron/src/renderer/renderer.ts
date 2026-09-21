@@ -371,7 +371,6 @@ function isDuplicateRepush(view: PaneView, pane: RendererPaneState, nextSignatur
 
 function paneRenderKey(state: RendererWindowState, pane: RendererPaneState): string {
   return JSON.stringify({
-    activeKeyboardPane: pane.activeKeyboardPane,
     annotationBorderVisible: pane.annotationBorderVisible,
     canGoBack: pane.canGoBack,
     canGoForward: pane.canGoForward,
@@ -3003,6 +3002,7 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
     if (!previousPane || !view?.rootEl.isConnected) {
       return false;
     }
+    view.rootEl.classList.toggle("keyboard-active", pane.activeKeyboardPane);
     if (chromeStateChanged || paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane)) {
       updatePane(view, pane);
       patchedPaneCount += 1;
