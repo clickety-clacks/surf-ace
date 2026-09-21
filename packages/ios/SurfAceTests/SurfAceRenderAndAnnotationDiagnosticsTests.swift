@@ -706,8 +706,10 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let imageBase64 = try XCTUnwrap(snapshot.imageBase64)
         let imageData = try XCTUnwrap(Data(base64Encoded: imageBase64))
         let image = try XCTUnwrap(UIImage(data: imageData))
-        XCTAssertEqual(image.size.width, frame.width, accuracy: 1)
-        XCTAssertEqual(image.size.height, frame.height, accuracy: 1)
+        let imagePixels = try XCTUnwrap(image.cgImage)
+        let rendererScale = UIGraphicsImageRendererFormat.default().scale
+        XCTAssertEqual(imagePixels.width, Int((frame.width * rendererScale).rounded()))
+        XCTAssertEqual(imagePixels.height, Int((frame.height * rendererScale).rounded()))
     }
 
     func testPencilStrokeTransitionsAnnotationModeAndRecordsTool() {
