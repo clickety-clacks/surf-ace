@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Network
 
 struct SurfAceRegistrationSurface: Codable, Equatable, Sendable {
     struct Pane: Codable, Equatable, Sendable {
@@ -30,6 +31,86 @@ enum SurfAceRegistrationError: Error {
     case topologyChanged
 }
 
+private enum SurfAceRegistrationWire {
+    struct Payload: Codable {
+        let clientId: String
+        let surfaces: [SurfAceRegistrationSurface]
+    }
+
+    struct Request: Encodable {
+        let id: String
+        let op = "client.register"
+        let type = "request"
+        let v = 1
+        let sentAt = Int64(Date().timeIntervalSince1970 * 1000)
+        let payload: Payload
+    }
+
+    struct Response: Decodable {
+        struct Payload: Decodable {
+            let clientId: String
+            let surfaces: [SurfAceRegistrationAssignment]
+        }
+        let id: String
+        let op: String
+        let ok: Bool
+        let payload: Payload?
+    }
+
+    static func requestData(clientId: String, surfaces: [SurfAceRegistrationSurface], id: String) throws -> Data {
+        try JSONEncoder().encode(Request(id: id, payload: Payload(clientId: clientId, surfaces: surfaces)))
+    }
+
+    static func assignments(
+        from data: Data,
+        requestId: String,
+        clientId: String,
+        surfaces: [SurfAceRegistrationSurface]
+    ) throws -> [SurfAceRegistrationAssignment] {
+        let response = try JSONDecoder().decode(Response.self, from: data)
+        guard response.id == requestId, response.op == "client.register", response.ok,
+              let payload = response.payload, payload.clientId == clientId,
+              payload.surfaces.count == surfaces.count,
+              Set(payload.surfaces.map(\.surfaceId)) == Set(surfaces.map(\.surfaceId)) else {
+            throw SurfAceRegistrationError.invalidResponse
+        }
+        return payload.surfaces
+    }
+}
+
+enum SurfAceRegistrationEndpoint {
+    /// A user-configured local numeric endpoint is the only path that bypasses URLSession's
+    /// hostname-oriented ATS handling. It remains pinned to the exact configured URL; it is
+    /// never replaced with a discovered controller. Remote numeric endpoints stay on URLSession.
+    static func usesLocalNumericTransport(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "ws", let host = url.host else { return false }
+        return isLocalNumericAddress(host)
+    }
+
+    static func isLocalNumericAddress(_ host: String) -> Bool {
+        let unscopedHost = host.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? host
+        var ipv4 = in_addr()
+        if unscopedHost.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
+            let value = UInt32(bigEndian: ipv4.s_addr)
+            let privateRange = (value & 0xff000000) == 0x0a000000
+                || (value & 0xffc00000) == 0x64400000
+                || (value & 0xff000000) == 0x7f000000
+                || (value & 0xffff0000) == 0xa9fe0000
+                || (value & 0xfff00000) == 0xac100000
+                || (value & 0xffff0000) == 0xc0a80000
+            return privateRange
+        }
+
+        var ipv6 = in6_addr()
+        guard unscopedHost.withCString({ inet_pton(AF_INET6, $0, &ipv6) }) == 1 else { return false }
+        let bytes = withUnsafeBytes(of: ipv6) { Array($0) }
+        let loopback = bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+        let uniqueLocal = (bytes[0] & 0xfe) == 0xfc
+        let linkLocal = bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80
+        return loopback || uniqueLocal || linkLocal
+    }
+}
+
 @MainActor
 protocol SurfAceRegistrationTransport: AnyObject {
     func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment]
@@ -50,25 +131,6 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
     }
 
     func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment] {
-        struct Payload: Encodable { let clientId: String; let surfaces: [SurfAceRegistrationSurface] }
-        struct Request: Encodable {
-            let id: String
-            let op = "client.register"
-            let type = "request"
-            let v = 1
-            let sentAt = Int64(Date().timeIntervalSince1970 * 1000)
-            let payload: Payload
-        }
-        struct Response: Decodable {
-            struct Payload: Decodable {
-                let clientId: String
-                let surfaces: [SurfAceRegistrationAssignment]
-            }
-            let id: String
-            let op: String
-            let ok: Bool
-            let payload: Payload?
-        }
         let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let timeout = Task { [socket] in
             do {
@@ -77,7 +139,7 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
             } catch { }
         }
         defer { timeout.cancel() }
-        try await socket.send(.data(JSONEncoder().encode(Request(id: id, payload: Payload(clientId: clientId, surfaces: surfaces)))))
+        try await socket.send(.data(SurfAceRegistrationWire.requestData(clientId: clientId, surfaces: surfaces, id: id)))
         let message = try await socket.receive()
         let data: Data
         switch message {
@@ -85,19 +147,158 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
         case .string(let value): data = Data(value.utf8)
         @unknown default: throw SurfAceRegistrationError.invalidResponse
         }
-        let response = try JSONDecoder().decode(Response.self, from: data)
-        guard response.id == id, response.op == "client.register", response.ok,
-              let payload = response.payload, payload.clientId == clientId,
-              payload.surfaces.count == surfaces.count,
-              Set(payload.surfaces.map(\.surfaceId)) == Set(surfaces.map(\.surfaceId)) else {
-            throw SurfAceRegistrationError.invalidResponse
-        }
-        return payload.surfaces
+        return try SurfAceRegistrationWire.assignments(from: data, requestId: id, clientId: clientId, surfaces: surfaces)
     }
 
     func close() {
         socket.cancel(with: .normalClosure, reason: nil)
         session.invalidateAndCancel()
+    }
+}
+
+private final class SurfAceRegistrationContinuation<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+
+    init(_ continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: Value) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+
+    func resume(throwing error: Error) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(throwing: error)
+    }
+}
+
+@MainActor
+final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTransport {
+    private let url: URL
+    private let queue = DispatchQueue(label: "co.clicketyclacks.surface.local-registration")
+    private var connection: NWConnection?
+    private var ready = false
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment] {
+        let timeout = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+                self?.connection?.cancel()
+            } catch { }
+        }
+        defer { timeout.cancel() }
+
+        do {
+            try await connectIfNeeded()
+            let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            let data = try SurfAceRegistrationWire.requestData(clientId: clientId, surfaces: surfaces, id: id)
+            try await send(data)
+            let response = try await receive()
+            return try SurfAceRegistrationWire.assignments(from: response, requestId: id, clientId: clientId, surfaces: surfaces)
+        } catch {
+            close()
+            throw error
+        }
+    }
+
+    func close() {
+        connection?.cancel()
+        connection = nil
+        ready = false
+    }
+
+    private func connectIfNeeded() async throws {
+        if ready, connection != nil { return }
+        guard SurfAceRegistrationEndpoint.usesLocalNumericTransport(url), url.port != nil else {
+            throw SurfAceRegistrationError.invalidResponse
+        }
+        let parameters = NWParameters.tcp
+        let webSocket = NWProtocolWebSocket.Options()
+        webSocket.autoReplyPing = true
+        parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)
+        let connection = NWConnection(to: .url(url), using: parameters)
+        self.connection = connection
+        do {
+            try await waitUntilReady(connection)
+            ready = true
+        } catch {
+            connection.cancel()
+            self.connection = nil
+            throw error
+        }
+    }
+
+    private func waitUntilReady(_ connection: NWConnection) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let gate = SurfAceRegistrationContinuation(continuation)
+            connection.stateUpdateHandler = { [weak connection] state in
+                switch state {
+                case .ready:
+                    connection?.stateUpdateHandler = nil
+                    gate.resume(returning: ())
+                case .failed, .cancelled:
+                    connection?.stateUpdateHandler = nil
+                    gate.resume(throwing: URLError(.cannotConnectToHost))
+                default:
+                    break
+                }
+            }
+            connection.start(queue: queue)
+        }
+    }
+
+    private func send(_ data: Data) async throws {
+        guard let connection else { throw SurfAceRegistrationError.noServer }
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
+        let context = NWConnection.ContentContext(identifier: "surf-ace-registration")
+        context.protocolMetadata = [metadata]
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
+                if let error {
+                    continuation.resume(throwing: URLError(.cannotConnectToHost, userInfo: [NSUnderlyingErrorKey: error]))
+                } else {
+                    continuation.resume()
+                }
+            })
+        }
+    }
+
+    private func receive() async throws -> Data {
+        guard let connection else { throw SurfAceRegistrationError.noServer }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+            connection.receiveMessage { data, _, _, error in
+                if let error {
+                    continuation.resume(throwing: URLError(.cannotConnectToHost, userInfo: [NSUnderlyingErrorKey: error]))
+                } else if let data {
+                    continuation.resume(returning: data)
+                } else {
+                    continuation.resume(throwing: SurfAceRegistrationError.invalidResponse)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+enum SurfAceRegistrationTransportFactory {
+    static func make(url: URL) -> any SurfAceRegistrationTransport {
+        if SurfAceRegistrationEndpoint.usesLocalNumericTransport(url) {
+            return SurfAceLocalNumericRegistrationWebSocket(url: url)
+        }
+        return SurfAceRegistrationWebSocket(url: url)
     }
 }
 
@@ -134,7 +335,7 @@ final class SurfAceCentralRegistration {
 
     init(clientId: String, configured: URL?,
          discover: @escaping @MainActor () async -> [URL],
-         makeTransport: @escaping @MainActor (URL) -> any SurfAceRegistrationTransport = { SurfAceRegistrationWebSocket(url: $0) },
+         makeTransport: @escaping @MainActor (URL) -> any SurfAceRegistrationTransport = { SurfAceRegistrationTransportFactory.make(url: $0) },
          transportFallbacks: @escaping @MainActor (URL) -> [URL] = { _ in [] },
          snapshot: @escaping Snapshot, apply: @escaping Apply,
          onError: @escaping @MainActor (Error) -> Void = { _ in },
@@ -177,6 +378,11 @@ final class SurfAceCentralRegistration {
             }
         }
         if let configured, try await attempt(configured, surfaces: surfaces) { return }
+        // An explicitly configured local numeric endpoint is an identity pin. If it is
+        // unavailable, do not silently register this client with another discovered controller.
+        if let configured, SurfAceRegistrationEndpoint.usesLocalNumericTransport(configured) {
+            throw SurfAceRegistrationError.noServer
+        }
         if selected == nil { setStatus(.connecting) }
         for url in await discover() {
             if try await attempt(url, surfaces: surfaces) { return }

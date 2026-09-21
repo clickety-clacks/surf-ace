@@ -13,6 +13,13 @@ central registration, then discovers `_surf-ace._tcp` advertisements with
 allocated window labels in the lockless authority generation. Direct controller
 pairing remains on the client WebSocket endpoint.
 
+Transport security is narrow by design: hostname URLs, all `wss://` URLs, and
+non-local numeric URLs continue through URLSession and ATS. A user-configured
+local-use numeric `ws://` URL uses Network.framework's WebSocket transport to
+avoid the numeric-host ATS rejection, remains pinned to that exact URL, and
+never falls through to an unrelated Bonjour controller when unavailable. No
+arbitrary-loads exception, LAN scan, or remote transport weakening is used.
+
 Build gates:
 
 ```bash

@@ -210,6 +210,77 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(discoveredLocal, URL(string: "ws://racter.local:43867/socket"))
     }
 
+    func testConfiguredLocalNumericEndpointUsesNarrowTransportPolicy() throws {
+        let local = try XCTUnwrap(URL(string: "ws://100.64.12.34:43867/"))
+        let remote = try XCTUnwrap(URL(string: "ws://203.0.113.9:43867/"))
+        let hostname = try XCTUnwrap(URL(string: "ws://racter:43867/"))
+        let secure = try XCTUnwrap(URL(string: "wss://192.168.1.9:43867/"))
+
+        XCTAssertTrue(SurfAceRegistrationEndpoint.usesLocalNumericTransport(local))
+        XCTAssertFalse(SurfAceRegistrationEndpoint.usesLocalNumericTransport(remote))
+        XCTAssertFalse(SurfAceRegistrationEndpoint.usesLocalNumericTransport(hostname))
+        XCTAssertFalse(SurfAceRegistrationEndpoint.usesLocalNumericTransport(secure))
+
+        let localTransport = SurfAceRegistrationTransportFactory.make(url: local)
+        let remoteTransport = SurfAceRegistrationTransportFactory.make(url: remote)
+        let hostnameTransport = SurfAceRegistrationTransportFactory.make(url: hostname)
+        let secureTransport = SurfAceRegistrationTransportFactory.make(url: secure)
+        XCTAssertTrue(localTransport is SurfAceLocalNumericRegistrationWebSocket)
+        XCTAssertTrue(remoteTransport is SurfAceRegistrationWebSocket)
+        XCTAssertTrue(hostnameTransport is SurfAceRegistrationWebSocket)
+        XCTAssertTrue(secureTransport is SurfAceRegistrationWebSocket)
+        localTransport.close()
+        remoteTransport.close()
+        hostnameTransport.close()
+        secureTransport.close()
+    }
+
+    func testConfiguredLocalNumericSuccessRemainsPinnedAndSkipsDiscovery() async throws {
+        let configured = try XCTUnwrap(URL(string: "ws://100.64.12.34:43867/"))
+        let transport = Transport()
+        var attempted: [URL] = []
+        let registration = SurfAceCentralRegistration(
+            clientId: "numeric-client",
+            configured: configured,
+            discover: { XCTFail("a successful configured numeric controller must not discover another controller"); return [] },
+            makeTransport: { url in attempted.append(url); return transport },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
+            apply: { _, _ in }
+        )
+
+        try await registration.synchronize()
+        XCTAssertEqual(attempted, [configured])
+        XCTAssertEqual(registration.status, .connected)
+        registration.stop()
+    }
+
+    func testConfiguredLocalNumericFailureDoesNotSubstituteDiscoveredController() async throws {
+        let configured = try XCTUnwrap(URL(string: "ws://100.64.12.34:43867/"))
+        let discovered = try XCTUnwrap(URL(string: "ws://racter:43867/"))
+        let transport = Transport()
+        transport.fails = true
+        var attempted: [URL] = []
+        var discoveredCalled = false
+        let registration = SurfAceCentralRegistration(
+            clientId: "numeric-client",
+            configured: configured,
+            discover: { discoveredCalled = true; return [discovered] },
+            makeTransport: { url in attempted.append(url); return transport },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
+            apply: { _, _ in }
+        )
+
+        do {
+            try await registration.synchronize()
+            XCTFail("unavailable configured numeric controller must remain pinned")
+        } catch SurfAceRegistrationError.noServer {
+            // Expected: the configured endpoint is unavailable and identity-pinned.
+        }
+        XCTAssertEqual(attempted, [configured])
+        XCTAssertFalse(discoveredCalled)
+        registration.stop()
+    }
+
     func testConfiguredSecureRemoteURLIsNotNormalizedByDiscovery() async throws {
         let configured = try XCTUnwrap(URL(string: "wss://central.example.com:9443/secure"))
         let transport = Transport()
