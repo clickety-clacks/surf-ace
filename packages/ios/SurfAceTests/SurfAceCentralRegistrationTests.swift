@@ -285,7 +285,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         primary.fails = false
         try await registration.synchronize()
-        XCTAssertEqual(attempted, [configured, discovered, discovered, configured])
+        XCTAssertEqual(attempted, [configured, discovered, configured])
         XCTAssertEqual(applied, ["bonjour", "bonjour", "configured"])
         XCTAssertEqual(registration.status, .connected)
         registration.stop()
