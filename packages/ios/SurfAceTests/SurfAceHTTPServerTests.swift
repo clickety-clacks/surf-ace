@@ -97,6 +97,14 @@ final class SurfAceHTTPServerTests: XCTestCase {
         XCTAssertFalse(usageDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
+    func testInfoPlistAllowsOnlyLocalNetworkTransport() throws {
+        let info = try loadAppInfoPlist()
+        let transportSecurity = try XCTUnwrap(info["NSAppTransportSecurity"] as? [String: Any])
+
+        XCTAssertEqual(Set(transportSecurity.keys), Set(["NSAllowsLocalNetworking"]))
+        XCTAssertEqual(transportSecurity["NSAllowsLocalNetworking"] as? Bool, true)
+    }
+
     func testInfoPlistDeclaresSurfAceBonjourServiceType() throws {
         let info = try loadAppInfoPlist()
         let services = try XCTUnwrap(info["NSBonjourServices"] as? [String])
