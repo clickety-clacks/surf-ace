@@ -694,12 +694,20 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             restoreViewport: nil
         )
 
-        let snapshot = try XCTUnwrap(await hostView.fetchSnapshot(includeImage: true))
-        XCTAssertGreaterThan(snapshot.viewport.visibleRect.width, 1)
-        XCTAssertGreaterThan(snapshot.viewport.visibleRect.height, 1)
-        XCTAssertGreaterThan(snapshot.viewport.contentSize.width, 1)
-        XCTAssertGreaterThan(snapshot.viewport.contentSize.height, 1)
+        let rawSnapshot = await hostView.fetchSnapshot(includeImage: true)
+        let snapshot = try XCTUnwrap(rawSnapshot)
+        XCTAssertEqual(snapshot.viewport.visibleRect.width, Double(frame.width), accuracy: 1)
+        XCTAssertEqual(snapshot.viewport.visibleRect.height, Double(frame.height), accuracy: 1)
+        XCTAssertGreaterThanOrEqual(snapshot.viewport.contentSize.width, Double(frame.width) - 1)
+        XCTAssertGreaterThanOrEqual(snapshot.viewport.contentSize.height, Double(frame.height) - 1)
+        XCTAssertEqual(snapshot.viewport.scrollOffset, SurfAcePoint(x: 0, y: 0))
         XCTAssertEqual(snapshot.visibleText, markdown)
+
+        let imageBase64 = try XCTUnwrap(snapshot.imageBase64)
+        let imageData = try XCTUnwrap(Data(base64Encoded: imageBase64))
+        let image = try XCTUnwrap(UIImage(data: imageData))
+        XCTAssertEqual(image.size.width, frame.width, accuracy: 1)
+        XCTAssertEqual(image.size.height, frame.height, accuracy: 1)
     }
 
     func testPencilStrokeTransitionsAnnotationModeAndRecordsTool() {
