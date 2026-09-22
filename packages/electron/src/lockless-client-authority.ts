@@ -258,6 +258,25 @@ function tombstoneScopes(
   ];
 }
 
+function refreshTombstoneBytes(tombstone: PersistentTombstone): void {
+  const nested = (
+    tombstone.payload as { paneTombstones?: PersistentTombstone[] }
+  )?.paneTombstones ?? [];
+  for (const child of nested) {
+    refreshTombstoneBytes(child);
+  }
+  const { bytes: _bytes, ...material } = tombstone;
+  tombstone.bytes = exactDurableBytes({ version: 1, ...material });
+}
+
+function refreshRetainedTombstoneBytes(
+  state: PersistentLocklessClientState,
+): void {
+  for (const tombstone of state.tombstones) {
+    refreshTombstoneBytes(tombstone);
+  }
+}
+
 function scopeSurfaceId(scopeId: string): string | null {
   if (scopeId.startsWith("surface:")) {
     return decodeURIComponent(scopeId.slice("surface:".length));
@@ -783,6 +802,7 @@ export class LocklessClientAuthority {
         gapGeneration: 0,
       };
     }
+    refreshRetainedTombstoneBytes(this.state);
     this.acceptAudit(
       requestId,
       "controller.admit",
@@ -1864,6 +1884,7 @@ export class LocklessClientAuthority {
         (scope.records.at(-1)?.sequence ?? 0) + 1,
       );
     }
+    refreshRetainedTombstoneBytes(this.state);
   }
 
   private allScopes(): PersistentConsumableScope[] {
@@ -2251,6 +2272,7 @@ export class LocklessClientAuthority {
       }
       this.dropFullyConsumedRecords(scope);
     }
+    refreshRetainedTombstoneBytes(this.state);
     const correlation = {
       clientIdentity: this.clientIdentity,
       controllerInstanceId: victim.controllerInstanceId,

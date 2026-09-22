@@ -2200,10 +2200,20 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
   const resumed = await connect(
     `ws://127.0.0.1:${secondPort}${secondServer.wsPath}`,
   );
+  const secondControllerSession = await connect(
+    `ws://127.0.0.1:${secondPort}${secondServer.wsPath}`,
+  );
   try {
     const admitted = await pair(resumed, "tight-beam");
     assert.equal(admitted.ok, true, JSON.stringify(admitted));
     assert.equal(admitted.payload.resumed, true);
+    const secondController = await pair(secondControllerSession, "openclaw");
+    assert.equal(secondController.ok, true, JSON.stringify(secondController));
+    // A new controller adds cursors to retained nested pane scopes. The
+    // resulting persisted generation must remain restart-valid before restore.
+    assert.doesNotThrow(
+      () => new SurfaceCore({ persistentState: restarted.getPersistentState() }),
+    );
     const empty = await request(resumed, "surfaces.list", {});
     assert.deepEqual(empty.payload.surfaces, []);
     const restored = await request(resumed, "surface.window.restore", {
@@ -2218,6 +2228,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
     );
   } finally {
     resumed.close();
+    secondControllerSession.close();
     await secondServer.stop();
   }
 });

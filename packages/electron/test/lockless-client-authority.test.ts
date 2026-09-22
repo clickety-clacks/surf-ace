@@ -1193,3 +1193,63 @@ test("authority FIFO isolates persisted work, ordinary mutations, failure rollba
   assert.equal(restored.scopeSnapshot("controller-a", "surface:surface-c").records.length, 1);
   assert.equal(restored.scopeSnapshot("controller-a", "surface:surface-b").records.length, 1);
 });
+
+test("nested retained tombstone bytes remain exact after later controller admission and restart", () => {
+  const target = authority();
+  target.ensureScope("surface:surface-a", "surface");
+  target.ensureScope("pane:surface-a:1", "pane");
+  admit(target, "controller-a");
+  target.appendConsumable({
+    payload: { value: "retained" },
+    recordClass: "tap",
+    scopeId: "pane:surface-a:1",
+    scopeKind: "pane",
+    triggerOperation: "test.tombstone-admission",
+  });
+
+  target.createTombstone({
+    kind: "pane",
+    payload: { pane: { paneId: 1, value: "pane" } },
+    surfaceId: "surface-a",
+  });
+  const paneTombstones = target.takePaneTombstonesForSurface("surface-a");
+  target.createTombstone({
+    kind: "surface",
+    payload: {
+      paneTombstones,
+      surface: { surfaceId: "surface-a", value: "surface" },
+    },
+    surfaceId: "surface-a",
+  });
+
+  // Admission legitimately adds the new controller's cursor to every retained
+  // scope, including nested pane tombstones. That mutation must update each
+  // child and enclosing tombstone's durable byte field before persistence.
+  admit(target, "controller-b");
+  const exported = target.exportState();
+  const restored = new LocklessClientAuthority(exported);
+  const retained = restored.listTombstones("surface")[0]!;
+  const nested = (retained.payload as { paneTombstones: typeof paneTombstones })
+    .paneTombstones[0]!;
+  assert.equal(
+    nested.bytes,
+    exactDurableBytes({
+      version: 1,
+      ...(({ bytes: _bytes, ...material }) => material)(nested),
+    }),
+  );
+  assert.equal(
+    retained.bytes,
+    exactDurableBytes({
+      version: 1,
+      ...(({ bytes: _bytes, ...material }) => material)(retained),
+    }),
+  );
+
+  const malformed = structuredClone(exported);
+  malformed.tombstones[0]!.bytes -= 1;
+  assert.throws(
+    () => new LocklessClientAuthority(malformed),
+    /Persisted tombstone byte accounting is invalid/,
+  );
+});
