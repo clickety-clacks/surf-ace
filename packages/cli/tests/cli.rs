@@ -1567,6 +1567,79 @@ fn native_cli_rejects_unknown_input_fields_before_transport_or_state() {
 }
 
 #[test]
+fn native_cli_read_returns_current_content_when_unread_delta_is_empty() {
+    let temp = TempDir::new().unwrap();
+    let scope_id = "pane:sf_ipad:1";
+    let current_content = json!({
+        "bytes": 510,
+        "payload": {
+            "annotations": { "drawingData": "", "strokesById": {} },
+            "content": { "markdown": "# CURRENT IPAD PANE" },
+            "contentId": "current-ipad-pane-1",
+            "contentType": "markdown",
+            "historyEntryId": "he_current",
+            "paneId": 1,
+            "provenance": {
+                "controllerProductName": "Surf Ace regression",
+                "friendlyChatName": "Current-state probe"
+            },
+            "revision": 19,
+            "surfaceId": "sf_ipad"
+        },
+        "recordClass": "content",
+        "recordId": "record:45",
+        "sequence": 45
+    });
+    fs::write(
+        temp.path().join("controller-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "controllerInstanceId": "ctl_current_read_regression",
+            "scopes": {
+                scope_id: {
+                    "clientCursor": 46,
+                    "projectedCursor": 46,
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 45,
+                    "records": [current_content],
+                    "gap": null,
+                    "synchronized": true,
+                    "synchronizationCutoff": "cutoff-current"
+                }
+            },
+            "acknowledgementOutbox": [],
+            "unresolved": {},
+            "resumeMetadata": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args([
+            "--state-root",
+            temp.path().to_str().unwrap(),
+            "read",
+            "--input-json",
+            &serde_json::to_string(&json!({ "scopeId": scope_id })).unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["result"]["cacheStatus"], "current");
+    assert_eq!(result["result"]["consumableLoss"], Value::Null);
+    assert_eq!(result["result"]["records"], json!([]));
+    assert_eq!(result["result"]["currentContentRecord"], current_content);
+
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["scopes"][scope_id]["projectedCursor"], 46);
+    assert_eq!(persisted["scopes"][scope_id]["clientCursor"], 46);
+}
+
+#[test]
 fn production_lifecycle_connection_flushes_multi_surface_read_acknowledgements() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());

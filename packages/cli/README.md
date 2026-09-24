@@ -29,6 +29,11 @@ The complete command set is `list`, `push`, `read`, `topology-intent`,
 one JSON object via `--input-json` or standard input and writes exactly one JSON
 result to standard output. `read` is strictly local and rejects `--endpoint`.
 
+`read` keeps unread-delta consumption and current-state inspection separate.
+Its `records` array contains only records at or beyond the projected cursor;
+`currentContentRecord` independently returns the newest retained `content`
+record for the exact requested scope, or `null` when none is retained.
+
 `target-apply` returns after Surf Ace has durably committed the target intent,
 before browser/native materialization. Its `operationReceipt` proves that intent
 commit only. Materialization success or failure arrives later as a correlated

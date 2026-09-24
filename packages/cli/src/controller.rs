@@ -211,11 +211,18 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
                 "acknowledgement": null,
                 "cacheStatus": "unsynchronized",
                 "consumableLoss": null,
+                "currentContentRecord": null,
                 "records": [],
                 "scopeId": scope_id,
                 "synchronizationCutoff": null,
             });
         };
+        let current_content_record = scope
+            .records
+            .iter()
+            .filter(|record| record.get("recordClass").and_then(Value::as_str) == Some("content"))
+            .max_by_key(|record| record.get("sequence").and_then(Value::as_u64).unwrap_or(0))
+            .cloned();
         let records = scope
             .records
             .iter()
@@ -255,6 +262,7 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
             "acknowledgement": acknowledgement,
             "cacheStatus": if scope.synchronized { "current" } else { "unsynchronized" },
             "consumableLoss": scope.gap,
+            "currentContentRecord": current_content_record,
             "records": records,
             "scopeId": scope_id,
             "synchronizationCutoff": scope.synchronization_cutoff,
