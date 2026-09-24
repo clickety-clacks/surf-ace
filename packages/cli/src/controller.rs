@@ -220,9 +220,14 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
         let current_content_record = scope
             .records
             .iter()
-            .filter(|record| record.get("recordClass").and_then(Value::as_str) == Some("content"))
-            .max_by_key(|record| record.get("sequence").and_then(Value::as_u64).unwrap_or(0))
-            .cloned();
+            .filter_map(|record| {
+                let sequence = record.get("sequence").and_then(Value::as_u64)?;
+                (sequence > 0
+                    && record.get("recordClass").and_then(Value::as_str) == Some("content"))
+                .then_some((sequence, record))
+            })
+            .max_by_key(|(sequence, _)| *sequence)
+            .map(|(_, record)| record.clone());
         let records = scope
             .records
             .iter()

@@ -1640,6 +1640,86 @@ fn native_cli_read_returns_current_content_when_unread_delta_is_empty() {
 }
 
 #[test]
+fn native_cli_read_ignores_malformed_current_content_sequences() {
+    let temp = TempDir::new().unwrap();
+    let mixed_scope = "pane:sf_ipad:1";
+    let invalid_scope = "pane:sf_ipad:2";
+    let current_content = json!({
+        "bytes": 128,
+        "payload": { "contentId": "valid-current" },
+        "recordClass": "content",
+        "recordId": "record:7",
+        "sequence": 7
+    });
+    fs::write(
+        temp.path().join("controller-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "controllerInstanceId": "ctl_malformed_current_regression",
+            "scopes": {
+                mixed_scope: {
+                    "clientCursor": 100,
+                    "projectedCursor": 100,
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 99,
+                    "records": [
+                        { "recordClass": "content", "recordId": "missing-sequence" },
+                        { "recordClass": "content", "recordId": "zero-sequence", "sequence": 0 },
+                        { "recordClass": "content", "recordId": "string-sequence", "sequence": "9" },
+                        { "recordClass": "tap", "recordId": "later-non-content", "sequence": 99 },
+                        current_content
+                    ],
+                    "gap": null,
+                    "synchronized": true,
+                    "synchronizationCutoff": "cutoff-current"
+                },
+                invalid_scope: {
+                    "clientCursor": 1,
+                    "projectedCursor": 1,
+                    "firstRetainedSequence": 0,
+                    "lastRetainedSequence": 0,
+                    "records": [
+                        { "recordClass": "content", "recordId": "missing-sequence" },
+                        { "recordClass": "content", "recordId": "zero-sequence", "sequence": 0 }
+                    ],
+                    "gap": null,
+                    "synchronized": true,
+                    "synchronizationCutoff": "cutoff-current"
+                }
+            },
+            "acknowledgementOutbox": [],
+            "unresolved": {},
+            "resumeMetadata": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let run_read = |scope_id: &str| {
+        let output = ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+            .args([
+                "--state-root",
+                temp.path().to_str().unwrap(),
+                "read",
+                "--input-json",
+                &serde_json::to_string(&json!({ "scopeId": scope_id })).unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    let mixed = run_read(mixed_scope);
+    assert_eq!(mixed["result"]["records"], json!([]));
+    assert_eq!(mixed["result"]["currentContentRecord"], current_content);
+
+    let invalid = run_read(invalid_scope);
+    assert_eq!(invalid["result"]["records"], json!([]));
+    assert_eq!(invalid["result"]["currentContentRecord"], Value::Null);
+}
+
+#[test]
 fn production_lifecycle_connection_flushes_multi_surface_read_acknowledgements() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
