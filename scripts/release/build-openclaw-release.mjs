@@ -180,7 +180,7 @@ export async function buildOpenclawRelease(options) {
     formatVersion: 1,
     lockfileSha256: await sha256(path.join(sourceDir, "pnpm-lock.yaml")),
     smoke: {
-      command: "node tooling/scripts/release/smoke-openclaw-release.mjs --baseline-commit d889f2f4bfb554bc3bfde0eb9927372552d40e51 --candidate-commit 58ac8c435679e6611903d31abaecec11bb9d7f75 --openclaw-version 2026.7.1-2 --manifest build/release/openclaw/surf-ace-openclaw-v0.1.0-manifest.json --extension build/release/openclaw/surf-ace-openclaw-extension-v0.1.0.tgz --electron build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip",
+      command: "node tooling/scripts/release/smoke-openclaw-release.mjs --baseline-commit d889f2f4bfb554bc3bfde0eb9927372552d40e51 --candidate-commit 801fc08047886028bd6fefc4ce35c8be04f7dff4 --openclaw-version 2026.7.1-2 --manifest build/release/openclaw/surf-ace-openclaw-v0.1.1-manifest.json --extension build/release/openclaw/surf-ace-openclaw-extension-v0.1.1.tgz --electron build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip",
       required: true,
       status: "pending",
     },

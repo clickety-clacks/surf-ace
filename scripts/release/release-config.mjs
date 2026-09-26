@@ -13,16 +13,16 @@ export const TOOLCHAINS = Object.freeze({
 
 export const OPENCLAW = Object.freeze({
   baselineCommit: "d889f2f4bfb554bc3bfde0eb9927372552d40e51",
-  candidateCommit: "58ac8c435679e6611903d31abaecec11bb9d7f75",
+  candidateCommit: "801fc08047886028bd6fefc4ce35c8be04f7dff4",
   files: [
-    "surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip",
-    "surf-ace-openclaw-extension-v0.1.0.tgz",
-    "surf-ace-openclaw-v0.1.0-manifest.json",
+    "surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip",
+    "surf-ace-openclaw-extension-v0.1.1.tgz",
+    "surf-ace-openclaw-v0.1.1-manifest.json",
   ],
   hostIntegrity: "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==",
   hostVersion: "2026.7.1-2",
-  sourceTag: "surf-ace-openclaw-v0.1.0",
-  version: "0.1.0",
+  sourceTag: "surf-ace-openclaw-v0.1.1",
+  version: "0.1.1",
 });
 
 export const TIGHTBEAM = Object.freeze({
