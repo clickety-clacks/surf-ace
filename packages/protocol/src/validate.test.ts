@@ -342,7 +342,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
     op: "panes.list",
     payload: {
       nativeCompositorStatus: {
-        activeFocusTarget: { NativePane: { pane_id: 1 } },
+        activeFocusTarget: { native_pane: { pane_id: "7" } },
         lastDiagnostic: "native_owner_lost",
       },
       panes: [
