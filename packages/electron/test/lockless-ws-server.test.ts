@@ -15,6 +15,7 @@ import {
   locklessPaneScopeId,
 } from "../../protocol/src/lockless.js";
 import { SurfaceCore } from "../src/surface-core.js";
+import { compositorPaneIdForSurface } from "../src/native-pane-bridge.js";
 import {
   DEFAULT_LOCKLESS_LIMITS,
   LocklessAuthorityError,
@@ -314,7 +315,7 @@ test("pane focus changes reach the compositor through its runtime focus target A
   });
   const nativeCompositorStatus = {
     runtime: {
-      active_focus_target: { native_pane: { pane_id: "7" } },
+      active_focus_target: { native_pane: { pane_id: compositorPaneIdForSurface(surface.surfaceId, 7) } },
       last_diagnostic: null,
     },
     native_pane_window_groups: [],
@@ -374,7 +375,7 @@ test("pane focus changes reach the compositor through its runtime focus target A
     core.setActiveKeyboardPane(surface.surfaceId, 7);
     const nativeFocusRequestPayload = await nativeFocusRequest;
     assert.deepEqual(nativeFocusRequestPayload, {
-      target: { native_pane: { pane_id: "7" } },
+      target: { native_pane: { pane_id: compositorPaneIdForSurface(surface.surfaceId, 7) } },
       type: "set_runtime_focus_target",
     });
 
@@ -383,7 +384,7 @@ test("pane focus changes reach the compositor through its runtime focus target A
     assert.equal(paired.ok, true);
     const paneList = await request(client, "panes.list", { surfaceId: surface.surfaceId });
     assert.deepEqual(paneList.payload.nativeCompositorStatus, {
-      activeFocusTarget: { native_pane: { pane_id: "7" } },
+      activeFocusTarget: { native_pane: { pane_id: compositorPaneIdForSurface(surface.surfaceId, 7) } },
       lastDiagnostic: null,
     }, `compositor requests: ${JSON.stringify(compositorRequestTypes)}; panes.list response: ${JSON.stringify(paneList)}`);
   } finally {

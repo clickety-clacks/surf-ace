@@ -7,12 +7,14 @@ import test from "node:test";
 
 import {
   compositorNativePaneStatusSummary,
+  compositorPaneIdForSurface,
   compositorFailureMessage,
   isOverlayNativePaneLivenessFailure,
   nativePaneFocusRequestForCompositor,
   nativePaneInstanceIdsForCompositor,
   nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
+  localPaneIdForSurfaceCompositorPaneId,
   overlayLivePaneAuthorityFromCompositorResponse,
   overlayLivePaneInstanceIdFromCompositorResponse,
   overlayRegionsClearRequestForCompositor,
@@ -98,13 +100,15 @@ test("native pane bridge resolves only the explicit compositor socket env", () =
 
 test("native pane bridge serializes host and overlay requests from protocol materialization", () => {
   const input = materialization();
+  const compositorPaneId = "surf-ace-pane:v1:7:sf_test:3:118";
 
   assert.deepEqual(requestForCompositor(input), {
-    focused_pane_id: "118",
+    focused_pane_id: compositorPaneId,
     focused_pane_instance_id: "pl_118",
     geometry_revision: 3,
     panes: input.panes.map((pane) => ({
       ...pane,
+      id: compositorPaneId,
       ...(pane.windowGroup?.launchIdentity.launchToken
         ? { launchToken: pane.windowGroup.launchIdentity.launchToken }
         : {}),
@@ -115,7 +119,7 @@ test("native pane bridge serializes host and overlay requests from protocol mate
     type: "native_pane.host",
   });
   assert.deepEqual(nativePaneFocusRequestForCompositor(input.focus, new Set(["118"])), {
-    target: { native_pane: { pane_id: "118" } },
+    target: { native_pane: { pane_id: compositorPaneId } },
     type: "set_runtime_focus_target",
   });
   assert.deepEqual(nativePaneFocusRequestForCompositor(input.focus, new Set(["7"])), {
@@ -131,6 +135,7 @@ test("native pane bridge serializes host and overlay requests from protocol mate
       {
         ...input.overlaySet!.regions[0]!,
         kind: "other",
+        paneId: compositorPaneId,
         paneInstanceId: "118:target_top",
       },
     ],
@@ -139,6 +144,54 @@ test("native pane bridge serializes host and overlay requests from protocol mate
   });
   assert.equal(overlayRequestForCompositor(materialization({ op: "native_pane.update" }))?.updateReason, "update");
   assert.equal(overlayRequestForCompositor(materialization({ overlaySet: undefined })), null);
+});
+
+test("native pane compositor IDs stay stable and distinct across surfaces", () => {
+  const firstSurfacePaneId = compositorPaneIdForSurface("surface:a", 7);
+  const secondSurfacePaneId = compositorPaneIdForSurface("surface:b", 7);
+
+  assert.notEqual(firstSurfacePaneId, secondSurfacePaneId);
+  assert.equal(localPaneIdForSurfaceCompositorPaneId("surface:a", firstSurfacePaneId), "7");
+  assert.equal(localPaneIdForSurfaceCompositorPaneId("surface:b", firstSurfacePaneId), null);
+  assert.equal(localPaneIdForSurfaceCompositorPaneId("surface:a", "surf-ace-pane:v1:10:surface:a:2:7"), null);
+});
+
+test("native pane materialization qualifies its identity consistently on host and update", () => {
+  const localPane = materialization().panes[0]!;
+  const groupedPane = {
+    ...localPane,
+    windowGroup: {
+      launchIdentity: {
+        launchToken: "sf_test:118:target_top:1",
+        paneId: "118",
+        paneInstanceId: "pl_118",
+        surfaceId: "sf_test" as never,
+        targetId: "target_top",
+      },
+      policy: {
+        accessoryVisibility: "focused_pane_only" as const,
+        clipToPane: false as const,
+        constrainToPane: false as const,
+        denyForeignToplevels: true as const,
+        primaryVisibility: "always" as const,
+        sameLaunchSecondaryToplevels: "accept" as const,
+      },
+    },
+  };
+  const host = requestForCompositor(materialization({ panes: [groupedPane] }));
+  const update = requestForCompositor(materialization({ op: "native_pane.update", panes: [groupedPane] }));
+  const compositorPaneId = "surf-ace-pane:v1:7:sf_test:3:118";
+
+  for (const request of [host, update]) {
+    if (!("panes" in request)) {
+      throw new Error("expected a native pane materialization request");
+    }
+    const pane = request.panes[0] as Record<string, unknown> | undefined;
+    const windowGroup = pane?.windowGroup as { launchIdentity?: { paneId?: string; surfaceId?: string } } | undefined;
+    assert.equal(pane?.id, compositorPaneId);
+    assert.equal(windowGroup?.launchIdentity?.paneId, compositorPaneId);
+    assert.equal(windowGroup?.launchIdentity?.surfaceId, "sf_test");
+  }
 });
 
 test("native pane bridge names compositor panes as native materialized panes, not topology panes", () => {
@@ -176,17 +229,18 @@ test("native pane bridge names compositor panes as native materialized panes, no
 });
 
 test("native pane bridge reads T316 runtime status and current camelCase group status", () => {
+  const compositorPaneId = compositorPaneIdForSurface("sf_test", 7);
   const lastDiagnostic = "native pane owner disappeared: pane_id=7; native grab remains until release and future focus targets Surf Ace's main surface when available";
   const response = {
     ok: true,
     status: {
       runtime: {
-        active_focus_target: { native_pane: { pane_id: "7" } },
+        active_focus_target: { native_pane: { pane_id: compositorPaneId } },
         last_diagnostic: lastDiagnostic,
       },
       native_pane_window_groups: [
         {
-          paneId: "7",
+          paneId: compositorPaneId,
           primaryWindowId: "primary-7",
           focusedWindowId: "primary-7",
           acceptedSecondaryCount: 0,
@@ -208,7 +262,7 @@ test("native pane bridge reads T316 runtime status and current camelCase group s
 
   const summary = compositorNativePaneStatusSummary(response);
   assert.deepEqual(summary.nativeRuntimeStatus, {
-    activeFocusTarget: { native_pane: { pane_id: "7" } },
+    activeFocusTarget: { native_pane: { pane_id: compositorPaneId } },
     lastDiagnostic,
   });
   const group = summary.nativePaneWindowGroups[0];
@@ -218,7 +272,7 @@ test("native pane bridge reads T316 runtime status and current camelCase group s
     focusedWindowId: group?.focusedWindowId,
     members: group?.members.map(({ id, focused }) => ({ id, focused })),
   }, {
-    paneId: "7",
+    paneId: compositorPaneId,
     primaryWindowId: "primary-7",
     focusedWindowId: "primary-7",
     members: [{ id: "primary-7", focused: true }],
@@ -227,6 +281,7 @@ test("native pane bridge reads T316 runtime status and current camelCase group s
 
 test("native pane bridge extracts pane-local window group diagnostics from compositor status", () => {
   // Synthetic future compositor shape: T316 ccc0002 reports only each pane's primary surface.
+  const compositorPaneId = compositorPaneIdForSurface("sf", 7);
   const response = {
     ok: true,
     status: {
@@ -236,7 +291,7 @@ test("native pane bridge extracts pane-local window group diagnostics from compo
           clipping_status: "clipped",
           denied_reasons: ["foreign_launch_token"],
           denied_toplevel_count: 1,
-          focused_pane_id: "7",
+          focused_pane_id: compositorPaneId,
           focused_window_id: "dialog-1",
           interaction_state: "active",
           lifecycle_diagnostic: null,
@@ -271,7 +326,7 @@ test("native pane bridge extracts pane-local window group diagnostics from compo
               z_order: 1,
             },
           ],
-          pane_id: "7",
+          pane_id: compositorPaneId,
           pane_instance_id: "pl_7",
           pane_local_bounds: { height: 200, width: 300, x: 0, y: 0 },
           pane_focused: true,
@@ -290,7 +345,7 @@ test("native pane bridge extracts pane-local window group diagnostics from compo
     deniedReasons: ["foreign_launch_token"],
     deniedToplevelCount: 1,
     focusedWindowId: "dialog-1",
-    focusedPaneId: "7",
+    focusedPaneId: compositorPaneId,
     interactionState: "active",
     lifecycleDiagnostic: null,
     launchToken: "sf:7:target:3",
@@ -399,6 +454,7 @@ test("native pane bridge extracts pane-local window group diagnostics from compo
 });
 
 test("native pane bridge preserves hidden destruction and cancellation diagnostics", () => {
+  const compositorPaneId = compositorPaneIdForSurface("sf", 9);
   assert.deepEqual(nativePaneWindowGroupsFromCompositorStatus({
     ok: true,
     status: {
@@ -407,7 +463,7 @@ test("native pane bridge preserves hidden destruction and cancellation diagnosti
         clipping_status: "unclipped",
         denied_reasons: [],
         denied_toplevel_count: 0,
-        focused_pane_id: "9",
+        focused_pane_id: compositorPaneId,
         focused_window_id: null,
         interaction_state: "cancelled",
         launch_token: "sf:9:target:3",
@@ -426,7 +482,7 @@ test("native pane bridge preserves hidden destruction and cancellation diagnosti
           z_order: 3,
         }],
         pane_focused: true,
-        pane_id: "9",
+        pane_id: compositorPaneId,
         pane_instance_id: "pl_9",
         pane_local_bounds: { height: 200, width: 300, x: 0, y: 0 },
         primary_visible: true,
@@ -439,7 +495,7 @@ test("native pane bridge preserves hidden destruction and cancellation diagnosti
     clippingStatus: "unclipped",
     deniedReasons: [],
     deniedToplevelCount: 0,
-    focusedPaneId: "9",
+    focusedPaneId: compositorPaneId,
     focusedWindowId: null,
     interactionState: "cancelled",
     launchToken: "sf:9:target:3",
@@ -488,6 +544,7 @@ test("native pane bridge derives native overlay rectangles from pane geometry", 
       {
         ...input.overlaySet!.regions[0]!,
         kind: "other",
+        paneId: "surf-ace-pane:v1:7:sf_test:3:118",
         paneInstanceId: "118:target_top",
         rect: { height: 384, width: 512, x: 512, y: 0 },
       },
@@ -523,7 +580,7 @@ test("native pane bridge serializes renderer overlay region updates without coor
       {
         captures: ["pointer_hover"],
         kind: "pane_badge",
-        paneId: "sf_test:118",
+        paneId: "surf-ace-pane:v1:7:sf_test:10:sf_test:118",
         paneInstanceId: "sf_test:118:target_top",
         rect: { height: 29.75, width: 102.5, x: 48.25, y: 18.5 },
         regionId: "surf-ace-pane-118-pane-indicator-0",
@@ -760,8 +817,8 @@ test("native pane bridge serializes overlay region clears", () => {
 });
 
 test("native pane bridge serializes native pane releases", () => {
-  assert.deepEqual(nativePaneReleaseRequestForCompositor([1, "2"]), {
-    pane_ids: ["1", "2"],
+  assert.deepEqual(nativePaneReleaseRequestForCompositor("sf_test", [1, "2"]), {
+    pane_ids: ["surf-ace-pane:v1:7:sf_test:1:1", "surf-ace-pane:v1:7:sf_test:1:2"],
     type: "native_pane.release",
   });
 });

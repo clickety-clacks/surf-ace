@@ -55,6 +55,7 @@ import {
   nativePaneFocusRequestForCompositor,
   nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
+  compositorPaneIdForSurface,
   overlayRequestForCompositor,
   overlayRegionsWithLivePaneInstanceAuthority,
   overlayTopologyEpochFromCompositorResponse,
@@ -4223,7 +4224,7 @@ export class SurfaceWsServer {
     if (!this.compositorSocketPath) {
       return `${operation} cannot replace a live native-hosted pane without native pane release support`;
     }
-    const releaseRequest = nativePaneReleaseRequestForCompositor(releasePaneIds);
+    const releaseRequest = nativePaneReleaseRequestForCompositor(surfaceId, releasePaneIds);
     let releaseResponse: CompositorControlResponse;
     try {
       releaseResponse = await sendCompositorControl(this.compositorSocketPath, releaseRequest);
@@ -4377,7 +4378,7 @@ export class SurfaceWsServer {
     try {
       releaseResponse = await sendCompositorControl(
         this.compositorSocketPath,
-        nativePaneReleaseRequestForCompositor(paneIds),
+        nativePaneReleaseRequestForCompositor(surfaceId, paneIds),
       );
     } catch {
       return false;
@@ -5448,12 +5449,13 @@ function nativePaneWindowGroupMatchesMaterialization(
     return false;
   }
   if (pane.windowGroup?.launchIdentity.launchToken) {
-    return group.launchToken === pane.windowGroup.launchIdentity.launchToken;
+    return group.launchToken === pane.windowGroup.launchIdentity.launchToken &&
+      group.paneId === compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id);
   }
   if (group.paneInstanceId && group.paneInstanceId === pane.geometry.paneInstanceId) {
-    return true;
+    return group.paneId === compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id);
   }
-  return group.paneId === String(pane.id) && (
+  return group.paneId === compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id) && (
     group.primaryWindowId === pane.binding_id ||
     group.primaryWindowId === pane.content_id
   );

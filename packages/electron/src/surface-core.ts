@@ -42,8 +42,12 @@ import type {
   TopologyApplyResponse,
   TopologyRevision,
 } from "../../protocol/src/index.js";
-import type { NativePaneFocusProjection, NativePaneMaterialization } from "./native-pane-bridge.js";
-import type { NativePaneWindowGroupStatus } from "./native-pane-bridge.js";
+import {
+  localPaneIdForSurfaceCompositorPaneId,
+  type NativePaneFocusProjection,
+  type NativePaneMaterialization,
+  type NativePaneWindowGroupStatus,
+} from "./native-pane-bridge.js";
 import {
   LocklessAuthorityError,
   LocklessClientAuthority,
@@ -1954,12 +1958,23 @@ export class SurfaceCore {
     let didChange = false;
     const trustedGroups = new Map<number, NativePaneWindowGroupStatus>();
     for (const group of groups) {
-      const paneId = Number(group.paneId);
-      const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
-      if (!pane || !pane.nativeHost?.launchToken || !sameNativePaneWindowGroupIdentity(group, pane, paneGeometry.get(paneId))) {
+      const paneId = numericCompositorPaneIdForSurface(surfaceId, group.paneId);
+      if (paneId === null) {
         continue;
       }
-      trustedGroups.set(paneId, group);
+      const pane = surface.panes.get(paneId);
+      if (!pane?.nativeHost?.launchToken) {
+        continue;
+      }
+      const localGroup = {
+        ...group,
+        focusedPaneId: numericCompositorPaneIdForSurface(surfaceId, group.focusedPaneId)?.toString() ?? null,
+        paneId: String(paneId),
+      };
+      if (!sameNativePaneWindowGroupIdentity(localGroup, pane, paneGeometry.get(paneId))) {
+        continue;
+      }
+      trustedGroups.set(paneId, localGroup);
     }
     for (const [paneId, pane] of surface.panes) {
       if (!pane.externalNative || !pane.nativeHost?.launchToken) {
@@ -4358,6 +4373,20 @@ function numericPaneId(value: string | null): PaneId | null {
   }
   const paneId = Number(value);
   return Number.isSafeInteger(paneId) && paneId > 0 ? paneId as PaneId : null;
+}
+
+function numericCompositorPaneIdForSurface(surfaceId: string, compositorPaneId: string | null): PaneId | null {
+  if (compositorPaneId === null) {
+    return null;
+  }
+  const localPaneId = localPaneIdForSurfaceCompositorPaneId(surfaceId, compositorPaneId);
+  if (localPaneId === null) {
+    return null;
+  }
+  const paneId = Number(localPaneId);
+  return Number.isSafeInteger(paneId) && paneId > 0 && String(paneId) === localPaneId
+    ? paneId as PaneId
+    : null;
 }
 
 function sameNativePaneWindowGroupDiagnostic(

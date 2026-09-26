@@ -220,6 +220,45 @@ export type CompositorControlRequest =
     type: "capture_screen";
   };
 
+const COMPOSITOR_PANE_ID_PREFIX = "surf-ace-pane:v1:";
+
+/**
+ * SurfaceCore pane IDs are local to one surface, while the compositor indexes
+ * native panes by one global PaneId. Keep the local ID inside a reversible,
+ * length-prefixed surface namespace at the compositor boundary.
+ */
+export function compositorPaneIdForSurface(surfaceId: SurfaceId | string, paneId: number | string): string {
+  const surface = String(surfaceId);
+  const localPaneId = String(paneId);
+  if (surface.length === 0 || localPaneId.length === 0) {
+    throw new Error("compositor pane identity requires non-empty surface and pane ids");
+  }
+  return `${COMPOSITOR_PANE_ID_PREFIX}${surface.length}:${surface}:${localPaneId.length}:${localPaneId}`;
+}
+
+export function localPaneIdForSurfaceCompositorPaneId(surfaceId: SurfaceId | string, compositorPaneId: string): string | null {
+  const surface = String(surfaceId);
+  const prefix = `${COMPOSITOR_PANE_ID_PREFIX}${surface.length}:${surface}:`;
+  if (surface.length === 0 || !compositorPaneId.startsWith(prefix)) {
+    return null;
+  }
+  const localIdentity = compositorPaneId.slice(prefix.length);
+  const separator = localIdentity.indexOf(":");
+  if (separator <= 0) {
+    return null;
+  }
+  const lengthText = localIdentity.slice(0, separator);
+  if (!/^[1-9][0-9]*$/.test(lengthText)) {
+    return null;
+  }
+  const declaredLength = Number(lengthText);
+  const localPaneId = localIdentity.slice(separator + 1);
+  if (!Number.isSafeInteger(declaredLength) || declaredLength <= 0 || localPaneId.length !== declaredLength) {
+    return null;
+  }
+  return localPaneId;
+}
+
 export type CompositorControlResponse = Record<string, unknown>;
 
 export type CompositorNativePaneStatusSummary = {
@@ -258,6 +297,10 @@ export function resolveCompositorControlSocketPath(
 export function requestForCompositor(
   materialization: NativePaneMaterialization,
 ): CompositorControlRequest {
+  const surfaceId = materialization.focus.surfaceId;
+  if (materialization.overlaySet && String(materialization.overlaySet.surfaceId) !== String(surfaceId)) {
+    throw new Error("native pane materialization focus and overlay surface identities do not match");
+  }
   return {
     ...nativePaneFocusFieldsForCompositor(materialization.focus),
     panes: materialization.panes.map((pane) => {
@@ -267,8 +310,26 @@ export function requestForCompositor(
       if (!pane.geometry.paneInstanceId || pane.geometry.topologyEpoch === undefined || !pane.geometry.surfaceEpoch || pane.geometry.geometryRevision === undefined) {
         throw new Error(`native pane ${pane.id} geometry missing canonical revision identity`);
       }
+      if (pane.windowGroup && (
+        String(pane.windowGroup.launchIdentity.surfaceId) !== String(surfaceId) ||
+        String(pane.windowGroup.launchIdentity.paneId) !== String(pane.id)
+      )) {
+        throw new Error(`native pane ${pane.id} launch identity does not match its surface and pane`);
+      }
       return {
         ...pane,
+        id: compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id),
+        ...(pane.windowGroup
+          ? {
+              windowGroup: {
+                ...pane.windowGroup,
+                launchIdentity: {
+                  ...pane.windowGroup.launchIdentity,
+                  paneId: compositorPaneIdForSurface(surfaceId, pane.id),
+                },
+              },
+            }
+          : {}),
         ...(pane.windowGroup?.launchIdentity.launchToken ? { launchToken: pane.windowGroup.launchIdentity.launchToken } : {}),
       };
     }),
@@ -287,7 +348,7 @@ export function nativePaneFocusRequestForCompositor(
     return { target: "main_app", type: "set_runtime_focus_target" };
   }
   return {
-    target: { native_pane: { pane_id: focus.focusedPaneId } },
+    target: { native_pane: { pane_id: compositorPaneIdForSurface(focus.surfaceId, focus.focusedPaneId) } },
     type: "set_runtime_focus_target",
   };
 }
@@ -301,7 +362,9 @@ function nativePaneFocusFieldsForCompositor(focus: NativePaneFocusProjection): {
   topology_epoch: TopologyRevision;
 } {
   return {
-    focused_pane_id: focus.focusedPaneId,
+    focused_pane_id: focus.focusedPaneId === null
+      ? null
+      : compositorPaneIdForSurface(focus.surfaceId, focus.focusedPaneId),
     focused_pane_instance_id: focus.focusedPaneInstanceId,
     geometry_revision: focus.geometryRevision,
     surface_epoch: focus.surfaceEpoch,
@@ -328,6 +391,7 @@ export function overlayRequestForCompositor(
       return {
         ...region,
         kind: "other",
+        paneId: compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id),
         paneInstanceId: nativePaneInstanceIdForCompositor(pane),
         rect: {
           height: pane.geometry.height,
@@ -369,6 +433,7 @@ export function overlayRegionsSetRequestForCompositor(snapshot: {
     coordinateSpace: "surface_logical",
     regions: snapshot.regions.map((region) => ({
       ...region,
+      paneId: compositorPaneIdForSurface(snapshot.surfaceId, region.paneId),
       rect: {
         height: Number(region.rect.height),
         width: Number(region.rect.width),
@@ -429,9 +494,12 @@ export function overlayRegionsClearRequestForCompositor(
   };
 }
 
-export function nativePaneReleaseRequestForCompositor(paneIds: Array<number | string>): CompositorControlRequest {
+export function nativePaneReleaseRequestForCompositor(
+  surfaceId: SurfaceId | string,
+  paneIds: Array<number | string>,
+): CompositorControlRequest {
   return {
-    pane_ids: paneIds.map((paneId) => String(paneId)),
+    pane_ids: paneIds.map((paneId) => compositorPaneIdForSurface(surfaceId, paneId)),
     type: "native_pane.release",
   };
 }

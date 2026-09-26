@@ -10,6 +10,7 @@ import {
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import type { NativePaneMaterialization } from "../src/native-pane-bridge.js";
+import { compositorPaneIdForSurface } from "../src/native-pane-bridge.js";
 import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
 import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
 import {
@@ -2778,13 +2779,13 @@ test("surface core exposes native materialized panes to the renderer until conte
   core.markNativePaneMaterialized(surface.surfaceId, materialization);
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.externalNative, true);
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
-  core.markNativePaneWindowGroups(surface.surfaceId, [{
+  const compositorGroupStatus = {
     acceptedSecondaryCount: 1,
     clippingStatus: "unclipped",
     deniedReasons: ["foreign_launch_token"],
     deniedToplevelCount: 1,
     focusedWindowId: "dialog-1",
-    focusedPaneId: String(paneId),
+    focusedPaneId: compositorPaneIdForSurface(surface.surfaceId, paneId),
     interactionState: "idle",
     lifecycleDiagnostic: null,
     launchToken,
@@ -2802,14 +2803,20 @@ test("surface core exposes native materialized panes to the renderer until conte
       visibility: "visible",
       zOrder: 1,
     }],
-    paneId: String(paneId),
+    paneId: compositorPaneIdForSurface(surface.surfaceId, paneId),
     paneInstanceId: listedPane.geometry.paneInstanceId,
     paneLocalBounds: listedPane.geometry.contentViewport,
     paneFocused: true,
     primaryVisible: true,
     primaryWindowId: `${paneId}:target_top`,
     surfaceFocus: "native_accessory",
+  };
+  core.markNativePaneWindowGroups(surface.surfaceId, [{
+    ...compositorGroupStatus,
+    paneId: compositorPaneIdForSurface(`${surface.surfaceId}:other`, paneId),
   }]);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
+  core.markNativePaneWindowGroups(surface.surfaceId, [compositorGroupStatus]);
   const reportedGroup = core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup;
   assert.equal(reportedGroup?.acceptedSecondaryCount, 1);
   assert.equal(reportedGroup?.focusedWindowId, "dialog-1");
@@ -2843,7 +2850,7 @@ test("surface core exposes native materialized panes to the renderer until conte
     lifecycleDiagnostic: null,
     launchToken: "foreign-launch-token",
     members: [],
-    paneId: String(paneId),
+    paneId: compositorPaneIdForSurface(surface.surfaceId, paneId),
     paneInstanceId: listedPane.geometry.paneInstanceId,
     paneLocalBounds: listedPane.geometry.contentViewport,
     paneFocused: null,
@@ -2863,7 +2870,7 @@ test("surface core exposes native materialized panes to the renderer until conte
     lifecycleDiagnostic: null,
     launchToken: null,
     members: [],
-    paneId: String(paneId),
+    paneId: compositorPaneIdForSurface(surface.surfaceId, paneId),
     paneInstanceId: listedPane.geometry.paneInstanceId,
     paneLocalBounds: listedPane.geometry.contentViewport,
     paneFocused: null,
