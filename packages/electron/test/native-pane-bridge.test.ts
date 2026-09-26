@@ -394,7 +394,7 @@ test("native pane bridge extracts pane-local window group diagnostics from compo
       native_pane_window_groups: response.status.native_pane_window_groups,
       status: { panes: [{ id: "7" }] },
     })[0]?.paneId,
-    "7",
+    compositorPaneId,
   );
   assert.deepEqual(nativePaneWindowGroupsFromCompositorStatus({
     ok: true,
