@@ -69,6 +69,23 @@ export async function normalizeOpenclawDependencyClosure(sourceDir, dependencyCl
 
   await fs.unlink(selfLink);
   await requireMissing(selfLink, "openclaw_deploy_self_link_unresolved");
+
+  const nodeModules = path.join(closureRoot, "node_modules");
+  await fs.rm(path.join(nodeModules, ".modules.yaml"), { force: true });
+  const pending = [nodeModules];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const entryPath = path.join(directory, entry.name);
+      if (entry.name === ".bin") {
+        await fs.rm(entryPath, { force: true, recursive: true });
+      } else {
+        pending.push(entryPath);
+      }
+    }
+  }
 }
 
 export async function packageOpenclawElectron(sourceArgument, runCommand = run, environment = process.env) {

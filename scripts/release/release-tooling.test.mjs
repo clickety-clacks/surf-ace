@@ -233,6 +233,41 @@ test("OpenClaw deploy normalization removes only the exact diagnosed workspace s
   assert.ok(normalizeOffset < assembleOffset && assembleOffset < archiveOffset);
 });
 
+test("OpenClaw deploy normalization removes pnpm path and timestamp ephemera before archiving", async (t) => {
+  const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
+  const makeClosure = async (name, prunedAt) => {
+    const root = path.join(await temporary(t), name);
+    const sourceDir = path.join(root, "source");
+    const dependencyClosure = path.join(root, "dependency-closure");
+    const extensionDir = path.join(sourceDir, "packages/extension");
+    const selfLink = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/@surf-ace/extension");
+    const bin = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/.bin");
+    await fs.mkdir(extensionDir, { recursive: true });
+    await fs.mkdir(path.dirname(selfLink), { recursive: true });
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(path.join(extensionDir, "package.json"), '{"name":"@surf-ace/extension"}\n');
+    await fs.writeFile(path.join(dependencyClosure, "payload.js"), "export const value = 1;\n");
+    await fs.writeFile(path.join(dependencyClosure, "node_modules/.modules.yaml"),
+      `prunedAt: ${prunedAt}\nstoreDir: ${root}/store/v10\n`);
+    await fs.writeFile(path.join(bin, "multicast-dns"), `#!/bin/sh\nNODE_PATH=${root}/dependency-closure/node_modules\n`);
+    await fs.symlink(path.relative(path.dirname(selfLink), extensionDir), selfLink);
+    await normalize(sourceDir, dependencyClosure);
+    return { dependencyClosure, root };
+  };
+
+  const left = await makeClosure("left", "Sat, 26 Sep 2026 20:24:33 GMT");
+  const right = await makeClosure("right", "Sat, 26 Sep 2026 20:28:11 GMT");
+  await assert.rejects(fs.access(path.join(left.dependencyClosure, "node_modules/.modules.yaml")));
+  await assert.rejects(fs.access(path.join(right.dependencyClosure, "node_modules/.modules.yaml")));
+  await assert.rejects(fs.access(path.join(left.dependencyClosure, "node_modules/.pnpm/node_modules/.bin")));
+  await assert.rejects(fs.access(path.join(right.dependencyClosure, "node_modules/.pnpm/node_modules/.bin")));
+  const leftArchive = path.join(left.root, "closure.tgz");
+  const rightArchive = path.join(right.root, "closure.tgz");
+  await createTarGz(left.dependencyClosure, leftArchive, 1_700_000_000);
+  await createTarGz(right.dependencyClosure, rightArchive, 1_700_000_000);
+  assert.deepEqual(await fs.readFile(leftArchive), await fs.readFile(rightArchive));
+});
+
 test("OpenClaw deploy normalization rejects every non-exact self-link shape and preserves unrelated root escapes", async (t) => {
   const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
   assert.equal(typeof normalize, "function", "shipped builder must expose its deploy normalizer");
