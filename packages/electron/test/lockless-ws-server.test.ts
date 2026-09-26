@@ -395,6 +395,161 @@ test("pane focus changes reach the compositor through its runtime focus target A
   }
 });
 
+test("native readiness and proof match compositor-qualified pane IDs across surfaces", async () => {
+  const core = new SurfaceCore();
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  const otherSurface = core.createAdditionalSurface("Other Surf Ace", viewport);
+  const paneId = 7;
+  for (const [index, currentSurface] of [surface, otherSurface].entries()) {
+    core.applyProviderBootstrapTopology(currentSurface.surfaceId, {
+      initialPaneId: paneId,
+      initialPaneLabel: paneId,
+      windowLabel: index === 0 ? "a" : "b",
+    });
+  }
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    bounds: { height: 800, width: 1200, x: 0, y: 0 },
+    ...core.resolvedPaneGeometryIdentity(surface.surfaceId),
+  });
+
+  const currentPaneId = compositorPaneIdForSurface(surface.surfaceId, paneId);
+  const otherPaneId = compositorPaneIdForSurface(otherSurface.surfaceId, paneId);
+  let status: Record<string, any> = {
+    logical_surface_height: 800,
+    logical_surface_width: 1200,
+    native_pane_window_groups: [],
+    pane_geometry_coordinate_space: "compositor_logical",
+    panes: [],
+  };
+  const socketDir = await mkdtemp(path.join(tmpdir(), "surf-ace-native-pane-readiness-"));
+  const compositorSocketPath = path.join(socketDir, "control.sock");
+  const compositor = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      const compositorRequest = JSON.parse(buffer.slice(0, newline)) as Record<string, any>;
+      if (compositorRequest.type === "native_pane.host") {
+        const pane = compositorRequest.panes[0] as Record<string, any>;
+        const bindingId = String(pane.binding_id);
+        const contentId = String(pane.content_id);
+        const nativeApp = pane.nativeApp as Record<string, any>;
+        status = {
+          ...status,
+          native_pane_window_groups: [
+            {
+              launch_token: "other-surface-launch",
+              pane_id: otherPaneId,
+              primary_window_id: "other-surface-primary",
+            },
+            {
+              launch_token: String(pane.launchToken),
+              pane_id: currentPaneId,
+              primary_window_id: bindingId,
+            },
+          ],
+          panes: [
+            {
+              id: otherPaneId,
+              input_focus: "not_ready",
+              lifecycle: "exited",
+              nativeApp: { appId: "other-surface-app", args: ["wrong"], launchMode: "new_instance" },
+              nativeHost: { bindingId: "other-surface-binding", contentId: "other-surface-content" },
+            },
+            {
+              id: currentPaneId,
+              input_focus: "ready",
+              lifecycle: "running",
+              nativeApp,
+              nativeHost: { bindingId, contentId },
+            },
+          ],
+        };
+      }
+      socket.end(`${JSON.stringify({ ok: true, status })}\n`);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.once("error", reject);
+    compositor.listen(compositorSocketPath, resolve);
+  });
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath,
+    core,
+    endpointName: "Surf Ace",
+    getRuntimeAppBinding: () => ({
+      acknowledgement: "accepted",
+      bindingAuthority: "trusted",
+      bindingDegradedReasons: [],
+      diagnosticDrift: [],
+      expectedBundleId: null,
+      expectedPackageName: null,
+      expectedRuntimeId: "native-readiness-fixture",
+      launchTokenStatus: "matched",
+      observedUiLabel: null,
+      observedWaylandAppId: null,
+      observedWindowTitle: null,
+      processLineageStatus: "matched",
+      ready: true,
+      reportedBundleId: null,
+      reportedPackageName: null,
+      reportedRuntimeId: "native-readiness-fixture",
+    }),
+    hostName: "localhost",
+    nativeOverlayLivenessRetryCount: 0,
+    port,
+    viewport: () => viewport,
+  });
+  let client: WebSocket | null = null;
+  try {
+    await server.start();
+    client = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    assert.equal((await pair(client, "native-readiness-status-client", surface.surfaceId)).ok, true);
+    const pane = core.pairState(surface.surfaceId).panes.find((candidate) => Number(candidate.paneId) === paneId)!;
+    const resultEvent = nextEvent(client, "event.target_apply_result");
+    const accepted = await request(client, "target.apply", {
+      paneId,
+      paneLineageId: pane.paneLineageId,
+      requestId: "native-readiness-qualified-pane",
+      restoreReason: "initial",
+      surfaceId: surface.surfaceId,
+      targetEpoch: 1,
+      targetHeader: {
+        payloadSchemaVersion: 1,
+        replaySemantics: "launch_equivalent",
+        requiredCapabilities: ["target.native_app.v1"],
+        safeToLogFields: ["appId"],
+        safetyClass: "process",
+        summary: "qualified native readiness fixture",
+      },
+      targetId: "target_native_readiness_fixture",
+      targetKind: "native_app",
+      targetPayload: { appId: "native-readiness-fixture", args: [], launchMode: "new_instance" },
+    });
+    assert.equal(accepted.payload.status, "intent_committed");
+    const result = await resultEvent;
+    assert.equal(result.payload.status, "applied", JSON.stringify(result));
+    assert.notEqual(currentPaneId, otherPaneId);
+    assert.ok(currentPaneId.endsWith(":1:7"));
+    assert.ok(otherPaneId.endsWith(":1:7"));
+    assert.equal(result.payload.materializedState.lifecycle, "running");
+    assert.equal(result.payload.materializedState.inputFocus, "ready");
+    assert.equal(result.payload.materializedState.proof?.appId, "native-readiness-fixture");
+    assert.equal(result.payload.materializedState.proof?.paneId, currentPaneId);
+  } finally {
+    client?.close();
+    await server.stop();
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(socketDir, { force: true, recursive: true });
+  }
+});
+
 test("canonical target-admission cases execute Electron authority semantics", async () => {
   for (const vectorCase of targetAdmissionVectorCases()) {
     const core = new SurfaceCore();

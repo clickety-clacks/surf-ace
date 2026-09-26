@@ -5381,13 +5381,15 @@ function nativePaneReadinessFromCompositor(
     return {};
   }
   const pane = materialization.panes[0];
+  const compositorPaneId = pane
+    ? compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id)
+    : null;
   const panes = Array.isArray(status.panes) ? status.panes : [];
   const paneStatus = panes.find((candidate) => {
-    if (!isPlainRecord(candidate) || !pane) {
+    if (!isPlainRecord(candidate) || compositorPaneId === null) {
       return false;
     }
-    return String(candidate.id ?? "") === String(pane.id) ||
-      (pane.binding_id ? String(candidate.binding_id ?? "") === String(pane.binding_id) : false);
+    return String(candidate.id ?? "") === compositorPaneId;
   });
   const source = isPlainRecord(paneStatus) ? paneStatus : status;
   const nativeHostStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.nativeHost)
@@ -5415,6 +5417,7 @@ function nativePaneReadinessFromCompositor(
     ? nativeHostStatus.process
     : null;
   const proof = paneProofFromCompositorStatus({
+    compositorPaneId,
     nativeAppStatus,
     pane,
     paneStatus: isPlainRecord(paneStatus) ? paneStatus : null,
@@ -5504,6 +5507,7 @@ function appendDiagnosticValues(target: Set<string>, value: unknown): void {
 }
 
 function paneProofFromCompositorStatus(input: {
+  compositorPaneId: string | null;
   nativeAppStatus: Record<string, unknown> | null;
   pane: NativePaneMaterialization["panes"][number] | undefined;
   paneStatus: Record<string, unknown> | null;
@@ -5513,6 +5517,7 @@ function paneProofFromCompositorStatus(input: {
   processStatus: Record<string, unknown> | null;
 }): NativeHostMaterializedState["proof"] | undefined {
   const {
+    compositorPaneId,
     nativeAppStatus,
     pane,
     paneStatus,
@@ -5524,7 +5529,8 @@ function paneProofFromCompositorStatus(input: {
   if (
     !pane ||
     !paneStatus ||
-    paneStatusId !== String(pane.id) ||
+    compositorPaneId === null ||
+    paneStatusId !== compositorPaneId ||
     !((pane.binding_id && paneStatusBindingId === pane.binding_id) ||
       (pane.content_id && paneStatusContentId === pane.content_id))
   ) {
