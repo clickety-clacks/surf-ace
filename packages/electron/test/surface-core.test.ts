@@ -788,6 +788,63 @@ test("surface core navigates the active keyboard pane by resolved geometry", () 
   assert.equal(core.navigateActiveKeyboardPane(surface.surfaceId, "left"), null);
 });
 
+test("surface core projects one authoritative pane focus and emits only real focus changes", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const initialPaneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "vertical",
+    newPaneIds: [9],
+    newPaneLabels: [9],
+    paneId: initialPaneId,
+  });
+  updateResolvedPaneSnapshot(core, surface.surfaceId, initialPaneId, {
+    bounds: { height: 800, width: 600, x: 0, y: 0 },
+  });
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
+    bounds: { height: 800, width: 600, x: 600, y: 0 },
+  });
+
+  const focusEvents: string[] = [];
+  const unsubscribe = core.subscribe((event) => {
+    if (event.type === "keyboard-focus-changed") {
+      focusEvents.push(event.surfaceId);
+    }
+  });
+  try {
+    core.setActiveKeyboardPane(surface.surfaceId, 9);
+    core.setActiveKeyboardPane(surface.surfaceId, 9);
+
+    assert.deepEqual(focusEvents, [surface.surfaceId]);
+    const geometryIdentity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
+    assert.deepEqual(core.projectNativePaneFocus(surface.surfaceId), {
+      focusedPaneId: "9",
+      focusedPaneInstanceId: core.panesList(surface.surfaceId).panes.find(
+        (pane) => pane.paneId === 9,
+      )?.geometry.paneInstanceId,
+      geometryRevision: geometryIdentity.geometryRevision,
+      surfaceEpoch: surface.surfaceEpoch,
+      surfaceId: surface.surfaceId,
+      topologyEpoch: geometryIdentity.topologyRevision,
+    });
+    assert.deepEqual(
+      core.getRendererWindowState(surface.surfaceId).panes.map((pane) => [
+        pane.paneId,
+        pane.activeKeyboardPane,
+      ]),
+      [[initialPaneId, false], [9, true]],
+    );
+  } finally {
+    unsubscribe();
+  }
+});
+
 test("surface core preserves resize weights in topology and renderer geometry", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -861,6 +918,7 @@ test("surface core preserves resize weights in topology and renderer geometry", 
 
     const nativePane = core.panesList(surface.surfaceId).panes.find((pane) => Number(pane.paneId) === 7)!;
     core.markNativePaneMaterialized(surface.surfaceId, {
+      focus: core.projectNativePaneFocus(surface.surfaceId),
       op: "native_pane.host",
       panes: [
         {
@@ -1182,6 +1240,7 @@ test("surface core exposes reload only for browser_url and file-backed content",
 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   core.markNativePaneMaterialized(surface.surfaceId, {
+    focus: core.projectNativePaneFocus(surface.surfaceId),
     op: "native_pane.host",
     panes: [
       {
@@ -1389,6 +1448,7 @@ test("surface core clears browser_url renderer content when native pane material
 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   core.markNativePaneMaterialized(surface.surfaceId, {
+    focus: core.projectNativePaneFocus(surface.surfaceId),
     op: "native_pane.host",
     panes: [
       {
@@ -1437,6 +1497,7 @@ test("surface core rejects browser_url targets while the pane is native-hosted",
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {
+    focus: core.projectNativePaneFocus(surface.surfaceId),
     op: "native_pane.host",
     panes: [
       {
@@ -1504,6 +1565,7 @@ test("surface core rejects stale native materialization identity after geometry 
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {
+    focus: core.projectNativePaneFocus(surface.surfaceId),
     op: "native_pane.host",
     panes: [
       {
@@ -1557,6 +1619,7 @@ test("surface core projects native topology overlay identity from accepted topol
   resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   core.markNativePaneMaterialized(surface.surfaceId, {
+    focus: core.projectNativePaneFocus(surface.surfaceId),
     op: "native_pane.host",
     panes: [
       {
@@ -1621,6 +1684,7 @@ test("surface core resyncs native topology overlays on window relabel without ge
   resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   core.markNativePaneMaterialized(surface.surfaceId, {
+    focus: core.projectNativePaneFocus(surface.surfaceId),
     op: "native_pane.host",
     panes: [
       {
@@ -1678,6 +1742,7 @@ test("surface core advances native overlay revision on label-only provider resum
   resolvePaneSnapshot(core, surface.surfaceId, paneId);
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   core.markNativePaneMaterialized(surface.surfaceId, {
+    focus: core.projectNativePaneFocus(surface.surfaceId),
     op: "native_pane.host",
     panes: [
       {
@@ -2491,13 +2556,16 @@ test("surface core materializes terminal_app targets through Surf Ace terminal h
       targetId: "target_btop",
     },
     policy: {
-      chromeInsets: { bottom: 44, left: 44, right: 44, top: 44 },
-      clipToPane: true,
-      constrainToPane: true,
+      accessoryVisibility: "focused_pane_only",
+      clipToPane: false,
+      constrainToPane: false,
       denyForeignToplevels: true,
+      primaryVisibility: "always",
       sameLaunchSecondaryToplevels: "accept",
     },
   });
+  assert.equal(materialization.focus.focusedPaneId, String(paneId));
+  assert.equal(materialization.focus.focusedPaneInstanceId, pane.paneLineageId);
   assert.equal(materialization.overlaySet?.regions[0]?.kind, "native_pane");
   assert.deepEqual(materialization.overlaySet?.regions[0]?.captures, ["pointer_hover", "pointer_button", "pointer_axis"]);
 });
@@ -2665,6 +2733,7 @@ test("surface core exposes native materialized panes to the renderer until conte
   const listedPane = core.panesList(surface.surfaceId).panes[0]!;
   const launchToken = `${surface.surfaceId}:${paneId}:target_top:1`;
   const materialization: NativePaneMaterialization = {
+    focus: core.projectNativePaneFocus(surface.surfaceId),
     op: "native_pane.host",
     panes: [
       {
@@ -2694,10 +2763,11 @@ test("surface core exposes native materialized panes to the renderer until conte
             targetId: "target_top",
           },
           policy: {
-            chromeInsets: { bottom: 44, left: 44, right: 44, top: 44 },
-            clipToPane: true,
-            constrainToPane: true,
+            accessoryVisibility: "focused_pane_only",
+            clipToPane: false,
+            constrainToPane: false,
             denyForeignToplevels: true,
+            primaryVisibility: "always",
             sameLaunchSecondaryToplevels: "accept",
           },
         },
@@ -2710,38 +2780,76 @@ test("surface core exposes native materialized panes to the renderer until conte
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
   core.markNativePaneWindowGroups(surface.surfaceId, [{
     acceptedSecondaryCount: 1,
-    clippingStatus: "clipped",
+    clippingStatus: "unclipped",
     deniedReasons: ["foreign_launch_token"],
     deniedToplevelCount: 1,
     focusedWindowId: "dialog-1",
+    focusedPaneId: String(paneId),
+    interactionState: "idle",
+    lifecycleDiagnostic: null,
     launchToken,
     members: [{
+      acceptsInput: true,
       bounds: { height: 120, width: 160, x: 8, y: 12 },
-      clippedToPane: true,
+      clippedToPane: false,
+      destroyedWhileHidden: false,
       focused: true,
+      hiddenReason: null,
       id: "dialog-1",
       lifecycle: "live",
+      restorationState: "preserved",
       role: "dialog",
+      visibility: "visible",
+      zOrder: 1,
     }],
     paneId: String(paneId),
     paneInstanceId: listedPane.geometry.paneInstanceId,
     paneLocalBounds: listedPane.geometry.contentViewport,
+    paneFocused: true,
+    primaryVisible: true,
     primaryWindowId: `${paneId}:target_top`,
+    surfaceFocus: "native_accessory",
   }]);
-  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.acceptedSecondaryCount, 1);
-  assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup?.focusedWindowId, "dialog-1");
+  const reportedGroup = core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup;
+  assert.equal(reportedGroup?.acceptedSecondaryCount, 1);
+  assert.equal(reportedGroup?.focusedWindowId, "dialog-1");
+  assert.equal(reportedGroup?.focusedPaneId, paneId);
+  assert.equal(reportedGroup?.paneFocused, true);
+  assert.equal(reportedGroup?.surfaceFocus, "native_accessory");
+  assert.equal(reportedGroup?.interactionState, "idle");
+  assert.equal(reportedGroup?.primaryVisible, true);
+  assert.deepEqual(reportedGroup?.members[0], {
+    acceptsInput: true,
+    bounds: { height: 120, width: 160, x: 8, y: 12 },
+    clippedToPane: false,
+    destroyedWhileHidden: false,
+    focused: true,
+    hiddenReason: null,
+    id: "dialog-1",
+    lifecycle: "live",
+    restorationState: "preserved",
+    role: "dialog",
+    visibility: "visible",
+    zOrder: 1,
+  });
   core.markNativePaneWindowGroups(surface.surfaceId, [{
     acceptedSecondaryCount: 99,
     clippingStatus: "unclipped",
     deniedReasons: [],
     deniedToplevelCount: 0,
     focusedWindowId: "foreign-dialog",
+    focusedPaneId: null,
+    interactionState: "unknown",
+    lifecycleDiagnostic: null,
     launchToken: "foreign-launch-token",
     members: [],
     paneId: String(paneId),
     paneInstanceId: listedPane.geometry.paneInstanceId,
     paneLocalBounds: listedPane.geometry.contentViewport,
+    paneFocused: null,
+    primaryVisible: null,
     primaryWindowId: "foreign-primary",
+    surfaceFocus: "unknown",
   }]);
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
   core.markNativePaneWindowGroups(surface.surfaceId, [{
@@ -2750,12 +2858,18 @@ test("surface core exposes native materialized panes to the renderer until conte
     deniedReasons: [],
     deniedToplevelCount: 0,
     focusedWindowId: "dialog-2",
+    focusedPaneId: null,
+    interactionState: "unknown",
+    lifecycleDiagnostic: null,
     launchToken: null,
     members: [],
     paneId: String(paneId),
     paneInstanceId: listedPane.geometry.paneInstanceId,
     paneLocalBounds: listedPane.geometry.contentViewport,
+    paneFocused: null,
+    primaryVisible: null,
     primaryWindowId: null,
+    surfaceFocus: "unknown",
   }]);
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
 

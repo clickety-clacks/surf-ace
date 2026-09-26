@@ -49,8 +49,10 @@ import {
 } from "../../protocol/src/lockless.js";
 import {
   compositorFailureMessage,
+  nativePaneCompositorRuntimeStatusFromStatus,
   isOverlayNativePaneLivenessFailure,
   type NativePaneMaterialization,
+  nativePaneFocusRequestForCompositor,
   nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
   overlayRequestForCompositor,
@@ -63,6 +65,7 @@ import {
   type CompositorControlRequest,
   type CompositorControlResponse,
   type NativePaneWindowGroupStatus,
+  type NativePaneCompositorRuntimeStatus,
 } from "./native-pane-bridge.js";
 import {
   type ClientDiagnosticFields,
@@ -865,6 +868,9 @@ export class SurfaceWsServer {
 
   private async handleCoreEvent(event: CoreEvent): Promise<void> {
     switch (event.type) {
+      case "keyboard-focus-changed":
+        await this.syncNativePaneFocus(event.surfaceId);
+        return;
       case "lockless-authority-changed":
         return;
       case "annotation-committed":
@@ -955,6 +961,53 @@ export class SurfaceWsServer {
       case "pane-geometry-changed":
         return;
     }
+  }
+
+  private async syncNativePaneFocus(surfaceId: string): Promise<CompositorControlResponse | null> {
+    if (!this.compositorSocketPath) {
+      return null;
+    }
+    return await this.runSurfaceMutation(surfaceId, async () => {
+      let focus: ReturnType<SurfaceCore["projectNativePaneFocus"]> | null = null;
+      try {
+        if (this.core.nativeHostedPaneIdsExcluding(surfaceId, []).length === 0) {
+          return null;
+        }
+        focus = this.core.projectNativePaneFocus(surfaceId);
+        const response = await sendCompositorControl(
+          this.compositorSocketPath!,
+          nativePaneFocusRequestForCompositor(focus),
+        );
+        const failure = compositorFailureMessage(response);
+        if (failure) {
+          persistentServerDiagnostic("warn", "native_pane_focus_sync_failed", {
+            error_message: failure,
+            focused_pane_id: focus.focusedPaneId ?? "none",
+            surface_id: surfaceId,
+          });
+          return response;
+        }
+        const observedGroups = nativePaneWindowGroupsFromCompositorStatus(response);
+        if (observedGroups.length > 0) {
+          this.core.markNativePaneWindowGroups(surfaceId, observedGroups);
+        }
+        persistentServerDiagnostic("info", "native_pane_focus_synced", {
+          focused_pane_id: focus.focusedPaneId ?? "none",
+          geometry_revision: Number(focus.geometryRevision),
+          surface_epoch: focus.surfaceEpoch,
+          surface_id: surfaceId,
+          topology_epoch: Number(focus.topologyEpoch),
+        });
+        return response;
+      } catch (error) {
+        persistentServerDiagnostic("warn", "native_pane_focus_sync_failed", {
+          error_message: error instanceof Error ? error.message : String(error),
+          focused_pane_id: focus?.focusedPaneId ?? "unknown",
+          surface_id: surfaceId,
+        });
+        return null;
+      }
+    });
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
@@ -1942,8 +1995,10 @@ export class SurfaceWsServer {
         );
       }
       this.requireLocklessSurface(targetSurfaceId);
+      const nativeCompositorStatus = await this.refreshNativePaneWindowGroups(targetSurfaceId);
       return locklessSuccess(request, {
         ...this.core.panesList(targetSurfaceId),
+        ...(nativeCompositorStatus ? { nativeCompositorStatus } : {}),
         topology: this.core.topologyState(targetSurfaceId),
       });
     }
@@ -2979,8 +3034,11 @@ export class SurfaceWsServer {
 
   private async handlePanesList(socket: WebSocket, request: PanesListRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    await this.refreshNativePaneWindowGroups(surfaceId);
-    const payload = this.core.panesList(surfaceId);
+    const nativeCompositorStatus = await this.refreshNativePaneWindowGroups(surfaceId);
+    const payload = {
+      ...this.core.panesList(surfaceId),
+      ...(nativeCompositorStatus ? { nativeCompositorStatus } : {}),
+    };
     persistentServerDiagnostic(
       "info",
       "panes_list_summary",
@@ -3004,9 +3062,9 @@ export class SurfaceWsServer {
     };
   }
 
-  private async refreshNativePaneWindowGroups(surfaceId: string): Promise<void> {
+  private async refreshNativePaneWindowGroups(surfaceId: string): Promise<NativePaneCompositorRuntimeStatus | null> {
     if (!this.compositorSocketPath) {
-      return;
+      return null;
     }
     try {
       const status = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
@@ -3016,15 +3074,17 @@ export class SurfaceWsServer {
           error_message: failure,
           surface_id: surfaceId,
         });
-        return;
+        return null;
       }
       const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(status);
       this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
+      return nativePaneCompositorRuntimeStatusFromStatus(status);
     } catch (error) {
       persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
         error_message: error instanceof Error ? error.message : String(error),
         surface_id: surfaceId,
       });
+      return null;
     }
   }
 

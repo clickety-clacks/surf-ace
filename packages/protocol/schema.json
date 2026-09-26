@@ -3225,6 +3225,14 @@
             "panes"
           ],
           "properties": {
+            "nativeCompositorStatus": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "activeFocusTarget": {},
+                "lastDiagnostic": {}
+              }
+            },
                 "panes": {
                   "type": "array",
                   "minItems": 1,
@@ -3306,6 +3314,12 @@
                       "deniedReasons",
                       "paneLocalBounds",
                       "clippingStatus",
+                      "focusedPaneId",
+                      "paneFocused",
+                      "primaryVisible",
+                      "surfaceFocus",
+                      "interactionState",
+                      "lifecycleDiagnostic",
                       "members"
                     ],
                     "properties": {
@@ -3328,12 +3342,26 @@
                       },
                       "paneLocalBounds": { "$ref": "#/$defs/Rect" },
                       "clippingStatus": { "enum": ["clipped", "unclipped", "unknown"] },
+                      "focusedPaneId": {
+                        "oneOf": [{ "$ref": "#/$defs/PaneId" }, { "type": "null" }]
+                      },
+                      "paneFocused": {
+                        "oneOf": [{ "type": "boolean" }, { "type": "null" }]
+                      },
+                      "primaryVisible": {
+                        "oneOf": [{ "type": "boolean" }, { "type": "null" }]
+                      },
+                      "surfaceFocus": { "enum": ["surf_ace", "native_primary", "native_accessory", "unknown"] },
+                      "interactionState": { "enum": ["idle", "active", "cancelled", "unknown"] },
+                      "lifecycleDiagnostic": {
+                        "oneOf": [{ "type": "string" }, { "type": "null" }]
+                      },
                       "members": {
                         "type": "array",
                         "items": {
                           "type": "object",
                           "additionalProperties": false,
-                          "required": ["id", "role", "bounds", "focused", "lifecycle", "clippedToPane"],
+                          "required": ["id", "role", "bounds", "focused", "lifecycle", "clippedToPane", "acceptsInput", "destroyedWhileHidden", "hiddenReason", "restorationState", "visibility", "zOrder"],
                           "properties": {
                             "id": { "type": "string", "minLength": 1 },
                             "role": { "enum": ["primary", "dialog", "palette", "popup", "secondary", "unknown"] },
@@ -3341,9 +3369,23 @@
                               "oneOf": [{ "$ref": "#/$defs/Rect" }, { "type": "null" }]
                             },
                             "focused": { "type": "boolean" },
-                            "lifecycle": { "enum": ["live", "closing", "closed", "unknown"] },
+                            "lifecycle": { "enum": ["live", "closing", "closed", "disappeared", "unknown"] },
                             "clippedToPane": {
                               "oneOf": [{ "type": "boolean" }, { "type": "null" }]
+                            },
+                            "acceptsInput": {
+                              "oneOf": [{ "type": "boolean" }, { "type": "null" }]
+                            },
+                            "destroyedWhileHidden": {
+                              "oneOf": [{ "type": "boolean" }, { "type": "null" }]
+                            },
+                            "hiddenReason": {
+                              "oneOf": [{ "type": "string" }, { "type": "null" }]
+                            },
+                            "restorationState": { "enum": ["preserved", "removed", "not_applicable", "unknown"] },
+                            "visibility": { "enum": ["visible", "focus_hidden", "hidden", "unknown"] },
+                            "zOrder": {
+                              "oneOf": [{ "type": "number" }, { "type": "null" }]
                             }
                           }
                         }

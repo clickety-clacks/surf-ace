@@ -42,7 +42,7 @@ import type {
   TopologyApplyResponse,
   TopologyRevision,
 } from "../../protocol/src/index.js";
-import type { NativePaneChromeInsets, NativePaneMaterialization } from "./native-pane-bridge.js";
+import type { NativePaneFocusProjection, NativePaneMaterialization } from "./native-pane-bridge.js";
 import type { NativePaneWindowGroupStatus } from "./native-pane-bridge.js";
 import {
   LocklessAuthorityError,
@@ -135,13 +135,6 @@ type PaneState = {
   pendingAnnotationCommit: boolean;
   snapshot: PaneSnapshot;
   toast: string | null;
-};
-
-const NATIVE_PANE_CHROME_REACHABILITY_INSETS: NativePaneChromeInsets = {
-  bottom: 44,
-  left: 44,
-  right: 44,
-  top: 44,
 };
 
 type LayoutNode =
@@ -303,6 +296,7 @@ export type ReloadEntryIdentity = {
 
 export type CoreEvent =
   | { type: "lockless-authority-changed" }
+  | { surfaceId: string; type: "keyboard-focus-changed" }
   | { surfaceId: string; type: "surface-changed" }
   | { surfaceId: string; type: "surface-created" }
   | { surfaceId: string; type: "surface-removed" }
@@ -1577,12 +1571,31 @@ export class SurfaceCore {
     return surface.activeKeyboardPaneId;
   }
 
+  projectNativePaneFocus(surfaceId: string): NativePaneFocusProjection {
+    const surface = this.getSurface(surfaceId);
+    this.ensureActiveKeyboardPane(surface);
+    const focusedPaneId = surface.activeKeyboardPaneId;
+    const focusedPane = focusedPaneId === null
+      ? undefined
+      : surface.panes.get(focusedPaneId);
+    if (focusedPaneId !== null && !focusedPane) {
+      throw new SurfaceCoreError("invalid_payload", `focused pane ${focusedPaneId} has no current core state`);
+    }
+    return {
+      focusedPaneId: focusedPaneId === null ? null : String(focusedPaneId),
+      focusedPaneInstanceId: focusedPane?.paneLineageId ?? null,
+      geometryRevision: surface.geometryRevision as Revision,
+      surfaceEpoch: surface.surfaceEpoch,
+      surfaceId: surface.surfaceId as SurfaceId,
+      topologyEpoch: surface.topologyRevision as TopologyRevision,
+    };
+  }
+
   setActiveKeyboardPane(surfaceId: string, paneId: number): void {
     const surface = this.getSurface(surfaceId);
-    if (!surface.panes.has(paneId) || surface.activeKeyboardPaneId === paneId) {
+    if (!surface.panes.has(paneId) || !this.assignActiveKeyboardPane(surface, paneId)) {
       return;
     }
-    surface.activeKeyboardPaneId = paneId;
     this.emit({ surfaceId, type: "surface-changed" });
   }
 
@@ -1790,13 +1803,7 @@ export class SurfaceCore {
           surfaceId: surface.surfaceId as SurfaceId,
           targetId: payload.targetId,
         },
-        policy: {
-          chromeInsets: NATIVE_PANE_CHROME_REACHABILITY_INSETS,
-          clipToPane: true,
-          constrainToPane: true,
-          denyForeignToplevels: true,
-          sameLaunchSecondaryToplevels: "accept",
-        },
+        policy: nativePaneWindowGroupPolicy(),
       },
     };
     if (payload.targetKind === "terminal_app" && isPlainRecord(payload.targetPayload)) {
@@ -1850,6 +1857,7 @@ export class SurfaceCore {
       y: compositorViewport.y,
     };
     return {
+      focus: this.projectNativePaneFocus(surfaceId),
       op: "native_pane.host",
       overlaySet: {
         coordinateSpace: "surface_logical",
@@ -2026,11 +2034,17 @@ export class SurfaceCore {
           : {}),
       };
     });
-    return nativePaneMaterializationFromProjectedPanes(surface, panes, layoutOrder, {
-      geometryRevision: surface.geometryRevision,
-      topologyRevision: surface.topologyRevision,
-      windowLabel: surface.windowLabel,
-    });
+    return nativePaneMaterializationFromProjectedPanes(
+      surface,
+      panes,
+      layoutOrder,
+      this.projectNativePaneFocus(surface.surfaceId),
+      {
+        geometryRevision: surface.geometryRevision,
+        topologyRevision: surface.topologyRevision,
+        windowLabel: surface.windowLabel,
+      },
+    );
   }
 
   nativeHostedPaneIdForLineage(surfaceId: string, paneLineageId: string): number | null {
@@ -2701,7 +2715,7 @@ export class SurfaceCore {
       surface.panes.set(pane.paneId, pane);
       surface.paneOrder.push(pane.paneId);
     }
-    surface.activeKeyboardPaneId = sourcePane.paneId;
+    this.assignActiveKeyboardPane(surface, sourcePane.paneId);
     surface.layout = splitLayoutNode(surface.layout!, sourcePane.paneId, payload.direction, [
       sourcePane.paneId,
       ...newPaneIds,
@@ -3592,7 +3606,7 @@ export class SurfaceCore {
     surface.panes.set(initialPaneId, replacementPane);
     surface.paneOrder = [initialPaneId];
     surface.layout = { paneId: initialPaneId, type: "pane" };
-    surface.activeKeyboardPaneId = initialPaneId;
+    this.assignActiveKeyboardPane(surface, initialPaneId);
     return true;
   }
 
@@ -3637,7 +3651,17 @@ export class SurfaceCore {
     if (surface.activeKeyboardPaneId !== null && surface.panes.has(surface.activeKeyboardPaneId)) {
       return;
     }
-    surface.activeKeyboardPaneId = surface.paneOrder[0] ?? null;
+    this.assignActiveKeyboardPane(surface, surface.paneOrder[0] ?? null);
+  }
+
+  private assignActiveKeyboardPane(surface: SurfaceState, paneId: number | null): boolean {
+    if (surface.activeKeyboardPaneId === paneId) {
+      return false;
+    }
+    surface.activeKeyboardPaneId = paneId;
+    // Compositor accessory visibility follows pane focus, so this change must cross its control seam.
+    this.emit({ surfaceId: surface.surfaceId, type: "keyboard-focus-changed" });
+    return true;
   }
 }
 
@@ -4258,9 +4282,11 @@ function nativePaneMaterializationFromProjectedPanes(
   surface: SurfaceState,
   panes: NativePaneMaterialization["panes"],
   layoutOrder: number[],
+  focus: NativePaneFocusProjection,
   revision: { geometryRevision: number; topologyRevision: number; windowLabel: string },
 ): NativePaneMaterialization {
   return {
+    focus,
     op: "native_pane.update",
     overlaySet: {
       coordinateSpace: "surface_logical",
@@ -4298,20 +4324,40 @@ function nativePaneWindowGroupDiagnosticFromStatus(
     deniedReasons: [...group.deniedReasons],
     deniedToplevelCount: group.deniedToplevelCount,
     focusedWindowId: group.focusedWindowId,
+    focusedPaneId: numericPaneId(group.focusedPaneId),
+    interactionState: group.interactionState,
+    lifecycleDiagnostic: group.lifecycleDiagnostic,
     launchToken: group.launchToken,
     members: group.members.map((member) => ({
+      acceptsInput: member.acceptsInput,
       bounds: member.bounds ? structuredClone(member.bounds) : null,
       clippedToPane: member.clippedToPane,
+      destroyedWhileHidden: member.destroyedWhileHidden,
       focused: member.focused,
+      hiddenReason: member.hiddenReason,
       id: member.id,
       lifecycle: member.lifecycle,
+      restorationState: member.restorationState,
       role: member.role,
+      visibility: member.visibility,
+      zOrder: member.zOrder,
     })),
     paneId: pane.paneId as PaneId,
     paneInstanceId: group.paneInstanceId ?? geometry.paneInstanceId,
     paneLocalBounds: group.paneLocalBounds ?? compositorResolvedRect(geometry.contentViewport),
+    paneFocused: group.paneFocused,
+    primaryVisible: group.primaryVisible,
     primaryWindowId: group.primaryWindowId,
+    surfaceFocus: group.surfaceFocus,
   };
+}
+
+function numericPaneId(value: string | null): PaneId | null {
+  if (value === null) {
+    return null;
+  }
+  const paneId = Number(value);
+  return Number.isSafeInteger(paneId) && paneId > 0 ? paneId as PaneId : null;
 }
 
 function sameNativePaneWindowGroupDiagnostic(
@@ -4346,10 +4392,11 @@ function nativePaneLaunchToken(surfaceId: string, paneId: number, targetId: stri
 
 function nativePaneWindowGroupPolicy(): NonNullable<NativePaneMaterialization["panes"][number]["windowGroup"]>["policy"] {
   return {
-    chromeInsets: NATIVE_PANE_CHROME_REACHABILITY_INSETS,
-    clipToPane: true,
-    constrainToPane: true,
+    accessoryVisibility: "focused_pane_only",
+    clipToPane: false,
+    constrainToPane: false,
     denyForeignToplevels: true,
+    primaryVisibility: "always",
     sameLaunchSecondaryToplevels: "accept",
   };
 }

@@ -1,6 +1,17 @@
 import net from "node:net";
 
-import type { Rect, Revision, SurfaceId, TopologyRevision } from "../../protocol/src/index.js";
+import type {
+  NativePaneInteractionState,
+  NativePaneSurfaceFocus,
+  NativePaneWindowGroupLifecycle,
+  NativePaneWindowGroupRestoration,
+  NativePaneWindowGroupVisibility,
+  NativePaneCompositorRuntimeStatus,
+  Rect,
+  Revision,
+  SurfaceId,
+  TopologyRevision,
+} from "../../protocol/src/index.js";
 import type { CompositorAppBindingRequest } from "./runtime-identity.js";
 
 export type NativePaneGeometry = Rect & {
@@ -40,20 +51,14 @@ export type NativePaneLaunchIdentity = {
   targetId?: string;
 };
 
-export type NativePaneChromeInsets = {
-  bottom: number;
-  left: number;
-  right: number;
-  top: number;
-};
-
 export type NativePaneWindowGroupRequest = {
   launchIdentity: NativePaneLaunchIdentity;
   policy: {
-    chromeInsets: NativePaneChromeInsets;
-    clipToPane: true;
-    constrainToPane: true;
+    accessoryVisibility: "focused_pane_only";
+    clipToPane: false;
+    constrainToPane: false;
     denyForeignToplevels: true;
+    primaryVisibility: "always";
     sameLaunchSecondaryToplevels: "accept";
   };
 };
@@ -61,11 +66,17 @@ export type NativePaneWindowGroupRequest = {
 export type NativePaneWindowGroupMemberRole = "primary" | "dialog" | "palette" | "popup" | "secondary" | "unknown";
 
 export type NativePaneWindowGroupMember = {
+  acceptsInput: boolean | null;
   id: string;
   role: NativePaneWindowGroupMemberRole;
   bounds: Rect | null;
+  destroyedWhileHidden: boolean | null;
   focused: boolean;
-  lifecycle: "live" | "closing" | "closed" | "unknown";
+  hiddenReason: string | null;
+  lifecycle: NativePaneWindowGroupLifecycle;
+  restorationState: NativePaneWindowGroupRestoration;
+  visibility: NativePaneWindowGroupVisibility;
+  zOrder: number | null;
   clippedToPane: boolean | null;
 };
 
@@ -80,6 +91,12 @@ export type NativePaneWindowGroupStatus = {
   deniedReasons: string[];
   paneLocalBounds: Rect | null;
   clippingStatus: "clipped" | "unclipped" | "unknown";
+  focusedPaneId: string | null;
+  paneFocused: boolean | null;
+  primaryVisible: boolean | null;
+  surfaceFocus: NativePaneSurfaceFocus;
+  interactionState: NativePaneInteractionState;
+  lifecycleDiagnostic: string | null;
   members: NativePaneWindowGroupMember[];
 };
 
@@ -101,9 +118,19 @@ export type NativePaneOverlaySet = {
 };
 
 export type NativePaneMaterialization = {
+  focus: NativePaneFocusProjection;
   op: "native_pane.host" | "native_pane.update";
   panes: NativePaneMaterializationPane[];
   overlaySet?: NativePaneOverlaySet;
+};
+
+export type NativePaneFocusProjection = {
+  focusedPaneId: string | null;
+  focusedPaneInstanceId: string | null;
+  geometryRevision: Revision;
+  surfaceEpoch: string;
+  surfaceId: SurfaceId | string;
+  topologyEpoch: TopologyRevision;
 };
 
 export type CompositorOverlayCapture = "pointer_axis" | "pointer_button" | "pointer_hover";
@@ -150,7 +177,22 @@ export type CompositorControlRequest =
     type: "get_status";
   }
   | {
+    focused_pane_id: string | null;
+    focused_pane_instance_id: string | null;
+    geometry_revision: Revision;
+    surface_epoch: string;
+    surface_id: string;
+    topology_epoch: TopologyRevision;
+    type: "native_pane.focus";
+  }
+  | {
+    focused_pane_id: string | null;
+    focused_pane_instance_id: string | null;
+    geometry_revision: Revision;
     panes: NativePaneMaterialization["panes"];
+    surface_epoch: string;
+    surface_id: string;
+    topology_epoch: TopologyRevision;
     type: NativePaneMaterialization["op"];
   }
   | {
@@ -182,6 +224,7 @@ export type CompositorControlResponse = Record<string, unknown>;
 
 export type CompositorNativePaneStatusSummary = {
   nativeMaterializedPaneCount: number | null;
+  nativeRuntimeStatus: NativePaneCompositorRuntimeStatus | null;
   nativePaneWindowGroups: NativePaneWindowGroupStatus[];
   topologyPaneCount: null;
   topologyPaneSource: "surf_ace_pair_or_panes_list";
@@ -216,6 +259,7 @@ export function requestForCompositor(
   materialization: NativePaneMaterialization,
 ): CompositorControlRequest {
   return {
+    ...nativePaneFocusFieldsForCompositor(materialization.focus),
     panes: materialization.panes.map((pane) => {
       if (pane.geometry.coordinateSpace !== "compositor_logical") {
         throw new Error(`native pane ${pane.id} geometry missing compositor_logical coordinate space`);
@@ -229,6 +273,33 @@ export function requestForCompositor(
       };
     }),
     type: materialization.op,
+  };
+}
+
+export function nativePaneFocusRequestForCompositor(
+  focus: NativePaneFocusProjection,
+): CompositorControlRequest {
+  return {
+    ...nativePaneFocusFieldsForCompositor(focus),
+    type: "native_pane.focus",
+  };
+}
+
+function nativePaneFocusFieldsForCompositor(focus: NativePaneFocusProjection): {
+  focused_pane_id: string | null;
+  focused_pane_instance_id: string | null;
+  geometry_revision: Revision;
+  surface_epoch: string;
+  surface_id: string;
+  topology_epoch: TopologyRevision;
+} {
+  return {
+    focused_pane_id: focus.focusedPaneId,
+    focused_pane_instance_id: focus.focusedPaneInstanceId,
+    geometry_revision: focus.geometryRevision,
+    surface_epoch: focus.surfaceEpoch,
+    surface_id: String(focus.surfaceId),
+    topology_epoch: focus.topologyEpoch,
   };
 }
 
@@ -505,10 +576,33 @@ export function compositorNativePaneStatusSummary(
     : response.panes;
   return {
     nativeMaterializedPaneCount: Array.isArray(panes) ? panes.length : null,
+    nativeRuntimeStatus: nativePaneCompositorRuntimeStatusFromStatus(response),
     nativePaneWindowGroups: nativePaneWindowGroupsFromCompositorStatus(response),
     topologyPaneCount: null,
     topologyPaneSource: "surf_ace_pair_or_panes_list",
   };
+}
+
+export function nativePaneCompositorRuntimeStatusFromStatus(
+  response: CompositorControlResponse,
+): NativePaneCompositorRuntimeStatus | null {
+  const status = response.status;
+  const statusRecord = status && typeof status === "object"
+    ? status as Record<string, unknown>
+    : null;
+  const sources = statusRecord ? [statusRecord, response] : [response];
+  const projection: NativePaneCompositorRuntimeStatus = {};
+  for (const source of sources) {
+    const activeFocusTarget = statusValue(source, "active_focus_target", "activeFocusTarget");
+    if (activeFocusTarget !== undefined && projection.activeFocusTarget === undefined) {
+      projection.activeFocusTarget = activeFocusTarget;
+    }
+    const lastDiagnostic = statusValue(source, "last_diagnostic", "lastDiagnostic");
+    if (lastDiagnostic !== undefined && projection.lastDiagnostic === undefined) {
+      projection.lastDiagnostic = lastDiagnostic;
+    }
+  }
+  return Object.keys(projection).length > 0 ? projection : null;
 }
 
 export function nativePaneWindowGroupsFromCompositorStatus(
@@ -539,12 +633,18 @@ export function nativePaneWindowGroupsFromCompositorStatus(
       deniedReasons: Array.isArray(deniedReasonsValue) ? deniedReasonsValue.filter((reason): reason is string => typeof reason === "string") : [],
       deniedToplevelCount: statusCount(record, "denied_toplevel_count", "deniedToplevelCount") ?? 0,
       focusedWindowId: statusText(record, "focused_window_id", "focusedWindowId"),
+      focusedPaneId: statusText(record, "focused_pane_id", "focusedPaneId"),
+      interactionState: statusInteractionState(statusValue(record, "interaction_state", "interactionState")),
+      lifecycleDiagnostic: statusText(record, "lifecycle_diagnostic", "lifecycleDiagnostic"),
       launchToken: statusText(record, "launch_token", "launchToken"),
       members: Array.isArray(membersValue) ? membersValue.flatMap(nativePaneWindowGroupMemberFromStatus) : [],
       paneId,
       paneInstanceId: statusText(record, "pane_instance_id", "paneInstanceId"),
       paneLocalBounds: statusRect(statusValue(record, "pane_local_bounds", "paneLocalBounds")),
+      paneFocused: statusBoolean(record, "pane_focused", "paneFocused"),
+      primaryVisible: statusBoolean(record, "primary_visible", "primaryVisible"),
       primaryWindowId: statusText(record, "primary_window_id", "primaryWindowId"),
+      surfaceFocus: statusSurfaceFocus(statusValue(record, "surface_focus", "surfaceFocus")),
     }];
   });
 }
@@ -559,12 +659,18 @@ function nativePaneWindowGroupMemberFromStatus(member: unknown): NativePaneWindo
     return [];
   }
   return [{
+    acceptsInput: statusBoolean(record, "accepts_input", "acceptsInput"),
     bounds: statusRect(statusValue(record, "bounds", "pane_local_bounds", "paneLocalBounds")),
     clippedToPane: statusBoolean(record, "clipped_to_pane", "clippedToPane"),
+    destroyedWhileHidden: statusBoolean(record, "destroyed_while_hidden", "destroyedWhileHidden"),
     focused: record.focused === true,
+    hiddenReason: statusText(record, "hidden_reason", "hiddenReason"),
     id,
     lifecycle: statusLifecycle(record.lifecycle),
+    restorationState: statusRestorationState(statusValue(record, "restoration_state", "restorationState")),
     role: statusMemberRole(record.role),
+    visibility: statusVisibility(statusValue(record, "visibility", "visibility_state", "visibilityState")),
+    zOrder: statusFiniteNumber(record, "z_order", "zOrder"),
   }];
 }
 
@@ -579,6 +685,11 @@ function statusText(record: Record<string, unknown>, ...fields: string[]): strin
 function statusCount(record: Record<string, unknown>, ...fields: string[]): number | null {
   const value = statusValue(record, ...fields);
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function statusFiniteNumber(record: Record<string, unknown>, ...fields: string[]): number | null {
+  const value = statusValue(record, ...fields);
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function statusBoolean(record: Record<string, unknown>, ...fields: string[]): boolean | null {
@@ -611,7 +722,23 @@ function statusClipping(value: unknown): NativePaneWindowGroupStatus["clippingSt
 }
 
 function statusLifecycle(value: unknown): NativePaneWindowGroupMember["lifecycle"] {
-  return value === "live" || value === "closing" || value === "closed" ? value : "unknown";
+  return value === "live" || value === "closing" || value === "closed" || value === "disappeared" ? value : "unknown";
+}
+
+function statusVisibility(value: unknown): NativePaneWindowGroupMember["visibility"] {
+  return value === "visible" || value === "focus_hidden" || value === "hidden" ? value : "unknown";
+}
+
+function statusRestorationState(value: unknown): NativePaneWindowGroupMember["restorationState"] {
+  return value === "preserved" || value === "removed" || value === "not_applicable" ? value : "unknown";
+}
+
+function statusSurfaceFocus(value: unknown): NativePaneWindowGroupStatus["surfaceFocus"] {
+  return value === "surf_ace" || value === "native_primary" || value === "native_accessory" ? value : "unknown";
+}
+
+function statusInteractionState(value: unknown): NativePaneWindowGroupStatus["interactionState"] {
+  return value === "idle" || value === "active" || value === "cancelled" ? value : "unknown";
 }
 
 function statusMemberRole(value: unknown): NativePaneWindowGroupMemberRole {

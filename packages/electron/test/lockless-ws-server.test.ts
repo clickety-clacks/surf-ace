@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -242,6 +243,139 @@ async function waitForTargetCounts(
     expected,
   );
 }
+
+test("pane focus changes reach the compositor with the current surface and geometry identity", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const paneId = 7;
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: paneId,
+    initialPaneLabel: paneId,
+    windowLabel: "a",
+  });
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "vertical",
+    newPaneIds: [9],
+    newPaneLabels: [9],
+    paneId,
+  });
+  const geometryIdentity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
+  core.updatePaneSnapshot(surface.surfaceId, paneId, {
+    bounds: { height: 800, width: 600, x: 0, y: 0 },
+    ...geometryIdentity,
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 9, {
+    bounds: { height: 800, width: 600, x: 600, y: 0 },
+    ...geometryIdentity,
+  });
+  const nativePane = core.pairState(surface.surfaceId).panes.find((pane) => Number(pane.paneId) === paneId)!;
+  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+    paneLineageId: nativePane.paneLineageId,
+    requestId: "native-focus-fixture",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.native_app.v1"],
+      safeToLogFields: ["appId"],
+      safetyClass: "process",
+      summary: "native focus fixture",
+    },
+    targetId: "target_native_focus_fixture",
+    targetKind: "native_app",
+    targetPayload: { appId: "native-focus-fixture", args: [], launchMode: "new_instance" },
+  });
+  core.markNativePaneMaterialized(surface.surfaceId, materialization);
+
+  const socketDir = await mkdtemp(path.join(tmpdir(), "surf-ace-native-pane-focus-"));
+  const compositorSocketPath = path.join(socketDir, "control.sock");
+  let resolveFocusRequest!: (request: Record<string, unknown>) => void;
+  const focusRequest = new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("compositor did not receive pane focus")), 2_000);
+    resolveFocusRequest = (request) => {
+      clearTimeout(timeout);
+      resolve(request);
+    };
+  });
+  const nativeCompositorStatus = {
+    active_focus_target: { NativePane: { pane_id: 9 } },
+    last_diagnostic: "native_owner_lost",
+    native_pane_window_groups: [],
+  };
+  const compositorRequestTypes: string[] = [];
+  const compositor = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) {
+        return;
+      }
+      const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+      compositorRequestTypes.push(String(request.type));
+      if (request.type === "native_pane.focus") {
+        resolveFocusRequest(request);
+      }
+      socket.end(`${JSON.stringify({
+        ok: true,
+        status: request.type === "get_status" ? nativeCompositorStatus : {},
+      })}\n`);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.once("error", reject);
+    compositor.listen(compositorSocketPath, resolve);
+  });
+
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port: nextPort++,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  let client: WebSocket | null = null;
+  try {
+    await server.start();
+    core.setActiveKeyboardPane(surface.surfaceId, 9);
+    const focusRequestPayload = await focusRequest;
+    const focus = core.projectNativePaneFocus(surface.surfaceId);
+
+    assert.deepEqual(focusRequestPayload, {
+      focused_pane_id: "9",
+      focused_pane_instance_id: focus.focusedPaneInstanceId,
+      geometry_revision: Number(focus.geometryRevision),
+      surface_epoch: focus.surfaceEpoch,
+      surface_id: surface.surfaceId,
+      topology_epoch: Number(focus.topologyEpoch),
+      type: "native_pane.focus",
+    });
+
+    client = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const paired = await pair(client, "native-focus-status-client", surface.surfaceId);
+    assert.equal(paired.ok, true);
+    const paneList = await request(client, "panes.list", { surfaceId: surface.surfaceId });
+    assert.deepEqual(paneList.payload.nativeCompositorStatus, {
+      activeFocusTarget: { NativePane: { pane_id: 9 } },
+      lastDiagnostic: "native_owner_lost",
+    }, `compositor requests: ${JSON.stringify(compositorRequestTypes)}; panes.list response: ${JSON.stringify(paneList)}`);
+  } finally {
+    client?.close();
+    await server.stop();
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(socketDir, { force: true, recursive: true });
+  }
+});
 
 test("canonical target-admission cases execute Electron authority semantics", async () => {
   for (const vectorCase of targetAdmissionVectorCases()) {
