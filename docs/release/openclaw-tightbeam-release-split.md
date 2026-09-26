@@ -243,18 +243,25 @@ pnpm --dir source/packages/extension exec sh -c \
   'node --import tsx --test src/*.test.ts scripts/*.test.mjs'
 ```
 
-The OpenClaw workflow must then run these exact commands at `58ac8c4`:
+The OpenClaw workflow must first build the workspace packages imported by the
+extension tests, then run these exact commands at `58ac8c4`:
 
 ```sh
+pnpm --dir source --filter @surf-ace/protocol build
+pnpm --dir source --filter @surf-ace/controller build
+pnpm --dir source/packages/extension exec sh -c \
+  'node --import tsx --test src/*.test.ts scripts/*.test.mjs'
 pnpm --dir source --filter @surf-ace/controller test
 pnpm --dir source --filter @surf-ace/protocol test
 pnpm --dir source --filter @surf-ace/electron build
 pnpm --dir source --filter @surf-ace/electron test
 ```
 
-Success means every extension test, every controller test, every protocol
-test, and every built Electron test passes. `test:lockless` alone is not
-sufficient. The tracked source bytes must remain unchanged.
+Each preparation and test command is followed by the tracked-input guard.
+Success means both prerequisite builds and every extension, controller,
+protocol, and built Electron test pass. `test:lockless` alone is not
+sufficient. A failed prerequisite stops before extension tests, and the
+tracked source bytes must remain unchanged.
 
 The Tightbeam-first workflow must run these exact commands at the approved
 candidate:

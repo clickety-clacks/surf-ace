@@ -92,6 +92,10 @@ jobs:
             git -C source diff --cached --exit-code HEAD -- .
           }
           guard
+          pnpm --dir source --filter @surf-ace/protocol build
+          guard
+          pnpm --dir source --filter @surf-ace/controller build
+          guard
           pnpm --dir source/packages/extension exec sh -c 'node --import tsx --test src/*.test.ts scripts/*.test.mjs'
           guard
           pnpm --dir source --filter @surf-ace/controller test

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import {
   assertExactPublicFiles,
   assertDisjointTrees,
@@ -28,6 +30,8 @@ import { buildOpenclawRelease } from "./build-openclaw-release.mjs";
 import { buildTightbeamRelease } from "./build-tightbeam-release.mjs";
 import { OPENCLAW } from "./release-config.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
+
+const exec = promisify(execFile);
 
 async function temporary(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-release-test-"));
@@ -366,7 +370,7 @@ test("channel builders reject any source identity outside the reviewed constants
 
 test("canonical spec and workflows preserve reviewed bytes and immutable action pins", async () => {
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  assert.equal(await sha256(path.join(repository, "docs/release/openclaw-tightbeam-release-split.md")), "fc5dd8fdbcf458284cb119a385877bbac757a131c8145eecea1290571e68419c");
+  assert.equal(await sha256(path.join(repository, "docs/release/openclaw-tightbeam-release-split.md")), "e26016584b80492d86f766af311715dca71a197d396a3e15b17e2593b021feb9");
   assert.ok((await lockedPackages(path.join(repository, "pnpm-lock.yaml"))).size > 100);
   assert.ok((await cargoLockedPackages(path.join(repository, "packages/cli/Cargo.lock"))).length > 10);
   for (const workflow of ["release-openclaw.yml", "release-openclaw-gate5.yml", "release-tightbeam.yml"]) {
@@ -402,6 +406,84 @@ test("OpenClaw Gate 4 dispatch cannot reach smoke or publication", async () => {
   assert.doesNotMatch(workflow, /^\s+contents: write$/m);
   assert.doesNotMatch(workflow, /^\s+id-token:/m);
   assert.doesNotMatch(workflow, /^\s+attestations:/m);
+});
+
+test("OpenClaw Gate 4 builds imported workspace prerequisites before extension tests and stops on failure", async (t) => {
+  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-openclaw.yml"), "utf8");
+  const marker = "      - name: Run exact OpenClaw tests without changing tracked inputs\n        run: |\n";
+  const markerOffset = workflow.indexOf(marker);
+  assert.notEqual(markerOffset, -1, "missing exact OpenClaw test step");
+  const lines = workflow.slice(markerOffset + marker.length).split("\n");
+  const body = [];
+  for (const line of lines) {
+    if (line.startsWith("          ")) body.push(line.slice(10));
+    else if (line === "") body.push("");
+    else break;
+  }
+  const script = body.join("\n").trimEnd();
+  const expected = [
+    "guard",
+    "pnpm --dir source --filter @surf-ace/protocol build",
+    "guard",
+    "pnpm --dir source --filter @surf-ace/controller build",
+    "guard",
+    "pnpm --dir source/packages/extension exec sh -c 'node --import tsx --test src/*.test.ts scripts/*.test.mjs'",
+    "guard",
+    "pnpm --dir source --filter @surf-ace/controller test",
+    "guard",
+    "pnpm --dir source --filter @surf-ace/protocol test",
+    "guard",
+    "pnpm --dir source --filter @surf-ace/electron build",
+    "guard",
+    "pnpm --dir source --filter @surf-ace/electron test",
+    "guard",
+  ];
+  let offset = -1;
+  for (const command of expected) {
+    const next = script.indexOf(command, offset + 1);
+    assert.ok(next > offset, `missing or misordered Gate 4 command: ${command}`);
+    offset = next;
+  }
+
+  const root = await temporary(t);
+  const bin = path.join(root, "bin");
+  const log = path.join(root, "pnpm.log");
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, "git"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(path.join(bin, "pnpm"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PNPM_LOG\"\nif test \"$*\" = \"$FAIL_COMMAND\"; then exit 29; fi\n", { mode: 0o755 });
+  const runStep = async (failCommand) => {
+    await fs.writeFile(log, "");
+    const result = exec("/bin/bash", ["-c", script], {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        PNPM_LOG: log,
+        FAIL_COMMAND: failCommand,
+      },
+    });
+    if (failCommand) await assert.rejects(result);
+    else await result;
+    return (await fs.readFile(log, "utf8")).trim().split("\n").filter(Boolean);
+  };
+
+  assert.deepEqual(await runStep("--dir source --filter @surf-ace/protocol build"), [
+    "--dir source --filter @surf-ace/protocol build",
+  ]);
+  assert.deepEqual(await runStep("--dir source --filter @surf-ace/controller build"), [
+    "--dir source --filter @surf-ace/protocol build",
+    "--dir source --filter @surf-ace/controller build",
+  ]);
+  assert.deepEqual(await runStep(""), [
+    "--dir source --filter @surf-ace/protocol build",
+    "--dir source --filter @surf-ace/controller build",
+    "--dir source/packages/extension exec sh -c node --import tsx --test src/*.test.ts scripts/*.test.mjs",
+    "--dir source --filter @surf-ace/controller test",
+    "--dir source --filter @surf-ace/protocol test",
+    "--dir source --filter @surf-ace/electron build",
+    "--dir source --filter @surf-ace/electron test",
+  ]);
 });
 
 test("OpenClaw Gate 5 requires a separate exact successful Gate 4 run", async () => {
