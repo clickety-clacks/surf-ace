@@ -305,8 +305,10 @@ test("pane focus changes reach the compositor with the current surface and geome
     };
   });
   const nativeCompositorStatus = {
-    active_focus_target: { NativePane: { pane_id: 9 } },
-    last_diagnostic: "native_owner_lost",
+    runtime: {
+      active_focus_target: { native_pane: { pane_id: "9" } },
+      last_diagnostic: "native pane owner disappeared: pane_id=9; native grab remains until release and future focus targets Surf Ace's main surface when available",
+    },
     native_pane_window_groups: [],
   };
   const compositorRequestTypes: string[] = [];
@@ -366,8 +368,8 @@ test("pane focus changes reach the compositor with the current surface and geome
     assert.equal(paired.ok, true);
     const paneList = await request(client, "panes.list", { surfaceId: surface.surfaceId });
     assert.deepEqual(paneList.payload.nativeCompositorStatus, {
-      activeFocusTarget: { NativePane: { pane_id: 9 } },
-      lastDiagnostic: "native_owner_lost",
+      activeFocusTarget: { native_pane: { pane_id: "9" } },
+      lastDiagnostic: "native pane owner disappeared: pane_id=9; native grab remains until release and future focus targets Surf Ace's main surface when available",
     }, `compositor requests: ${JSON.stringify(compositorRequestTypes)}; panes.list response: ${JSON.stringify(paneList)}`);
   } finally {
     client?.close();

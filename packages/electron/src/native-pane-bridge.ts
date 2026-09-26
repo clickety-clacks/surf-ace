@@ -590,7 +590,18 @@ export function nativePaneCompositorRuntimeStatusFromStatus(
   const statusRecord = status && typeof status === "object"
     ? status as Record<string, unknown>
     : null;
-  const sources = statusRecord ? [statusRecord, response] : [response];
+  const runtimeStatus = statusRecord ? statusValue(statusRecord, "runtime") : undefined;
+  const runtimeRecord = runtimeStatus && typeof runtimeStatus === "object"
+    ? runtimeStatus as Record<string, unknown>
+    : null;
+  const sources: Record<string, unknown>[] = [];
+  if (runtimeRecord) {
+    sources.push(runtimeRecord);
+  }
+  if (statusRecord) {
+    sources.push(statusRecord);
+  }
+  sources.push(response);
   const projection: NativePaneCompositorRuntimeStatus = {};
   for (const source of sources) {
     const activeFocusTarget = statusValue(source, "active_focus_target", "activeFocusTarget");

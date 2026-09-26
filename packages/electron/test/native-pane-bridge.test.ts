@@ -173,22 +173,58 @@ test("native pane bridge names compositor panes as native materialized panes, no
   );
 });
 
-test("native pane bridge preserves compositor-level focus target and last diagnostic verbatim", () => {
+test("native pane bridge reads T316 runtime status and current camelCase group status", () => {
+  const lastDiagnostic = "native pane owner disappeared: pane_id=7; native grab remains until release and future focus targets Surf Ace's main surface when available";
   const response = {
     ok: true,
     status: {
-      active_focus_target: { NativePane: { pane_id: 7 } },
-      last_diagnostic: { kind: "native_owner_lost", pane_id: 7 },
+      runtime: {
+        active_focus_target: { native_pane: { pane_id: "7" } },
+        last_diagnostic: lastDiagnostic,
+      },
+      native_pane_window_groups: [
+        {
+          paneId: "7",
+          primaryWindowId: "primary-7",
+          focusedWindowId: "primary-7",
+          acceptedSecondaryCount: 0,
+          deniedToplevelCount: 0,
+          deniedReasons: [],
+          clippingStatus: "clipped",
+          members: [
+            {
+              id: "primary-7",
+              role: "primary",
+              focused: true,
+              lifecycle: "live",
+            },
+          ],
+        },
+      ],
     },
   };
 
-  assert.deepEqual(compositorNativePaneStatusSummary(response).nativeRuntimeStatus, {
-    activeFocusTarget: { NativePane: { pane_id: 7 } },
-    lastDiagnostic: { kind: "native_owner_lost", pane_id: 7 },
+  const summary = compositorNativePaneStatusSummary(response);
+  assert.deepEqual(summary.nativeRuntimeStatus, {
+    activeFocusTarget: { native_pane: { pane_id: "7" } },
+    lastDiagnostic,
+  });
+  const group = summary.nativePaneWindowGroups[0];
+  assert.deepEqual({
+    paneId: group?.paneId,
+    primaryWindowId: group?.primaryWindowId,
+    focusedWindowId: group?.focusedWindowId,
+    members: group?.members.map(({ id, focused }) => ({ id, focused })),
+  }, {
+    paneId: "7",
+    primaryWindowId: "primary-7",
+    focusedWindowId: "primary-7",
+    members: [{ id: "primary-7", focused: true }],
   });
 });
 
 test("native pane bridge extracts pane-local window group diagnostics from compositor status", () => {
+  // Synthetic future compositor shape: T316 ccc0002 reports only each pane's primary surface.
   const response = {
     ok: true,
     status: {
