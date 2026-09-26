@@ -455,6 +455,7 @@ test("native pane bridge extracts pane-local window group diagnostics from compo
 });
 
 test("native pane bridge preserves hidden destruction and cancellation diagnostics", () => {
+  // Synthetic future T368 group status; ccc0002 reports primary-only group status.
   const compositorPaneId = compositorPaneIdForSurface("sf", 9);
   assert.deepEqual(nativePaneWindowGroupsFromCompositorStatus({
     ok: true,
