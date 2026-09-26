@@ -2779,6 +2779,7 @@ test("surface core exposes native materialized panes to the renderer until conte
   core.markNativePaneMaterialized(surface.surfaceId, materialization);
   assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.externalNative, true);
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.nativeWindowGroup, undefined);
+  // Synthetic future T368 group statuses in this test; ccc0002 emits only each pane's primary member.
   const compositorGroupStatus = {
     acceptedSecondaryCount: 1,
     clippingStatus: "unclipped",

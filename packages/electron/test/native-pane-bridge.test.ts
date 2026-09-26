@@ -231,6 +231,7 @@ test("native pane bridge names compositor panes as native materialized panes, no
 test("native pane bridge reads T316 runtime status and current camelCase group status", () => {
   const compositorPaneId = compositorPaneIdForSurface("sf_test", 7);
   const lastDiagnostic = "native pane owner disappeared: pane_id=7; native grab remains until release and future focus targets Surf Ace's main surface when available";
+  // Source-derived ccc0002 shape, not a captured compositor response.
   const response = {
     ok: true,
     status: {
@@ -280,7 +281,7 @@ test("native pane bridge reads T316 runtime status and current camelCase group s
 });
 
 test("native pane bridge extracts pane-local window group diagnostics from compositor status", () => {
-  // Synthetic future compositor shape: T316 ccc0002 reports only each pane's primary surface.
+  // Synthetic future T368 shape: T316 ccc0002 reports only each pane's primary surface.
   const compositorPaneId = compositorPaneIdForSurface("sf", 7);
   const response = {
     ok: true,

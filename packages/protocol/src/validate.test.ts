@@ -342,7 +342,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
     op: "panes.list",
     payload: {
       nativeCompositorStatus: {
-        activeFocusTarget: { native_pane: { pane_id: "7" } },
+        activeFocusTarget: { native_pane: { pane_id: "surf-ace-pane:v1:4:sf_1:1:1" } },
         lastDiagnostic: "native_owner_lost",
       },
       panes: [
@@ -380,6 +380,7 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
             targetPayload: { url: "https://example.test/live" },
           },
           externalNative: false,
+          // Synthetic future T368 group status; ccc0002 currently reports only the primary member.
           nativeWindowGroup: {
             acceptedSecondaryCount: 1,
             clippingStatus: "unclipped",

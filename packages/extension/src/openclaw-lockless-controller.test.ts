@@ -449,6 +449,7 @@ test("lockless screen listing preserves native pane-group diagnostics", async ()
     viewport: { height: 768, scale: 1, width: 1024 },
     wsPath: "/ws",
   };
+  // Synthetic future T368 group status; ccc0002 currently reports only the primary member.
   const nativeWindowGroup = {
     acceptedSecondaryCount: 1,
     clippingStatus: "unclipped",
@@ -482,7 +483,7 @@ test("lockless screen listing preserves native pane-group diagnostics", async ()
     surfaceFocus: "native_accessory",
   };
   const nativeCompositorStatus = {
-    activeFocusTarget: { NativePane: { pane_id: 1 } },
+    activeFocusTarget: { native_pane: { pane_id: "surf-ace-pane:v1:4:sf_1:1:1" } },
     lastDiagnostic: "native_owner_lost",
   };
   const endpointState = { live: true, nativeCompositorStatus, nativeWindowGroup };
