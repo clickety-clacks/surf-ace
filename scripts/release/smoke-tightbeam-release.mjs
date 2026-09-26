@@ -86,19 +86,39 @@ async function smokeLinux(options) {
   }
 }
 
+export function macosSmokePlan(root, candidate, baseline) {
+  const transitionHome = path.join(root, "transition-profile");
+  return [
+    { archive: candidate, home: path.join(root, "clean-profile"), installRoot: path.join(root, "clean-install"), phase: "clean-install", port: 19101 },
+    { archive: baseline, home: transitionHome, installRoot: path.join(root, "transition-baseline"), phase: "baseline", port: 19102 },
+    { archive: candidate, home: transitionHome, installRoot: path.join(root, "transition-upgrade"), phase: "upgrade", port: 19103 },
+    { archive: baseline, home: transitionHome, installRoot: path.join(root, "transition-rollback"), phase: "rollback", port: 19104 },
+  ];
+}
+
+export async function runMacosSmokePlan(plan, operations = {}) {
+  const extract = operations.extract ?? (async (archive, installRoot) => run("unzip", ["-q", archive, "-d", installRoot]));
+  const handshake = operations.handshake ?? electronHandshake;
+  let canonicalIdentity;
+  for (const step of plan) {
+    await removeIfExists(step.installRoot);
+    await fs.mkdir(step.installRoot, { recursive: true });
+    await extract(step.archive, step.installRoot);
+    await handshake(path.join(step.installRoot, "Surf Ace.app/Contents/MacOS/Surf Ace"), step.home, step.port);
+    const identity = await fs.readFile(path.join(step.home, "electron-state/surface-identity.json"));
+    if (identity.length === 0) throw new Error(`tightbeam_macos_${step.phase}_identity_empty`);
+    if (step.phase === "baseline") canonicalIdentity = identity;
+    if (step.phase === "upgrade" && !identity.equals(canonicalIdentity)) throw new Error("tightbeam_macos_upgrade_did_not_reuse_canonical_identity");
+    if (step.phase === "rollback" && !identity.equals(canonicalIdentity)) throw new Error("tightbeam_macos_rollback_did_not_reuse_canonical_identity");
+  }
+}
+
 async function smokeMacos(options) {
   const baseline = process.env.SURF_ACE_TIGHTBEAM_BASELINE_ELECTRON;
   if (!baseline) throw new Error("tightbeam_smoke_baseline_electron_required");
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-tightbeam-electron-"));
   try {
-    let port = 19101;
-    for (const archive of [options.electron, baseline, options.electron, baseline]) {
-      const phase = path.join(root, String(port));
-      await fs.mkdir(phase, { recursive: true });
-      await run("unzip", ["-q", archive, "-d", phase]);
-      await electronHandshake(path.join(phase, "Surf Ace.app/Contents/MacOS/Surf Ace"), phase, port);
-      port += 1;
-    }
+    await runMacosSmokePlan(macosSmokePlan(root, options.electron, baseline));
     return { component: "macos", phases: ["clean-install", "upgrade", "rollback"], status: "passed" };
   } finally {
     await removeIfExists(root);

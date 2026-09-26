@@ -34,7 +34,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (Boolean(args.output) === Boolean(args.receipt)) throw new Error("exactly_one_of_output_or_receipt_required");
   const options = {
     channel: args.channel,
-    files: args.files.split(",").map(path.resolve),
+    files: args.files.split(",").map((file) => path.resolve(file)),
     manifest: path.resolve(args.manifest),
   };
   if (args.output) await writeSmokeReceipt({ ...options, output: path.resolve(args.output) });

@@ -220,6 +220,81 @@ test("smoke receipts bind the manifest identity and unchanged release bytes", as
   await assert.rejects(verifySmokeReceipt({ ...options, receipt }), /smoke_receipt_mismatch/);
 });
 
+test("smoke receipt CLI writes and verifies multiple files and rejects tampering", async (t) => {
+  const root = await temporary(t);
+  const manifest = path.join(root, "manifest.json");
+  const first = path.join(root, "first.tgz");
+  const second = path.join(root, "second.zip");
+  const receipt = path.join(root, "smoke.json");
+  const script = path.resolve(path.dirname(new URL(import.meta.url).pathname), "write-smoke-receipt.mjs");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const exec = promisify(execFile);
+  const args = [
+    script,
+    "--channel", "test",
+    "--manifest", manifest,
+    "--files", `${first},${second}`,
+  ];
+  await fs.writeFile(manifest, '{"source":{"commit":"product","tag":"product-tag"},"tooling":{"commit":"tooling","tag":"tooling-tag"}}\n');
+  await fs.writeFile(first, "first bytes");
+  await fs.writeFile(second, "second bytes");
+
+  await exec(process.execPath, [...args, "--output", receipt]);
+  assert.deepEqual(Object.keys(JSON.parse(await fs.readFile(receipt, "utf8")).files), ["first.tgz", "second.zip"]);
+  await exec(process.execPath, [...args, "--receipt", receipt]);
+
+  await fs.writeFile(first, "tampered bytes");
+  await assert.rejects(exec(process.execPath, [...args, "--receipt", receipt]), /smoke_receipt_mismatch/);
+  await fs.writeFile(first, "first bytes");
+  await fs.writeFile(manifest, '{"source":{"commit":"changed","tag":"product-tag"},"tooling":{"commit":"tooling","tag":"tooling-tag"}}\n');
+  await assert.rejects(exec(process.execPath, [...args, "--receipt", receipt]), /smoke_receipt_mismatch/);
+});
+
+test("Tightbeam macOS smoke retains one profile across baseline upgrade and rollback", async (t) => {
+  const root = await temporary(t);
+  const candidate = path.join(root, "candidate.zip");
+  const baseline = path.join(root, "baseline.zip");
+  const { macosSmokePlan, runMacosSmokePlan } = await import("./smoke-tightbeam-release.mjs");
+  const plan = macosSmokePlan(root, candidate, baseline);
+  assert.deepEqual(plan.map(({ archive, phase }) => ({ archive, phase })), [
+    { archive: candidate, phase: "clean-install" },
+    { archive: baseline, phase: "baseline" },
+    { archive: candidate, phase: "upgrade" },
+    { archive: baseline, phase: "rollback" },
+  ]);
+  assert.notEqual(plan[0].home, plan[1].home);
+  assert.equal(plan[1].home, plan[2].home);
+  assert.equal(plan[2].home, plan[3].home);
+  assert.equal(new Set(plan.map(({ installRoot }) => installRoot)).size, 4);
+
+  const handshakes = [];
+  const extract = async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true });
+  const handshake = async (_executable, home, port) => {
+    handshakes.push({ home, port });
+    const identity = path.join(home, "electron-state/surface-identity.json");
+    await fs.mkdir(path.dirname(identity), { recursive: true });
+    try {
+      await fs.access(identity);
+    } catch {
+      await fs.writeFile(identity, `identity:${home}`);
+    }
+  };
+  await runMacosSmokePlan(plan, { extract, handshake });
+  assert.deepEqual(handshakes.map(({ home }) => home), plan.map(({ home }) => home));
+
+  let transition = 0;
+  await assert.rejects(runMacosSmokePlan(plan, {
+    extract,
+    handshake: async (_executable, home) => {
+      const identity = path.join(home, "electron-state/surface-identity.json");
+      await fs.mkdir(path.dirname(identity), { recursive: true });
+      if (home === plan[1].home && transition++ === 1) await fs.writeFile(identity, "changed identity");
+      else if (!(await fs.stat(identity).catch(() => null))) await fs.writeFile(identity, `identity:${home}`);
+    },
+  }), /tightbeam_macos_upgrade_did_not_reuse_canonical_identity/);
+});
+
 test("tracked-product guard detects worktree and index changes", async (t) => {
   const root = await temporary(t);
   const { execFile } = await import("node:child_process");
