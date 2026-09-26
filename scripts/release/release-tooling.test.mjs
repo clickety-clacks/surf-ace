@@ -26,19 +26,20 @@ import { compareReleaseBuilds } from "./compare-release-builds.mjs";
 import { cargoLockedPackages, lockedPackages, packagedProductionInventory } from "./lockfile-inventory.mjs";
 import { verifySri } from "./verify-sri.mjs";
 import { verifyOpenclawPackage } from "./verify-openclaw-package.mjs";
-import { buildOpenclawRelease } from "./build-openclaw-release.mjs";
+import * as openclawReleaseBuilder from "./build-openclaw-release.mjs";
 import {
   assembleTightbeamLinuxStage,
   buildTightbeamRelease,
   TIGHTBEAM_LINUX_RUNTIME_FILES,
   verifyTightbeamLinuxStage,
 } from "./build-tightbeam-release.mjs";
-import { OPENCLAW, TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
+import { OPENCLAW, OPENCLAW_BUILD_COMMANDS, TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
 import { runLinuxStateDriver, validateTightbeamStateSequence } from "./smoke-tightbeam-release.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 
 const exec = promisify(execFile);
 const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+const { buildOpenclawRelease } = openclawReleaseBuilder;
 
 function workflowRunScript(workflow, stepName) {
   const marker = `      - name: ${stepName}\n`;
@@ -190,6 +191,130 @@ test("archive creation refuses absolute and escaping symbolic links", async (t) 
   await fs.writeFile(path.join(longRoot, longTarget), "target\n");
   await fs.symlink(longTarget, path.join(longRoot, "long-link"));
   await assert.rejects(createTarGz(longRoot, path.join(root, "long.tgz"), 1_700_000_000), /tar_link_target_too_long/);
+});
+
+test("OpenClaw deploy normalization removes only the exact diagnosed workspace self-link", async (t) => {
+  const root = await temporary(t);
+  const sourceDir = path.join(root, "build/source");
+  const dependencyClosure = path.join(root, "build/release/openclaw/dependency-closure");
+  const extensionDir = path.join(sourceDir, "packages/extension");
+  const selfLink = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/@surf-ace/extension");
+  await fs.mkdir(extensionDir, { recursive: true });
+  await fs.writeFile(path.join(extensionDir, "package.json"), '{"name":"@surf-ace/extension"}\n');
+  await fs.mkdir(path.dirname(selfLink), { recursive: true });
+  await fs.symlink(path.relative(path.dirname(selfLink), extensionDir), selfLink);
+
+  await assert.rejects(
+    createTarGz(dependencyClosure, path.join(root, "before.tgz"), 1_700_000_000),
+    /path_escapes_root:\.\.\/\.\.\/\.\.\/source\/packages\/extension/,
+  );
+
+  const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
+  assert.equal(typeof normalize, "function", "shipped builder must expose its deploy normalizer");
+  await normalize(sourceDir, dependencyClosure);
+  await assert.rejects(fs.lstat(selfLink), { code: "ENOENT" });
+  await createTarGz(dependencyClosure, path.join(root, "after.tgz"), 1_700_000_000);
+
+  const builder = await fs.readFile(path.join(repository, "scripts/release/build-openclaw-release.mjs"), "utf8");
+  const deployOffset = builder.indexOf('"deploy", "--legacy", dependencyClosure');
+  const normalizeOffset = builder.indexOf("await normalizeOpenclawDependencyClosure(sourceDir, dependencyClosure)");
+  const assembleOffset = builder.indexOf("await assembleOpenclawPackage(sourceDir, dependencyClosure, packageRoot)");
+  const archiveOffset = builder.indexOf("await createDirectoryTarGz(packageRoot");
+  assert.ok(deployOffset >= 0 && deployOffset < normalizeOffset);
+  assert.ok(normalizeOffset < assembleOffset && assembleOffset < archiveOffset);
+});
+
+test("OpenClaw deploy normalization rejects every non-exact self-link shape and preserves unrelated root escapes", async (t) => {
+  const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
+  assert.equal(typeof normalize, "function", "shipped builder must expose its deploy normalizer");
+
+  const fixture = async (name, configure) => {
+    const root = path.join(await temporary(t), name);
+    const sourceDir = path.join(root, "build/source");
+    const dependencyClosure = path.join(root, "build/release/openclaw/dependency-closure");
+    const extensionDir = path.join(sourceDir, "packages/extension");
+    const selfLink = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/@surf-ace/extension");
+    await fs.mkdir(extensionDir, { recursive: true });
+    await fs.writeFile(path.join(extensionDir, "package.json"), '{"name":"@surf-ace/extension"}\n');
+    await fs.mkdir(path.dirname(selfLink), { recursive: true });
+    await configure({ dependencyClosure, extensionDir, root, selfLink, sourceDir });
+    return { dependencyClosure, extensionDir, root, selfLink, sourceDir };
+  };
+
+  const missing = await fixture("missing", async () => {});
+  await assert.rejects(normalize(missing.sourceDir, missing.dependencyClosure), /openclaw_deploy_self_link_missing/);
+
+  const changed = await fixture("changed", async ({ selfLink }) => fs.symlink("../../../../../../../changed/packages/extension", selfLink));
+  await assert.rejects(normalize(changed.sourceDir, changed.dependencyClosure), /openclaw_deploy_self_link_target_mismatch/);
+
+  const sibling = await fixture("sibling", async ({ selfLink, sourceDir }) => {
+    const siblingDir = path.join(sourceDir, "packages/controller");
+    await fs.mkdir(siblingDir, { recursive: true });
+    await fs.symlink(path.relative(path.dirname(selfLink), siblingDir), selfLink);
+  });
+  await assert.rejects(normalize(sibling.sourceDir, sibling.dependencyClosure), /openclaw_deploy_self_link_target_mismatch/);
+
+  const absolute = await fixture("absolute", async ({ extensionDir, selfLink }) => fs.symlink(extensionDir, selfLink));
+  await assert.rejects(normalize(absolute.sourceDir, absolute.dependencyClosure), /openclaw_deploy_self_link_absolute/);
+
+  const nonLink = await fixture("non-link", async ({ selfLink }) => fs.writeFile(selfLink, "not a link\n"));
+  await assert.rejects(normalize(nonLink.sourceDir, nonLink.dependencyClosure), /openclaw_deploy_self_link_not_symlink/);
+
+  const unrelated = await fixture("unrelated", async ({ dependencyClosure, extensionDir, selfLink }) => {
+    await fs.symlink(path.relative(path.dirname(selfLink), extensionDir), selfLink);
+    await fs.symlink("../../outside", path.join(dependencyClosure, "unrelated-escape"));
+  });
+  await normalize(unrelated.sourceDir, unrelated.dependencyClosure);
+  await assert.rejects(
+    createTarGz(unrelated.dependencyClosure, path.join(unrelated.root, "unrelated.tgz"), 1_700_000_000),
+    /path_escapes_root/,
+  );
+});
+
+test("OpenClaw Electron packaging is explicitly nonpublishing in ordinary and tag environments", async () => {
+  const packageElectron = openclawReleaseBuilder.packageOpenclawElectron;
+  assert.equal(typeof packageElectron, "function", "shipped builder must expose its Electron packaging step");
+
+  for (const environment of [
+    { PATH: process.env.PATH },
+    {
+      PATH: process.env.PATH,
+      GITHUB_REF: "refs/tags/surf-ace-release-tooling-openclaw-v0.1.2",
+      GITHUB_REF_NAME: "surf-ace-release-tooling-openclaw-v0.1.2",
+      GITHUB_REF_TYPE: "tag",
+    },
+  ]) {
+    const calls = [];
+    await packageElectron("source", async (command, args, options) => {
+      calls.push({ args, command, env: options.env });
+    }, environment);
+    assert.deepEqual(calls.map(({ args, command }) => ({ args, command })), [
+      {
+        command: "pnpm",
+        args: ["--dir", "source", "--filter", "@surf-ace/electron", "build"],
+      },
+      {
+        command: "pnpm",
+        args: [
+          "--dir", "source", "--filter", "@surf-ace/electron", "exec",
+          "electron-builder", "--mac", "dir", "--arm64", "--publish", "never",
+        ],
+      },
+    ]);
+    const packagerArgs = calls[1].args;
+    assert.equal(packagerArgs.filter((argument) => argument === "--publish").length, 1);
+    assert.equal(packagerArgs.at(packagerArgs.indexOf("--publish") + 1), "never");
+    assert.equal(calls.some(({ args, command }) => /(?:github|release|upload)/i.test([command, ...args].join(" "))), false);
+  }
+
+  assert.deepEqual(OPENCLAW_BUILD_COMMANDS.slice(-3), [
+    "pnpm --dir source --filter @surf-ace/electron build",
+    "pnpm --dir source --filter @surf-ace/electron exec electron-builder --mac dir --arm64 --publish never",
+    "node tooling/scripts/release/verify-openclaw-package.mjs --package-dir build/release/openclaw/package-root --lockfile source/pnpm-lock.yaml",
+  ]);
+  const builder = await fs.readFile(path.join(repository, "scripts/release/build-openclaw-release.mjs"), "utf8");
+  assert.match(builder, /await packageOpenclawElectron\(sourceArgument\)/);
+  assert.doesNotMatch(builder, /"@surf-ace\/electron", "package"/);
 });
 
 test("release archive wrappers retain the required install roots", async (t) => {

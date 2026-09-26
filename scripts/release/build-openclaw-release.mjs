@@ -23,10 +23,68 @@ import {
 } from "./release-lib.mjs";
 
 const toolingRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const openclawDeploySelfLink = "node_modules/.pnpm/node_modules/@surf-ace/extension";
 
 async function copyRequired(source, destination) {
   await fs.mkdir(path.dirname(destination), { recursive: true });
   await copyTree(source, destination);
+}
+
+async function requireMissing(file, errorCode) {
+  try {
+    await fs.lstat(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error(errorCode);
+}
+
+export async function normalizeOpenclawDependencyClosure(sourceDir, dependencyClosure) {
+  const closureRoot = path.resolve(dependencyClosure);
+  const sourcePackage = path.resolve(sourceDir, "packages/extension");
+  const selfLink = path.join(closureRoot, ...openclawDeploySelfLink.split("/"));
+  let metadata;
+  try {
+    metadata = await fs.lstat(selfLink);
+  } catch (error) {
+    if (error.code === "ENOENT") throw new Error("openclaw_deploy_self_link_missing");
+    throw error;
+  }
+  if (!metadata.isSymbolicLink()) throw new Error("openclaw_deploy_self_link_not_symlink");
+
+  const target = await fs.readlink(selfLink);
+  if (path.isAbsolute(target)) throw new Error("openclaw_deploy_self_link_absolute");
+  const resolvedTarget = path.resolve(path.dirname(selfLink), target);
+  const expectedTarget = path.relative(path.dirname(selfLink), sourcePackage);
+  const normalizedTarget = path.relative(closureRoot, resolvedTarget).split(path.sep).join(path.posix.sep);
+  const expectedNormalizedTarget = path.relative(closureRoot, sourcePackage).split(path.sep).join(path.posix.sep);
+  if (
+    target !== expectedTarget ||
+    resolvedTarget !== sourcePackage ||
+    normalizedTarget !== expectedNormalizedTarget
+  ) {
+    throw new Error(`openclaw_deploy_self_link_target_mismatch:${normalizedTarget}`);
+  }
+
+  await fs.unlink(selfLink);
+  await requireMissing(selfLink, "openclaw_deploy_self_link_unresolved");
+}
+
+export async function packageOpenclawElectron(sourceArgument, runCommand = run, environment = process.env) {
+  await runCommand(
+    "pnpm",
+    ["--dir", sourceArgument, "--filter", "@surf-ace/electron", "build"],
+    { env: environment },
+  );
+  await runCommand(
+    "pnpm",
+    [
+      "--dir", sourceArgument, "--filter", "@surf-ace/electron", "exec",
+      "electron-builder", "--mac", "dir", "--arm64", "--publish", "never",
+    ],
+    { env: environment },
+  );
 }
 
 export async function assembleOpenclawPackage(sourceDir, dependencyClosure, packageRoot) {
@@ -82,9 +140,14 @@ export async function buildOpenclawRelease(options) {
   await run("pnpm", ["--dir", sourceArgument, "--filter", "@surf-ace/controller", "build"]);
   await run("pnpm", ["--dir", sourceArgument, "--filter", "@surf-ace/extension", "build"]);
   await run("pnpm", ["--dir", sourceArgument, "--filter", "@surf-ace/extension", "--prod", "deploy", "--legacy", dependencyClosure]);
-  await run("pnpm", ["--dir", sourceArgument, "--filter", "@surf-ace/electron", "package"]);
+  await normalizeOpenclawDependencyClosure(sourceDir, dependencyClosure);
+  await packageOpenclawElectron(sourceArgument);
 
   await assembleOpenclawPackage(sourceDir, dependencyClosure, packageRoot);
+  await requireMissing(
+    path.join(packageRoot, ...openclawDeploySelfLink.split("/")),
+    "openclaw_package_self_link_unresolved",
+  );
   const packageJsonPath = path.join(packageRoot, "package.json");
   const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8"));
   packageJson.version = options.version;

@@ -52,7 +52,8 @@ export const OPENCLAW_BUILD_COMMANDS = Object.freeze([
   "pnpm --dir source --filter @surf-ace/controller build",
   "pnpm --dir source --filter @surf-ace/extension build",
   "pnpm --dir source --filter @surf-ace/extension --prod deploy --legacy $GITHUB_WORKSPACE/build/release/openclaw/dependency-closure",
-  "pnpm --dir source --filter @surf-ace/electron package",
+  "pnpm --dir source --filter @surf-ace/electron build",
+  "pnpm --dir source --filter @surf-ace/electron exec electron-builder --mac dir --arm64 --publish never",
   "node tooling/scripts/release/verify-openclaw-package.mjs --package-dir build/release/openclaw/package-root --lockfile source/pnpm-lock.yaml",
 ]);
 
