@@ -11,13 +11,17 @@ The canonical repository home is
 `docs/release/openclaw-tightbeam-release-split.md` in
 `clickety-clacks/surf-ace`. Until reviewed bytes merge there, the immutable
 Tightbeam artifact ID and SHA-256 named by the review are the authority.
+Any copied or generated rendering is non-authoritative and must identify the
+repository, exact revision, canonical path, and SHA-256 of these source bytes.
 
 ## Goal
 
 Publish one reproducible final OpenClaw-compatible release from exact commit
-`58ac8c435679e6611903d31abaecec11bb9d7f75`. Then move `main` to a separately
-reviewed Tightbeam-first commit and publish a reproducible Tightbeam-first
-release without an OpenClaw compatibility obligation.
+`58ac8c435679e6611903d31abaecec11bb9d7f75`. Separately land reviewed release
+tooling without changing the fixed Tightbeam product cutoff, then publish a
+reproducible Tightbeam-first release from exact commit
+`8fc9f508ae9b4371a3c25f6318920940fbad10cd` without an OpenClaw compatibility
+obligation.
 
 Every published file must pass tests, two-clean-build comparison, and artifact
 smoke before publication.
@@ -36,14 +40,18 @@ smoke before publication.
 
 - **Cutoff**: the exact last OpenClaw-compatible commit, `58ac8c4`.
 - **Boundary**: `779c493`, where mainline discovery moves into the controller.
-- **Candidate**: the exact reviewed commit proposed for Tightbeam-first
-  `main`. The current candidate is `ec623c54616b`.
+- **Candidate**: the exact reviewed Tightbeam-first cutoff. The current
+  candidate is `8fc9f508ae9b4371a3c25f6318920940fbad10cd`.
 - **Release owner**: an authorized human who alone may move Git refs after all
   earlier gates pass. An agent may prepare evidence but may not create, move,
   delete, or push a branch or tag under this specification.
-- **Tooling ref**: immutable tag `surf-ace-release-tooling-v0.1.0` at the exact
-  reviewed implementation commit that contains the canonical spec, workflows,
-  build programs, and smoke programs. It is not a product source tag.
+- **Tooling refs**: immutable tag `surf-ace-release-tooling-v0.1.1` for the
+  Tightbeam gates and immutable tag
+  `surf-ace-release-tooling-openclaw-v0.1.2` for the corrected OpenClaw gates.
+  The two distinct channel tags may peel to the same exact independently
+  reviewed tooling commit. Neither is a product source tag, and neither may be
+  moved. The incident name `surf-ace-release-tooling-openclaw-v0.1.1` is
+  reserved historical evidence and may not be recreated or reused.
 - **Artifact smoke**: install, health, upgrade, rollback, and post-rollback
   health checks against the packaged files in a new environment.
 - **Immutable**: an existing tag or published file is never moved, deleted,
@@ -57,8 +65,8 @@ smoke before publication.
   environments.
 - OpenClaw smoke uses immediate predecessor commit
   `d889f2f4bfb554bc3bfde0eb9927372552d40e51` as its test-only baseline.
-- Tightbeam-first smoke uses immediate predecessor commit
-  `24b4a389bd2dceb29307a2308b70520adb3571db` as its test-only baseline.
+- Tightbeam-first smoke uses same-architecture commit
+  `cf91ef1baab26d6045fac5300487c29d0ddf332d` as its test-only baseline.
 - Baseline bytes are test inputs only. They are never public release inputs.
 
 ## Invariants
@@ -76,6 +84,12 @@ smoke before publication.
 8. Each channel uses distinct tags and filenames.
 9. No publication occurs before artifact smoke passes for that channel.
 10. A reviewer approves the exact spec and source commit before each ref move.
+11. `surf-ace-tightbeam-v0.2.0` always resolves to exact product commit
+    `8fc9f508ae9b4371a3c25f6318920940fbad10cd`, independently of any later
+    tooling-only advancement of `main`.
+12. Each channel manifest records its actual selected tooling tag and the full
+    tooling commit. Its guard verifies that exact tag peels to the checked-out
+    tooling commit; it never substitutes the other channel's tag.
 
 ## Architecture
 
@@ -95,15 +109,21 @@ direct child of `58ac8c4`. It is not a child of `779c493` and not an ancestor
 of the current candidate. Both children confirm the cutoff.
 
 The current Tightbeam-first candidate is
-`ec623c54616b6c71a180cede45a91bc54269238c` (`ec623c54616b`). It contains
-the resident controller, thin local CLI, half-close fix, corrected install
-layout, and graceful supervisor shutdown.
+`8fc9f508ae9b4371a3c25f6318920940fbad10cd` (`8fc9f508`). It preserves the
+reviewed current controller, CLI, Electron, protocol, iOS, and dependency
+behavior. Its test-only baseline `cf91ef1baab26d6045fac5300487c29d0ddf332d`
+has the same central-server architecture; it differs only where the candidate
+adds the current-content read projection and later product fixes.
 
-After separate source review, the release owner fast-forwards `main` to the
-approved full candidate SHA and pushes `refs/heads/main`. A merge commit is
-not permitted unless a separate review approves that exact merge commit as
-the candidate. The release owner then creates
-`surf-ace-tightbeam-v0.2.0` at the exact new `main` commit.
+The Tightbeam product cutoff and the release-tooling line are independent.
+After integrated tooling review, the authorized owner may fast-forward `main`
+to the exact reviewed tooling commit and verify the remote SHA and tree. A
+merge commit is not permitted unless a separate review approves that exact
+merge commit. This tooling-only advancement never retargets the product
+cutoff: under separate tag authority the release owner creates
+`surf-ace-tightbeam-v0.2.0` at exact commit
+`8fc9f508ae9b4371a3c25f6318920940fbad10cd`, regardless of the commit then at
+`main`, and verifies the remote tag peels to that fixed product commit.
 
 ### Public destination
 
@@ -128,13 +148,16 @@ commit `58ac8c435679e6611903d31abaecec11bb9d7f75`.
      commit, checksums, toolchains, commands, test outcomes, smoke
      requirements, dependency inventory or SBOM, and provenance.
 
-The Tightbeam-first release uses tag `surf-ace-tightbeam-v0.2.0` and the
-exact reviewed `main` commit. The current candidate is
-`ec623c54616b6c71a180cede45a91bc54269238c`.
+The Tightbeam-first release uses tag `surf-ace-tightbeam-v0.2.0` and exact
+reviewed commit `8fc9f508ae9b4371a3c25f6318920940fbad10cd`.
 
 1. `surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz`
-   - Include the resident controller, thin Rust CLI, systemd unit,
-     supervisor, and production runtime dependencies.
+   - Include the standalone Rust CLI, callable `central-server.cjs`, protocol
+     and allocator schemas required by those bytes, and explicit start/close
+     lifecycle documentation.
+   - It does not contain or install a daemon, supervisor, service unit, or
+     database provisioner. The process owner supplies already-provisioned
+     PostgreSQL custody and calls `startCentralServer`/`service.close`.
 2. `surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip`
    - Build only from `packages/electron` at the same source commit.
 3. `surf-ace-tightbeam-v0.2.0-manifest.json`
@@ -178,12 +201,16 @@ git -C source diff --exit-code HEAD -- .
 git -C source diff --cached --exit-code HEAD -- .
 ```
 
-The workflow stops if the tooling tag or product tag does not peel to the
-manifest’s full commit or if a tracked product input changes. Each build job
+The workflow stops if its actual selected tooling tag or product tag does not
+peel to the manifest's full commit or if a tracked product input changes. Each build job
 removes its whole workspace, including ignored dependency and generated-build
-paths, after retaining only the compared files and receipts. The tooling tag
-may be superseded only by a newly named, separately reviewed tooling tag; it
-is never moved.
+paths, after retaining only the compared files and receipts. Tightbeam v0.2.0
+uses `surf-ace-release-tooling-v0.1.1`; the corrected OpenClaw gates use
+`surf-ace-release-tooling-openclaw-v0.1.2`. Both may peel to one exact reviewed
+tooling commit, but every manifest and guard retains its channel's actual tag.
+The currently absent incident name `surf-ace-release-tooling-openclaw-v0.1.1`
+remains reserved and is not evidence of an unused or reusable name. Its two
+failed Gate 4 runs remain historical evidence and authorize no retry.
 
 ### Reproducible builds
 
@@ -275,9 +302,7 @@ pnpm --dir source --filter @surf-ace/electron test
 ```
 
 Success means all controller and protocol tests pass, all Rust CLI tests pass,
-and all built Electron tests pass. The controller suite includes
-`src/packaging.test.ts`, which must prove `SIGTERM` and `SIGINT` stop and reap
-both supervisor children.
+and all built Electron tests pass.
 
 ### Deterministic packaging commands
 
@@ -338,24 +363,21 @@ node tooling/scripts/release/build-tightbeam-release.mjs \
   --source-dir source \
   --output-dir build/release/tightbeam \
   --source-tag surf-ace-tightbeam-v0.2.0 \
-  --source-commit ec623c54616b6c71a180cede45a91bc54269238c \
+  --source-commit 8fc9f508ae9b4371a3c25f6318920940fbad10cd \
   --version 0.2.0 \
   --target x86_64-unknown-linux-gnu
 ```
 
-If source review approves another candidate, both the product tag and
-`--source-commit` must name that same full SHA. The program must run
-`pnpm --dir source --filter @surf-ace/controller package:linux -- <new-stage>`,
-run `pnpm --dir source --filter @surf-ace/electron package`, normalize and
-rename the staged Linux archive and Electron app zip, and write the canonical
-manifest. It must produce exactly the three Tightbeam-first filenames listed
-in **Release files**, with no extra public file. Packaging must use a new
-output path and a valid unit without changing the checkout. The Tightbeam
-smoke installs the package at `/opt/surf-ace` and runs:
-
-```sh
-systemd-analyze verify /opt/surf-ace/surf-ace-controller.service
-```
+The program must compile the locked standalone Rust CLI for the named target,
+build the Electron server bundle, and assemble only the five documented Linux
+runtime files: `README.md`, `bin/surf-ace`,
+`server/central-server.cjs`, `schemas/protocol/schema.json`, and
+`schemas/allocator/001_allocator.sql`. It separately packages the Electron
+app, normalizes both archives, and writes the canonical manifest. It must
+produce exactly the three Tightbeam-first filenames listed in **Release
+files**, with no extra public file and without changing the checkout. The
+Linux archive contract is lifecycle-callable, not host-installing: no daemon,
+service unit, supervisor, or database provisioning is permitted.
 
 ### OpenClaw smoke host contract
 
@@ -453,20 +475,28 @@ Before Tightbeam-first publication, GitHub Actions must run:
 
 ```sh
 node tooling/scripts/release/smoke-tightbeam-release.mjs \
-  --baseline-commit 24b4a389bd2dceb29307a2308b70520adb3571db \
-  --candidate-commit ec623c54616b6c71a180cede45a91bc54269238c \
+  --baseline-commit cf91ef1baab26d6045fac5300487c29d0ddf332d \
+  --candidate-commit 8fc9f508ae9b4371a3c25f6318920940fbad10cd \
   --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \
   --backend build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz \
   --electron build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip
 ```
 
-If review approves a different candidate, the command must use that exact SHA
-instead of `ec623c54616b`. The command must verify checksums and clean-install
-both candidate packages. It must start exactly one packaged controller, run
-the packaged CLI health and list requests, and verify the Electron handshake.
-It must upgrade from the test-only baseline, verify health and canonical state
-reuse, restore the baseline, verify post-rollback health, and remove every
-process and temporary state directory.
+The command must verify checksums and the exact Linux runtime closure, reject
+the obsolete daemon layout, and verify the Electron package handshake. The
+state smoke uses one run-owned PostgreSQL custody database and stable client
+identity across `cf91` baseline, `8fc9` candidate, and `cf91` rollback, with
+separate package roots and exactly one controller at a time. It seeds labels,
+multiple panes, content/history, a consumable synchronization scope/outbox,
+and a retained tombstone. Candidate-acknowledged writes must remain readable
+after rollback; the smoke never rewinds or restores a database backup. Only
+normalized lifecycle bookkeeping may differ. Baseline observations require
+real current/no-loss records, while the candidate additionally requires a
+non-null `currentContentRecord`. Wrong source or baseline identity, any reset,
+loss, identity change, sequence/fence regression, state discard, or package
+substitution fails closed. Every process and temporary package/profile root
+must be removed after the phase owner closes it; the owned database evidence
+is retained with the smoke receipt.
 
 GitHub Actions must store each smoke receipt as an immutable attestation for
 the tooling tag and commit, product source tag and commit, manifest SHA-256,
@@ -478,9 +508,10 @@ attestation before publication.
 
 - `surf-ace-openclaw-v0.1.0` supports the canonical OpenClaw provider contract
   at `58ac8c4` on pinned host `openclaw@2026.7.1-2`.
-- Tightbeam-first `main` uses one resident controller for discovery, durable
-  topology, identity, reconnects, and discovery-loss retention.
-- The Tightbeam Rust CLI is only a local thin client.
+- Tightbeam-first uses one externally owned central server for discovery,
+  durable topology, identity, reconnects, and discovery-loss retention.
+- The Tightbeam Rust CLI is a standalone client; the Linux archive exposes the
+  central server as a callable module with explicit owner-controlled lifetime.
 - Tightbeam-first work does not preserve the OpenClaw provider API or its
   deployment model.
 - A manifest promises shared wire compatibility only when its protocol tests
@@ -508,39 +539,48 @@ smoke before it supersedes the bad release.
 The release must follow these gates in order:
 
 1. An independent reviewer approves the exact revision-5 bytes.
-2. A reviewed implementation lands the canonical spec, GitHub Actions,
-   pinned tools, direct immutable-checkout tests, deterministic package
-   programs, and both smoke programs in `clickety-clacks/surf-ace`. The
-   release owner creates `surf-ace-release-tooling-v0.1.0` at that exact
-   reviewed commit and verifies its remote peel.
-3. The release owner creates `release/openclaw-final` and immutable tag
+2. One independent integrated review approves the exact combined tooling
+   commit, including this canonical spec, both workflows, channel-specific
+   tag/manifest guards, build programs, smoke programs, and tests. Under
+   separate landing authority, the release owner may fast-forward `main` to
+   that reviewed tooling commit and verifies the remote SHA and tree. This is
+   a tooling-only move and does not select a product source.
+3. Under separate tooling-tag authority, the release owner creates distinct
+   immutable tags `surf-ace-release-tooling-v0.1.1` and
+   `surf-ace-release-tooling-openclaw-v0.1.2` at the same reviewed tooling
+   commit and verifies both remote peels. The absent incident tag
+   `surf-ace-release-tooling-openclaw-v0.1.1` remains reserved and untouched.
+4. The release owner creates `release/openclaw-final` and immutable tag
    `surf-ace-openclaw-v0.1.0` at exact commit `58ac8c4`. The owner verifies
    both remote refs peel to that commit.
-4. GitHub Actions executes from the immutable tooling tag, checks out the
+5. GitHub Actions executes from the actual selected immutable OpenClaw tooling
+   tag, records that tag and the reviewed tooling commit, checks out the
    OpenClaw product tag separately, runs every test, builds the three files
    twice, and verifies identical SHA-256 records and file bytes.
-5. GitHub Actions runs the OpenClaw artifact smoke against those exact files.
+6. GitHub Actions runs the OpenClaw artifact smoke against those exact files.
    Clean install, pinned-host RPC health, plugin runtime inspection, Electron
    health, upgrade, rollback, and post-rollback health pass.
-6. GitHub Actions publishes only the smoke-approved OpenClaw files to the
+7. GitHub Actions publishes only the smoke-approved OpenClaw files to the
    matching GitHub Release.
-7. A clean consumer downloads every OpenClaw file and verifies its checksum.
-8. A separate review approves the exact Tightbeam-first target commit.
-9. The release owner fast-forwards and pushes `refs/heads/main` to that full
-   SHA. The owner verifies the remote `main` ref and the unchanged OpenClaw
-   refs.
-10. The release owner creates immutable tag `surf-ace-tightbeam-v0.2.0` at the
-    exact new `main` commit and verifies the remote tag peels to that commit.
-11. GitHub Actions executes from the immutable tooling tag, checks out the
-    Tightbeam-first product tag separately, runs every test, builds the three
-    files twice, and verifies identical SHA-256 records and file bytes.
+8. A clean consumer downloads every OpenClaw file and verifies its checksum.
+9. A separate review approves exact Tightbeam product cutoff
+   `8fc9f508ae9b4371a3c25f6318920940fbad10cd`.
+10. Under separate product-tag authority, the release owner creates immutable
+    tag `surf-ace-tightbeam-v0.2.0` at that exact product commit, independently
+    of the commit then at `main`, and verifies the remote peel.
+11. GitHub Actions executes from Tightbeam tooling tag
+    `surf-ace-release-tooling-v0.1.1`, records that actual tag and the reviewed
+    tooling commit, checks out the Tightbeam product tag separately, runs every
+    test, builds the three files twice, and verifies identical SHA-256 records
+    and file bytes.
 12. GitHub Actions runs the Tightbeam-first artifact smoke against those exact
     files. Clean install, health, upgrade, rollback, state reuse, and
     post-rollback health pass.
 13. GitHub Actions publishes only the smoke-approved Tightbeam-first files to
     the matching GitHub Release.
 14. A clean consumer downloads every Tightbeam-first file and verifies its
-    checksum, install, service ownership, and health.
+    checksum, exact runtime closure, explicit server start/close ownership,
+    stable state, and health.
 15. The fleet soak uses only the published files. Device installation remains
     later user verification.
 

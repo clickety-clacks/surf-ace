@@ -24,6 +24,98 @@ import { cargoLockedPackages, lockedPackages } from "./lockfile-inventory.mjs";
 
 const toolingRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
+export const TIGHTBEAM_LINUX_RUNTIME_FILES = Object.freeze([
+  "README.md",
+  "bin/surf-ace",
+  "schemas/allocator/001_allocator.sql",
+  "schemas/protocol/schema.json",
+  "server/central-server.cjs",
+]);
+
+export async function verifyTightbeamLinuxStage(stageDir) {
+  const stage = path.resolve(stageDir);
+  const actual = [];
+  async function walk(directory, relative = "") {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const child = path.posix.join(relative, entry.name);
+      if (entry.isDirectory()) await walk(path.join(directory, entry.name), child);
+      else actual.push(child);
+    }
+  }
+  await walk(stage);
+  if (JSON.stringify(actual.sort()) !== JSON.stringify([...TIGHTBEAM_LINUX_RUNTIME_FILES].sort())) {
+    throw new Error(`tightbeam_linux_runtime_closure_mismatch:${actual.sort().join(",")}`);
+  }
+  const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
+  if (!/startCentralServer\(config, name\)/.test(guide) || !/await service\.close\(\)/.test(guide)) {
+    throw new Error("tightbeam_linux_lifecycle_documentation_missing");
+  }
+  if (!/already-provisioned PostgreSQL custody/.test(guide)) throw new Error("tightbeam_linux_custody_contract_missing");
+  return { files: actual.sort(), stageDir: stage };
+}
+
+const linuxReadme = `# Surf Ace Tightbeam Linux package
+
+This package contains the standalone \`bin/surf-ace\` CLI and the callable
+\`server/central-server.cjs\` module. It does not install or supervise a
+daemon, provision PostgreSQL, or modify host services.
+
+The consumer must supply already-provisioned PostgreSQL custody matching the
+allocator schema in \`schemas/allocator/001_allocator.sql\`. Start and close
+the server from the owning process:
+
+\`\`\`js
+const { startCentralServer } = require("./server/central-server.cjs");
+const service = await startCentralServer(config, name);
+try {
+  // Use service.server.address.url while this owner retains custody.
+} finally {
+  await service.close();
+}
+\`\`\`
+
+\`config\` is the existing AllocatorServerConfig, including a run-owned host
+lock and already-provisioned PostgreSQL custody URLs. The package performs no
+database initialization.
+`;
+
+export async function assembleTightbeamLinuxStage({ sourceDir, stageDir, target }) {
+  const source = path.resolve(sourceDir);
+  const stage = path.resolve(stageDir);
+  const inputs = {
+    "bin/surf-ace": path.join(source, "packages/cli/target", target, "release/surf-ace"),
+    "schemas/allocator/001_allocator.sql": path.join(source, "packages/allocator/sql/001_allocator.sql"),
+    "schemas/protocol/schema.json": path.join(source, "packages/electron/dist/schema.json"),
+    "server/central-server.cjs": path.join(source, "packages/electron/dist/central-server.cjs"),
+  };
+  await removeIfExists(stage);
+  await fs.mkdir(stage, { recursive: true });
+  for (const [relative, input] of Object.entries(inputs)) {
+    const output = path.join(stage, relative);
+    await fs.mkdir(path.dirname(output), { recursive: true });
+    await fs.copyFile(input, output);
+  }
+  await fs.chmod(path.join(stage, "bin/surf-ace"), 0o755);
+  await fs.writeFile(path.join(stage, "README.md"), linuxReadme);
+  return verifyTightbeamLinuxStage(stage);
+}
+
+export async function buildTightbeamLinuxStage({ sourceDir, stageDir, target }) {
+  const source = path.resolve(sourceDir);
+  await run("cargo", [
+    "build",
+    "--manifest-path", path.join(source, "packages/cli/Cargo.toml"),
+    "--target-dir", path.join(source, "packages/cli/target"),
+    "--release",
+    "--locked",
+    "--target", target,
+  ]);
+  await run("pnpm", ["--dir", source, "--filter", "@surf-ace/protocol", "build"]);
+  await run("pnpm", ["--dir", source, "--filter", "@surf-ace/controller", "build"]);
+  await run("pnpm", ["--dir", source, "--filter", "@surf-ace/electron", "build"]);
+  return assembleTightbeamLinuxStage({ sourceDir: source, stageDir, target });
+}
+
 export async function buildTightbeamRelease(options) {
   const sourceArgument = options.sourceDir;
   const sourceDir = path.resolve(options.sourceDir);
@@ -51,10 +143,8 @@ export async function buildTightbeamRelease(options) {
   const electronFile = path.join(outputDir, electronName);
   if (component === "all" || component === "linux") {
     const stage = path.join(outputDir, ".linux-stage");
-    await run("pnpm", ["--dir", sourceArgument, "--filter", "@surf-ace/controller", "package:linux", "--", stage], {
-      env: { ...process.env, SURF_ACE_LINUX_TARGET: options.target },
-    });
-    await createDirectoryTarGz(path.join(stage, "surf-ace-linux"), "surf-ace-linux", backendFile, epoch);
+    await buildTightbeamLinuxStage({ sourceDir: sourceArgument, stageDir: stage, target: options.target });
+    await createDirectoryTarGz(stage, "surf-ace-linux", backendFile, epoch);
     await removeIfExists(stage);
   }
   if (component === "all" || component === "macos") {
@@ -81,7 +171,7 @@ export async function buildTightbeamRelease(options) {
         pnpmSha256: await sha256(path.join(sourceDir, "pnpm-lock.yaml")),
       },
       smoke: {
-        command: "node tooling/scripts/release/smoke-tightbeam-release.mjs --baseline-commit 24b4a389bd2dceb29307a2308b70520adb3571db --candidate-commit ec623c54616b6c71a180cede45a91bc54269238c --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json --backend build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz --electron build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip",
+        command: `node tooling/scripts/release/smoke-tightbeam-release.mjs --baseline-commit ${TIGHTBEAM.baselineCommit} --candidate-commit ${TIGHTBEAM.candidateCommit} --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json --backend build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz --electron build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip`,
         required: true,
         status: "pending",
       },

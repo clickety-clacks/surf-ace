@@ -27,8 +27,14 @@ import { cargoLockedPackages, lockedPackages, packagedProductionInventory } from
 import { verifySri } from "./verify-sri.mjs";
 import { verifyOpenclawPackage } from "./verify-openclaw-package.mjs";
 import { buildOpenclawRelease } from "./build-openclaw-release.mjs";
-import { buildTightbeamRelease } from "./build-tightbeam-release.mjs";
-import { OPENCLAW } from "./release-config.mjs";
+import {
+  assembleTightbeamLinuxStage,
+  buildTightbeamRelease,
+  TIGHTBEAM_LINUX_RUNTIME_FILES,
+  verifyTightbeamLinuxStage,
+} from "./build-tightbeam-release.mjs";
+import { OPENCLAW, TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
+import { runLinuxStateDriver, validateTightbeamStateSequence } from "./smoke-tightbeam-release.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 
 const exec = promisify(execFile);
@@ -368,9 +374,487 @@ test("channel builders reject any source identity outside the reviewed constants
   await assert.rejects(buildTightbeamRelease({ sourceDir: ".", outputDir: "build/release/tightbeam", sourceTag: "wrong", sourceCommit: "wrong", version: "0", target: "wrong" }), /tightbeam_release_identity_mismatch/);
 });
 
+test("Tightbeam v0.2.0 binds the reviewed cutoff, same-architecture baseline, and unissued tooling successor", () => {
+  assert.equal(TOOLING_TAG, "surf-ace-release-tooling-v0.1.1");
+  assert.deepEqual(TIGHTBEAM, {
+    baselineCommit: "cf91ef1baab26d6045fac5300487c29d0ddf332d",
+    candidateCommit: "8fc9f508ae9b4371a3c25f6318920940fbad10cd",
+    files: [
+      "surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip",
+      "surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz",
+      "surf-ace-tightbeam-v0.2.0-manifest.json",
+    ],
+    sourceTag: "surf-ace-tightbeam-v0.2.0",
+    version: "0.2.0",
+  });
+});
+
+test("channel tooling identities remain distinct and reject cross-channel or reserved tag selection", () => {
+  const expected = Object.freeze({
+    openclaw: "surf-ace-release-tooling-openclaw-v0.1.2",
+    tightbeam: TOOLING_TAG,
+  });
+  const reserved = "surf-ace-release-tooling-openclaw-v0.1.1";
+  const requireChannelTag = (channel, actual) => {
+    if (actual !== expected[channel]) throw new Error(`${channel}_tooling_tag_mismatch:${actual}`);
+    if (actual === reserved) throw new Error(`reserved_tooling_tag:${actual}`);
+  };
+
+  assert.notEqual(expected.openclaw, expected.tightbeam);
+  assert.doesNotThrow(() => requireChannelTag("openclaw", expected.openclaw));
+  assert.doesNotThrow(() => requireChannelTag("tightbeam", expected.tightbeam));
+  assert.throws(() => requireChannelTag("openclaw", expected.tightbeam), /openclaw_tooling_tag_mismatch/);
+  assert.throws(() => requireChannelTag("tightbeam", expected.openclaw), /tightbeam_tooling_tag_mismatch/);
+  assert.throws(() => requireChannelTag("openclaw", reserved), /openclaw_tooling_tag_mismatch/);
+});
+
+test("Tightbeam Linux stage contains only the standalone CLI, callable server closure, schemas, and lifecycle docs", async (t) => {
+  const root = await temporary(t);
+  const source = path.join(root, "source");
+  const stage = path.join(root, "stage");
+  const target = "x86_64-unknown-linux-gnu";
+  const files = {
+    [`packages/cli/target/${target}/release/surf-ace`]: "rust-cli",
+    "packages/electron/dist/central-server.cjs": "module.exports={startCentralServer(){}};",
+    "packages/electron/dist/schema.json": "{}\n",
+    "packages/allocator/sql/001_allocator.sql": "-- schema\n",
+  };
+  for (const [relative, contents] of Object.entries(files)) {
+    const file = path.join(source, relative);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, contents);
+  }
+
+  await assembleTightbeamLinuxStage({ sourceDir: source, stageDir: stage, target });
+  const actual = [];
+  async function walk(directory, relative = "") {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const child = path.posix.join(relative, entry.name);
+      if (entry.isDirectory()) await walk(path.join(directory, entry.name), child);
+      else actual.push(child);
+    }
+  }
+  await walk(stage);
+  assert.deepEqual(actual.sort(), [...TIGHTBEAM_LINUX_RUNTIME_FILES].sort());
+  const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
+  assert.match(guide, /startCentralServer\(config, name\)/);
+  assert.match(guide, /await service\.close\(\)/);
+  assert.match(guide, /already-provisioned PostgreSQL custody/);
+  assert.doesNotMatch(actual.join("\n"), /systemd|service|surf-ace-runtime|controller\/dist\/main\.js/);
+
+  await fs.writeFile(path.join(stage, "surf-ace-runtime"), "obsolete daemon launcher\n");
+  await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_runtime_closure_mismatch/);
+});
+
+test("Tightbeam Linux builder creates source-declared dependencies before the Electron server bundle", async () => {
+  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const builder = await fs.readFile(path.join(repository, "scripts/release/build-tightbeam-release.mjs"), "utf8");
+  const functionStart = builder.indexOf("export async function buildTightbeamLinuxStage");
+  const functionEnd = builder.indexOf("export async function buildTightbeamRelease", functionStart);
+  const body = builder.slice(functionStart, functionEnd);
+  const protocol = body.indexOf('"@surf-ace/protocol", "build"');
+  const controller = body.indexOf('"@surf-ace/controller", "build"');
+  const electron = body.indexOf('"@surf-ace/electron", "build"');
+  assert.ok(protocol >= 0, "protocol build is required");
+  assert.ok(controller > protocol, "controller build must follow protocol");
+  assert.ok(electron > controller, "Electron server bundle must follow controller");
+});
+
+function semanticPhase(sourceCommit, overrides = {}) {
+  const phase = {
+    acknowledgedWriteIds: [],
+    acknowledgementEvidence: [],
+    allocatorAfterRegistration: {
+      allocatorId: "allocator-owned", assignmentCount: 1, nextOrdinalFence: 7, primaryHeadSeq: 4, stateVersion: 1,
+    },
+    allocatorBeforeRegistration: {
+      allocatorId: "allocator-owned", assignmentCount: 1, nextOrdinalFence: 7, primaryHeadSeq: 4, stateVersion: 1,
+    },
+    allocatorFence: 7,
+    allocatorHeadSeq: 4,
+    allocatorIdentity: "allocator-owned",
+    allocatorStateVersion: 1,
+    clientIdentity: "client-stable",
+    currentContentRecord: null,
+    databaseIdentity: "database-owned",
+    loss: null,
+    registrationIdentity: "registered-client-stable",
+    resetCount: 0,
+    resetEvidence: { databaseIdentity: "database-owned", priorDatabaseIdentity: null },
+    semanticState: {
+      content: { seed: { contentId: "seed" } },
+      history: { "pane:sf_1:1": ["seed"] },
+      labels: { pane1: 1, surface: "a" },
+      outbox: ["ack-seed"],
+      panes: [1, 2],
+      tombstones: ["pane-old"],
+    },
+    sequence: 12,
+    sourceCommit,
+    ...overrides,
+  };
+  const records = Object.keys(phase.semanticState.content).map((contentId, index) => ({
+    payload: { contentId },
+    recordClass: "content",
+    recordId: `record-${contentId}`,
+    sequence: index + 1,
+  }));
+  if (!("allocatorAfterRegistration" in overrides)) {
+    phase.allocatorAfterRegistration = {
+      ...phase.allocatorAfterRegistration,
+      allocatorId: phase.allocatorIdentity,
+      nextOrdinalFence: phase.allocatorFence,
+      primaryHeadSeq: phase.allocatorHeadSeq,
+      stateVersion: phase.allocatorStateVersion,
+    };
+  }
+  if (!("allocatorBeforeRegistration" in overrides)) {
+    phase.allocatorBeforeRegistration = structuredClone(phase.allocatorAfterRegistration);
+  }
+  phase.readEvidence ??= [{
+    captureOutput: {
+      controllerInstanceId: phase.clientIdentity,
+      result: { contentId: records.at(-1)?.payload?.contentId ?? null, contentType: "html", paneId: 1, revision: 1 },
+    },
+    output: {
+      controllerInstanceId: phase.clientIdentity,
+      result: {
+        cacheStatus: "current",
+        consumableLoss: null,
+        currentContentRecord: records.at(-1) ?? null,
+        records,
+        scopeId: "pane:sf_1:1",
+      },
+    },
+    scopeId: "pane:sf_1:1",
+  }];
+  phase.readControllerIdentities ??= [phase.clientIdentity];
+  phase.acknowledgementEvidence ??= [];
+  if (phase.acknowledgedWriteIds.length > 0 && phase.acknowledgementEvidence.length === 0) {
+    phase.acknowledgementEvidence = [{
+      cursor: records.length + 1,
+      idempotencyKey: "pane:sf_1:1:ack",
+      scopeId: "pane:sf_1:1",
+      writeIds: [...phase.acknowledgedWriteIds],
+    }];
+  }
+  const state = {
+    acknowledgementOutbox: [],
+    controllerInstanceId: phase.clientIdentity,
+    scopes: {
+      "pane:sf_1:1": {
+        clientCursor: records.length + 1,
+        lastRetainedSequence: records.length,
+        records: [],
+        synchronized: true,
+      },
+    },
+    version: 1,
+  };
+  phase.controllerStateBeforeAcknowledgement ??= state;
+  phase.controllerStateAfterAcknowledgement ??= structuredClone(state);
+  return phase;
+}
+
+test("Tightbeam state sequence preserves one database and identity and retains candidate-acknowledged writes through rollback", () => {
+  const baselineBefore = semanticPhase(TIGHTBEAM.baselineCommit);
+  const semanticState = {
+    ...baselineBefore.semanticState,
+    content: { ...baselineBefore.semanticState.content, "write-candidate-1": { contentId: "write-candidate-1" } },
+    history: { ...baselineBefore.semanticState.history, "pane:sf_1:2": ["write-candidate-1"] },
+  };
+  const candidateAfter = semanticPhase(TIGHTBEAM.candidateCommit, {
+    acknowledgedWriteIds: ["write-candidate-1"],
+    allocatorFence: 8,
+    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
+    semanticState,
+    sequence: 20,
+  });
+  const rollbackAfter = semanticPhase(TIGHTBEAM.baselineCommit, {
+    acknowledgedWriteIds: ["write-candidate-1"],
+    allocatorFence: 8,
+    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
+    semanticState,
+    sequence: 21,
+  });
+  assert.deepEqual(validateTightbeamStateSequence({ baselineBefore, candidateAfter, rollbackAfter }), {
+    acknowledgedWriteIds: ["write-candidate-1"],
+    baselineCommit: TIGHTBEAM.baselineCommit,
+    candidateCommit: TIGHTBEAM.candidateCommit,
+    clientIdentity: "client-stable",
+    databaseIdentity: "database-owned",
+    status: "passed",
+  });
+});
+
+test("Tightbeam state sequence rejects dropped or regressed packaged controller scopes even when capture remains current", () => {
+  const baselineBefore = semanticPhase(TIGHTBEAM.baselineCommit);
+  const semanticState = {
+    ...baselineBefore.semanticState,
+    content: { ...baselineBefore.semanticState.content, "write-candidate-1": { contentId: "write-candidate-1" } },
+    history: { ...baselineBefore.semanticState.history, "pane:sf_1:2": ["write-candidate-1"] },
+  };
+  const candidateAfter = semanticPhase(TIGHTBEAM.candidateCommit, {
+    acknowledgedWriteIds: ["write-candidate-1"],
+    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
+    semanticState,
+    sequence: 20,
+  });
+  const rollbackAfter = semanticPhase(TIGHTBEAM.baselineCommit, {
+    acknowledgedWriteIds: ["write-candidate-1"],
+    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
+    semanticState,
+    sequence: 21,
+  });
+  const scopeId = "pane:sf_1:1";
+  const validateCandidateState = (controllerStateAfterAcknowledgement) => validateTightbeamStateSequence({
+    baselineBefore,
+    candidateAfter: { ...candidateAfter, controllerStateAfterAcknowledgement },
+    rollbackAfter,
+  });
+  const validateRollbackState = (controllerStateAfterAcknowledgement) => validateTightbeamStateSequence({
+    baselineBefore,
+    candidateAfter,
+    rollbackAfter: { ...rollbackAfter, controllerStateAfterAcknowledgement },
+  });
+
+  const droppedScope = structuredClone(candidateAfter.controllerStateAfterAcknowledgement);
+  delete droppedScope.scopes[scopeId];
+  assert.throws(() => validateCandidateState(droppedScope), /candidate_controller_state_scope_missing/);
+
+  const droppedRollbackScope = structuredClone(rollbackAfter.controllerStateAfterAcknowledgement);
+  delete droppedRollbackScope.scopes[scopeId];
+  assert.throws(() => validateRollbackState(droppedRollbackScope), /rollback_controller_state_scope_missing/);
+
+  for (const [field, value] of [["clientCursor", 0], ["lastRetainedSequence", 0]]) {
+    const regressedScope = structuredClone(candidateAfter.controllerStateAfterAcknowledgement);
+    regressedScope.scopes[scopeId][field] = value;
+    assert.throws(() => validateCandidateState(regressedScope), new RegExp(`candidate_controller_state_scope_${field}_regression`));
+  }
+
+  const unsynchronizedScope = structuredClone(candidateAfter.controllerStateAfterAcknowledgement);
+  unsynchronizedScope.scopes[scopeId].synchronized = false;
+  assert.throws(() => validateCandidateState(unsynchronizedScope), /candidate_controller_state_scope_not_synchronized/);
+
+  assert.ok(candidateAfter.readEvidence[0].captureOutput, "negative cases retain packaged capture evidence");
+});
+
+test("Tightbeam state sequence rejects wrong sources, loss, reset, identity drift, and stale rollback", () => {
+  const before = semanticPhase(TIGHTBEAM.baselineCommit);
+  const semanticState = {
+    ...before.semanticState,
+    content: { ...before.semanticState.content, "write-candidate-1": { contentId: "write-candidate-1" } },
+    history: { ...before.semanticState.history, "pane:sf_1:2": ["write-candidate-1"] },
+  };
+  const candidate = semanticPhase(TIGHTBEAM.candidateCommit, {
+    acknowledgedWriteIds: ["write-candidate-1"],
+    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
+    semanticState,
+    sequence: 20,
+  });
+  const rollback = semanticPhase(TIGHTBEAM.baselineCommit, {
+    acknowledgedWriteIds: ["write-candidate-1"],
+    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
+    semanticState,
+    sequence: 21,
+  });
+  const validate = (change) => validateTightbeamStateSequence({ baselineBefore: before, candidateAfter: candidate, rollbackAfter: rollback, ...change });
+  assert.throws(() => validate({ baselineBefore: { ...before, sourceCommit: "wrong" } }), /baseline_source_mismatch/);
+  assert.throws(() => validate({ candidateAfter: { ...candidate, sourceCommit: TIGHTBEAM.baselineCommit } }), /candidate_source_mismatch/);
+  assert.throws(() => validate({ candidateAfter: { ...candidate, loss: { from: 13, to: 14 } } }), /consumable_loss/);
+  assert.throws(() => validate({
+    rollbackAfter: {
+      ...rollback,
+      allocatorIdentity: "changed",
+      allocatorAfterRegistration: { ...rollback.allocatorAfterRegistration, allocatorId: "changed" },
+    },
+  }), /allocator_reset/);
+  assert.throws(() => validate({ rollbackAfter: { ...rollback, clientIdentity: "changed" } }), /controller_state_identity_mismatch/);
+  assert.throws(() => validate({ rollbackAfter: { ...rollback, semanticState: before.semanticState } }), /candidate_discarded_baseline_content/);
+  assert.throws(() => validate({ rollbackAfter: { ...rollback, sequence: 11 } }), /sequence_regression/);
+  assert.throws(() => validate({ rollbackAfter: { ...rollback, resetCount: 1 } }), /database_reset/);
+  assert.throws(() => validate({
+    candidateAfter: {
+      ...candidate,
+      semanticState: {
+        ...candidate.semanticState,
+        content: { "write-candidate-1": { contentId: "write-candidate-1" } },
+      },
+    },
+  }), /candidate_discarded_baseline_content/);
+  assert.throws(() => validate({
+    candidateAfter: {
+      ...candidate,
+      semanticState: {
+        ...candidate.semanticState,
+        history: { "pane:sf_1:2": ["write-candidate-1"] },
+      },
+    },
+  }), /candidate_discarded_baseline_history/);
+  assert.throws(() => validate({
+    rollbackAfter: {
+      ...rollback,
+      semanticState: {
+        ...rollback.semanticState,
+        tombstones: [],
+      },
+    },
+  }), /candidate_discarded_baseline_tombstones/);
+  assert.throws(() => validate({
+    candidateAfter: {
+      ...candidate,
+      readEvidence: [{
+        output: {
+          controllerInstanceId: candidate.clientIdentity,
+          result: {
+            cacheStatus: "current",
+            consumableLoss: null,
+            currentContentRecord: null,
+            records: [],
+            scopeId: "pane:sf_1:1",
+          },
+        },
+        scopeId: "pane:sf_1:1",
+      }],
+    },
+  }), /candidate_packaged_read_content_missing/);
+});
+
+test("cf91 macOS baseline is packaged from a clean external source and output root", async () => {
+  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const script = await fs.readFile(path.join(repository, "scripts/release/build-smoke-baseline.mjs"), "utf8");
+  assert.match(script, /git.*archive/);
+  assert.match(script, /\.macos-source/);
+  assert.match(script, /--config\.directories\.output=/);
+  assert.match(script, /tightbeam_baseline_macos_recursive_package/);
+  assert.doesNotMatch(script, /stagedSource, "--filter", "@surf-ace\/electron", "package"/);
+});
+
+test("Tightbeam Linux publication gate requires the executable state driver and validates its three phases", async () => {
+  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
+  assert.match(smoke, /tightbeam_smoke_state_driver_required/);
+  assert.match(smoke, /validateTightbeamStateSequence\(stateSequence\)/);
+  assert.match(fixture, /startCentralServer/);
+  assert.match(fixture, /PostgresCustodyAdapter\.initializeAbsentFleet/);
+  assert.match(fixture, /bin\/surf-ace/);
+  assert.match(fixture, /await runPhase\("baseline"/);
+  assert.match(fixture, /await runPhase\("candidate"/);
+  assert.match(fixture, /await runPhase\("rollback"/);
+  assert.match(workflow, /tightbeam-state-smoke-fixture\.ts/);
+  assert.match(workflow, /pnpm --dir tooling --filter @surf-ace\/electron exec esbuild/);
+  assert.doesNotMatch(workflow, /pnpm --dir tooling exec esbuild/);
+  assert.match(workflow, /--banner:js='import \{ createRequire as __createRequire \} from "node:module"; const require = __createRequire\(import\.meta\.url\);'/);
+  assert.match(fixture, /const nodeRequire = createRequire\(import\.meta\.url\)/);
+  assert.doesNotMatch(fixture, /const require = createRequire\(import\.meta\.url\)/);
+  assert.match(workflow, /SURF_ACE_TIGHTBEAM_STATE_DRIVER/);
+  assert.match(workflow, /^  attest-and-publish:\n    needs: \[smoke-linux, smoke-macos\]/m);
+});
+
+test("Tightbeam Linux state evidence comes from packaged CLI reads and durable controller state", async () => {
+  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  assert.match(fixture, /readPackagedControllerState/);
+  assert.match(fixture, /controllerStateBeforeAcknowledgement/);
+  assert.match(fixture, /controllerStateAfterAcknowledgement/);
+  assert.match(fixture, /acknowledgementOutbox/);
+  assert.match(fixture, /controllerInstanceId/);
+  assert.match(fixture, /primaryHeadSeq/);
+  assert.match(fixture, /resultDerivedSplitChildren\(split, paneId, 3\)/);
+  assert.match(fixture, /raw-cli-evidence\.ndjson/);
+  assert.match(fixture, /rawCliEvidenceSha256/);
+  assert.match(fixture, /rollback-observer-cli/);
+  assert.match(fixture, /latestContentRecord\(\[rollbackRead\]\)/);
+  assert.match(fixture, /currentCaptureObservation\(\[rollbackRead\]\)/);
+  assert.match(fixture, /source: "packaged-capture-pane"/);
+  assert.match(fixture, /semanticContentProjection/);
+  assert.match(fixture, /readControllerIdentities/);
+  assert.match(fixture, /priorDatabaseIdentity !== databaseIdentity/);
+  assert.match(fixture, /resetEvidence: \{ databaseIdentity, priorDatabaseIdentity \}/);
+  assert.doesNotMatch(fixture, /splitPayload\?\.createdPaneIds/);
+  assert.match(fixture, /witnessApplicationName: "surf_ace_witness"/);
+  assert.doesNotMatch(fixture, /application_name=surf_ace_smoke_witness/);
+  assert.doesNotMatch(fixture, /ALTER SYSTEM SET synchronous_commit = 'remote_apply'; SELECT pg_reload_conf\(\);/);
+  assert.doesNotMatch(fixture, /semanticState\(core, writes\)/);
+  assert.doesNotMatch(fixture, /resetCount:\s*0/);
+});
+
+test("Linux state driver gate executes one driver and rejects a baseline-to-candidate loss", async (t) => {
+  const root = await temporary(t);
+  const output = path.join(root, "state.json");
+  const baselineBefore = semanticPhase(TIGHTBEAM.baselineCommit);
+  const retained = {
+    ...baselineBefore.semanticState,
+    content: { ...baselineBefore.semanticState.content, "candidate-write": { contentId: "candidate-write" } },
+    history: { ...baselineBefore.semanticState.history, "pane:sf_1:2": ["candidate-write"] },
+    outbox: [...baselineBefore.semanticState.outbox, "candidate-write"],
+  };
+  const candidateAfter = semanticPhase(TIGHTBEAM.candidateCommit, {
+    acknowledgedWriteIds: ["candidate-write"],
+    currentContentRecord: { contentId: "candidate-write", revision: 2 },
+    semanticState: retained,
+    sequence: 20,
+  });
+  const rollbackAfter = semanticPhase(TIGHTBEAM.baselineCommit, {
+    acknowledgedWriteIds: ["candidate-write"],
+    currentContentRecord: { contentId: "candidate-write", revision: 2 },
+    semanticState: retained,
+    sequence: 21,
+  });
+  let calls = 0;
+  const options = {
+    baselineCommit: TIGHTBEAM.baselineCommit,
+    baselineRoot: path.join(root, "baseline"),
+    candidateCommit: TIGHTBEAM.candidateCommit,
+    candidateRoot: path.join(root, "candidate"),
+    driver: path.join(root, "driver.mjs"),
+    output,
+    stateRoot: path.join(root, "state"),
+  };
+  const execute = async (command, args) => {
+    calls++;
+    assert.equal(command, process.execPath);
+    assert.deepEqual(args, [
+      options.driver,
+      "--baseline-commit", options.baselineCommit,
+      "--baseline-root", options.baselineRoot,
+      "--candidate-commit", options.candidateCommit,
+      "--candidate-root", options.candidateRoot,
+      "--output", options.output,
+      "--state-root", options.stateRoot,
+    ]);
+    await fs.writeFile(output, JSON.stringify({ baselineBefore, candidateAfter, rollbackAfter }));
+  };
+  assert.equal((await runLinuxStateDriver(options, execute)).status, "passed");
+  assert.equal(calls, 1);
+  await assert.rejects(runLinuxStateDriver(options, async () => {
+    await fs.writeFile(output, JSON.stringify({
+      baselineBefore,
+      candidateAfter: {
+        ...candidateAfter,
+        semanticState: { ...retained, content: { "candidate-write": { contentId: "candidate-write" } } },
+      },
+      rollbackAfter,
+    }));
+  }), /candidate_discarded_baseline_content/);
+});
+
 test("canonical spec and workflows preserve reviewed bytes and immutable action pins", async () => {
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  assert.equal(await sha256(path.join(repository, "docs/release/openclaw-tightbeam-release-split.md")), "e26016584b80492d86f766af311715dca71a197d396a3e15b17e2593b021feb9");
+  const specificationPath = path.join(repository, "docs/release/openclaw-tightbeam-release-split.md");
+  const specification = await fs.readFile(specificationPath, "utf8");
+  assert.equal(await sha256(specificationPath), "aeef6b105d28c453fa185f1949be480fc802c204ff59d089384427574ad37cf0");
+  assert.match(specification, /58ac8c435679e6611903d31abaecec11bb9d7f75/);
+  assert.match(specification, /8fc9f508ae9b4371a3c25f6318920940fbad10cd/);
+  assert.match(specification, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
+  assert.match(specification, /surf-ace-release-tooling-v0\.1\.1/);
+  assert.match(specification, /surf-ace-release-tooling-openclaw-v0\.1\.2/);
+  assert.match(specification, /surf-ace-tightbeam-v0\.2\.0` always resolves to exact product commit/);
+  assert.match(specification, /Any copied or generated rendering is non-authoritative/);
+  assert.doesNotMatch(specification, /surf-ace-tightbeam-v0\.2\.0` at the exact new `main` commit/);
+  assert.doesNotMatch(specification, /resident controller, thin Rust CLI, systemd unit/);
   assert.ok((await lockedPackages(path.join(repository, "pnpm-lock.yaml"))).size > 100);
   assert.ok((await cargoLockedPackages(path.join(repository, "packages/cli/Cargo.lock"))).length > 10);
   for (const workflow of ["release-openclaw.yml", "release-openclaw-gate5.yml", "release-tightbeam.yml"]) {
@@ -391,6 +875,13 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   assert.match(tightbeamWorkflow, /--output macos-smoke-receipt\.json/);
   assert.match(tightbeamWorkflow, /subject-path: release\/\.receipts\/linux-smoke-receipt\.json/);
   assert.match(tightbeamWorkflow, /subject-path: release\/\.receipts\/macos-smoke-receipt\.json/);
+  assert.match(tightbeamWorkflow, /PRODUCT_COMMIT: 8fc9f508ae9b4371a3c25f6318920940fbad10cd/);
+  assert.match(tightbeamWorkflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.1\.1/);
+  assert.match(tightbeamWorkflow, /tooling_remote="\$\(peel_tag "\$\{TOOLING_TAG\}"\)"/);
+  assert.match(tightbeamWorkflow, /test "\$\{tooling_remote\}" = "\$\{GITHUB_SHA\}"/);
+  assert.match(tightbeamWorkflow, /ref: cf91ef1baab26d6045fac5300487c29d0ddf332d/);
+  assert.doesNotMatch(tightbeamWorkflow, /24b4a389|ec623c546|package:linux|surf-ace-runtime|systemd-analyze/);
+  assert.match(tightbeamWorkflow, /^  attest-and-publish:\n    needs: \[smoke-linux, smoke-macos\]/m);
 });
 
 test("OpenClaw Gate 4 dispatch cannot reach smoke or publication", async () => {
@@ -400,6 +891,10 @@ test("OpenClaw Gate 4 dispatch cannot reach smoke or publication", async () => {
   assert.doesNotMatch(workflow, /^\s+push:/m);
   assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
   assert.match(workflow, /test "\$\{GITHUB_REF_TYPE\}" = tag/);
+  assert.match(workflow, /test "\$\{GITHUB_REF\}" = "refs\/tags\/\$\{TOOLING_TAG\}"/);
+  assert.match(workflow, /tooling_remote="\$\(peel_tag "\$\{TOOLING_TAG\}"\)"/);
+  assert.match(workflow, /test "\$\{tooling_remote\}" = "\$\{GITHUB_SHA\}"/);
+  assert.doesNotMatch(workflow, /surf-ace-release-tooling-v0\.1\.1/);
   assert.match(workflow, /^  compare:/m);
   assert.doesNotMatch(workflow, /^  smoke:/m);
   assert.doesNotMatch(workflow, /^  attest-and-publish:/m);

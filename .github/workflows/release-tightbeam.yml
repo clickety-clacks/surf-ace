@@ -17,10 +17,12 @@ concurrency:
 env:
   NODE_VERSION: 24.3.0
   PNPM_VERSION: 10.15.1
-  PRODUCT_COMMIT: ec623c54616b6c71a180cede45a91bc54269238c
+  POSTGRES_VERSION: "16"
+  PRODUCT_COMMIT: 8fc9f508ae9b4371a3c25f6318920940fbad10cd
+  RUST_VERSION: 1.89.0
   PRODUCT_TAG: surf-ace-tightbeam-v0.2.0
   RUST_TARGET: x86_64-unknown-linux-gnu
-  TOOLING_TAG: surf-ace-release-tooling-v0.1.0
+  TOOLING_TAG: surf-ace-release-tooling-v0.1.1
   TRIGGER_REF: refs/heads/release/run-tightbeam-v0.2.0
 
 jobs:
@@ -289,8 +291,6 @@ jobs:
   smoke-linux:
     needs: compare
     runs-on: ubuntu-24.04
-    container:
-      image: rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff
     steps:
       - name: Check out immutable tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -303,38 +303,53 @@ jobs:
         with:
           path: baseline
           persist-credentials: false
-          ref: 24b4a389bd2dceb29307a2308b70520adb3571db
+          ref: cf91ef1baab26d6045fac5300487c29d0ddf332d
       - name: Download compared candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: tightbeam-build-a
           path: build/release/tightbeam
+      - name: Pin Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install pinned tools and build baseline
         run: |
           set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends systemd
-          curl -fsSLO https://nodejs.org/dist/v24.3.0/node-v24.3.0-linux-x64.tar.xz
-          printf '%s  %s\n' a962afadaa8b94bae8bff87ddd6c11f7aae621032424ef05c0a4fe2537fa4de0 node-v24.3.0-linux-x64.tar.xz | sha256sum -c -
-          tar -xJf node-v24.3.0-linux-x64.tar.xz -C /usr/local --strip-components=1
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          export RUSTUP_TOOLCHAIN="${RUST_VERSION}"
+          test "$(rustc --version)" = "rustc ${RUST_VERSION} (29483883e 2025-08-04)"
+          test "$(pg_config --version | cut -d. -f1)" = "PostgreSQL ${POSTGRES_VERSION}"
           corepack enable
           corepack prepare "pnpm@${PNPM_VERSION}" --activate
           pnpm --dir baseline fetch --frozen-lockfile
           pnpm --dir baseline install --offline --frozen-lockfile
+          pnpm --dir tooling fetch --frozen-lockfile
+          pnpm --dir tooling install --offline --frozen-lockfile
           node tooling/scripts/release/build-smoke-baseline.mjs \
             --component tightbeam-linux \
             --source-dir baseline \
             --output-dir baseline-build \
-            --source-commit 24b4a389bd2dceb29307a2308b70520adb3571db
+            --source-commit cf91ef1baab26d6045fac5300487c29d0ddf332d \
+            --target "${RUST_TARGET}"
+          pnpm --dir tooling --filter @surf-ace/electron exec esbuild \
+            "${GITHUB_WORKSPACE}/tooling/scripts/release/tightbeam-state-smoke-fixture.ts" \
+            --bundle \
+            --format=esm \
+            --platform=node \
+            --target=node24 \
+            --banner:js='import { createRequire as __createRequire } from "node:module"; const require = __createRequire(import.meta.url);' \
+            --outfile="${GITHUB_WORKSPACE}/tightbeam-state-smoke-fixture.mjs"
       - name: Smoke Linux clean install, upgrade, and rollback
         env:
           SURF_ACE_SMOKE_COMPONENT: linux
           SURF_ACE_TIGHTBEAM_BASELINE_BACKEND: ${{ github.workspace }}/baseline-build/baseline-backend.tar.gz
+          SURF_ACE_TIGHTBEAM_STATE_DRIVER: ${{ github.workspace }}/tightbeam-state-smoke-fixture.mjs
         run: |
           set -euo pipefail
           node tooling/scripts/release/smoke-tightbeam-release.mjs \
-            --baseline-commit 24b4a389bd2dceb29307a2308b70520adb3571db \
-            --candidate-commit ec623c54616b6c71a180cede45a91bc54269238c \
+            --baseline-commit cf91ef1baab26d6045fac5300487c29d0ddf332d \
+            --candidate-commit 8fc9f508ae9b4371a3c25f6318920940fbad10cd \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \
             --backend build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz \
             --electron build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
@@ -368,7 +383,7 @@ jobs:
         with:
           path: baseline
           persist-credentials: false
-          ref: 24b4a389bd2dceb29307a2308b70520adb3571db
+          ref: cf91ef1baab26d6045fac5300487c29d0ddf332d
       - name: Download compared candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -390,7 +405,7 @@ jobs:
             --component tightbeam-macos \
             --source-dir baseline \
             --output-dir baseline-build \
-            --source-commit 24b4a389bd2dceb29307a2308b70520adb3571db
+            --source-commit cf91ef1baab26d6045fac5300487c29d0ddf332d
       - name: Smoke macOS clean install, upgrade, and rollback
         env:
           SURF_ACE_SMOKE_COMPONENT: macos
@@ -398,8 +413,8 @@ jobs:
         run: |
           set -euo pipefail
           node tooling/scripts/release/smoke-tightbeam-release.mjs \
-            --baseline-commit 24b4a389bd2dceb29307a2308b70520adb3571db \
-            --candidate-commit ec623c54616b6c71a180cede45a91bc54269238c \
+            --baseline-commit cf91ef1baab26d6045fac5300487c29d0ddf332d \
+            --candidate-commit 8fc9f508ae9b4371a3c25f6318920940fbad10cd \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \
             --backend build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz \
             --electron build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \

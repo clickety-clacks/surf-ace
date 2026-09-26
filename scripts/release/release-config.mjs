@@ -1,10 +1,11 @@
-export const TOOLING_TAG = "surf-ace-release-tooling-v0.1.0";
+export const TOOLING_TAG = "surf-ace-release-tooling-v0.1.1";
 
 export const TOOLCHAINS = Object.freeze({
   linuxContainer: "rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff",
   macosRunner: "macos-15",
   node: "24.3.0",
   pnpm: "10.15.1",
+  postgres: "16",
   rust: "1.89.0",
   rustTarget: "x86_64-unknown-linux-gnu",
   xcode: "16.4",
@@ -25,8 +26,8 @@ export const OPENCLAW = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  baselineCommit: "24b4a389bd2dceb29307a2308b70520adb3571db",
-  candidateCommit: "ec623c54616b6c71a180cede45a91bc54269238c",
+  baselineCommit: "cf91ef1baab26d6045fac5300487c29d0ddf332d",
+  candidateCommit: "8fc9f508ae9b4371a3c25f6318920940fbad10cd",
   files: [
     "surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip",
     "surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz",
@@ -66,6 +67,7 @@ export const TIGHTBEAM_TEST_COMMANDS = Object.freeze([
 export const TIGHTBEAM_BUILD_COMMANDS = Object.freeze([
   "pnpm --dir source fetch --frozen-lockfile",
   "pnpm --dir source install --offline --frozen-lockfile",
-  "pnpm --dir source --filter @surf-ace/controller package:linux -- <new-stage>",
+  "cargo build --manifest-path source/packages/cli/Cargo.toml --target-dir source/packages/cli/target --release --locked --target x86_64-unknown-linux-gnu",
+  "pnpm --dir source --filter @surf-ace/electron build",
   "pnpm --dir source --filter @surf-ace/electron package",
 ]);
