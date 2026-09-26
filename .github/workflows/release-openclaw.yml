@@ -1,0 +1,158 @@
+name: OpenClaw Gate 4 - test and compare
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: surf-ace-openclaw-v0.1.0
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 24.3.0
+  PNPM_VERSION: 10.15.1
+  PRODUCT_COMMIT: 58ac8c435679e6611903d31abaecec11bb9d7f75
+  PRODUCT_TAG: surf-ace-openclaw-v0.1.0
+  TOOLING_TAG: ${{ github.ref_name }}
+
+jobs:
+  guard:
+    runs-on: macos-15
+    steps:
+      - name: Require immutable tooling dispatch and product tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          peel_tag() {
+            read -r object_type object_sha <<EOF
+          $(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$1" --jq '.object.type + " " + .object.sha')
+          EOF
+            while test "${object_type}" = tag; do
+              read -r object_type object_sha <<EOF
+          $(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" --jq '.object.type + " " + .object.sha')
+          EOF
+            done
+            test "${object_type}" = commit
+            printf '%s\n' "${object_sha}"
+          }
+          test "${GITHUB_EVENT_NAME}" = workflow_dispatch
+          test "${GITHUB_REF_TYPE}" = tag
+          test "${GITHUB_REF}" = "refs/tags/${TOOLING_TAG}"
+          tooling_remote="$(peel_tag "${TOOLING_TAG}")"
+          product_remote="$(peel_tag "${PRODUCT_TAG}")"
+          test "${tooling_remote}" = "${GITHUB_SHA}"
+          test "${product_remote}" = "${PRODUCT_COMMIT}"
+
+  build:
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [build-a, build-b]
+    runs-on: macos-15
+    steps:
+      - name: Check out immutable tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Check out immutable product source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_TAG }}
+      - name: Pin Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Pin pnpm and frozen dependency closure
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_16.4.app
+          test "$(xcodebuild -version | head -1)" = "Xcode 16.4"
+          corepack enable
+          corepack prepare "pnpm@${PNPM_VERSION}" --activate
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(pnpm --version)" = "${PNPM_VERSION}"
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          sha256sum source/pnpm-lock.yaml
+          pnpm --dir source fetch --frozen-lockfile
+          pnpm --dir source install --offline --frozen-lockfile
+      - name: Run exact OpenClaw tests without changing tracked inputs
+        run: |
+          set -euo pipefail
+          guard() {
+            git -C source diff --exit-code HEAD -- .
+            git -C source diff --cached --exit-code HEAD -- .
+          }
+          guard
+          pnpm --dir source/packages/extension exec sh -c 'node --import tsx --test src/*.test.ts scripts/*.test.mjs'
+          guard
+          pnpm --dir source --filter @surf-ace/controller test
+          guard
+          pnpm --dir source --filter @surf-ace/protocol test
+          guard
+          pnpm --dir source --filter @surf-ace/electron build
+          guard
+          pnpm --dir source --filter @surf-ace/electron test
+          guard
+      - name: Build exact release set
+        run: |
+          set -euo pipefail
+          node tooling/scripts/release/build-openclaw-release.mjs \
+            --source-dir source \
+            --output-dir build/release/openclaw \
+            --source-tag "${PRODUCT_TAG}" \
+            --source-commit "${PRODUCT_COMMIT}" \
+            --version 0.1.0
+          git -C source diff --exit-code HEAD -- .
+          git -C source diff --cached --exit-code HEAD -- .
+      - name: Retain one clean build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: openclaw-${{ matrix.lane }}
+          path: build/release/openclaw
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove job-owned source and generated paths
+        if: always()
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
+
+  compare:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - name: Check out immutable tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Download build A
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: openclaw-build-a
+          path: build-a
+      - name: Download build B
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: openclaw-build-b
+          path: build-b
+      - name: Pin Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Compare checksums and every public byte
+        run: |
+          node tooling/scripts/release/compare-release-builds.mjs \
+            --build-a build-a \
+            --build-b build-b \
+            --files surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip,surf-ace-openclaw-extension-v0.1.0.tgz,surf-ace-openclaw-v0.1.0-manifest.json
