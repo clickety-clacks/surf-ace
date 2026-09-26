@@ -42,7 +42,7 @@ export const OPENCLAW_TEST_COMMANDS = Object.freeze([
   "pnpm --dir source --filter @surf-ace/controller test",
   "pnpm --dir source --filter @surf-ace/protocol test",
   "pnpm --dir source --filter @surf-ace/electron build",
-  "pnpm --dir source --filter @surf-ace/electron test",
+  "pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
 ]);
 
 export const OPENCLAW_BUILD_COMMANDS = Object.freeze([

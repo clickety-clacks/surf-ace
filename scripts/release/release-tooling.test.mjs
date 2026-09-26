@@ -33,7 +33,7 @@ import {
   TIGHTBEAM_LINUX_RUNTIME_FILES,
   verifyTightbeamLinuxStage,
 } from "./build-tightbeam-release.mjs";
-import { OPENCLAW, OPENCLAW_BUILD_COMMANDS, TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
+import { OPENCLAW, OPENCLAW_BUILD_COMMANDS, OPENCLAW_TEST_COMMANDS, TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
 import { runLinuxStateDriver, validateTightbeamStateSequence } from "./smoke-tightbeam-release.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 
@@ -1235,7 +1235,7 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
   const specificationPath = path.join(repository, "docs/release/openclaw-tightbeam-release-split.md");
   const specification = await fs.readFile(specificationPath, "utf8");
-  assert.equal(await sha256(specificationPath), "90d9d45ba6582a8b9bf8d2ccf55a4a5bac839c206e0fc75df3971dca8ad6a717");
+  assert.equal(await sha256(specificationPath), "b3532729738dd610e66455e2e5d96228082a9d9db089474f74bc6ab48aad58f6");
   assert.match(specification, /58ac8c435679e6611903d31abaecec11bb9d7f75/);
   assert.match(specification, /8fc9f508ae9b4371a3c25f6318920940fbad10cd/);
   assert.match(specification, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
@@ -1376,6 +1376,10 @@ test("OpenClaw Gate 4 builds imported workspace prerequisites before extension t
     "pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
     "guard",
   ];
+  assert.equal(
+    OPENCLAW_TEST_COMMANDS.at(-1),
+    "pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
+  );
   let offset = -1;
   for (const command of expected) {
     const next = script.indexOf(command, offset + 1);

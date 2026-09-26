@@ -366,7 +366,7 @@ pnpm --dir source/packages/extension exec sh -c \
 pnpm --dir source --filter @surf-ace/controller test
 pnpm --dir source --filter @surf-ace/protocol test
 pnpm --dir source --filter @surf-ace/electron build
-pnpm --dir source --filter @surf-ace/electron test
+pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js
 ```
 
 Each preparation and test command is followed by the tracked-input guard.
