@@ -1338,7 +1338,7 @@ test("OpenClaw Gate 4 builds imported workspace prerequisites before extension t
     "guard",
     "pnpm --dir source --filter @surf-ace/electron build",
     "guard",
-    "pnpm --dir source --filter @surf-ace/electron test",
+    "pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
     "guard",
   ];
   let offset = -1;
@@ -1395,7 +1395,7 @@ exit 0
     "--dir source --filter @surf-ace/controller test",
     "--dir source --filter @surf-ace/protocol test",
     "--dir source --filter @surf-ace/electron build",
-    "--dir source --filter @surf-ace/electron test",
+    "--dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
   ]);
 });
 
