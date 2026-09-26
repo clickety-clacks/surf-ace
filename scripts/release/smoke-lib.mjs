@@ -63,19 +63,29 @@ export async function waitForCommand(command, args, options = {}, deadlineMs = 9
   throw new Error(`observable_command_never_succeeded:${command}:${lastError?.message ?? "unknown"}`);
 }
 
-export async function electronHandshake(appExecutable, home, port) {
-  const stateDir = path.join(home, "electron-state");
-  await fs.mkdir(stateDir, { recursive: true });
-  const started = start(appExecutable, [], {
+export function electronLaunchConfig(home, port) {
+  const userDataDir = path.join(home, "user-data");
+  return {
+    args: [`--user-data-dir=${userDataDir}`],
     env: {
       ...process.env,
       HOME: home,
       SURF_ACE_BIND: "127.0.0.1",
       SURF_ACE_DISABLE_ADVERTISING: "1",
       SURF_ACE_PORT: String(port),
-      SURF_ACE_STATE_DIR: stateDir,
     },
-  });
+    userDataDir,
+  };
+}
+
+export async function launchElectron(appExecutable, home, port, launchProcess = start) {
+  const launch = electronLaunchConfig(home, port);
+  await fs.mkdir(launch.userDataDir, { recursive: true });
+  return { launch, started: launchProcess(appExecutable, launch.args, { env: launch.env }) };
+}
+
+export async function electronHandshake(appExecutable, home, port) {
+  const { started } = await launchElectron(appExecutable, home, port);
   try {
     const expiresAt = Date.now() + 60_000;
     let response;

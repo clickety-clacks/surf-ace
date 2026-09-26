@@ -251,10 +251,35 @@ test("smoke receipt CLI writes and verifies multiple files and rejects tampering
   await assert.rejects(exec(process.execPath, [...args, "--receipt", receipt]), /smoke_receipt_mismatch/);
 });
 
+test("Electron handshake binds smoke identity to an explicit userData launch path", async (t) => {
+  const root = await temporary(t);
+  const home = path.join(root, "profile");
+  const { electronLaunchConfig, launchElectron } = await import("./smoke-lib.mjs");
+  const launch = electronLaunchConfig(home, 19101);
+  assert.equal(launch.userDataDir, path.join(home, "user-data"));
+  assert.deepEqual(launch.args, [`--user-data-dir=${launch.userDataDir}`]);
+  assert.equal(launch.env.HOME, home);
+  assert.equal(launch.env.SURF_ACE_STATE_DIR, undefined);
+  const sentinel = {};
+  let invocation;
+  const launched = await launchElectron("/fixture/Surf Ace", home, 19101, (command, args, options) => {
+    invocation = { args, command, options };
+    return sentinel;
+  });
+  assert.equal(launched.started, sentinel);
+  assert.deepEqual(invocation, {
+    args: launch.args,
+    command: "/fixture/Surf Ace",
+    options: { env: launch.env },
+  });
+  assert.equal((await fs.stat(launch.userDataDir)).isDirectory(), true);
+});
+
 test("Tightbeam macOS smoke retains one profile across baseline upgrade and rollback", async (t) => {
   const root = await temporary(t);
   const candidate = path.join(root, "candidate.zip");
   const baseline = path.join(root, "baseline.zip");
+  const { electronLaunchConfig } = await import("./smoke-lib.mjs");
   const { macosSmokePlan, runMacosSmokePlan } = await import("./smoke-tightbeam-release.mjs");
   const plan = macosSmokePlan(root, candidate, baseline);
   assert.deepEqual(plan.map(({ archive, phase }) => ({ archive, phase })), [
@@ -267,12 +292,15 @@ test("Tightbeam macOS smoke retains one profile across baseline upgrade and roll
   assert.equal(plan[1].home, plan[2].home);
   assert.equal(plan[2].home, plan[3].home);
   assert.equal(new Set(plan.map(({ installRoot }) => installRoot)).size, 4);
+  for (const step of plan) {
+    assert.equal(step.identityFile, path.join(electronLaunchConfig(step.home, step.port).userDataDir, "surface-identity.json"));
+  }
 
   const handshakes = [];
   const extract = async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true });
   const handshake = async (_executable, home, port) => {
     handshakes.push({ home, port });
-    const identity = path.join(home, "electron-state/surface-identity.json");
+    const identity = path.join(electronLaunchConfig(home, port).userDataDir, "surface-identity.json");
     await fs.mkdir(path.dirname(identity), { recursive: true });
     try {
       await fs.access(identity);
@@ -286,8 +314,8 @@ test("Tightbeam macOS smoke retains one profile across baseline upgrade and roll
   let transition = 0;
   await assert.rejects(runMacosSmokePlan(plan, {
     extract,
-    handshake: async (_executable, home) => {
-      const identity = path.join(home, "electron-state/surface-identity.json");
+    handshake: async (_executable, home, port) => {
+      const identity = path.join(electronLaunchConfig(home, port).userDataDir, "surface-identity.json");
       await fs.mkdir(path.dirname(identity), { recursive: true });
       if (home === plan[1].home && transition++ === 1) await fs.writeFile(identity, "changed identity");
       else if (!(await fs.stat(identity).catch(() => null))) await fs.writeFile(identity, `identity:${home}`);

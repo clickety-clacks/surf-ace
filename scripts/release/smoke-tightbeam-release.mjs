@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
 import { parseArgs, removeIfExists, run, verifyManifestFiles } from "./release-lib.mjs";
-import { electronHandshake, start, stop, waitForCommand } from "./smoke-lib.mjs";
+import { electronHandshake, electronLaunchConfig, start, stop, waitForCommand } from "./smoke-lib.mjs";
 
 async function installArchive(archive, installRoot) {
   await removeIfExists(installRoot);
@@ -93,7 +93,10 @@ export function macosSmokePlan(root, candidate, baseline) {
     { archive: baseline, home: transitionHome, installRoot: path.join(root, "transition-baseline"), phase: "baseline", port: 19102 },
     { archive: candidate, home: transitionHome, installRoot: path.join(root, "transition-upgrade"), phase: "upgrade", port: 19103 },
     { archive: baseline, home: transitionHome, installRoot: path.join(root, "transition-rollback"), phase: "rollback", port: 19104 },
-  ];
+  ].map((step) => ({
+    ...step,
+    identityFile: path.join(electronLaunchConfig(step.home, step.port).userDataDir, "surface-identity.json"),
+  }));
 }
 
 export async function runMacosSmokePlan(plan, operations = {}) {
@@ -105,7 +108,7 @@ export async function runMacosSmokePlan(plan, operations = {}) {
     await fs.mkdir(step.installRoot, { recursive: true });
     await extract(step.archive, step.installRoot);
     await handshake(path.join(step.installRoot, "Surf Ace.app/Contents/MacOS/Surf Ace"), step.home, step.port);
-    const identity = await fs.readFile(path.join(step.home, "electron-state/surface-identity.json"));
+    const identity = await fs.readFile(step.identityFile);
     if (identity.length === 0) throw new Error(`tightbeam_macos_${step.phase}_identity_empty`);
     if (step.phase === "baseline") canonicalIdentity = identity;
     if (step.phase === "upgrade" && !identity.equals(canonicalIdentity)) throw new Error("tightbeam_macos_upgrade_did_not_reuse_canonical_identity");
