@@ -296,22 +296,31 @@ test("pane focus changes reach the compositor through its runtime focus target A
 
   const socketDir = await mkdtemp(path.join(tmpdir(), "surf-ace-native-pane-focus-"));
   const compositorSocketPath = path.join(socketDir, "control.sock");
-  let resolveFocusRequest!: (request: Record<string, unknown>) => void;
-  const focusRequest = new Promise<Record<string, unknown>>((resolve, reject) => {
+  let resolveWebFocusRequest!: (request: Record<string, unknown>) => void;
+  const webFocusRequest = new Promise<Record<string, unknown>>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("compositor did not receive pane focus")), 2_000);
-    resolveFocusRequest = (request) => {
+    resolveWebFocusRequest = (request) => {
+      clearTimeout(timeout);
+      resolve(request);
+    };
+  });
+  let resolveNativeFocusRequest!: (request: Record<string, unknown>) => void;
+  const nativeFocusRequest = new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("compositor did not receive native pane focus")), 2_000);
+    resolveNativeFocusRequest = (request) => {
       clearTimeout(timeout);
       resolve(request);
     };
   });
   const nativeCompositorStatus = {
     runtime: {
-      active_focus_target: { native_pane: { pane_id: "9" } },
-      last_diagnostic: "native pane owner disappeared: pane_id=9; native grab remains until release and future focus targets Surf Ace's main surface when available",
+      active_focus_target: { native_pane: { pane_id: "7" } },
+      last_diagnostic: null,
     },
     native_pane_window_groups: [],
   };
   const compositorRequestTypes: string[] = [];
+  let focusRequestCount = 0;
   const compositor = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -324,7 +333,12 @@ test("pane focus changes reach the compositor through its runtime focus target A
       const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
       compositorRequestTypes.push(String(request.type));
       if (request.type === "set_runtime_focus_target") {
-        resolveFocusRequest(request);
+        if (focusRequestCount === 0) {
+          resolveWebFocusRequest(request);
+        } else if (focusRequestCount === 1) {
+          resolveNativeFocusRequest(request);
+        }
+        focusRequestCount += 1;
       }
       socket.end(`${JSON.stringify({
         ok: true,
@@ -350,10 +364,17 @@ test("pane focus changes reach the compositor through its runtime focus target A
   try {
     await server.start();
     core.setActiveKeyboardPane(surface.surfaceId, 9);
-    const focusRequestPayload = await focusRequest;
+    const webFocusRequestPayload = await webFocusRequest;
 
-    assert.deepEqual(focusRequestPayload, {
-      target: { native_pane: { pane_id: "9" } },
+    assert.deepEqual(webFocusRequestPayload, {
+      target: "main_app",
+      type: "set_runtime_focus_target",
+    });
+
+    core.setActiveKeyboardPane(surface.surfaceId, 7);
+    const nativeFocusRequestPayload = await nativeFocusRequest;
+    assert.deepEqual(nativeFocusRequestPayload, {
+      target: { native_pane: { pane_id: "7" } },
       type: "set_runtime_focus_target",
     });
 
@@ -362,8 +383,8 @@ test("pane focus changes reach the compositor through its runtime focus target A
     assert.equal(paired.ok, true);
     const paneList = await request(client, "panes.list", { surfaceId: surface.surfaceId });
     assert.deepEqual(paneList.payload.nativeCompositorStatus, {
-      activeFocusTarget: { native_pane: { pane_id: "9" } },
-      lastDiagnostic: "native pane owner disappeared: pane_id=9; native grab remains until release and future focus targets Surf Ace's main surface when available",
+      activeFocusTarget: { native_pane: { pane_id: "7" } },
+      lastDiagnostic: null,
     }, `compositor requests: ${JSON.stringify(compositorRequestTypes)}; panes.list response: ${JSON.stringify(paneList)}`);
   } finally {
     client?.close();

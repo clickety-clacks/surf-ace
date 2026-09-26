@@ -970,13 +970,16 @@ export class SurfaceWsServer {
     return await this.runSurfaceMutation(surfaceId, async () => {
       let focus: ReturnType<SurfaceCore["projectNativePaneFocus"]> | null = null;
       try {
-        if (this.core.nativeHostedPaneIdsExcluding(surfaceId, []).length === 0) {
+        const nativePaneIds = new Set(
+          this.core.nativeHostedPaneIdsExcluding(surfaceId, []).map(String),
+        );
+        if (nativePaneIds.size === 0) {
           return null;
         }
         focus = this.core.projectNativePaneFocus(surfaceId);
         const response = await sendCompositorControl(
           this.compositorSocketPath!,
-          nativePaneFocusRequestForCompositor(focus),
+          nativePaneFocusRequestForCompositor(focus, nativePaneIds),
         );
         const failure = compositorFailureMessage(response);
         if (failure) {

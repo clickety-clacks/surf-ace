@@ -177,10 +177,8 @@ export type CompositorControlRequest =
     type: "get_status";
   }
   | {
-    target: {
-      native_pane: {
-        pane_id: string;
-      };
+    target: "main_app" | {
+      native_pane: { pane_id: string };
     };
     type: "set_runtime_focus_target";
   }
@@ -280,9 +278,13 @@ export function requestForCompositor(
 
 export function nativePaneFocusRequestForCompositor(
   focus: NativePaneFocusProjection,
+  nativePaneIds: ReadonlySet<string>,
 ): CompositorControlRequest {
   if (focus.focusedPaneId === null) {
     return { type: "clear_runtime_focus_target" };
+  }
+  if (!nativePaneIds.has(focus.focusedPaneId)) {
+    return { target: "main_app", type: "set_runtime_focus_target" };
   }
   return {
     target: { native_pane: { pane_id: focus.focusedPaneId } },
