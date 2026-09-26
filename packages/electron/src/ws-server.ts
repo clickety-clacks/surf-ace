@@ -5318,7 +5318,7 @@ function nativeHostMaterializedState(
   state: {
     diagnostics?: string[];
     inputFocus?: "ready" | "not_ready" | "unknown";
-    lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+    lifecycle?: "launch_requested" | "running" | "failed" | "exited" | "unknown";
     nativeHost: "applied" | "not_applied" | "released_after_failure";
     overlayRegions: "applied" | "not_applied" | "not_requested";
     proof?: NativeHostMaterializedState["proof"];
@@ -5373,7 +5373,7 @@ function nativePaneReadinessFromCompositor(
 ): {
   diagnostics?: string[];
   inputFocus?: "ready" | "not_ready" | "unknown";
-  lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+  lifecycle?: "launch_requested" | "running" | "failed" | "exited" | "unknown";
   proof?: NativeHostMaterializedState["proof"];
 } {
   const status = response.status;
@@ -5432,11 +5432,17 @@ function nativePaneReadinessFromCompositor(
     ...(!nativePaneWindowGroupsFromCompositorStatus(response).some((group) =>
       nativePaneWindowGroupMatchesMaterialization(group, materialization)
     ) ? { diagnostics: [...diagnostics, "matching native pane window group was not observed"] } : {}),
-    inputFocus: normalizeNativeInputFocus(source.inputFocus ?? source.input_focus),
+    inputFocus: nativePaneInputFocusFromRuntime(status, compositorPaneId) ??
+      normalizeNativeInputFocus(source.inputFocus ?? source.input_focus),
     lifecycle: normalizeNativeLifecycle(source.lifecycle) ??
       normalizeNativeLifecycle(
         isPlainRecord(nativeHostStatus?.lifecycle)
           ? nativeHostStatus.lifecycle.state
+          : undefined,
+      ) ??
+      normalizeNativeLifecycle(
+        isPlainRecord(paneStatus) && isPlainRecord(paneStatus.external_native_state)
+          ? paneStatus.external_native_state.state
           : undefined,
       ),
     ...(proof ? { proof } : {}),
@@ -5590,9 +5596,58 @@ function normalizeNativeInputFocus(value: unknown): "ready" | "not_ready" | "unk
   return undefined;
 }
 
-function normalizeNativeLifecycle(value: unknown): "launch_requested" | "running" | "exited" | "unknown" | undefined {
-  if (value === "launch_requested" || value === "running" || value === "exited" || value === "unknown") {
+function nativePaneInputFocusFromRuntime(
+  status: Record<string, unknown>,
+  compositorPaneId: string | null,
+): "ready" | "not_ready" | "unknown" | undefined {
+  if (!Object.prototype.hasOwnProperty.call(status, "runtime")) {
+    return undefined;
+  }
+  const runtime = status.runtime;
+  if (!isPlainRecord(runtime)) {
+    return "unknown";
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(runtime, "active_focus_target") ||
+    runtime.active_focus_target === null
+  ) {
+    // T316 serializes its optional RuntimeFocusTarget by omitting it when there is no active target.
+    return "not_ready";
+  }
+  const activeFocusTarget = runtime.active_focus_target;
+  if (activeFocusTarget === "main_app" || activeFocusTarget === "overlay_native") {
+    return "not_ready";
+  }
+  if (!isPlainRecord(activeFocusTarget) || !isPlainRecord(activeFocusTarget.native_pane)) {
+    return "unknown";
+  }
+  const focusedPaneId = stringProperty(activeFocusTarget.native_pane, "pane_id");
+  if (focusedPaneId === undefined || compositorPaneId === null) {
+    return "unknown";
+  }
+  return focusedPaneId === compositorPaneId ? "ready" : "not_ready";
+}
+
+function normalizeNativeLifecycle(
+  value: unknown,
+): "launch_requested" | "running" | "failed" | "exited" | "unknown" | undefined {
+  if (
+    value === "launch_requested" ||
+    value === "running" ||
+    value === "failed" ||
+    value === "exited" ||
+    value === "unknown"
+  ) {
     return value;
+  }
+  if (value === "launching") {
+    return "launch_requested";
+  }
+  if (value === "attached") {
+    return "running";
+  }
+  if (value === "absent") {
+    return "unknown";
   }
   return undefined;
 }

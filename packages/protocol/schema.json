@@ -390,7 +390,7 @@
             },
             "lifecycle": {
               "type": "string",
-              "enum": ["launch_requested", "running", "exited", "unknown"]
+              "enum": ["launch_requested", "running", "failed", "exited", "unknown"]
             },
             "nativeTarget": {
               "type": "object",

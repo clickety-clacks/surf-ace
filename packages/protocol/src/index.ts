@@ -65,7 +65,7 @@ export type NativeHostMaterializedState = {
   };
   diagnostics?: string[];
   inputFocus?: "ready" | "not_ready" | "unknown";
-  lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+  lifecycle?: "launch_requested" | "running" | "failed" | "exited" | "unknown";
   nativeTarget?: {
     appId?: string;
     args?: string[];

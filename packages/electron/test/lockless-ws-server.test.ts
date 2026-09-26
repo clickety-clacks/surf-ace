@@ -395,7 +395,7 @@ test("pane focus changes reach the compositor through its runtime focus target A
   }
 });
 
-test("native readiness and proof match compositor-qualified pane IDs across surfaces", async () => {
+test("native readiness maps T316 lifecycle and focus status using compositor-qualified pane IDs", async () => {
   const core = new SurfaceCore();
   const viewport = { height: 800, scale: 2, width: 1200 };
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
@@ -415,6 +415,60 @@ test("native readiness and proof match compositor-qualified pane IDs across surf
 
   const currentPaneId = compositorPaneIdForSurface(surface.surfaceId, paneId);
   const otherPaneId = compositorPaneIdForSurface(otherSurface.surfaceId, paneId);
+  // Source-derived status fragments from frozen T316 ccc0002. This fixture does not capture
+  // live compositor output.
+  const cases = [
+    {
+      name: "attached and focused",
+      lifecycle: { state: "attached", pid: 101 },
+      focus: "current",
+      expectedLifecycle: "running",
+      expectedInputFocus: "ready",
+    },
+    {
+      name: "launching with main app focus",
+      lifecycle: { state: "launching", pid: 102 },
+      focus: "main_app",
+      expectedLifecycle: "launch_requested",
+      expectedInputFocus: "not_ready",
+    },
+    {
+      name: "failed with another pane focused",
+      lifecycle: { state: "failed", reason: "fixture launch failed" },
+      focus: "other",
+      expectedLifecycle: "failed",
+      expectedInputFocus: "not_ready",
+    },
+    {
+      name: "exited with overlay focus",
+      lifecycle: { state: "exited", pid: 104, exit_code: 1 },
+      focus: "overlay_native",
+      expectedLifecycle: "exited",
+      expectedInputFocus: "not_ready",
+    },
+    {
+      name: "absent with no active focus target",
+      lifecycle: { state: "absent" },
+      focus: "none",
+      expectedLifecycle: "unknown",
+      expectedInputFocus: "not_ready",
+    },
+    {
+      name: "attached with no runtime object",
+      lifecycle: { state: "attached", pid: 106 },
+      focus: "missing_runtime",
+      expectedLifecycle: "running",
+      expectedInputFocus: "unknown",
+    },
+    {
+      name: "attached with unknown focus variant",
+      lifecycle: { state: "attached", pid: 107 },
+      focus: "unknown_variant",
+      expectedLifecycle: "running",
+      expectedInputFocus: "unknown",
+    },
+  ] as const;
+  let currentCase: typeof cases[number] = cases[0];
   let status: Record<string, any> = {
     logical_surface_height: 800,
     logical_surface_width: 1200,
@@ -437,36 +491,92 @@ test("native readiness and proof match compositor-qualified pane IDs across surf
         const bindingId = String(pane.binding_id);
         const contentId = String(pane.content_id);
         const nativeApp = pane.nativeApp as Record<string, any>;
+        const otherLifecycle = { state: "attached", pid: 202 };
+        const otherFocus = currentCase.focus === "other";
+        const currentFocus = currentCase.focus === "current";
+        const focusTarget = currentCase.focus === "current"
+          ? { native_pane: { pane_id: currentPaneId } }
+          : currentCase.focus === "other"
+          ? { native_pane: { pane_id: otherPaneId } }
+          : currentCase.focus === "main_app"
+          ? "main_app"
+          : currentCase.focus === "overlay_native"
+          ? "overlay_native"
+          : currentCase.focus === "unknown_variant"
+          ? "future_target"
+          : undefined;
+        const runtime = currentCase.focus === "missing_runtime"
+          ? undefined
+          : focusTarget === undefined
+          ? {}
+          : { active_focus_target: focusTarget };
+        const process = {
+          args: Array.isArray(nativeApp.args) ? nativeApp.args : [],
+          command: typeof nativeApp.appId === "string" ? nativeApp.appId : "native-readiness-fixture",
+        };
+        const otherProcess = { args: ["wrong"], command: "other-surface-app" };
+        const currentGroup = {
+          acceptedSecondaryCount: 0,
+          clippingStatus: "clipped",
+          deniedReasons: [],
+          deniedToplevelCount: 0,
+          focusedWindowId: currentFocus ? bindingId : undefined,
+          launchToken: String(pane.launchToken),
+          members: [{
+            focused: currentFocus,
+            id: bindingId,
+            lifecycle: "live",
+            role: "primary",
+          }],
+          paneId: currentPaneId,
+          primaryWindowId: bindingId,
+        };
+        const otherGroup = {
+          acceptedSecondaryCount: 0,
+          clippingStatus: "clipped",
+          deniedReasons: [],
+          deniedToplevelCount: 0,
+          focusedWindowId: otherFocus ? "other-surface-primary" : undefined,
+          launchToken: "other-surface-launch",
+          members: [{
+            focused: otherFocus,
+            id: "other-surface-primary",
+            lifecycle: "live",
+            role: "primary",
+          }],
+          paneId: otherPaneId,
+          primaryWindowId: "other-surface-primary",
+        };
+        const currentPaneStatus = {
+          external_native_state: currentCase.lifecycle,
+          id: currentPaneId,
+          nativeHost: {
+            bindingId,
+            contentId,
+            lifecycle: currentCase.lifecycle,
+            paneId: currentPaneId,
+            process,
+            revision: 1,
+          },
+        };
+        const otherPaneStatus = {
+          external_native_state: otherLifecycle,
+          id: otherPaneId,
+          nativeHost: {
+            bindingId: "other-surface-binding",
+            contentId: "other-surface-content",
+            lifecycle: otherLifecycle,
+            paneId: otherPaneId,
+            process: otherProcess,
+            revision: 1,
+          },
+        };
         status = {
-          ...status,
-          native_pane_window_groups: [
-            {
-              launch_token: "other-surface-launch",
-              pane_id: otherPaneId,
-              primary_window_id: "other-surface-primary",
-            },
-            {
-              launch_token: String(pane.launchToken),
-              pane_id: currentPaneId,
-              primary_window_id: bindingId,
-            },
-          ],
-          panes: [
-            {
-              id: otherPaneId,
-              input_focus: "not_ready",
-              lifecycle: "exited",
-              nativeApp: { appId: "other-surface-app", args: ["wrong"], launchMode: "new_instance" },
-              nativeHost: { bindingId: "other-surface-binding", contentId: "other-surface-content" },
-            },
-            {
-              id: currentPaneId,
-              input_focus: "ready",
-              lifecycle: "running",
-              nativeApp,
-              nativeHost: { bindingId, contentId },
-            },
-          ],
+          native_pane_window_groups: currentCase.lifecycle.state === "attached"
+            ? [otherGroup, currentGroup]
+            : [otherGroup],
+          panes: [otherPaneStatus, currentPaneStatus],
+          ...(runtime === undefined ? {} : { runtime }),
         };
       }
       socket.end(`${JSON.stringify({ ok: true, status })}\n`);
@@ -512,36 +622,42 @@ test("native readiness and proof match compositor-qualified pane IDs across surf
     client = await connect(`ws://127.0.0.1:${server.port}/ws`);
     assert.equal((await pair(client, "native-readiness-status-client", surface.surfaceId)).ok, true);
     const pane = core.pairState(surface.surfaceId).panes.find((candidate) => Number(candidate.paneId) === paneId)!;
-    const resultEvent = nextEvent(client, "event.target_apply_result");
-    const accepted = await request(client, "target.apply", {
-      paneId,
-      paneLineageId: pane.paneLineageId,
-      requestId: "native-readiness-qualified-pane",
-      restoreReason: "initial",
-      surfaceId: surface.surfaceId,
-      targetEpoch: 1,
-      targetHeader: {
-        payloadSchemaVersion: 1,
-        replaySemantics: "launch_equivalent",
-        requiredCapabilities: ["target.native_app.v1"],
-        safeToLogFields: ["appId"],
-        safetyClass: "process",
-        summary: "qualified native readiness fixture",
-      },
-      targetId: "target_native_readiness_fixture",
-      targetKind: "native_app",
-      targetPayload: { appId: "native-readiness-fixture", args: [], launchMode: "new_instance" },
-    });
-    assert.equal(accepted.payload.status, "intent_committed");
-    const result = await resultEvent;
-    assert.equal(result.payload.status, "applied", JSON.stringify(result));
     assert.notEqual(currentPaneId, otherPaneId);
     assert.ok(currentPaneId.endsWith(":1:7"));
     assert.ok(otherPaneId.endsWith(":1:7"));
-    assert.equal(result.payload.materializedState.lifecycle, "running");
-    assert.equal(result.payload.materializedState.inputFocus, "ready");
-    assert.equal(result.payload.materializedState.proof?.appId, "native-readiness-fixture");
-    assert.equal(result.payload.materializedState.proof?.paneId, currentPaneId);
+    for (const [index, readinessCase] of cases.entries()) {
+      currentCase = readinessCase;
+      const appId = `native-readiness-${readinessCase.name.replaceAll(" ", "-")}`;
+      const resultEvent = nextEvent(client, "event.target_apply_result");
+      const accepted = await request(client, "target.apply", {
+        paneId,
+        paneLineageId: pane.paneLineageId,
+        requestId: `native-readiness-${index}`,
+        restoreReason: "initial",
+        surfaceId: surface.surfaceId,
+        targetEpoch: index + 1,
+        targetHeader: {
+          payloadSchemaVersion: 1,
+          replaySemantics: "launch_equivalent",
+          requiredCapabilities: ["target.native_app.v1"],
+          safeToLogFields: ["appId"],
+          safetyClass: "process",
+          summary: `T316 lifecycle and focus case: ${readinessCase.name}`,
+        },
+        targetId: `target_native_readiness_fixture_${index}`,
+        targetKind: "native_app",
+        targetPayload: { appId, args: [], launchMode: "new_instance" },
+      });
+      assert.equal(accepted.payload.status, "intent_committed", JSON.stringify(accepted));
+      const result = await resultEvent;
+      assert.equal(result.payload.status, "applied", JSON.stringify(result));
+      assert.equal(result.payload.materializedState.lifecycle, readinessCase.expectedLifecycle, readinessCase.name);
+      assert.equal(result.payload.materializedState.inputFocus, readinessCase.expectedInputFocus, readinessCase.name);
+      if (readinessCase.focus === "current") {
+        assert.equal(result.payload.materializedState.proof?.appId, appId);
+        assert.equal(result.payload.materializedState.proof?.paneId, currentPaneId);
+      }
+    }
   } finally {
     client?.close();
     await server.stop();

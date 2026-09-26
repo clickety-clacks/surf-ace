@@ -533,7 +533,7 @@ test("validateEnvelopeType accepts target.apply.result responses", () => {
   assert.deepEqual(result, { ok: true });
 });
 
-test("validateEnvelopeType accepts target.apply.result native app proof state", () => {
+test("validateEnvelopeType accepts target.apply.result native app proof and failed lifecycle state", () => {
   const result = validateEnvelopeType("target.apply", {
     id: "req_target",
     ok: true,
@@ -546,6 +546,7 @@ test("validateEnvelopeType accepts target.apply.result native app proof state", 
           surfaceId: "sf_1",
           targetEpoch: 1,
         },
+        lifecycle: "failed",
         nativeHost: "applied",
         nativeTarget: {
           appId: "com.example.App",
