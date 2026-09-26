@@ -38,6 +38,96 @@ import { runLinuxStateDriver, validateTightbeamStateSequence } from "./smoke-tig
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 
 const exec = promisify(execFile);
+const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+
+function workflowRunScript(workflow, stepName) {
+  const marker = `      - name: ${stepName}\n`;
+  const stepOffset = workflow.indexOf(marker);
+  assert.notEqual(stepOffset, -1, `missing workflow step: ${stepName}`);
+  const runMarker = "        run: |\n";
+  const runOffset = workflow.indexOf(runMarker, stepOffset + marker.length);
+  assert.notEqual(runOffset, -1, `missing run block: ${stepName}`);
+  const lines = workflow.slice(runOffset + runMarker.length).split("\n");
+  const body = [];
+  for (const line of lines) {
+    if (line.startsWith("          ")) body.push(line.slice(10));
+    else if (line === "") body.push("");
+    else break;
+  }
+  return body.join("\n").trimEnd();
+}
+
+async function workflowAtRevision(revision, relativePath) {
+  return (await exec("git", ["show", `${revision}:${relativePath}`], { cwd: repository })).stdout;
+}
+
+async function runWorkflowGuard(t, script, overrides = {}) {
+  const root = await temporary(t);
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, "gh"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const [command, endpoint] = process.argv.slice(2);
+fs.appendFileSync(process.env.GH_LOG, JSON.stringify({ command, endpoint }) + "\\n");
+if (command !== "api") process.exit(90);
+if (endpoint.endsWith("/git/ref/tags/" + process.env.TOOLING_TAG)) {
+  console.log("commit " + process.env.MOCK_TOOLING_REMOTE);
+} else if (endpoint.endsWith("/git/ref/tags/" + process.env.PRODUCT_TAG)) {
+  console.log("commit " + process.env.MOCK_PRODUCT_REMOTE);
+} else if (endpoint.includes("/actions/runs/")) {
+  console.log([
+    process.env.MOCK_GATE4_EVENT,
+    process.env.MOCK_GATE4_STATUS,
+    process.env.MOCK_GATE4_CONCLUSION,
+    process.env.MOCK_GATE4_HEAD_SHA,
+    process.env.MOCK_GATE4_PATH,
+  ].join("\\t"));
+} else {
+  process.exit(91);
+}
+`, { mode: 0o755 });
+  await fs.writeFile(ghLog, "");
+
+  const toolingCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const productCommit = "58ac8c435679e6611903d31abaecec11bb9d7f75";
+  const toolingTag = "surf-ace-release-tooling-openclaw-v0.1.2";
+  const environment = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    GH_LOG: ghLog,
+    GH_TOKEN: "test-token",
+    GITHUB_REPOSITORY: "clickety-clacks/surf-ace",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_REF_TYPE: "tag",
+    GITHUB_REF: `refs/tags/${toolingTag}`,
+    GITHUB_SHA: toolingCommit,
+    TOOLING_TAG: toolingTag,
+    PRODUCT_TAG: "surf-ace-openclaw-v0.1.0",
+    PRODUCT_COMMIT: productCommit,
+    GATE4_RUN_ID: "123456",
+    TRIGGER_REF: "refs/heads/release/run-tightbeam-v0.2.0",
+    MOCK_TOOLING_REMOTE: toolingCommit,
+    MOCK_PRODUCT_REMOTE: productCommit,
+    MOCK_GATE4_EVENT: "workflow_dispatch",
+    MOCK_GATE4_STATUS: "completed",
+    MOCK_GATE4_CONCLUSION: "success",
+    MOCK_GATE4_HEAD_SHA: toolingCommit,
+    MOCK_GATE4_PATH: ".github/workflows/release-openclaw.yml",
+    ...overrides,
+  };
+  try {
+    const result = await exec("/bin/bash", ["-c", script], { cwd: root, env: environment });
+    return { ...result, exitCode: 0, ghLog: await fs.readFile(ghLog, "utf8") };
+  } catch (error) {
+    return {
+      exitCode: error.code,
+      stdout: error.stdout ?? "",
+      stderr: error.stderr ?? "",
+      ghLog: await fs.readFile(ghLog, "utf8"),
+    };
+  }
+}
 
 async function temporary(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-release-test-"));
@@ -389,23 +479,82 @@ test("Tightbeam v0.2.0 binds the reviewed cutoff, same-architecture baseline, an
   });
 });
 
-test("channel tooling identities remain distinct and reject cross-channel or reserved tag selection", () => {
-  const expected = Object.freeze({
-    openclaw: "surf-ace-release-tooling-openclaw-v0.1.2",
-    tightbeam: TOOLING_TAG,
-  });
-  const reserved = "surf-ace-release-tooling-openclaw-v0.1.1";
-  const requireChannelTag = (channel, actual) => {
-    if (actual !== expected[channel]) throw new Error(`${channel}_tooling_tag_mismatch:${actual}`);
-    if (actual === reserved) throw new Error(`reserved_tooling_tag:${actual}`);
-  };
+test("committed channel guards enforce their actual selected tooling tags", async (t) => {
+  const predecessor = "6bdf393a234c73174185032e61b0b155d65124d4";
+  const openclawTag = "surf-ace-release-tooling-openclaw-v0.1.2";
+  const tightbeamTag = TOOLING_TAG;
+  const reservedTag = "surf-ace-release-tooling-openclaw-v0.1.1";
+  const arbitraryTag = "surf-ace-release-tooling-other-v9.9.9";
+  const gate4Path = ".github/workflows/release-openclaw.yml";
+  const gate5Path = ".github/workflows/release-openclaw-gate5.yml";
+  const gate4Step = "Require immutable tooling dispatch and product tag";
+  const gate5Step = "Require an exact successful Gate 4 run and immutable refs";
+  const gate4 = workflowRunScript(await fs.readFile(path.join(repository, gate4Path), "utf8"), gate4Step);
+  const gate5 = workflowRunScript(await fs.readFile(path.join(repository, gate5Path), "utf8"), gate5Step);
+  const predecessorGate4 = workflowRunScript(await workflowAtRevision(predecessor, gate4Path), gate4Step);
+  const predecessorGate5 = workflowRunScript(await workflowAtRevision(predecessor, gate5Path), gate5Step);
 
-  assert.notEqual(expected.openclaw, expected.tightbeam);
-  assert.doesNotThrow(() => requireChannelTag("openclaw", expected.openclaw));
-  assert.doesNotThrow(() => requireChannelTag("tightbeam", expected.tightbeam));
-  assert.throws(() => requireChannelTag("openclaw", expected.tightbeam), /openclaw_tooling_tag_mismatch/);
-  assert.throws(() => requireChannelTag("tightbeam", expected.openclaw), /tightbeam_tooling_tag_mismatch/);
-  assert.throws(() => requireChannelTag("openclaw", reserved), /openclaw_tooling_tag_mismatch/);
+  for (const [name, script] of [["Gate 4", predecessorGate4], ["Gate 5", predecessorGate5]]) {
+    await t.test(`${name} predecessor accepted the Tightbeam tag at the same tooling commit`, async (t) => {
+      const result = await runWorkflowGuard(t, script, {
+        TOOLING_TAG: tightbeamTag,
+        GITHUB_REF: `refs/tags/${tightbeamTag}`,
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+    });
+  }
+
+  for (const [name, script] of [["Gate 4", gate4], ["Gate 5", gate5]]) {
+    await t.test(`${name} accepts only its own valid channel dispatch`, async (t) => {
+      const result = await runWorkflowGuard(t, script);
+      assert.equal(result.exitCode, 0, result.stderr);
+    });
+    for (const rejectedTag of [tightbeamTag, reservedTag, arbitraryTag]) {
+      await t.test(`${name} rejects ${rejectedTag} even when it peels to the same commit`, async (t) => {
+        const result = await runWorkflowGuard(t, script, {
+          TOOLING_TAG: rejectedTag,
+          GITHUB_REF: `refs/tags/${rejectedTag}`,
+        });
+        assert.notEqual(result.exitCode, 0);
+        assert.equal(result.ghLog, "", "wrong-channel tag must stop before any GitHub API call");
+      });
+    }
+    for (const [failure, overrides] of [
+      ["wrong event", { GITHUB_EVENT_NAME: "push" }],
+      ["wrong ref type", { GITHUB_REF_TYPE: "branch" }],
+      ["wrong ref", { GITHUB_REF: `refs/tags/${openclawTag}-other` }],
+      ["wrong tooling peel", { MOCK_TOOLING_REMOTE: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }],
+      ["wrong product peel", { MOCK_PRODUCT_REMOTE: "cccccccccccccccccccccccccccccccccccccccc" }],
+    ]) {
+      await t.test(`${name} rejects ${failure}`, async (t) => {
+        const result = await runWorkflowGuard(t, script, overrides);
+        assert.notEqual(result.exitCode, 0);
+      });
+    }
+  }
+
+  await t.test("Gate 5 rejects a mismatched Gate 4 receipt", async (t) => {
+    const result = await runWorkflowGuard(t, gate5, {
+      MOCK_GATE4_HEAD_SHA: "dddddddddddddddddddddddddddddddddddddddd",
+    });
+    assert.notEqual(result.exitCode, 0);
+  });
+
+  await t.test("Tightbeam committed guard accepts its own valid channel dispatch", async (t) => {
+    const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
+    const script = workflowRunScript(workflow, "Require immutable tooling dispatch and reviewed product tag");
+    const result = await runWorkflowGuard(t, script, {
+      GITHUB_EVENT_NAME: "push",
+      GITHUB_REF_TYPE: "branch",
+      GITHUB_REF: "refs/heads/release/run-tightbeam-v0.2.0",
+      GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      TOOLING_TAG: tightbeamTag,
+      PRODUCT_TAG: "surf-ace-tightbeam-v0.2.0",
+      PRODUCT_COMMIT: "8fc9f508ae9b4371a3c25f6318920940fbad10cd",
+      MOCK_PRODUCT_REMOTE: "8fc9f508ae9b4371a3c25f6318920940fbad10cd",
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+  });
 });
 
 test("Tightbeam Linux stage contains only the standalone CLI, callable server closure, schemas, and lifecycle docs", async (t) => {
@@ -845,12 +994,18 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
   const specificationPath = path.join(repository, "docs/release/openclaw-tightbeam-release-split.md");
   const specification = await fs.readFile(specificationPath, "utf8");
-  assert.equal(await sha256(specificationPath), "aeef6b105d28c453fa185f1949be480fc802c204ff59d089384427574ad37cf0");
+  assert.equal(await sha256(specificationPath), "fceccf7de4241f8dd4a4d788310d221cbf009e4e4f4d68fe4a2abdce5cbb471e");
   assert.match(specification, /58ac8c435679e6611903d31abaecec11bb9d7f75/);
   assert.match(specification, /8fc9f508ae9b4371a3c25f6318920940fbad10cd/);
   assert.match(specification, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.match(specification, /surf-ace-release-tooling-v0\.1\.1/);
   assert.match(specification, /surf-ace-release-tooling-openclaw-v0\.1\.2/);
+  assert.equal((specification.match(/surf-ace-release-tooling-v0\.1\.0/g) ?? []).length, 1);
+  assert.match(specification, /surf-ace-release-tooling-v0\.1\.0` points to\n`9d8ca5a490a32a57c5177e4769aef4100dd5f5bf`/);
+  assert.match(specification, /incident tag `surf-ace-release-tooling-openclaw-v0\.1\.1` is present and\nreserved/);
+  assert.match(specification, /26ce99cf43463e817c5322c8793bcdd2d9eadc2e/);
+  assert.match(specification, /failed Gate 4 runs `36222148637` and `36222183104`/);
+  assert.doesNotMatch(specification, /absent incident|currently absent incident/);
   assert.match(specification, /surf-ace-tightbeam-v0\.2\.0` always resolves to exact product commit/);
   assert.match(specification, /Any copied or generated rendering is non-authoritative/);
   assert.doesNotMatch(specification, /surf-ace-tightbeam-v0\.2\.0` at the exact new `main` commit/);
@@ -891,10 +1046,13 @@ test("OpenClaw Gate 4 dispatch cannot reach smoke or publication", async () => {
   assert.doesNotMatch(workflow, /^\s+push:/m);
   assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
   assert.match(workflow, /test "\$\{GITHUB_REF_TYPE\}" = tag/);
+  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.2/);
   assert.match(workflow, /test "\$\{GITHUB_REF\}" = "refs\/tags\/\$\{TOOLING_TAG\}"/);
   assert.match(workflow, /tooling_remote="\$\(peel_tag "\$\{TOOLING_TAG\}"\)"/);
   assert.match(workflow, /test "\$\{tooling_remote\}" = "\$\{GITHUB_SHA\}"/);
   assert.doesNotMatch(workflow, /surf-ace-release-tooling-v0\.1\.1/);
+  assert.match(workflow, /^  build:\n    needs: guard/m);
+  assert.match(workflow, /^  compare:\n    needs: build/m);
   assert.match(workflow, /^  compare:/m);
   assert.doesNotMatch(workflow, /^  smoke:/m);
   assert.doesNotMatch(workflow, /^  attest-and-publish:/m);
@@ -988,10 +1146,11 @@ test("OpenClaw Gate 5 requires a separate exact successful Gate 4 run", async ()
   assert.doesNotMatch(workflow, /^\s+push:/m);
   assert.match(workflow, /gate4_run_id:/);
   assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
+  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.2/);
   assert.match(workflow, /test "\$\{gate4_conclusion\}" = success/);
   assert.match(workflow, /test "\$\{gate4_head_sha\}" = "\$\{GITHUB_SHA\}"/);
   assert.match(workflow, /test "\$\{gate4_path\}" = \.github\/workflows\/release-openclaw\.yml/);
   assert.match(workflow, /run-id: \$\{\{ inputs\.gate4_run_id \}\}/);
-  assert.match(workflow, /^  smoke:/m);
-  assert.match(workflow, /^  attest-and-publish:/m);
+  assert.match(workflow, /^  smoke:\n    needs: guard/m);
+  assert.match(workflow, /^  attest-and-publish:\n    needs: smoke/m);
 });

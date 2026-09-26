@@ -40,6 +40,7 @@ jobs:
           }
           test "${GITHUB_EVENT_NAME}" = workflow_dispatch
           test "${GITHUB_REF_TYPE}" = tag
+          test "${TOOLING_TAG}" = surf-ace-release-tooling-openclaw-v0.1.2
           test "${GITHUB_REF}" = "refs/tags/${TOOLING_TAG}"
           tooling_remote="$(peel_tag "${TOOLING_TAG}")"
           product_remote="$(peel_tag "${PRODUCT_TAG}")"

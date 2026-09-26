@@ -72,8 +72,10 @@ smoke before publication.
 ## Invariants
 
 1. `surf-ace-openclaw-v0.1.0` always resolves to `58ac8c4`.
-2. `surf-ace-release-tooling-v0.1.0` always resolves to the one reviewed
-   tooling commit approved at Gate 2.
+2. `surf-ace-release-tooling-v0.1.1` and
+   `surf-ace-release-tooling-openclaw-v0.1.2` each resolve to the exact
+   reviewed tooling commit approved for their channel at Gate 2. The distinct
+   immutable names may peel to the same commit.
 3. A published tag, checksum, manifest, and file never change.
 4. GitHub Actions builds every public file from its recorded product source
    tag while executing only tooling checked out at the recorded tooling tag.
@@ -184,8 +186,13 @@ per-invocation controller and lacks the required resident behavior.
 Gate 2 adds the repository-owned release programs under
 `scripts/release/` and workflows under `.github/workflows/`. An independent
 review approves their exact implementation commit. The release owner then
-creates `surf-ace-release-tooling-v0.1.0` at that commit and verifies the
-remote tag peels to the reviewed full SHA.
+creates the channel-specific immutable tags
+`surf-ace-release-tooling-v0.1.1` and
+`surf-ace-release-tooling-openclaw-v0.1.2` at that commit and verifies both
+remote tags peel to the reviewed full SHA. The historical tooling tag
+`surf-ace-release-tooling-v0.1.0` points to
+`9d8ca5a490a32a57c5177e4769aef4100dd5f5bf`; it is retained as history only
+and is not a checkout or creation target under this revision.
 
 Every release job checks that tooling tag into `tooling/` and checks the
 product source tag into a separate new `source/` directory. Commands that
@@ -208,9 +215,13 @@ paths, after retaining only the compared files and receipts. Tightbeam v0.2.0
 uses `surf-ace-release-tooling-v0.1.1`; the corrected OpenClaw gates use
 `surf-ace-release-tooling-openclaw-v0.1.2`. Both may peel to one exact reviewed
 tooling commit, but every manifest and guard retains its channel's actual tag.
-The currently absent incident name `surf-ace-release-tooling-openclaw-v0.1.1`
-remains reserved and is not evidence of an unused or reusable name. Its two
-failed Gate 4 runs remain historical evidence and authorize no retry.
+The incident tag `surf-ace-release-tooling-openclaw-v0.1.1` is present and
+reserved: annotated object `26ce99cf43463e817c5322c8793bcdd2d9eadc2e`
+peels to `8fc9f508ae9b4371a3c25f6318920940fbad10cd`. Its presence is
+not evidence of an unused or reusable name, and no cause is inferred for its
+creation. The earlier workflow could not enforce this new channel guard. Its
+failed Gate 4 runs `36222148637` and `36222183104` remain historical evidence
+and authorize no retry.
 
 ### Reproducible builds
 
@@ -548,8 +559,10 @@ The release must follow these gates in order:
 3. Under separate tooling-tag authority, the release owner creates distinct
    immutable tags `surf-ace-release-tooling-v0.1.1` and
    `surf-ace-release-tooling-openclaw-v0.1.2` at the same reviewed tooling
-   commit and verifies both remote peels. The absent incident tag
-   `surf-ace-release-tooling-openclaw-v0.1.1` remains reserved and untouched.
+   commit and verifies both remote peels. The present incident tag
+   `surf-ace-release-tooling-openclaw-v0.1.1` remains reserved and untouched;
+   annotated object `26ce99cf43463e817c5322c8793bcdd2d9eadc2e`
+   peels to `8fc9f508ae9b4371a3c25f6318920940fbad10cd`.
 4. The release owner creates `release/openclaw-final` and immutable tag
    `surf-ace-openclaw-v0.1.0` at exact commit `58ac8c4`. The owner verifies
    both remote refs peel to that commit.
