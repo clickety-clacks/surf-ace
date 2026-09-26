@@ -244,7 +244,7 @@ async function waitForTargetCounts(
   );
 }
 
-test("pane focus changes reach the compositor with the current surface and geometry identity", async () => {
+test("pane focus changes reach the compositor through its runtime focus target API", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -323,7 +323,7 @@ test("pane focus changes reach the compositor with the current surface and geome
       }
       const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
       compositorRequestTypes.push(String(request.type));
-      if (request.type === "native_pane.focus") {
+      if (request.type === "set_runtime_focus_target") {
         resolveFocusRequest(request);
       }
       socket.end(`${JSON.stringify({
@@ -351,16 +351,10 @@ test("pane focus changes reach the compositor with the current surface and geome
     await server.start();
     core.setActiveKeyboardPane(surface.surfaceId, 9);
     const focusRequestPayload = await focusRequest;
-    const focus = core.projectNativePaneFocus(surface.surfaceId);
 
     assert.deepEqual(focusRequestPayload, {
-      focused_pane_id: "9",
-      focused_pane_instance_id: focus.focusedPaneInstanceId,
-      geometry_revision: Number(focus.geometryRevision),
-      surface_epoch: focus.surfaceEpoch,
-      surface_id: surface.surfaceId,
-      topology_epoch: Number(focus.topologyEpoch),
-      type: "native_pane.focus",
+      target: { native_pane: { pane_id: "9" } },
+      type: "set_runtime_focus_target",
     });
 
     client = await connect(`ws://127.0.0.1:${server.port}/ws`);

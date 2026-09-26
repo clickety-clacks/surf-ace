@@ -177,13 +177,15 @@ export type CompositorControlRequest =
     type: "get_status";
   }
   | {
-    focused_pane_id: string | null;
-    focused_pane_instance_id: string | null;
-    geometry_revision: Revision;
-    surface_epoch: string;
-    surface_id: string;
-    topology_epoch: TopologyRevision;
-    type: "native_pane.focus";
+    target: {
+      native_pane: {
+        pane_id: string;
+      };
+    };
+    type: "set_runtime_focus_target";
+  }
+  | {
+    type: "clear_runtime_focus_target";
   }
   | {
     focused_pane_id: string | null;
@@ -279,9 +281,12 @@ export function requestForCompositor(
 export function nativePaneFocusRequestForCompositor(
   focus: NativePaneFocusProjection,
 ): CompositorControlRequest {
+  if (focus.focusedPaneId === null) {
+    return { type: "clear_runtime_focus_target" };
+  }
   return {
-    ...nativePaneFocusFieldsForCompositor(focus),
-    type: "native_pane.focus",
+    target: { native_pane: { pane_id: focus.focusedPaneId } },
+    type: "set_runtime_focus_target",
   };
 }
 

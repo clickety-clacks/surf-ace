@@ -115,13 +115,14 @@ test("native pane bridge serializes host and overlay requests from protocol mate
     type: "native_pane.host",
   });
   assert.deepEqual(nativePaneFocusRequestForCompositor(input.focus), {
-    focused_pane_id: "118",
-    focused_pane_instance_id: "pl_118",
-    geometry_revision: 3,
-    surface_epoch: "sf_test:1",
-    surface_id: "sf_test",
-    topology_epoch: 2,
-    type: "native_pane.focus",
+    target: { native_pane: { pane_id: "118" } },
+    type: "set_runtime_focus_target",
+  });
+  assert.deepEqual(nativePaneFocusRequestForCompositor({
+    ...input.focus,
+    focusedPaneId: null,
+  }), {
+    type: "clear_runtime_focus_target",
   });
   assert.deepEqual(overlayRequestForCompositor(input), {
     ...input.overlaySet,
