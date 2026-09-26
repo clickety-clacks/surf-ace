@@ -313,6 +313,8 @@ test("OpenClaw Electron packaging is explicitly nonpublishing in ordinary and ta
     const packagerArgs = calls[1].args;
     assert.equal(packagerArgs.filter((argument) => argument === "--publish").length, 1);
     assert.equal(packagerArgs.at(packagerArgs.indexOf("--publish") + 1), "never");
+    assert.equal(calls[0].env.CSC_IDENTITY_AUTO_DISCOVERY, "false");
+    assert.equal(calls[1].env.CSC_IDENTITY_AUTO_DISCOVERY, "false");
     assert.equal(calls.some(({ args, command }) => /(?:github|release|upload)/i.test([command, ...args].join(" "))), false);
   }
 

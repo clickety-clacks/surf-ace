@@ -72,10 +72,14 @@ export async function normalizeOpenclawDependencyClosure(sourceDir, dependencyCl
 }
 
 export async function packageOpenclawElectron(sourceArgument, runCommand = run, environment = process.env) {
+  const packagingEnvironment = {
+    ...environment,
+    CSC_IDENTITY_AUTO_DISCOVERY: "false",
+  };
   await runCommand(
     "pnpm",
     ["--dir", sourceArgument, "--filter", "@surf-ace/electron", "build"],
-    { env: environment },
+    { env: packagingEnvironment },
   );
   await runCommand(
     "pnpm",
@@ -83,7 +87,7 @@ export async function packageOpenclawElectron(sourceArgument, runCommand = run, 
       "--dir", sourceArgument, "--filter", "@surf-ace/electron", "exec",
       "electron-builder", "--mac", "dir", "--arm64", "--publish", "never",
     ],
-    { env: environment },
+    { env: packagingEnvironment },
   );
 }
 
