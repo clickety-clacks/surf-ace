@@ -40,6 +40,9 @@ import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs
 const exec = promisify(execFile);
 const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const { buildOpenclawRelease } = openclawReleaseBuilder;
+const reviewedOpenclawToolingBase = "61c70f99f4d2ba00248f5117e3c927c03e8cb7ba";
+const openclawToolingTag = "surf-ace-release-tooling-openclaw-v0.1.3";
+const consumedOpenclawToolingTag = "surf-ace-release-tooling-openclaw-v0.1.2";
 
 function workflowRunScript(workflow, stepName) {
   const marker = `      - name: ${stepName}\n`;
@@ -92,7 +95,7 @@ if (endpoint.endsWith("/git/ref/tags/" + process.env.TOOLING_TAG)) {
 
   const toolingCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const productCommit = "58ac8c435679e6611903d31abaecec11bb9d7f75";
-  const toolingTag = "surf-ace-release-tooling-openclaw-v0.1.2";
+  const toolingTag = openclawToolingTag;
   const environment = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
@@ -279,8 +282,8 @@ test("OpenClaw Electron packaging is explicitly nonpublishing in ordinary and ta
     { PATH: process.env.PATH },
     {
       PATH: process.env.PATH,
-      GITHUB_REF: "refs/tags/surf-ace-release-tooling-openclaw-v0.1.2",
-      GITHUB_REF_NAME: "surf-ace-release-tooling-openclaw-v0.1.2",
+      GITHUB_REF: `refs/tags/${openclawToolingTag}`,
+      GITHUB_REF_NAME: openclawToolingTag,
       GITHUB_REF_TYPE: "tag",
     },
   ]) {
@@ -606,7 +609,7 @@ test("Tightbeam v0.2.0 binds the reviewed cutoff, same-architecture baseline, an
 
 test("committed channel guards enforce their actual selected tooling tags", async (t) => {
   const predecessor = "6bdf393a234c73174185032e61b0b155d65124d4";
-  const openclawTag = "surf-ace-release-tooling-openclaw-v0.1.2";
+  const openclawTag = openclawToolingTag;
   const tightbeamTag = TOOLING_TAG;
   const reservedTag = "surf-ace-release-tooling-openclaw-v0.1.1";
   const arbitraryTag = "surf-ace-release-tooling-other-v9.9.9";
@@ -618,6 +621,8 @@ test("committed channel guards enforce their actual selected tooling tags", asyn
   const gate5 = workflowRunScript(await fs.readFile(path.join(repository, gate5Path), "utf8"), gate5Step);
   const predecessorGate4 = workflowRunScript(await workflowAtRevision(predecessor, gate4Path), gate4Step);
   const predecessorGate5 = workflowRunScript(await workflowAtRevision(predecessor, gate5Path), gate5Step);
+  const reviewedBaseGate4 = workflowRunScript(await workflowAtRevision(reviewedOpenclawToolingBase, gate4Path), gate4Step);
+  const reviewedBaseGate5 = workflowRunScript(await workflowAtRevision(reviewedOpenclawToolingBase, gate5Path), gate5Step);
 
   for (const [name, script] of [["Gate 4", predecessorGate4], ["Gate 5", predecessorGate5]]) {
     await t.test(`${name} predecessor accepted the Tightbeam tag at the same tooling commit`, async (t) => {
@@ -629,12 +634,22 @@ test("committed channel guards enforce their actual selected tooling tags", asyn
     });
   }
 
+  for (const [name, script] of [["Gate 4", reviewedBaseGate4], ["Gate 5", reviewedBaseGate5]]) {
+    await t.test(`${name} reviewed base accepted the consumed v0.1.2 tag`, async (t) => {
+      const result = await runWorkflowGuard(t, script, {
+        TOOLING_TAG: consumedOpenclawToolingTag,
+        GITHUB_REF: `refs/tags/${consumedOpenclawToolingTag}`,
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+    });
+  }
+
   for (const [name, script] of [["Gate 4", gate4], ["Gate 5", gate5]]) {
     await t.test(`${name} accepts only its own valid channel dispatch`, async (t) => {
       const result = await runWorkflowGuard(t, script);
       assert.equal(result.exitCode, 0, result.stderr);
     });
-    for (const rejectedTag of [tightbeamTag, reservedTag, arbitraryTag]) {
+    for (const rejectedTag of [consumedOpenclawToolingTag, tightbeamTag, reservedTag, arbitraryTag]) {
       await t.test(`${name} rejects ${rejectedTag} even when it peels to the same commit`, async (t) => {
         const result = await runWorkflowGuard(t, script, {
           TOOLING_TAG: rejectedTag,
@@ -1119,12 +1134,13 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
   const specificationPath = path.join(repository, "docs/release/openclaw-tightbeam-release-split.md");
   const specification = await fs.readFile(specificationPath, "utf8");
-  assert.equal(await sha256(specificationPath), "fceccf7de4241f8dd4a4d788310d221cbf009e4e4f4d68fe4a2abdce5cbb471e");
+  assert.equal(await sha256(specificationPath), "b751e0979cfcdad9d83024ea2e4a323158e04c8f7b089ec4b4d6560d37e38e17");
   assert.match(specification, /58ac8c435679e6611903d31abaecec11bb9d7f75/);
   assert.match(specification, /8fc9f508ae9b4371a3c25f6318920940fbad10cd/);
   assert.match(specification, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.match(specification, /surf-ace-release-tooling-v0\.1\.1/);
-  assert.match(specification, /surf-ace-release-tooling-openclaw-v0\.1\.2/);
+  assert.match(specification, /surf-ace-release-tooling-openclaw-v0\.1\.3/);
+  assert.match(specification, /consumed predecessor\s+`surf-ace-release-tooling-openclaw-v0\.1\.2` remains immutable history/);
   assert.equal((specification.match(/surf-ace-release-tooling-v0\.1\.0/g) ?? []).length, 1);
   assert.match(specification, /surf-ace-release-tooling-v0\.1\.0` points to\n`9d8ca5a490a32a57c5177e4769aef4100dd5f5bf`/);
   assert.match(specification, /incident tag `surf-ace-release-tooling-openclaw-v0\.1\.1` is present and\nreserved/);
@@ -1135,6 +1151,19 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   assert.match(specification, /Any copied or generated rendering is non-authoritative/);
   assert.doesNotMatch(specification, /surf-ace-tightbeam-v0\.2\.0` at the exact new `main` commit/);
   assert.doesNotMatch(specification, /resident controller, thin Rust CLI, systemd unit/);
+  const openclawCommandsMarker = "Instead, it must run these exact build and frozen-deployment commands:\n\n```sh\n";
+  const openclawCommandsOffset = specification.indexOf(openclawCommandsMarker);
+  assert.notEqual(openclawCommandsOffset, -1, "missing canonical OpenClaw build command block");
+  const openclawCommandsEnd = specification.indexOf("\n```", openclawCommandsOffset + openclawCommandsMarker.length);
+  assert.notEqual(openclawCommandsEnd, -1, "unterminated canonical OpenClaw build command block");
+  const documentedOpenclawCommands = specification
+    .slice(openclawCommandsOffset + openclawCommandsMarker.length, openclawCommandsEnd)
+    .replaceAll(/\\\n\s*/g, " ")
+    .split("\n")
+    .filter(Boolean);
+  assert.deepEqual(documentedOpenclawCommands, OPENCLAW_BUILD_COMMANDS.slice(2, -1));
+  assert.equal(documentedOpenclawCommands.filter((command) => command.includes("--publish never")).length, 1);
+  assert.ok(documentedOpenclawCommands.every((command) => !command.endsWith("@surf-ace/electron package")));
   assert.ok((await lockedPackages(path.join(repository, "pnpm-lock.yaml"))).size > 100);
   assert.ok((await cargoLockedPackages(path.join(repository, "packages/cli/Cargo.lock"))).length > 10);
   for (const workflow of ["release-openclaw.yml", "release-openclaw-gate5.yml", "release-tightbeam.yml"]) {
@@ -1171,7 +1200,7 @@ test("OpenClaw Gate 4 dispatch cannot reach smoke or publication", async () => {
   assert.doesNotMatch(workflow, /^\s+push:/m);
   assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
   assert.match(workflow, /test "\$\{GITHUB_REF_TYPE\}" = tag/);
-  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.2/);
+  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.3/);
   assert.match(workflow, /test "\$\{GITHUB_REF\}" = "refs\/tags\/\$\{TOOLING_TAG\}"/);
   assert.match(workflow, /tooling_remote="\$\(peel_tag "\$\{TOOLING_TAG\}"\)"/);
   assert.match(workflow, /test "\$\{tooling_remote\}" = "\$\{GITHUB_SHA\}"/);
@@ -1271,7 +1300,7 @@ test("OpenClaw Gate 5 requires a separate exact successful Gate 4 run", async ()
   assert.doesNotMatch(workflow, /^\s+push:/m);
   assert.match(workflow, /gate4_run_id:/);
   assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
-  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.2/);
+  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.3/);
   assert.match(workflow, /test "\$\{gate4_conclusion\}" = success/);
   assert.match(workflow, /test "\$\{gate4_head_sha\}" = "\$\{GITHUB_SHA\}"/);
   assert.match(workflow, /test "\$\{gate4_path\}" = \.github\/workflows\/release-openclaw\.yml/);
