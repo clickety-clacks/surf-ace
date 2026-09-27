@@ -11,6 +11,7 @@ import {
   compositorFailureMessage,
   isOverlayNativePaneLivenessFailure,
   nativePaneFocusRequestForCompositor,
+  nativePaneCompositorRuntimeStatusFromStatus,
   nativePaneInstanceIdsForCompositor,
   nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
@@ -102,31 +103,59 @@ test("native pane bridge serializes host and overlay requests from protocol mate
   const input = materialization();
   const compositorPaneId = "surf-ace-pane:v1:7:sf_test:3:118";
 
-  assert.deepEqual(requestForCompositor(input), {
+  const request = requestForCompositor(input);
+  assert.deepEqual(request, {
+    focus_revision: 0,
     focused_pane_id: compositorPaneId,
     focused_pane_instance_id: "pl_118",
     geometry_revision: 3,
     panes: input.panes.map((pane) => ({
       ...pane,
       id: compositorPaneId,
+      ...(pane.windowGroup ? {
+        windowGroup: {
+          ...pane.windowGroup,
+          launchIdentity: { ...pane.windowGroup.launchIdentity, paneId: compositorPaneId },
+        },
+      } : {}),
       ...(pane.windowGroup?.launchIdentity.launchToken
         ? { launchToken: pane.windowGroup.launchIdentity.launchToken }
         : {}),
     })),
+    presentation_generation: {
+      focus_revision: 0,
+      geometry_revision: 3,
+      pane_instances: { [compositorPaneId]: "pl_118" },
+      surface_epoch: "sf_test:1",
+      surface_id: "sf_test",
+      topology_epoch: 2,
+    },
     surface_epoch: "sf_test:1",
     surface_id: "sf_test",
     topology_epoch: 2,
     type: "native_pane.host",
   });
+  const focusGeneration = {
+    focus_revision: 0,
+    focused_pane_id: compositorPaneId,
+    focused_pane_instance_id: "pl_118",
+    geometry_revision: 3,
+    surface_epoch: "sf_test:1",
+    surface_id: "sf_test",
+    topology_epoch: 2,
+  };
   assert.deepEqual(nativePaneFocusRequestForCompositor(input.focus, new Set(["118"])), {
+    focus_generation: focusGeneration,
     target: { native_pane: { pane_id: compositorPaneId } },
     type: "set_runtime_focus_target",
   });
   assert.deepEqual(nativePaneFocusRequestForCompositor(input.focus, new Set(["7"])), {
+    focus_generation: focusGeneration,
     target: "main_app",
     type: "set_runtime_focus_target",
   });
   assert.deepEqual(nativePaneFocusRequestForCompositor({ ...input.focus, focusedPaneId: null }, new Set()), {
+    focus_generation: { ...focusGeneration, focused_pane_id: null, focused_pane_instance_id: null },
     type: "clear_runtime_focus_target",
   });
   assert.deepEqual(overlayRequestForCompositor(input), {
@@ -277,6 +306,38 @@ test("native pane bridge reads T316 runtime status and current camelCase group s
     primaryWindowId: "primary-7",
     focusedWindowId: "primary-7",
     members: [{ id: "primary-7", focused: true }],
+  });
+});
+
+test("native pane bridge parses generation-bound compositor focus return from nested runtime status", () => {
+  const paneId = compositorPaneIdForSurface("surface-a", 7);
+  // Synthetic T368 extension to RuntimeStatus; T316 ccc0002 has no focus generation.
+  const response = {
+    ok: true,
+    status: {
+      runtime: {
+        active_focus_generation: {
+          focus_revision: 14,
+          focused_pane_id: paneId,
+          focused_pane_instance_id: "pane-instance-7",
+          geometry_revision: 9,
+          surface_epoch: "surface-a:epoch-4",
+          surface_id: "surface-a",
+          topology_epoch: 6,
+        },
+      },
+    },
+  };
+  assert.deepEqual(nativePaneCompositorRuntimeStatusFromStatus(response), {
+    activeFocusGeneration: {
+      focusRevision: 14,
+      focusedPaneId: paneId,
+      focusedPaneInstanceId: "pane-instance-7",
+      geometryRevision: 9,
+      surfaceEpoch: "surface-a:epoch-4",
+      surfaceId: "surface-a",
+      topologyEpoch: 6,
+    },
   });
 });
 

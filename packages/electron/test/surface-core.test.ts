@@ -819,12 +819,14 @@ test("surface core projects one authoritative pane focus and emits only real foc
     }
   });
   try {
+    const initialFocusRevision = core.projectNativePaneFocus(surface.surfaceId).focusRevision!;
     core.setActiveKeyboardPane(surface.surfaceId, 9);
     core.setActiveKeyboardPane(surface.surfaceId, 9);
 
     assert.deepEqual(focusEvents, [surface.surfaceId]);
     const geometryIdentity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
     assert.deepEqual(core.projectNativePaneFocus(surface.surfaceId), {
+      focusRevision: initialFocusRevision + 1,
       focusedPaneId: "9",
       focusedPaneInstanceId: core.panesList(surface.surfaceId).panes.find(
         (pane) => pane.paneId === 9,
@@ -844,6 +846,77 @@ test("surface core projects one authoritative pane focus and emits only real foc
   } finally {
     unsubscribe();
   }
+});
+
+test("surface core rejects stale compositor focus returns by focus and pane generation", () => {
+  const core = new SurfaceCore({
+    persistentState: { primarySurfaceId: null, version: 1 },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const initialPaneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "vertical",
+    newPaneIds: [9],
+    newPaneLabels: [9],
+    paneId: initialPaneId,
+  });
+  updateResolvedPaneSnapshot(core, surface.surfaceId, initialPaneId, {
+    bounds: { height: 800, width: 600, x: 0, y: 0 },
+  });
+  updateResolvedPaneSnapshot(core, surface.surfaceId, 9, {
+    bounds: { height: 800, width: 600, x: 600, y: 0 },
+  });
+
+  const initialFocusRevision = core.projectNativePaneFocus(surface.surfaceId).focusRevision!;
+  core.setActiveKeyboardPane(surface.surfaceId, 9);
+  const stale = core.projectNativePaneFocus(surface.surfaceId);
+  core.setActiveKeyboardPane(surface.surfaceId, initialPaneId);
+  assert.equal(stale.focusRevision, initialFocusRevision + 1);
+  assert.equal(core.projectNativePaneFocus(surface.surfaceId).focusRevision, stale.focusRevision! + 1);
+  assert.equal(core.applyCompositorKeyboardPaneFocus(
+    surface.surfaceId,
+    9,
+    stale.focusedPaneInstanceId!,
+    stale.focusRevision!,
+    stale.surfaceEpoch,
+    Number(stale.topologyEpoch),
+    Number(stale.geometryRevision),
+  ), false);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), initialPaneId);
+
+  const current = core.projectNativePaneFocus(surface.surfaceId);
+  assert.equal(core.applyCompositorKeyboardPaneFocus(
+    surface.surfaceId,
+    initialPaneId,
+    "wrong-pane-instance",
+    current.focusRevision!,
+    current.surfaceEpoch,
+    Number(current.topologyEpoch),
+    Number(current.geometryRevision),
+  ), false);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), initialPaneId);
+  assert.equal(core.applyCompositorKeyboardPaneFocus(
+    surface.surfaceId,
+    initialPaneId,
+    current.focusedPaneInstanceId!,
+    current.focusRevision! + 1,
+    current.surfaceEpoch,
+    Number(current.topologyEpoch),
+    Number(current.geometryRevision),
+  ), true);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), initialPaneId);
+  assert.equal(core.projectNativePaneFocus(surface.surfaceId).focusRevision, current.focusRevision! + 1);
+  assert.equal(core.applyCompositorKeyboardPaneFocus(
+    surface.surfaceId,
+    9,
+    stale.focusedPaneInstanceId!,
+    current.focusRevision!,
+    current.surfaceEpoch,
+    Number(current.topologyEpoch),
+    Number(current.geometryRevision),
+  ), false);
+  assert.equal(core.activeKeyboardPaneId(surface.surfaceId), initialPaneId);
 });
 
 test("surface core preserves resize weights in topology and renderer geometry", () => {

@@ -157,6 +157,7 @@ type LayoutNode =
 type SurfaceState = {
   activeKeyboardPaneId: number | null;
   connectionBar: "connected" | "connecting" | "disconnected";
+  focusIntentRevision: number;
   geometryRevision: number;
   layout: LayoutNode | null;
   name: string;
@@ -204,6 +205,7 @@ export type PersistentSurfaceState = {
 
 type PersistentSurfaceRecord = {
   activeKeyboardPaneId: number | null;
+  focusIntentRevision?: number;
   geometryRevision: number;
   layout: LayoutNode | null;
   name: string;
@@ -1588,6 +1590,7 @@ export class SurfaceCore {
     return {
       focusedPaneId: focusedPaneId === null ? null : String(focusedPaneId),
       focusedPaneInstanceId: focusedPane?.paneLineageId ?? null,
+      focusRevision: surface.focusIntentRevision,
       geometryRevision: surface.geometryRevision as Revision,
       surfaceEpoch: surface.surfaceEpoch,
       surfaceId: surface.surfaceId as SurfaceId,
@@ -1601,6 +1604,64 @@ export class SurfaceCore {
       return;
     }
     this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  applyCompositorKeyboardPaneFocus(
+    surfaceId: string,
+    paneId: number,
+    paneInstanceId: string,
+    focusRevision: number,
+    surfaceEpoch: string,
+    topologyRevision: number,
+    geometryRevision: number,
+  ): boolean {
+    const surface = this.getSurface(surfaceId);
+    const pane = surface.panes.get(paneId);
+    if (
+      !pane ||
+      pane.paneLineageId !== paneInstanceId ||
+      !Number.isSafeInteger(focusRevision) ||
+      focusRevision < surface.focusIntentRevision ||
+      surface.surfaceEpoch !== surfaceEpoch ||
+      surface.topologyRevision !== topologyRevision ||
+      surface.geometryRevision !== geometryRevision
+    ) {
+      return false;
+    }
+    const paneChanged = surface.activeKeyboardPaneId !== paneId;
+    const focusRevisionChanged = surface.focusIntentRevision !== focusRevision;
+    surface.focusIntentRevision = focusRevision;
+    if (paneChanged) {
+      surface.activeKeyboardPaneId = paneId;
+    }
+    if (paneChanged || focusRevisionChanged) {
+      this.emit({ surfaceId, type: "surface-changed" });
+    }
+    return true;
+  }
+
+  applyCompositorKeyboardPaneFocusFromStatus(
+    surfaceId: string,
+    compositorPaneId: string,
+    paneInstanceId: string,
+    focusRevision: number,
+    surfaceEpoch: string,
+    topologyRevision: number,
+    geometryRevision: number,
+  ): boolean {
+    const paneId = numericCompositorPaneIdForSurface(surfaceId, compositorPaneId);
+    if (paneId === null) {
+      return false;
+    }
+    return this.applyCompositorKeyboardPaneFocus(
+      surfaceId,
+      paneId,
+      paneInstanceId,
+      focusRevision,
+      surfaceEpoch,
+      topologyRevision,
+      geometryRevision,
+    );
   }
 
   navigateActiveKeyboardPane(surfaceId: string, direction: PaneNavigationDirection): number | null {
@@ -3559,6 +3620,7 @@ export class SurfaceCore {
     const surface: SurfaceState = {
       activeKeyboardPaneId: BOOTSTRAP_PANE_ID,
       connectionBar: "disconnected",
+      focusIntentRevision: 0,
       geometryRevision: 1,
       layout: { paneId: BOOTSTRAP_PANE_ID, type: "pane" },
       name,
@@ -3674,6 +3736,7 @@ export class SurfaceCore {
       return false;
     }
     surface.activeKeyboardPaneId = paneId;
+    surface.focusIntentRevision = Math.min(Number.MAX_SAFE_INTEGER, surface.focusIntentRevision + 1);
     // Compositor accessory visibility follows pane focus, so this change must cross its control seam.
     this.emit({ surfaceId: surface.surfaceId, type: "keyboard-focus-changed" });
     return true;
@@ -3737,6 +3800,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
 function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
   return {
     activeKeyboardPaneId: surface.activeKeyboardPaneId,
+    focusIntentRevision: surface.focusIntentRevision,
     geometryRevision: surface.geometryRevision,
     layout: surface.layout ? structuredClone(surface.layout) : null,
     name: surface.name,
@@ -3862,6 +3926,10 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
   return {
     activeKeyboardPaneId: panes.has(Number(record.activeKeyboardPaneId)) ? Number(record.activeKeyboardPaneId) : finalPaneOrder[0]!,
     connectionBar: "disconnected",
+    focusIntentRevision:
+      Number.isSafeInteger(record.focusIntentRevision) && Number(record.focusIntentRevision) >= 0
+        ? Number(record.focusIntentRevision)
+        : 0,
     geometryRevision: Math.max(1, Math.trunc(Number(record.geometryRevision ?? 1))),
     layout,
     name: typeof record.name === "string" && record.name.length > 0 ? record.name : "Surf Ace",

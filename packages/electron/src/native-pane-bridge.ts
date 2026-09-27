@@ -7,6 +7,7 @@ import type {
   NativePaneWindowGroupRestoration,
   NativePaneWindowGroupVisibility,
   NativePaneCompositorRuntimeStatus,
+  NativePaneCompositorFocusGeneration,
   Rect,
   Revision,
   SurfaceId,
@@ -131,6 +132,21 @@ export type NativePaneFocusProjection = {
   surfaceEpoch: string;
   surfaceId: SurfaceId | string;
   topologyEpoch: TopologyRevision;
+  focusRevision?: number;
+};
+
+export type NativePanePresentationGeneration = {
+  focus_revision: number;
+  geometry_revision: number;
+  pane_instances?: Record<string, string>;
+  surface_epoch: string;
+  surface_id: string;
+  topology_epoch: number;
+};
+
+export type NativePaneFocusGeneration = NativePanePresentationGeneration & {
+  focused_pane_id: string | null;
+  focused_pane_instance_id: string | null;
 };
 
 export type CompositorOverlayCapture = "pointer_axis" | "pointer_button" | "pointer_hover";
@@ -177,19 +193,23 @@ export type CompositorControlRequest =
     type: "get_status";
   }
   | {
+    focus_generation?: NativePaneFocusGeneration;
     target: "main_app" | {
       native_pane: { pane_id: string };
     };
     type: "set_runtime_focus_target";
   }
   | {
+    focus_generation?: NativePaneFocusGeneration;
     type: "clear_runtime_focus_target";
   }
   | {
+    focus_revision: number;
     focused_pane_id: string | null;
     focused_pane_instance_id: string | null;
     geometry_revision: Revision;
     panes: NativePaneMaterialization["panes"];
+    presentation_generation?: NativePanePresentationGeneration;
     surface_epoch: string;
     surface_id: string;
     topology_epoch: TopologyRevision;
@@ -303,6 +323,13 @@ export function requestForCompositor(
   }
   return {
     ...nativePaneFocusFieldsForCompositor(materialization.focus),
+    presentation_generation: {
+      ...nativePanePresentationGenerationForCompositor(materialization.focus),
+      pane_instances: Object.fromEntries(materialization.panes.map((pane) => [
+        compositorPaneIdForSurface(surfaceId, pane.id),
+        pane.geometry.paneInstanceId,
+      ])),
+    },
     panes: materialization.panes.map((pane) => {
       if (pane.geometry.coordinateSpace !== "compositor_logical") {
         throw new Error(`native pane ${pane.id} geometry missing compositor_logical coordinate space`);
@@ -341,19 +368,40 @@ export function nativePaneFocusRequestForCompositor(
   focus: NativePaneFocusProjection,
   nativePaneIds: ReadonlySet<string>,
 ): CompositorControlRequest {
+  const focus_generation: NativePaneFocusGeneration = {
+    ...nativePanePresentationGenerationForCompositor(focus),
+    focused_pane_id: focus.focusedPaneId === null
+      ? null
+      : compositorPaneIdForSurface(focus.surfaceId, focus.focusedPaneId),
+    focused_pane_instance_id: focus.focusedPaneId === null ? null : focus.focusedPaneInstanceId,
+  };
   if (focus.focusedPaneId === null) {
-    return { type: "clear_runtime_focus_target" };
+    return { focus_generation, type: "clear_runtime_focus_target" };
   }
   if (!nativePaneIds.has(focus.focusedPaneId)) {
-    return { target: "main_app", type: "set_runtime_focus_target" };
+    return { focus_generation, target: "main_app", type: "set_runtime_focus_target" };
   }
   return {
+    focus_generation,
     target: { native_pane: { pane_id: compositorPaneIdForSurface(focus.surfaceId, focus.focusedPaneId) } },
     type: "set_runtime_focus_target",
   };
 }
 
+function nativePanePresentationGenerationForCompositor(
+  focus: NativePaneFocusProjection,
+): NativePanePresentationGeneration {
+  return {
+    focus_revision: focus.focusRevision ?? 0,
+    geometry_revision: Number(focus.geometryRevision),
+    surface_epoch: focus.surfaceEpoch,
+    surface_id: String(focus.surfaceId),
+    topology_epoch: Number(focus.topologyEpoch),
+  };
+}
+
 function nativePaneFocusFieldsForCompositor(focus: NativePaneFocusProjection): {
+  focus_revision: number;
   focused_pane_id: string | null;
   focused_pane_instance_id: string | null;
   geometry_revision: Revision;
@@ -362,10 +410,11 @@ function nativePaneFocusFieldsForCompositor(focus: NativePaneFocusProjection): {
   topology_epoch: TopologyRevision;
 } {
   return {
+    focus_revision: focus.focusRevision ?? 0,
     focused_pane_id: focus.focusedPaneId === null
       ? null
       : compositorPaneIdForSurface(focus.surfaceId, focus.focusedPaneId),
-    focused_pane_instance_id: focus.focusedPaneInstanceId,
+    focused_pane_instance_id: focus.focusedPaneId === null ? null : focus.focusedPaneInstanceId,
     geometry_revision: focus.geometryRevision,
     surface_epoch: focus.surfaceEpoch,
     surface_id: String(focus.surfaceId),
@@ -683,6 +732,12 @@ export function nativePaneCompositorRuntimeStatusFromStatus(
     if (activeFocusTarget !== undefined && projection.activeFocusTarget === undefined) {
       projection.activeFocusTarget = activeFocusTarget;
     }
+    const focusGeneration = nativePaneFocusGenerationFromStatus(
+      statusValue(source, "active_focus_generation", "activeFocusGeneration"),
+    );
+    if (focusGeneration && projection.activeFocusGeneration === undefined) {
+      projection.activeFocusGeneration = focusGeneration;
+    }
     const lastDiagnostic = statusValue(source, "last_diagnostic", "lastDiagnostic");
     if (lastDiagnostic !== undefined && projection.lastDiagnostic === undefined) {
       projection.lastDiagnostic = lastDiagnostic;
@@ -758,6 +813,42 @@ function nativePaneWindowGroupMemberFromStatus(member: unknown): NativePaneWindo
     visibility: statusVisibility(statusValue(record, "visibility", "visibility_state", "visibilityState")),
     zOrder: statusFiniteNumber(record, "z_order", "zOrder"),
   }];
+}
+
+function nativePaneFocusGenerationFromStatus(value: unknown): NativePaneCompositorFocusGeneration | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const surfaceId = statusText(record, "surface_id", "surfaceId");
+  const surfaceEpoch = statusText(record, "surface_epoch", "surfaceEpoch");
+  const focusedPaneInstanceId = statusText(record, "focused_pane_instance_id", "focusedPaneInstanceId");
+  const geometryRevision = statusCount(record, "geometry_revision", "geometryRevision");
+  const focusRevision = statusCount(record, "focus_revision", "focusRevision");
+  const topologyEpoch = statusCount(record, "topology_epoch", "topologyEpoch");
+  const focusedPaneIdValue = statusValue(record, "focused_pane_id", "focusedPaneId");
+  const focusedPaneId = typeof focusedPaneIdValue === "string" && focusedPaneIdValue.length > 0
+    ? focusedPaneIdValue
+    : null;
+  if (
+    surfaceId === null ||
+    surfaceEpoch === null ||
+    geometryRevision === null ||
+    focusRevision === null ||
+    topologyEpoch === null ||
+    (focusedPaneId !== null && focusedPaneInstanceId === null)
+  ) {
+    return null;
+  }
+  return {
+    focusRevision,
+    focusedPaneId,
+    focusedPaneInstanceId,
+    geometryRevision,
+    surfaceEpoch,
+    surfaceId,
+    topologyEpoch,
+  };
 }
 
 function statusText(record: Record<string, unknown>, ...fields: string[]): string | null {

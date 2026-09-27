@@ -521,8 +521,19 @@ export type NativePaneInteractionState = "idle" | "active" | "cancelled" | "unkn
 
 // Raw compositor-level status stays separate from pane-group status because
 // the active input target and last diagnostic may describe the whole surface.
+export type NativePaneCompositorFocusGeneration = {
+  focusRevision: number;
+  focusedPaneId: string | null;
+  focusedPaneInstanceId: string | null;
+  geometryRevision: number;
+  surfaceEpoch: string;
+  surfaceId: string;
+  topologyEpoch: number;
+};
+
 export type NativePaneCompositorRuntimeStatus = {
   activeFocusTarget?: unknown;
+  activeFocusGeneration?: NativePaneCompositorFocusGeneration | null;
   lastDiagnostic?: unknown;
 };
 

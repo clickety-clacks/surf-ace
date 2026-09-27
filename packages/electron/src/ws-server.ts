@@ -995,6 +995,7 @@ export class SurfaceWsServer {
         if (observedGroups.length > 0) {
           this.core.markNativePaneWindowGroups(surfaceId, observedGroups);
         }
+        this.applyNativePaneFocusReturn(surfaceId, response);
         persistentServerDiagnostic("info", "native_pane_focus_synced", {
           focused_pane_id: focus.focusedPaneId ?? "none",
           geometry_revision: Number(focus.geometryRevision),
@@ -3082,6 +3083,7 @@ export class SurfaceWsServer {
       }
       const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(status);
       this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
+      this.applyNativePaneFocusReturn(surfaceId, status);
       return nativePaneCompositorRuntimeStatusFromStatus(status);
     } catch (error) {
       persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
@@ -3090,6 +3092,27 @@ export class SurfaceWsServer {
       });
       return null;
     }
+  }
+
+  private applyNativePaneFocusReturn(surfaceId: string, response: CompositorControlResponse): void {
+    const generation = nativePaneCompositorRuntimeStatusFromStatus(response)?.activeFocusGeneration;
+    if (
+      !generation ||
+      generation.surfaceId !== surfaceId ||
+      generation.focusedPaneId === null ||
+      generation.focusedPaneInstanceId === null
+    ) {
+      return;
+    }
+    this.core.applyCompositorKeyboardPaneFocusFromStatus(
+      surfaceId,
+      generation.focusedPaneId,
+      generation.focusedPaneInstanceId,
+      generation.focusRevision,
+      generation.surfaceEpoch,
+      generation.topologyEpoch,
+      generation.geometryRevision,
+    );
   }
 
   private async runSurfaceMutation<T>(surfaceId: string, operation: () => Promise<T> | T): Promise<T> {

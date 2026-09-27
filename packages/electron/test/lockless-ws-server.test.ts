@@ -322,6 +322,20 @@ test("pane focus changes reach the compositor through its runtime focus target A
   };
   const compositorRequestTypes: string[] = [];
   let focusRequestCount = 0;
+  const focusGenerationForCurrentPane = (): Record<string, unknown> => {
+    const focus = core.projectNativePaneFocus(surface.surfaceId);
+    return {
+      focus_revision: focus.focusRevision ?? 0,
+      focused_pane_id: focus.focusedPaneId === null
+        ? null
+        : compositorPaneIdForSurface(surface.surfaceId, Number(focus.focusedPaneId)),
+      focused_pane_instance_id: focus.focusedPaneId === null ? null : focus.focusedPaneInstanceId,
+      geometry_revision: Number(focus.geometryRevision),
+      surface_epoch: focus.surfaceEpoch,
+      surface_id: surface.surfaceId,
+      topology_epoch: Number(focus.topologyEpoch),
+    };
+  };
   const compositor = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -368,6 +382,7 @@ test("pane focus changes reach the compositor through its runtime focus target A
     const webFocusRequestPayload = await webFocusRequest;
 
     assert.deepEqual(webFocusRequestPayload, {
+      focus_generation: focusGenerationForCurrentPane(),
       target: "main_app",
       type: "set_runtime_focus_target",
     });
@@ -375,6 +390,7 @@ test("pane focus changes reach the compositor through its runtime focus target A
     core.setActiveKeyboardPane(surface.surfaceId, 7);
     const nativeFocusRequestPayload = await nativeFocusRequest;
     assert.deepEqual(nativeFocusRequestPayload, {
+      focus_generation: focusGenerationForCurrentPane(),
       target: { native_pane: { pane_id: compositorPaneIdForSurface(surface.surfaceId, 7) } },
       type: "set_runtime_focus_target",
     });
