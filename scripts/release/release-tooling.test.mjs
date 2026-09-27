@@ -33,7 +33,7 @@ import {
   TIGHTBEAM_LINUX_RUNTIME_FILES,
   verifyTightbeamLinuxStage,
 } from "./build-tightbeam-release.mjs";
-import { OPENCLAW, OPENCLAW_BUILD_COMMANDS, TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
+import { OPENCLAW, OPENCLAW_BUILD_COMMANDS, OPENCLAW_TEST_COMMANDS, TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
 import { runLinuxStateDriver, validateTightbeamStateSequence } from "./smoke-tightbeam-release.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 
@@ -41,8 +41,14 @@ const exec = promisify(execFile);
 const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const { buildOpenclawRelease } = openclawReleaseBuilder;
 const reviewedOpenclawToolingBase = "61c70f99f4d2ba00248f5117e3c927c03e8cb7ba";
-const openclawToolingTag = "surf-ace-release-tooling-openclaw-v0.1.3";
-const consumedOpenclawToolingTag = "surf-ace-release-tooling-openclaw-v0.1.2";
+const currentOpenclawToolingBase = "70909bd8ceea4ceb6cf5438422e741588ebd8340";
+const openclawToolingTag = "surf-ace-release-tooling-openclaw-v0.1.4";
+const consumedOpenclawToolingTags = [
+  "surf-ace-release-tooling-openclaw-v0.1.3",
+  "surf-ace-release-tooling-openclaw-v0.1.2",
+];
+const openclawProductCommit = "801fc08047886028bd6fefc4ce35c8be04f7dff4";
+const openclawProductTag = "surf-ace-openclaw-v0.1.1";
 
 function workflowRunScript(workflow, stepName) {
   const marker = `      - name: ${stepName}\n`;
@@ -94,7 +100,7 @@ if (endpoint.endsWith("/git/ref/tags/" + process.env.TOOLING_TAG)) {
   await fs.writeFile(ghLog, "");
 
   const toolingCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-  const productCommit = "58ac8c435679e6611903d31abaecec11bb9d7f75";
+  const productCommit = openclawProductCommit;
   const toolingTag = openclawToolingTag;
   const environment = {
     ...process.env,
@@ -107,7 +113,7 @@ if (endpoint.endsWith("/git/ref/tags/" + process.env.TOOLING_TAG)) {
     GITHUB_REF: `refs/tags/${toolingTag}`,
     GITHUB_SHA: toolingCommit,
     TOOLING_TAG: toolingTag,
-    PRODUCT_TAG: "surf-ace-openclaw-v0.1.0",
+    PRODUCT_TAG: openclawProductTag,
     PRODUCT_COMMIT: productCommit,
     GATE4_RUN_ID: "123456",
     TRIGGER_REF: "refs/heads/release/run-tightbeam-v0.2.0",
@@ -227,6 +233,41 @@ test("OpenClaw deploy normalization removes only the exact diagnosed workspace s
   assert.ok(normalizeOffset < assembleOffset && assembleOffset < archiveOffset);
 });
 
+test("OpenClaw deploy normalization removes pnpm path and timestamp ephemera before archiving", async (t) => {
+  const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
+  const makeClosure = async (name, prunedAt) => {
+    const root = path.join(await temporary(t), name);
+    const sourceDir = path.join(root, "source");
+    const dependencyClosure = path.join(root, "dependency-closure");
+    const extensionDir = path.join(sourceDir, "packages/extension");
+    const selfLink = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/@surf-ace/extension");
+    const bin = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/.bin");
+    await fs.mkdir(extensionDir, { recursive: true });
+    await fs.mkdir(path.dirname(selfLink), { recursive: true });
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(path.join(extensionDir, "package.json"), '{"name":"@surf-ace/extension"}\n');
+    await fs.writeFile(path.join(dependencyClosure, "payload.js"), "export const value = 1;\n");
+    await fs.writeFile(path.join(dependencyClosure, "node_modules/.modules.yaml"),
+      `prunedAt: ${prunedAt}\nstoreDir: ${root}/store/v10\n`);
+    await fs.writeFile(path.join(bin, "multicast-dns"), `#!/bin/sh\nNODE_PATH=${root}/dependency-closure/node_modules\n`);
+    await fs.symlink(path.relative(path.dirname(selfLink), extensionDir), selfLink);
+    await normalize(sourceDir, dependencyClosure);
+    return { dependencyClosure, root };
+  };
+
+  const left = await makeClosure("left", "Sat, 26 Sep 2026 20:24:33 GMT");
+  const right = await makeClosure("right", "Sat, 26 Sep 2026 20:28:11 GMT");
+  await assert.rejects(fs.access(path.join(left.dependencyClosure, "node_modules/.modules.yaml")));
+  await assert.rejects(fs.access(path.join(right.dependencyClosure, "node_modules/.modules.yaml")));
+  await assert.rejects(fs.access(path.join(left.dependencyClosure, "node_modules/.pnpm/node_modules/.bin")));
+  await assert.rejects(fs.access(path.join(right.dependencyClosure, "node_modules/.pnpm/node_modules/.bin")));
+  const leftArchive = path.join(left.root, "closure.tgz");
+  const rightArchive = path.join(right.root, "closure.tgz");
+  await createTarGz(left.dependencyClosure, leftArchive, 1_700_000_000);
+  await createTarGz(right.dependencyClosure, rightArchive, 1_700_000_000);
+  assert.deepEqual(await fs.readFile(leftArchive), await fs.readFile(rightArchive));
+});
+
 test("OpenClaw deploy normalization rejects every non-exact self-link shape and preserves unrelated root escapes", async (t) => {
   const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
   assert.equal(typeof normalize, "function", "shipped builder must expose its deploy normalizer");
@@ -307,6 +348,8 @@ test("OpenClaw Electron packaging is explicitly nonpublishing in ordinary and ta
     const packagerArgs = calls[1].args;
     assert.equal(packagerArgs.filter((argument) => argument === "--publish").length, 1);
     assert.equal(packagerArgs.at(packagerArgs.indexOf("--publish") + 1), "never");
+    assert.equal(calls[0].env.CSC_IDENTITY_AUTO_DISCOVERY, "false");
+    assert.equal(calls[1].env.CSC_IDENTITY_AUTO_DISCOVERY, "false");
     assert.equal(calls.some(({ args, command }) => /(?:github|release|upload)/i.test([command, ...args].join(" "))), false);
   }
 
@@ -318,6 +361,9 @@ test("OpenClaw Electron packaging is explicitly nonpublishing in ordinary and ta
   const builder = await fs.readFile(path.join(repository, "scripts/release/build-openclaw-release.mjs"), "utf8");
   assert.match(builder, /await packageOpenclawElectron\(sourceArgument\)/);
   assert.doesNotMatch(builder, /"@surf-ace\/electron", "package"/);
+  assert.match(builder, new RegExp(`--candidate-commit ${openclawProductCommit}`));
+  for (const file of OPENCLAW.files) assert.match(builder, new RegExp(file.replaceAll(".", "\\.")));
+  assert.doesNotMatch(builder, /v0\.1\.0/);
 });
 
 test("release archive wrappers retain the required install roots", async (t) => {
@@ -587,7 +633,25 @@ test("source identity binds HEAD and the immutable source tag to one commit", as
 });
 
 test("channel builders reject any source identity outside the reviewed constants before I/O", async () => {
-  await assert.rejects(buildOpenclawRelease({ sourceDir: ".", outputDir: "build/release/openclaw", sourceTag: "wrong", sourceCommit: "wrong", toolingTag: "wrong", version: "0" }), /openclaw_release_identity_mismatch/);
+  const openclawIdentity = {
+    sourceDir: ".",
+    outputDir: "build/release/openclaw",
+    sourceTag: OPENCLAW.sourceTag,
+    sourceCommit: OPENCLAW.candidateCommit,
+    toolingTag: openclawToolingTag,
+    version: OPENCLAW.version,
+  };
+  for (const [field, value] of [
+    ["sourceTag", "surf-ace-openclaw-v0.1.0"],
+    ["sourceCommit", "58ac8c435679e6611903d31abaecec11bb9d7f75"],
+    ["version", "0.1.0"],
+  ]) {
+    await assert.rejects(
+      buildOpenclawRelease({ ...openclawIdentity, [field]: value }),
+      /openclaw_release_identity_mismatch/,
+      `wrong OpenClaw ${field} must fail before I/O`,
+    );
+  }
   await assert.rejects(buildOpenclawRelease({ sourceDir: ".", outputDir: "build/release/openclaw", sourceTag: OPENCLAW.sourceTag, sourceCommit: OPENCLAW.candidateCommit, version: OPENCLAW.version }), /openclaw_tooling_tag_required/);
   await assert.rejects(buildTightbeamRelease({ sourceDir: ".", outputDir: "build/release/tightbeam", sourceTag: "wrong", sourceCommit: "wrong", version: "0", target: "wrong" }), /tightbeam_release_identity_mismatch/);
 });
@@ -607,6 +671,22 @@ test("Tightbeam v0.2.0 binds the reviewed cutoff, same-architecture baseline, an
   });
 });
 
+test("OpenClaw v0.1.1 binds reviewed Product P and the exact public file set", () => {
+  assert.deepEqual(OPENCLAW, {
+    baselineCommit: "d889f2f4bfb554bc3bfde0eb9927372552d40e51",
+    candidateCommit: openclawProductCommit,
+    files: [
+      "surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip",
+      "surf-ace-openclaw-extension-v0.1.1.tgz",
+      "surf-ace-openclaw-v0.1.1-manifest.json",
+    ],
+    hostIntegrity: "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==",
+    hostVersion: "2026.7.1-2",
+    sourceTag: openclawProductTag,
+    version: "0.1.1",
+  });
+});
+
 test("committed channel guards enforce their actual selected tooling tags", async (t) => {
   const predecessor = "6bdf393a234c73174185032e61b0b155d65124d4";
   const openclawTag = openclawToolingTag;
@@ -623,6 +703,8 @@ test("committed channel guards enforce their actual selected tooling tags", asyn
   const predecessorGate5 = workflowRunScript(await workflowAtRevision(predecessor, gate5Path), gate5Step);
   const reviewedBaseGate4 = workflowRunScript(await workflowAtRevision(reviewedOpenclawToolingBase, gate4Path), gate4Step);
   const reviewedBaseGate5 = workflowRunScript(await workflowAtRevision(reviewedOpenclawToolingBase, gate5Path), gate5Step);
+  const currentBaseGate4 = workflowRunScript(await workflowAtRevision(currentOpenclawToolingBase, gate4Path), gate4Step);
+  const currentBaseGate5 = workflowRunScript(await workflowAtRevision(currentOpenclawToolingBase, gate5Path), gate5Step);
 
   for (const [name, script] of [["Gate 4", predecessorGate4], ["Gate 5", predecessorGate5]]) {
     await t.test(`${name} predecessor accepted the Tightbeam tag at the same tooling commit`, async (t) => {
@@ -637,8 +719,21 @@ test("committed channel guards enforce their actual selected tooling tags", asyn
   for (const [name, script] of [["Gate 4", reviewedBaseGate4], ["Gate 5", reviewedBaseGate5]]) {
     await t.test(`${name} reviewed base accepted the consumed v0.1.2 tag`, async (t) => {
       const result = await runWorkflowGuard(t, script, {
-        TOOLING_TAG: consumedOpenclawToolingTag,
-        GITHUB_REF: `refs/tags/${consumedOpenclawToolingTag}`,
+        TOOLING_TAG: consumedOpenclawToolingTags[1],
+        GITHUB_REF: `refs/tags/${consumedOpenclawToolingTags[1]}`,
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+    });
+  }
+
+  for (const [name, script] of [["Gate 4", currentBaseGate4], ["Gate 5", currentBaseGate5]]) {
+    await t.test(`${name} current base accepted the consumed v0.1.3 tag`, async (t) => {
+      const result = await runWorkflowGuard(t, script, {
+        TOOLING_TAG: consumedOpenclawToolingTags[0],
+        GITHUB_REF: `refs/tags/${consumedOpenclawToolingTags[0]}`,
+        PRODUCT_TAG: "surf-ace-openclaw-v0.1.0",
+        PRODUCT_COMMIT: "58ac8c435679e6611903d31abaecec11bb9d7f75",
+        MOCK_PRODUCT_REMOTE: "58ac8c435679e6611903d31abaecec11bb9d7f75",
       });
       assert.equal(result.exitCode, 0, result.stderr);
     });
@@ -649,7 +744,7 @@ test("committed channel guards enforce their actual selected tooling tags", asyn
       const result = await runWorkflowGuard(t, script);
       assert.equal(result.exitCode, 0, result.stderr);
     });
-    for (const rejectedTag of [consumedOpenclawToolingTag, tightbeamTag, reservedTag, arbitraryTag]) {
+    for (const rejectedTag of [...consumedOpenclawToolingTags, tightbeamTag, reservedTag, arbitraryTag]) {
       await t.test(`${name} rejects ${rejectedTag} even when it peels to the same commit`, async (t) => {
         const result = await runWorkflowGuard(t, script, {
           TOOLING_TAG: rejectedTag,
@@ -673,12 +768,18 @@ test("committed channel guards enforce their actual selected tooling tags", asyn
     }
   }
 
-  await t.test("Gate 5 rejects a mismatched Gate 4 receipt", async (t) => {
-    const result = await runWorkflowGuard(t, gate5, {
-      MOCK_GATE4_HEAD_SHA: "dddddddddddddddddddddddddddddddddddddddd",
+  for (const [failure, overrides] of [
+    ["event", { MOCK_GATE4_EVENT: "push" }],
+    ["status", { MOCK_GATE4_STATUS: "in_progress" }],
+    ["conclusion", { MOCK_GATE4_CONCLUSION: "failure" }],
+    ["tooling head", { MOCK_GATE4_HEAD_SHA: "dddddddddddddddddddddddddddddddddddddddd" }],
+    ["workflow path", { MOCK_GATE4_PATH: ".github/workflows/other.yml" }],
+  ]) {
+    await t.test(`Gate 5 rejects a mismatched Gate 4 ${failure}`, async (t) => {
+      const result = await runWorkflowGuard(t, gate5, overrides);
+      assert.notEqual(result.exitCode, 0);
     });
-    assert.notEqual(result.exitCode, 0);
-  });
+  }
 
   await t.test("Tightbeam committed guard accepts its own valid channel dispatch", async (t) => {
     const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
@@ -1134,12 +1235,17 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
   const specificationPath = path.join(repository, "docs/release/openclaw-tightbeam-release-split.md");
   const specification = await fs.readFile(specificationPath, "utf8");
-  assert.equal(await sha256(specificationPath), "b751e0979cfcdad9d83024ea2e4a323158e04c8f7b089ec4b4d6560d37e38e17");
+  assert.equal(await sha256(specificationPath), "b3532729738dd610e66455e2e5d96228082a9d9db089474f74bc6ab48aad58f6");
   assert.match(specification, /58ac8c435679e6611903d31abaecec11bb9d7f75/);
   assert.match(specification, /8fc9f508ae9b4371a3c25f6318920940fbad10cd/);
   assert.match(specification, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.match(specification, /surf-ace-release-tooling-v0\.1\.1/);
   assert.match(specification, /surf-ace-release-tooling-openclaw-v0\.1\.3/);
+  assert.match(specification, /surf-ace-release-tooling-openclaw-v0\.1\.4/);
+  assert.match(specification, /801fc08047886028bd6fefc4ce35c8be04f7dff4/);
+  assert.match(specification, /3e9675d0579f1ed46bf7310cee720efeb8e32997/);
+  assert.match(specification, /att_ea20cac9/);
+  assert.match(specification, /art_bab59fdf/);
   assert.match(specification, /consumed predecessor\s+`surf-ace-release-tooling-openclaw-v0\.1\.2` remains immutable history/);
   assert.equal((specification.match(/surf-ace-release-tooling-v0\.1\.0/g) ?? []).length, 1);
   assert.match(specification, /surf-ace-release-tooling-v0\.1\.0` points to\n`9d8ca5a490a32a57c5177e4769aef4100dd5f5bf`/);
@@ -1151,6 +1257,21 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   assert.match(specification, /Any copied or generated rendering is non-authoritative/);
   assert.doesNotMatch(specification, /surf-ace-tightbeam-v0\.2\.0` at the exact new `main` commit/);
   assert.doesNotMatch(specification, /resident controller, thin Rust CLI, systemd unit/);
+  for (const file of OPENCLAW.files) assert.match(specification, new RegExp(file.replaceAll(".", "\\.")));
+  const correctionCommand = [
+    "node tooling/scripts/release/build-openclaw-release.mjs",
+    "--source-dir source",
+    "--output-dir build/release/openclaw",
+    `--source-tag ${OPENCLAW.sourceTag}`,
+    `--source-commit ${OPENCLAW.candidateCommit}`,
+    `--version ${OPENCLAW.version}`,
+  ];
+  const correctionBlock = specification.match(/The Product P Gate 4 builder invocation is exactly:\n\n```sh\n([\s\S]*?)\n```/);
+  assert.ok(correctionBlock, "missing Product P builder command block");
+  assert.deepEqual(
+    correctionBlock[1].replaceAll(/\\\n\s*/g, " ").split(" ").filter(Boolean),
+    correctionCommand.flatMap((part) => part.split(" ")),
+  );
   const openclawCommandsMarker = "Instead, it must run these exact build and frozen-deployment commands:\n\n```sh\n";
   const openclawCommandsOffset = specification.indexOf(openclawCommandsMarker);
   assert.notEqual(openclawCommandsOffset, -1, "missing canonical OpenClaw build command block");
@@ -1167,7 +1288,9 @@ test("canonical spec and workflows preserve reviewed bytes and immutable action 
   assert.ok((await lockedPackages(path.join(repository, "pnpm-lock.yaml"))).size > 100);
   assert.ok((await cargoLockedPackages(path.join(repository, "packages/cli/Cargo.lock"))).length > 10);
   for (const workflow of ["release-openclaw.yml", "release-openclaw-gate5.yml", "release-tightbeam.yml"]) {
-    const text = await fs.readFile(path.join(repository, ".github/workflows", workflow), "utf8");
+    const workflowPath = path.join(repository, ".github/workflows", workflow);
+    const text = await fs.readFile(workflowPath, "utf8");
+    await exec("ruby", ["-e", "require 'yaml'; YAML.load_file(ARGV.fetch(0))", workflowPath]);
     for (const match of text.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) {
       assert.match(match[1], /@[0-9a-f]{40}$/);
     }
@@ -1200,7 +1323,14 @@ test("OpenClaw Gate 4 dispatch cannot reach smoke or publication", async () => {
   assert.doesNotMatch(workflow, /^\s+push:/m);
   assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
   assert.match(workflow, /test "\$\{GITHUB_REF_TYPE\}" = tag/);
-  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.3/);
+  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.4/);
+  assert.match(workflow, /PRODUCT_COMMIT: 801fc08047886028bd6fefc4ce35c8be04f7dff4/);
+  assert.match(workflow, /PRODUCT_TREE: 3e9675d0579f1ed46bf7310cee720efeb8e32997/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-openclaw-v0\.1\.1/);
+  assert.match(workflow, /group: surf-ace-openclaw-v0\.1\.1/);
+  assert.match(workflow, /--version 0\.1\.1/);
+  for (const file of OPENCLAW.files) assert.match(workflow, new RegExp(file.replaceAll(".", "\\.")));
+  assert.doesNotMatch(workflow, /v0\.1\.0/);
   assert.match(workflow, /test "\$\{GITHUB_REF\}" = "refs\/tags\/\$\{TOOLING_TAG\}"/);
   assert.match(workflow, /tooling_remote="\$\(peel_tag "\$\{TOOLING_TAG\}"\)"/);
   assert.match(workflow, /test "\$\{tooling_remote\}" = "\$\{GITHUB_SHA\}"/);
@@ -1243,9 +1373,13 @@ test("OpenClaw Gate 4 builds imported workspace prerequisites before extension t
     "guard",
     "pnpm --dir source --filter @surf-ace/electron build",
     "guard",
-    "pnpm --dir source --filter @surf-ace/electron test",
+    "pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
     "guard",
   ];
+  assert.equal(
+    OPENCLAW_TEST_COMMANDS.at(-1),
+    "pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
+  );
   let offset = -1;
   for (const command of expected) {
     const next = script.indexOf(command, offset + 1);
@@ -1257,7 +1391,16 @@ test("OpenClaw Gate 4 builds imported workspace prerequisites before extension t
   const bin = path.join(root, "bin");
   const log = path.join(root, "pnpm.log");
   await fs.mkdir(bin);
-  await fs.writeFile(path.join(bin, "git"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(path.join(bin, "git"), `#!/bin/sh
+if test "$3" = rev-parse; then
+  case "$4" in
+    HEAD) printf '%s\\n' '${openclawProductCommit}' ;;
+    'HEAD^{tree}') printf '%s\\n' '3e9675d0579f1ed46bf7310cee720efeb8e32997' ;;
+    *) exit 92 ;;
+  esac
+fi
+exit 0
+`, { mode: 0o755 });
   await fs.writeFile(path.join(bin, "pnpm"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PNPM_LOG\"\nif test \"$*\" = \"$FAIL_COMMAND\"; then exit 29; fi\n", { mode: 0o755 });
   const runStep = async (failCommand) => {
     await fs.writeFile(log, "");
@@ -1268,6 +1411,8 @@ test("OpenClaw Gate 4 builds imported workspace prerequisites before extension t
         PATH: `${bin}:${process.env.PATH}`,
         PNPM_LOG: log,
         FAIL_COMMAND: failCommand,
+        PRODUCT_COMMIT: openclawProductCommit,
+        PRODUCT_TREE: "3e9675d0579f1ed46bf7310cee720efeb8e32997",
       },
     });
     if (failCommand) await assert.rejects(result);
@@ -1289,7 +1434,7 @@ test("OpenClaw Gate 4 builds imported workspace prerequisites before extension t
     "--dir source --filter @surf-ace/controller test",
     "--dir source --filter @surf-ace/protocol test",
     "--dir source --filter @surf-ace/electron build",
-    "--dir source --filter @surf-ace/electron test",
+    "--dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
   ]);
 });
 
@@ -1300,7 +1445,12 @@ test("OpenClaw Gate 5 requires a separate exact successful Gate 4 run", async ()
   assert.doesNotMatch(workflow, /^\s+push:/m);
   assert.match(workflow, /gate4_run_id:/);
   assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
-  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.3/);
+  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.4/);
+  assert.match(workflow, /PRODUCT_COMMIT: 801fc08047886028bd6fefc4ce35c8be04f7dff4/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-openclaw-v0\.1\.1/);
+  assert.match(workflow, /group: surf-ace-openclaw-v0\.1\.1/);
+  for (const file of OPENCLAW.files) assert.match(workflow, new RegExp(file.replaceAll(".", "\\.")));
+  assert.doesNotMatch(workflow, /v0\.1\.0/);
   assert.match(workflow, /test "\$\{gate4_conclusion\}" = success/);
   assert.match(workflow, /test "\$\{gate4_head_sha\}" = "\$\{GITHUB_SHA\}"/);
   assert.match(workflow, /test "\$\{gate4_path\}" = \.github\/workflows\/release-openclaw\.yml/);

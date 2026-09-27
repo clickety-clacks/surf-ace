@@ -15,14 +15,14 @@ permissions:
   attestations: write
 
 concurrency:
-  group: surf-ace-openclaw-v0.1.0
+  group: surf-ace-openclaw-v0.1.1
   cancel-in-progress: false
 
 env:
   NODE_VERSION: 24.3.0
   PNPM_VERSION: 10.15.1
-  PRODUCT_COMMIT: 58ac8c435679e6611903d31abaecec11bb9d7f75
-  PRODUCT_TAG: surf-ace-openclaw-v0.1.0
+  PRODUCT_COMMIT: 801fc08047886028bd6fefc4ce35c8be04f7dff4
+  PRODUCT_TAG: surf-ace-openclaw-v0.1.1
   TOOLING_TAG: ${{ github.ref_name }}
 
 jobs:
@@ -49,7 +49,7 @@ jobs:
           }
           test "${GITHUB_EVENT_NAME}" = workflow_dispatch
           test "${GITHUB_REF_TYPE}" = tag
-          test "${TOOLING_TAG}" = surf-ace-release-tooling-openclaw-v0.1.3
+          test "${TOOLING_TAG}" = surf-ace-release-tooling-openclaw-v0.1.4
           test "${GITHUB_REF}" = "refs/tags/${TOOLING_TAG}"
           test -n "${GATE4_RUN_ID}"
           tooling_remote="$(peel_tag "${TOOLING_TAG}")"
@@ -115,15 +115,15 @@ jobs:
           set -euo pipefail
           node tooling/scripts/release/smoke-openclaw-release.mjs \
             --baseline-commit d889f2f4bfb554bc3bfde0eb9927372552d40e51 \
-            --candidate-commit 58ac8c435679e6611903d31abaecec11bb9d7f75 \
+            --candidate-commit 801fc08047886028bd6fefc4ce35c8be04f7dff4 \
             --openclaw-version 2026.7.1-2 \
-            --manifest build/release/openclaw/surf-ace-openclaw-v0.1.0-manifest.json \
-            --extension build/release/openclaw/surf-ace-openclaw-extension-v0.1.0.tgz \
-            --electron build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip
+            --manifest build/release/openclaw/surf-ace-openclaw-v0.1.1-manifest.json \
+            --extension build/release/openclaw/surf-ace-openclaw-extension-v0.1.1.tgz \
+            --electron build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel openclaw \
-            --manifest build/release/openclaw/surf-ace-openclaw-v0.1.0-manifest.json \
-            --files build/release/openclaw/surf-ace-openclaw-extension-v0.1.0.tgz,build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip \
+            --manifest build/release/openclaw/surf-ace-openclaw-v0.1.1-manifest.json \
+            --files build/release/openclaw/surf-ace-openclaw-extension-v0.1.1.tgz,build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip \
             --output build/release/openclaw/.receipts/smoke-receipt.json
       - name: Retain smoke-approved bytes and receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -157,10 +157,10 @@ jobs:
           set -euo pipefail
           test -n "${ATTESTATION_URL}"
           gh release create "${PRODUCT_TAG}" \
-            release/surf-ace-openclaw-extension-v0.1.0.tgz \
-            release/surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip \
-            release/surf-ace-openclaw-v0.1.0-manifest.json \
+            release/surf-ace-openclaw-extension-v0.1.1.tgz \
+            release/surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip \
+            release/surf-ace-openclaw-v0.1.1-manifest.json \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
-            --title "Surf Ace OpenClaw v0.1.0" \
+            --title "Surf Ace OpenClaw v0.1.1" \
             --notes "Smoke attestation: ${ATTESTATION_URL}"

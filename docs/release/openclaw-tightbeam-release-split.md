@@ -16,8 +16,10 @@ repository, exact revision, canonical path, and SHA-256 of these source bytes.
 
 ## Goal
 
-Publish one reproducible final OpenClaw-compatible release from exact commit
-`58ac8c435679e6611903d31abaecec11bb9d7f75`. Separately land reviewed release
+Preserve the reproducible historical OpenClaw-compatible v0.1.0 release from
+exact commit `58ac8c435679e6611903d31abaecec11bb9d7f75`, and prepare the separately
+reviewed Product P correction as proposed v0.1.1 without rewriting that
+history. Separately land reviewed release
 tooling without changing the fixed Tightbeam product cutoff, then publish a
 reproducible Tightbeam-first release from exact commit
 `8fc9f508ae9b4371a3c25f6318920940fbad10cd` without an OpenClaw compatibility
@@ -29,7 +31,8 @@ smoke before publication.
 ## Non-goals
 
 - This specification does not perform a release action.
-- It does not preserve OpenClaw provider compatibility after `58ac8c4`.
+- It does not preserve general mainline OpenClaw provider compatibility after
+  `58ac8c4`; Product P is the explicitly reviewed two-file correction lineage.
 - It does not publish iPad Simulator, `SurfAceSpatial`, Linux compositor, or
   OpenClaw Rust CLI artifacts.
 - It does not define physical-device signing or installation as a publication
@@ -47,9 +50,11 @@ smoke before publication.
   delete, or push a branch or tag under this specification.
 - **Tooling refs**: immutable tag `surf-ace-release-tooling-v0.1.1` for the
   Tightbeam gates and prospective immutable tag
-  `surf-ace-release-tooling-openclaw-v0.1.3` for the corrected OpenClaw gates.
+  `surf-ace-release-tooling-openclaw-v0.1.4` for the Product P OpenClaw gates.
   Each tag peels to the exact independently reviewed tooling commit approved
   for its channel. Neither is a product source tag, and neither may be moved.
+  `surf-ace-release-tooling-openclaw-v0.1.3` remains the immutable reviewed
+  v0.1.0 tooling predecessor and is not selected by the Product P correction.
   The consumed predecessor
   `surf-ace-release-tooling-openclaw-v0.1.2` remains immutable history and is
   not selected by this revision. The incident name
@@ -75,8 +80,10 @@ smoke before publication.
 ## Invariants
 
 1. `surf-ace-openclaw-v0.1.0` always resolves to `58ac8c4`.
+   Prospective `surf-ace-openclaw-v0.1.1`, if separately authorized, resolves
+   only to reviewed Product P `801fc08047886028bd6fefc4ce35c8be04f7dff4`.
 2. `surf-ace-release-tooling-v0.1.1` and
-   `surf-ace-release-tooling-openclaw-v0.1.3` each resolve to the exact
+   prospective `surf-ace-release-tooling-openclaw-v0.1.4` each resolve to the exact
    reviewed tooling commit approved for their channel at Gate 2.
 3. A published tag, checksum, manifest, and file never change.
 4. GitHub Actions builds every public file from its recorded product source
@@ -129,6 +136,64 @@ cutoff: under separate tag authority the release owner creates
 `8fc9f508ae9b4371a3c25f6318920940fbad10cd`, regardless of the commit then at
 `main`, and verifies the remote tag peels to that fixed product commit.
 
+### Reviewed Product P correction lineage
+
+The historical OpenClaw v0.1.0 source, tag, files, and tooling v0.1.3 remain
+immutable as documented below. Product P is a distinct reviewed correction
+lineage from that source. Its exact identity is commit
+`801fc08047886028bd6fefc4ce35c8be04f7dff4`, tree
+`3e9675d0579f1ed46bf7310cee720efeb8e32997`, with only:
+
+1. `packages/extension/src/surf-ace-runtime.ts`, blob
+   `ba6ec6deea4e3c66e97575ac00585596e111857e`;
+2. `packages/extension/src/surf-ace-runtime.test.ts`, blob
+   `23ed4a96a46b7d07ee57e935786088a041e93a4c`.
+
+The independent correction review is reviewed-clean under `att_ea20cac9` and
+report `art_bab59fdf`. The proposed, still-unissued product tag is
+`surf-ace-openclaw-v0.1.1`; the proposed, still-unissued tooling tag is
+`surf-ace-release-tooling-openclaw-v0.1.4`. Their absence is not authority to
+create either ref.
+
+The v0.1.1 public file contract is exactly:
+
+1. `surf-ace-openclaw-extension-v0.1.1.tgz`
+2. `surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip`
+3. `surf-ace-openclaw-v0.1.1-manifest.json`
+
+The Product P Gate 4 builder invocation is exactly:
+
+```sh
+node tooling/scripts/release/build-openclaw-release.mjs \
+  --source-dir source \
+  --output-dir build/release/openclaw \
+  --source-tag surf-ace-openclaw-v0.1.1 \
+  --source-commit 801fc08047886028bd6fefc4ce35c8be04f7dff4 \
+  --version 0.1.1
+```
+
+The Product P artifact-smoke invocation is exactly:
+
+```sh
+node tooling/scripts/release/smoke-openclaw-release.mjs \
+  --baseline-commit d889f2f4bfb554bc3bfde0eb9927372552d40e51 \
+  --candidate-commit 801fc08047886028bd6fefc4ce35c8be04f7dff4 \
+  --openclaw-version 2026.7.1-2 \
+  --manifest build/release/openclaw/surf-ace-openclaw-v0.1.1-manifest.json \
+  --extension build/release/openclaw/surf-ace-openclaw-extension-v0.1.1.tgz \
+  --electron build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip
+```
+
+Product P preserves the authority gate proven by its reviewed tests: no target
+apply before genuine current authority and one natural release in the tested
+provider-timed resume ordering. A distinct late `event.surface_resumed` after
+that marker clears retains the historical repush behavior; this specification
+makes no global exactly-once claim. Focused reconnect tests near the reviewed
+source lines 11914 and 11992 have shown timing flakes since Product P, so a
+full Gate 4 lane must preserve complete output and treat any occurrence as Red
+without immediate retry. The prior heartbeat/replay-success coupling remains
+outside this tooling integration.
+
 ### Public destination
 
 The only authorized public repository is `clickety-clacks/surf-ace` on
@@ -138,7 +203,8 @@ file. Each third-party action must use an immutable commit SHA.
 
 ### Release files
 
-The final OpenClaw release uses tag `surf-ace-openclaw-v0.1.0` and source
+The historical final OpenClaw v0.1.0 release uses tag
+`surf-ace-openclaw-v0.1.0` and source
 commit `58ac8c435679e6611903d31abaecec11bb9d7f75`.
 
 1. `surf-ace-openclaw-extension-v0.1.0.tgz`
@@ -190,7 +256,7 @@ Gate 2 adds the repository-owned release programs under
 review approves their exact implementation commit. The release owner then
 preserves the channel-specific immutable tag
 `surf-ace-release-tooling-v0.1.1`, and under separate authority creates
-`surf-ace-release-tooling-openclaw-v0.1.3` at its independently reviewed
+`surf-ace-release-tooling-openclaw-v0.1.4` at its independently reviewed
 channel commit. The owner verifies both remote tags peel to their reviewed
 full SHAs. The historical tooling tag
 `surf-ace-release-tooling-v0.1.0` points to
@@ -198,6 +264,9 @@ full SHAs. The historical tooling tag
 and is not a checkout or creation target under this revision. The consumed
 OpenClaw tooling predecessor `surf-ace-release-tooling-openclaw-v0.1.2`
 remains immutable history and is likewise not selected or recreated.
+The reviewed v0.1.0 tooling tag
+`surf-ace-release-tooling-openclaw-v0.1.3` also remains immutable history and
+is not selected by the Product P v0.1.1 workflow.
 
 Every release job checks that tooling tag into `tooling/` and checks the
 product source tag into a separate new `source/` directory. Commands that
@@ -218,7 +287,7 @@ peel to the manifest's full commit or if a tracked product input changes. Each b
 removes its whole workspace, including ignored dependency and generated-build
 paths, after retaining only the compared files and receipts. Tightbeam v0.2.0
 uses `surf-ace-release-tooling-v0.1.1`; the corrected OpenClaw gates use
-`surf-ace-release-tooling-openclaw-v0.1.3`. Every manifest and guard retains
+`surf-ace-release-tooling-openclaw-v0.1.4`. Every manifest and guard retains
 its channel's actual tag and independently reviewed tooling commit.
 The incident tag `surf-ace-release-tooling-openclaw-v0.1.1` is present and
 reserved: annotated object `26ce99cf43463e817c5322c8793bcdd2d9eadc2e`
@@ -297,7 +366,7 @@ pnpm --dir source/packages/extension exec sh -c \
 pnpm --dir source --filter @surf-ace/controller test
 pnpm --dir source --filter @surf-ace/protocol test
 pnpm --dir source --filter @surf-ace/electron build
-pnpm --dir source --filter @surf-ace/electron test
+pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js
 ```
 
 Each preparation and test command is followed by the tracked-input guard.
@@ -568,14 +637,17 @@ The release must follow these gates in order:
    a tooling-only move and does not select a product source.
 3. Under separate tooling-tag authority, the release owner preserves immutable
    `surf-ace-release-tooling-v0.1.1` and creates distinct immutable tag
-   `surf-ace-release-tooling-openclaw-v0.1.3` at its independently reviewed
-   channel commit, then verifies both remote peels. The present incident tag
+   `surf-ace-release-tooling-openclaw-v0.1.4` at its independently reviewed
+   channel commit, then verifies both remote peels. The reviewed v0.1.3 tag
+   remains immutable history. The present incident tag
    `surf-ace-release-tooling-openclaw-v0.1.1` remains reserved and untouched;
    annotated object `26ce99cf43463e817c5322c8793bcdd2d9eadc2e`
    peels to `8fc9f508ae9b4371a3c25f6318920940fbad10cd`.
-4. The release owner creates `release/openclaw-final` and immutable tag
-   `surf-ace-openclaw-v0.1.0` at exact commit `58ac8c4`. The owner verifies
-   both remote refs peel to that commit.
+4. Under separate product-tag authority, the release owner creates immutable
+   tag `surf-ace-openclaw-v0.1.1` at exact reviewed Product P commit
+   `801fc08047886028bd6fefc4ce35c8be04f7dff4` and verifies its remote peel.
+   Historical `release/openclaw-final` and `surf-ace-openclaw-v0.1.0` remain
+   fixed at `58ac8c4` and are not moved or recreated.
 5. GitHub Actions executes from the actual selected immutable OpenClaw tooling
    tag, records that tag and the reviewed tooling commit, checks out the
    OpenClaw product tag separately, runs every test, builds the three files

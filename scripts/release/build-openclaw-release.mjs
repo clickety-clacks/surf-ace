@@ -69,13 +69,34 @@ export async function normalizeOpenclawDependencyClosure(sourceDir, dependencyCl
 
   await fs.unlink(selfLink);
   await requireMissing(selfLink, "openclaw_deploy_self_link_unresolved");
+
+  const nodeModules = path.join(closureRoot, "node_modules");
+  await fs.rm(path.join(nodeModules, ".modules.yaml"), { force: true });
+  const pending = [nodeModules];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const entryPath = path.join(directory, entry.name);
+      if (entry.name === ".bin") {
+        await fs.rm(entryPath, { force: true, recursive: true });
+      } else {
+        pending.push(entryPath);
+      }
+    }
+  }
 }
 
 export async function packageOpenclawElectron(sourceArgument, runCommand = run, environment = process.env) {
+  const packagingEnvironment = {
+    ...environment,
+    CSC_IDENTITY_AUTO_DISCOVERY: "false",
+  };
   await runCommand(
     "pnpm",
     ["--dir", sourceArgument, "--filter", "@surf-ace/electron", "build"],
-    { env: environment },
+    { env: packagingEnvironment },
   );
   await runCommand(
     "pnpm",
@@ -83,7 +104,7 @@ export async function packageOpenclawElectron(sourceArgument, runCommand = run, 
       "--dir", sourceArgument, "--filter", "@surf-ace/electron", "exec",
       "electron-builder", "--mac", "dir", "--arm64", "--publish", "never",
     ],
-    { env: environment },
+    { env: packagingEnvironment },
   );
 }
 
@@ -180,7 +201,7 @@ export async function buildOpenclawRelease(options) {
     formatVersion: 1,
     lockfileSha256: await sha256(path.join(sourceDir, "pnpm-lock.yaml")),
     smoke: {
-      command: "node tooling/scripts/release/smoke-openclaw-release.mjs --baseline-commit d889f2f4bfb554bc3bfde0eb9927372552d40e51 --candidate-commit 58ac8c435679e6611903d31abaecec11bb9d7f75 --openclaw-version 2026.7.1-2 --manifest build/release/openclaw/surf-ace-openclaw-v0.1.0-manifest.json --extension build/release/openclaw/surf-ace-openclaw-extension-v0.1.0.tgz --electron build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.0.zip",
+      command: "node tooling/scripts/release/smoke-openclaw-release.mjs --baseline-commit d889f2f4bfb554bc3bfde0eb9927372552d40e51 --candidate-commit 801fc08047886028bd6fefc4ce35c8be04f7dff4 --openclaw-version 2026.7.1-2 --manifest build/release/openclaw/surf-ace-openclaw-v0.1.1-manifest.json --extension build/release/openclaw/surf-ace-openclaw-extension-v0.1.1.tgz --electron build/release/openclaw/surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip",
       required: true,
       status: "pending",
     },
