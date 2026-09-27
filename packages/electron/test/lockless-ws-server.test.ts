@@ -586,7 +586,7 @@ test("next panes.list converges after the compositor rejects a stale pane focus 
   }
 });
 
-test("compositor status polling adopts click focus within 250 ms and stops when groups close", async (t) => {
+test("compositor status polling adopts click focus, stops after read failure, recovers on demand, and stops when groups close", async (t) => {
   const core = new SurfaceCore();
   const viewport = { height: 800, scale: 2, width: 1200 };
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
@@ -689,7 +689,7 @@ test("compositor status polling adopts click focus within 250 ms and stops when 
   const socketDir = await mkdtemp(path.join(tmpdir(), "surf-ace-native-focus-polling-"));
   const compositorSocketPath = path.join(socketDir, "control.sock");
   // The local socket fixture models a physical compositor click by changing the returned live status.
-  const compositor = createServer((socket) => {
+  const createCompositorServer = () => createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => {
@@ -705,6 +705,7 @@ test("compositor status polling adopts click focus within 250 ms and stops when 
       socket.end(JSON.stringify({ ok: true, status: makeCompositorStatus() }) + "\n");
     });
   });
+  let compositor = createCompositorServer();
   await new Promise<void>((resolve, reject) => {
     compositor.once("error", reject);
     compositor.listen(compositorSocketPath, resolve);
@@ -776,6 +777,54 @@ test("compositor status polling adopts click focus within 250 ms and stops when 
       true,
     );
     assert.ok(getStatusRequests >= 2, "the compositor click was discovered by a status poll without a client request");
+
+    const diagnosticWarnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      diagnosticWarnings.push(args.map(String).join(" "));
+    };
+    try {
+      await new Promise<void>((resolve) => compositor.close(() => resolve()));
+      await rm(compositorSocketPath, { force: true });
+      await new Promise<void>((resolve) => setTimeout(resolve, 160));
+      assert.equal(
+        diagnosticWarnings.filter((line) => line.includes("event=native_window_group_refresh_failed")).length,
+        1,
+        "one warning records the transition to an unavailable compositor",
+      );
+
+      const requestsBeforeRecovery = getStatusRequests;
+      compositor = createCompositorServer();
+      await new Promise<void>((resolve, reject) => {
+        compositor.once("error", reject);
+        compositor.listen(compositorSocketPath, resolve);
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      assert.equal(
+        getStatusRequests,
+        requestsBeforeRecovery,
+        "periodic polling stays stopped after a failed read until a later signal succeeds",
+      );
+
+      const recoveredList = await request(client, "panes.list", { surfaceId: surface.surfaceId });
+      assert.equal(recoveredList.ok, true, JSON.stringify(recoveredList));
+      const requestsAfterRecovery = getStatusRequests;
+      const pollDeadline = Date.now() + 1_000;
+      while (getStatusRequests === requestsAfterRecovery && Date.now() < pollDeadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+      assert.ok(
+        getStatusRequests > requestsAfterRecovery,
+        "a successful on-demand read resumes periodic polling for the open group",
+      );
+      assert.equal(
+        diagnosticWarnings.filter((line) => line.includes("event=native_window_group_refresh_failed")).length,
+        1,
+        "the failed-read warning is not repeated for each poll interval",
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
 
     const groupsCleared = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {

@@ -265,6 +265,7 @@ export class SurfaceWsServer {
   private readonly nativePaneStatusPollSurfaces = new Set<string>();
   private nativePaneStatusPollTimer: NodeJS.Timeout | null = null;
   private nativePaneStatusPollingStopped = false;
+  private nativePaneStatusFailureReported = false;
   private lifecycleMutationQueue: Promise<void> = Promise.resolve();
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
@@ -420,6 +421,7 @@ export class SurfaceWsServer {
     });
     this.ignoreInitialSurfaceEvents = false;
     this.nativePaneStatusPollingStopped = false;
+    this.nativePaneStatusFailureReported = false;
     for (const surface of this.core.listSurfaces()) {
       this.syncNativePaneStatusPolling(surface.surfaceId);
     }
@@ -3106,12 +3108,10 @@ export class SurfaceWsServer {
       const status = await sendCompositorControl(this.compositorSocketPath!, { type: "get_status" });
       const failure = compositorFailureMessage(status);
       if (failure) {
-        persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
-          error_message: failure,
-          surface_id: surfaceId,
-        });
+        this.noteNativePaneStatusReadFailure(surfaceId, failure);
         return null;
       }
+      this.nativePaneStatusFailureReported = false;
       const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(status);
       // get_status is process-wide: route its groups and generation to each current Surf Ace surface.
       for (const surface of this.core.listSurfaces()) {
@@ -3125,14 +3125,29 @@ export class SurfaceWsServer {
           });
         }
       }
+      // A successful on-demand read can recover polling even if the group projection
+      // was unchanged and therefore did not emit a surface-changed event.
+      this.updateNativePaneStatusPollTimer();
       return status;
     } catch (error) {
-      persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
-        error_message: error instanceof Error ? error.message : String(error),
-        surface_id: surfaceId,
-      });
+      this.noteNativePaneStatusReadFailure(
+        surfaceId,
+        error instanceof Error ? error.message : String(error),
+      );
       return null;
     }
+  }
+
+  private noteNativePaneStatusReadFailure(surfaceId: string, errorMessage: string): void {
+    this.stopNativePaneStatusPollTimer();
+    if (this.nativePaneStatusFailureReported) {
+      return;
+    }
+    this.nativePaneStatusFailureReported = true;
+    persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
+      error_message: errorMessage,
+      surface_id: surfaceId,
+    });
   }
 
   private syncNativePaneStatusPolling(surfaceId: string): void {
@@ -3163,10 +3178,7 @@ export class SurfaceWsServer {
 
   private updateNativePaneStatusPollTimer(): void {
     if (this.nativePaneStatusPollingStopped || this.nativePaneStatusPollSurfaces.size === 0) {
-      if (this.nativePaneStatusPollTimer) {
-        clearInterval(this.nativePaneStatusPollTimer);
-        this.nativePaneStatusPollTimer = null;
-      }
+      this.stopNativePaneStatusPollTimer();
       return;
     }
     if (this.nativePaneStatusPollTimer) {
@@ -3182,13 +3194,17 @@ export class SurfaceWsServer {
     this.nativePaneStatusPollTimer.unref();
   }
 
-  private stopNativePaneStatusPolling(): void {
-    this.nativePaneStatusPollingStopped = true;
-    this.nativePaneStatusPollSurfaces.clear();
+  private stopNativePaneStatusPollTimer(): void {
     if (this.nativePaneStatusPollTimer) {
       clearInterval(this.nativePaneStatusPollTimer);
       this.nativePaneStatusPollTimer = null;
     }
+  }
+
+  private stopNativePaneStatusPolling(): void {
+    this.nativePaneStatusPollingStopped = true;
+    this.nativePaneStatusPollSurfaces.clear();
+    this.stopNativePaneStatusPollTimer();
   }
 
   private applyNativePaneFocusReturn(surfaceId: string, response: CompositorControlResponse): void {
