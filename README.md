@@ -1,67 +1,127 @@
 # Surf Ace
 
-Turn any screen into an OpenClaw-managed surface. Push content, read annotations, orchestrate displays across devices.
+Surf Ace is a standalone surface system for coordinating Linux, macOS, and
+iPadOS clients. The v0.2.0 release includes a Linux registry/server package,
+the Rust CLI, desktop clients, and a signed iPad app.
 
-Supported clients are Linux, macOS, iOS, and iPadOS only. Windows and visionOS are not supported and are not delivery or soak gates. Linux and macOS controller/server requirements remain in scope.
+The former OpenClaw integration has been retired. This release has no extension
+or provider configuration and does not require an agent gateway.
 
-## Packages
+## Components and routing
 
-| Package | Description |
+- The Linux registry/server accepts client registrations and coordinates
+  shared window labels through an already-provisioned PostgreSQL 16 allocator.
+  It does not relay pair or content operations.
+- Electron clients run on Linux and macOS. The iPadOS client is distributed as
+  a signed IPA.
+- The `surf-ace` CLI sends network operations directly to the selected client's
+  WebSocket endpoint. The registry endpoint is not a CLI target.
+
+Electron clients can discover a registry on their network or use an explicit
+registry WebSocket URL with `SURF_ACE_SERVER`. The registry identifies
+registered clients and surfaces. To operate on a surface, select the client
+and surface in your deployment's inventory, then use that client's direct
+`/ws` address; if the inventory does not provide the address, configure it
+explicitly. Do not substitute the registry URL for the client's URL.
+
+Every CLI invocation uses a state root. Networked commands also require the
+client endpoint and a product label; `read` is a local state projection and
+does not take an endpoint:
+
+```sh
+surf-ace \
+  --state-root "$HOME/.local/state/surf-ace" \
+  --endpoint "ws://client.example:3210/ws" \
+  --product-label "Surf Ace" \
+  list
+```
+
+The CLI provides `list`, `push`, `read`, `capture-pane`, topology, surface,
+annotation, and target commands. See the packaged CLI README and protocol
+documentation for the exact inputs and outputs.
+
+## Release assets
+
+The v0.2.0 release asset set is versioned and accompanied by a manifest and
+`SHA256SUMS`:
+
+| Asset | Platform and purpose |
 |---|---|
-| `packages/protocol` | Shared TypeScript types and JSON Schema for the wire protocol |
-| `packages/extension` | OpenClaw extension — provider-side WS client, OpenClaw tools, Bonjour discovery |
-| `packages/ios` | iOS/iPadOS surface app (Swift) |
-| `packages/electron` | Electron surface app (Linux/macOS) |
+| `surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz` | Linux registry/server, CLI, schemas, and operations guide |
+| `surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz` | Linux CLI |
+| `surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip` | Linux desktop client |
+| `surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz` | macOS arm64 CLI |
+| `surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip` | macOS arm64 desktop client |
+| `surf-ace-tightbeam-ios-ipad-v0.2.0.ipa` | Signed iPadOS client |
+| `surf-ace-tightbeam-v0.2.0-manifest.json` | Source, tooling, dependency, signing, and asset identity |
+| `SHA256SUMS` | Checksums for the six assets and manifest |
 
-## Spec
+When published, download assets from the matching Surf Ace GitHub release.
+After downloading the complete asset set into one directory, verify it with
+`sha256sum -c SHA256SUMS` on Linux or `shasum -a 256 -c SHA256SUMS` on macOS.
+Inspect the manifest's `version`, `source`, and `tooling` fields before installing. The CLI
+does not provide a `--version` switch; use the versioned asset name, manifest,
+and checksum rather than inferring a version from command output.
 
-Full wire protocol spec: [DESIGN.md](./DESIGN.md)
+## Install and run
 
-UI flows reference: [docs/design/surf-ace-ui-flows.html](./docs/design/surf-ace-ui-flows.html)
+Extract CLI archives into a versioned user-owned directory so an older version
+remains available for rollback. For example, with the matching Linux CLI asset
+and `SHA256SUMS` already downloaded and verified:
 
-## Repo
+```sh
+VERSION=0.2.0
+INSTALL_ROOT="$HOME/.local/opt/surf-ace/$VERSION"
+mkdir -p "$INSTALL_ROOT"
+tar -xzf "surf-ace-tightbeam-cli-linux-x86_64-v${VERSION}.tar.gz" -C "$INSTALL_ROOT"
+"$INSTALL_ROOT/surf-ace-cli/bin/surf-ace" \
+  --state-root "$HOME/.local/state/surf-ace" \
+  --endpoint "ws://client.example:3210/ws" \
+  --product-label "Surf Ace" \
+  list
+```
 
-`clickety-clacks/surf-ace`
+For a macOS arm64 CLI, use
+`surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz`; its archive has the same
+`surf-ace-cli/bin/surf-ace` executable path. Extract a Linux desktop ZIP to a
+user-owned directory and launch `Surf Ace/surf-ace`. Extract the macOS desktop
+ZIP so `Surf Ace.app` is available, then open the app with Finder or `open`.
+Install the signed iPad IPA using your normal iPadOS app-distribution process.
 
-## Development Workflow
+The Linux server archive extracts under `surf-ace-server/`. PostgreSQL 16 must
+already be provisioned and configured; the package does not install a service,
+create a database, or migrate a serving database. Create a private server
+configuration using the fields documented in
+[`docs/release/tightbeam-linux-operations.md`](./docs/release/tightbeam-linux-operations.md),
+then validate and start the packaged foreground server:
 
-Extension/provider startup requires an explicit host allowlist. Set `SURF_ACE_PROVIDER_ALLOWED_HOSTS` to the approved comma-separated host names. Startup fails when this value is absent, malformed, or does not include the current host.
+```sh
+SERVER_ROOT="$HOME/.local/opt/surf-ace/server/0.2.0/surf-ace-server"
+"$SERVER_ROOT/bin/surf-ace-server" validate --config "$SERVER_CONFIG"
+"$SERVER_ROOT/bin/surf-ace-server" start --config "$SERVER_CONFIG"
+```
 
-Provider deployment also requires explicit configuration. Set `SURF_ACE_EXTENSION_DEPLOY_HOST` to a valid destination host name, then run `make -C packages/extension deploy-provider`. The deploy target fails before packaging when the value is absent or malformed.
+`start` stays in the foreground. Stop it with Ctrl-C or send `SIGTERM` to the
+owned launcher process; it closes the registry and releases its writer lease.
+The packaged `health` command checks a WebSocket handshake without registering
+a client or changing registry state:
 
-Persistent launchd/auto-start installation requires `SURF_ACE_AUTOSTART_ALLOWED_HOSTS`. Set it to the approved comma-separated host names before `pnpm --filter @surf-ace/electron launchd:install`. The installer fails when this value is absent, malformed, or does not include the current host. Manual foreground startup does not use this install guard.
+```sh
+"$SERVER_ROOT/bin/surf-ace-server" health --endpoint "$REGISTRY_WS"
+```
 
-Provider runtime state must use the standard OpenClaw extension state root: `~/.openclaw/extensions/surf-ace/`. The legacy standalone state root `~/.surf-ace-openclaw-extension` is non-standard and must not be used for durable installs, gateway runtime, or soak harnesses.
+## Upgrade and rollback
 
-### OpenClaw Tool Admission
+There is no in-place upgrade or rollback command. Keep verified releases in
+separate versioned directories. For a server upgrade, follow the packaged
+operations guide's PostgreSQL backup, staged-restore, validation, and rollback
+procedure before switching the foreground server to the new version. Stop the
+current server cleanly before starting another owner. If validation fails,
+return to the previous verified server/client assets and retain the original
+database; discard only the isolated staging database. Version 0.2.0's allocator
+schema initializes an empty PostgreSQL 16 database and is not an in-place
+migration. Do not apply it over an existing database.
 
-Surf Ace is an OpenClaw plugin tool surface. In installs that use the normal coding tool profile, the plugin must be explicitly admitted in `~/.openclaw/openclaw.json`; plugin installation/enabling alone is not enough to make `surf_ace_*` tools visible to OpenClaw sessions.
-
-Required OpenClaw config:
-
-    {
-      "tools": {
-        "profile": "coding",
-        "alsoAllow": ["surf-ace"]
-      },
-      "plugins": {
-        "allow": ["surf-ace"],
-        "entries": {
-          "surf-ace": { "enabled": true }
-        }
-      }
-    }
-
-Use `tools.alsoAllow`, not `tools.allow`, when the install should keep the normal coding tools and add Surf Ace. `tools.allow: ["surf-ace"]` is plugin-only admission and can hide the normal coding profile tools.
-
-After changing tool admission, reload OpenClaw/gateway sessions before verification. The product-level proof is that a normal session declares the `surf_ace_*` tools and a harmless `surf_ace_list` succeeds through that tool surface. Direct Surf Ace HTTP/WS calls, provider logs, DNS-SD, screenshots, and stale pane IDs are diagnostic only; they are not proof that the operator surface is installed correctly.
-
-Native GUI/app materialization has the same real-path rule. Product proof must launch through the official Surf Ace provider/tool path, `surf_ace_launch_native_app` with `confirmed:true`, against an actionable provider-admitted pane. The proof must show the provider-owned target state and materialization evidence for that pane, including `nativeHost: "applied"` and `overlayRegions: "applied"`, plus visible rendering in the pane. Direct compositor calls such as `native_pane.host`, native-pane demo fixtures, mocked compositor status, or manually hosted windows are lower-layer diagnostics only; they must not be reported as Surf Ace production/spec proof.
-
-## Status
-
-- [x] Wire protocol spec (DESIGN.md)
-- [x] Protocol package (types + JSON Schema)
-- [x] Extension package (WS runtime, OpenClaw tools, discovery, reconnect)
-- [ ] iOS surface app
-- [ ] Electron surface app
+The release tooling does not install or enable the optional Linux service-unit
+template. Service-manager setup and changes to PostgreSQL remain operator-owned
+actions.
