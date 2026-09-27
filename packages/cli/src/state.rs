@@ -25,6 +25,10 @@ pub struct ScopeProjection {
     pub first_retained_sequence: u64,
     pub last_retained_sequence: u64,
     #[serde(default)]
+    pub current_content_record: Option<Value>,
+    #[serde(default)]
+    pub current_content_sequence: Option<u64>,
+    #[serde(default)]
     pub records: Vec<Value>,
     #[serde(default)]
     pub gap: Option<Value>,
