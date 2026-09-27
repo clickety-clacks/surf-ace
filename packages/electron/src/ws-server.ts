@@ -261,10 +261,7 @@ export class SurfaceWsServer {
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
-  private readonly nativePaneStatusRefreshes = new Map<
-    string,
-    Promise<NativePaneCompositorRuntimeStatus | null>
-  >();
+  private nativePaneStatusRefresh: Promise<CompositorControlResponse | null> | null = null;
   private readonly nativePaneStatusPollSurfaces = new Set<string>();
   private nativePaneStatusPollTimer: NodeJS.Timeout | null = null;
   private nativePaneStatusPollingStopped = false;
@@ -3087,22 +3084,24 @@ export class SurfaceWsServer {
     if (!this.compositorSocketPath) {
       return null;
     }
-    const inFlight = this.nativePaneStatusRefreshes.get(surfaceId);
+    const inFlight = this.nativePaneStatusRefresh;
     if (inFlight) {
-      return await inFlight;
+      const status = await inFlight;
+      return status ? nativePaneCompositorRuntimeStatusFromStatus(status) : null;
     }
     const refresh = this.readNativePaneWindowGroups(surfaceId);
-    this.nativePaneStatusRefreshes.set(surfaceId, refresh);
+    this.nativePaneStatusRefresh = refresh;
     try {
-      return await refresh;
+      const status = await refresh;
+      return status ? nativePaneCompositorRuntimeStatusFromStatus(status) : null;
     } finally {
-      if (this.nativePaneStatusRefreshes.get(surfaceId) === refresh) {
-        this.nativePaneStatusRefreshes.delete(surfaceId);
+      if (this.nativePaneStatusRefresh === refresh) {
+        this.nativePaneStatusRefresh = null;
       }
     }
   }
 
-  private async readNativePaneWindowGroups(surfaceId: string): Promise<NativePaneCompositorRuntimeStatus | null> {
+  private async readNativePaneWindowGroups(surfaceId: string): Promise<CompositorControlResponse | null> {
     try {
       const status = await sendCompositorControl(this.compositorSocketPath!, { type: "get_status" });
       const failure = compositorFailureMessage(status);
@@ -3114,9 +3113,19 @@ export class SurfaceWsServer {
         return null;
       }
       const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(status);
-      this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
-      this.applyNativePaneFocusReturn(surfaceId, status);
-      return nativePaneCompositorRuntimeStatusFromStatus(status);
+      // get_status is process-wide: route its groups and generation to each current Surf Ace surface.
+      for (const surface of this.core.listSurfaces()) {
+        try {
+          this.core.markNativePaneWindowGroups(surface.surfaceId, observedWindowGroups);
+          this.applyNativePaneFocusReturn(surface.surfaceId, status);
+        } catch (error) {
+          persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
+            error_message: error instanceof Error ? error.message : String(error),
+            surface_id: surface.surfaceId,
+          });
+        }
+      }
+      return status;
     } catch (error) {
       persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
         error_message: error instanceof Error ? error.message : String(error),
@@ -3163,8 +3172,10 @@ export class SurfaceWsServer {
     if (this.nativePaneStatusPollTimer) {
       return;
     }
+    // One shared status read covers every surface with a currently open native group.
     this.nativePaneStatusPollTimer = setInterval(() => {
-      for (const surfaceId of this.nativePaneStatusPollSurfaces) {
+      const surfaceId = this.nativePaneStatusPollSurfaces.values().next().value;
+      if (surfaceId !== undefined) {
         void this.refreshNativePaneWindowGroups(surfaceId).catch(() => {});
       }
     }, NATIVE_PANE_FOCUS_STATUS_POLL_INTERVAL_MS);

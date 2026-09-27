@@ -586,7 +586,7 @@ test("next panes.list converges after the compositor rejects a stale pane focus 
   }
 });
 
-test("compositor status polling adopts click focus within 250 ms and stops when groups close", async () => {
+test("compositor status polling adopts click focus within 250 ms and stops when groups close", async (t) => {
   const core = new SurfaceCore();
   const viewport = { height: 800, scale: 2, width: 1200 };
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
@@ -766,6 +766,7 @@ test("compositor status polling adopts click focus within 250 ms and stops when 
     nativePaneFocused = true;
 
     const indicatorDelayMs = await indicatorUpdate;
+    t.diagnostic("click-to-indicator delay: " + indicatorDelayMs + " ms");
     assert.ok(
       indicatorDelayMs <= 250,
       "compositor click reached the renderer's existing surface-state source in " + indicatorDelayMs + " ms",
