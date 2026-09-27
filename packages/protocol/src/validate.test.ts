@@ -341,6 +341,10 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
     ok: true,
     op: "panes.list",
     payload: {
+      nativeCompositorStatus: {
+        activeFocusTarget: { native_pane: { pane_id: "surf-ace-pane:v1:4:sf_1:1:1" } },
+        lastDiagnostic: "native_owner_lost",
+      },
       panes: [
         {
           activeContentId: null,
@@ -376,6 +380,39 @@ test("validateEnvelopeType accepts payloadless list requests and responses", () 
             targetPayload: { url: "https://example.test/live" },
           },
           externalNative: false,
+          // Synthetic future T368 group status; ccc0002 currently reports only the primary member.
+          nativeWindowGroup: {
+            acceptedSecondaryCount: 1,
+            clippingStatus: "unclipped",
+            deniedReasons: ["foreign_launch_identity"],
+            deniedToplevelCount: 1,
+            focusedPaneId: 1,
+            focusedWindowId: "dialog-1",
+            interactionState: "active",
+            launchToken: "sf_1:1:tg_1:1",
+            lifecycleDiagnostic: null,
+            members: [{
+              acceptsInput: true,
+              bounds: { height: 180, width: 220, x: -20, y: 44 },
+              clippedToPane: false,
+              destroyedWhileHidden: false,
+              focused: true,
+              hiddenReason: null,
+              id: "dialog-1",
+              lifecycle: "live",
+              restorationState: "preserved",
+              role: "dialog",
+              visibility: "visible",
+              zOrder: 1,
+            }],
+            paneFocused: true,
+            paneId: 1,
+            paneInstanceId: "pl_1",
+            paneLocalBounds: { height: 384, width: 1024, x: 0, y: 384 },
+            primaryVisible: true,
+            primaryWindowId: "native-primary-1",
+            surfaceFocus: "native_accessory",
+          },
           geometry: {
             contentViewport: { height: 384, width: 1024, x: 0, y: 384 },
             coordinateSpace: "surface_logical",
@@ -497,7 +534,7 @@ test("validateEnvelopeType accepts target.apply.result responses", () => {
   assert.deepEqual(result, { ok: true });
 });
 
-test("validateEnvelopeType accepts target.apply.result native app proof state", () => {
+test("validateEnvelopeType accepts target.apply.result native app proof and failed lifecycle state", () => {
   const result = validateEnvelopeType("target.apply", {
     id: "req_target",
     ok: true,
@@ -510,6 +547,7 @@ test("validateEnvelopeType accepts target.apply.result native app proof state", 
           surfaceId: "sf_1",
           targetEpoch: 1,
         },
+        lifecycle: "failed",
         nativeHost: "applied",
         nativeTarget: {
           appId: "com.example.App",

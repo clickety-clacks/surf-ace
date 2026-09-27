@@ -49,10 +49,13 @@ import {
 } from "../../protocol/src/lockless.js";
 import {
   compositorFailureMessage,
+  nativePaneCompositorRuntimeStatusFromStatus,
   isOverlayNativePaneLivenessFailure,
   type NativePaneMaterialization,
+  nativePaneFocusRequestForCompositor,
   nativePaneWindowGroupsFromCompositorStatus,
   nativePaneReleaseRequestForCompositor,
+  compositorPaneIdForSurface,
   overlayRequestForCompositor,
   overlayRegionsWithLivePaneInstanceAuthority,
   overlayTopologyEpochFromCompositorResponse,
@@ -63,6 +66,7 @@ import {
   type CompositorControlRequest,
   type CompositorControlResponse,
   type NativePaneWindowGroupStatus,
+  type NativePaneCompositorRuntimeStatus,
 } from "./native-pane-bridge.js";
 import {
   type ClientDiagnosticFields,
@@ -158,6 +162,7 @@ const DEFAULT_LIMITS = {
 };
 const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
 const PANE_GEOMETRY_READY_TIMEOUT_MS = 8_000;
+const NATIVE_PANE_FOCUS_STATUS_POLL_INTERVAL_MS = 100;
 const NATIVE_OVERLAY_LIVENESS_RETRY_COUNT = 80;
 const NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS = 100;
 type ServerDiagnosticFields = ClientDiagnosticFields;
@@ -256,6 +261,11 @@ export class SurfaceWsServer {
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
+  private nativePaneStatusRefresh: Promise<CompositorControlResponse | null> | null = null;
+  private readonly nativePaneStatusPollSurfaces = new Set<string>();
+  private nativePaneStatusPollTimer: NodeJS.Timeout | null = null;
+  private nativePaneStatusPollingStopped = false;
+  private nativePaneStatusFailureReported = false;
   private lifecycleMutationQueue: Promise<void> = Promise.resolve();
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
@@ -410,6 +420,11 @@ export class SurfaceWsServer {
       this.httpServer.once("error", reject);
     });
     this.ignoreInitialSurfaceEvents = false;
+    this.nativePaneStatusPollingStopped = false;
+    this.nativePaneStatusFailureReported = false;
+    for (const surface of this.core.listSurfaces()) {
+      this.syncNativePaneStatusPolling(surface.surfaceId);
+    }
     persistentServerDiagnostic(
       "info",
       "server_bind_ok",
@@ -424,6 +439,7 @@ export class SurfaceWsServer {
   }
 
   async stop(): Promise<void> {
+    this.stopNativePaneStatusPolling();
     persistentServerDiagnostic(
       "info",
       "server_stop_begin",
@@ -865,6 +881,9 @@ export class SurfaceWsServer {
 
   private async handleCoreEvent(event: CoreEvent): Promise<void> {
     switch (event.type) {
+      case "keyboard-focus-changed":
+        await this.syncNativePaneFocus(event.surfaceId);
+        return;
       case "lockless-authority-changed":
         return;
       case "annotation-committed":
@@ -949,12 +968,66 @@ export class SurfaceWsServer {
         await this.broadcastSurfaceAppeared(event.surfaceId);
         return;
       case "surface-removed":
+        this.stopNativePaneStatusPollingForSurface(event.surfaceId);
         await this.broadcastSurfaceRemoved(event.surfaceId);
         return;
       case "surface-changed":
+        this.syncNativePaneStatusPolling(event.surfaceId);
+        return;
       case "pane-geometry-changed":
         return;
     }
+  }
+
+  private async syncNativePaneFocus(surfaceId: string): Promise<CompositorControlResponse | null> {
+    if (!this.compositorSocketPath) {
+      return null;
+    }
+    return await this.runSurfaceMutation(surfaceId, async () => {
+      let focus: ReturnType<SurfaceCore["projectNativePaneFocus"]> | null = null;
+      try {
+        const nativePaneIds = new Set(
+          this.core.nativeHostedPaneIdsExcluding(surfaceId, []).map(String),
+        );
+        if (nativePaneIds.size === 0) {
+          return null;
+        }
+        focus = this.core.projectNativePaneFocus(surfaceId);
+        const response = await sendCompositorControl(
+          this.compositorSocketPath!,
+          nativePaneFocusRequestForCompositor(focus, nativePaneIds),
+        );
+        const failure = compositorFailureMessage(response);
+        if (failure) {
+          persistentServerDiagnostic("warn", "native_pane_focus_sync_failed", {
+            error_message: failure,
+            focused_pane_id: focus.focusedPaneId ?? "none",
+            surface_id: surfaceId,
+          });
+          return response;
+        }
+        const observedGroups = nativePaneWindowGroupsFromCompositorStatus(response);
+        if (observedGroups.length > 0) {
+          this.core.markNativePaneWindowGroups(surfaceId, observedGroups);
+        }
+        this.applyNativePaneFocusReturn(surfaceId, response);
+        persistentServerDiagnostic("info", "native_pane_focus_synced", {
+          focused_pane_id: focus.focusedPaneId ?? "none",
+          geometry_revision: Number(focus.geometryRevision),
+          surface_epoch: focus.surfaceEpoch,
+          surface_id: surfaceId,
+          topology_epoch: Number(focus.topologyEpoch),
+        });
+        return response;
+      } catch (error) {
+        persistentServerDiagnostic("warn", "native_pane_focus_sync_failed", {
+          error_message: error instanceof Error ? error.message : String(error),
+          focused_pane_id: focus?.focusedPaneId ?? "unknown",
+          surface_id: surfaceId,
+        });
+        return null;
+      }
+    });
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
@@ -1942,8 +2015,10 @@ export class SurfaceWsServer {
         );
       }
       this.requireLocklessSurface(targetSurfaceId);
+      const nativeCompositorStatus = await this.refreshNativePaneWindowGroups(targetSurfaceId);
       return locklessSuccess(request, {
         ...this.core.panesList(targetSurfaceId),
+        ...(nativeCompositorStatus ? { nativeCompositorStatus } : {}),
         topology: this.core.topologyState(targetSurfaceId),
       });
     }
@@ -2979,8 +3054,11 @@ export class SurfaceWsServer {
 
   private async handlePanesList(socket: WebSocket, request: PanesListRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    await this.refreshNativePaneWindowGroups(surfaceId);
-    const payload = this.core.panesList(surfaceId);
+    const nativeCompositorStatus = await this.refreshNativePaneWindowGroups(surfaceId);
+    const payload = {
+      ...this.core.panesList(surfaceId),
+      ...(nativeCompositorStatus ? { nativeCompositorStatus } : {}),
+    };
     persistentServerDiagnostic(
       "info",
       "panes_list_summary",
@@ -3004,28 +3082,150 @@ export class SurfaceWsServer {
     };
   }
 
-  private async refreshNativePaneWindowGroups(surfaceId: string): Promise<void> {
+  private async refreshNativePaneWindowGroups(surfaceId: string): Promise<NativePaneCompositorRuntimeStatus | null> {
     if (!this.compositorSocketPath) {
-      return;
+      return null;
     }
+    const inFlight = this.nativePaneStatusRefresh;
+    if (inFlight) {
+      const status = await inFlight;
+      return status ? nativePaneCompositorRuntimeStatusFromStatus(status) : null;
+    }
+    const refresh = this.readNativePaneWindowGroups(surfaceId);
+    this.nativePaneStatusRefresh = refresh;
     try {
-      const status = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      const status = await refresh;
+      return status ? nativePaneCompositorRuntimeStatusFromStatus(status) : null;
+    } finally {
+      if (this.nativePaneStatusRefresh === refresh) {
+        this.nativePaneStatusRefresh = null;
+      }
+    }
+  }
+
+  private async readNativePaneWindowGroups(surfaceId: string): Promise<CompositorControlResponse | null> {
+    try {
+      const status = await sendCompositorControl(this.compositorSocketPath!, { type: "get_status" });
       const failure = compositorFailureMessage(status);
       if (failure) {
-        persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
-          error_message: failure,
-          surface_id: surfaceId,
-        });
-        return;
+        this.noteNativePaneStatusReadFailure(surfaceId, failure);
+        return null;
       }
+      this.nativePaneStatusFailureReported = false;
       const observedWindowGroups = nativePaneWindowGroupsFromCompositorStatus(status);
-      this.core.markNativePaneWindowGroups(surfaceId, observedWindowGroups);
+      // get_status is process-wide: route its groups and generation to each current Surf Ace surface.
+      for (const surface of this.core.listSurfaces()) {
+        try {
+          this.core.markNativePaneWindowGroups(surface.surfaceId, observedWindowGroups);
+          this.applyNativePaneFocusReturn(surface.surfaceId, status);
+        } catch (error) {
+          persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
+            error_message: error instanceof Error ? error.message : String(error),
+            surface_id: surface.surfaceId,
+          });
+        }
+      }
+      // A successful on-demand read can recover polling even if the group projection
+      // was unchanged and therefore did not emit a surface-changed event.
+      this.updateNativePaneStatusPollTimer();
+      return status;
     } catch (error) {
-      persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
-        error_message: error instanceof Error ? error.message : String(error),
-        surface_id: surfaceId,
-      });
+      this.noteNativePaneStatusReadFailure(
+        surfaceId,
+        error instanceof Error ? error.message : String(error),
+      );
+      return null;
     }
+  }
+
+  private noteNativePaneStatusReadFailure(surfaceId: string, errorMessage: string): void {
+    this.stopNativePaneStatusPollTimer();
+    if (this.nativePaneStatusFailureReported) {
+      return;
+    }
+    this.nativePaneStatusFailureReported = true;
+    persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
+      error_message: errorMessage,
+      surface_id: surfaceId,
+    });
+  }
+
+  private syncNativePaneStatusPolling(surfaceId: string): void {
+    if (this.nativePaneStatusPollingStopped || !this.compositorSocketPath) {
+      return;
+    }
+    let hasOpenNativeWindowGroup = false;
+    try {
+      hasOpenNativeWindowGroup = this.core.panesList(surfaceId).panes.some(
+        (pane) => pane.externalNative && pane.nativeWindowGroup !== undefined,
+      );
+    } catch {
+      this.stopNativePaneStatusPollingForSurface(surfaceId);
+      return;
+    }
+    if (hasOpenNativeWindowGroup) {
+      this.nativePaneStatusPollSurfaces.add(surfaceId);
+    } else {
+      this.nativePaneStatusPollSurfaces.delete(surfaceId);
+    }
+    this.updateNativePaneStatusPollTimer();
+  }
+
+  private stopNativePaneStatusPollingForSurface(surfaceId: string): void {
+    this.nativePaneStatusPollSurfaces.delete(surfaceId);
+    this.updateNativePaneStatusPollTimer();
+  }
+
+  private updateNativePaneStatusPollTimer(): void {
+    if (this.nativePaneStatusPollingStopped || this.nativePaneStatusPollSurfaces.size === 0) {
+      this.stopNativePaneStatusPollTimer();
+      return;
+    }
+    if (this.nativePaneStatusPollTimer) {
+      return;
+    }
+    // One shared status read covers every surface with a currently open native group.
+    this.nativePaneStatusPollTimer = setInterval(() => {
+      const surfaceId = this.nativePaneStatusPollSurfaces.values().next().value;
+      if (surfaceId !== undefined) {
+        void this.refreshNativePaneWindowGroups(surfaceId).catch(() => {});
+      }
+    }, NATIVE_PANE_FOCUS_STATUS_POLL_INTERVAL_MS);
+    this.nativePaneStatusPollTimer.unref();
+  }
+
+  private stopNativePaneStatusPollTimer(): void {
+    if (this.nativePaneStatusPollTimer) {
+      clearInterval(this.nativePaneStatusPollTimer);
+      this.nativePaneStatusPollTimer = null;
+    }
+  }
+
+  private stopNativePaneStatusPolling(): void {
+    this.nativePaneStatusPollingStopped = true;
+    this.nativePaneStatusPollSurfaces.clear();
+    this.stopNativePaneStatusPollTimer();
+  }
+
+  private applyNativePaneFocusReturn(surfaceId: string, response: CompositorControlResponse): void {
+    const generation = nativePaneCompositorRuntimeStatusFromStatus(response)?.activeFocusGeneration;
+    if (
+      !generation ||
+      generation.surfaceId !== surfaceId ||
+      generation.focusedPaneId === null ||
+      generation.focusedPaneInstanceId === null
+    ) {
+      return;
+    }
+    this.core.applyCompositorKeyboardPaneFocusFromStatus(
+      surfaceId,
+      generation.focusedPaneId,
+      generation.focusedPaneInstanceId,
+      generation.focusRevision,
+      generation.surfaceEpoch,
+      generation.topologyEpoch,
+      generation.geometryRevision,
+    );
   }
 
   private async runSurfaceMutation<T>(surfaceId: string, operation: () => Promise<T> | T): Promise<T> {
@@ -4160,7 +4360,7 @@ export class SurfaceWsServer {
     if (!this.compositorSocketPath) {
       return `${operation} cannot replace a live native-hosted pane without native pane release support`;
     }
-    const releaseRequest = nativePaneReleaseRequestForCompositor(releasePaneIds);
+    const releaseRequest = nativePaneReleaseRequestForCompositor(surfaceId, releasePaneIds);
     let releaseResponse: CompositorControlResponse;
     try {
       releaseResponse = await sendCompositorControl(this.compositorSocketPath, releaseRequest);
@@ -4314,7 +4514,7 @@ export class SurfaceWsServer {
     try {
       releaseResponse = await sendCompositorControl(
         this.compositorSocketPath,
-        nativePaneReleaseRequestForCompositor(paneIds),
+        nativePaneReleaseRequestForCompositor(surfaceId, paneIds),
       );
     } catch {
       return false;
@@ -5254,7 +5454,7 @@ function nativeHostMaterializedState(
   state: {
     diagnostics?: string[];
     inputFocus?: "ready" | "not_ready" | "unknown";
-    lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+    lifecycle?: "launch_requested" | "running" | "failed" | "exited" | "unknown";
     nativeHost: "applied" | "not_applied" | "released_after_failure";
     overlayRegions: "applied" | "not_applied" | "not_requested";
     proof?: NativeHostMaterializedState["proof"];
@@ -5309,7 +5509,7 @@ function nativePaneReadinessFromCompositor(
 ): {
   diagnostics?: string[];
   inputFocus?: "ready" | "not_ready" | "unknown";
-  lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+  lifecycle?: "launch_requested" | "running" | "failed" | "exited" | "unknown";
   proof?: NativeHostMaterializedState["proof"];
 } {
   const status = response.status;
@@ -5317,13 +5517,15 @@ function nativePaneReadinessFromCompositor(
     return {};
   }
   const pane = materialization.panes[0];
+  const compositorPaneId = pane
+    ? compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id)
+    : null;
   const panes = Array.isArray(status.panes) ? status.panes : [];
   const paneStatus = panes.find((candidate) => {
-    if (!isPlainRecord(candidate) || !pane) {
+    if (!isPlainRecord(candidate) || compositorPaneId === null) {
       return false;
     }
-    return String(candidate.id ?? "") === String(pane.id) ||
-      (pane.binding_id ? String(candidate.binding_id ?? "") === String(pane.binding_id) : false);
+    return String(candidate.id ?? "") === compositorPaneId;
   });
   const source = isPlainRecord(paneStatus) ? paneStatus : status;
   const nativeHostStatus = isPlainRecord(paneStatus) && isPlainRecord(paneStatus.nativeHost)
@@ -5351,6 +5553,7 @@ function nativePaneReadinessFromCompositor(
     ? nativeHostStatus.process
     : null;
   const proof = paneProofFromCompositorStatus({
+    compositorPaneId,
     nativeAppStatus,
     pane,
     paneStatus: isPlainRecord(paneStatus) ? paneStatus : null,
@@ -5365,11 +5568,17 @@ function nativePaneReadinessFromCompositor(
     ...(!nativePaneWindowGroupsFromCompositorStatus(response).some((group) =>
       nativePaneWindowGroupMatchesMaterialization(group, materialization)
     ) ? { diagnostics: [...diagnostics, "matching native pane window group was not observed"] } : {}),
-    inputFocus: normalizeNativeInputFocus(source.inputFocus ?? source.input_focus),
+    inputFocus: nativePaneInputFocusFromRuntime(status, compositorPaneId) ??
+      normalizeNativeInputFocus(source.inputFocus ?? source.input_focus),
     lifecycle: normalizeNativeLifecycle(source.lifecycle) ??
       normalizeNativeLifecycle(
         isPlainRecord(nativeHostStatus?.lifecycle)
           ? nativeHostStatus.lifecycle.state
+          : undefined,
+      ) ??
+      normalizeNativeLifecycle(
+        isPlainRecord(paneStatus) && isPlainRecord(paneStatus.external_native_state)
+          ? paneStatus.external_native_state.state
           : undefined,
       ),
     ...(proof ? { proof } : {}),
@@ -5385,12 +5594,13 @@ function nativePaneWindowGroupMatchesMaterialization(
     return false;
   }
   if (pane.windowGroup?.launchIdentity.launchToken) {
-    return group.launchToken === pane.windowGroup.launchIdentity.launchToken;
+    return group.launchToken === pane.windowGroup.launchIdentity.launchToken &&
+      group.paneId === compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id);
   }
   if (group.paneInstanceId && group.paneInstanceId === pane.geometry.paneInstanceId) {
-    return true;
+    return group.paneId === compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id);
   }
-  return group.paneId === String(pane.id) && (
+  return group.paneId === compositorPaneIdForSurface(materialization.focus.surfaceId, pane.id) && (
     group.primaryWindowId === pane.binding_id ||
     group.primaryWindowId === pane.content_id
   );
@@ -5439,6 +5649,7 @@ function appendDiagnosticValues(target: Set<string>, value: unknown): void {
 }
 
 function paneProofFromCompositorStatus(input: {
+  compositorPaneId: string | null;
   nativeAppStatus: Record<string, unknown> | null;
   pane: NativePaneMaterialization["panes"][number] | undefined;
   paneStatus: Record<string, unknown> | null;
@@ -5448,6 +5659,7 @@ function paneProofFromCompositorStatus(input: {
   processStatus: Record<string, unknown> | null;
 }): NativeHostMaterializedState["proof"] | undefined {
   const {
+    compositorPaneId,
     nativeAppStatus,
     pane,
     paneStatus,
@@ -5459,7 +5671,8 @@ function paneProofFromCompositorStatus(input: {
   if (
     !pane ||
     !paneStatus ||
-    paneStatusId !== String(pane.id) ||
+    compositorPaneId === null ||
+    paneStatusId !== compositorPaneId ||
     !((pane.binding_id && paneStatusBindingId === pane.binding_id) ||
       (pane.content_id && paneStatusContentId === pane.content_id))
   ) {
@@ -5519,9 +5732,58 @@ function normalizeNativeInputFocus(value: unknown): "ready" | "not_ready" | "unk
   return undefined;
 }
 
-function normalizeNativeLifecycle(value: unknown): "launch_requested" | "running" | "exited" | "unknown" | undefined {
-  if (value === "launch_requested" || value === "running" || value === "exited" || value === "unknown") {
+function nativePaneInputFocusFromRuntime(
+  status: Record<string, unknown>,
+  compositorPaneId: string | null,
+): "ready" | "not_ready" | "unknown" | undefined {
+  if (!Object.prototype.hasOwnProperty.call(status, "runtime")) {
+    return undefined;
+  }
+  const runtime = status.runtime;
+  if (!isPlainRecord(runtime)) {
+    return "unknown";
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(runtime, "active_focus_target") ||
+    runtime.active_focus_target === null
+  ) {
+    // T316 serializes its optional RuntimeFocusTarget by omitting it when there is no active target.
+    return "not_ready";
+  }
+  const activeFocusTarget = runtime.active_focus_target;
+  if (activeFocusTarget === "main_app" || activeFocusTarget === "overlay_native") {
+    return "not_ready";
+  }
+  if (!isPlainRecord(activeFocusTarget) || !isPlainRecord(activeFocusTarget.native_pane)) {
+    return "unknown";
+  }
+  const focusedPaneId = stringProperty(activeFocusTarget.native_pane, "pane_id");
+  if (focusedPaneId === undefined || compositorPaneId === null) {
+    return "unknown";
+  }
+  return focusedPaneId === compositorPaneId ? "ready" : "not_ready";
+}
+
+function normalizeNativeLifecycle(
+  value: unknown,
+): "launch_requested" | "running" | "failed" | "exited" | "unknown" | undefined {
+  if (
+    value === "launch_requested" ||
+    value === "running" ||
+    value === "failed" ||
+    value === "exited" ||
+    value === "unknown"
+  ) {
     return value;
+  }
+  if (value === "launching") {
+    return "launch_requested";
+  }
+  if (value === "attached") {
+    return "running";
+  }
+  if (value === "absent") {
+    return "unknown";
   }
   return undefined;
 }

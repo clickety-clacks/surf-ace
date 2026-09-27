@@ -65,7 +65,7 @@ export type NativeHostMaterializedState = {
   };
   diagnostics?: string[];
   inputFocus?: "ready" | "not_ready" | "unknown";
-  lifecycle?: "launch_requested" | "running" | "exited" | "unknown";
+  lifecycle?: "launch_requested" | "running" | "failed" | "exited" | "unknown";
   nativeTarget?: {
     appId?: string;
     args?: string[];
@@ -513,12 +513,42 @@ export type HeartbeatPingRequest = RequestBase<"heartbeat.ping"> & {
 
 export type PanesListRequest = RequestBase<"panes.list">;
 
+export type NativePaneWindowGroupLifecycle = "live" | "closing" | "closed" | "disappeared" | "unknown";
+export type NativePaneWindowGroupVisibility = "visible" | "focus_hidden" | "hidden" | "unknown";
+export type NativePaneWindowGroupRestoration = "preserved" | "removed" | "not_applicable" | "unknown";
+export type NativePaneSurfaceFocus = "surf_ace" | "native_primary" | "native_accessory" | "unknown";
+export type NativePaneInteractionState = "idle" | "active" | "cancelled" | "unknown";
+
+// Raw compositor-level status stays separate from pane-group status because
+// the active input target and last diagnostic may describe the whole surface.
+export type NativePaneCompositorFocusGeneration = {
+  focusRevision: number;
+  focusedPaneId: string | null;
+  focusedPaneInstanceId: string | null;
+  geometryRevision: number;
+  surfaceEpoch: string;
+  surfaceId: string;
+  topologyEpoch: number;
+};
+
+export type NativePaneCompositorRuntimeStatus = {
+  activeFocusTarget?: unknown;
+  activeFocusGeneration?: NativePaneCompositorFocusGeneration | null;
+  lastDiagnostic?: unknown;
+};
+
 export type NativePaneWindowGroupMember = {
+  acceptsInput: boolean | null;
   id: string;
   role: "primary" | "dialog" | "palette" | "popup" | "secondary" | "unknown";
   bounds: Rect | null;
+  destroyedWhileHidden: boolean | null;
   focused: boolean;
-  lifecycle: "live" | "closing" | "closed" | "unknown";
+  hiddenReason: string | null;
+  lifecycle: NativePaneWindowGroupLifecycle;
+  restorationState: NativePaneWindowGroupRestoration;
+  visibility: NativePaneWindowGroupVisibility;
+  zOrder: number | null;
   clippedToPane: boolean | null;
 };
 
@@ -533,6 +563,12 @@ export type NativePaneWindowGroupDiagnostic = {
   deniedReasons: string[];
   paneLocalBounds: Rect;
   clippingStatus: "clipped" | "unclipped" | "unknown";
+  focusedPaneId: PaneId | null;
+  paneFocused: boolean | null;
+  primaryVisible: boolean | null;
+  surfaceFocus: NativePaneSurfaceFocus;
+  interactionState: NativePaneInteractionState;
+  lifecycleDiagnostic: string | null;
   members: NativePaneWindowGroupMember[];
 };
 
@@ -732,6 +768,7 @@ export type HeartbeatPongResponse = ResponseBase<"heartbeat.ping"> & {
 
 export type PanesListResponse = ResponseBase<"panes.list"> & {
   payload: {
+    nativeCompositorStatus?: NativePaneCompositorRuntimeStatus;
     panes: Array<{
       paneId: PaneId;
       paneLabel: number;

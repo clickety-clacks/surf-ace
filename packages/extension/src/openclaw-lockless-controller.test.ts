@@ -84,6 +84,8 @@ class LocklessFakeWire implements ControllerWire {
       paneId?: number;
       paneLabel?: number;
       paneLive?: boolean;
+      nativeWindowGroup?: unknown;
+      nativeCompositorStatus?: unknown;
       staleTopologyOnce?: boolean;
       topologyRevision?: number;
     } = { live: true },
@@ -160,6 +162,9 @@ class LocklessFakeWire implements ControllerWire {
     if (op === "panes.list") {
       const paneId = this.endpointState.paneId ?? 1;
       return response(op, {
+        ...(this.endpointState.nativeCompositorStatus !== undefined
+          ? { nativeCompositorStatus: this.endpointState.nativeCompositorStatus }
+          : {}),
         panes: this.endpointState.paneLive === false ? [] : [{
           activeContentId: "ct_1",
           contentType: "html",
@@ -176,6 +181,9 @@ class LocklessFakeWire implements ControllerWire {
           paneId,
           paneLabel: this.endpointState.paneLabel ?? paneId,
           paneLineageId: "pl_1",
+          ...(this.endpointState.nativeWindowGroup !== undefined
+            ? { nativeWindowGroup: this.endpointState.nativeWindowGroup }
+            : {}),
           viewport: { height: 768, scale: 1, width: 1024 },
         }],
         topology: {
@@ -424,6 +432,81 @@ test("lockless alert presentation has no embedded host or session route", async 
   );
   assert.equal(source.includes("localhost:18800"), false);
   assert.equal(source.includes("agent:main:main"), false);
+});
+
+test("lockless screen listing preserves native pane-group diagnostics", async () => {
+  const endpoint: SurfAceDiscoveryEndpoint = {
+    busy: false,
+    capabilitiesBitmask: 0,
+    endpointId: "electron-native-group",
+    fingerprintPrefix: "sf",
+    host: "127.0.0.1",
+    instanceName: "Surf Ace",
+    lastSeenAt: 1,
+    name: "Studio",
+    port: 17_700,
+    protocolVersion: 1,
+    viewport: { height: 768, scale: 1, width: 1024 },
+    wsPath: "/ws",
+  };
+  // Synthetic future T368 group status; ccc0002 currently reports only the primary member.
+  const nativeWindowGroup = {
+    acceptedSecondaryCount: 1,
+    clippingStatus: "unclipped",
+    deniedReasons: ["foreign_launch_identity"],
+    deniedToplevelCount: 1,
+    focusedPaneId: 1,
+    focusedWindowId: "dialog-1",
+    interactionState: "active",
+    launchToken: "sf_1:1:target:1",
+    lifecycleDiagnostic: null,
+    members: [{
+      acceptsInput: true,
+      bounds: { height: 120, width: 160, x: -12, y: 44 },
+      clippedToPane: false,
+      destroyedWhileHidden: false,
+      focused: true,
+      hiddenReason: null,
+      id: "dialog-1",
+      lifecycle: "live",
+      restorationState: "preserved",
+      role: "dialog",
+      visibility: "visible",
+      zOrder: 2,
+    }],
+    paneFocused: true,
+    paneId: 1,
+    paneInstanceId: "pl_1",
+    paneLocalBounds: { height: 768, width: 1024, x: 0, y: 0 },
+    primaryVisible: true,
+    primaryWindowId: "primary-1",
+    surfaceFocus: "native_accessory",
+  };
+  const nativeCompositorStatus = {
+    activeFocusTarget: { native_pane: { pane_id: "surf-ace-pane:v1:4:sf_1:1:1" } },
+    lastDiagnostic: "native_owner_lost",
+  };
+  const endpointState = { live: true, nativeCompositorStatus, nativeWindowGroup };
+  const wires: LocklessFakeWire[] = [];
+  const controller = new OpenClawLocklessController({
+    discovery: new StaticDiscovery(endpoint),
+    stateDir: "/unused",
+    storeFactory: () => new MemoryStore(),
+    wireFactory: () => {
+      const wire = new LocklessFakeWire(wires.length > 0, endpointState);
+      wires.push(wire);
+      return wire;
+    },
+  });
+  await controller.start();
+  try {
+    const screen = (await controller.listScreens())[0];
+    const pane = screen?.panes[0];
+    assert.deepEqual(pane?.nativeWindowGroup, nativeWindowGroup);
+    assert.deepEqual(screen?.nativeCompositorStatus, nativeCompositorStatus);
+  } finally {
+    await controller.stop();
+  }
 });
 
 test("OpenClaw consumes canonical lockless clear, annotation, and snapshot operations", async () => {

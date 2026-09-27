@@ -607,7 +607,7 @@ async function releaseNativePaneInstancesForSurface(surfaceId: string, operation
   if (!socketPath) {
     throw new Error(`${operation} cannot release live native-hosted panes without compositor control`);
   }
-  const releaseResponse = await sendCompositorControl(socketPath, nativePaneReleaseRequestForCompositor(paneIds));
+  const releaseResponse = await sendCompositorControl(socketPath, nativePaneReleaseRequestForCompositor(surfaceId, paneIds));
   const releaseFailure = compositorFailureMessage(releaseResponse);
   if (releaseFailure) {
     throw new Error(releaseFailure);

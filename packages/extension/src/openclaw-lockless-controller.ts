@@ -1042,6 +1042,11 @@ export class OpenClawLocklessController {
                 ? pane.activeContentId
                 : null,
             },
+            ...(pane.nativeWindowGroup && typeof pane.nativeWindowGroup === "object"
+              ? {
+                  nativeWindowGroup: pane.nativeWindowGroup as SurfAceScreenSummary["panes"][number]["nativeWindowGroup"],
+                }
+              : {}),
             name: typeof pane.name === "string" ? pane.name : null,
             paneAddress: stringValue(
               pane.paneAddress,
@@ -1074,6 +1079,9 @@ export class OpenClawLocklessController {
         endpointId: endpoint.endpoint.endpointId,
         fingerprint: surfaceId,
         lastSeenAt: endpoint.endpoint.lastSeenAt,
+        ...(panePayload.nativeCompositorStatus && typeof panePayload.nativeCompositorStatus === "object"
+          ? { nativeCompositorStatus: panePayload.nativeCompositorStatus as SurfAceScreenSummary["nativeCompositorStatus"] }
+          : {}),
         name: stringValue(surface.name, endpoint.endpoint.name),
         panes,
         pendingEvents: 0,

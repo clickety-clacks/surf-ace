@@ -6,6 +6,8 @@ import type {
   ConsumableRecord,
   ContentId,
   ContentType,
+  NativePaneWindowGroupDiagnostic,
+  NativePaneCompositorRuntimeStatus,
   PusherProvenance,
   Selection,
   Stroke,
@@ -85,6 +87,7 @@ export type SurfAcePaneSummary = {
   } | null;
   displayId: string;
   historySummary: SurfAceHistorySummary;
+  nativeWindowGroup?: NativePaneWindowGroupDiagnostic;
   name: string | null;
   paneAddress: string;
   paneId: PaneId;
@@ -109,6 +112,7 @@ export type SurfAceScreenSummary = {
   endpointId?: string;
   fingerprint: string;
   lastSeenAt: number;
+  nativeCompositorStatus?: NativePaneCompositorRuntimeStatus;
   name: string;
   panes: SurfAcePaneSummary[];
   pendingEvents: number;

@@ -245,7 +245,7 @@ const realizeTopologyDesiredSchema = createRealizeTopologyNodeSchema();
 export function createSurfAceTools(runtime: SurfAceRuntime): SurfAceToolDefinition<any>[] {
   return [
     {
-      description: "List discovered Surf Ace surfaces, optionally narrowed by surface or pane identifiers, including the unique user-facing `displayId` / `paneAddress`, `windowLabel` / `paneLabel`, and internal pane ids for subsequent pane-scoped calls.",
+      description: "List discovered Surf Ace surfaces, optionally narrowed by surface or pane identifiers, including the unique user-facing `displayId` / `paneAddress`, `windowLabel` / `paneLabel`, internal pane ids, and observed native window-group focus, visibility, lifecycle, compositor focus-target, and last-diagnostic status.",
       execute: async (args: SurfAceListInput = {}) => compactSurfAceListOutput(await runtime.listScreens(), args),
       inputSchema: {
         additionalProperties: false,

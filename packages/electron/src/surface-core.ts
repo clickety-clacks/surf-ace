@@ -42,8 +42,12 @@ import type {
   TopologyApplyResponse,
   TopologyRevision,
 } from "../../protocol/src/index.js";
-import type { NativePaneChromeInsets, NativePaneMaterialization } from "./native-pane-bridge.js";
-import type { NativePaneWindowGroupStatus } from "./native-pane-bridge.js";
+import {
+  localPaneIdForSurfaceCompositorPaneId,
+  type NativePaneFocusProjection,
+  type NativePaneMaterialization,
+  type NativePaneWindowGroupStatus,
+} from "./native-pane-bridge.js";
 import {
   LocklessAuthorityError,
   LocklessClientAuthority,
@@ -137,13 +141,6 @@ type PaneState = {
   toast: string | null;
 };
 
-const NATIVE_PANE_CHROME_REACHABILITY_INSETS: NativePaneChromeInsets = {
-  bottom: 44,
-  left: 44,
-  right: 44,
-  top: 44,
-};
-
 type LayoutNode =
   | {
       paneId: number;
@@ -160,6 +157,7 @@ type LayoutNode =
 type SurfaceState = {
   activeKeyboardPaneId: number | null;
   connectionBar: "connected" | "connecting" | "disconnected";
+  focusIntentRevision: number;
   geometryRevision: number;
   layout: LayoutNode | null;
   name: string;
@@ -207,6 +205,7 @@ export type PersistentSurfaceState = {
 
 type PersistentSurfaceRecord = {
   activeKeyboardPaneId: number | null;
+  focusIntentRevision?: number;
   geometryRevision: number;
   layout: LayoutNode | null;
   name: string;
@@ -303,6 +302,7 @@ export type ReloadEntryIdentity = {
 
 export type CoreEvent =
   | { type: "lockless-authority-changed" }
+  | { surfaceId: string; type: "keyboard-focus-changed" }
   | { surfaceId: string; type: "surface-changed" }
   | { surfaceId: string; type: "surface-created" }
   | { surfaceId: string; type: "surface-removed" }
@@ -1577,13 +1577,91 @@ export class SurfaceCore {
     return surface.activeKeyboardPaneId;
   }
 
+  projectNativePaneFocus(surfaceId: string): NativePaneFocusProjection {
+    const surface = this.getSurface(surfaceId);
+    this.ensureActiveKeyboardPane(surface);
+    const focusedPaneId = surface.activeKeyboardPaneId;
+    const focusedPane = focusedPaneId === null
+      ? undefined
+      : surface.panes.get(focusedPaneId);
+    if (focusedPaneId !== null && !focusedPane) {
+      throw new SurfaceCoreError("invalid_payload", `focused pane ${focusedPaneId} has no current core state`);
+    }
+    return {
+      focusedPaneId: focusedPaneId === null ? null : String(focusedPaneId),
+      focusedPaneInstanceId: focusedPane?.paneLineageId ?? null,
+      focusRevision: surface.focusIntentRevision,
+      geometryRevision: surface.geometryRevision as Revision,
+      surfaceEpoch: surface.surfaceEpoch,
+      surfaceId: surface.surfaceId as SurfaceId,
+      topologyEpoch: surface.topologyRevision as TopologyRevision,
+    };
+  }
+
   setActiveKeyboardPane(surfaceId: string, paneId: number): void {
     const surface = this.getSurface(surfaceId);
-    if (!surface.panes.has(paneId) || surface.activeKeyboardPaneId === paneId) {
+    if (!surface.panes.has(paneId) || !this.assignActiveKeyboardPane(surface, paneId)) {
       return;
     }
-    surface.activeKeyboardPaneId = paneId;
     this.emit({ surfaceId, type: "surface-changed" });
+  }
+
+  applyCompositorKeyboardPaneFocus(
+    surfaceId: string,
+    paneId: number,
+    paneInstanceId: string,
+    focusRevision: number,
+    surfaceEpoch: string,
+    topologyRevision: number,
+    geometryRevision: number,
+  ): boolean {
+    const surface = this.getSurface(surfaceId);
+    const pane = surface.panes.get(paneId);
+    if (
+      !pane ||
+      pane.paneLineageId !== paneInstanceId ||
+      !Number.isSafeInteger(focusRevision) ||
+      focusRevision < surface.focusIntentRevision ||
+      surface.surfaceEpoch !== surfaceEpoch ||
+      surface.topologyRevision !== topologyRevision ||
+      surface.geometryRevision !== geometryRevision
+    ) {
+      return false;
+    }
+    const paneChanged = surface.activeKeyboardPaneId !== paneId;
+    const focusRevisionChanged = surface.focusIntentRevision !== focusRevision;
+    surface.focusIntentRevision = focusRevision;
+    if (paneChanged) {
+      surface.activeKeyboardPaneId = paneId;
+    }
+    if (paneChanged || focusRevisionChanged) {
+      this.emit({ surfaceId, type: "surface-changed" });
+    }
+    return true;
+  }
+
+  applyCompositorKeyboardPaneFocusFromStatus(
+    surfaceId: string,
+    compositorPaneId: string,
+    paneInstanceId: string,
+    focusRevision: number,
+    surfaceEpoch: string,
+    topologyRevision: number,
+    geometryRevision: number,
+  ): boolean {
+    const paneId = numericCompositorPaneIdForSurface(surfaceId, compositorPaneId);
+    if (paneId === null) {
+      return false;
+    }
+    return this.applyCompositorKeyboardPaneFocus(
+      surfaceId,
+      paneId,
+      paneInstanceId,
+      focusRevision,
+      surfaceEpoch,
+      topologyRevision,
+      geometryRevision,
+    );
   }
 
   navigateActiveKeyboardPane(surfaceId: string, direction: PaneNavigationDirection): number | null {
@@ -1790,13 +1868,7 @@ export class SurfaceCore {
           surfaceId: surface.surfaceId as SurfaceId,
           targetId: payload.targetId,
         },
-        policy: {
-          chromeInsets: NATIVE_PANE_CHROME_REACHABILITY_INSETS,
-          clipToPane: true,
-          constrainToPane: true,
-          denyForeignToplevels: true,
-          sameLaunchSecondaryToplevels: "accept",
-        },
+        policy: nativePaneWindowGroupPolicy(),
       },
     };
     if (payload.targetKind === "terminal_app" && isPlainRecord(payload.targetPayload)) {
@@ -1850,6 +1922,7 @@ export class SurfaceCore {
       y: compositorViewport.y,
     };
     return {
+      focus: this.projectNativePaneFocus(surfaceId),
       op: "native_pane.host",
       overlaySet: {
         coordinateSpace: "surface_logical",
@@ -1946,12 +2019,23 @@ export class SurfaceCore {
     let didChange = false;
     const trustedGroups = new Map<number, NativePaneWindowGroupStatus>();
     for (const group of groups) {
-      const paneId = Number(group.paneId);
-      const pane = Number.isInteger(paneId) ? surface.panes.get(paneId) : undefined;
-      if (!pane || !pane.nativeHost?.launchToken || !sameNativePaneWindowGroupIdentity(group, pane, paneGeometry.get(paneId))) {
+      const paneId = numericCompositorPaneIdForSurface(surfaceId, group.paneId);
+      if (paneId === null) {
         continue;
       }
-      trustedGroups.set(paneId, group);
+      const pane = surface.panes.get(paneId);
+      if (!pane?.nativeHost?.launchToken) {
+        continue;
+      }
+      const localGroup = {
+        ...group,
+        focusedPaneId: numericCompositorPaneIdForSurface(surfaceId, group.focusedPaneId)?.toString() ?? null,
+        paneId: String(paneId),
+      };
+      if (!sameNativePaneWindowGroupIdentity(localGroup, pane, paneGeometry.get(paneId))) {
+        continue;
+      }
+      trustedGroups.set(paneId, localGroup);
     }
     for (const [paneId, pane] of surface.panes) {
       if (!pane.externalNative || !pane.nativeHost?.launchToken) {
@@ -2026,11 +2110,17 @@ export class SurfaceCore {
           : {}),
       };
     });
-    return nativePaneMaterializationFromProjectedPanes(surface, panes, layoutOrder, {
-      geometryRevision: surface.geometryRevision,
-      topologyRevision: surface.topologyRevision,
-      windowLabel: surface.windowLabel,
-    });
+    return nativePaneMaterializationFromProjectedPanes(
+      surface,
+      panes,
+      layoutOrder,
+      this.projectNativePaneFocus(surface.surfaceId),
+      {
+        geometryRevision: surface.geometryRevision,
+        topologyRevision: surface.topologyRevision,
+        windowLabel: surface.windowLabel,
+      },
+    );
   }
 
   nativeHostedPaneIdForLineage(surfaceId: string, paneLineageId: string): number | null {
@@ -2701,7 +2791,7 @@ export class SurfaceCore {
       surface.panes.set(pane.paneId, pane);
       surface.paneOrder.push(pane.paneId);
     }
-    surface.activeKeyboardPaneId = sourcePane.paneId;
+    this.assignActiveKeyboardPane(surface, sourcePane.paneId);
     surface.layout = splitLayoutNode(surface.layout!, sourcePane.paneId, payload.direction, [
       sourcePane.paneId,
       ...newPaneIds,
@@ -3530,6 +3620,7 @@ export class SurfaceCore {
     const surface: SurfaceState = {
       activeKeyboardPaneId: BOOTSTRAP_PANE_ID,
       connectionBar: "disconnected",
+      focusIntentRevision: 0,
       geometryRevision: 1,
       layout: { paneId: BOOTSTRAP_PANE_ID, type: "pane" },
       name,
@@ -3592,7 +3683,7 @@ export class SurfaceCore {
     surface.panes.set(initialPaneId, replacementPane);
     surface.paneOrder = [initialPaneId];
     surface.layout = { paneId: initialPaneId, type: "pane" };
-    surface.activeKeyboardPaneId = initialPaneId;
+    this.assignActiveKeyboardPane(surface, initialPaneId);
     return true;
   }
 
@@ -3637,7 +3728,18 @@ export class SurfaceCore {
     if (surface.activeKeyboardPaneId !== null && surface.panes.has(surface.activeKeyboardPaneId)) {
       return;
     }
-    surface.activeKeyboardPaneId = surface.paneOrder[0] ?? null;
+    this.assignActiveKeyboardPane(surface, surface.paneOrder[0] ?? null);
+  }
+
+  private assignActiveKeyboardPane(surface: SurfaceState, paneId: number | null): boolean {
+    if (surface.activeKeyboardPaneId === paneId) {
+      return false;
+    }
+    surface.activeKeyboardPaneId = paneId;
+    surface.focusIntentRevision = Math.min(Number.MAX_SAFE_INTEGER, surface.focusIntentRevision + 1);
+    // Compositor accessory visibility follows pane focus, so this change must cross its control seam.
+    this.emit({ surfaceId: surface.surfaceId, type: "keyboard-focus-changed" });
+    return true;
   }
 }
 
@@ -3698,6 +3800,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
 function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
   return {
     activeKeyboardPaneId: surface.activeKeyboardPaneId,
+    focusIntentRevision: surface.focusIntentRevision,
     geometryRevision: surface.geometryRevision,
     layout: surface.layout ? structuredClone(surface.layout) : null,
     name: surface.name,
@@ -3823,6 +3926,10 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
   return {
     activeKeyboardPaneId: panes.has(Number(record.activeKeyboardPaneId)) ? Number(record.activeKeyboardPaneId) : finalPaneOrder[0]!,
     connectionBar: "disconnected",
+    focusIntentRevision:
+      Number.isSafeInteger(record.focusIntentRevision) && Number(record.focusIntentRevision) >= 0
+        ? Number(record.focusIntentRevision)
+        : 0,
     geometryRevision: Math.max(1, Math.trunc(Number(record.geometryRevision ?? 1))),
     layout,
     name: typeof record.name === "string" && record.name.length > 0 ? record.name : "Surf Ace",
@@ -4258,9 +4365,11 @@ function nativePaneMaterializationFromProjectedPanes(
   surface: SurfaceState,
   panes: NativePaneMaterialization["panes"],
   layoutOrder: number[],
+  focus: NativePaneFocusProjection,
   revision: { geometryRevision: number; topologyRevision: number; windowLabel: string },
 ): NativePaneMaterialization {
   return {
+    focus,
     op: "native_pane.update",
     overlaySet: {
       coordinateSpace: "surface_logical",
@@ -4298,20 +4407,54 @@ function nativePaneWindowGroupDiagnosticFromStatus(
     deniedReasons: [...group.deniedReasons],
     deniedToplevelCount: group.deniedToplevelCount,
     focusedWindowId: group.focusedWindowId,
+    focusedPaneId: numericPaneId(group.focusedPaneId),
+    interactionState: group.interactionState,
+    lifecycleDiagnostic: group.lifecycleDiagnostic,
     launchToken: group.launchToken,
     members: group.members.map((member) => ({
+      acceptsInput: member.acceptsInput,
       bounds: member.bounds ? structuredClone(member.bounds) : null,
       clippedToPane: member.clippedToPane,
+      destroyedWhileHidden: member.destroyedWhileHidden,
       focused: member.focused,
+      hiddenReason: member.hiddenReason,
       id: member.id,
       lifecycle: member.lifecycle,
+      restorationState: member.restorationState,
       role: member.role,
+      visibility: member.visibility,
+      zOrder: member.zOrder,
     })),
     paneId: pane.paneId as PaneId,
     paneInstanceId: group.paneInstanceId ?? geometry.paneInstanceId,
     paneLocalBounds: group.paneLocalBounds ?? compositorResolvedRect(geometry.contentViewport),
+    paneFocused: group.paneFocused,
+    primaryVisible: group.primaryVisible,
     primaryWindowId: group.primaryWindowId,
+    surfaceFocus: group.surfaceFocus,
   };
+}
+
+function numericPaneId(value: string | null): PaneId | null {
+  if (value === null) {
+    return null;
+  }
+  const paneId = Number(value);
+  return Number.isSafeInteger(paneId) && paneId > 0 ? paneId as PaneId : null;
+}
+
+function numericCompositorPaneIdForSurface(surfaceId: string, compositorPaneId: string | null): PaneId | null {
+  if (compositorPaneId === null) {
+    return null;
+  }
+  const localPaneId = localPaneIdForSurfaceCompositorPaneId(surfaceId, compositorPaneId);
+  if (localPaneId === null) {
+    return null;
+  }
+  const paneId = Number(localPaneId);
+  return Number.isSafeInteger(paneId) && paneId > 0 && String(paneId) === localPaneId
+    ? paneId as PaneId
+    : null;
 }
 
 function sameNativePaneWindowGroupDiagnostic(
@@ -4346,10 +4489,11 @@ function nativePaneLaunchToken(surfaceId: string, paneId: number, targetId: stri
 
 function nativePaneWindowGroupPolicy(): NonNullable<NativePaneMaterialization["panes"][number]["windowGroup"]>["policy"] {
   return {
-    chromeInsets: NATIVE_PANE_CHROME_REACHABILITY_INSETS,
-    clipToPane: true,
-    constrainToPane: true,
+    accessoryVisibility: "focused_pane_only",
+    clipToPane: false,
+    constrainToPane: false,
     denyForeignToplevels: true,
+    primaryVisibility: "always",
     sameLaunchSecondaryToplevels: "accept",
   };
 }
