@@ -162,6 +162,7 @@ const DEFAULT_LIMITS = {
 };
 const BROWSER_URL_NAVIGATION_TIMEOUT_MS = 8_000;
 const PANE_GEOMETRY_READY_TIMEOUT_MS = 8_000;
+const NATIVE_PANE_FOCUS_STATUS_POLL_INTERVAL_MS = 100;
 const NATIVE_OVERLAY_LIVENESS_RETRY_COUNT = 80;
 const NATIVE_OVERLAY_LIVENESS_RETRY_DELAY_MS = 100;
 type ServerDiagnosticFields = ClientDiagnosticFields;
@@ -260,6 +261,13 @@ export class SurfaceWsServer {
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
+  private readonly nativePaneStatusRefreshes = new Map<
+    string,
+    Promise<NativePaneCompositorRuntimeStatus | null>
+  >();
+  private readonly nativePaneStatusPollSurfaces = new Set<string>();
+  private nativePaneStatusPollTimer: NodeJS.Timeout | null = null;
+  private nativePaneStatusPollingStopped = false;
   private lifecycleMutationQueue: Promise<void> = Promise.resolve();
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
@@ -414,6 +422,10 @@ export class SurfaceWsServer {
       this.httpServer.once("error", reject);
     });
     this.ignoreInitialSurfaceEvents = false;
+    this.nativePaneStatusPollingStopped = false;
+    for (const surface of this.core.listSurfaces()) {
+      this.syncNativePaneStatusPolling(surface.surfaceId);
+    }
     persistentServerDiagnostic(
       "info",
       "server_bind_ok",
@@ -428,6 +440,7 @@ export class SurfaceWsServer {
   }
 
   async stop(): Promise<void> {
+    this.stopNativePaneStatusPolling();
     persistentServerDiagnostic(
       "info",
       "server_stop_begin",
@@ -956,9 +969,12 @@ export class SurfaceWsServer {
         await this.broadcastSurfaceAppeared(event.surfaceId);
         return;
       case "surface-removed":
+        this.stopNativePaneStatusPollingForSurface(event.surfaceId);
         await this.broadcastSurfaceRemoved(event.surfaceId);
         return;
       case "surface-changed":
+        this.syncNativePaneStatusPolling(event.surfaceId);
+        return;
       case "pane-geometry-changed":
         return;
     }
@@ -3071,8 +3087,24 @@ export class SurfaceWsServer {
     if (!this.compositorSocketPath) {
       return null;
     }
+    const inFlight = this.nativePaneStatusRefreshes.get(surfaceId);
+    if (inFlight) {
+      return await inFlight;
+    }
+    const refresh = this.readNativePaneWindowGroups(surfaceId);
+    this.nativePaneStatusRefreshes.set(surfaceId, refresh);
     try {
-      const status = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
+      return await refresh;
+    } finally {
+      if (this.nativePaneStatusRefreshes.get(surfaceId) === refresh) {
+        this.nativePaneStatusRefreshes.delete(surfaceId);
+      }
+    }
+  }
+
+  private async readNativePaneWindowGroups(surfaceId: string): Promise<NativePaneCompositorRuntimeStatus | null> {
+    try {
+      const status = await sendCompositorControl(this.compositorSocketPath!, { type: "get_status" });
       const failure = compositorFailureMessage(status);
       if (failure) {
         persistentServerDiagnostic("warn", "native_window_group_refresh_failed", {
@@ -3091,6 +3123,60 @@ export class SurfaceWsServer {
         surface_id: surfaceId,
       });
       return null;
+    }
+  }
+
+  private syncNativePaneStatusPolling(surfaceId: string): void {
+    if (this.nativePaneStatusPollingStopped || !this.compositorSocketPath) {
+      return;
+    }
+    let hasOpenNativeWindowGroup = false;
+    try {
+      hasOpenNativeWindowGroup = this.core.panesList(surfaceId).panes.some(
+        (pane) => pane.externalNative && pane.nativeWindowGroup !== undefined,
+      );
+    } catch {
+      this.stopNativePaneStatusPollingForSurface(surfaceId);
+      return;
+    }
+    if (hasOpenNativeWindowGroup) {
+      this.nativePaneStatusPollSurfaces.add(surfaceId);
+    } else {
+      this.nativePaneStatusPollSurfaces.delete(surfaceId);
+    }
+    this.updateNativePaneStatusPollTimer();
+  }
+
+  private stopNativePaneStatusPollingForSurface(surfaceId: string): void {
+    this.nativePaneStatusPollSurfaces.delete(surfaceId);
+    this.updateNativePaneStatusPollTimer();
+  }
+
+  private updateNativePaneStatusPollTimer(): void {
+    if (this.nativePaneStatusPollingStopped || this.nativePaneStatusPollSurfaces.size === 0) {
+      if (this.nativePaneStatusPollTimer) {
+        clearInterval(this.nativePaneStatusPollTimer);
+        this.nativePaneStatusPollTimer = null;
+      }
+      return;
+    }
+    if (this.nativePaneStatusPollTimer) {
+      return;
+    }
+    this.nativePaneStatusPollTimer = setInterval(() => {
+      for (const surfaceId of this.nativePaneStatusPollSurfaces) {
+        void this.refreshNativePaneWindowGroups(surfaceId).catch(() => {});
+      }
+    }, NATIVE_PANE_FOCUS_STATUS_POLL_INTERVAL_MS);
+    this.nativePaneStatusPollTimer.unref();
+  }
+
+  private stopNativePaneStatusPolling(): void {
+    this.nativePaneStatusPollingStopped = true;
+    this.nativePaneStatusPollSurfaces.clear();
+    if (this.nativePaneStatusPollTimer) {
+      clearInterval(this.nativePaneStatusPollTimer);
+      this.nativePaneStatusPollTimer = null;
     }
   }
 

@@ -586,6 +586,231 @@ test("next panes.list converges after the compositor rejects a stale pane focus 
   }
 });
 
+test("compositor status polling adopts click focus within 250 ms and stops when groups close", async () => {
+  const core = new SurfaceCore();
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  const nativePaneId = 7;
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: nativePaneId,
+    initialPaneLabel: nativePaneId,
+    windowLabel: "a",
+  });
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "vertical",
+    newPaneIds: [9],
+    newPaneLabels: [9],
+    paneId: nativePaneId,
+  });
+  const geometryIdentity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
+  core.updatePaneSnapshot(surface.surfaceId, nativePaneId, {
+    bounds: { height: 800, width: 600, x: 0, y: 0 },
+    ...geometryIdentity,
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 9, {
+    bounds: { height: 800, width: 600, x: 600, y: 0 },
+    ...geometryIdentity,
+  });
+  const nativePane = core.panesList(surface.surfaceId).panes.find(
+    (pane) => Number(pane.paneId) === nativePaneId,
+  )!;
+  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+    paneLineageId: nativePane.paneLineageId,
+    requestId: "native-focus-polling-fixture",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.native_app.v1"],
+      safeToLogFields: ["appId"],
+      safetyClass: "process",
+      summary: "native focus polling fixture",
+    },
+    targetId: "target_native_focus_polling_fixture",
+    targetKind: "native_app",
+    targetPayload: { appId: "native-focus-polling-fixture", args: [], launchMode: "new_instance" },
+  });
+  core.markNativePaneMaterialized(surface.surfaceId, materialization);
+  core.setActiveKeyboardPane(surface.surfaceId, 9);
+
+  const compositorPaneId = compositorPaneIdForSurface(surface.surfaceId, nativePaneId);
+  const launchToken = materialization.panes[0]!.windowGroup!.launchIdentity.launchToken;
+  let groupOpen = true;
+  let nativePaneFocused = false;
+  let clickFocusGeneration: Record<string, unknown> | null = null;
+  let getStatusRequests = 0;
+  const makeCompositorStatus = (): Record<string, unknown> => ({
+    native_pane_window_groups: groupOpen
+      ? [{
+        accepted_secondary_count: 0,
+        clipping_status: "unclipped",
+        denied_reasons: [],
+        denied_toplevel_count: 0,
+        focused_pane_id: nativePaneFocused ? compositorPaneId : null,
+        focused_window_id: nativePaneFocused ? "native-primary" : null,
+        interaction_state: "idle",
+        launch_token: launchToken,
+        lifecycle_diagnostic: null,
+        members: [{
+          accepts_input: nativePaneFocused,
+          bounds: { height: 800, width: 600, x: 0, y: 0 },
+          clipped_to_pane: false,
+          destroyed_while_hidden: false,
+          focused: nativePaneFocused,
+          hidden_reason: null,
+          id: "native-primary",
+          lifecycle: "live",
+          restoration_state: "not_applicable",
+          role: "primary",
+          visibility: "visible",
+          z_order: 0,
+        }],
+        pane_focused: nativePaneFocused,
+        pane_id: compositorPaneId,
+        pane_instance_id: nativePane.paneLineageId,
+        pane_local_bounds: { height: 800, width: 600, x: 0, y: 0 },
+        primary_visible: true,
+        primary_window_id: "native-primary",
+        surface_focus: nativePaneFocused ? "native_primary" : "surf_ace",
+      }]
+      : [],
+    runtime: {
+      active_focus_generation: clickFocusGeneration,
+      active_focus_target: nativePaneFocused
+        ? { native_pane: { pane_id: compositorPaneId } }
+        : "main_app",
+      last_diagnostic: null,
+    },
+  });
+
+  const socketDir = await mkdtemp(path.join(tmpdir(), "surf-ace-native-focus-polling-"));
+  const compositorSocketPath = path.join(socketDir, "control.sock");
+  // The local socket fixture models a physical compositor click by changing the returned live status.
+  const compositor = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) {
+        return;
+      }
+      const compositorRequest = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+      if (compositorRequest.type === "get_status") {
+        getStatusRequests += 1;
+      }
+      socket.end(JSON.stringify({ ok: true, status: makeCompositorStatus() }) + "\n");
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.once("error", reject);
+    compositor.listen(compositorSocketPath, resolve);
+  });
+
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port: nextPort++,
+    viewport: () => viewport,
+  });
+  let client: WebSocket | null = null;
+  let unsubscribeFocus: (() => void) | null = null;
+  let unsubscribeGroups: (() => void) | null = null;
+  try {
+    await server.start();
+    assert.equal(getStatusRequests, 0, "status polling stays idle until a compositor group is observed");
+    client = await connect("ws://127.0.0.1:" + server.port + "/ws");
+    assert.equal((await pair(client, "native-focus-polling-client", surface.surfaceId)).ok, true);
+    const paneList = await request(client, "panes.list", { surfaceId: surface.surfaceId });
+    assert.equal(paneList.ok, true, JSON.stringify(paneList));
+    assert.ok(core.panesList(surface.surfaceId).panes.find(
+      (pane) => Number(pane.paneId) === nativePaneId,
+    )?.nativeWindowGroup);
+
+    let clickStartedAt = 0;
+    const indicatorUpdate = new Promise<number>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        unsubscribeFocus?.();
+        reject(new Error("focus indicator did not adopt the compositor click"));
+      }, 2_000);
+      unsubscribeFocus = core.subscribe((event) => {
+        if (
+          event.type === "surface-changed" &&
+          event.surfaceId === surface.surfaceId &&
+          core.activeKeyboardPaneId(surface.surfaceId) === nativePaneId
+        ) {
+          clearTimeout(timeout);
+          unsubscribeFocus?.();
+          unsubscribeFocus = null;
+          resolve(Date.now() - clickStartedAt);
+        }
+      });
+    });
+    const projectedFocus = core.projectNativePaneFocus(surface.surfaceId);
+    clickFocusGeneration = {
+      focus_revision: Number(projectedFocus.focusRevision ?? 0) + 1,
+      focused_pane_id: compositorPaneId,
+      focused_pane_instance_id: nativePane.paneLineageId,
+      geometry_revision: Number(projectedFocus.geometryRevision),
+      surface_epoch: projectedFocus.surfaceEpoch,
+      surface_id: surface.surfaceId,
+      topology_epoch: Number(projectedFocus.topologyEpoch),
+    };
+    clickStartedAt = Date.now();
+    nativePaneFocused = true;
+
+    const indicatorDelayMs = await indicatorUpdate;
+    assert.ok(
+      indicatorDelayMs <= 250,
+      "compositor click reached the renderer's existing surface-state source in " + indicatorDelayMs + " ms",
+    );
+    assert.equal(
+      core.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === nativePaneId)?.activeKeyboardPane,
+      true,
+    );
+    assert.ok(getStatusRequests >= 2, "the compositor click was discovered by a status poll without a client request");
+
+    const groupsCleared = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        unsubscribeGroups?.();
+        reject(new Error("native group polling did not stop after the group disappeared"));
+      }, 2_000);
+      unsubscribeGroups = core.subscribe((event) => {
+        if (
+          event.type === "surface-changed" &&
+          event.surfaceId === surface.surfaceId &&
+          core.panesList(surface.surfaceId).panes.find(
+            (pane) => Number(pane.paneId) === nativePaneId,
+          )?.nativeWindowGroup === undefined
+        ) {
+          clearTimeout(timeout);
+          unsubscribeGroups?.();
+          unsubscribeGroups = null;
+          resolve();
+        }
+      });
+    });
+    groupOpen = false;
+    await groupsCleared;
+    const requestsAfterClose = getStatusRequests;
+    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+    assert.equal(getStatusRequests, requestsAfterClose, "polling stops when the compositor reports no open native groups");
+  } finally {
+    unsubscribeFocus?.();
+    unsubscribeGroups?.();
+    client?.close();
+    await server.stop();
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(socketDir, { force: true, recursive: true });
+  }
+});
+
 test("native readiness maps T316 lifecycle and focus status using compositor-qualified pane IDs", async () => {
   const core = new SurfaceCore();
   const viewport = { height: 800, scale: 2, width: 1200 };
