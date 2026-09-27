@@ -411,6 +411,181 @@ test("pane focus changes reach the compositor through its runtime focus target A
   }
 });
 
+test("next panes.list converges after the compositor rejects a stale pane focus intent", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const nativePaneId = 7;
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: nativePaneId,
+    initialPaneLabel: nativePaneId,
+    windowLabel: "a",
+  });
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "vertical",
+    newPaneIds: [9],
+    newPaneLabels: [9],
+    paneId: nativePaneId,
+  });
+  const geometryIdentity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
+  core.updatePaneSnapshot(surface.surfaceId, nativePaneId, {
+    bounds: { height: 800, width: 600, x: 0, y: 0 },
+    ...geometryIdentity,
+  });
+  core.updatePaneSnapshot(surface.surfaceId, 9, {
+    bounds: { height: 800, width: 600, x: 600, y: 0 },
+    ...geometryIdentity,
+  });
+  const nativePane = core.panesList(surface.surfaceId).panes.find(
+    (pane) => Number(pane.paneId) === nativePaneId,
+  )!;
+  const materialization = core.projectNativePaneMaterialization(surface.surfaceId, {
+    paneLineageId: nativePane.paneLineageId,
+    requestId: "native-focus-stale-intent-fixture",
+    restoreReason: "initial_apply",
+    surfaceId: surface.surfaceId as never,
+    targetEpoch: 1,
+    targetHeader: {
+      payloadSchemaVersion: 1,
+      replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.native_app.v1"],
+      safeToLogFields: ["appId"],
+      safetyClass: "process",
+      summary: "native stale focus fixture",
+    },
+    targetId: "target_native_stale_focus_fixture",
+    targetKind: "native_app",
+    targetPayload: { appId: "native-stale-focus-fixture", args: [], launchMode: "new_instance" },
+  });
+  core.markNativePaneMaterialized(surface.surfaceId, materialization);
+
+  const socketDir = await mkdtemp(path.join(tmpdir(), "surf-ace-native-pane-stale-focus-"));
+  const compositorSocketPath = path.join(socketDir, "control.sock");
+  const compositorRequestTypes: string[] = [];
+  let resolveStaleIntent!: (request: Record<string, unknown>) => void;
+  const staleIntentReceived = new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("compositor did not receive stale pane intent")), 2_000);
+    resolveStaleIntent = (request) => {
+      clearTimeout(timeout);
+      resolve(request);
+    };
+  });
+  let resolveStaleIntentReply!: () => void;
+  const staleIntentReplySent = new Promise<void>((resolve) => {
+    resolveStaleIntentReply = resolve;
+  });
+  let compositorStatus: Record<string, unknown> = {
+    native_pane_window_groups: [],
+    runtime: {
+      active_focus_generation: null,
+      active_focus_target: null,
+      last_diagnostic: null,
+    },
+  };
+  const compositor = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) {
+        return;
+      }
+      const request = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+      const requestType = String(request.type);
+      compositorRequestTypes.push(requestType);
+      if (requestType === "set_runtime_focus_target") {
+        const staleGeneration = request.focus_generation as Record<string, unknown>;
+        const clickGeneration = {
+          ...staleGeneration,
+          focus_revision: Number(staleGeneration.focus_revision) + 1,
+          focused_pane_id: compositorPaneIdForSurface(surface.surfaceId, nativePaneId),
+          focused_pane_instance_id: nativePane.paneLineageId,
+        };
+        compositorStatus = {
+          native_pane_window_groups: [],
+          runtime: {
+            active_focus_generation: clickGeneration,
+            active_focus_target: {
+              native_pane: { pane_id: compositorPaneIdForSurface(surface.surfaceId, nativePaneId) },
+            },
+            last_diagnostic: null,
+          },
+        };
+        resolveStaleIntent(request);
+        socket.end(JSON.stringify({
+          error: "stale native pane focus generation",
+          ok: false,
+        }) + "\n", resolveStaleIntentReply);
+        return;
+      }
+      socket.end(JSON.stringify({
+        ok: true,
+        status: requestType === "get_status" ? compositorStatus : {},
+      }) + "\n");
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    compositor.once("error", reject);
+    compositor.listen(compositorSocketPath, resolve);
+  });
+
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port: nextPort++,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  let client: WebSocket | null = null;
+  try {
+    await server.start();
+    client = await connect("ws://127.0.0.1:" + server.port + "/ws");
+    const paired = await pair(client, "native-stale-focus-return-client", surface.surfaceId);
+    assert.equal(paired.ok, true);
+
+    core.setActiveKeyboardPane(surface.surfaceId, 9);
+    const staleRequest = await staleIntentReceived;
+    assert.equal(staleRequest.type, "set_runtime_focus_target");
+    assert.equal(staleRequest.target, "main_app");
+    assert.equal(core.activeKeyboardPaneId(surface.surfaceId), 9);
+    await staleIntentReplySent;
+
+    const paneList = await request(client, "panes.list", { surfaceId: surface.surfaceId });
+    assert.equal(paneList.ok, true, JSON.stringify(paneList));
+    assert.equal(
+      core.activeKeyboardPaneId(surface.surfaceId),
+      nativePaneId,
+      "the next existing status read should adopt the compositor's newer physical-click focus",
+    );
+    assert.equal(
+      core.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === nativePaneId)?.activeKeyboardPane,
+      true,
+    );
+    assert.equal(
+      paneList.payload.nativeCompositorStatus.activeFocusGeneration.focusedPaneId,
+      compositorPaneIdForSurface(surface.surfaceId, nativePaneId),
+    );
+    assert.ok(compositorRequestTypes.includes("get_status"));
+    assert.equal(
+      compositorRequestTypes.filter((type) => type === "set_runtime_focus_target").length,
+      1,
+      "adopting the compositor click must not push stale client focus back",
+    );
+  } finally {
+    client?.close();
+    await server.stop();
+    await new Promise<void>((resolve) => compositor.close(() => resolve()));
+    await rm(socketDir, { force: true, recursive: true });
+  }
+});
+
 test("native readiness maps T316 lifecycle and focus status using compositor-qualified pane IDs", async () => {
   const core = new SurfaceCore();
   const viewport = { height: 800, scale: 2, width: 1200 };

@@ -1,0 +1,42 @@
+name: T368 client CPU checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".node-version"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/t368-client-cpu.yml"
+      - "packages/controller/**"
+      - "packages/electron/**"
+      - "packages/extension/**"
+      - "packages/protocol/**"
+
+permissions:
+  contents: read
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @surf-ace/protocol test
+      - run: pnpm --filter @surf-ace/protocol build
+      - run: pnpm --filter @surf-ace/controller build
+      - run: pnpm --filter @surf-ace/extension test:lockless
+      - run: pnpm --filter @surf-ace/extension build
+      - run: pnpm --filter @surf-ace/electron build
+      - run: pnpm --filter @surf-ace/electron test
