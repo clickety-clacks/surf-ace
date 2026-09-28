@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import type { PostgresCustodyConfig } from "../../packages/allocator/src/custody.js";
-import { acknowledgementEvidenceForReads, electronLaunchConfig, hasRequiredAllocatorBackupObjects, launchElectron, matchesRegisteredDirectTarget, stop as stopElectron, verifyAllocatorServiceLifecycle, verifyClientAppVersion } from "./smoke-lib.mjs";
+import { electronLaunchConfig, hasRequiredAllocatorBackupObjects, launchElectron, matchesRegisteredDirectTarget, stop as stopElectron, verifyAllocatorServiceLifecycle, verifyClientAppVersion } from "./smoke-lib.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 
 const execFile = promisify(execFileCallback);
@@ -473,17 +473,6 @@ function resultDerivedSplitChildren(output: any, sourcePaneId: number, expectedC
   return children;
 }
 
-async function readPackagedControllerState(stateRoot: string) {
-  const state = JSON.parse(await fs.readFile(path.join(stateRoot, "controller-state.json"), "utf8"));
-  if (state?.version !== 1 || typeof state.controllerInstanceId !== "string" || !state.controllerInstanceId) {
-    throw new Error("packaged_cli_state_identity_invalid");
-  }
-  if (!state.scopes || typeof state.scopes !== "object" || !Array.isArray(state.acknowledgementOutbox)) {
-    throw new Error("packaged_cli_state_shape_invalid");
-  }
-  return state;
-}
-
 function listedSurface(list: any, expectedSurfaceId?: string) {
   const surfaces = resultPayload(list)?.surfaces;
   if (!Array.isArray(surfaces)) throw new Error("packaged_cli_list_surfaces_missing");
@@ -527,31 +516,6 @@ async function readPane(binary: string, stateRoot: string, endpoint: string, sur
     throw new Error(`packaged_cli_read_not_current:${scopeId}`);
   }
   return { captureOutput, endpoint, output, paneId, scopeId, surfaceId };
-}
-
-async function acknowledgeObservedReads(binary: string, stateRoot: string, endpoint: string, reads: any[]) {
-  const controllerStateBeforeAcknowledgement = await readPackagedControllerState(stateRoot);
-  const acknowledgementEvidence = acknowledgementEvidenceForReads(controllerStateBeforeAcknowledgement, reads);
-  const list = await cli(binary, stateRoot, "list", {}, endpoint);
-  const controllerStateAfterAcknowledgement = await readPackagedControllerState(stateRoot);
-  if (controllerStateAfterAcknowledgement.controllerInstanceId !== controllerStateBeforeAcknowledgement.controllerInstanceId) {
-    throw new Error("packaged_cli_identity_changed_while_acknowledging");
-  }
-  for (const acknowledgement of acknowledgementEvidence) {
-    if (controllerStateAfterAcknowledgement.acknowledgementOutbox.some(
-      (candidate: any) => candidate?.idempotencyKey === acknowledgement.idempotencyKey,
-    )) throw new Error(`packaged_cli_acknowledgement_not_flushed:${acknowledgement.idempotencyKey}`);
-    const scope = controllerStateAfterAcknowledgement.scopes[acknowledgement.scopeId];
-    if (!scope || Number(scope.clientCursor ?? -1) < acknowledgement.cursor) {
-      throw new Error(`packaged_cli_acknowledgement_cursor_stale:${acknowledgement.scopeId}`);
-    }
-  }
-  return {
-    acknowledgementEvidence,
-    controllerStateAfterAcknowledgement,
-    controllerStateBeforeAcknowledgement,
-    list,
-  };
 }
 
 const allocatorProjectionTables = [
@@ -968,8 +932,6 @@ async function rejectedWrongSurfacePush(binary: string, stateRoot: string, endpo
 }
 
 function summarizeFreshInstallPhase(options: {
-  acknowledgement: Awaited<ReturnType<typeof acknowledgeObservedReads>>;
-  acknowledgedWriteIds: string[];
   app: Awaited<ReturnType<typeof startPackagedElectronClient>>;
   databaseIdentity: string;
   diagnosticsAfterRegistration: Record<string, any>;
@@ -985,32 +947,7 @@ function summarizeFreshInstallPhase(options: {
   const capture = resultPayload(options.read.captureOutput);
   const read = resultPayload(options.read.output);
   const currentContentRecord = read?.currentContentRecord ?? null;
-  const scopeIds = new Set([
-    options.read.scopeId,
-    ...options.acknowledgement.acknowledgementEvidence.map((item: any) => item.scopeId),
-  ]);
-  const acknowledgedScopes = Object.fromEntries([...scopeIds].map((scopeId) => {
-    const scope = options.acknowledgement.controllerStateAfterAcknowledgement.scopes[scopeId];
-    const cursors = options.acknowledgement.acknowledgementEvidence
-      .filter((item: any) => item.scopeId === scopeId)
-      .map((item: any) => Number(item.cursor));
-    return [scopeId, {
-      acknowledgedCursor: Math.max(0, ...cursors),
-      clientCursor: Number(scope?.clientCursor),
-      lastRetainedSequence: Number(scope?.lastRetainedSequence),
-      synchronized: scope?.synchronized === true,
-    }];
-  }));
   return {
-    acknowledgement: {
-      controllerInstanceIdAfter: options.acknowledgement.controllerStateAfterAcknowledgement.controllerInstanceId,
-      controllerInstanceIdBefore: options.acknowledgement.controllerStateBeforeAcknowledgement.controllerInstanceId,
-      outboxAfterCount: options.acknowledgement.controllerStateAfterAcknowledgement.acknowledgementOutbox.length,
-      outboxBeforeCount: options.acknowledgement.controllerStateBeforeAcknowledgement.acknowledgementOutbox.length,
-      scopes: acknowledgedScopes,
-      writeIds: [...new Set(options.acknowledgedWriteIds)].sort(),
-    },
-    acknowledgedWriteIds: [...new Set(options.acknowledgedWriteIds)].sort(),
     clientAppVersion: options.app.appVersion,
     clientAppVersionEvidenceSha256: options.app.appVersionEvidenceSha256,
     capture: {
@@ -1117,13 +1054,16 @@ async function freshInstallMain(options: Options) {
 
     const contentId = "linux-fresh-install-content";
     const visibleText = "Surf Ace fresh-install direct-client verification";
-    await cli(options.cliBinary, cliStateRoot, "push", {
+    const pushOutput = await cli(options.cliBinary, cliStateRoot, "push", {
       content: { html: `<main>${visibleText}</main>` },
       contentId,
       contentType: "html",
       paneId,
       surfaceId,
     }, app.endpoint);
+    if (pushOutput.command !== "push" || pushOutput.ok !== true) {
+      throw new Error("fresh_install_direct_push_not_accepted");
+    }
     const firstRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
     const firstCapture = resultPayload(firstRead.captureOutput);
     const firstRecord = resultPayload(firstRead.output)?.currentContentRecord;
@@ -1133,22 +1073,6 @@ async function freshInstallMain(options: Options) {
         Number(firstCapture?.paneId) !== paneId || !String(firstCapture?.visibleText ?? "").includes(visibleText) ||
         !matchesFreshInstallCurrentContent(firstRecord, contentId, surfaceId, paneId)) {
       throw new Error("fresh_install_initial_content_render_or_read_mismatch");
-    }
-
-    // The next network command can flush the acknowledgement queued by this
-    // read. Observe and verify that acknowledgement before sending the
-    // intentional wrong-surface request, so the evidence captures the actual
-    // pending outbox rather than mistaking an already-flushed queue for no ack.
-    const initialAcknowledgement = await acknowledgeObservedReads(
-      options.cliBinary,
-      cliStateRoot,
-      app.endpoint,
-      [firstRead],
-    );
-    const initialAcknowledgedWriteIds = initialAcknowledgement.acknowledgementEvidence.flatMap((item: any) => item.writeIds);
-    if (!initialAcknowledgedWriteIds.includes(contentId) ||
-        initialAcknowledgement.controllerStateAfterAcknowledgement.acknowledgementOutbox.length !== 0) {
-      throw new Error("fresh_install_initial_content_not_acknowledged");
     }
 
     const wrongSurfaceId = `${surfaceId}-wrong-target`;
@@ -1171,12 +1095,10 @@ async function freshInstallMain(options: Options) {
       throw new Error("fresh_install_wrong_surface_changed_valid_target");
     }
     const initial = summarizeFreshInstallPhase({
-      acknowledgement: initialAcknowledgement,
-      acknowledgedWriteIds: initialAcknowledgedWriteIds,
       app,
       databaseIdentity: cluster.databaseIdentity,
       diagnosticsAfterRegistration,
-      directList: initialAcknowledgement.list,
+      directList,
       read: afterWrongSurfaceRead,
       registration,
       registryEndpoint,
@@ -1246,18 +1168,11 @@ async function freshInstallMain(options: Options) {
         resultPayload(afterRestartRead.output)?.consumableLoss !== null) {
       throw new Error("fresh_install_after_restart_current_content_or_no_loss_mismatch");
     }
-    const restartAcknowledgement = await acknowledgeObservedReads(options.cliBinary, cliStateRoot, app.endpoint, [afterRestartRead]);
-    const afterRestartAcknowledgedWriteIds = [
-      ...initialAcknowledgedWriteIds,
-      ...restartAcknowledgement.acknowledgementEvidence.flatMap((item: any) => item.writeIds),
-    ];
     const afterRestart = summarizeFreshInstallPhase({
-      acknowledgement: restartAcknowledgement,
-      acknowledgedWriteIds: afterRestartAcknowledgedWriteIds,
       app,
       databaseIdentity: cluster.databaseIdentity,
       diagnosticsAfterRegistration: diagnosticsAfterRestart,
-      directList: restartAcknowledgement.list,
+      directList: listAfterRestart,
       read: afterRestartRead,
       registration: registrationAfterRestart,
       registryEndpoint,

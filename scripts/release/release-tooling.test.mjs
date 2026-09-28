@@ -1355,8 +1355,6 @@ test("Tightbeam Linux clean tests build protocol before controller tests and sto
 
 function semanticPhase(sourceCommit, overrides = {}) {
   const phase = {
-    acknowledgedWriteIds: [],
-    acknowledgementEvidence: [],
     allocatorAfterRegistration: {
       allocatorId: "allocator-owned", assignmentCount: 1, nextOrdinalFence: 7, primaryHeadSeq: 4, stateVersion: 1,
     },
@@ -1387,7 +1385,6 @@ function semanticPhase(sourceCommit, overrides = {}) {
       content: { seed: { contentId: "seed" } },
       history: { "pane:sf_1:1": ["seed"] },
       labels: { pane1: 1, surface: "a" },
-      outbox: ["ack-seed"],
       panes: [1, 2],
       tombstones: ["pane-old"],
     },
@@ -1434,30 +1431,6 @@ function semanticPhase(sourceCommit, overrides = {}) {
     surfaceId: phase.surfaceId,
   }];
   phase.readControllerIdentities ??= [phase.controllerIdentity];
-  phase.acknowledgementEvidence ??= [];
-  if (phase.acknowledgedWriteIds.length > 0 && phase.acknowledgementEvidence.length === 0) {
-    phase.acknowledgementEvidence = [{
-      cursor: records.length + 1,
-      idempotencyKey: "pane:sf_1:1:ack",
-      scopeId: "pane:sf_1:1",
-      writeIds: [...phase.acknowledgedWriteIds],
-    }];
-  }
-  const state = {
-    acknowledgementOutbox: [],
-    controllerInstanceId: phase.controllerIdentity,
-    scopes: {
-      "pane:sf_1:1": {
-        clientCursor: records.length + 1,
-        lastRetainedSequence: records.length,
-        records: [],
-        synchronized: true,
-      },
-    },
-    version: 1,
-  };
-  phase.controllerStateBeforeAcknowledgement ??= state;
-  phase.controllerStateAfterAcknowledgement ??= structuredClone(state);
   return phase;
 }
 
@@ -1692,27 +1665,30 @@ test("Tightbeam staged server allows only append-only writer lease bookkeeping",
   } }, "active").reason, "lease_revision_delta_invalid");
 });
 
-test("Tightbeam Linux state evidence comes from packaged CLI reads and durable controller state", async () => {
+test("Tightbeam Linux acceptance uses packaged behavior, not transient acknowledgement helper fields", async () => {
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
   const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
-  assert.match(fixture, /readPackagedControllerState/);
-  assert.match(fixture, /async function acknowledgeObservedReads/);
-  assert.match(fixture, /controllerStateBeforeAcknowledgement/);
-  assert.match(fixture, /controllerStateAfterAcknowledgement/);
-  assert.match(fixture, /acknowledgementOutbox/);
-  assert.match(fixture, /controllerInstanceId/);
-  assert.match(fixture, /primaryHeadSeq/);
+  const shared = await fs.readFile(path.join(repository, "scripts/release/smoke-lib.mjs"), "utf8");
+  assert.doesNotMatch(fixture, /readPackagedControllerState|acknowledgeObservedReads|acknowledgementOutbox|acknowledgedWriteIds|clientCursor|lastRetainedSequence|acknowledgementEvidence/);
+  assert.doesNotMatch(smoke, /acknowledgement_state_not_current|acknowledgedWriteIds|outboxBeforeCount|outboxAfterCount|clientCursor|lastRetainedSequence/);
+  assert.doesNotMatch(shared, /acknowledgementEvidenceForReads/);
   assert.match(fixture, /raw-cli-evidence\.ndjson/);
   assert.match(fixture, /rawCliEvidenceSha256/);
   assert.match(fixture, /rawCliEvidenceBase64/);
   assert.match(fixture, /function summarizeFreshInstallPhase/);
   assert.match(fixture, /matchesFreshInstallCurrentContent\(firstRecord, contentId, surfaceId, paneId\)/);
   assert.match(fixture, /content: currentContentRecord/);
+  assert.match(fixture, /const directList = await cli\(options\.cliBinary, cliStateRoot, "list", \{\}, app\.endpoint\)/);
+  assert.match(fixture, /await cli\(options\.cliBinary, cliStateRoot, "push",/);
+  assert.match(fixture, /pushOutput\.command !== "push" \|\| pushOutput\.ok !== true/);
+  assert.match(fixture, /firstCapture\?\.contentId !== contentId/);
   assert.match(fixture, /const firstRead = await readPane\(options\.cliBinary, cliStateRoot, app\.endpoint, surfaceId, paneId\)/);
   assert.match(fixture, /const afterWrongSurfaceRead = await readPane\(options\.cliBinary, cliStateRoot, app\.endpoint, surfaceId, paneId\)/);
+  assert.match(fixture, /rejectedWrongSurfacePush\(/);
   assert.match(fixture, /const registryShutdownBeforeRestart = await registryProcess\.stop\(\)/);
   assert.match(fixture, /const postgresRestart = await restartPostgresCluster\(cluster, allocatorProjectionAfterRegistryShutdown\)/);
+  assert.match(fixture, /const registryStop = await registryProcess\.stop\(\)/);
   assert.match(smoke, /function requireLinuxFreshInstallRawCliCoverage/);
   assert.match(smoke, /matchesFreshInstallCurrentContent\(result\?\.currentContentRecord/);
   assert.match(fixture, /matchesRegisteredDirectTarget\(electronClientId, registration, listed\)/);
@@ -1764,16 +1740,6 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
   const directClientEndpoint = "ws://127.0.0.1:19001/ws";
   const registryEndpoint = "ws://127.0.0.1:19999/ws";
   const phase = (overrides = {}) => ({
-    acknowledgement: {
-      controllerInstanceIdAfter: "ctl_fresh",
-      controllerInstanceIdBefore: "ctl_fresh",
-      cursor: 1,
-      outboxAfterCount: 0,
-      outboxBeforeCount: 1,
-      scopes: { "pane:sf_fresh:1": { acknowledgedCursor: 1, clientCursor: 1, lastRetainedSequence: 1, synchronized: true } },
-      writeIds: [contentId],
-    },
-    acknowledgedWriteIds: [contentId],
     capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText },
     clientIdentity,
     clientAppVersion: TIGHTBEAM.version,
@@ -1950,54 +1916,85 @@ test("fresh-install wrong-surface probe omits fixture metadata from the packaged
   assert.doesNotMatch(returnedSummary, /input: request/);
 });
 
-test("fresh-install acknowledgement evidence retains CLI reads after the outbox was flushed", async () => {
-  const { acknowledgementEvidenceForReads } = await import("./smoke-lib.mjs");
-  const scopeId = "pane:sf_fresh:1";
-  const currentContentRecord = {
-    payload: { contentId: "fresh-content", historyEntryId: "he_fresh", paneId: 1, revision: 1, surfaceId: "sf_fresh" },
-    recordClass: "content",
-    sequence: 1,
+test("Linux fresh-install acceptance is based on direct current-content evidence", () => {
+  const phase = (contentId = "linux-fresh-install-content") => ({
+    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText: "fresh-install-visible-marker" },
+    clientIdentity: "1234abcd",
+    clientAppVersion: TIGHTBEAM.version,
+    clientAppVersionEvidenceSha256: "d".repeat(64),
+    commandRoute: "direct-client-websocket",
+    controllerIdentity: "ctl_fresh",
+    currentRead: {
+      cacheStatus: "current",
+      consumableLoss: null,
+      content: { recordClass: "content", payload: { contentId, historyEntryId: "he_fresh", paneId: 1, revision: 1, surfaceId: "sf_fresh" } },
+      contentId,
+      scopeId: "pane:sf_fresh:1",
+    },
+    databaseIdentity: "db_fresh",
+    directClientEndpoint: "ws://127.0.0.1:19001/ws",
+    paneId: 1,
+    paneLabel: 1,
+    registeredClientId: `1234abcd${"a".repeat(56)}`,
+    registeredPaneIds: [1],
+    registeredPaneLabel: 1,
+    registeredSurfaceId: "sf_fresh",
+    registeredWindowLabel: "a",
+    registrationIdentity: `1234abcd${"a".repeat(56)}`,
+    registryEndpoint: "ws://127.0.0.1:19999/ws",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    surfaceId: "sf_fresh",
+    windowLabel: "a",
+  });
+  const projection = "b".repeat(64);
+  const contentId = "linux-fresh-install-content";
+  const state = {
+    mode: "fresh-install",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    displayReady: { display: ":99", probeSha256: "a".repeat(64), status: "verified", tool: "xdpyinfo" },
+    expectedContentId: contentId,
+    expectedVisibleText: "fresh-install-visible-marker",
+    expectedVersion: TIGHTBEAM.version,
+    initial: phase(contentId),
+    afterRestart: phase(contentId),
+    wrongSurfaceRejection: {
+      directClientEndpoint: "ws://127.0.0.1:19001/ws",
+      expectedSurfaceId: "sf_fresh",
+      requestedSurfaceId: "sf_wrong",
+      status: "rejected",
+      errorCode: "unknown_surface",
+    },
+    postgresRestart: {
+      status: "verified",
+      databaseIdentity: "db_fresh",
+      projectionBeforeSha256: projection,
+      projectionAfterSha256: projection,
+      registryShutdown: {
+        activeProjectionSha256: "c".repeat(64),
+        releasedProjectionSha256: projection,
+        continuity: {
+          appendedRevisionHeads: 1,
+          custodyRevisionDelta: 1,
+          journalHeadUnchanged: true,
+          leaseGenerationDelta: 1,
+          ok: true,
+          phase: "released",
+          semanticProjectionUnchanged: true,
+        },
+      },
+      witnessSynchronized: true,
+      registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      registryShutdownClean: true,
+      initialRegistryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      schema: { has_fleets: true, has_journal: true, has_read_state: true, has_journal_validator: true },
+      lifecycle: {
+        primary: { stopExitCode: 0, startExitCode: 0, pidBefore: 100, pidAfter: 101, stopStdout: "stopped", startStdout: "started" },
+        witness: { stopExitCode: 0, startExitCode: 0, pidBefore: 200, pidAfter: 201, stopStdout: "stopped", startStdout: "started" },
+      },
+    },
+    cleanup: { clientStopped: true, registryStopped: true, postgresStopped: true },
   };
-  const input = {
-    state: { acknowledgementOutbox: [] },
-    reads: [{
-      scopeId,
-      output: { result: {
-        acknowledgement: { cursor: 3, idempotencyKey: `${scopeId}:3:0`, scopeId },
-        cacheStatus: "current",
-        currentContentRecord,
-        records: [currentContentRecord],
-        scopeId,
-      } },
-    }],
-  };
-  const expectedEvidence = [{
-    cursor: 3,
-    idempotencyKey: `${scopeId}:3:0`,
-    scopeId,
-    writeIds: ["fresh-content"],
-  }];
-  assert.deepEqual(acknowledgementEvidenceForReads(input.state, input.reads), expectedEvidence);
-  assert.deepEqual(acknowledgementEvidenceForReads({
-    acknowledgementOutbox: [{ cursor: 3, idempotencyKey: `${scopeId}:3:0`, scopeId }],
-  }, [{
-    scopeId,
-    output: { result: { currentContentRecord, records: [currentContentRecord], scopeId } },
-  }]), expectedEvidence);
-  assert.throws(() => acknowledgementEvidenceForReads(input.state, [{
-    ...input.reads[0],
-    scopeId: "pane:sf_other:1",
-  }]), /packaged_cli_acknowledgement_invalid/);
-});
-
-test("Linux candidate smoke observes the content acknowledgement before the next network command can flush it", async () => {
-  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
-  const firstRead = fixture.indexOf("const firstRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId)");
-  const acknowledgement = fixture.indexOf("const initialAcknowledgement = await acknowledgeObservedReads(", firstRead);
-  const wrongSurfaceProbe = fixture.indexOf("const wrongSurfaceId = `${surfaceId}-wrong-target`", firstRead);
-  assert.ok(firstRead >= 0 && acknowledgement > firstRead && wrongSurfaceProbe > acknowledgement,
-    "the acknowledgement snapshot must occur before the wrong-surface network request can flush the read outbox");
-  assert.match(fixture.slice(acknowledgement, wrongSurfaceProbe), /\[firstRead\]/);
+  assert.equal(validateTightbeamFreshInstallState(state).status, "passed");
 });
 
 test("Linux fresh-install state driver binds candidate-only inputs and packaged CLI evidence", async (t) => {
@@ -2015,16 +2012,6 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   const clientIdentity = "1234abcd";
   const registrationIdentity = `${clientIdentity}${"a".repeat(56)}`;
   const phase = (endpoint) => ({
-    acknowledgement: {
-      controllerInstanceIdAfter: "ctl_fresh",
-      controllerInstanceIdBefore: "ctl_fresh",
-      cursor: 1,
-      outboxAfterCount: 0,
-      outboxBeforeCount: 1,
-      scopes: { "pane:sf_fresh:1": { acknowledgedCursor: 1, clientCursor: 1, lastRetainedSequence: 1, synchronized: true } },
-      writeIds: [contentId],
-    },
-    acknowledgedWriteIds: [contentId],
     capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText },
     clientIdentity,
     clientAppVersion: TIGHTBEAM.version,
@@ -2160,7 +2147,6 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   record("list", {}, initialEndpoint, listed);
   record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
-  record("list", {}, initialEndpoint, listed); // The read's queued acknowledgement flushes on the next network call.
   const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
   Object.assign(stateSequence, {
     rawCliEvidenceBase64: bytes.toString("base64"),
@@ -2201,9 +2187,21 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   assert.equal(calls, 1);
   assert.equal(result.mode, "fresh-install");
   assert.equal(result.status, "passed");
-  assert.equal(result.rawCliEvidence.events.length, 11);
-  assert.equal(result.rawCliEvidence.events.at(-1).command, "list",
-    "the post-read acknowledgement flush must not replace the earlier resumed-client list");
+  assert.equal(result.rawCliEvidence.events.length, 10);
+  assert.equal(result.rawCliEvidence.events.at(-1).command, "read");
+  const unacceptedPushEvents = events.map((event, index) => index === 1
+    ? { ...event, output: { ...event.output, ok: false }, stdout: JSON.stringify({ ...event.output, ok: false }) }
+    : event);
+  const unacceptedPushBytes = Buffer.from(`${unacceptedPushEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  const unacceptedPushSequence = {
+    ...stateSequence,
+    rawCliEvidenceBase64: unacceptedPushBytes.toString("base64"),
+    rawCliEvidenceBytes: unacceptedPushBytes.byteLength,
+    rawCliEvidenceSha256: createHash("sha256").update(unacceptedPushBytes).digest("hex"),
+  };
+  await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
+    await fs.writeFile(output, JSON.stringify(unacceptedPushSequence));
+  }), /linux_fresh_install_raw_cli_stdout_result_mismatch/);
   const invalidEvents = [...events.map((event) => ({ ...event }))];
   invalidEvents[4] = {
     ...invalidEvents[4],

@@ -121,56 +121,6 @@ export function matchesRegisteredDirectTarget(expectedClientId, registration, di
     new Set(paneIds).size === paneIds.length;
 }
 
-export function acknowledgementEvidenceForReads(state, reads) {
-  if (!Array.isArray(state?.acknowledgementOutbox) || !Array.isArray(reads)) {
-    throw new Error("packaged_cli_acknowledgement_evidence_shape_invalid");
-  }
-  const intentsByKey = new Map();
-  const addIntent = (intent, readScopeId) => {
-    if (typeof intent?.scopeId !== "string" || !intent.scopeId ||
-        !Number.isSafeInteger(Number(intent.cursor)) || Number(intent.cursor) < 0 ||
-        typeof intent.idempotencyKey !== "string" || !intent.idempotencyKey ||
-        (readScopeId !== undefined && intent.scopeId !== readScopeId)) {
-      throw new Error("packaged_cli_acknowledgement_invalid");
-    }
-    const normalized = {
-      cursor: Number(intent.cursor),
-      idempotencyKey: intent.idempotencyKey,
-      scopeId: intent.scopeId,
-    };
-    const previous = intentsByKey.get(normalized.idempotencyKey);
-    if (previous && (previous.cursor !== normalized.cursor || previous.scopeId !== normalized.scopeId)) {
-      throw new Error("packaged_cli_acknowledgement_conflict");
-    }
-    intentsByKey.set(normalized.idempotencyKey, normalized);
-  };
-  for (const intent of state.acknowledgementOutbox) addIntent(intent);
-  const records = [];
-  for (const evidence of reads) {
-    const result = evidence?.output?.result?.payload ?? evidence?.output?.result;
-    const intent = result?.acknowledgement;
-    if (intent !== null && intent !== undefined) addIntent(intent, evidence?.scopeId);
-    const candidates = [
-      ...(Array.isArray(result?.records) ? result.records : []),
-      ...(result?.currentContentRecord ? [result.currentContentRecord] : []),
-    ];
-    for (const record of candidates) {
-      const contentId = record?.payload?.contentId ?? record?.contentId;
-      if (record?.recordClass !== "content" || typeof contentId !== "string" || !contentId ||
-          !Number.isSafeInteger(Number(record.sequence))) continue;
-      records.push({ contentId, scopeId: evidence.scopeId, sequence: Number(record.sequence) });
-    }
-  }
-  return [...intentsByKey.values()].map((intent) => ({
-    cursor: intent.cursor,
-    idempotencyKey: intent.idempotencyKey,
-    scopeId: intent.scopeId,
-    writeIds: [...new Set(records
-      .filter((record) => record.scopeId === intent.scopeId && record.sequence < intent.cursor)
-      .map((record) => record.contentId))],
-  }));
-}
-
 export function hasRequiredAllocatorBackupObjects(pgRestoreList) {
   if (typeof pgRestoreList !== "string") return false;
   const tables = new Set();

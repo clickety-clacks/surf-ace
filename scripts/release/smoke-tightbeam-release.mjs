@@ -281,12 +281,14 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
   const expectedScope = `pane:${encodeURIComponent(initial.surfaceId)}:${initial.paneId}`;
   const events = rawCliEvidence.events;
   const eventIndex = (predicate, start = 0) => events.findIndex((event, index) => index >= start && predicate(event));
-  const phaseList = (phase) => (event) => event.command === "list" && event.endpoint === phase.directClientEndpoint &&
+  const phaseList = (phase) => (event) => event.command === "list" && event.status === 0 &&
+    event.output?.ok === true && event.output?.command === "list" && event.endpoint === phase.directClientEndpoint &&
     (event.output?.result?.payload ?? event.output?.result)?.surfaces?.some((surface) => surface.surfaceId === phase.surfaceId);
   const initialListIndex = eventIndex(phaseList(initial));
   if (initialListIndex < 0) throw new Error("linux_fresh_install_initial_direct_list_missing");
   const pushIndex = eventIndex((event) => event.command === "push" && event.endpoint === initial.directClientEndpoint &&
-    event.status === 0 && event.input.surfaceId === initial.surfaceId && event.input.paneId === initial.paneId &&
+    event.status === 0 && event.output?.ok === true && event.output?.command === "push" &&
+    event.input.surfaceId === initial.surfaceId && event.input.paneId === initial.paneId &&
     event.input.contentId === stateSequence.expectedContentId &&
     JSON.stringify(event.input.content ?? {}).includes(stateSequence.expectedVisibleText), initialListIndex + 1);
   if (pushIndex < 0) throw new Error("linux_fresh_install_direct_push_target_mismatch");
@@ -297,11 +299,11 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
     event.expectedRejection?.code === "unknown_surface" &&
     event.expectedRejection?.expectedSurfaceId === initial.surfaceId, pushIndex + 1);
   if (rejectedPushIndex < 0) throw new Error("linux_fresh_install_wrong_surface_raw_event_missing");
-  // The first post-rejection list is the resumed client's baseline. A later
-  // list may merely flush the read acknowledgement after the final read.
+  // The first post-rejection list is the resumed client's baseline.
   const resumedListIndex = eventIndex(phaseList(afterRestart), rejectedPushIndex + 1);
   if (resumedListIndex < 0) throw new Error("linux_fresh_install_post_restart_direct_list_missing");
-  const currentReads = events.filter((event) => event.command === "read" && event.endpoint === null &&
+  const currentReads = events.filter((event) => event.command === "read" && event.status === 0 &&
+    event.output?.ok === true && event.output?.command === "read" && event.endpoint === null &&
     event.input.scopeId === expectedScope &&
     (() => {
       const result = event.output?.result?.payload ?? event.output?.result;
@@ -321,6 +323,7 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
   const captureMatches = (phase) => (event) => {
     const capture = event.output?.result?.payload ?? event.output?.result;
     return event.command === "capture-pane" && event.endpoint === phase.directClientEndpoint && event.status === 0 &&
+      event.output?.ok === true && event.output?.command === "capture-pane" &&
       event.input.surfaceId === phase.surfaceId && event.input.paneId === phase.paneId &&
       (capture?.surfaceId == null || capture.surfaceId === phase.surfaceId) && capture?.paneId === phase.paneId &&
       capture?.contentId === stateSequence.expectedContentId &&
@@ -389,22 +392,6 @@ function requireFreshInstallPhase(phase, name, expected) {
       capture.paneId !== phase.paneId || typeof capture.visibleText !== "string" ||
       !capture.visibleText.includes(expected.visibleText)) {
     throw new Error(`${name}_rendered_capture_mismatch`);
-  }
-  if (!Array.isArray(phase.acknowledgedWriteIds) ||
-      !phase.acknowledgedWriteIds.includes(expected.contentId)) {
-    throw new Error(`${name}_content_acknowledgement_missing`);
-  }
-  const acknowledgement = phase.acknowledgement;
-  const scope = acknowledgement?.scopes?.[read.scopeId];
-  if (!acknowledgement || acknowledgement.controllerInstanceIdBefore !== phase.controllerIdentity ||
-      acknowledgement.controllerInstanceIdAfter !== phase.controllerIdentity ||
-      (name === "fresh_install_initial" && acknowledgement.outboxBeforeCount < 1) ||
-      acknowledgement.outboxAfterCount !== 0 ||
-      !acknowledgement.writeIds?.includes(expected.contentId) ||
-      scope?.synchronized !== true || !Number.isSafeInteger(scope.clientCursor) ||
-      !Number.isSafeInteger(scope.lastRetainedSequence) ||
-      !Number.isSafeInteger(scope.acknowledgedCursor) || scope.clientCursor < scope.acknowledgedCursor) {
-    throw new Error(`${name}_acknowledgement_state_not_current`);
   }
 }
 
