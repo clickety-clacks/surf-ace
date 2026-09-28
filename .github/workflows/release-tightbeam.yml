@@ -439,6 +439,16 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
+      - name: Install packaged Electron inspection dependencies
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare "pnpm@${PNPM_VERSION}" --activate
+          test "$(pnpm --version)" = "${PNPM_VERSION}"
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          pnpm --dir source fetch --frozen-lockfile
+          pnpm --dir source install --offline --frozen-lockfile
       - name: Select and verify Xcode 27.0
         run: |
           set -euo pipefail

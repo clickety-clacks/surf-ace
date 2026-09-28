@@ -98,12 +98,12 @@ export async function assertTightbeamSmokeParticipantAssetBytes(identities, comp
   return participants;
 }
 
-export function assertTightbeamElectronPackageIdentity(packageMetadata) {
-  if (!packageMetadata || packageMetadata.name !== "@surf-ace/electron" ||
-      packageMetadata.version !== TIGHTBEAM.version) {
+export function assertTightbeamElectronPackageIdentity(packageIdentity) {
+  if (!packageIdentity || packageIdentity.packageName !== "@surf-ace/electron" ||
+      packageIdentity.version !== TIGHTBEAM.version) {
     throw new Error("tightbeam_smoke_electron_package_identity_mismatch");
   }
-  return { packageName: packageMetadata.name, version: packageMetadata.version };
+  return { packageName: packageIdentity.packageName, version: packageIdentity.version };
 }
 
 async function readTightbeamElectronPackageIdentity(asarPath, sourceDir) {
@@ -111,7 +111,11 @@ async function readTightbeamElectronPackageIdentity(asarPath, sourceDir) {
   const electronBuilderRequire = createRequire(productRequire.resolve("electron-builder"));
   const asar = electronBuilderRequire("@electron/asar");
   const packageBytes = asar.extractFile(path.resolve(asarPath), "package.json");
-  return assertTightbeamElectronPackageIdentity(JSON.parse(packageBytes.toString("utf8")));
+  const packageMetadata = JSON.parse(packageBytes.toString("utf8"));
+  return assertTightbeamElectronPackageIdentity({
+    packageName: packageMetadata.name,
+    version: packageMetadata.version,
+  });
 }
 
 function sameJson(left, right) {

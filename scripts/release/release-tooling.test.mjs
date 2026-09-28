@@ -392,7 +392,12 @@ test("smoke participant identity gate binds server, CLI, and client to exact v0.
     assert.throws(() => assertTightbeamSmokeParticipantIdentities(mismatched, "linux"),
       new RegExp(`tightbeam_smoke_participant_identity_mismatch:${participant}`));
   }
-  assert.throws(() => assertTightbeamElectronPackageIdentity({ name: "@surf-ace/electron", version: "0.1.0" }),
+  assert.deepEqual(assertTightbeamElectronPackageIdentity({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }), {
+    packageName: "@surf-ace/electron", version: TIGHTBEAM.version,
+  });
+  assert.throws(() => assertTightbeamElectronPackageIdentity({ packageName: "@surf-ace/electron", version: "0.1.0" }),
+    /tightbeam_smoke_electron_package_identity_mismatch/);
+  assert.throws(() => assertTightbeamElectronPackageIdentity({ name: "@surf-ace/electron", version: TIGHTBEAM.version }),
     /tightbeam_smoke_electron_package_identity_mismatch/);
 });
 
@@ -503,7 +508,7 @@ test("Electron smoke rejects the packaged client version before launching it", a
     cliBinary: "/fixture/bin/surf-ace",
     extract: async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true }),
     participantIdentities: smokeParticipantIdentities("macos"),
-    readElectronPackageIdentity: async () => ({ name: "@surf-ace/electron", version: "0.1.0" }),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: "0.1.0" }),
     launchClient: async () => { launches += 1; return { async stop() {} }; },
   }), /tightbeam_smoke_electron_package_identity_mismatch/);
   assert.equal(launches, 0);
@@ -517,7 +522,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     cliBinary: "/fixture/bin/surf-ace",
     extract: async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true }),
     participantIdentities: smokeParticipantIdentities("macos"),
-    readElectronPackageIdentity: async () => ({ name: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }),
     invokeCli: async () => { cliCalls += 1; throw new Error("CLI must not run after an identity Red"); },
     launchClient: async (_executable, step, _endpoint, evidence) => {
       await fs.mkdir(path.dirname(step.identityFile), { recursive: true });
@@ -572,7 +577,7 @@ test("Tightbeam macOS smoke uses the packaged CLI directly against one candidate
     extract: async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true }),
     invokeCli, launchClient,
     participantIdentities: smokeParticipantIdentities("macos"),
-    readElectronPackageIdentity: async () => ({ name: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }),
     stateRoot: path.join(root, "cli-state"), waitForEndpoint: async () => undefined,
   });
   assert.deepEqual(result.phases.map(({ phase }) => phase), ["candidate"]);
@@ -603,7 +608,7 @@ test("Tightbeam direct capture rejects a contradictory response surface", async 
       return { async stop() {} };
     },
     participantIdentities: smokeParticipantIdentities("macos"),
-    readElectronPackageIdentity: async () => ({ name: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }),
     stateRoot: path.join(root, "cli-state"), waitForEndpoint: async () => undefined,
   }), /tightbeam_macos_candidate_capture_target_mismatch/);
 });
@@ -636,7 +641,7 @@ test("Tightbeam direct smoke rejects missing current content despite a matching 
       return { async stop() {} };
     },
     participantIdentities: smokeParticipantIdentities("macos"),
-    readElectronPackageIdentity: async () => ({ name: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }),
     stateRoot: path.join(root, "cli-state"), waitForEndpoint: async () => undefined,
   }), /tightbeam_macos_candidate_capture_read_content_mismatch/);
 });
@@ -2360,6 +2365,14 @@ test("standalone specification and release gates bind the fixed product and publ
   ].map((command) => macosTests.indexOf(command));
   assert.ok(macosBuildOrder.every((index) => index >= 0));
   assert.deepEqual([...macosBuildOrder].sort((left, right) => left - right), macosBuildOrder);
+  const macosSmokeDependencies = workflowRunScript(workflow, "Install packaged Electron inspection dependencies");
+  assert.match(macosSmokeDependencies, /corepack prepare "pnpm@\$\{PNPM_VERSION\}" --activate/);
+  assert.match(macosSmokeDependencies, /pnpm --dir source fetch --frozen-lockfile/);
+  assert.match(macosSmokeDependencies, /pnpm --dir source install --offline --frozen-lockfile/);
+  const macosSmokeDependencyOffset = workflow.indexOf("      - name: Install packaged Electron inspection dependencies\n");
+  const macosSmokeRunOffset = workflow.indexOf("      - name: Run the matching macOS candidate client and CLI smoke\n");
+  assert.ok(macosSmokeRunOffset > macosSmokeDependencyOffset,
+    "macOS smoke must install source package-inspection dependencies before launching the packaged app");
   assert.ok(workflow.includes("xcodebuild test"), "hosted iPad simulator tests remain distinct from IPA distribution signing");
   assert.match(workflow, /name: tightbeam-linux-build-a/);
   assert.match(workflow, /name: tightbeam-linux-build-b/);
