@@ -153,7 +153,7 @@ jobs:
       fail-fast: false
       matrix:
         lane: [build-a, build-b]
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - name: Check out immutable tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -167,15 +167,17 @@ jobs:
           path: source
           persist-credentials: false
           ref: ${{ env.PRODUCT_TAG }}
-      - name: Pin Node and Xcode
+      - name: Pin Node and select Xcode 27.0
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install frozen dependencies and run macOS/iPadOS tests
         run: |
           set -euo pipefail
-          sudo xcode-select --switch /Applications/Xcode_26.6.app
-          test "$(xcodebuild -version | head -1)" = "Xcode 26.6"
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
+          xcrun simctl list runtimes | grep -F 'iOS 27.0'
+          xcrun simctl list devices available | grep -F 'iPad Pro 13-inch (M5)'
           corepack enable
           corepack prepare "pnpm@${PNPM_VERSION}" --activate
           test "$(pnpm --version)" = "${PNPM_VERSION}"
@@ -202,7 +204,7 @@ jobs:
             -scheme SurfAce \
             -configuration Release \
             ENABLE_TESTABILITY=YES \
-            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.5'
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0'
           guard
       - name: Build standalone macOS CLI and Electron assets
         env:
@@ -404,7 +406,7 @@ jobs:
   smoke-macos:
     if: ${{ inputs.run_smoke }}
     needs: assemble
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - name: Check out immutable tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -427,11 +429,11 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Pin Xcode 26.6
+      - name: Select and verify Xcode 27.0
         run: |
           set -euo pipefail
-          sudo xcode-select --switch /Applications/Xcode_26.6.app
-          test "$(xcodebuild -version | head -1)" = "Xcode 26.6"
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
       - name: Run the matching macOS candidate client and CLI smoke
         env:
           SURF_ACE_SMOKE_COMPONENT: macos
