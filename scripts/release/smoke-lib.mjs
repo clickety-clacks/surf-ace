@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { run } from "./release-lib.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { run, sha256 } from "./release-lib.mjs";
 
 export function start(command, args, options = {}) {
   const child = spawn(command, args, { detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], ...options });
@@ -13,6 +14,10 @@ export function start(command, args, options = {}) {
 }
 
 export async function stop(started) {
+  const hasExited = () => started.child.exitCode !== null || started.child.signalCode !== null;
+  const waitForExit = () => hasExited()
+    ? Promise.resolve()
+    : new Promise((resolve) => started.child.once("exit", resolve));
   const signal = (name) => {
     try {
       if (process.platform === "win32") started.child.kill(name);
@@ -21,18 +26,16 @@ export async function stop(started) {
       if (error?.code !== "ESRCH") throw error;
     }
   };
-  const exited = started.child.exitCode === null
-    ? new Promise((resolve) => started.child.once("exit", resolve))
-    : Promise.resolve();
+  const exited = waitForExit();
   signal("SIGTERM");
-  if (started.child.exitCode === null) {
+  if (!hasExited()) {
     await Promise.race([
       exited,
       new Promise((resolve) => setTimeout(resolve, 10_000)),
     ]);
   }
-  if (started.child.exitCode === null) {
-    const killed = new Promise((resolve) => started.child.once("exit", resolve));
+  if (!hasExited()) {
+    const killed = waitForExit();
     signal("SIGKILL");
     await killed;
   }
@@ -63,23 +66,212 @@ export async function waitForCommand(command, args, options = {}, deadlineMs = 9
   throw new Error(`observable_command_never_succeeded:${command}:${lastError?.message ?? "unknown"}`);
 }
 
-export function electronLaunchConfig(home, port) {
-  const userDataDir = path.join(home, "user-data");
+export async function verifyClientAppVersion(diagnosticLogPath, expectedVersion) {
+  if (typeof expectedVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(expectedVersion)) {
+    throw new Error("tightbeam_client_expected_version_invalid");
+  }
+  const diagnostic = await fs.readFile(diagnosticLogPath, "utf8");
+  const launchLines = diagnostic.split(/\r?\n/)
+    .filter((line) => line.includes("[surf-ace:app] event=app_launch"));
+  if (launchLines.length !== 1) throw new Error("tightbeam_client_app_launch_identity_missing_or_ambiguous");
+  const match = launchLines[0].match(/(?:^|\s)app_version=([^\s]+)/);
+  if (!match) throw new Error("tightbeam_client_app_version_missing");
+  if (match[1] !== expectedVersion) {
+    throw new Error(`tightbeam_client_app_version_mismatch:${match[1]}:${expectedVersion}`);
+  }
   return {
-    args: [`--user-data-dir=${userDataDir}`],
-    env: {
-      ...process.env,
-      HOME: home,
-      SURF_ACE_BIND: "127.0.0.1",
-      SURF_ACE_DISABLE_ADVERTISING: "1",
-      SURF_ACE_PORT: String(port),
-    },
+    evidenceSha256: await sha256(diagnosticLogPath),
+    source: "electron.app.getVersion",
+    version: match[1],
+  };
+}
+
+export function electronLaunchConfig(home, port, registryEndpoint = null, diagnosticLogPath = undefined, platform = process.platform) {
+  const userDataDir = path.join(home, "user-data");
+  const args = [`--user-data-dir=${userDataDir}`];
+  if (platform === "linux") args.push("--disable-gpu", "--disable-dev-shm-usage");
+  const env = {
+    ...process.env,
+    HOME: home,
+    SURF_ACE_BIND: "127.0.0.1",
+    SURF_ACE_DISABLE_ADVERTISING: "1",
+    SURF_ACE_PORT: String(port),
+  };
+  // Smoke must never inherit an operator's or CI runner's registry endpoint.
+  // A non-null value is supplied only for the local packaged registry test.
+  delete env.SURF_ACE_SERVER;
+  if (registryEndpoint !== null) env.SURF_ACE_SERVER = registryEndpoint;
+  if (diagnosticLogPath !== undefined) env.SURF_ACE_CLIENT_DIAGNOSTIC_LOG = diagnosticLogPath;
+  return {
+    args,
+    env,
     userDataDir,
   };
 }
 
-export async function launchElectron(appExecutable, home, port, launchProcess = start) {
-  const launch = electronLaunchConfig(home, port);
+export function matchesRegisteredDirectTarget(expectedClientId, registration, directSurface) {
+  const panes = directSurface?.topology?.panes;
+  if (typeof expectedClientId !== "string" || !expectedClientId ||
+      registration?.client?.clientId !== expectedClientId ||
+      typeof registration?.surface?.surfaceId !== "string" ||
+      registration.surface.surfaceId !== directSurface?.surfaceId ||
+      !Array.isArray(panes) || panes.length === 0) return false;
+  const paneIds = panes.map((pane) => Number(pane?.paneId));
+  return paneIds.every((paneId) => Number.isSafeInteger(paneId) && paneId > 0) &&
+    new Set(paneIds).size === paneIds.length;
+}
+
+export function acknowledgementEvidenceForReads(state, reads) {
+  if (!Array.isArray(state?.acknowledgementOutbox) || !Array.isArray(reads)) {
+    throw new Error("packaged_cli_acknowledgement_evidence_shape_invalid");
+  }
+  const intentsByKey = new Map();
+  const addIntent = (intent, readScopeId) => {
+    if (typeof intent?.scopeId !== "string" || !intent.scopeId ||
+        !Number.isSafeInteger(Number(intent.cursor)) || Number(intent.cursor) < 0 ||
+        typeof intent.idempotencyKey !== "string" || !intent.idempotencyKey ||
+        (readScopeId !== undefined && intent.scopeId !== readScopeId)) {
+      throw new Error("packaged_cli_acknowledgement_invalid");
+    }
+    const normalized = {
+      cursor: Number(intent.cursor),
+      idempotencyKey: intent.idempotencyKey,
+      scopeId: intent.scopeId,
+    };
+    const previous = intentsByKey.get(normalized.idempotencyKey);
+    if (previous && (previous.cursor !== normalized.cursor || previous.scopeId !== normalized.scopeId)) {
+      throw new Error("packaged_cli_acknowledgement_conflict");
+    }
+    intentsByKey.set(normalized.idempotencyKey, normalized);
+  };
+  for (const intent of state.acknowledgementOutbox) addIntent(intent);
+  const records = [];
+  for (const evidence of reads) {
+    const result = evidence?.output?.result?.payload ?? evidence?.output?.result;
+    const intent = result?.acknowledgement;
+    if (intent !== null && intent !== undefined) addIntent(intent, evidence?.scopeId);
+    const candidates = [
+      ...(Array.isArray(result?.records) ? result.records : []),
+      ...(result?.currentContentRecord ? [result.currentContentRecord] : []),
+    ];
+    for (const record of candidates) {
+      const contentId = record?.payload?.contentId ?? record?.contentId;
+      if (record?.recordClass !== "content" || typeof contentId !== "string" || !contentId ||
+          !Number.isSafeInteger(Number(record.sequence))) continue;
+      records.push({ contentId, scopeId: evidence.scopeId, sequence: Number(record.sequence) });
+    }
+  }
+  return [...intentsByKey.values()].map((intent) => ({
+    cursor: intent.cursor,
+    idempotencyKey: intent.idempotencyKey,
+    scopeId: intent.scopeId,
+    writeIds: [...new Set(records
+      .filter((record) => record.scopeId === intent.scopeId && record.sequence < intent.cursor)
+      .map((record) => record.contentId))],
+  }));
+}
+
+export function hasRequiredAllocatorBackupObjects(pgRestoreList) {
+  if (typeof pgRestoreList !== "string") return false;
+  const tables = new Set();
+  for (const line of pgRestoreList.split(/\r?\n/)) {
+    const match = line.match(/^\s*\d+;\s+\d+\s+\d+\s+TABLE\s+surf_ace_allocator\s+(custody_journal|fleets)\s/);
+    if (match) tables.add(match[1]);
+  }
+  return tables.has("custody_journal") && tables.has("fleets");
+}
+
+export function verifyAllocatorServiceLifecycle(before, after, phase) {
+  const fail = (reason) => ({ ok: false, phase, reason });
+  const deltaByPhase = { active: 1, released: 1, completed: 2 };
+  const expectedDelta = deltaByPhase[phase];
+  if (!expectedDelta) return fail("phase_invalid");
+  if (!before || !after || typeof before.databaseIdentity !== "string" ||
+      !before.databaseIdentity || before.databaseIdentity !== after.databaseIdentity) {
+    return fail("database_identity_changed");
+  }
+  if (!before.tables || !after.tables) return fail("projection_missing");
+
+  const tableNames = [
+    "fleet_tombstones", "fleets", "authority_owners", "allocation_transactions",
+    "assignments", "custody_journal", "custody_revision_heads", "restore_generations",
+  ];
+  if (tableNames.some((name) => !Array.isArray(before.tables[name]) || !Array.isArray(after.tables[name]))) {
+    return fail("projection_table_missing");
+  }
+  const beforeFleets = before.tables.fleets;
+  const afterFleets = after.tables.fleets;
+  if (beforeFleets.length !== 1 || afterFleets.length !== 1) return fail("fleet_cardinality_changed");
+  const beforeFleet = beforeFleets[0];
+  const afterFleet = afterFleets[0];
+
+  const leaseBookkeeping = new Set([
+    "custody_revision", "last_commit_at", "lease_backend_pid", "lease_generation", "lease_id", "lease_mode",
+  ]);
+  const stableFleet = (fleet) => Object.fromEntries(
+    Object.entries(fleet).filter(([key]) => !leaseBookkeeping.has(key)),
+  );
+  for (const table of tableNames) {
+    if (table === "fleets" || table === "custody_revision_heads") continue;
+    if (!isDeepStrictEqual(before.tables[table], after.tables[table])) return fail(`semantic_table_changed:${table}`);
+  }
+  if (!isDeepStrictEqual(stableFleet(beforeFleet), stableFleet(afterFleet))) return fail("fleet_semantics_changed");
+
+  const beforeRevision = Number(beforeFleet.custody_revision);
+  const afterRevision = Number(afterFleet.custody_revision);
+  const beforeLeaseGeneration = Number(beforeFleet.lease_generation);
+  const afterLeaseGeneration = Number(afterFleet.lease_generation);
+  if (![beforeRevision, afterRevision, beforeLeaseGeneration, afterLeaseGeneration].every(Number.isSafeInteger) ||
+      afterRevision - beforeRevision !== expectedDelta ||
+      afterLeaseGeneration - beforeLeaseGeneration !== expectedDelta) {
+    return fail("lease_revision_delta_invalid");
+  }
+  if (beforeFleet.head_seq !== afterFleet.head_seq || beforeFleet.head_hash !== afterFleet.head_hash) {
+    return fail("journal_head_changed");
+  }
+  const beforeHeads = before.tables.custody_revision_heads;
+  const afterHeads = after.tables.custody_revision_heads;
+  if (beforeHeads.length === 0 || Number(beforeHeads.at(-1)?.custody_revision) !== beforeRevision ||
+      afterHeads.length !== beforeHeads.length + expectedDelta ||
+      !isDeepStrictEqual(afterHeads.slice(0, beforeHeads.length), beforeHeads)) {
+    return fail("revision_heads_not_append_only");
+  }
+  const suffix = afterHeads.slice(beforeHeads.length);
+  for (let index = 0; index < suffix.length; index += 1) {
+    if (Number(suffix[index]?.custody_revision) !== beforeRevision + index + 1 ||
+        suffix[index]?.head_seq !== beforeFleet.head_seq || suffix[index]?.head_hash !== beforeFleet.head_hash) {
+      return fail("revision_head_suffix_invalid");
+    }
+  }
+
+  if (phase === "active") {
+    if (typeof afterFleet.lease_id !== "string" || !afterFleet.lease_id ||
+        afterFleet.lease_mode !== "writer" || !Number.isSafeInteger(Number(afterFleet.lease_backend_pid)) ||
+        Number(afterFleet.lease_backend_pid) <= 0) return fail("writer_lease_not_active");
+  } else if (afterFleet.lease_id !== null || afterFleet.lease_mode !== null || afterFleet.lease_backend_pid !== null) {
+    return fail("writer_lease_not_released");
+  }
+
+  return {
+    ok: true,
+    phase,
+    custodyRevisionDelta: expectedDelta,
+    leaseGenerationDelta: expectedDelta,
+    appendedRevisionHeads: suffix.length,
+    semanticProjectionUnchanged: true,
+    journalHeadUnchanged: true,
+  };
+}
+
+export async function launchElectron(
+  appExecutable,
+  home,
+  port,
+  launchProcess = start,
+  registryEndpoint = undefined,
+  diagnosticLogPath = undefined,
+) {
+  const launch = electronLaunchConfig(home, port, registryEndpoint, diagnosticLogPath);
   await fs.mkdir(launch.userDataDir, { recursive: true });
   return { launch, started: launchProcess(appExecutable, launch.args, { env: launch.env }) };
 }

@@ -1,14 +1,21 @@
-name: Release Tightbeam-first Surf Ace
+name: Build standalone Surf Ace Tightbeam release
 
 on:
-  push:
-    branches:
-      - release/run-tightbeam-v0.2.0
+  workflow_dispatch:
+    inputs:
+      run_smoke:
+        description: Run isolated Linux and macOS client/state acceptance after reproducible build comparison.
+        required: true
+        type: boolean
+        default: false
+      publish_release:
+        description: Publish only after both smoke receipts and protected environment approval.
+        required: true
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: surf-ace-tightbeam-v0.2.0
@@ -17,17 +24,19 @@ concurrency:
 env:
   NODE_VERSION: 24.3.0
   PNPM_VERSION: 10.15.1
-  PRODUCT_COMMIT: ec623c54616b6c71a180cede45a91bc54269238c
+  POSTGRES_VERSION: "16"
+  PRODUCT_COMMIT: 0c181cc512816ee3e03a0284fdcea9a70a175019
   PRODUCT_TAG: surf-ace-tightbeam-v0.2.0
-  RUST_TARGET: x86_64-unknown-linux-gnu
-  TOOLING_TAG: surf-ace-release-tooling-v0.1.0
-  TRIGGER_REF: refs/heads/release/run-tightbeam-v0.2.0
+  RUST_VERSION: 1.89.0
+  LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
+  MACOS_RUST_TARGET: aarch64-apple-darwin
+  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.0
 
 jobs:
   guard:
     runs-on: macos-15
     steps:
-      - name: Require immutable tooling dispatch and reviewed product tag
+      - name: Require exact manual tooling and immutable product tags
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -44,8 +53,9 @@ jobs:
             test "${object_type}" = commit
             printf '%s\n' "${object_sha}"
           }
-          test "${GITHUB_EVENT_NAME}" = push
-          test "${GITHUB_REF}" = "${TRIGGER_REF}"
+          test "${GITHUB_EVENT_NAME}" = workflow_dispatch
+          test "${GITHUB_REF_TYPE}" = tag
+          test "${GITHUB_REF}" = "refs/tags/${TOOLING_TAG}"
           tooling_remote="$(peel_tag "${TOOLING_TAG}")"
           product_remote="$(peel_tag "${PRODUCT_TAG}")"
           test "${tooling_remote}" = "${GITHUB_SHA}"
@@ -81,21 +91,24 @@ jobs:
           tar -xJf node-v24.3.0-linux-x64.tar.xz -C /usr/local --strip-components=1
           corepack enable
           corepack prepare "pnpm@${PNPM_VERSION}" --activate
-          test "$(rustc --version | cut -d' ' -f2)" = 1.89.0
+          test "$(rustc --version | cut -d' ' -f2)" = "${RUST_VERSION}"
           test "$(node --version)" = "v${NODE_VERSION}"
           test "$(pnpm --version)" = "${PNPM_VERSION}"
           test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
           test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
-      - name: Install frozen closure and run Linux tests
+      - name: Install frozen dependencies and run Linux product tests
         run: |
           set -euo pipefail
           guard() {
             git -C source diff --exit-code HEAD -- .
             git -C source diff --cached --exit-code HEAD -- .
           }
-          sha256sum source/pnpm-lock.yaml source/packages/cli/Cargo.lock
           pnpm --dir source fetch --frozen-lockfile
           pnpm --dir source install --offline --frozen-lockfile
+          guard
+          pnpm --dir source --filter @surf-ace/protocol build
+          guard
+          pnpm --dir source --filter @surf-ace/controller build
           guard
           pnpm --dir source --filter @surf-ace/controller test
           guard
@@ -103,28 +116,31 @@ jobs:
           guard
           cargo test --manifest-path source/packages/cli/Cargo.toml --locked
           guard
-      - name: Build deterministic Linux component
+      - name: Build standalone Linux server, CLI and Electron assets
         env:
           SURF_ACE_RELEASE_COMPONENT: linux
         run: |
+          set -euo pipefail
           node tooling/scripts/release/build-tightbeam-release.mjs \
             --source-dir source \
             --output-dir build/release/tightbeam \
             --source-tag "${PRODUCT_TAG}" \
             --source-commit "${PRODUCT_COMMIT}" \
             --version 0.2.0 \
-            --target "${RUST_TARGET}"
-      - name: Retain Linux component
+            --target "${LINUX_RUST_TARGET}"
+      - name: Retain deterministic Linux assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tightbeam-linux-${{ matrix.lane }}
-          path: build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz
+          path: |
+            build/release/tightbeam/surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz
+            build/release/tightbeam/surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz
+            build/release/tightbeam/surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip
           if-no-files-found: error
           retention-days: 30
-      - name: Remove job-owned source and generated paths
+      - name: Remove job-owned checkout and build paths
         if: always()
-        run: |
-          rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
+        run: rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
 
   build-macos:
     needs: guard
@@ -146,63 +162,254 @@ jobs:
           path: source
           persist-credentials: false
           ref: ${{ env.PRODUCT_TAG }}
-      - name: Pin Node
+      - name: Pin Node and Xcode
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Pin Xcode, pnpm, and frozen closure
+      - name: Install frozen dependencies and run macOS/iPadOS tests
         run: |
           set -euo pipefail
           sudo xcode-select --switch /Applications/Xcode_16.4.app
           test "$(xcodebuild -version | head -1)" = "Xcode 16.4"
           corepack enable
           corepack prepare "pnpm@${PNPM_VERSION}" --activate
-          test "$(node --version)" = "v${NODE_VERSION}"
           test "$(pnpm --version)" = "${PNPM_VERSION}"
           test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
           test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
           pnpm --dir source fetch --frozen-lockfile
           pnpm --dir source install --offline --frozen-lockfile
-      - name: Run Electron tests without changing tracked inputs
-        run: |
-          set -euo pipefail
           guard() {
             git -C source diff --exit-code HEAD -- .
             git -C source diff --cached --exit-code HEAD -- .
           }
           guard
+          pnpm --dir source --filter @surf-ace/controller test
+          pnpm --dir source --filter @surf-ace/protocol test
           pnpm --dir source --filter @surf-ace/electron build
-          guard
           pnpm --dir source --filter @surf-ace/electron test
           guard
-      - name: Build deterministic macOS component
+          xcodebuild test \
+            -project source/packages/ios/SurfAce.xcodeproj \
+            -scheme SurfAce \
+            -configuration Release \
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M4)'
+          guard
+      - name: Build standalone macOS CLI and Electron assets
         env:
           SURF_ACE_RELEASE_COMPONENT: macos
         run: |
+          set -euo pipefail
+          node tooling/scripts/release/build-tightbeam-release.mjs \
+            --source-dir source \
+            --output-dir build/release/tightbeam \
+            --source-tag "${PRODUCT_TAG}" \
+            --source-commit "${PRODUCT_COMMIT}" \
+            --version 0.2.0
+      - name: Retain deterministic macOS assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tightbeam-macos-${{ matrix.lane }}
+          path: |
+            build/release/tightbeam/surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz
+            build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove job-owned checkout and build paths
+        if: always()
+        run: rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
+
+  build-ios:
+    needs: guard
+    runs-on: macos-15
+    environment: tightbeam-ios-signing
+    steps:
+      - name: Check out immutable tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Check out immutable product source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_TAG }}
+      - name: Pin Node and require protected signing material
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Prepare an ephemeral signing keychain and profile
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          IOS_TEAM_IDENTIFIER: ${{ secrets.IOS_TEAM_IDENTIFIER }}
+          IOS_PROFILE_NAME: ${{ secrets.IOS_PROFILE_NAME }}
+          IOS_EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
+        run: |
+          set -euo pipefail
+          for name in IOS_CERTIFICATE_P12_BASE64 IOS_CERTIFICATE_PASSWORD IOS_PROVISIONING_PROFILE_BASE64 IOS_TEAM_IDENTIFIER IOS_PROFILE_NAME IOS_EXPORT_METHOD; do
+            test -n "${!name}"
+          done
+          test "${IOS_TEAM_IDENTIFIER}" = "Z7R59J7QV8"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/surf-ace-tightbeam-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          printf '%s' "${IOS_CERTIFICATE_P12_BASE64}" | base64 --decode > "${RUNNER_TEMP}/distribution.p12"
+          printf '%s' "${IOS_PROVISIONING_PROFILE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/distribution.mobileprovision"
+          security default-keychain -d user | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//' > "${RUNNER_TEMP}/original-default-keychain"
+          security list-keychains -d user | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//' > "${RUNNER_TEMP}/original-keychain-list"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${RUNNER_TEMP}/distribution.p12" -P "${IOS_CERTIFICATE_PASSWORD}" -k "${KEYCHAIN_PATH}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}"
+          security default-keychain -d user -s "${KEYCHAIN_PATH}"
+          mkdir -p "${HOME}/Library/MobileDevice/Provisioning Profiles"
+          security cms -D -i "${RUNNER_TEMP}/distribution.mobileprovision" > "${RUNNER_TEMP}/distribution-profile.plist"
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "${RUNNER_TEMP}/distribution-profile.plist")"
+          cp "${RUNNER_TEMP}/distribution.mobileprovision" "${HOME}/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
+          {
+            echo "IOS_KEYCHAIN_PATH=${KEYCHAIN_PATH}"
+            echo "IOS_PROFILE_UUID=${PROFILE_UUID}"
+          } >> "${GITHUB_ENV}"
+      - name: Archive and export the signed Aleph iPadOS IPA
+        env:
+          IOS_TEAM_IDENTIFIER: ${{ secrets.IOS_TEAM_IDENTIFIER }}
+          IOS_PROFILE_NAME: ${{ secrets.IOS_PROFILE_NAME }}
+          IOS_EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
+        run: |
+          set -euo pipefail
+          test "$(xcodebuild -version | head -1)" = "Xcode 16.4"
+          mkdir -p build/ipa
+          xcodebuild archive \
+            -project source/packages/ios/SurfAce.xcodeproj \
+            -scheme SurfAce \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "${RUNNER_TEMP}/SurfAce.xcarchive" \
+            MARKETING_VERSION=0.2.0 \
+            CURRENT_PROJECT_VERSION=18 \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY='Apple Distribution' \
+            DEVELOPMENT_TEAM="${IOS_TEAM_IDENTIFIER}" \
+            PROVISIONING_PROFILE_SPECIFIER="${IOS_PROFILE_NAME}"
+          cat > "${RUNNER_TEMP}/exportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>${IOS_EXPORT_METHOD}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>${IOS_TEAM_IDENTIFIER}</string>
+            <key>provisioningProfiles</key><dict>
+              <key>co.clicketyclacks.SurfAce</key><string>${IOS_PROFILE_UUID}</string>
+            </dict>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "${RUNNER_TEMP}/SurfAce.xcarchive" \
+            -exportPath build/ipa \
+            -exportOptionsPlist "${RUNNER_TEMP}/exportOptions.plist"
+          test -s "build/ipa/Surf Ace.ipa"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+      - name: Verify signed IPA and write signing provenance
+        env:
+          SURF_ACE_RELEASE_COMPONENT: ios
+        run: |
+          set -euo pipefail
           node tooling/scripts/release/build-tightbeam-release.mjs \
             --source-dir source \
             --output-dir build/release/tightbeam \
             --source-tag "${PRODUCT_TAG}" \
             --source-commit "${PRODUCT_COMMIT}" \
             --version 0.2.0 \
-            --target "${RUST_TARGET}"
-      - name: Retain macOS component
+            --ipa-path "build/ipa/Surf Ace.ipa"
+      - name: Retain verified IPA and nonsecret signing receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tightbeam-macos-${{ matrix.lane }}
-          path: build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip
+          name: tightbeam-ios-ipa
+          path: |
+            build/release/tightbeam/surf-ace-tightbeam-ios-ipad-v0.2.0.ipa
+            build/release/tightbeam/.evidence/ios-signing-receipt.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
-      - name: Remove job-owned source and generated paths
+      - name: Remove job-owned credentials, keychain and checkout
         if: always()
         run: |
+          set +e
+          test -f "${RUNNER_TEMP}/original-default-keychain" && security default-keychain -d user -s "$(cat "${RUNNER_TEMP}/original-default-keychain")"
+          if test -f "${RUNNER_TEMP}/original-keychain-list"; then
+            original_keychains=()
+            while IFS= read -r keychain; do
+              test -n "${keychain}" && original_keychains+=("${keychain}")
+            done < "${RUNNER_TEMP}/original-keychain-list"
+            security list-keychains -d user -s "${original_keychains[@]}"
+          fi
+          test -n "${IOS_KEYCHAIN_PATH:-}" && security delete-keychain "${IOS_KEYCHAIN_PATH}"
+          test -z "${IOS_PROFILE_UUID:-}" || rm -f "${HOME}/Library/MobileDevice/Provisioning Profiles/${IOS_PROFILE_UUID}.mobileprovision"
+          rm -f "${RUNNER_TEMP}/distribution.p12" "${RUNNER_TEMP}/distribution.mobileprovision" "${RUNNER_TEMP}/distribution-profile.plist"
           rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
 
-  assemble:
+  compare:
     needs: [build-linux, build-macos]
-    strategy:
-      matrix:
-        lane: [build-a, build-b]
+    runs-on: macos-15
+    steps:
+      - name: Check out immutable tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Download independent Linux and macOS lane assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tightbeam-linux-build-a
+          path: build/downloads/build-a
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tightbeam-macos-build-a
+          path: build/downloads/build-a
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tightbeam-linux-build-b
+          path: build/downloads/build-b
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tightbeam-macos-build-b
+          path: build/downloads/build-b
+      - name: Separate lane bytes and compare five reproducible assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-a build-b
+          for file in \
+            surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz \
+            surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz \
+            surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip \
+            surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz \
+            surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip; do
+            test -s "build/downloads/build-a/${file}"
+            test -s "build/downloads/build-b/${file}"
+            cp "build/downloads/build-a/${file}" build-a/
+            cp "build/downloads/build-b/${file}" build-b/
+          done
+          node tooling/scripts/release/compare-release-builds.mjs \
+            --build-a build-a \
+            --build-b build-b \
+            --files surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz,surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz,surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip,surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz,surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip
+      - name: Retain byte-comparison receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tightbeam-byte-comparison
+          path: build-a
+          if-no-files-found: error
+
+  assemble:
+    needs: [compare, build-ios]
     runs-on: macos-15
     steps:
       - name: Check out immutable tooling
@@ -217,47 +424,52 @@ jobs:
           path: source
           persist-credentials: false
           ref: ${{ env.PRODUCT_TAG }}
-      - name: Download Linux component
+      - name: Download compared build A assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-linux-${{ matrix.lane }}
+          name: tightbeam-linux-build-a
           path: build/release/tightbeam
-      - name: Download macOS component
+      - name: Download compared macOS build A assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-macos-${{ matrix.lane }}
+          name: tightbeam-macos-build-a
+          path: build/release/tightbeam
+      - name: Download independently verified signed iPadOS IPA
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tightbeam-ios-ipa
           path: build/release/tightbeam
       - name: Pin Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Write canonical manifest and checksum record
+      - name: Verify signature again and assemble exact manifest plus SHA256SUMS
         env:
           SURF_ACE_RELEASE_COMPONENT: manifest
         run: |
+          set -euo pipefail
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
           node tooling/scripts/release/build-tightbeam-release.mjs \
             --source-dir source \
             --output-dir build/release/tightbeam \
             --source-tag "${PRODUCT_TAG}" \
             --source-commit "${PRODUCT_COMMIT}" \
             --version 0.2.0 \
-            --target "${RUST_TARGET}"
-      - name: Retain complete build
+            --target "${LINUX_RUST_TARGET}"
+      - name: Retain assembled release candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tightbeam-${{ matrix.lane }}
+          name: tightbeam-release-candidate
           path: build/release/tightbeam
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
-      - name: Remove job-owned source and generated paths
-        if: always()
-        run: |
-          rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
 
-  compare:
+  smoke-linux:
+    if: ${{ inputs.run_smoke }}
     needs: assemble
-    runs-on: macos-15
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out immutable tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -265,86 +477,52 @@ jobs:
           path: tooling
           persist-credentials: false
           ref: ${{ env.TOOLING_TAG }}
-      - name: Download build A
+      - name: Check out immutable product source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_TAG }}
+      - name: Download assembled release candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-build-a
-          path: build-a
-      - name: Download build B
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: tightbeam-build-b
-          path: build-b
+          name: tightbeam-release-candidate
+          path: build/release/tightbeam
       - name: Pin Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Compare checksums and every public byte
-        run: |
-          node tooling/scripts/release/compare-release-builds.mjs \
-            --build-a build-a \
-            --build-b build-b \
-            --files surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip,surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz,surf-ace-tightbeam-v0.2.0-manifest.json
-
-  smoke-linux:
-    needs: compare
-    runs-on: ubuntu-24.04
-    container:
-      image: rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff
-    steps:
-      - name: Check out immutable tooling
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          path: tooling
-          persist-credentials: false
-          ref: ${{ env.TOOLING_TAG }}
-      - name: Check out test-only baseline
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          path: baseline
-          persist-credentials: false
-          ref: 24b4a389bd2dceb29307a2308b70520adb3571db
-      - name: Download compared candidate
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: tightbeam-build-a
-          path: build/release/tightbeam
-      - name: Install pinned tools and build baseline
+      - name: Prepare the exact candidate product and state driver
         run: |
           set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends systemd
-          curl -fsSLO https://nodejs.org/dist/v24.3.0/node-v24.3.0-linux-x64.tar.xz
-          printf '%s  %s\n' a962afadaa8b94bae8bff87ddd6c11f7aae621032424ef05c0a4fe2537fa4de0 node-v24.3.0-linux-x64.tar.xz | sha256sum -c -
-          tar -xJf node-v24.3.0-linux-x64.tar.xz -C /usr/local --strip-components=1
+          test "$(pg_config --version | cut -d' ' -f2 | cut -d. -f1)" = "${POSTGRES_VERSION}"
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
           corepack enable
           corepack prepare "pnpm@${PNPM_VERSION}" --activate
-          pnpm --dir baseline fetch --frozen-lockfile
-          pnpm --dir baseline install --offline --frozen-lockfile
-          node tooling/scripts/release/build-smoke-baseline.mjs \
-            --component tightbeam-linux \
-            --source-dir baseline \
-            --output-dir baseline-build \
-            --source-commit 24b4a389bd2dceb29307a2308b70520adb3571db
-      - name: Smoke Linux clean install, upgrade, and rollback
+          pnpm --dir source fetch --frozen-lockfile
+          pnpm --dir source install --offline --frozen-lockfile
+          pnpm --dir tooling fetch --frozen-lockfile
+          pnpm --dir tooling install --offline --frozen-lockfile
+      - name: Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance
         env:
           SURF_ACE_SMOKE_COMPONENT: linux
-          SURF_ACE_TIGHTBEAM_BASELINE_BACKEND: ${{ github.workspace }}/baseline-build/baseline-backend.tar.gz
+          SURF_ACE_TIGHTBEAM_STATE_DRIVER: ${{ github.workspace }}/tooling/scripts/release/tightbeam-state-smoke-fixture.ts
         run: |
           set -euo pipefail
-          node tooling/scripts/release/smoke-tightbeam-release.mjs \
-            --baseline-commit 24b4a389bd2dceb29307a2308b70520adb3571db \
-            --candidate-commit ec623c54616b6c71a180cede45a91bc54269238c \
+          xvfb-run -a node tooling/scripts/release/smoke-tightbeam-release.mjs \
+            --source-dir source \
+            --source-commit "${PRODUCT_COMMIT}" \
+            --tooling-commit "${GITHUB_SHA}" \
+            --candidate-commit 0c181cc512816ee3e03a0284fdcea9a70a175019 \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \
-            --backend build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz \
-            --electron build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
             > linux-smoke.json
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \
-            --files build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz,build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
+            --files build/release/tightbeam/surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz,build/release/tightbeam/surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz,build/release/tightbeam/surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip,build/release/tightbeam/surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz,build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip,build/release/tightbeam/surf-ace-tightbeam-ios-ipad-v0.2.0.ipa \
             --output linux-smoke-receipt.json
-      - name: Retain Linux smoke evidence
+      - name: Retain Linux smoke result and receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tightbeam-linux-smoke
@@ -354,7 +532,8 @@ jobs:
           if-no-files-found: error
 
   smoke-macos:
-    needs: compare
+    if: ${{ inputs.run_smoke }}
+    needs: assemble
     runs-on: macos-15
     steps:
       - name: Check out immutable tooling
@@ -363,53 +542,39 @@ jobs:
           path: tooling
           persist-credentials: false
           ref: ${{ env.TOOLING_TAG }}
-      - name: Check out test-only baseline
+      - name: Check out immutable product source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          path: baseline
+          path: source
           persist-credentials: false
-          ref: 24b4a389bd2dceb29307a2308b70520adb3571db
-      - name: Download compared candidate
+          ref: ${{ env.PRODUCT_TAG }}
+      - name: Download assembled release candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-build-a
+          name: tightbeam-release-candidate
           path: build/release/tightbeam
-      - name: Pin tools and build test-only baseline
+      - name: Pin Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Build baseline Electron package
-        run: |
-          set -euo pipefail
-          sudo xcode-select --switch /Applications/Xcode_16.4.app
-          corepack enable
-          corepack prepare "pnpm@${PNPM_VERSION}" --activate
-          pnpm --dir baseline fetch --frozen-lockfile
-          pnpm --dir baseline install --offline --frozen-lockfile
-          node tooling/scripts/release/build-smoke-baseline.mjs \
-            --component tightbeam-macos \
-            --source-dir baseline \
-            --output-dir baseline-build \
-            --source-commit 24b4a389bd2dceb29307a2308b70520adb3571db
-      - name: Smoke macOS clean install, upgrade, and rollback
+      - name: Run the matching macOS candidate client and CLI smoke
         env:
           SURF_ACE_SMOKE_COMPONENT: macos
-          SURF_ACE_TIGHTBEAM_BASELINE_ELECTRON: ${{ github.workspace }}/baseline-build/baseline-electron.zip
         run: |
           set -euo pipefail
           node tooling/scripts/release/smoke-tightbeam-release.mjs \
-            --baseline-commit 24b4a389bd2dceb29307a2308b70520adb3571db \
-            --candidate-commit ec623c54616b6c71a180cede45a91bc54269238c \
+            --source-dir source \
+            --source-commit "${PRODUCT_COMMIT}" \
+            --tooling-commit "${GITHUB_SHA}" \
+            --candidate-commit 0c181cc512816ee3e03a0284fdcea9a70a175019 \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \
-            --backend build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz \
-            --electron build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
             > macos-smoke.json
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-macos \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \
-            --files build/release/tightbeam/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz,build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
+            --files build/release/tightbeam/surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz,build/release/tightbeam/surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz,build/release/tightbeam/surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip,build/release/tightbeam/surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz,build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip,build/release/tightbeam/surf-ace-tightbeam-ios-ipad-v0.2.0.ipa \
             --output macos-smoke-receipt.json
-      - name: Retain macOS smoke evidence
+      - name: Retain macOS smoke result and receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tightbeam-macos-smoke
@@ -418,10 +583,15 @@ jobs:
             macos-smoke-receipt.json
           if-no-files-found: error
 
-  attest-and-publish:
-    needs: [smoke-linux, smoke-macos]
+  publish:
+    if: ${{ inputs.publish_release && inputs.run_smoke }}
+    needs: [assemble, smoke-linux, smoke-macos]
     environment: tightbeam-release
     runs-on: macos-15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Check out immutable tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -429,49 +599,46 @@ jobs:
           path: tooling
           persist-credentials: false
           ref: ${{ env.TOOLING_TAG }}
-      - name: Download unchanged smoke-approved files
+      - name: Download unchanged smoke-approved assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-build-a
+          name: tightbeam-release-candidate
           path: release
-      - name: Download Linux smoke receipt
+      - name: Download both smoke receipts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-linux-smoke
-          path: release/.receipts
-      - name: Download macOS smoke receipt
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: tightbeam-macos-smoke
+          pattern: tightbeam-*-smoke
+          merge-multiple: true
           path: release/.receipts
       - name: Pin Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Verify both receipts bind the unchanged release bytes
+      - name: Verify receipts bind the same exact six assets and manifest
         run: |
           set -euo pipefail
+          FILES="release/surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz,release/surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz,release/surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip,release/surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz,release/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip,release/surf-ace-tightbeam-ios-ipad-v0.2.0.ipa"
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
             --manifest release/surf-ace-tightbeam-v0.2.0-manifest.json \
-            --files release/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz,release/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
+            --files "${FILES}" \
             --receipt release/.receipts/linux-smoke-receipt.json
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-macos \
             --manifest release/surf-ace-tightbeam-v0.2.0-manifest.json \
-            --files release/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz,release/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
+            --files "${FILES}" \
             --receipt release/.receipts/macos-smoke-receipt.json
-      - name: Attest immutable Linux smoke receipt
+      - name: Attest Linux smoke receipt
         id: attest-linux
         uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd
         with:
           subject-path: release/.receipts/linux-smoke-receipt.json
-      - name: Attest immutable macOS smoke receipt
+      - name: Attest macOS smoke receipt
         id: attest-macos
         uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd
         with:
           subject-path: release/.receipts/macos-smoke-receipt.json
-      - name: Publish only attested smoke-approved files
+      - name: Publish only after both verified receipts
         env:
           GH_TOKEN: ${{ github.token }}
           LINUX_ATTESTATION_URL: ${{ steps.attest-linux.outputs.attestation-url }}
@@ -481,9 +648,14 @@ jobs:
           test -n "${LINUX_ATTESTATION_URL}"
           test -n "${MACOS_ATTESTATION_URL}"
           gh release create "${PRODUCT_TAG}" \
-            release/surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz \
+            release/surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz \
+            release/surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz \
+            release/surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip \
+            release/surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz \
             release/surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
+            release/surf-ace-tightbeam-ios-ipad-v0.2.0.ipa \
             release/surf-ace-tightbeam-v0.2.0-manifest.json \
+            release/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --title "Surf Ace Tightbeam v0.2.0" \
