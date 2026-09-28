@@ -530,24 +530,43 @@ export async function runLinuxFreshInstallStateDriver(options, execute = run) {
   const productSourceDir = path.resolve(options.productSourceDir);
   const tsxLoader = path.join(productSourceDir, "packages/allocator/node_modules/tsx/dist/loader.mjs");
   await fs.access(tsxLoader);
-  await execute(process.execPath, [
-    "--import", tsxLoader,
-    path.resolve(options.driver),
-    "--mode", "fresh-install",
-    "--candidate-commit", options.candidateCommit,
-    "--expected-version", TIGHTBEAM.version,
-    "--candidate-electron", path.resolve(options.candidateElectron),
-    "--candidate-root", path.resolve(options.candidateRoot),
-    "--cli-binary", path.resolve(options.cliBinary),
-    "--product-source", productSourceDir,
-    "--output", path.resolve(options.output),
-    "--state-root", path.resolve(options.stateRoot),
-  ], {
-    env: {
-      ...process.env,
-      SURF_ACE_CLIENT_DIAGNOSTIC_LOG: path.join(path.resolve(options.stateRoot), "client-flight-recorder.log"),
-    },
-  });
+  try {
+    await execute(process.execPath, [
+      "--import", tsxLoader,
+      path.resolve(options.driver),
+      "--mode", "fresh-install",
+      "--candidate-commit", options.candidateCommit,
+      "--expected-version", TIGHTBEAM.version,
+      "--candidate-electron", path.resolve(options.candidateElectron),
+      "--candidate-root", path.resolve(options.candidateRoot),
+      "--cli-binary", path.resolve(options.cliBinary),
+      "--product-source", productSourceDir,
+      "--output", path.resolve(options.output),
+      "--state-root", path.resolve(options.stateRoot),
+    ], {
+      env: {
+        ...process.env,
+        SURF_ACE_CLIENT_DIAGNOSTIC_LOG: path.join(path.resolve(options.stateRoot), "client-flight-recorder.log"),
+      },
+    });
+  } catch (error) {
+    let driverFailure;
+    try {
+      const state = JSON.parse(await fs.readFile(path.resolve(options.output), "utf8"));
+      if (state?.mode === "fresh-install" && state?.status === "failed" && typeof state.error === "string") {
+        driverFailure = state.error;
+      }
+    } catch {
+      // The child may have failed before it could write its structured state.
+    }
+    const clientDiagnostics = await readFailureFileTail(
+      path.join(path.resolve(options.stateRoot), "client-flight-recorder.log"),
+    );
+    const exit = Number.isInteger(error?.code) ? `exit=${error.code}` :
+      (error?.signal ? `signal=${error.signal}` : "exit=unknown");
+    const diagnosticDetail = clientDiagnostics ? `\nclient_flight_recorder_tail:\n${clientDiagnostics}` : "";
+    throw new Error(`linux_state_driver_failed:${driverFailure ?? exit}${diagnosticDetail}`, { cause: error });
+  }
   const stateSequence = JSON.parse(await fs.readFile(options.output, "utf8"));
   const validated = validateTightbeamFreshInstallState(stateSequence);
   const rawCliEvidence = decodeRawCliEvidence(
@@ -570,6 +589,57 @@ export async function runLinuxFreshInstallStateDriver(options, execute = run) {
     throw new Error("linux_fresh_install_wrong_surface_raw_evidence_invalid");
   }
   return { ...validated, rawCliEvidence, wrongSurfaceRejection: wrong };
+}
+
+const FAILURE_DIAGNOSTIC_LIMIT = 6_000;
+
+async function readFailureFileTail(file) {
+  let handle;
+  try {
+    handle = await fs.open(file, "r");
+    const { size } = await handle.stat();
+    const length = Math.min(size, FAILURE_DIAGNOSTIC_LIMIT);
+    const contents = Buffer.alloc(length);
+    if (length > 0) await handle.read(contents, 0, length, size - length);
+    return boundedFailureText(contents.toString("utf8").trim());
+  } catch {
+    return "";
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function boundedFailureText(value) {
+  const text = String(value ?? "");
+  const redacted = text
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, "[REDACTED PRIVATE KEY]")
+    .replace(/((?:postgres(?:ql)?:\/\/)[^:@/\s]+(?::[^@/\s]*)?@)/gi, "[REDACTED DATABASE CREDENTIALS]@")
+    .replace(/((?:authorization|access[_-]?token|password|secret|private[_-]?key)(?:[\"']?\s*[:=]\s*[\"']?))[^\s,\"'}]+/gi, "$1[REDACTED]");
+  if (redacted.length <= FAILURE_DIAGNOSTIC_LIMIT) return redacted;
+  return `[truncated to final ${FAILURE_DIAGNOSTIC_LIMIT} characters]\n${redacted.slice(-FAILURE_DIAGNOSTIC_LIMIT)}`;
+}
+
+export function formatSmokeFailure(error) {
+  const lines = ["tightbeam_release_smoke_failed"];
+  const seen = new Set();
+  let current = error;
+  let depth = 0;
+  while (current && depth < 8 && !seen.has(current)) {
+    seen.add(current);
+    const name = current.name || "Error";
+    const message = boundedFailureText(current.message ?? current);
+    lines.push(`${depth === 0 ? "error" : `cause[${depth}]`}: ${name}: ${message}`);
+    if (current.code !== undefined) {
+      const field = typeof current.code === "number" ? "exit_code" : "error_code";
+      lines.push(`  ${field}: ${boundedFailureText(current.code)}`);
+    }
+    if (current.signal) lines.push(`  signal: ${boundedFailureText(current.signal)}`);
+    if (current.stdout) lines.push(`  stdout:\n${boundedFailureText(current.stdout)}`);
+    if (current.stderr) lines.push(`  stderr:\n${boundedFailureText(current.stderr)}`);
+    current = current.cause;
+    depth += 1;
+  }
+  return lines.join("\n");
 }
 
 export async function verifyTightbeamChecksums(manifestPath) {
@@ -1108,7 +1178,7 @@ export async function smokeTightbeam(options) {
   };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+async function main() {
   const args = parseArgs(process.argv.slice(2), [], ["qualification-only", "source-dir", "source-commit", "tooling-commit", "package-dir", "candidate-commit", "manifest"]);
   let result;
   if (args["qualification-only"] !== undefined) {
@@ -1135,4 +1205,11 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     });
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`${formatSmokeFailure(error)}\n`);
+    process.exitCode = 1;
+  });
 }

@@ -392,13 +392,22 @@ jobs:
           SURF_ACE_TIGHTBEAM_STATE_DRIVER: ${{ github.workspace }}/tooling/scripts/release/tightbeam-state-smoke-fixture.ts
         run: |
           set -euo pipefail
-          xvfb-run -a node tooling/scripts/release/smoke-tightbeam-release.mjs \
+          smoke_tmp="$(mktemp -d /tmp/sa.XXXXXX)"
+          trap 'rm -rf "$smoke_tmp"' EXIT
+          TMPDIR="$smoke_tmp" xvfb-run -a node tooling/scripts/release/smoke-tightbeam-release.mjs \
             --source-dir source \
             --source-commit "${PRODUCT_COMMIT}" \
             --tooling-commit "${GITHUB_SHA}" \
             --candidate-commit 0c181cc512816ee3e03a0284fdcea9a70a175019 \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \
-            > linux-smoke.json
+            > linux-smoke.json || {
+              smoke_status=$?
+              echo "Linux acceptance smoke failed with exit ${smoke_status}; diagnostic details follow." >&2
+              if [[ -s linux-smoke.json ]]; then
+                cat linux-smoke.json >&2
+              fi
+              exit "${smoke_status}"
+            }
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.0-manifest.json \

@@ -58,6 +58,7 @@ import {
   electronSmokePlan,
   macosSmokePlan,
   buildTightbeamSmokeParticipantIdentities,
+  formatSmokeFailure,
   installElectronArchive,
   runMacosSmokePlan,
   smokeLinuxFreshInstall,
@@ -2280,6 +2281,66 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   }), /raw_cli_evidence_digest_mismatch/);
 });
 
+test("Linux smoke reports the persisted state-driver failure and subprocess diagnostics", async (t) => {
+  const root = await temporary(t);
+  const output = path.join(root, "fresh-install-state.json");
+  const productSourceDir = path.join(root, "product");
+  const tsxLoader = path.join(productSourceDir, "packages/allocator/node_modules/tsx/dist/loader.mjs");
+  await fs.mkdir(path.dirname(tsxLoader), { recursive: true });
+  await fs.writeFile(tsxLoader, "export {};\n");
+  const options = {
+    candidateCommit: TIGHTBEAM.candidateCommit,
+    candidateElectron: path.join(root, "candidate-electron/Surf Ace/surf-ace"),
+    candidateRoot: path.join(root, "candidate"),
+    cliBinary: path.join(root, "cli/bin/surf-ace"),
+    driver: path.join(root, "tightbeam-state-smoke-fixture.ts"),
+    output,
+    productSourceDir,
+    stateRoot: path.join(root, "state"),
+  };
+  const processError = Object.assign(new Error("state driver exited nonzero"), {
+    code: 1,
+    stderr: "client launch failed: ECONNREFUSED 127.0.0.1:19001 password=hunter2",
+    stdout: "",
+  });
+
+  await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
+    await fs.mkdir(options.stateRoot, { recursive: true });
+    await fs.writeFile(path.join(options.stateRoot, "client-flight-recorder.log"), [
+      "[surf-ace:app] event=app_launch app_version=0.2.0 platform=linux",
+      "[surf-ace:app] event=window_created error_message=ECONNREFUSED",
+    ].join("\n"));
+    await fs.writeFile(output, JSON.stringify({
+      error: "fresh-install-direct-client-endpoint-timeout:last=ECONNREFUSED",
+      mode: "fresh-install",
+      sourceCommit: TIGHTBEAM.candidateCommit,
+      status: "failed",
+    }));
+    throw processError;
+  }), (error) => {
+    const jobLog = formatSmokeFailure(error);
+    assert.match(jobLog, /fresh-install-direct-client-endpoint-timeout:last=ECONNREFUSED/);
+    assert.match(jobLog, /ECONNREFUSED 127\.0\.0\.1:19001/);
+    assert.match(jobLog, /client_flight_recorder_tail:/);
+    assert.match(jobLog, /event=window_created error_message=ECONNREFUSED/);
+    assert.match(jobLog, /exit_code: 1/);
+    assert.match(jobLog, /stderr:/);
+    assert.match(jobLog, /password=\[REDACTED\]/);
+    assert.doesNotMatch(jobLog, /hunter2/);
+    return true;
+  });
+});
+
+test("smoke CLI writes caught failures to stderr for the hosted job log", async () => {
+  const smokeScript = path.join(repository, "scripts/release/smoke-tightbeam-release.mjs");
+  await assert.rejects(exec(process.execPath, [smokeScript, "--invalid", "value"]), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /tightbeam_release_smoke_failed/);
+    assert.match(error.stderr, /unknown_argument:--invalid/);
+    return true;
+  });
+});
+
 test("Tightbeam Linux smoke fixture binds adapter dependencies to the exact product checkout", async () => {
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
   const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
@@ -2353,6 +2414,10 @@ test("standalone specification and release gates bind the fixed product and publ
   ].map((command) => linuxTests.indexOf(command));
   assert.ok(linuxBuildOrder.every((index) => index >= 0));
   assert.deepEqual([...linuxBuildOrder].sort((left, right) => left - right), linuxBuildOrder);
+  const linuxSmoke = workflowRunScript(workflow, "Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance");
+  assert.match(linuxSmoke, /smoke_tmp="\$\(mktemp -d \/tmp\/sa\.XXXXXX\)"/);
+  assert.match(linuxSmoke, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
+  assert.match(linuxSmoke, /TMPDIR="\$smoke_tmp" xvfb-run -a node tooling\/scripts\/release\/smoke-tightbeam-release\.mjs/);
   const macosTests = workflowRunScript(workflow, "Install frozen dependencies and run macOS/iPadOS tests");
   const macosBuildOrder = [
     "pnpm --dir source --filter @surf-ace/protocol build",
