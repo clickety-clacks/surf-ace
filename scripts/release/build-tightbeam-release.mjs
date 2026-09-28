@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -18,7 +17,6 @@ import {
   assertSourceIdentity,
   assertTrackedInputsUnchanged,
   capture,
-  canonicalJson,
   createDirectoryTarGz,
   createDirectoryZip,
   parseArgs,
@@ -346,81 +344,9 @@ export async function installLinuxElectronLauncher(electronRoot) {
   return launcher;
 }
 
-export async function verifySignedIpa(ipaPath, execute = run) {
-  const source = path.resolve(ipaPath);
-  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-tightbeam-ipa-verify-"));
-  const decodedProfile = path.join(scratch, "embedded-profile.plist");
-  try {
-    await execute("ditto", ["-x", "-k", source, scratch]);
-    const payload = path.join(scratch, "Payload");
-    const apps = (await fs.readdir(payload, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory() && entry.name.endsWith(".app"));
-    if (apps.length !== 1) throw new Error(`tightbeam_ipa_app_count:${apps.length}`);
-    const app = path.join(payload, apps[0].name);
-    const infoPlist = path.join(app, "Info.plist");
-    const profile = path.join(app, "embedded.mobileprovision");
-    const bundleIdentifier = (await execute("plutil", ["-extract", "CFBundleIdentifier", "raw", "-o", "-", infoPlist])).stdout.trim();
-    if (bundleIdentifier !== TIGHTBEAM.iosBundleIdentifier) throw new Error(`tightbeam_ipa_bundle_identifier_mismatch:${bundleIdentifier}`);
-    await execute("codesign", ["--verify", "--deep", "--strict", "--verbose=2", app]);
-    const display = await execute("codesign", ["-dv", "--verbose=4", app]);
-    const details = `${display.stdout ?? ""}\n${display.stderr ?? ""}`;
-    const signedBundleIdentifier = details.match(/^Identifier=(.+)$/m)?.[1]?.trim();
-    const signedTeamIdentifier = details.match(/^TeamIdentifier=(.+)$/m)?.[1]?.trim();
-    if (signedBundleIdentifier !== bundleIdentifier || signedTeamIdentifier !== TIGHTBEAM.iosTeamIdentifier) {
-      throw new Error("tightbeam_ipa_codesign_identity_mismatch");
-    }
-    await execute("security", ["cms", "-D", "-i", profile, "-o", decodedProfile]);
-    const readProfileValue = async (key) => (await execute("plutil", ["-extract", key, "raw", "-o", "-", decodedProfile])).stdout.trim();
-    const teamIdentifier = await readProfileValue("TeamIdentifier.0");
-    const applicationIdentifier = await readProfileValue("Entitlements.application-identifier");
-    const getTaskAllow = await readProfileValue("Entitlements.get-task-allow");
-    const expirationJson = await execute("plutil", ["-extract", "ExpirationDate", "json", "-o", "-", decodedProfile]);
-    const expiration = JSON.parse(expirationJson.stdout);
-    if (teamIdentifier !== TIGHTBEAM.iosTeamIdentifier ||
-        ![`${teamIdentifier}.${bundleIdentifier}`, `${teamIdentifier}.*`].includes(applicationIdentifier) ||
-        getTaskAllow !== "false" || !Number.isFinite(Date.parse(expiration)) || Date.parse(expiration) <= Date.now()) {
-      throw new Error("tightbeam_ipa_provisioning_profile_invalid");
-    }
-    return {
-      bundleIdentifier,
-      codeSignatureVerified: true,
-      expirationDate: new Date(Date.parse(expiration)).toISOString(),
-      ipaSha256: await sha256(source),
-      provisioningProfileUuid: await readProfileValue("UUID"),
-      teamIdentifier,
-    };
-  } finally {
-    await removeIfExists(scratch);
-  }
-}
-
-export async function stageTightbeamIpa({ outputDir, ipaPath }) {
-  if (!ipaPath) throw new Error("tightbeam_ipa_path_required");
-  const output = path.join(path.resolve(outputDir), TIGHTBEAM.assets[5]);
-  const source = path.resolve(ipaPath);
-  const receipt = await verifySignedIpa(source);
-  const actualSha256 = await sha256(source);
-  if (receipt.codeSignatureVerified !== true || receipt.ipaSha256 !== actualSha256) throw new Error("tightbeam_ipa_signing_receipt_invalid");
-  await fs.copyFile(source, output);
-  const evidenceDir = path.join(path.resolve(outputDir), ".evidence");
-  await fs.mkdir(evidenceDir, { recursive: true });
-  await writeCanonicalJson(path.join(evidenceDir, "ios-signing-receipt.json"), receipt);
-  return { file: output, receipt };
-}
-
 export async function writeTightbeamManifest({ sourceDir, outputDir, toolingCommit }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
-  const ipaPath = path.join(output, TIGHTBEAM.assets[5]);
-  const signingReceiptPath = path.join(output, ".evidence/ios-signing-receipt.json");
-  const recordedSigningReceipt = JSON.parse(await fs.readFile(signingReceiptPath, "utf8"));
-  const signingReceipt = await verifySignedIpa(ipaPath);
-  if (canonicalJson(recordedSigningReceipt) !== canonicalJson(signingReceipt)) {
-    throw new Error("tightbeam_manifest_ipa_signature_evidence_mismatch");
-  }
-  if (signingReceipt.bundleIdentifier !== TIGHTBEAM.iosBundleIdentifier || signingReceipt.teamIdentifier !== TIGHTBEAM.iosTeamIdentifier) {
-    throw new Error("tightbeam_manifest_ipa_identity_mismatch");
-  }
   await verifyStandaloneElectronSource(source);
   const assetDetails = [];
   for (const name of TIGHTBEAM.assets) {
@@ -448,13 +374,6 @@ export async function writeTightbeamManifest({ sourceDir, outputDir, toolingComm
     commands: { build: TIGHTBEAM_BUILD_COMMANDS, tests: TIGHTBEAM_TEST_COMMANDS },
     dependencyInventory: { cargo: cargoDependencies, node: nodeDependencies },
     formatVersion: 2,
-    iosSigning: {
-      bundleIdentifier: signingReceipt.bundleIdentifier,
-      codeSignatureVerified: true,
-      expirationDate: signingReceipt.expirationDate,
-      provisioningProfileUuid: signingReceipt.provisioningProfileUuid,
-      teamIdentifier: signingReceipt.teamIdentifier,
-    },
     lockfiles: {
       cargoSha256: await sha256(path.join(source, "packages/cli/Cargo.lock")),
       pnpmSha256: await sha256(path.join(source, "pnpm-lock.yaml")),
@@ -469,7 +388,7 @@ export async function writeTightbeamManifest({ sourceDir, outputDir, toolingComm
   for (const name of checksumNames) lines.push(`${await sha256(path.join(output, name))}  ${name}`);
   await fs.writeFile(path.join(output, TIGHTBEAM.checksums), `${lines.join("\n")}\n`);
   await assertExactPublicFiles(output, TIGHTBEAM_PUBLIC_FILES);
-  return { files: TIGHTBEAM_PUBLIC_FILES, manifestPath, signingTeamIdentifier: signingReceipt.teamIdentifier };
+  return { files: TIGHTBEAM_PUBLIC_FILES, manifestPath };
 }
 
 export function assertTightbeamLinuxQualificationClaims({ sourceCommit, toolingCommit, version, target }) {
@@ -556,7 +475,7 @@ export async function buildTightbeamRelease(options) {
   const toolingPeel = await capture("git", ["-C", toolingRoot, "rev-parse", `refs/tags/${TIGHTBEAM_TOOLING_TAG}^{commit}`]);
   if (toolingPeel !== toolingCommit) throw new Error(`tooling_tag_mismatch:${toolingPeel}:${toolingCommit}`);
   const component = process.env.SURF_ACE_RELEASE_COMPONENT;
-  if (!["linux", "macos", "ios", "manifest"].includes(component)) {
+  if (!["linux", "macos", "manifest"].includes(component)) {
     throw new Error(`invalid_or_missing_tightbeam_release_component:${component ?? "<missing>"}`);
   }
   await fs.mkdir(outputDir, { recursive: true });
@@ -565,10 +484,6 @@ export async function buildTightbeamRelease(options) {
   }
   if (component === "macos") {
     return { ...await buildTightbeamMacosPackages({ sourceDir: sourceArgument, outputDir }), sourceCommit: options.sourceCommit, toolingCommit };
-  }
-  if (component === "ios") {
-    const staged = await stageTightbeamIpa({ outputDir, ipaPath: options.ipaPath });
-    return { files: [TIGHTBEAM.assets[5]], outputDir, signingTeamIdentifier: staged.receipt.teamIdentifier, sourceCommit: options.sourceCommit, toolingCommit };
   }
   const manifest = await writeTightbeamManifest({
     outputDir,
@@ -579,10 +494,10 @@ export async function buildTightbeamRelease(options) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const args = parseArgs(process.argv.slice(2), ["source-dir", "output-dir", "version"], ["qualification-only", "source-tag", "source-commit", "tooling-commit", "target", "ipa-path"]);
+  const args = parseArgs(process.argv.slice(2), ["source-dir", "output-dir", "version"], ["qualification-only", "source-tag", "source-commit", "tooling-commit", "target"]);
   let result;
   if (args["qualification-only"] !== undefined) {
-    if (args["qualification-only"] !== "linux" || args["source-tag"] !== undefined || args["ipa-path"] !== undefined) {
+    if (args["qualification-only"] !== "linux" || args["source-tag"] !== undefined) {
       throw new Error("invalid_tightbeam_qualification_arguments");
     }
     result = await buildTightbeamLinuxQualification({
@@ -598,7 +513,6 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       throw new Error("missing_or_invalid_tightbeam_release_identity_arguments");
     }
     result = await buildTightbeamRelease({
-      ipaPath: args["ipa-path"],
       outputDir: args["output-dir"],
       sourceCommit: args["source-commit"],
       sourceDir: args["source-dir"],

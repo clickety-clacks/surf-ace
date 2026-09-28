@@ -37,8 +37,8 @@ import {
   TIGHTBEAM_CLI_FILES,
   TIGHTBEAM_LINUX_SERVER_FILES,
   TIGHTBEAM_LINUX_RUNTIME_FILES,
-  verifySignedIpa,
   verifyStandaloneElectronSource,
+  writeTightbeamManifest,
   verifyTightbeamCliStage,
   verifyTightbeamLinuxStage,
 } from "./build-tightbeam-release.mjs";
@@ -651,25 +651,6 @@ test("Tightbeam Linux Electron smoke plans one matching candidate client", async
   assert.equal(plan[0].identityFile, path.join(electronLaunchConfig(plan[0].home, plan[0].port).userDataDir, "surface-identity.json"));
 });
 
-test("signed IPA verifier rejects a code-signing team mismatch before profile acceptance", async (t) => {
-  const root = await temporary(t);
-  const ipa = path.join(root, "offline-placeholder.ipa");
-  await fs.writeFile(ipa, "not a distributable IPA; injected executor only\n");
-  const execute = async (command, args) => {
-    if (command === "ditto") {
-      await fs.mkdir(path.join(args[3], "Payload/Surf Ace.app"), { recursive: true });
-      return { stdout: "", stderr: "" };
-    }
-    if (command === "plutil") return { stdout: "co.clicketyclacks.SurfAce\n", stderr: "" };
-    if (command === "codesign" && args[0] === "--verify") return { stdout: "", stderr: "" };
-    if (command === "codesign" && args[0] === "-dv") {
-      return { stdout: "", stderr: "Identifier=co.clicketyclacks.SurfAce\nTeamIdentifier=WRONGTEAM\n" };
-    }
-    throw new Error(`unexpected verifier operation: ${command}`);
-  };
-  await assert.rejects(verifySignedIpa(ipa, execute), /tightbeam_ipa_codesign_identity_mismatch/);
-});
-
 test("tracked-product guard detects worktree and index changes", async (t) => {
   const root = await temporary(t);
   const { execFile } = await import("node:child_process");
@@ -1042,15 +1023,15 @@ test("tagless qualification leaves release build and manifest-smoke tag admissio
   assert.match(freshInstallMain, /fresh_install_wrong_surface_changed_valid_target/);
 });
 
-test("Tightbeam v0.2.0 binds the reviewed candidate, assets, and tooling identity", () => {
+test("Tightbeam v0.2.0 binds the reviewed candidate, five hosted assets, and tooling identity", () => {
   assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.0");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "0c181cc512816ee3e03a0284fdcea9a70a175019",
     sourceTag: "surf-ace-tightbeam-v0.2.0", version: "0.2.0", toolingTag: TIGHTBEAM_TOOLING_TAG,
-    iosBundleIdentifier: "co.clicketyclacks.SurfAce", iosTeamIdentifier: "Z7R59J7QV8",
-    assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip","surf-ace-tightbeam-ios-ipad-v0.2.0.ipa"],
+    assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip"],
     manifest: "surf-ace-tightbeam-v0.2.0-manifest.json", checksums: "SHA256SUMS",
   });
+  assert.equal(TIGHTBEAM.assets.length, 5);
   assert.deepEqual(TIGHTBEAM_ROUTING, {
     clientOperations: "packaged-cli-direct-to-client-websocket",
     registryResponsibilities: ["client-registration", "global-window-label-allocation", "postgresql-backed-registry-health"],
@@ -1058,7 +1039,7 @@ test("Tightbeam v0.2.0 binds the reviewed candidate, assets, and tooling identit
   });
 });
 
-test("Tightbeam SHA256SUMS binds exactly the six assets and manifest", async (t) => {
+test("Tightbeam SHA256SUMS binds exactly the five hosted assets and manifest", async (t) => {
   const root = await temporary(t);
   const names = [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort();
   const lines = [];
@@ -1072,6 +1053,31 @@ test("Tightbeam SHA256SUMS binds exactly the six assets and manifest", async (t)
   assert.deepEqual((await verifyTightbeamChecksums(path.join(root, TIGHTBEAM.manifest))).files, names);
   await fs.writeFile(path.join(root, names[0]), "tampered\n");
   await assert.rejects(verifyTightbeamChecksums(path.join(root, TIGHTBEAM.manifest)), /tightbeam_checksum_mismatch/);
+});
+
+test("Tightbeam manifest assembles the five hosted assets without iOS distribution signing", async (t) => {
+  const outputDir = await temporary(t);
+  for (const name of TIGHTBEAM.assets) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
+
+  const result = await writeTightbeamManifest({
+    outputDir,
+    sourceDir: repository,
+    toolingCommit: "a".repeat(40),
+  });
+  const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
+  assert.deepEqual(result.files, TIGHTBEAM_PUBLIC_FILES);
+  assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets);
+  assert.equal(Object.hasOwn(manifest, "iosSigning"), false);
+  assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
+    [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort());
+  assert.deepEqual((await fs.readdir(outputDir)).sort(), [...TIGHTBEAM_PUBLIC_FILES].sort());
+
+  await fs.writeFile(path.join(outputDir, "surf-ace-tightbeam-ios-ipad-v0.2.0.ipa"), "stale\n");
+  await assert.rejects(writeTightbeamManifest({
+    outputDir,
+    sourceDir: repository,
+    toolingCommit: "a".repeat(40),
+  }), /public_file_set_mismatch/);
 });
 
 test("Tightbeam manifest inventory follows only Electron production dependencies", async () => {
@@ -1309,16 +1315,20 @@ test("Tightbeam Linux builder creates source-declared dependencies before the El
   assert.ok(electron > controller, "Electron server bundle must follow controller");
 });
 
-test("Tightbeam Linux clean tests build protocol before controller tests and stop on prerequisite failure", async (t) => {
+test("Tightbeam Linux clean tests build required workspace packages before controller tests and stop on prerequisite failure", async (t) => {
   const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
   const script = workflowRunScript(workflow, "Install frozen dependencies and run Linux product tests");
   const protocolBuild = script.indexOf("pnpm --dir source --filter @surf-ace/protocol build");
+  const allocatorBuild = script.indexOf("pnpm --dir source --filter @surf-ace/allocator build");
   const controllerBuild = script.indexOf("pnpm --dir source --filter @surf-ace/controller build");
   const controllerTest = script.indexOf("pnpm --dir source --filter @surf-ace/controller test");
   const protocolTest = script.indexOf("pnpm --dir source --filter @surf-ace/protocol test");
-  assert.ok(protocolBuild >= 0 && controllerBuild > protocolBuild && controllerTest > controllerBuild && protocolTest > controllerTest,
-    "a clean install must build protocol before the controller tests load its dist entrypoint");
+  assert.ok(protocolBuild >= 0 && allocatorBuild > protocolBuild && controllerBuild > allocatorBuild &&
+    controllerTest > controllerBuild && protocolTest > controllerTest,
+  "a clean install must build protocol and allocator before controller tests load dist entrypoints");
   assert.ok(TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/protocol build") <
+    TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/allocator build"));
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/allocator build") <
     TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/controller test"));
   assert.ok(TIGHTBEAM_BUILD_COMMANDS.some((command) => command.includes("--config.executableName surf-ace")),
     "the manifest must bind the same Linux executable-name override as the packaged builder");
@@ -1344,6 +1354,7 @@ test("Tightbeam Linux clean tests build protocol before controller tests and sto
     "--dir source fetch --frozen-lockfile",
     "--dir source install --offline --frozen-lockfile",
     "--dir source --filter @surf-ace/protocol build",
+    "--dir source --filter @surf-ace/allocator build",
     "--dir source --filter @surf-ace/controller build",
     "--dir source --filter @surf-ace/controller test",
     "--dir source --filter @surf-ace/protocol test",
@@ -2323,6 +2334,33 @@ test("standalone specification and release gates bind the fixed product and publ
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
+  assert.doesNotMatch(workflow, /build-ios|tightbeam-ios-ipa|xcodebuild archive|-exportArchive|\.ipa\b|IOS_CERTIFICATE|IOS_PROVISIONING_PROFILE|tightbeam-ios-signing/);
+  const linuxStart = workflow.indexOf("  build-linux:\n");
+  const macosStart = workflow.indexOf("  build-macos:\n", linuxStart);
+  const linuxJob = workflow.slice(linuxStart, macosStart);
+  assert.match(linuxJob, /^    defaults:\n      run:\n        shell: bash$/m);
+  const linuxTests = workflowRunScript(workflow, "Install frozen dependencies and run Linux product tests");
+  const linuxBuildOrder = [
+    "pnpm --dir source --filter @surf-ace/protocol build",
+    "pnpm --dir source --filter @surf-ace/allocator build",
+    "pnpm --dir source --filter @surf-ace/controller build",
+    "pnpm --dir source --filter @surf-ace/controller test",
+  ].map((command) => linuxTests.indexOf(command));
+  assert.ok(linuxBuildOrder.every((index) => index >= 0));
+  assert.deepEqual([...linuxBuildOrder].sort((left, right) => left - right), linuxBuildOrder);
+  const macosTests = workflowRunScript(workflow, "Install frozen dependencies and run macOS/iPadOS tests");
+  const macosBuildOrder = [
+    "pnpm --dir source --filter @surf-ace/protocol build",
+    "pnpm --dir source --filter @surf-ace/allocator build",
+    "pnpm --dir source --filter @surf-ace/controller build",
+    "pnpm --dir source --filter @surf-ace/electron build",
+    "pnpm --dir source --filter @surf-ace/controller test",
+    "pnpm --dir source --filter @surf-ace/protocol test",
+    "pnpm --dir source --filter @surf-ace/electron test",
+  ].map((command) => macosTests.indexOf(command));
+  assert.ok(macosBuildOrder.every((index) => index >= 0));
+  assert.deepEqual([...macosBuildOrder].sort((left, right) => left - right), macosBuildOrder);
+  assert.ok(workflow.includes("xcodebuild test"), "hosted iPad simulator tests remain distinct from IPA distribution signing");
   assert.match(workflow, /name: tightbeam-linux-build-a/);
   assert.match(workflow, /name: tightbeam-linux-build-b/);
   assert.match(workflow, /name: tightbeam-macos-build-a/);
@@ -2340,11 +2378,9 @@ test("standalone specification and release gates bind the fixed product and publ
     "pnpm --dir source --filter @surf-ace/controller build",
     "pnpm --dir source --filter @surf-ace/electron exec electron-builder",
   ]) assert.ok(TIGHTBEAM_BUILD_COMMANDS.some((item) => item.startsWith(command)));
-  assert.ok(TIGHTBEAM_BUILD_COMMANDS.includes(
-    "xcodebuild archive -project source/packages/ios/SurfAce.xcodeproj -scheme SurfAce -configuration Release -destination 'generic/platform=iOS' -archivePath build/SurfAce.xcarchive MARKETING_VERSION=0.2.0 CURRENT_PROJECT_VERSION=18",
-  ));
-  assert.match(workflow, /xcodebuild archive[\s\S]*?MARKETING_VERSION=0\.2\.0[\s\S]*?CURRENT_PROJECT_VERSION=18/);
+  assert.doesNotMatch(TIGHTBEAM_BUILD_COMMANDS.join("\n"), /xcodebuild archive|-exportArchive|\.ipa\b/);
   assert.ok(TIGHTBEAM_TEST_COMMANDS.includes("cargo test --manifest-path source/packages/cli/Cargo.toml --locked"));
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
 });
 
 test("v0.2.0 release smoke gates bind only matching candidate participants", async () => {

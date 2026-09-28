@@ -17,15 +17,12 @@ export const TIGHTBEAM = Object.freeze({
   sourceTag: "surf-ace-tightbeam-v0.2.0",
   version: "0.2.0",
   toolingTag: TIGHTBEAM_TOOLING_TAG,
-  iosBundleIdentifier: "co.clicketyclacks.SurfAce",
-  iosTeamIdentifier: "Z7R59J7QV8",
   assets: [
     "surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz",
     "surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz",
     "surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip",
     "surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz",
     "surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip",
-    "surf-ace-tightbeam-ios-ipad-v0.2.0.ipa",
   ],
   manifest: "surf-ace-tightbeam-v0.2.0-manifest.json",
   checksums: "SHA256SUMS",
@@ -45,11 +42,12 @@ export const TIGHTBEAM_PUBLIC_FILES = Object.freeze([
 
 export const TIGHTBEAM_TEST_COMMANDS = Object.freeze([
   "pnpm --dir source --filter @surf-ace/protocol build",
+  "pnpm --dir source --filter @surf-ace/allocator build",
   "pnpm --dir source --filter @surf-ace/controller build",
+  "pnpm --dir source --filter @surf-ace/electron build",
   "pnpm --dir source --filter @surf-ace/controller test",
   "pnpm --dir source --filter @surf-ace/protocol test",
   "cargo test --manifest-path source/packages/cli/Cargo.toml --locked",
-  "pnpm --dir source --filter @surf-ace/electron build",
   "pnpm --dir source --filter @surf-ace/electron test",
   "xcodebuild test -project source/packages/ios/SurfAce.xcodeproj -scheme SurfAce -configuration Release -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M4)'",
 ]);
@@ -65,6 +63,4 @@ export const TIGHTBEAM_BUILD_COMMANDS = Object.freeze([
   "pnpm --dir source --filter @surf-ace/electron exec electron-builder --linux dir --x64 --publish never --config.executableName surf-ace",
   "cargo build --manifest-path source/packages/cli/Cargo.toml --target-dir source/packages/cli/target --release --locked --target aarch64-apple-darwin",
   "pnpm --dir source --filter @surf-ace/electron exec electron-builder --mac dir --arm64 --publish never",
-  "xcodebuild archive -project source/packages/ios/SurfAce.xcodeproj -scheme SurfAce -configuration Release -destination 'generic/platform=iOS' -archivePath build/SurfAce.xcarchive MARKETING_VERSION=0.2.0 CURRENT_PROJECT_VERSION=18",
-  "xcodebuild -exportArchive -archivePath build/SurfAce.xcarchive -exportPath build/ipa -exportOptionsPlist build/exportOptions.plist",
 ]);
