@@ -63,6 +63,19 @@ Inspect the manifest's `version`, `source`, and `tooling` fields before installi
 does not provide a `--version` switch; use the versioned asset name, manifest,
 and checksum rather than inferring a version from command output.
 
+## Testing and participant identity
+
+Before a release smoke uses any server, CLI, or client, it records and verifies
+that participant's exact v0.2.0 asset name, byte size, SHA-256, product commit,
+and tooling commit. It rehashes the archive bytes before use and stops before
+launch or CLI operations if any participant does not match. Checking the server
+or CLI does not establish the client's identity, and vice versa. For Electron,
+the packaged `@surf-ace/electron` version and the running
+`electron.app.getVersion()` value must both be `0.2.0`; the runtime value is
+checked before CLI operations. Server and CLI archives do not expose a separate
+version command, so their identity comes from the versioned asset name, manifest
+and checksum rather than inferred command output.
+
 ## Install and run
 
 Extract CLI archives into a versioned user-owned directory so an older version

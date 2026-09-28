@@ -39,6 +39,17 @@ checksum to identify the installed bytes. To upgrade or roll back, select the
 versioned executable path for the desired verified release; no in-place CLI
 updater is provided.
 
+## Verify release-smoke participants
+
+Before a release smoke starts or uses any server, CLI, or client, check that
+participant independently against its exact v0.2.0 asset name, byte size,
+SHA-256, product commit, and tooling commit. Rehash the archive bytes and stop
+before launch or CLI operations on any mismatch. For Electron, also require the
+packaged version and runtime `electron.app.getVersion()` to equal `0.2.0`, with
+the runtime check completed before CLI operations. Do not infer the server or
+CLI version from command output; identify those archives through their
+versioned names, manifest, and checksum.
+
 ## Select a client and endpoint
 
 Electron clients register their surfaces with the standalone registry. They
