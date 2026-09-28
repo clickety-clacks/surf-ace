@@ -201,6 +201,7 @@ jobs:
             -project source/packages/ios/SurfAce.xcodeproj \
             -scheme SurfAce \
             -configuration Release \
+            ENABLE_TESTABILITY=YES \
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.5'
           guard
       - name: Build standalone macOS CLI and Electron assets
