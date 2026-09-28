@@ -290,15 +290,20 @@ test("Electron handshake binds smoke identity to an explicit userData launch pat
   const home = path.join(root, "profile");
   const { electronLaunchConfig, launchElectron } = await import("./smoke-lib.mjs");
   const priorRegistry = process.env.SURF_ACE_SERVER;
+  const priorGpu = process.env.SURF_ACE_DISABLE_GPU;
   let launch;
   try {
     process.env.SURF_ACE_SERVER = "ws://operator-registry.invalid/ws";
+    delete process.env.SURF_ACE_DISABLE_GPU;
     launch = electronLaunchConfig(home, 19101, null, undefined, "darwin");
     assert.equal(launch.userDataDir, path.join(home, "user-data"));
     assert.deepEqual(launch.args, [`--user-data-dir=${launch.userDataDir}`]);
     assert.equal(launch.env.HOME, home);
     assert.equal(launch.env.SURF_ACE_STATE_DIR, undefined);
     assert.equal(launch.env.SURF_ACE_SERVER, undefined, "unqualified host registry configuration is stripped");
+    assert.equal(electronLaunchConfig(home, 19101, null, undefined, "darwin").env.SURF_ACE_DISABLE_GPU, undefined);
+    assert.equal(electronLaunchConfig(home, 19101, null, undefined, "darwin", true).env.SURF_ACE_DISABLE_GPU, "1");
+    assert.equal(electronLaunchConfig(home, 19101, null, undefined, "linux").env.SURF_ACE_DISABLE_GPU, undefined);
     assert.equal(electronLaunchConfig(home, 19101, "ws://127.0.0.1:19301/ws").env.SURF_ACE_SERVER, "ws://127.0.0.1:19301/ws");
     assert.deepEqual(
       electronLaunchConfig(home, 19101, null, undefined, "linux").args,
@@ -307,6 +312,8 @@ test("Electron handshake binds smoke identity to an explicit userData launch pat
   } finally {
     if (priorRegistry === undefined) delete process.env.SURF_ACE_SERVER;
     else process.env.SURF_ACE_SERVER = priorRegistry;
+    if (priorGpu === undefined) delete process.env.SURF_ACE_DISABLE_GPU;
+    else process.env.SURF_ACE_DISABLE_GPU = priorGpu;
   }
   const sentinel = {};
   let invocation;
@@ -320,6 +327,12 @@ test("Electron handshake binds smoke identity to an explicit userData launch pat
     command: "/fixture/Surf Ace",
     options: { env: launched.launch.env },
   });
+  let gpuFallbackInvocation;
+  await launchElectron("/fixture/Surf Ace", home, 19101, (command, args, options) => {
+    gpuFallbackInvocation = { args, command, options };
+    return sentinel;
+  }, undefined, undefined, true);
+  assert.equal(gpuFallbackInvocation.options.env.SURF_ACE_DISABLE_GPU, "1");
   assert.equal((await fs.stat(launch.userDataDir)).isDirectory(), true);
 });
 
@@ -546,6 +559,7 @@ test("Tightbeam macOS smoke uses the packaged CLI directly against one candidate
   let activePort;
   const launchClient = async (_exe, step, _endpoint, evidence) => {
     activePort = step.port;
+    assert.equal(evidence.disableGpu, true, "macOS smoke must request the GPU fallback for headless hosted runners");
     await fs.mkdir(path.dirname(step.identityFile), { recursive: true });
     await fs.writeFile(step.identityFile, "candidate");
     await recordClientAppLaunch(evidence.diagnosticLogPath);

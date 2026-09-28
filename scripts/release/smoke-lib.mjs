@@ -86,7 +86,7 @@ export async function verifyClientAppVersion(diagnosticLogPath, expectedVersion)
   };
 }
 
-export function electronLaunchConfig(home, port, registryEndpoint = null, diagnosticLogPath = undefined, platform = process.platform) {
+export function electronLaunchConfig(home, port, registryEndpoint = null, diagnosticLogPath = undefined, platform = process.platform, disableGpu = false) {
   const userDataDir = path.join(home, "user-data");
   const args = [`--user-data-dir=${userDataDir}`];
   if (platform === "linux") args.push("--disable-gpu", "--disable-dev-shm-usage");
@@ -100,6 +100,9 @@ export function electronLaunchConfig(home, port, registryEndpoint = null, diagno
   // Smoke must never inherit an operator's or CI runner's registry endpoint.
   // A non-null value is supplied only for the local packaged registry test.
   delete env.SURF_ACE_SERVER;
+  // The caller opts in only for hosted macOS smoke; otherwise preserve the
+  // existing environment behavior for operators with an explicit override.
+  if (disableGpu) env.SURF_ACE_DISABLE_GPU = "1";
   if (registryEndpoint !== null) env.SURF_ACE_SERVER = registryEndpoint;
   if (diagnosticLogPath !== undefined) env.SURF_ACE_CLIENT_DIAGNOSTIC_LOG = diagnosticLogPath;
   return {
@@ -220,8 +223,9 @@ export async function launchElectron(
   launchProcess = start,
   registryEndpoint = undefined,
   diagnosticLogPath = undefined,
+  disableGpu = false,
 ) {
-  const launch = electronLaunchConfig(home, port, registryEndpoint, diagnosticLogPath);
+  const launch = electronLaunchConfig(home, port, registryEndpoint, diagnosticLogPath, process.platform, disableGpu);
   await fs.mkdir(launch.userDataDir, { recursive: true });
   return { launch, started: launchProcess(appExecutable, launch.args, { env: launch.env }) };
 }

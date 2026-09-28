@@ -946,11 +946,12 @@ async function runDirectClientCandidate(step, executable, cliBinary, stateRoot, 
     diagnosticLogPath: path.join(path.dirname(stateRoot), `${channel}-${step.phase}-client-flight-recorder.ndjson`),
     rawCliEvidencePath: path.join(path.dirname(stateRoot), `${channel}-${step.phase}-raw-cli-evidence.ndjson`),
   };
+  const disableGpu = channel === "macos";
   const launchClient = operations.launchClient ?? (async (_executable, _step, _endpoint, paths) => {
-    const { started } = await launchElectron(executable, step.home, step.port, undefined, undefined, paths.diagnosticLogPath);
+    const { started } = await launchElectron(executable, step.home, step.port, undefined, undefined, paths.diagnosticLogPath, paths.disableGpu);
     return { started, async stop() { await stopElectron(started); } };
   });
-  const client = await launchClient(executable, step, endpoint, evidencePaths);
+  const client = await launchClient(executable, step, endpoint, { ...evidencePaths, disableGpu });
   try {
     await (operations.waitForEndpoint ?? waitForClientWebSocket)(endpoint);
     const clientRuntimeIdentity = await verifyClientAppVersion(evidencePaths.diagnosticLogPath, TIGHTBEAM.version);
