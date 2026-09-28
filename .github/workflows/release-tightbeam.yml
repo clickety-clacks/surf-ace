@@ -274,6 +274,16 @@ jobs:
             cp "build/downloads/build-a/${file}" build-a/
             cp "build/downloads/build-b/${file}" build-b/
           done
+          mkdir -p build-a/.receipts build-b/.receipts
+          for file in \
+            surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz \
+            surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz \
+            surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip \
+            surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip \
+            surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz; do
+            (cd build-a && shasum -a 256 "${file}") >> build-a/.receipts/SHA256SUMS
+            (cd build-b && shasum -a 256 "${file}") >> build-b/.receipts/SHA256SUMS
+          done
           node tooling/scripts/release/compare-release-builds.mjs \
             --build-a build-a \
             --build-b build-b \
