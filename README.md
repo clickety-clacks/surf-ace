@@ -39,12 +39,16 @@ surf-ace \
 
 The CLI provides `list`, `push`, `read`, `capture-pane`, topology, surface,
 annotation, and target commands. See the packaged CLI README and protocol
-documentation for the exact inputs and outputs.
+documentation for the exact inputs and outputs. The v0.2.1 release boundaries
+and hosted asset set are recorded in
+[`docs/release/tightbeam-standalone-v0.2.1.md`](./docs/release/tightbeam-standalone-v0.2.1.md);
+Linux server lifecycle and database operations are in
+[`docs/release/tightbeam-linux-operations.md`](./docs/release/tightbeam-linux-operations.md).
 
 ## Release assets
 
-The v0.2.1 release asset set is versioned and accompanied by a manifest and
-`SHA256SUMS`:
+The v0.2.1 release contains six versioned assets, a manifest, and
+`SHA256SUMS`, which covers all six assets plus the manifest:
 
 | Asset | Platform and purpose |
 |---|---|
@@ -53,8 +57,9 @@ The v0.2.1 release asset set is versioned and accompanied by a manifest and
 | `surf-ace-tightbeam-electron-linux-x86_64-v0.2.1.zip` | Linux desktop client |
 | `surf-ace-tightbeam-cli-macos-arm64-v0.2.1.tar.gz` | macOS arm64 CLI |
 | `surf-ace-tightbeam-electron-macos-arm64-v0.2.1.zip` | macOS arm64 desktop client |
+| `surf-ace-tightbeam-skill-v0.2.1.md` | Standalone Tightbeam agent skill source |
 | `surf-ace-tightbeam-v0.2.1-manifest.json` | Source, tooling, dependency, and asset identity |
-| `SHA256SUMS` | Checksums for the five assets and manifest |
+| `SHA256SUMS` | Checksums for the six assets and manifest |
 
 When published, download assets from the matching Surf Ace GitHub release.
 After downloading the complete asset set into one directory, verify it with
@@ -80,15 +85,19 @@ and checksum rather than inferred command output.
 
 This repository includes the Surf Ace Tightbeam skill at
 [`integrations/tightbeam/skills/surf-ace/SKILL.md`](./integrations/tightbeam/skills/surf-ace/SKILL.md).
-It teaches an agent to use the same standalone `surf-ace` CLI described here;
-it is guidance, not a plugin, a separate executable, or a resident service.
+The same file is published separately as
+`surf-ace-tightbeam-skill-v0.2.1.md` and is covered by the release manifest and
+`SHA256SUMS`. It teaches an agent to use the standalone `surf-ace` CLI; it is
+guidance, not a plugin, a separate executable, or a resident service.
 
-To enable it for a Tightbeam agent, ask a workspace administrator to register
-that skill file in the served Tightbeam identity under the name `surf-ace`, add
-`surf-ace` to the selected archetype's `skills` list, and apply the updated
-identity to existing sessions or provision new sessions. The agent can then
-use its installed `surf-ace` executable with the explicit state root and client
-endpoint described below. Installing the skill does not install the CLI.
+After downloading the release asset set, verify it with `SHA256SUMS` before
+using any file. To enable the skill, ask a workspace administrator to register
+the verified Markdown file in the served Tightbeam identity under the name
+`surf-ace`, add `surf-ace` to the selected archetype's `skills` list, and apply
+the updated identity to existing sessions or provision new sessions. Ask an
+enabled agent to use its Surf Ace skill for these CLI operations. The skill
+does not install the standalone executable; install that separately from the
+platform-specific CLI asset below.
 
 ## Install and run
 

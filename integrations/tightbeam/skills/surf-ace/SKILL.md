@@ -11,11 +11,13 @@ resident service.
 
 The repository source for this skill is
 `integrations/tightbeam/skills/surf-ace/SKILL.md`. To enable it for a
-Tightbeam agent, ask the workspace administrator to register the file in the
-served identity as `surf-ace`, attach `surf-ace` to the chosen archetype, and
-apply that identity to existing sessions or provision a new session. The skill
-provides CLI guidance only; the standalone executable must be installed
-separately.
+Tightbeam agent, download the separate `surf-ace-tightbeam-skill-v0.2.1.md`
+release asset with its manifest and `SHA256SUMS`, then verify the checksum.
+Ask the workspace administrator to register the verified Markdown content in
+the served identity as `surf-ace`, attach `surf-ace` to the chosen archetype,
+and apply that identity to existing sessions or provision a new session. The
+skill provides CLI guidance only; the standalone executable must be installed
+separately from the platform-specific CLI asset.
 
 ## Install and verify the CLI
 
