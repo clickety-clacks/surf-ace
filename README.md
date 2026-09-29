@@ -39,11 +39,9 @@ surf-ace \
 
 The CLI provides `list`, `push`, `read`, `capture-pane`, topology, surface,
 annotation, and target commands. See the packaged CLI README and protocol
-documentation for the exact inputs and outputs. The v0.2.1 release boundaries
-and hosted asset set are recorded in
-[`docs/release/tightbeam-standalone-v0.2.1.md`](./docs/release/tightbeam-standalone-v0.2.1.md);
-Linux server lifecycle and database operations are in
-[`docs/release/tightbeam-linux-operations.md`](./docs/release/tightbeam-linux-operations.md).
+documentation for the exact inputs and outputs. The Linux server archive
+includes `docs/OPERATIONS.md` with PostgreSQL configuration, health checks,
+backup, staged restore, and rollback guidance.
 
 ## Release assets
 
