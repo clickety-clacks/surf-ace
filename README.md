@@ -125,13 +125,13 @@ separately for your device using the standard development-signing workflow.
 
 The Linux server archive extracts under `surf-ace-server/`. PostgreSQL 16 must
 already be provisioned and configured; the package does not install a service,
-create a database, or migrate a serving database. Create a private server
-configuration using the fields documented in
-[`docs/release/tightbeam-linux-operations.md`](./docs/release/tightbeam-linux-operations.md),
-then validate and start the packaged foreground server:
+create a database, or migrate a serving database. Follow the included
+`docs/OPERATIONS.md` to create a private server configuration, then validate
+and start the packaged foreground server:
 
 ```sh
 SERVER_ROOT="$HOME/.local/opt/surf-ace/server/0.2.1/surf-ace-server"
+SERVER_CONFIG="$HOME/.config/surf-ace/server.json"
 "$SERVER_ROOT/bin/surf-ace-server" validate --config "$SERVER_CONFIG"
 "$SERVER_ROOT/bin/surf-ace-server" start --config "$SERVER_CONFIG"
 ```
@@ -142,6 +142,7 @@ The packaged `health` command checks a WebSocket handshake without registering
 a client or changing registry state:
 
 ```sh
+REGISTRY_WS="ws://registry.example:19001/ws"
 "$SERVER_ROOT/bin/surf-ace-server" health --endpoint "$REGISTRY_WS"
 ```
 
