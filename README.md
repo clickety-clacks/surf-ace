@@ -62,9 +62,12 @@ The v0.2.1 release contains six versioned assets, a manifest, and
 When published, download assets from the matching Surf Ace GitHub release.
 After downloading the complete asset set into one directory, verify it with
 `sha256sum -c SHA256SUMS` on Linux or `shasum -a 256 -c SHA256SUMS` on macOS.
-Inspect the manifest's `version`, `source`, and `tooling` fields before installing. The CLI
-does not provide a `--version` switch; use the versioned asset name, manifest,
-and checksum rather than inferring a version from command output.
+Inspect the manifest's `version`, `source`, and `tooling` fields before
+installing. The CLI does not implement a `--version` switch. Verify the
+downloaded CLI's version from its versioned asset name and the verified
+manifest before installing; after installation, the PATH link below points
+into that version-specific directory, so its target identifies the active
+release.
 
 ## Testing and participant identity
 
@@ -100,20 +103,33 @@ platform-specific CLI asset below.
 ## Install and run
 
 Extract CLI archives into a versioned user-owned directory so an older version
-remains available for rollback. For example, with the matching Linux CLI asset
+remains available for rollback. The example installs a bare `surf-ace` command
+in `~/.local/bin` and places it on `PATH`. With the matching Linux CLI asset
 and `SHA256SUMS` already downloaded and verified:
 
 ```sh
 VERSION=0.2.1
 INSTALL_ROOT="$HOME/.local/opt/surf-ace/$VERSION"
-mkdir -p "$INSTALL_ROOT"
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$INSTALL_ROOT" "$BIN_DIR"
 tar -xzf "surf-ace-tightbeam-cli-linux-x86_64-v${VERSION}.tar.gz" -C "$INSTALL_ROOT"
-"$INSTALL_ROOT/surf-ace-cli/bin/surf-ace" \
+ln -sfn "$INSTALL_ROOT/surf-ace-cli/bin/surf-ace" "$BIN_DIR/surf-ace"
+export PATH="$BIN_DIR:$PATH"
+command -v surf-ace
+readlink "$(command -v surf-ace)"
+surf-ace \
   --state-root "$HOME/.local/state/surf-ace" \
   --endpoint "ws://client.example:3210/ws" \
   --product-label "Surf Ace" \
   list
 ```
+
+The `readlink` output should point into the selected version directory, for
+example `~/.local/opt/surf-ace/0.2.1/surf-ace-cli/bin/surf-ace`. Confirm the
+asset name and manifest both identify `0.2.1`; the CLI itself has no version
+command, so do not use `surf-ace --version`. Add `~/.local/bin` to your shell
+startup file if you want the command on `PATH` in future sessions. To roll
+back, change the symlink to a previously verified version directory.
 
 For a macOS arm64 CLI, use
 `surf-ace-tightbeam-cli-macos-arm64-v0.2.1.tar.gz`; its archive has the same
