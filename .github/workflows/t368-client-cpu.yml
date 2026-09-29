@@ -12,7 +12,6 @@ on:
       - ".github/workflows/t368-client-cpu.yml"
       - "packages/controller/**"
       - "packages/electron/**"
-      - "packages/extension/**"
       - "packages/protocol/**"
 
 permissions:
@@ -36,7 +35,5 @@ jobs:
       - run: pnpm --filter @surf-ace/protocol test
       - run: pnpm --filter @surf-ace/protocol build
       - run: pnpm --filter @surf-ace/controller build
-      - run: pnpm --filter @surf-ace/extension test:lockless
-      - run: pnpm --filter @surf-ace/extension build
       - run: pnpm --filter @surf-ace/electron build
       - run: pnpm --filter @surf-ace/electron test

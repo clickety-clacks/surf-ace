@@ -13,8 +13,8 @@ label is compiled in.
 surf-ace \
   --state-root /path/to/controller-state \
   --endpoint ws://surf-ace.example:3210 \
-  --product-label Clawline \
-  push --input-json '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"Hello"},"friendlyChatName":"OpenClaw"}'
+  --product-label Surf-Ace-CLI \
+  push --input-json '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"Hello"},"friendlyChatName":"Terminal"}'
 ```
 
 `push` validates the protocol's discriminated content value: `html` uses
