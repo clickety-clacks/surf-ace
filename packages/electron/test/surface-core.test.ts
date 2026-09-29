@@ -1167,6 +1167,29 @@ test("surface core falls back to authoritative html text when renderer snapshot 
   assert.equal(snapshot.visibleText, "pane two\nready");
 });
 
+test("surface core extracts visible text from an accepted HTML fragment when renderer snapshot is empty", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  core.locklessContentPush(surface.surfaceId, {
+    content: { html: "<p>accepted fragment is visible</p>" },
+    contentId: "ct_html_fragment",
+    contentType: "html",
+    friendlyChatName: "Plumbus test",
+    paneId,
+  }, null);
+
+  const snapshot = core.captureSnapshot(surface.surfaceId, paneId);
+  assert.equal(snapshot.contentId, "ct_html_fragment");
+  assert.equal(snapshot.visibleText, "accepted fragment is visible");
+});
+
 test("surface core starts browser_url targets without reporting unverified navigation as applied", () => {
   const core = new SurfaceCore({
     persistentState: {

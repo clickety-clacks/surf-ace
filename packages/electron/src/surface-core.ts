@@ -4082,7 +4082,11 @@ function isReloadableEntry(entry: HistoryEntry, externalNative: boolean): boolea
 }
 
 function htmlVisibleText(content: HtmlContent): string | null {
-  const { document } = parseHTML(content.html);
+  const isFullDocument = /^\s*<!doctype\s+html/i.test(content.html) || /^\s*<html[\s>]/i.test(content.html);
+  const html = isFullDocument
+    ? content.html
+    : `<!doctype html><html><head></head><body>${content.html}</body></html>`;
+  const { document } = parseHTML(html);
   const text = (document.body?.innerText ?? document.body?.textContent ?? "").trim();
   return text ? text.slice(0, 4096) : null;
 }
