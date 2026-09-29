@@ -249,6 +249,85 @@ fn event(op: &str, payload: Value) -> Envelope {
     }
 }
 
+fn pane_content_record(
+    surface_id: &str,
+    pane_id: u64,
+    sequence: u64,
+    content_id: Option<&str>,
+    operation: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "contentId": content_id,
+        "currentContentId": content_id,
+        "currentRevision": sequence,
+        "historyEntryId": format!("he_{}_{}", content_id.unwrap_or("cleared"), sequence),
+        "paneId": pane_id,
+        "revision": sequence,
+        "surfaceId": surface_id
+    });
+    if let Some(operation) = operation {
+        payload["operation"] = json!(operation);
+    }
+    json!({
+        "bytes": 128,
+        "payload": payload,
+        "recordClass": "content",
+        "recordId": format!("record:{surface_id}:{pane_id}:{sequence}"),
+        "sequence": sequence
+    })
+}
+
+fn pane_scroll_record(surface_id: &str, pane_id: u64, sequence: u64) -> Value {
+    json!({
+        "bytes": 96,
+        "payload": {
+            "contentId": "content-visible",
+            "paneId": pane_id,
+            "phase": "settled",
+            "revision": 1,
+            "surfaceId": surface_id,
+            "visibleText": "content visible after resume"
+        },
+        "recordClass": "scroll",
+        "recordId": format!("scroll:{surface_id}:{pane_id}:{sequence}"),
+        "sequence": sequence
+    })
+}
+
+fn pane_scope_snapshot(scope_id: &str, cursor: u64, records: Vec<Value>) -> Value {
+    let first = records
+        .first()
+        .and_then(|record| record["sequence"].as_u64())
+        .unwrap_or(cursor);
+    let last = records
+        .last()
+        .and_then(|record| record["sequence"].as_u64())
+        .unwrap_or(cursor.saturating_sub(1));
+    json!({
+        "cursor": { "cursor": cursor, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": first,
+        "lastRetainedSequence": last,
+        "records": records,
+        "scopeId": scope_id,
+        "version": 1
+    })
+}
+
+fn native_cli_read(temp: &TempDir, scope_id: &str) -> Value {
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args([
+            "--state-root",
+            temp.path().to_str().unwrap(),
+            "read",
+            "--input-json",
+            &serde_json::to_string(&json!({ "scopeId": scope_id })).unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
 #[test]
 fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1640,13 +1719,277 @@ fn native_cli_read_returns_current_content_when_unread_delta_is_empty() {
 }
 
 #[test]
+fn current_content_survives_acknowledgement_scroll_only_resume_and_process_restart() {
+    let temp = TempDir::new().unwrap();
+    let scope_id = "pane:sf_1:1";
+    let current_content = pane_content_record("sf_1", 1, 1, Some("content-visible"), None);
+    let mut initial = FakeWire::ordinary();
+    initial.scopes = vec![pane_scope_snapshot(
+        scope_id,
+        1,
+        vec![current_content.clone(), pane_scroll_record("sf_1", 1, 2)],
+    )];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initial).unwrap();
+
+    let before_restart = native_cli_read(&temp, scope_id);
+    assert_eq!(
+        before_restart["result"]["currentContentRecord"],
+        current_content
+    );
+    assert_eq!(
+        before_restart["result"]["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(before_restart["result"]["acknowledgement"]["cursor"], 3);
+
+    // Re-open the same durable state root as a fresh CLI process. The server has
+    // accepted the cursor, so its resumed snapshot contains only a newer scroll.
+    let mut resumed = FakeWire::ordinary();
+    resumed.scopes = vec![pane_scope_snapshot(
+        scope_id,
+        3,
+        vec![pane_scroll_record("sf_1", 1, 3)],
+    )];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut resumed).unwrap();
+    let ack = resumed
+        .payloads
+        .iter()
+        .find(|(operation, _)| operation == "consumable.ack")
+        .map(|(_, payload)| payload)
+        .expect("the prior read cursor is acknowledged after resume");
+    assert_eq!(ack["cursor"], 3);
+
+    let after_restart = native_cli_read(&temp, scope_id);
+    assert_eq!(after_restart["result"]["cacheStatus"], "current");
+    assert_eq!(after_restart["result"]["consumableLoss"], Value::Null);
+    assert_eq!(
+        after_restart["result"]["records"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        after_restart["result"]["records"][0]["recordClass"],
+        "scroll"
+    );
+    assert_eq!(
+        after_restart["result"]["currentContentRecord"],
+        current_content
+    );
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["scopes"][scope_id]["clientCursor"], 3);
+    assert_eq!(persisted["scopes"][scope_id]["projectedCursor"], 4);
+}
+
+#[test]
+fn current_content_tracks_replacement_and_clear_without_promoting_scroll() {
+    let temp = TempDir::new().unwrap();
+    let scope_id = "pane:sf_1:1";
+    let original = pane_content_record("sf_1", 1, 1, Some("original"), None);
+    let mut initial = FakeWire::ordinary();
+    initial.scopes = vec![pane_scope_snapshot(scope_id, 1, vec![original])];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initial).unwrap();
+
+    let replacement = pane_content_record("sf_1", 1, 2, Some("replacement"), None);
+    let mut replacement_wire = FakeWire::ordinary();
+    replacement_wire.scopes = vec![pane_scope_snapshot(scope_id, 2, vec![replacement.clone()])];
+    execute_with_wire(
+        invocation(&temp, Command::List, json!({})),
+        &mut replacement_wire,
+    )
+    .unwrap();
+    let replaced = native_cli_read(&temp, scope_id);
+    assert_eq!(replaced["result"]["currentContentRecord"], replacement);
+
+    let scroll = pane_scroll_record("sf_1", 1, 3);
+    let mut scroll_wire = FakeWire::ordinary();
+    scroll_wire.scopes = vec![pane_scope_snapshot(scope_id, 3, vec![scroll])];
+    execute_with_wire(
+        invocation(&temp, Command::List, json!({})),
+        &mut scroll_wire,
+    )
+    .unwrap();
+    assert_eq!(
+        native_cli_read(&temp, scope_id)["result"]["currentContentRecord"],
+        replacement,
+        "a later scroll record is not a content replacement"
+    );
+
+    let cleared = pane_content_record("sf_1", 1, 4, None, Some("content.clear"));
+    let mut clear_wire = FakeWire::ordinary();
+    clear_wire.scopes = vec![pane_scope_snapshot(scope_id, 4, vec![cleared])];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut clear_wire).unwrap();
+    assert_eq!(
+        native_cli_read(&temp, scope_id)["result"]["currentContentRecord"],
+        Value::Null,
+        "an explicit clear invalidates the remembered current content"
+    );
+}
+
+#[test]
+fn current_content_isolated_by_pane_and_client_state_root() {
+    let first_client = TempDir::new().unwrap();
+    let pane_one = "pane:sf_shared:1";
+    let pane_two = "pane:sf_shared:2";
+    let pane_one_content = pane_content_record("sf_shared", 1, 1, Some("client-a-pane-1"), None);
+    let pane_two_content = pane_content_record("sf_shared", 2, 1, Some("client-a-pane-2"), None);
+    let mut first_wire = FakeWire::ordinary();
+    first_wire.scopes = vec![
+        pane_scope_snapshot(pane_one, 1, vec![pane_one_content.clone()]),
+        pane_scope_snapshot(pane_two, 1, vec![pane_two_content.clone()]),
+    ];
+    execute_with_wire(
+        invocation(&first_client, Command::List, json!({})),
+        &mut first_wire,
+    )
+    .unwrap();
+    assert_eq!(
+        native_cli_read(&first_client, pane_one)["result"]["currentContentRecord"],
+        pane_one_content
+    );
+    assert_eq!(
+        native_cli_read(&first_client, pane_two)["result"]["currentContentRecord"],
+        pane_two_content
+    );
+
+    let second_client = TempDir::new().unwrap();
+    let second_client_content =
+        pane_content_record("sf_shared", 1, 1, Some("client-b-pane-1"), None);
+    let mut second_wire = FakeWire::ordinary();
+    second_wire.scopes = vec![pane_scope_snapshot(
+        pane_one,
+        1,
+        vec![second_client_content.clone()],
+    )];
+    execute_with_wire(
+        invocation(&second_client, Command::List, json!({})),
+        &mut second_wire,
+    )
+    .unwrap();
+    assert_eq!(
+        native_cli_read(&second_client, pane_one)["result"]["currentContentRecord"],
+        second_client_content
+    );
+    assert_ne!(
+        first_wire.payloads[0].1["controllerInstanceId"],
+        second_wire.payloads[0].1["controllerInstanceId"],
+        "each state root keeps an independent controller identity"
+    );
+}
+
+#[test]
+fn current_content_is_withheld_after_loss_or_wrong_surface_record() {
+    let temp = TempDir::new().unwrap();
+    let scope_id = "pane:sf_1:1";
+    let current_content = pane_content_record("sf_1", 1, 1, Some("known-current"), None);
+    let mut initial = FakeWire::ordinary();
+    initial.scopes = vec![pane_scope_snapshot(scope_id, 1, vec![current_content])];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initial).unwrap();
+    assert_eq!(
+        native_cli_read(&temp, scope_id)["result"]["currentContentRecord"]["payload"]["contentId"],
+        "known-current"
+    );
+
+    let mut lost = FakeWire::ordinary();
+    lost.scopes = vec![pane_scope_snapshot(scope_id, 2, vec![])];
+    lost.response_events.insert(
+        "surfaces.list".into(),
+        vec![event(
+            "event.consumable_overflow",
+            json!({
+                "firstRetainedSequence": 3,
+                "gap": {
+                    "cause": "source_overflow",
+                    "generation": 1,
+                    "lastLostSequence": 2,
+                    "lossExtent": "exact",
+                    "recordClasses": ["content"]
+                },
+                "lastRetainedSequence": 2,
+                "scopeId": scope_id
+            }),
+        )],
+    );
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut lost).unwrap();
+    let after_loss = native_cli_read(&temp, scope_id);
+    assert_eq!(after_loss["result"]["consumableLoss"]["generation"], 1);
+    assert_eq!(after_loss["result"]["currentContentRecord"], Value::Null);
+
+    let wrong_surface_root = TempDir::new().unwrap();
+    let wrong_surface = pane_content_record("sf_other", 1, 1, Some("wrong-surface"), None);
+    let mut wrong_wire = FakeWire::ordinary();
+    wrong_wire.scopes = vec![pane_scope_snapshot(scope_id, 1, vec![wrong_surface])];
+    execute_with_wire(
+        invocation(&wrong_surface_root, Command::List, json!({})),
+        &mut wrong_wire,
+    )
+    .unwrap();
+    assert_eq!(
+        native_cli_read(&wrong_surface_root, scope_id)["result"]["currentContentRecord"],
+        Value::Null,
+        "content from another surface cannot become current for this scope"
+    );
+}
+
+#[test]
+fn successful_pane_close_discards_that_scope_current_content() {
+    let temp = TempDir::new().unwrap();
+    let scope_id = "pane:sf_1:2";
+    let current_content = pane_content_record("sf_1", 2, 1, Some("to-be-closed"), None);
+    let mut initial = FakeWire::ordinary();
+    initial.scopes = vec![pane_scope_snapshot(scope_id, 1, vec![current_content])];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initial).unwrap();
+    assert_eq!(
+        native_cli_read(&temp, scope_id)["result"]["currentContentRecord"]["payload"]["contentId"],
+        "to-be-closed"
+    );
+
+    let mut close = FakeWire::ordinary();
+    close.scopes = vec![pane_scope_snapshot(scope_id, 2, vec![])];
+    execute_with_wire(
+        invocation(
+            &temp,
+            Command::TopologyIntent,
+            json!({
+                "action": "close",
+                "expectedTopologyRevision": 4,
+                "paneId": 2,
+                "surfaceId": "sf_1"
+            }),
+        ),
+        &mut close,
+    )
+    .unwrap();
+    assert!(close.operations.contains(&"pane.close".into()));
+    assert_eq!(
+        native_cli_read(&temp, scope_id)["result"]["cacheStatus"],
+        "unsynchronized"
+    );
+    assert_eq!(
+        native_cli_read(&temp, scope_id)["result"]["currentContentRecord"],
+        Value::Null
+    );
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert!(persisted["scopes"].get(scope_id).is_none());
+}
+
+#[test]
 fn native_cli_read_ignores_malformed_current_content_sequences() {
     let temp = TempDir::new().unwrap();
     let mixed_scope = "pane:sf_ipad:1";
     let invalid_scope = "pane:sf_ipad:2";
     let current_content = json!({
         "bytes": 128,
-        "payload": { "contentId": "valid-current" },
+        "payload": {
+            "contentId": "valid-current",
+            "paneId": 1,
+            "surfaceId": "sf_ipad"
+        },
         "recordClass": "content",
         "recordId": "record:7",
         "sequence": 7
