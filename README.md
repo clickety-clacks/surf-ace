@@ -133,7 +133,8 @@ back, change the symlink to a previously verified version directory.
 
 For a macOS arm64 CLI, use
 `surf-ace-tightbeam-cli-macos-arm64-v0.2.1.tar.gz`; its archive has the same
-`surf-ace-cli/bin/surf-ace` executable path. Extract a Linux desktop ZIP to a
+`surf-ace-cli/bin/surf-ace` executable path, and use the same versioned install,
+symlink, and `PATH` steps with that archive. Extract a Linux desktop ZIP to a
 user-owned directory and launch `Surf Ace/surf-ace`. Extract the macOS desktop
 ZIP so `Surf Ace.app` is available, then open the app with Finder or `open`.
 The iPadOS client is not in the hosted release assets; build and sign it
